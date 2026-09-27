@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scale import verify_mixed_load
+from scale import verify_mixed_load, verify_reader_loss
 
 
 class MixedLoadEvidence(unittest.TestCase):
@@ -78,6 +78,47 @@ class MixedLoadEvidence(unittest.TestCase):
         result = verify_mixed_load(self.root, 3)
         self.assertEqual((result["acknowledged_writes"], result["missed_writes"], result["fully_served_writes"]),
                          (299, 1, False))
+
+
+class ReaderLossEvidence(unittest.TestCase):
+    change = MixedLoadEvidence.change
+
+    def setUp(self):
+        MixedLoadEvidence.setUp(self)
+        for path in self.root.glob("mixed-3-*.tsv"):
+            (self.root / path.name.replace("mixed-3", "reader_loss-5")).write_bytes(path.read_bytes())
+        (self.root / "reader-loss.tsv").write_text(
+            "killed_node\trequested_us\tkilled_us\tready_us\tserved_us\n"
+            "3\t10000000\t10500000\t24000000\t25000000\n")
+        for lane in range(8):
+            strict = lane % 2 == 0
+            def update(rows):
+                for start, sequence, count in [(5_000_000, 150, 35), (40_000_000, 500, 210), (15_000_000, 250, 85)]:
+                    rows.insert(0, dict(started_us=str(start), elapsed_us="1000",
+                                        minimum_sequence=str(sequence if strict else 0),
+                                        latest_count=str(count), outcome="ok", sequence=str(sequence),
+                                        count=str(count)))
+            self.change(f"reader_loss-5-reader-{lane}.tsv", update)
+
+    def test_live_fault_reports_each_phase(self):
+        result = verify_reader_loss(self.root, 3)
+        self.assertEqual([result["phases"][phase]["reads"]["successes"]
+                          for phase in ("before", "replacement", "after")], [8, 8, 8])
+
+    def test_fault_after_load_is_rejected(self):
+        self.change("reader-loss.tsv", lambda rows: rows[0].update(
+            requested_us="60000000", killed_us="61000000", ready_us="70000000", served_us="71000000"))
+        with self.assertRaises(AssertionError):
+            verify_reader_loss(self.root, 3)
+
+    def test_post_recovery_reads_do_not_prove_service_during_replacement(self):
+        self.change("reader_loss-5-reader-0.tsv", lambda rows: rows[0].update(elapsed_us="11000000"))
+        with self.assertRaisesRegex(AssertionError, "no progress replacement"):
+            verify_reader_loss(self.root, 3)
+
+    def test_wrong_killed_node_is_rejected(self):
+        with self.assertRaises(AssertionError):
+            verify_reader_loss(self.root, 4)
 
 
 if __name__ == "__main__":

@@ -355,9 +355,24 @@ was missed, even if all admitted work remains correct. Query latency excludes
 typed behind responses; their count remains visible. This is a fixed mixed
 workload, not a saturation curve or a freshness guarantee.
 
-At five nodes, three readers and one spare are eligible. The controller kills
-one selected reader-only container, proves exit 137 without an OOM event, and
-the driver requires a newly selected reader plus twelve exact query results.
+At five nodes, three readers and one spare are eligible. A separate sixty-second
+window keeps the same five scheduled writes/second and eight read lanes active.
+Ten seconds into that window, the controller kills a selected reader container
+and proves exit 137 without an OOM event. The writer uses the original three
+gateways throughout this window; gateway removal and owner failure remain
+separate qualifications. Replica reads keep using public selection and its
+bounded attempts across the selected readers. Unexpected errors fail the run.
+
+The driver requires an automatically recruited replacement to serve workload
+queries before second fifty, leaving at least ten seconds of subsequent load.
+After the window, every reader must cover the final acknowledged receipt, and
+twelve exact queries check the replacement set. Raw `reader_loss-5-*.tsv` files
+and `reader-loss.tsv` retain the workload and fault timeline. The independent
+verifier requires successful writes and queries from every read lane wholly
+before, during, and after replacement. It reports phase counts and latency,
+checks receipt/value correspondence, and preserves missed scheduled writes.
+A request spanning the outage cannot count as service during replacement.
+
 The fleet temporarily has four survivors before growing to ten. The killed
 boot is never restarted with the fixture's deterministic identity: growth
 creates a new node/session, yielding twenty live nodes out of twenty-one
@@ -373,7 +388,7 @@ to the same source configuration; the resolved result is retained.
 
 This combines a scaling/failure smoke and bounded mixed-workload measurements.
 One replicated SQL Cell and one killed reader do not establish many-Cell
-capacity, continuous fault availability or an owner-loss SLO. A one-CPU cap
+capacity, gateway-loss handling, arbitrary fault availability or an owner-loss SLO. A one-CPU cap
 does not reserve a physical core; record Docker VM resources and contention
 before comparing latency across sizes. The Compose CI runs this profile after
 the three-node lifecycle smoke using the same compiled binary.

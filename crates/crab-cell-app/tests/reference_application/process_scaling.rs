@@ -23,6 +23,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+struct LoadWindow<'a> {
+    label: &'a str,
+    request_domain: u8,
+    started: Instant,
+}
+
 struct Controller<'a> {
     sync: &'a Path,
     sequence: usize,
@@ -226,7 +232,12 @@ async fn reference_compose_reader_scaling() {
             "PERF reader_scale: nodes={count} readers={desired} by_node={by_node:?} ingress={entries:?} owner_unchanged=1"
         );
         observed.lock().unwrap().clear();
-        expected = mixed_load(&owner, &reader, sync, count, expected).await;
+        let window = LoadWindow {
+            label: "mixed",
+            request_domain: 107,
+            started: Instant::now(),
+        };
+        expected = mixed_load(&owner, &reader, sync, count, expected, window).await;
         let reads = observed.lock().unwrap().clone();
         assert_eq!(
             reads
@@ -253,24 +264,100 @@ async fn reference_compose_reader_scaling() {
                 .iter()
                 .find(|node| **node >= 3 && selected.contains(&node_session(**node)))
                 .unwrap();
-            let started = Instant::now();
-            survivors = controller.command("kill", lost).await;
-            assert!(!survivors.contains(&lost));
-            let fault_command_ms = started.elapsed().as_millis();
-            let replacement = ready_readers(
-                &router,
-                &peer,
-                target,
-                expected.receipt,
-                desired,
-                Some(node_session(lost)),
-            )
-            .await;
-            let recovery_ms = started.elapsed().as_millis();
-            assert!(
+            // Keep owner ingress on the original three nodes while faulting a
+            // reader. Gateway withdrawal is a separate product fleet invariant.
+            let (address, fault_server, _) = start_balancer(owners).await;
+            let fault_fixture = PerfFixture::from_processes(
+                tempfile::TempDir::new().unwrap(),
+                rustfs_store(),
+                owners,
+                Some(address),
+            );
+            let fault_client = ReferenceClient::new(fault_fixture.typed.clone()).unwrap();
+            let fault_owner = fault_client
+                .orders(&OrderId(b"compose-scaling".to_vec()))
+                .unwrap();
+            observed.lock().unwrap().clear();
+            let window = LoadWindow {
+                label: "reader_loss",
+                request_domain: 108,
+                started: Instant::now(),
+            };
+            let started = window.started;
+            let minimum = expected.receipt;
+            let fault = async {
+                tokio::time::sleep_until((started + Duration::from_secs(10)).into()).await;
+                assert!(
+                    observed
+                        .lock()
+                        .unwrap()
+                        .get(&node_session(lost))
+                        .copied()
+                        .unwrap_or(0)
+                        > 0
+                );
+                let requested_us = started.elapsed().as_micros();
+                survivors = controller.command("kill", lost).await;
+                assert!(!survivors.contains(&lost));
+                let killed_us = started.elapsed().as_micros();
+                let replacement = ready_readers(
+                    &router,
+                    &peer,
+                    target,
+                    minimum,
+                    desired,
+                    Some(node_session(lost)),
+                )
+                .await;
+                let ready_us = started.elapsed().as_micros();
+                let added = replacement
+                    .difference(&selected)
+                    .copied()
+                    .collect::<Vec<_>>();
+                assert!(!added.is_empty());
+                loop {
+                    // Only load lanes issue queries here. Readiness alone cannot
+                    // prove that a newly recruited reader served live traffic.
+                    if added.iter().all(|session| {
+                        observed.lock().unwrap().get(session).copied().unwrap_or(0) > 0
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        started.elapsed() < Duration::from_secs(50),
+                        "replacement did not serve during the load window"
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                let served_us = started.elapsed().as_micros();
+                assert!(
+                    served_us < 50_000_000,
+                    "replacement left no post-recovery load interval"
+                );
+                std::fs::write(sync.join("reader-loss.tsv"), format!(
+                    "killed_node\trequested_us\tkilled_us\tready_us\tserved_us\n{lost}\t{requested_us}\t{killed_us}\t{ready_us}\t{served_us}\n"
+                )).unwrap();
+                (
+                    replacement,
+                    killed_us - requested_us,
+                    served_us - requested_us,
+                )
+            };
+            let load = mixed_load(&fault_owner, &reader, sync, count, expected, window);
+            let (output, (replacement, fault_command_us, recovery_us)) = tokio::join!(load, fault);
+            expected = output;
+            fault_server.abort();
+            assert_eq!(
+                ready_readers(
+                    &router,
+                    &peer,
+                    target,
+                    expected.receipt,
+                    desired,
+                    Some(node_session(lost))
+                )
+                .await,
                 replacement
-                    .iter()
-                    .any(|session| !selected.contains(session))
             );
             observed.lock().unwrap().clear();
             for _ in 0..12 {
@@ -292,7 +379,7 @@ async fn reference_compose_reader_scaling() {
                 replacement
             );
             println!(
-                "PERF constrained_reader_replacement: nodes_before=5 nodes_after=4 killed_node={lost} ready_readers={desired} exact_queries=12 fault_command_ms={fault_command_ms} recovery_ms={recovery_ms}"
+                "PERF constrained_reader_replacement: nodes_before=5 nodes_after=4 killed_node={lost} ready_readers={desired} exact_queries=12 fault_command_us={fault_command_us} recovery_us={recovery_us} during_arrivals=1"
             );
         }
         let after = authority.load(target.cell_id()).await.unwrap().unwrap();
@@ -330,13 +417,18 @@ async fn mixed_load(
     sync: &Path,
     nodes: usize,
     baseline: Observed<u64>,
+    window: LoadWindow<'_>,
 ) -> Observed<u64> {
-    let started = Instant::now();
+    let LoadWindow {
+        label,
+        request_domain,
+        started,
+    } = window;
     let window = Duration::from_secs(60);
     let latest = Mutex::new(baseline.clone());
     let writes = async {
         let mut raw =
-            BufWriter::new(File::create(sync.join(format!("mixed-{nodes}-writes.tsv"))).unwrap());
+            BufWriter::new(File::create(sync.join(format!("{label}-{nodes}-writes.tsv"))).unwrap());
         writeln!(
             raw,
             "arrival\tscheduled_us\tstarted_us\telapsed_us\toutcome\tsequence\tcount"
@@ -370,7 +462,7 @@ async fn mixed_load(
                 continue;
             }
             let input = CronInvocation {
-                schedule_id: [107; 16],
+                schedule_id: [request_domain; 16],
                 generation: 1,
                 occurrence: (nodes as u64 * 300) + arrival,
                 scheduled_at_ms: now_ms(),
@@ -378,7 +470,10 @@ async fn mixed_load(
             };
             let call = Instant::now();
             let committed = owner
-                .receive_cron(identity(107, nodes * 300 + arrival as usize, 0), input)
+                .receive_cron(
+                    identity(request_domain, nodes * 300 + arrival as usize, 0),
+                    input,
+                )
                 .await
                 .unwrap();
             let elapsed = call.elapsed();
@@ -406,11 +501,11 @@ async fn mixed_load(
         raw.flush().unwrap();
         assert!(!samples.is_empty());
         println!(
-            "PERF mixed_writes: nodes={nodes} planned=300 committed={} missed={missed} arrival_seconds=60",
+            "PERF {label}_writes: nodes={nodes} planned=300 committed={} missed={missed} arrival_seconds=60",
             samples.len()
         );
         report_samples(
-            &format!("mixed_writes_{nodes}_nodes"),
+            &format!("{label}_writes_{nodes}_nodes"),
             &mut samples,
             started.elapsed().max(window),
         );
@@ -420,7 +515,7 @@ async fn mixed_load(
         let latest = &latest;
         async move {
             let mut raw = BufWriter::new(
-                File::create(sync.join(format!("mixed-{nodes}-reader-{lane}.tsv"))).unwrap(),
+                File::create(sync.join(format!("{label}-{nodes}-reader-{lane}.tsv"))).unwrap(),
             );
             writeln!(
                 raw,
@@ -502,10 +597,10 @@ async fn mixed_load(
         }
     }
     println!(
-        "PERF mixed_reads: nodes={nodes} clients=8 behind={behind} max_acknowledged_count_lag={lag} window_seconds=60"
+        "PERF {label}_reads: nodes={nodes} clients=8 behind={behind} max_acknowledged_count_lag={lag} window_seconds=60"
     );
     report_samples(
-        &format!("mixed_replica_reads_{nodes}_nodes"),
+        &format!("{label}_replica_reads_{nodes}_nodes"),
         &mut latencies,
         started.elapsed(),
     );
