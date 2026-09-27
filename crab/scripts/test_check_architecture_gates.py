@@ -263,14 +263,38 @@ impl CoordinationState {
 
 
 class StandaloneLtxHardCutTests(unittest.TestCase):
-    def check_source(self, text):
+    def check_source(self, text, relative="crates/crab-ltx/src/lib.rs"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source = root / "crates/crab-ltx/src/lib.rs"
+            source = root / relative
             source.parent.mkdir(parents=True)
             source.write_text(text, encoding="utf-8")
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 return GATES.check_standalone_ltx_hard_cut(root)
+
+    def test_tenant_catalog_head_is_admitted_only_in_its_layout_method(self):
+        source = '''impl CellStorageLayout {
+    pub fn catalog_head_path(&self, tenant: &[u8; 16], shard: u8) -> Path {
+        Path::from(format!(
+            "{}/{}/{shard:02x}/head.json",
+            self.catalog_tenants_prefix(),
+            encode_hex(tenant)
+        ))
+    }
+}
+'''
+        path = "crates/crab-ltx/src/cell_layout.rs"
+        self.assertTrue(self.check_source(source, path))
+        for relative, text in (
+            ("crates/crab-ltx/src/other/cell_layout.rs", source),
+            (path, source.replace("catalog_head_path", "standalone_head_path")),
+            (path, source + 'fn head() -> &\'static str { "head.json" }\n'),
+            (path, source.replace("head.json", "manifest.json")),
+            (path, source.replace('"{}/{}/{shard:02x}/head.json",',
+                                  '"catalog/{shard:02x}/head.json", Replica,')),
+        ):
+            with self.subTest(relative=relative, source=text):
+                self.assertFalse(self.check_source(text, relative))
 
     def test_retired_epoch_head_symbols_are_rejected(self):
         for symbol in (
