@@ -86,6 +86,25 @@ host. Owner-loss recovery, continuous container/schema rollout, workflow and
 read-model traffic, actual queue depth, repeated capacity runs, and isolated
 multi-host fault domains remain separate qualification gates.
 
+### Qualification status (2026-09-27)
+
+The first Colima/RustFS run used source
+`0d4bc19e1c19e63eb226d68e8bed18361d37fef5`. All nine three-node windows
+completed, including receipt readback and published-root checks for twelve
+Cells. The run then failed during the five-node hot workload at 16 scheduled
+actions per node per second: a mutation for entity 13 remained unresolved and
+its owner's active Cell count fell from four to three. Ten- and twenty-node
+entity stages were not reached. The fencing cause remains unproven.
+
+The same run exposed an independent verifier error: its ten-second duration
+check used wall time during a clock correction. A regression now checks the
+monotonic window while retaining the wall-clock adjustment. Source
+`62e45a44caed99e4ddf9500f4c41a230de9b6f2a` also adds fencing-cause warnings
+and retains RustFS file logs. That source passed 23 native reference tests,
+16 Python verifier tests, strict app/runtime Clippy and the Linux release build.
+Its diagnostic Compose repeat has not been run. These results do not establish
+a passing 3/5/10/20 writable-entity profile or supported throughput limits.
+
 ## Additive application release correctness
 
 The public-host rollout test compiles a successor SQL module with a new typed
