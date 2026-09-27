@@ -473,6 +473,7 @@ pub(crate) struct Repository {
 
 pub(crate) struct RepositorySet {
     current: SyncRwLock<RepositoryIndex>,
+    refresh: Mutex<()>,
 }
 
 struct RepositoryIndex {
@@ -558,24 +559,21 @@ impl RepositorySet {
 #[cfg(test)]
 impl From<BTreeMap<(String, String), Repository>> for RepositorySet {
     fn from(repositories: BTreeMap<(String, String), Repository>) -> Self {
-        Self {
-            current: SyncRwLock::new(RepositoryIndex::new(
-                0,
-                repositories
-                    .into_iter()
-                    .map(|(key, repository)| (key, Arc::new(repository)))
-                    .collect(),
-            )),
-        }
+        RepositoryIndex::new(
+            0,
+            repositories
+                .into_iter()
+                .map(|(key, repository)| (key, Arc::new(repository)))
+                .collect(),
+        )
+        .into()
     }
 }
 
 #[cfg(test)]
 impl From<BTreeMap<(String, String), Arc<Repository>>> for RepositorySet {
     fn from(repositories: BTreeMap<(String, String), Arc<Repository>>) -> Self {
-        Self {
-            current: SyncRwLock::new(RepositoryIndex::new(0, repositories)),
-        }
+        RepositoryIndex::new(0, repositories).into()
     }
 }
 
@@ -583,6 +581,7 @@ impl From<RepositoryIndex> for RepositorySet {
     fn from(repositories: RepositoryIndex) -> Self {
         Self {
             current: SyncRwLock::new(repositories),
+            refresh: Mutex::new(()),
         }
     }
 }
@@ -939,6 +938,23 @@ impl Server {
         let next = materialize_catalog(&catalog, document).await?;
         self.repositories.replace(next);
         Ok(())
+    }
+
+    pub(crate) async fn refresh_catalog_after_repository_miss(&self, id: Uuid) -> Result<()> {
+        if self.repositories.by_id(id).is_some() {
+            return Ok(());
+        }
+        let _refresh = self.repositories.refresh.lock().await;
+        // Concurrent first requests share the installation. Publication still
+        // uses the revision guard because import and polling can finish here too.
+        if self.repositories.by_id(id).is_some() {
+            return Ok(());
+        }
+        let catalog = self.catalog().ok_or(crate::Error::Config(
+            "repository catalog refresh requires a catalog",
+        ))?;
+        let (document, _) = catalog.load().await?;
+        self.install_catalog(document).await
     }
 
     fn scheduler_status(&self) -> Option<crate::cells::SchedulerStatus> {

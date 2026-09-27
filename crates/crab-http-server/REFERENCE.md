@@ -425,9 +425,15 @@ readiness unhealthy; it swaps in ready changes without a restart.
 Catalog snapshots retain their durable revision. Import completion and periodic
 refresh validate Cell readiness through the same installation path and publish
 only newer revisions, so a delayed import cannot restore revoked membership or
-hide repositories installed by a newer refresh. This prevents local regression;
-new repositories and membership changes still propagate through the existing
-five-second catalog poll on other nodes.
+hide repositories installed by a newer refresh. When an authenticated peer
+request targets a repository missing from the execution node's snapshot, that
+node loads and installs the current catalog within the signed request deadline,
+then checks repository membership and the requested action again. Concurrent
+misses share an installation; warm requests and denials for known repositories
+do not reload the catalog. Storage or readiness failures return HTTP 503;
+an unresolved repository or unauthorized principal still receives HTTP 401 on
+the private peer route. Public ingress discovery and membership changes for
+already known repositories still use the five-second poll on other nodes.
 
 The binary's `healthcheck` command calls `/readyz` on the management listener.
 `SIGTERM` and Ctrl-C start the same graceful drain. Repository, catalog,

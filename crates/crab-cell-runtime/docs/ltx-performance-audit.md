@@ -3261,7 +3261,53 @@ This change adds no request-path provider I/O, polling interval, wire field,
 stored format, or dependency. Membership administration still authorizes against
 the current durable catalog; data, Git, LFS, and peer routes share the protected
 in-memory indexes. Five-second propagation to other nodes and the first-request
-creation race in finding 32 remain separate open work.
+creation race in finding 32 remain separate work; finding 35 addresses the
+remote execution node's first-request miss.
+
+### 35. A lagging execution node must discover a new repository before dispatch
+
+**Reproduced:** with the revision-safe installer from finding 34, an ingress
+can still know a newly initialized repository while its execution node retains
+the pre-creation catalog. The public HTTP/mTLS fixture now starts in that state,
+with no catalog poller to repair it. Its first settings mutation returns HTTP
+503 before the fix. The original ordering also failed at its first native Git
+push, because that operation queries the repository Cell's lifecycle state.
+
+**Fix:** after peer authentication, a missing repository UUID triggers one
+catalog load through `Server::install_catalog`, bounded by the existing signed
+request deadline. The same installer verifies ready Cells and publishes the
+revision, name index, and UUID index atomically. A shared async lock coalesces
+concurrent first requests; waiters recheck the index after acquiring it.
+Cancellation releases the lock. The receiver then evaluates the principal and
+operation against the installed catalog, and normal dispatch retains its final
+authorization check before SQL.
+
+Warm authorized calls and denials for known repositories add no catalog I/O.
+The receiver returns an authorization denial if discovery does not establish
+access; provider or readiness errors remain service failures. There is no
+cached allow decision, new polling interval, retry policy, or wire field.
+
+**Proof:** the public HTTP/mTLS scenario exercises the first settings mutation,
+subsequent Git pushes, duplicate delivery, published LTX, replica reads, owner
+loss and recovery. A signed request with an unauthorized principal executes
+neither catalog reads nor SQL once the repository is known. A later authorized
+mutation also performs no catalog reads. Focused tests cover sixteen concurrent
+misses sharing one installation, fresh membership revocation during discovery,
+and a timed-out lock waiter followed by a successful refresh. The existing
+provider CI runs the same HTTP/mTLS scenario against RustFS.
+The local scenario passes with both in-memory storage and RustFS 1.0 GA
+(`sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858`)
+on Colima. The HTTP nodes in this fixture run as separate listeners in one
+test process; this is real-provider correctness proof, not a container fleet
+measurement.
+
+Public ingress lookup still uses its local catalog; a request arriving at an
+ingress that has not discovered the repository can remain unavailable until its
+five-second poll. Known repositories retain the existing membership propagation
+window. These boundaries need a separate explicit product contract. The local
+fixture does not establish multi-host capacity, throughput, or a latency limit.
+Cold discovery materializes the complete catalog, so its cost still grows with
+catalog size and requires large-catalog qualification.
 
 ## Safety and proof retained by the audit
 
