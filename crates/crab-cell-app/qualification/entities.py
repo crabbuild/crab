@@ -48,7 +48,7 @@ def verify_window(control: Path, nodes: int, shape: str, rate_per_node: int,
         assert int(metadata[key]) == expected
     elapsed_us = int(metadata["elapsed_us"])
     assert elapsed_us >= SECONDS * 1_000_000
-    assert int(metadata["ended_ms"]) >= int(metadata["started_ms"]) + SECONDS * 1000
+    assert int(metadata["ended_boot_ms"]) >= int(metadata["started_boot_ms"]) + SECONDS * 1000
     rate = nodes * rate_per_node
     planned = rate * SECONDS
     samples = sorted(rows(control / f"{label}.tsv"), key=lambda row: int(row["arrival"]))
@@ -116,6 +116,8 @@ def verify_window(control: Path, nodes: int, shape: str, rate_per_node: int,
                 completed_per_second=len(successes) * 1_000_000 / elapsed_us,
                 service_latency=distribution(successes), arrival_latency=distribution(arrival_latencies),
                 started_ms=int(metadata["started_ms"]), ended_ms=int(metadata["ended_ms"]),
+                started_boot_ms=int(metadata["started_boot_ms"]), ended_boot_ms=int(metadata["ended_boot_ms"]),
+                wall_clock_adjustment_ms=int(metadata["ended_ms"]) - int(metadata["started_ms"]) - elapsed_us / 1000,
                 elapsed_us=elapsed_us, peak_client_inflight=peak)
 
 
@@ -152,7 +154,7 @@ def verify_entities(control: Path) -> dict:
         samples = rows(control / f"node-{node}-resources.tsv")
         assert len(samples) >= 2
         assert all(int(row["active_cells"]) == CELLS_PER_NODE for row in samples)
-        for column in ("at_ms", "cpu_usage_us", "throttled_us", "object_started", "object_finished", "bytes_read", "bytes_written"):
+        for column in ("boot_ms", "cpu_usage_us", "throttled_us", "object_started", "object_finished", "bytes_read", "bytes_written"):
             values = [int(row[column]) for row in samples]
             assert values == sorted(values), f"node {node}: {column} regressed"
         assert {int(row["stage"]) for row in samples} >= {stage for stage in STAGES if node < stage}
@@ -171,11 +173,11 @@ def verify_entities(control: Path) -> dict:
         for window in windows:
             if node >= window["nodes"]:
                 continue
-            observed = [row for row in samples if window["started_ms"] <= int(row["at_ms"]) <= window["ended_ms"]]
+            observed = [row for row in samples if window["started_boot_ms"] <= int(row["boot_ms"]) <= window["ended_boot_ms"]]
             assert len(observed) >= 2, "missing in-window node samples"
             first, last = observed[0], observed[-1]
             window.setdefault("node_samples", {})[node] = dict(
-                first_ms=int(first["at_ms"]), last_ms=int(last["at_ms"]),
+                first_boot_ms=int(first["boot_ms"]), last_boot_ms=int(last["boot_ms"]),
                 cpu_usage_us=int(last["cpu_usage_us"]) - int(first["cpu_usage_us"]),
                 throttled_us=int(last["throttled_us"]) - int(first["throttled_us"]),
                 logical_object_started=int(last["object_started"]) - int(first["object_started"]),

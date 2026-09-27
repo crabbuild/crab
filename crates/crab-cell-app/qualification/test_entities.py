@@ -15,8 +15,8 @@ class EntityWindowEvidence(unittest.TestCase):
         self.root = Path(temporary.name)
         self.label = "entities-3-uniform-1"
         (self.root / f"{self.label}-window.tsv").write_text(
-            "window_id\tnodes\tshape\trate_per_node\tconcurrency\tseconds\tstarted_ms\tended_ms\telapsed_us\n"
-            "0\t3\tuniform\t1\t4\t10\t100000\t110000\t10000000\n")
+            "window_id\tnodes\tshape\trate_per_node\tconcurrency\tseconds\tstarted_ms\tended_ms\tstarted_boot_ms\tended_boot_ms\telapsed_us\n"
+            "0\t3\tuniform\t1\t4\t10\t100000\t110000\t100000\t110000\t10000000\n")
         counts = [0] * 12
         lines = ["arrival\tscheduled_us\tstarted_us\telapsed_us\tentity\tkind\toutcome\tsequence\tread_sequence\tcount"]
         for arrival in range(30):
@@ -51,6 +51,11 @@ class EntityWindowEvidence(unittest.TestCase):
         self.change("", lambda rows: rows[0].update(count="2"))
         with self.assertRaisesRegex(AssertionError, "read value disagrees"):
             self.verify()
+
+    def test_wall_clock_adjustment_does_not_shorten_the_load_window(self):
+        self.change("-window", lambda rows: rows[0].update(ended_ms="109898"))
+        result = self.verify()
+        self.assertEqual((result["fully_served_arrivals"], result["wall_clock_adjustment_ms"]), (True, -102))
 
     def test_missing_arrival_is_rejected(self):
         self.change("", lambda rows: rows.pop())

@@ -24,3 +24,4 @@ object_store.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
 tokio-util.workspace = true
+tracing-subscriber = "0.3"

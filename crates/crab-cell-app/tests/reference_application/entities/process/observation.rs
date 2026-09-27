@@ -45,7 +45,7 @@ impl NodeObservations {
             BufWriter::new(File::create(sync.join(format!("node-{node}-{name}.tsv"))).unwrap())
         };
         let mut resources = create("resources");
-        writeln!(resources, "at_ms\tstage\tactive_cells\tworker_jobs\tprimitive_jobs\thydration_jobs\tretained_bytes\tdisk_reserved_bytes\tdisk_bytes\tcpu_usage_us\tthrottled_us\tmemory_current_bytes\tmemory_peak_bytes\tgateway_local\tgateway_forwarded\tobject_started\tobject_finished\tbytes_read\tbytes_written").unwrap();
+        writeln!(resources, "at_ms\tboot_ms\tstage\tactive_cells\tworker_jobs\tprimitive_jobs\thydration_jobs\tretained_bytes\tdisk_reserved_bytes\tdisk_bytes\tcpu_usage_us\tthrottled_us\tmemory_current_bytes\tmemory_peak_bytes\tgateway_local\tgateway_forwarded\tobject_started\tobject_finished\tbytes_read\tbytes_written").unwrap();
         Self {
             resources,
             objects: create("objects"),
@@ -81,6 +81,7 @@ impl NodeObservations {
         let (local, forwarded) = gateway.counts();
         let values = [
             now_ms() as u64,
+            boot_ms(),
             stage as u64,
             stats.active_cells() as u64,
             stats.worker_jobs() as u64,

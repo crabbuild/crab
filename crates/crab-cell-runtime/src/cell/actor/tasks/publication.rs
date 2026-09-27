@@ -148,6 +148,9 @@ pub(super) fn handle_compacted(
         return;
     }
     active.finish_task(effect_id, CoordinationEffect::Compaction);
+    if let Err(error) = &result {
+        tracing::warn!(cell = ?cell, error = ?error, "Cell compaction fenced its owner");
+    }
     let fenced = result.is_err() || node_lease.check().is_err();
     active.publisher = Some(*publisher);
     if matches!(result, Ok(None)) {

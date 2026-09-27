@@ -321,11 +321,16 @@ class Fleet:
         print(f"Verified 3/5/10/20 nodes and reader replacement; evidence: {self.evidence}", flush=True)
 
     def retain(self) -> None:
-        (self.evidence / "compose.log").write_text(self.compose("logs", "--no-color"))
-        containers = self.compose("ps", "-aq").split()
-        if containers:
-            (self.evidence / "containers.json").write_text(self.run("docker", "inspect", *containers))
-        self.compose("stop")
+        try:
+            (self.evidence / "compose.log").write_text(self.compose("logs", "--no-color"))
+            containers = self.compose("ps", "-aq").split()
+            if containers:
+                (self.evidence / "containers.json").write_text(self.run("docker", "inspect", *containers))
+            rustfs = self.compose("ps", "-aq", "rustfs").strip()
+            if rustfs:
+                self.run("docker", "cp", f"{rustfs}:/data/logs", str(self.evidence / "rustfs-logs"))
+        finally:
+            self.compose("stop")
 
 
 def main() -> None:

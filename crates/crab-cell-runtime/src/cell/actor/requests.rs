@@ -268,6 +268,7 @@ pub(super) async fn execute_command(
     };
     let fenced = must_fence && result.is_err();
     if fenced {
+        tracing::warn!(cell = ?command.cell, error = ?result.as_ref().err(), "Cell command execution fenced its owner");
         let _ = pool.fence(command.cell).await;
     }
     let result = if fenced {
@@ -481,6 +482,11 @@ pub(super) fn start_publication(
             "Cell LTX publication completed"
         );
         let fenced = result.is_err();
+        if let Err(error) = &result {
+            // The proof waiter receives an unknown outcome. Retain the cause
+            // here so an operator can distinguish storage failure from fencing.
+            tracing::warn!(cell = ?cell, commit_sequence, error = ?error, "Cell publication fenced its owner");
+        }
         if let Some(proof) = publication_proof {
             let _ = proof.send(if fenced { Err(Error::Fenced) } else { Ok(()) });
         }

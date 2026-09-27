@@ -222,6 +222,7 @@ async fn run_window(
     .unwrap();
     output.flush().unwrap();
     let started_ms = now_ms();
+    let started_boot_ms = boot_ms();
     let started = Instant::now();
     let mut jobs = JoinSet::new();
     let mut samples = Vec::with_capacity(planned);
@@ -263,6 +264,7 @@ async fn run_window(
     }
     let elapsed_us = started.elapsed().as_micros() as u64;
     let ended_ms = now_ms();
+    let ended_boot_ms = boot_ms();
     samples.sort_by_key(|sample| sample.arrival);
     assert_eq!(samples.len(), planned);
     for sample in &samples {
@@ -295,7 +297,7 @@ async fn run_window(
     publish_marker(
         &sync.join(format!("{label}-window.tsv")),
         format!(
-            "window_id\tnodes\tshape\trate_per_node\tconcurrency\tseconds\tstarted_ms\tended_ms\telapsed_us\n{}\t{}\t{}\t{}\t{}\t{WINDOW_SECONDS}\t{started_ms}\t{ended_ms}\t{elapsed_us}\n",
+            "window_id\tnodes\tshape\trate_per_node\tconcurrency\tseconds\tstarted_ms\tended_ms\tstarted_boot_ms\tended_boot_ms\telapsed_us\n{}\t{}\t{}\t{}\t{}\t{WINDOW_SECONDS}\t{started_ms}\t{ended_ms}\t{started_boot_ms}\t{ended_boot_ms}\t{elapsed_us}\n",
             window.id, window.nodes, window.shape, window.rate_per_node, window.concurrency
         ),
     );

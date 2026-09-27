@@ -72,6 +72,14 @@ are not queue-depth measurements. Raw object durability waits are retained per
 node. The current host profile uses object durability and owner reads; it does
 not measure follower durability or sparse replica-query capacity.
 
+Action durations use `Instant`. Resource samples and windows align using the
+shared Linux boot clock from [`/proc/uptime`](https://github.com/torvalds/linux/blob/master/fs/proc/uptime.c),
+whose centisecond precision is sufficient for one-second resource samples.
+Wall timestamps are retained with their observed adjustment, but do not govern
+duration or resource-window validation. Node logs retain runtime warnings,
+including SQL deadlines and the error that causes publication, compaction,
+renewal, or post-commit execution to fence a Cell.
+
 The Compose workflow runs this profile after reader qualification. Its resource
 limits remain 1 CPU/1 GiB per node, while all containers share the recorded Docker
 host. Owner-loss recovery, continuous container/schema rollout, workflow and

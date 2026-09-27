@@ -34,9 +34,28 @@ fn publish_marker(path: &Path, value: impl AsRef<[u8]>) {
     std::fs::rename(temporary, path).unwrap();
 }
 
+fn boot_ms() -> u64 {
+    // Linux exposes the shared boot clock with centisecond precision. Wall
+    // time can step during a window and cannot align resource observations.
+    let uptime = std::fs::read_to_string("/proc/uptime").unwrap();
+    let (seconds, centiseconds) = uptime
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .split_once('.')
+        .unwrap();
+    assert_eq!(centiseconds.len(), 2);
+    seconds.parse::<u64>().unwrap() * 1_000 + centiseconds.parse::<u64>().unwrap() * 10
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Compose entity node: Linux cgroups, private disk and real RustFS required"]
 async fn entity_process_node() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing_subscriber::filter::LevelFilter::WARN)
+        .with_ansi(false)
+        .try_init()
+        .unwrap();
     let node: usize = env::var("CRAB_CELL_PERF_PROCESS_NODE")
         .unwrap()
         .parse()
