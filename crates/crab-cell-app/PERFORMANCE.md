@@ -232,12 +232,16 @@ source and binary identity, and container resource evidence on GA RustFS.
 The [host-owned reader run](performance/2026-09-27-host-readers-compose.md)
 then proves automatic refresh, target-zero eviction, and terminal drain through
 the manager shared with the product server.
+The [public-host recruitment run](performance/2026-09-27-reader-recruitment.md)
+adds automatic signed placement on three constrained nodes and a separate
+native three-to-five-process test that replaces a killed reader. The latter
+does not impose per-process resource limits.
 
 This is an application integration smoke with six closed-loop lanes and seven
 Cells assigned 3/2/2. Ingress counts are even; owner load follows the action
 mix. It does not establish a supported throughput, 5/10/20-node application
-capacity, automatic reader placement/replacement, mTLS, failure-domain
-isolation, replica-query throughput, or recovery during arrivals. The issue-service fleet qualification
+capacity, mTLS, failure-domain isolation, replica-query throughput, or recovery
+during arrivals. The issue-service fleet qualification
 covers its separate product ingress and scaling paths.
 
 ## Native RustFS sanity check
