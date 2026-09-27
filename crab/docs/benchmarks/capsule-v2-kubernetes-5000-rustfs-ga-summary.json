@@ -1,4 +1,116 @@
 {
+  "main_integration_follow_up": {
+    "run_id": "capsule-main-integration-ga-20260927-r1",
+    "started_at": "2026-09-27T18:58:36+00:00",
+    "finished_at": "2026-09-27T19:52:21+00:00",
+    "status": "failed",
+    "error": "qualification performance gates failed; see report metrics",
+    "correctness": {
+      "cold_clone_sampled_blob_bytes": "matched source",
+      "cold_clone_strict_full_git_fsck": "passed",
+      "expected_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+      "final_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+      "incremental_fetches": 10,
+      "remote_crab_fsck": "passed",
+      "sampled_blob_count": 32,
+      "seed_remote_crab_fsck": "passed",
+      "seed_strict_full_git_fsck": "passed",
+      "seed_tip": "76f1c595bafaa8db583d511c95b7e54790fd5ca5",
+      "warm_clone_sampled_blob_bytes": "matched source",
+      "warm_clone_strict_full_git_fsck": "passed",
+      "warm_clone_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1"
+    },
+    "metrics": {
+      "push_count": 5000,
+      "push_latency_ms": {
+        "max": 8291,
+        "mean": 300.11,
+        "p50": 220,
+        "p95": 655,
+        "p99": 1263
+      },
+      "push_object_store_requests": {
+        "max": 42,
+        "mean": 7.012,
+        "p50": 6,
+        "p95": 6,
+        "p99": 40,
+        "total": 35060,
+        "under_10_average": true
+      },
+      "fetch": {
+        "count": 10,
+        "latency_ms": {
+          "max": 15511,
+          "mean": 6829.6,
+          "p50": 5664,
+          "p95": 15511,
+          "p99": 15511
+        },
+        "max_new_local_packs": 1,
+        "new_local_pack_count": 10,
+        "object_store_requests": {
+          "max": 87,
+          "mean": 82.5,
+          "p50": 82,
+          "p95": 87,
+          "p99": 87
+        },
+        "request_body_bytes": 1928,
+        "response_body_bytes": 597377323
+      },
+      "performance_gates": {
+        "500_commit_fetch": {
+          "latency_p95_ms_lte_10000": false,
+          "requests_p95_lte_10": false,
+          "required_interval": 500,
+          "status": "failed"
+        },
+        "push_mean_latency_ms_under_1000": true,
+        "push_mean_requests_under_10": true,
+        "status": "failed"
+      }
+    },
+    "clones": [
+      {
+        "operation": "cold-final-clone",
+        "elapsed_ms": 32382,
+        "requests": 17,
+        "response_body_bytes": 1313413256
+      },
+      {
+        "operation": "warm-final-clone",
+        "elapsed_ms": 58661,
+        "requests": 17,
+        "response_body_bytes": 1313413257
+      }
+    ],
+    "provenance": {
+      "candidate": "7d31c33adc2a5431fde1f95f3fdf5ab1ce41656f",
+      "base": "219afe03d0616f37714b872a1f4b0e090812fb93",
+      "binary_sha256": "423518e95a1539aeeb85e881c86503f4c1e001e6fc814f5397a0ae223d2841e2",
+      "source_sha256": "c2b7758ff7f12f64da5442b8fbda6a7bf18be54a8fb5251bc619614ac3cfd60b",
+      "report_sha256": "98243f6eea55ea27c5eba23b3f2c648dfc96031ead9dc12efada0870883841f7",
+      "requests_sha256": "65d45ded9e07a4bbbb9363320b345276047f40917f80170b031f4b0fde1e733b",
+      "harness_sha256": "1a31f2c94d771d4090e81fc660a0832f51e37679fcbab1c89dbe170d6a6a02a7",
+      "meter_sha256": "bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879",
+      "retained_root": "/Volumes/Workspace/Github/kubernetes/crab-capsule-qualification/capsule-main-integration-ga-20260927-r1"
+    },
+    "request_audit": {
+      "incremental_fetch_requests": 825,
+      "seed_capsule_reads": 0,
+      "stable_layer_reads": 0,
+      "server_errors": 0,
+      "warm_clone_pack_body_reads": 3
+    },
+    "scope_limits": [
+      "Shared host, OS and backend caches not flushed",
+      "No task compilation or second bulk qualification during replay; read-only diagnostics overlapped",
+      "Warm wire clone cache still empty; native installer cache tests do not qualify it",
+      "Not an isolated matched v1 comparison",
+      "Full Xet100GiB, fault/concurrency, product/provider parity and green CI remain open"
+    ]
+  },
   "schema": "crab.capsule-protocol-ga-qualification-summary",
   "version": 1,
   "run_id": "capsule-v2-ga-2721-20260927-r1",

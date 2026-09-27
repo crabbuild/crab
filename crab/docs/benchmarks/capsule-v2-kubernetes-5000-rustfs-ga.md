@@ -5,6 +5,53 @@ incremental-fetch latency and request-count gates. Push performance passed its
 sub-second mean and under-ten-request average gates; this is not a matched v1
 comparison or permission to retire v1.
 
+## Reconciled-main candidate: full replay, still not qualified
+
+`capsule-main-integration-ga-20260927-r1` ran from 18:58:36 to 19:52:21 UTC
+on September 27. Candidate `7d31c33adc2a5431fde1f95f3fdf5ab1ce41656f`, based
+on `219afe03d0616f37714b872a1f4b0e090812fb93`, completed the same seed and
+5,000 individual pushes, with fetch before repack every 500. The installed
+binary and sources remained frozen. The run passed all stated correctness
+checks and exited with failure for the unchanged fetch performance gates.
+
+| Operation | Latency | Origin requests |
+|---|---:|---:|
+| Seed push | 244.375 s | 9 |
+| Initial clone | 28.847 s | 13 |
+| Incremental push mean / p50 / p95 / p99 | 300.11 / 220 / 655 / 1,263 ms | 7.012 mean; 6 p50/p95; 40 p99 |
+| 500-commit fetch mean / p50 / p95 | 6.830 / 5.664 / 15.511 s | 82.5 mean; 87 p95 |
+| Final cold clone | 32.382 s | 17 |
+| Final warm-cache clone | 58.661 s | 17 |
+
+Every 500-push window averaged exactly 7.012 requests; window latency means
+ranged from 247.49 to 348.19 ms. This passes the mean push targets, not a
+sub-second tail guarantee. Ten fetches added one pack each and passed exact-tip
+and connectivity checks. Seed/final remote Crab fsck, native strict full Git
+fsck, and 32 sampled blob digests in each independent final clone all passed.
+An independent audit counts 825 incremental-fetch requests, no seed-capsule or
+stable pack-layer reads, and no server-error responses in those fetches.
+
+Warm reuse still fails. Both final clones downloaded approximately 1.313 GB;
+the warm clone fetched all three pack bodies again and its shared cache root
+remained empty. The native installer's earlier cache tests do not qualify this
+entry point: normal Git uses `upload_pack_wire`, whose pack materialization
+calls `RemoteGitReader::download_pack_source_to_path`. Its storage facade
+forwards v2 capsule/layer reads to origin and never invokes the native
+installer's verified pack-file cache. Fixing this requires actual wire-path
+coverage, not broadening cache-service admission or weakening integrity checks.
+
+The slowest fetch's Git Trace2 records a 7.692-second helper child and a
+subsequent 7.704-second connectivity `rev-list`; overlapping `index-pack` took
+2.633 seconds. Its 83 request durations sum to 1.796 seconds, which is not a
+critical-path measure. Native commit-graph acceleration is an untested
+hypothesis; connectivity checks remain enabled.
+
+No task-owned compilation or second bulk workload overlapped this run. Read-only
+diagnostics did, and the host remained shared; OS/backend caches were not
+flushed. This is not an isolated matched-v1 comparison. Binary/report/request
+hashes and exact metrics are retained under `main_integration_follow_up` in the
+machine-readable summary. CI and the full Xet/product/provider gates remain open.
+
 ## Environment and method
 
 | Item | Value |
