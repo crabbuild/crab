@@ -201,6 +201,44 @@ def git_pack_phase_summary(trace_path: Path) -> dict[str, dict[str, int | float]
     }
 
 
+def git_fetch_phase_summary(trace_path: Path) -> dict[str, Any]:
+    """Report direct-child observed times; helper and index-pack may overlap."""
+    root_sid = None
+    children: dict[int, dict[str, Any]] = {}
+    summary: dict[str, Any] = {"fetch_ms": None, "exit_code": None}
+    for event in git_trace_events(trace_path):
+        if root_sid is None and event.get("event") == "start":
+            root_sid = event["sid"]
+        if root_sid is None or event.get("sid") != root_sid:
+            continue
+        if event.get("event") == "child_start":
+            argv = event.get("argv", [])
+            command = argv[1] if len(argv) > 1 else "other"
+            phase = {
+                "rev-list": "connectivity",
+                "index-pack": "index-pack",
+                "unpack-objects": "unpack-objects",
+                "maintenance": "maintenance",
+                "gc": "maintenance",
+            }.get(command, "other")
+            if event.get("child_class", "").startswith("remote-"):
+                phase = "remote-helper"
+            children[event["child_id"]] = {
+                "phase": phase, "elapsed_ms": None, "exit_code": None,
+            }
+        elif event.get("event") == "child_exit" and event.get("child_id") in children:
+            children[event["child_id"]].update(
+                elapsed_ms=round(float(event["t_rel"]) * 1000, 3), exit_code=event["code"],
+            )
+        elif event.get("event") == "exit":
+            summary.update(fetch_ms=round(float(event["t_abs"]) * 1000, 3), exit_code=event["code"])
+    summary["children"] = list(children.values())
+    summary["complete"] = summary["fetch_ms"] is not None and all(
+        child["elapsed_ms"] is not None for child in children.values()
+    )
+    return summary
+
+
 def git_child_commands(trace_path: Path) -> list[list[str]]:
     events = []
     for event in git_trace_events(trace_path):
@@ -381,6 +419,7 @@ class Qualification:
         sample_resources: bool = False,
         operation: str | None = None,
         extra_env: dict[str, str] | None = None,
+        stderr_path: Path | None = None,
     ) -> tuple[int, dict[str, Any], dict[str, int] | None, str]:
         before = self.proxy.snapshot(include_paths=False)
         started = time.monotonic()
@@ -434,6 +473,16 @@ class Qualification:
             stderr.seek(0)
             stderr_text = stderr.read().decode("utf-8", errors="replace")
         elapsed_ms = round((time.monotonic() - started) * 1000)
+        # Persist selected diagnostic output, including failures, without turning
+        # credentials inherited by a child into report or exception contents.
+        safe_stdout = stdout_text
+        for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+            if value := env.get(key):
+                safe_stdout = safe_stdout.replace(value, "<redacted>")
+                stderr_text = stderr_text.replace(value, "<redacted>")
+        if stderr_path is not None:
+            stderr_path.parent.mkdir(parents=True, exist_ok=True)
+            stderr_path.write_text(stderr_text, encoding="utf-8")
         requests = RequestCountingProxy.delta(
             before, self.proxy.snapshot(include_paths=False)
         )
@@ -453,12 +502,12 @@ class Qualification:
         if timed_out:
             raise RuntimeError(
                 f"command timed out after {timeout}s: {' '.join(command)}\n"
-                f"stdout: {stdout_text[-2000:]}\nstderr: {stderr_text[-4000:]}"
+                f"stdout: {safe_stdout[-2000:]}\nstderr: {stderr_text[-4000:]}"
             )
         if exit_code:
             raise RuntimeError(
                 f"command failed ({exit_code}): {' '.join(command)}\n"
-                f"stdout: {stdout_text[-2000:]}\nstderr: {stderr_text[-4000:]}"
+                f"stdout: {safe_stdout[-2000:]}\nstderr: {stderr_text[-4000:]}"
             )
         resources = (
             {
@@ -753,6 +802,7 @@ class Qualification:
     def fetch(self, ordinal: int, expected: str) -> None:
         packs_before = git_pack_inventory(self.incremental)
         name = f"incremental-fetch-{ordinal:05}"
+        diagnostics = self.root / "artifacts" / "fetch-diagnostics" / f"{name}.stderr.log"
         elapsed, requests, resources, _ = self.run(
             # Exercise Git's normal maintenance policy; inventory and Trace2
             # checks must detect an unexpected local repack, not suppress it.
@@ -762,7 +812,14 @@ class Qualification:
             sample_resources=True,
             timeout=7200,
             operation=name,
-            extra_env={"GIT_TRACE2_EVENT": str(self.trace_path(name))},
+            stderr_path=diagnostics,
+            extra_env={
+                "GIT_TRACE2_EVENT": str(self.trace_path(name)),
+                "CRAB_LOG": (
+                    "error,crab_remote_git::telemetry=info,crab_read::upload_pack=info,"
+                    "crab::git::upload_pack_wire=info"
+                ),
+            },
         )
         packs_after = git_pack_inventory(self.incremental)
         installed_packs = require_at_most_one_new_pack(ordinal, packs_before, packs_after)
@@ -775,6 +832,8 @@ class Qualification:
                 "ordinal": ordinal,
                 "operation": "incremental-fetch",
                 "elapsed_ms": elapsed,
+                "git_fetch_phases": git_fetch_phase_summary(self.trace_path(name)),
+                "diagnostics": str(diagnostics),
                 "object_store": requests,
                 "tip": actual,
                 "new_local_packs": installed_packs,

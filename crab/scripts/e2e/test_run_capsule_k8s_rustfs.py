@@ -28,6 +28,129 @@ SPEC.loader.exec_module(QUALIFICATION)
 
 
 class CapsuleKubernetesQualificationTests(unittest.TestCase):
+    def test_saved_diagnostics_redact_credentials_without_changing_command_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tmp").mkdir()
+            qualification = object.__new__(QUALIFICATION.Qualification)
+            qualification.root = root
+            qualification.proxy = Mock()
+            qualification.proxy.snapshot.return_value = {}
+            qualification.proxy.paths_since.return_value = []
+            qualification.env = Mock(return_value={
+                "AWS_ACCESS_KEY_ID": "fixture-access", "AWS_SECRET_ACCESS_KEY": "fixture-secret",
+                "AWS_SESSION_TOKEN": "fixture-token",
+            })
+            diagnostics = root / "artifacts" / "fetch.stderr.log"
+            script = (
+                "import os,sys; values=' '.join(os.environ[k] for k in "
+                "('AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','AWS_SESSION_TOKEN')); "
+                "print(values); print(values,file=sys.stderr); sys.exit(int(sys.argv[1]))"
+            )
+            for exit_code in (0, 1):
+                with self.subTest(exit_code=exit_code):
+                    command = [sys.executable, "-c", script, str(exit_code)]
+                    if exit_code:
+                        with self.assertRaisesRegex(RuntimeError, "command failed") as error:
+                            qualification.run(command, root, stderr_path=diagnostics)
+                        for value in qualification.env().values():
+                            self.assertNotIn(value, str(error.exception))
+                    else:
+                        *_, stdout = qualification.run(command, root, stderr_path=diagnostics)
+                        self.assertEqual(stdout, "fixture-access fixture-secret fixture-token\n")
+                    self.assertEqual(diagnostics.read_text(), "<redacted> <redacted> <redacted>\n")
+
+    def test_fetch_phases_match_parent_sessions_without_summing_overlaps(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "fetch.jsonl"
+            events = [
+                {"event": "start", "sid": "root", "argv": ["git", "fetch", "origin"]},
+                {"event": "child_start", "sid": "root", "child_id": 0,
+                 "child_class": "remote-crab", "argv": ["git", "remote-crab"]},
+                {"event": "child_start", "sid": "root/child", "child_id": 0,
+                 "argv": ["git", "rev-list"]},
+                {"event": "child_exit", "sid": "root/child", "child_id": 0, "t_rel": 99, "code": 0},
+                {"event": "child_start", "sid": "root", "child_id": 1,
+                 "argv": ["git", "index-pack", "--stdin"]},
+                {"event": "child_exit", "sid": "root", "child_id": 1, "t_rel": 2, "code": 0},
+                {"event": "child_exit", "sid": "root", "child_id": 0, "t_rel": 7, "code": 0},
+                {"event": "child_start", "sid": "root", "child_id": 2,
+                 "argv": ["git", "rev-list", "--quiet"]},
+                {"event": "child_exit", "sid": "root", "child_id": 2, "t_rel": 3, "code": 0},
+                {"event": "exit", "sid": "root", "t_abs": 10.1, "code": 0},
+                {"event": "atexit", "sid": "root", "t_abs": 10.2, "code": 0},
+            ]
+            trace.write_text("\n".join(json.dumps(event) for event in events))
+            self.assertEqual(QUALIFICATION.git_fetch_phase_summary(trace), {
+                "fetch_ms": 10100.0,
+                "exit_code": 0,
+                "complete": True,
+                "children": [
+                    {"phase": "remote-helper", "elapsed_ms": 7000.0, "exit_code": 0},
+                    {"phase": "index-pack", "elapsed_ms": 2000.0, "exit_code": 0},
+                    {"phase": "connectivity", "elapsed_ms": 3000.0, "exit_code": 0},
+                ],
+            })
+
+    def test_missing_or_truncated_fetch_trace_is_not_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "fetch.jsonl"
+            self.assertFalse(QUALIFICATION.git_fetch_phase_summary(trace)["complete"])
+            trace.write_text('\n'.join([
+                json.dumps({"event": "start", "sid": "root"}),
+                json.dumps({"event": "child_start", "sid": "root", "child_id": 0,
+                            "argv": ["git", "index-pack"]}),
+                json.dumps({"event": "exit", "sid": "root", "t_abs": 1, "code": 1}),
+                '{"truncated":',
+            ]))
+            self.assertEqual(QUALIFICATION.git_fetch_phase_summary(trace), {
+                "fetch_ms": 1000.0, "exit_code": 1, "complete": False,
+                "children": [{"phase": "index-pack", "elapsed_ms": None, "exit_code": None}],
+            })
+
+    def test_fetch_retains_diagnostics_and_runs_integrity_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            qualification = object.__new__(QUALIFICATION.Qualification)
+            qualification.root = root
+            qualification.incremental = root / "client"
+            qualification.trace2_root = root / "trace2"
+            qualification.args = Mock(git_bin="git")
+            qualification.git = Mock(return_value="expected-tip")
+            qualification.report = {"maintenance": []}
+            qualification.save = Mock()
+
+            def run(command: list[str], cwd: Path, **options: object) -> tuple:
+                self.assertEqual(command, ["git", "fetch", "origin"])
+                self.assertEqual(cwd, qualification.incremental)
+                self.assertTrue(options["meter"])
+                self.assertIn("crab_remote_git::telemetry=info", options["extra_env"]["CRAB_LOG"])
+                trace = Path(options["extra_env"]["GIT_TRACE2_EVENT"])
+                trace.write_text('\n'.join(json.dumps(event) for event in [
+                    {"event": "start", "sid": "fetch"},
+                    {"event": "child_start", "sid": "fetch", "child_id": 0,
+                     "argv": ["git", "unpack-objects"]},
+                    {"event": "child_exit", "sid": "fetch", "child_id": 0,
+                     "t_rel": 0.1, "code": 0},
+                    {"event": "exit", "sid": "fetch", "t_abs": 0.2, "code": 0},
+                ]))
+                diagnostics = options["stderr_path"]
+                diagnostics.parent.mkdir(parents=True)
+                diagnostics.write_text("pack-generation measurement\n")
+                return 201, {"requests": 8}, {}, ""
+
+            qualification.run = run
+            qualification.fetch(500, "expected-tip")
+            measurement, = qualification.report["maintenance"]
+            self.assertEqual(measurement["git_fetch_phases"]["children"], [
+                {"phase": "unpack-objects", "elapsed_ms": 100.0, "exit_code": 0},
+            ])
+            self.assertEqual(Path(measurement["diagnostics"]).read_text(), "pack-generation measurement\n")
+            qualification.git.assert_any_call(
+                ["fsck", "--connectivity-only"], qualification.incremental, timeout=7200,
+            )
+            qualification.save.assert_called_once()
+
     def test_clone_leaves_private_cache_creation_to_crab_and_reuses_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

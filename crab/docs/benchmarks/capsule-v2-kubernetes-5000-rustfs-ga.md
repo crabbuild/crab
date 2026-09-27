@@ -261,6 +261,54 @@ bodies and finishes with two or three active packs, but still costs 63–65
 requests and 12.312–23.687 seconds per interval. Body-byte accounting excludes
 metadata, sidecars, readback verification and transport retries.
 
+### Fetch phase attribution: no evidence for changing Git's unpack policy
+
+The qualification harness now retains credential-redacted fetch diagnostics
+and direct-child Trace2 timings for the helper, pack installation, connectivity
+and automatic maintenance. Child times overlap; they must not be added together
+or called CPU time. Parent session and child ID identify each process; incomplete
+traces are explicitly marked. This follows Git's [Trace2 contract](https://git-scm.com/docs/api-trace2).
+The fetch command, normal maintenance policy, integrity checks and gates remain
+unchanged. All 23 focused harness tests pass, including diagnostic persistence,
+redaction on failure, unchanged successful command output and integrity wiring.
+
+On installed CLI SHA256 `d2e0357e196c64e9050cdc54b0854d35d35e321f7780a0bf953dbba6a100cfb3`,
+`native-fetch-phases-20260927-r1` passed 23 checks over a seed and twenty individual
+edits to a 256 KiB native blob. Fetch took 2,243 ms and 68 requests. Telemetry
+reported 259 ms generating the 60-object pack, all copied entries and no
+materialization; Git's overlapping `unpack-objects` child took 1,550.504 ms.
+This identifies component time in that sample, not a stable bottleneck.
+
+A fresh four-client ABBA diagnostic used the harness's actual `fetch` method
+against the same seed and twenty updates (`native-fetch-unpack-policy-20260927-r2`):
+
+| Trial | Command-scoped Git policy | Fetch ms | Installer child ms | Requests |
+|---|---|---:|---:|---:|
+| 1 | Default, loose objects | 293 | 169.306 | 68 |
+| 2 | `fetch.unpackLimit=1`, keep pack | 359 | 190.181 | 68 |
+| 3 | `fetch.unpackLimit=1`, keep pack | 781 | 605.142 | 70 |
+| 4 | Default, loose objects | 304 | 161.428 | 70 |
+
+All 37 checks passed: independent seed clients, exact fetched tips and bytes,
+strict full Git fsck, expected installer paths, and unchanged binary. Pack
+generation took 37/70/40/38 ms, with all 60 entries copied. Two reader-slot CAS
+conflicts explain the two extra requests in trials 3 and 4. Keep-pack trials
+installed one new pack each; default trials created loose objects. No production
+Git setting changed: this comparison does **not** support forcing keep-pack.
+It does not explain Kubernetes' 500-commit latency; those fetches already use
+`index-pack`. The host was shared, caches were not flushed, and no task-owned
+compilation or bulk qualification overlapped these diagnostics.
+
+The retained r1 policy trial failed its expected-installer assertion: setting
+the limit to zero bypasses the size heuristic on this path, so Git still used
+`unpack-objects`. [Git 2.50.1 source](https://github.com/git/git/blob/v2.50.1/fetch-pack.c#L862-L946)
+and the recorded child command establish this distinction. The corrected r2
+uses one; it does not overwrite the failed trial. Its report SHA256 is
+`1950cbf7eaef458fe05f6869d08a90d9e0bad8d21918079755f49d3e76ccc3de`.
+The initial phase probe report is
+`86e5d7fa39ef13ff43def13c4ad4fece9ebfbef7d0d5430ed160e35836b70da2`.
+Neither small diagnostic closes the full replay or request-count gates.
+
 ### Frontier request-budget audit
 
 The writer batches 32 leaves, then carries through equal-sized older runs.

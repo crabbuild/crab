@@ -3533,6 +3533,14 @@ tip/dependency proof, remote-helper wall time, and parent Git post-helper
 maintenance. Qualification enables Git Trace2 so `git fetch` time after the
 helper exits cannot be misattributed to object storage.
 
+The harness now records parent-session child timings and retains selected
+credential-redacted upload-pack diagnostics, including command failures.
+Observed helper and installer times can overlap; they are not additive CPU
+measurements. Missing or unfinished traces are marked incomplete. The small
+[unpack-policy comparison](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#fetch-phase-attribution-no-evidence-for-changing-gits-unpack-policy)
+did not demonstrate a keep-pack speedup, so normal Git settings remain unchanged.
+These diagnostics do not replace the complete Kubernetes performance gates.
+
 Repack timing is split into inventory selection, selected-source download,
 external-base reads, disjointness proof, structural concatenation or fallback
 recompression, sidecar construction, candidate validation, upload, and CAS.
