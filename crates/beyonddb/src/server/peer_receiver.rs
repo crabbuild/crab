@@ -1,4 +1,9 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Router,
@@ -299,6 +304,7 @@ async fn forward(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let started = Instant::now();
     if headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -306,6 +312,14 @@ async fn forward(
     {
         return error(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
+    // I/O waiters retain request copies and enrollment state, not CPU slots.
+    // Bound that memory independently before allowing another request to wait.
+    let Ok(_request_bytes) = receiver
+        .runtime
+        .try_reserve_node_bytes(body.len() * 3 + 64 * 1024)
+    else {
+        return busy();
+    };
     let decoded = {
         let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
             return busy();
@@ -315,36 +329,37 @@ async fn forward(
             Err(_) => return error(StatusCode::UNAUTHORIZED),
         }
     };
+    let deadline = started + Duration::from_millis(u64::from(decoded.remaining_ms()));
     let now_ms = match unix_time_ms() {
         Ok(now_ms) => now_ms,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
     };
     // Session enrollment reads object storage. Release the codec reservation
     // during that I/O so unrelated requests can make progress.
-    let verifier = match receiver
-        .directory
-        .peer_verifier(
-            decoded.session(),
-            identity.certificate(),
-            identity.public_key(),
-            now_ms,
-        )
-        .await
-    {
-        Ok(verifier) => verifier,
-        Err(_) => return error(StatusCode::UNAUTHORIZED),
+    let enrollment = receiver.directory.peer_verifier(
+        decoded.session(),
+        identity.certificate(),
+        identity.public_key(),
+        now_ms,
+    );
+    let verifier = match tokio::time::timeout_at(deadline.into(), enrollment).await {
+        Ok(Ok(verifier)) => verifier,
+        Ok(Err(_)) => return error(StatusCode::UNAUTHORIZED),
+        Err(_) => return error(StatusCode::GATEWAY_TIMEOUT),
     };
-    let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
-        return busy();
-    };
-    // Enrollment I/O consumes the signed request lifetime too.
-    let now_ms = match unix_time_ms() {
-        Ok(now_ms) => now_ms,
-        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
-    };
-    let request = match verifier.verify(decoded, now_ms) {
-        Ok(request) => request,
-        Err(_) => return error(StatusCode::UNAUTHORIZED),
+    let request = {
+        let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
+            return busy();
+        };
+        // Enrollment I/O consumes the signed request lifetime too.
+        let now_ms = match unix_time_ms() {
+            Ok(now_ms) => now_ms,
+            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+        match verifier.verify(decoded, now_ms) {
+            Ok(request) => request,
+            Err(_) => return error(StatusCode::UNAUTHORIZED),
+        }
     };
     // Each dispatcher authorizes before resolving. Only scoped admission
     // capabilities may acquire a Cell; forwarded application work cannot.
@@ -355,20 +370,26 @@ async fn forward(
     } else {
         None
     };
-    let dispatched = if let Some(dispatcher) = admission {
-        match tokio::time::timeout(
-            std::time::Duration::from_millis(u64::from(request.remaining_ms())),
-            dispatcher.dispatch_bytes(&request, now_ms),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => return error(StatusCode::GATEWAY_TIMEOUT),
-        }
-    } else {
-        receiver.dispatcher.dispatch_bytes(&request, now_ms).await
+    let dispatcher = admission.unwrap_or(&receiver.dispatcher);
+    let now_ms = match unix_time_ms() {
+        Ok(now_ms) => now_ms,
+        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    let reply = match dispatched {
+    let reply =
+        match tokio::time::timeout_at(deadline.into(), dispatcher.dispatch(&request, now_ms)).await
+        {
+            Ok(reply) => reply,
+            Err(_) => return error(StatusCode::GATEWAY_TIMEOUT),
+        };
+    // Resolution, restoration and actor publication own their resources. Only
+    // encoding needs another CPU reservation; post-dispatch failures are unknown
+    // outcomes and must never be labeled as safe-to-retry admission refusals.
+    let _reservation = match receiver.runtime.reserve_worker_job(deadline).await {
+        Ok(reservation) => reservation,
+        Err(Error::Deadline) => return error(StatusCode::GATEWAY_TIMEOUT),
+        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    let reply = match crab_cell_runtime::peer::encode_peer_reply(&reply) {
         Ok(reply) => reply,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
     };

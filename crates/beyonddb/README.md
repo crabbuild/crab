@@ -18,6 +18,10 @@ AWS SDK / DynamoDB JSON client
 ## Running the current server
 
 The server writes warnings and errors to stderr.
+Peer requests reserve memory while awaiting storage or Cell dispatch. CPU slots
+cover envelope decoding, signature verification and reply encoding; asynchronous
+work does not retain a codec slot. The signed request deadline bounds enrollment,
+dispatch and reply encoding.
 Serving nodes publish a 15-second lease and renew every three seconds. Graceful
 shutdown drains the runtime and joins heartbeat maintenance before withdrawing
 the boot-session advertisement. After an unclean exit, owner replacement waits

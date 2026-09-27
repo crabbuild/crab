@@ -1,3 +1,4 @@
+mod codec;
 mod creation;
 mod deletion;
 mod index_splits;
@@ -39,6 +40,10 @@ impl Fixture {
     }
 
     async fn with_partition_count(partitions: u16) -> Self {
+        Self::with_store(partitions, Arc::new(InMemory::new())).await
+    }
+
+    async fn with_store(partitions: u16, store: Arc<dyn object_store::ObjectStore>) -> Self {
         let files = tempfile::tempdir().unwrap();
         let (certificate, key, remote_certificate, remote_key, ca) = tls_files(files.path());
         let remote_tls =
@@ -55,7 +60,7 @@ impl Fixture {
         );
         let account = account_target("123456789012").unwrap();
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            Store::new(store),
             object_store::path::Path::from("beyonddb-residency"),
             *account.application().as_bytes(),
         );

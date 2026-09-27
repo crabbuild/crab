@@ -2090,3 +2090,46 @@ cancellation/fencing passed in 6.04s. The original standalone process scenario
 must still pass on the new PR head in CI before this failure is considered fully
 qualified. Hard-kill recovery and automatic fleet rebalancing retain their
 separate requirements.
+
+## Peer codec admission during storage waits
+
+Investigation of an intermittent GSI Scan 503 exposed a separate, deterministic
+admission defect. BeyondDB's peer handler held its signature-verification CPU
+reservation through catalog/control I/O, activation, actor dispatch and reply
+encoding. On a one-worker node, a delayed catalog GET occupied the only primitive
+CPU slot, preventing unrelated work from acquiring it. The slow-catalog mTLS
+regression failed on unchanged `e2daa9c3bdb` in 4.68s.
+
+The handler now releases that slot after signature verification, independently
+reserves request memory while asynchronous work waits, and reacquires CPU only
+for response encoding. The request-memory charge covers raw/decoded/signed
+copies and enrollment bookkeeping using the existing node ledger. Enrollment,
+dispatch and the encoding-slot wait share the signed request deadline. Initial
+admission refusals still advertise Retry-After; once dispatch begins, timeout or
+encoding failures remain uncertain outcomes and never use that retryable refusal.
+
+| Boundary | Evidence |
+| --- | --- |
+| Entry and callers | `server/peer_receiver.rs::forward`; ordinary typed peer clients and authenticated ACTIVATE/PROVISION requests all use it. |
+| CPU/memory owner | Runtime `try_reserve_worker_job`, `reserve_worker_job` and `try_reserve_node_bytes` own separate admission ledgers. They remain authoritative. |
+| Dispatch contract | `PeerDispatcher::dispatch` rechecks capability before resolving; `encode_peer_reply` preserves the same wire result. No private protocol changes. |
+| Cancellation contract | `CellHandle::execute` moves its work reservation into the actor's queued command before awaiting the reply. Dropping the HTTP waiter does not cancel accepted durable publication. |
+| Transport contract | `crab-cell-peer-http` treats 5xx failures after dispatch as unknown; only explicit admission refusal or a typed NotStarted result permits its bounded retry. |
+| Sibling and main | Current main retains the codec slot across dispatch. `crab-http-server/src/peer.rs` already separates memory, verification, dispatch and encoding with one deadline. |
+| Regression | A real authenticated peer query stalls at an observed catalog GET while unrelated CPU work must remain admissible. A second test allows a five-second sender timeout but proves the receiver terminates stalled enrollment at its shorter signed deadline. |
+
+The two codec regressions pass in 4.93s; all three base/GSI capacity cases pass in
+9.84s after the change. The original Scan failure did not recur in 20 instrumented
+runs of those three capacity cases before the fix. Temporary diagnostics were
+removed. Its cause therefore remains unproven; these passes do not establish that
+the original intermittent failure is fixed. Full signed SDK/process qualification
+and fleet admission/load qualification remain separate gates.
+
+Production growth is 21 net lines: explicit retained-memory admission and deadline
+handling replace the old reservation spanning every async phase. No dependency,
+configuration, serialized format or persistence changes are required.
+
+Remote cold activation, resumption of a claimed owner and capability rejection
+pass in 15.77s. Both initial remote base/GSI placement and unpublished-owner
+recovery cases pass in 19.17s. Strict all-target Clippy passes in 13.48s. The
+existing full signed SDK/standalone process CI suite must qualify the pushed head.
