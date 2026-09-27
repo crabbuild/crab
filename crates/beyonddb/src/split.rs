@@ -6,13 +6,12 @@ use extenddb_storage::error::StorageError;
 use crate::backend::{cell_error, mutation_identity};
 use crate::{
     ActivateImportedPartition, ActivateImportedPartitionInput, ActivateImportedPartitionOutcome,
-    CommitSplit, CommitSplitOutcome, FinishSplit, ImportPartitionItem, ImportSummary,
+    DirectoryPartitionInput, FinishDirectoryTransfer, ImportPartitionItem, ImportSummary,
     InstallPartition, InstallPartitionOutcome, Json, OpenPartition, OpenPartitionOutcome,
     PartitionExport, PartitionImportInput, PartitionImportOutcome, PartitionInstall,
     PartitionScanInput, PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState,
-    PublishedPartitionInput, ReadPartitionSplitPlan, ReadPartitionState, ReadSplitRoute,
-    SealPartition, SealPartitionOutcome, SplitPlan, SplitRouteState, account_target, data_key_hash,
-    data_target,
+    PublishDirectoryTransfer, ReadDirectoryTransfer, ReadPartitionState, SealPartition,
+    SealPartitionOutcome, SplitPlan, SplitRouteState, account_target, data_key_hash, data_target,
 };
 
 /// Runs a durable split using already admitted account and data Cells.
@@ -44,12 +43,19 @@ impl CellSplitController {
             data_target(account_id, &children[1].table.id, &children[1].partition_id)
                 .map_err(cell_identity)?,
         ];
+        let directory = crate::route_directory_target(
+            &self.client,
+            &account,
+            &source.table.id,
+            source.lower.unwrap_or([0; 16]),
+        )
+        .await?;
         let current_plan = self
             .client
-            .query::<ReadPartitionSplitPlan>(
-                &account,
+            .query::<ReadDirectoryTransfer>(
+                &directory,
                 None,
-                Json(PublishedPartitionInput {
+                Json(DirectoryPartitionInput {
                     table_id: source.table.id.clone(),
                     partition_id: source.partition_id,
                 }),
@@ -57,14 +63,12 @@ impl CellSplitController {
             .await
             .map_err(cell_error)?
             .output
-            .0;
-        let route_state = self
-            .client
-            .query::<ReadSplitRoute>(&account, None, Json(plan.clone()))
-            .await
-            .map_err(cell_error)?
-            .output
-            .0;
+            .0
+            .map(SplitPlan::try_from)
+            .transpose()
+            .map_err(cell_identity)?;
+        let route_state =
+            crate::split_route_state(&self.client, account_id, &plan.clone().into()).await?;
         let published_before = route_state == SplitRouteState::After;
         // Finish removes intent only after both durable opens. A completed
         // replay must not reacquire a historical source or consume a slot.
@@ -229,18 +233,19 @@ impl CellSplitController {
         }
         let published = self
             .client
-            .command::<CommitSplit>(&account, mutation_identity()?, Json(plan.clone()))
+            .command::<PublishDirectoryTransfer>(
+                &directory,
+                mutation_identity()?,
+                Json(plan.clone().into()),
+            )
             .await
             .map_err(cell_error)?;
-        if published.output.0 != CommitSplitOutcome::Committed {
+        if !published.output.0 {
             return Err(split_state("route switch did not commit"));
         }
-        let visible = self
-            .client
-            .query::<ReadSplitRoute>(&account, Some(published.receipt), Json(plan.clone()))
-            .await
-            .map_err(cell_error)?;
-        if visible.output.0 != SplitRouteState::After {
+        if crate::split_route_state(&self.client, account_id, &plan.clone().into()).await?
+            != SplitRouteState::After
+        {
             return Err(split_state("published route differs from split plan"));
         }
         for (index, target) in child_targets.iter().enumerate() {
@@ -281,7 +286,11 @@ impl CellSplitController {
         // Removing the plan earlier strands them after controller loss.
         match self
             .client
-            .command::<FinishSplit>(&account, mutation_identity()?, Json(plan.clone()))
+            .command::<FinishDirectoryTransfer>(
+                &directory,
+                mutation_identity()?,
+                Json(plan.clone().into()),
+            )
             .await
         {
             Ok(result) if result.output.0 => Ok(()),

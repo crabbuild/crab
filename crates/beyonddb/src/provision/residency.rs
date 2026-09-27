@@ -20,9 +20,8 @@ use super::{CellInitialPartitionProvisioner, provision_error};
 use crate::backend::cell_error;
 use crate::{
     DescribeTableById, DirectoryPartitionInput, GlobalIndexState, Json, PartitionState,
-    PublishedPartitionInput, PublishedPartitionOutcome, ReadDirectoryRange, ReadDirectoryTransfer,
-    ReadGlobalIndexPartition, ReadGlobalIndexState, ReadPartitionSplitPlan, ReadPartitionState,
-    ReadPublishedPartition,
+    ReadDirectoryRange, ReadDirectoryTransfer, ReadGlobalIndexPartition, ReadGlobalIndexState,
+    ReadPartitionState,
 };
 
 impl CellInitialPartitionProvisioner {
@@ -47,7 +46,7 @@ impl CellInitialPartitionProvisioner {
         {
             return Ok(());
         }
-        let ranges: HashSet<_> = self
+        let ranges: HashMap<_, _> = self
             .runtime
             .active_cell_targets()
             .await
@@ -57,17 +56,57 @@ impl CellInitialPartitionProvisioner {
                 [crate::DATA_NAMESPACE, crate::global_index::NAMESPACE]
                     .contains(&target.namespace())
             })
-            .map(|target| target.cell_id())
+            .map(|target| (target.cell_id(), target))
             .collect();
-        let candidate = self
+        let mut candidates = self
             .runtime
             .idle_transfer_candidates()
             .await
-            .map_err(provision_error)?
-            .into_iter()
-            .filter(|(cell, _, _, _)| *cell != target.cell_id() && ranges.contains(cell))
-            .min_by_key(|(_, _, last_used, _)| *last_used);
-        if let Some((cell, generation, _, _)) = candidate {
+            .map_err(provision_error)?;
+        candidates.sort_by_key(|(_, _, last_used, _)| *last_used);
+        let client = CellClient::local_runtime(
+            self.application.registry(),
+            self.runtime.clone(),
+            self.layout.clone(),
+        );
+        let mut candidate = None;
+        for (cell, generation, _, _) in candidates {
+            if cell == target.cell_id() {
+                continue;
+            }
+            let Some(range) = ranges.get(&cell) else {
+                continue;
+            };
+            // Prefer immutable sources over serving ranges. Restoration cannot
+            // depend on account/directory residency; all candidates retain their
+            // durable roots, including exports needed by unfinished transfers.
+            let sealed = if range.namespace() == crate::DATA_NAMESPACE {
+                client
+                    .query::<ReadPartitionState>(range, None, Json(()))
+                    .await
+                    .map_err(cell_error)?
+                    .output
+                    .0
+                    .is_some_and(|status| matches!(status.state, PartitionState::Sealed(_)))
+            } else {
+                matches!(
+                    client
+                        .query::<ReadGlobalIndexState>(range, None, Json(()))
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0,
+                    Some(GlobalIndexState::Sealed(_))
+                )
+            };
+            if candidate.is_none() || sealed {
+                candidate = Some((cell, generation));
+            }
+            if sealed {
+                break;
+            }
+        }
+        if let Some((cell, generation)) = candidate {
             // Release changes residency only. Durable items, intents, and range
             // fences restore through ordinary owner resolution; busy work stays.
             self.release_capacity(cell, generation).await?;
@@ -258,71 +297,95 @@ impl CellInitialPartitionProvisioner {
         // Missing metadata is permanent only for this exact generation and
         // only at the account owner. A stale replica cannot authorize release.
         let client = client.clone().with_read_policy(ReadPolicy::CurrentOwner);
-        for entry in self
-            .runtime
-            .active_catalog_entries()
-            .await
-            .map_err(provision_error)?
+        let mut ranges = Vec::new();
         {
-            if ![crate::DATA_NAMESPACE, crate::global_index::NAMESPACE].contains(&entry.namespace())
+            // Gather local state before metadata reads can restore owners and
+            // release ranges. Admission excludes competing product reclamation;
+            // remote discovery below must run without this recursive gate.
+            let _admission = self.admission.lock().await;
+            let stats = self.runtime.stats();
+            if stats.active_cells() < stats.active_cell_capacity() {
+                return Ok(());
+            }
+            for entry in self
+                .runtime
+                .active_catalog_entries()
+                .await
+                .map_err(provision_error)?
             {
-                continue;
-            }
-            let target = CellTarget::new(
-                account.tenant(),
-                account.application(),
-                entry.namespace(),
-                entry.partition(),
-            )
-            .map_err(provision_error)?;
-            // An unfinished controller may resume after publication. Keep its
-            // sealed export source resident throughout copy/open recovery.
-            if target.cell_id() != entry.cell() || retained_source == Some(entry.cell()) {
-                continue;
-            }
-            let (table_id, partition_id, index_id, sealed) =
-                if entry.namespace() == crate::DATA_NAMESPACE {
-                    let Some(status) = local
-                        .query::<ReadPartitionState>(&target, None, Json(()))
-                        .await
-                        .map_err(cell_error)?
-                        .output
-                        .0
-                    else {
-                        continue;
-                    };
-                    (
-                        status.spec.table.id,
-                        status.spec.partition_id,
-                        None,
-                        matches!(status.state, PartitionState::Sealed(_)),
-                    )
-                } else {
-                    let Some(spec) = local
-                        .query::<ReadGlobalIndexPartition>(&target, None, Json(()))
-                        .await
-                        .map_err(cell_error)?
-                        .output
-                        .0
-                    else {
-                        continue;
-                    };
-                    let sealed = matches!(
-                        local
-                            .query::<ReadGlobalIndexState>(&target, None, Json(()))
+                if ![crate::DATA_NAMESPACE, crate::global_index::NAMESPACE]
+                    .contains(&entry.namespace())
+                {
+                    continue;
+                }
+                let target = CellTarget::new(
+                    account.tenant(),
+                    account.application(),
+                    entry.namespace(),
+                    entry.partition(),
+                )
+                .map_err(provision_error)?;
+                // An unfinished controller may resume after publication. Keep its
+                // sealed export source resident throughout copy/open recovery.
+                if target.cell_id() != entry.cell() || retained_source == Some(entry.cell()) {
+                    continue;
+                }
+                let (table_id, partition_id, directory_id, lower, sealed) =
+                    if entry.namespace() == crate::DATA_NAMESPACE {
+                        let Some(status) = local
+                            .query::<ReadPartitionState>(&target, None, Json(()))
                             .await
                             .map_err(cell_error)?
                             .output
-                            .0,
-                        Some(GlobalIndexState::Sealed(_))
-                    );
-                    (
-                        spec.table.id,
-                        spec.partition_id,
-                        Some((spec.index.id, spec.lower.unwrap_or([0; 16]))),
-                        sealed,
-                    )
-                };
+                            .0
+                        else {
+                            continue;
+                        };
+                        (
+                            status.spec.table.id.clone(),
+                            status.spec.partition_id,
+                            status.spec.table.id,
+                            status.spec.lower.unwrap_or([0; 16]),
+                            matches!(status.state, PartitionState::Sealed(_)),
+                        )
+                    } else {
+                        let Some(spec) = local
+                            .query::<ReadGlobalIndexPartition>(&target, None, Json(()))
+                            .await
+                            .map_err(cell_error)?
+                            .output
+                            .0
+                        else {
+                            continue;
+                        };
+                        let sealed = matches!(
+                            local
+                                .query::<ReadGlobalIndexState>(&target, None, Json(()))
+                                .await
+                                .map_err(cell_error)?
+                                .output
+                                .0,
+                            Some(GlobalIndexState::Sealed(_))
+                        );
+                        (
+                            spec.table.id,
+                            spec.partition_id,
+                            spec.index.id,
+                            spec.lower.unwrap_or([0; 16]),
+                            sealed,
+                        )
+                    };
+                ranges.push((
+                    entry.cell(),
+                    table_id,
+                    partition_id,
+                    directory_id,
+                    lower,
+                    sealed,
+                ));
+            }
+        }
+        for (cell, table_id, partition_id, directory_id, lower, sealed) in ranges {
             let present = match tables.get(&table_id) {
                 Some(present) => *present,
                 None => {
@@ -341,59 +404,35 @@ impl CellInitialPartitionProvisioner {
                 if !sealed {
                     continue;
                 }
-                let unpublished = if let Some((index_id, lower)) = index_id {
-                    let directory =
-                        crate::global_index_directory_target(&client, account, &index_id, lower)
-                            .await?;
-                    let input = DirectoryPartitionInput {
-                        table_id: index_id,
-                        partition_id,
-                    };
-                    // Keep the sealed source resident while copying/opening is
-                    // pending. Completion removes its durable participant reservation.
-                    client
-                        .query::<ReadDirectoryTransfer>(&directory, None, Json(input.clone()))
-                        .await
-                        .map_err(cell_error)?
-                        .output
-                        .0
-                        .is_none()
-                        && client
-                            .query::<ReadDirectoryRange>(&directory, None, Json(input))
-                            .await
-                            .map_err(cell_error)?
-                            .output
-                            .0
-                            .is_none()
-                } else {
-                    let input = PublishedPartitionInput {
-                        table_id,
-                        partition_id,
-                    };
-                    client
-                        .query::<ReadPartitionSplitPlan>(account, None, Json(input.clone()))
-                        .await
-                        .map_err(cell_error)?
-                        .output
-                        .0
-                        .is_none()
-                        && matches!(
-                            client
-                                .query::<ReadPublishedPartition>(account, None, Json(input))
-                                .await
-                                .map_err(cell_error)?
-                                .output
-                                .0,
-                            PublishedPartitionOutcome::Missing
-                        )
+                let directory =
+                    crate::route_directory_target(&client, account, &directory_id, lower).await?;
+                let input = DirectoryPartitionInput {
+                    table_id: directory_id,
+                    partition_id,
                 };
+                // A leaf reservation retains the sealed source until both replacements
+                // open. Only its absence together with missing membership permits release.
+                let unpublished = client
+                    .query::<ReadDirectoryTransfer>(&directory, None, Json(input.clone()))
+                    .await
+                    .map_err(cell_error)?
+                    .output
+                    .0
+                    .is_none()
+                    && client
+                        .query::<ReadDirectoryRange>(&directory, None, Json(input))
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0
+                        .is_none();
                 if !unpublished {
                     continue;
                 }
             }
             // Generation IDs are never reused and sealed sources cannot reopen.
             // Release residency only: replay and recovery retain the durable root.
-            retired.insert(entry.cell());
+            retired.insert(cell);
         }
         if retired.is_empty() {
             // Ordinary admission can still reclaim a settled coordinator.

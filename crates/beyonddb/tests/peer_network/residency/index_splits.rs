@@ -121,13 +121,8 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
         .output
         .0
         .unwrap();
-    let base = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+    let base = crate::single_leaf_route(&fixture.client, &account, &table.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let index = &table.global_secondary_indexes[0];
     let index_directory =
@@ -141,9 +136,13 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
     };
     let RoutePageOutcome::Page {
         partitions, epoch, ..
-    } = beyonddb::read_global_index_route_page(&fixture.client, "123456789012", page.clone())
-        .await
-        .unwrap()
+    } = beyonddb::read_route_page(
+        &fixture.client,
+        &beyonddb::account_target("123456789012").unwrap(),
+        page.clone(),
+    )
+    .await
+    .unwrap()
     else {
         panic!("missing index route");
     };
@@ -434,17 +433,21 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
         partitions: ranges,
         epoch: current,
         ..
-    } = beyonddb::read_global_index_route_page(&fixture.client, "123456789012", page.clone())
-        .await
-        .unwrap()
+    } = beyonddb::read_route_page(
+        &fixture.client,
+        &beyonddb::account_target("123456789012").unwrap(),
+        page.clone(),
+    )
+    .await
+    .unwrap()
     else {
         panic!("split index directory missing");
     };
     assert_eq!((ranges.len(), current), (4, epoch + 2));
     assert_eq!(
-        beyonddb::read_global_index_route_page(
+        beyonddb::read_route_page(
             &fixture.client,
-            "123456789012",
+            &beyonddb::account_target("123456789012").unwrap(),
             RoutePageInput {
                 expected_epoch: Some(epoch),
                 ..page

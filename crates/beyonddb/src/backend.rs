@@ -32,8 +32,8 @@ use extenddb_storage::{BoxedFuture, TableEngine};
 use super::{
     APPLICATION, CreateTable, CreateTableOutcome, DeleteTable, DeleteTableOutcome, DescribeTable,
     DescribeTableById, Json, ListTables, ListTablesInput, ListTablesOutcome, NAMESPACE,
-    PartitionSpec, ReadRoutePage, RoutePageInput, RoutePageOutcome, TablePlacement, TableRecord,
-    TableSpec, TableUpdate, UpdateTable, UpdateTableOutcome, account_target,
+    PartitionSpec, RoutePageInput, RoutePageOutcome, TablePlacement, TableRecord, TableSpec,
+    TableUpdate, UpdateTable, UpdateTableOutcome, account_target,
 };
 
 /// Installs an initial table's data Cells before its route becomes visible.
@@ -58,8 +58,8 @@ pub trait InitialPartitionProvisioner: Send + Sync {
         index: &'a crate::GlobalIndexRecord,
     ) -> BoxedFuture<'a, Result<Vec<crate::GlobalIndexPartitionSpec>, StorageError>>;
 
-    /// Install the initial index directory before publishing its account anchor.
-    fn provision_global_index_directory<'a>(
+    /// Install the initial base or index directory before publishing its account anchor.
+    fn provision_route_directory<'a>(
         &'a self,
         client: &'a CellClient,
         account_id: &'a str,
@@ -553,22 +553,17 @@ impl CellStorage {
         table_id: &str,
     ) -> Result<bool, StorageError> {
         let account = target(account_id)?;
-        let result = self
-            .client
-            .query::<ReadRoutePage>(
-                &account,
-                None,
-                Json(RoutePageInput {
-                    table_id: table_id.to_owned(),
-                    start_hash: None,
-                    after_lower: None,
-                    expected_epoch: None,
-                }),
-            )
-            .await
-            .map_err(cell_error)?
-            .output
-            .0;
+        let result = crate::read_route_page(
+            &self.client,
+            &account,
+            RoutePageInput {
+                table_id: table_id.to_owned(),
+                start_hash: None,
+                after_lower: None,
+                expected_epoch: None,
+            },
+        )
+        .await?;
         match result {
             RoutePageOutcome::Unrouted => Ok(false),
             RoutePageOutcome::Page { .. } => Ok(true),

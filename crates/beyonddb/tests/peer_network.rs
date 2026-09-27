@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+include!("support/routes.rs");
+
 mod support;
 
 mod peer_network {
@@ -25,8 +27,8 @@ use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
 use beyonddb::{
     ActivateTableRoute, Beyonddb, BeyonddbPeerScope, BeyonddbPeers, CellAuthorizationStore,
     CellCredentialStore, CellInitialPartitionProvisioner, CreateTable, CreateTableOutcome,
-    DescribeTable, InitialPartitionProvisioner, Json, NodeLeasePublisher, ReadTableRoute,
-    TableRoute, TableSpec, account_target, build_http_state,
+    DescribeTable, InitialPartitionProvisioner, Json, NodeLeasePublisher, TableRoute, TableSpec,
+    account_target, build_http_state,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::{CellNode, CellNodeBuilder, CellNodeTaskGroup};
@@ -386,6 +388,23 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .provision(&client, "123456789012", &other_table)
         .await
         .unwrap();
+    let receipt = provisioner
+        .provision_route_directory(
+            &client,
+            "123456789012",
+            &other_table.id,
+            other_partitions
+                .iter()
+                .map(|range| beyonddb::RoutePagePartition {
+                    partition_id: range.partition_id,
+                    lower: range.lower.unwrap_or([0; 16]),
+                    upper: range.upper,
+                    epoch: range.epoch,
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
     remote_account
         .command::<ActivateTableRoute>(
             &account,
@@ -394,10 +413,13 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
                 issued_at_ms: now_ms(),
                 expires_at_ms: now_ms() + 60_000,
             },
-            Json(TableRoute {
-                table_id: other_table.id.clone(),
-                epoch: 1,
-                partitions: other_partitions.clone(),
+            Json(beyonddb::TableRoutePublication {
+                receipt,
+                route: TableRoute {
+                    table_id: other_table.id.clone(),
+                    epoch: 1,
+                    partitions: other_partitions.clone(),
+                },
             }),
         )
         .await
@@ -773,12 +795,8 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .output
         .0
         .unwrap();
-    let route = local_account
-        .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+    let route = crate::single_leaf_route(&client, &account, &table.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     for partition in &route.partitions {
         let target =

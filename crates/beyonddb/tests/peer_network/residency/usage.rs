@@ -86,7 +86,7 @@ async fn sdk_range_usage_survives_mutation_replay_split_and_owner_restore() {
     assert_eq!(usage(&fixture, &source).await, committed);
     let plan = fixture
         .provisioner
-        .split_partition(ACCOUNT, fixture.client.clone(), &table.id, [0; 16])
+        .split_partition(ACCOUNT, fixture.client.clone(), &table.id, [0; 16], [0; 16])
         .await
         .unwrap();
     fixture

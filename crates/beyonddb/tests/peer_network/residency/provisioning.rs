@@ -160,13 +160,8 @@ async fn sdk_initial_base_and_index_ranges_use_remote_owners() {
         .output
         .0
         .unwrap();
-    let route = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(record.id.clone()))
+    let route = crate::single_leaf_route(&fixture.client, &account, &record.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let mut targets = route
         .partitions
@@ -176,9 +171,9 @@ async fn sdk_initial_base_and_index_ranges_use_remote_owners() {
         })
         .collect::<Vec<_>>();
     let index = &record.global_secondary_indexes[0];
-    let page = beyonddb::read_global_index_route_page(
+    let page = beyonddb::read_route_page(
         &fixture.client,
-        "123456789012",
+        &beyonddb::account_target("123456789012").unwrap(),
         beyonddb::RoutePageInput {
             table_id: index.id.clone(),
             start_hash: None,
@@ -317,13 +312,8 @@ async fn sdk_initial_claim_recovery_preserves_unrouted_roots() {
         .await
         .unwrap();
     assert!(
-        fixture
-            .client
-            .query::<ReadTableRoute>(&account, None, Json(record.id.clone()))
+        crate::single_leaf_route(&fixture.client, &account, &record.id.clone())
             .await
-            .unwrap()
-            .output
-            .0
             .is_none()
     );
     let published_before = authority.load(published.cell_id()).await.unwrap().unwrap();

@@ -18,7 +18,7 @@ use crab_cell_runtime::cell::{
     actor::{CellHandle, CellRuntime},
     catalog::{CatalogRole, CellCatalog},
 };
-use crab_cell_runtime::client::{CellClient, LocalCellResolver};
+use crab_cell_runtime::client::LocalCellResolver;
 use crab_cell_runtime::control::{ControlState, authority::CellAuthority};
 use crab_cell_runtime::identity::{CellTarget, Digest, SessionId};
 use crab_cell_runtime::ltx::CellStorageLayout;
@@ -44,7 +44,6 @@ pub(super) struct LocalResolver {
     layout: CellStorageLayout,
     registry: Arc<Registry>,
     provisioner: Option<Arc<crate::CellInitialPartitionProvisioner>>,
-    metadata: Option<CellClient>,
     placement: Option<Arc<super::placement::RangePlacement>>,
     bootstrap: Option<NodeDirectory>,
 }
@@ -59,16 +58,6 @@ impl LocalResolver {
             layout: peers.layout.clone(),
             registry: peers.registry.clone(),
             provisioner: Some(provisioner),
-            // Retirement checks may reach a remote account, but cannot restore
-            // metadata recursively while admission is trying to free capacity.
-            metadata: Some(CellClient::runtime_with_peer(
-                peers.registry.clone(),
-                peers.runtime.clone(),
-                peers.layout.clone(),
-                peers.placement.signer.clone(),
-                peer_principal(peers.placement.directory.fleet(), peers.placement.session),
-                peers.placement.round_trip.clone(),
-            )),
             placement: None,
             bootstrap: None,
         }
@@ -152,21 +141,6 @@ impl LocalCellResolver for LocalResolver {
                         .await
                         .map_err(|source| Error::PeerTransport {
                             context: "BeyondDB placement residency",
-                            source: Box::new(source),
-                        })?;
-                }
-                if (needs_placement || resolver.bootstrap.is_some())
-                    && super::placement::is_data_target(&target)
-                {
-                    let account = crate::account_for_tenant(target.tenant())?;
-                    let metadata = resolver.metadata.as_ref().ok_or(Error::CellNotActive)?;
-                    // Release only proven retired ranges before placement observes
-                    // the local pool. Keep the requested historical source resident.
-                    provisioner
-                        .reclaim_retired_ranges(metadata, &account, Some(target.cell_id()))
-                        .await
-                        .map_err(|source| Error::PeerTransport {
-                            context: "BeyondDB range residency",
                             source: Box::new(source),
                         })?;
                 }
@@ -287,7 +261,6 @@ pub(super) fn peer_router(
             // The sender selects ownership before forwarding. A receiver may
             // only dispatch to that active owner; a raced release must reject.
             provisioner: None,
-            metadata: None,
             placement: None,
             bootstrap: None,
         }),

@@ -1,5 +1,11 @@
 # BeyondDB elastic Cell topology
 
+Current base/GSI routing uses directory leaves. The historical qualification
+sections below describe the revisions on which they ran, including retired
+account-owned routing APIs. See [current metadata ownership and base cutover
+status](METADATA_SHARDING.md#base-serving-cutover) for the serving path and its
+remaining verification gates.
+
 Global indexes now use independent initial ranges and a durable projection
 journal. Automatic index range splitting, bounded tombstone retention, projection
 throughput, and index-owner fleet recovery remain open scale gates. See

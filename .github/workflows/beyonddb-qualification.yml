@@ -70,22 +70,11 @@ jobs:
           set -euo pipefail
           cargo test -p beyonddb --locked --lib server::capacity \
             2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/capacity.log"
-          cargo test -p beyonddb --locked --test elastic_cells directory_activation \
-            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/directory-activation.log"
-          cargo test -p beyonddb --locked --test elastic_cells read_release \
-            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/read-release.log"
-          cargo test -p beyonddb --locked --test elastic_cells directory_tree \
-            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/directory-tree.log"
-          cargo test -p beyonddb --locked --test elastic_cells node_sessions \
-            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/node-sessions.log"
-          cargo test -p beyonddb --locked --test elastic_cells directory_transfers \
-            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/directory-transfers.log"
-          cargo test -p beyonddb --locked --test elastic_cells data_ranges_use_independent_cells \
-            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/participant-recovery.log"
-          # Keep the two process workloads serial so their storage load does not
-          # distort one another's unchanged readiness deadlines.
+          # The directory cutover changes native fixtures as well as SDK paths.
+          # Run all capability suites serially to keep fixture storage workloads
+          # from distorting one another's unchanged readiness deadlines.
           cargo test -p beyonddb --locked --no-fail-fast \
-            --test peer_network --test server_binary \
+            --test elastic_cells --test peer_network --test server_binary \
             -- --include-ignored --test-threads=1 --nocapture \
             2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/sdk.log"
       - name: Retain qualification logs

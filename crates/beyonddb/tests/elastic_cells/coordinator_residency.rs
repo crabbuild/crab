@@ -24,7 +24,7 @@ async fn capacity_sweep_survives_admission_backpressure() {
     );
     let session = SessionId::from_bytes([244; 16]);
     let host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 2).unwrap(), 16 * 1024 * 1024)
+        .with_runtime(SqlWorkerPool::new(1, 3).unwrap(), 16 * 1024 * 1024)
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(session)
         .build()
@@ -45,7 +45,7 @@ async fn capacity_sweep_survives_admission_backpressure() {
         )
         .unwrap(),
     );
-    let account = provisioner.admit_account(ACCOUNT).await.unwrap();
+    provisioner.admit_account(ACCOUNT).await.unwrap();
     let client = CellClient::local_runtime(application.registry(), host.runtime(), layout);
     let storage =
         CellStorage::new(client.clone(), "us-east-1").with_initial_partitions(provisioner.clone());
@@ -62,14 +62,15 @@ async fn capacity_sweep_survives_admission_backpressure() {
         )
         .await
         .unwrap();
-    // The account and source occupy both slots: splitting cannot admit a child.
+    // Account, directory and source occupy all slots: a split cannot admit a child.
     let mut cursor = None;
-    assert!(matches!(
-        provisioner
-            .reconcile_account_capacity(ACCOUNT, client.clone(), 1, &mut cursor)
-            .await,
-        Err(StorageError::Transient(_))
-    ));
+    let refusal = provisioner
+        .reconcile_account_capacity(ACCOUNT, client.clone(), 1, &mut cursor)
+        .await;
+    assert!(
+        matches!(refusal, Err(StorageError::LimitExceeded(_))),
+        "new-owner capacity refusal must retain its public classification: {refusal:?}"
+    );
     provisioner
         .install_account_capacity_loop(
             &tasks,
@@ -84,11 +85,19 @@ async fn capacity_sweep_survives_admission_backpressure() {
         host.is_ready(),
         "temporary capacity pressure stopped serving"
     );
-    let pending = CellClient::local(application.registry(), account)
-        .query::<ReadSplitPlan>(
-            &account_target(ACCOUNT).unwrap(),
+    let directory = beyonddb::directory_target(
+        ACCOUNT,
+        &beyonddb::DirectorySpec::root(table.table_id.clone()),
+    )
+    .unwrap();
+    let pending = client
+        .query::<beyonddb::ReadDirectoryTransfer>(
+            &directory,
             None,
-            Json(table.table_id),
+            Json(beyonddb::DirectoryPartitionInput {
+                table_id: table.table_id,
+                partition_id: [0; 16],
+            }),
         )
         .await
         .unwrap();
@@ -495,12 +504,8 @@ async fn table_creation_waits_for_coordinator_movement_capacity() {
         )
         .await
         .unwrap();
-    let route = client
-        .query::<ReadTableRoute>(&account, None, Json(table.table_id))
+    let route = crate::single_leaf_route(&client, &account, &table.table_id)
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     assert_eq!(route.partitions.len(), 4);
     host.shutdown().await.unwrap();

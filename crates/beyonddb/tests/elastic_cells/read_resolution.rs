@@ -41,12 +41,7 @@ pub(super) async fn assert_reads_finish_terminal_decisions(
         let mut participants = Vec::new();
         for (position, info) in infos.iter().enumerate() {
             let account = account_target(account_id).unwrap();
-            let route = client
-                .query::<ReadTableRoute>(&account, None, Json(info.table_id.clone()))
-                .await
-                .unwrap()
-                .output
-                .0;
+            let route = crate::single_leaf_route(client, &account, &info.table_id.clone()).await;
             let (target, participant) = match route {
                 Some(route) => {
                     let spec = &route.partitions[0];
@@ -269,12 +264,8 @@ async fn query_resolves_committed_create_in_intent_range() {
         .table_key_info(account_id, &table.table_name)
         .await
         .unwrap();
-    let route = client
-        .query::<ReadTableRoute>(&account, None, Json(table.table_id))
+    let route = crate::single_leaf_route(&client, &account, &table.table_id)
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let partition = &route.partitions[0];
     let target = data_target(account_id, &info.table_id, &partition.partition_id).unwrap();
@@ -319,17 +310,13 @@ async fn assert_query_finishes_commit(
         .await
         .unwrap();
     let coordinator = coordinator_target(&key_info.account_id, &id).unwrap();
-    let route = client
-        .query::<ReadTableRoute>(
-            &account_target(&key_info.account_id).unwrap(),
-            None,
-            Json(key_info.table_id.clone()),
-        )
-        .await
-        .unwrap()
-        .output
-        .0
-        .unwrap();
+    let route = crate::single_leaf_route(
+        client,
+        &account_target(&key_info.account_id).unwrap(),
+        &key_info.table_id.clone(),
+    )
+    .await
+    .unwrap();
     let participant = CoordinatorParticipant {
         target: CoordinatorParticipantTarget::Data {
             table_id: key_info.table_id.clone(),

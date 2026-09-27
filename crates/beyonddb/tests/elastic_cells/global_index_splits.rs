@@ -159,9 +159,9 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
             .unwrap();
     let RoutePageOutcome::Page {
         partitions, epoch, ..
-    } = beyonddb::read_global_index_route_page(
+    } = beyonddb::read_route_page(
         &client,
-        "123456789012",
+        &beyonddb::account_target("123456789012").unwrap(),
         RoutePageInput {
             table_id: index.id.clone(),
             start_hash: None,

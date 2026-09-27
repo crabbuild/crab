@@ -22,27 +22,16 @@ pub(super) async fn assert_shared_snapshots(
     let account = account_target(account_id).unwrap();
     let mut participants = Vec::new();
     for (index, info) in infos.iter().enumerate() {
-        let route = client
-            .query::<ReadPartitionRoute>(
-                &account,
-                None,
-                Json(PartitionLookupInput {
-                    table_id: info.table_id.clone(),
-                    hash: data_key_hash(&info.table_id, key, &info.base_key_schema).unwrap(),
-                }),
-            )
-            .await
-            .unwrap()
-            .output
-            .0;
+        let route = crate::point_range(
+            client,
+            &account,
+            &info.table_id,
+            data_key_hash(&info.table_id, key, &info.base_key_schema).unwrap(),
+        )
+        .await;
         let (target, participant) = match route {
-            PartitionLookupOutcome::Unrouted => {
-                (account.clone(), CoordinatorParticipantTarget::Account)
-            }
-            PartitionLookupOutcome::Routed {
-                partition_id,
-                epoch,
-            } => (
+            None => (account.clone(), CoordinatorParticipantTarget::Account),
+            Some((partition_id, epoch)) => (
                 data_target(account_id, &info.table_id, &partition_id).unwrap(),
                 CoordinatorParticipantTarget::Data {
                     table_id: info.table_id.clone(),

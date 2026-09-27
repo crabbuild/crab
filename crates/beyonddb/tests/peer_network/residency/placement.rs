@@ -401,13 +401,8 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
         .output
         .0
         .unwrap();
-    let before = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+    let before = crate::single_leaf_route(&fixture.client, &account, &table.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     fixture
         .provisioner
@@ -427,13 +422,8 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
                 fixture.node.is_ready(),
                 "remote capacity work stopped serving"
             );
-            let route = fixture
-                .client
-                .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+            let route = crate::single_leaf_route(&fixture.client, &account, &table.id.clone())
                 .await
-                .unwrap()
-                .output
-                .0
                 .unwrap();
             if route.epoch == before.epoch + 1 {
                 let split = fixture
@@ -443,6 +433,7 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
                         fixture.client.clone(),
                         &table.id,
                         before.partitions[0].partition_id,
+                        before.partitions[0].lower.unwrap_or([0; 16]),
                         1,
                     )
                     .await
@@ -603,6 +594,7 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
             fixture.client.clone(),
             &split.source.table.id,
             split.source.partition_id,
+            split.source.lower.unwrap_or([0; 16]),
             1,
         )
         .await

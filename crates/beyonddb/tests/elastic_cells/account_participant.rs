@@ -85,7 +85,13 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
                 &account,
                 mutation(),
                 Json(TableSpec {
-                    placement: beyonddb::TablePlacement::Account,
+                    placement: if name == "DataItems" {
+                        beyonddb::TablePlacement::Routed {
+                            initial_partitions: 1,
+                        }
+                    } else {
+                        beyonddb::TablePlacement::Account
+                    },
                     local_secondary_indexes: Vec::new(),
                     global_secondary_indexes: Vec::new(),
                     table_name: name.into(),
@@ -139,16 +145,19 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         )
         .await
         .unwrap();
-    client
-        .command::<ActivateTableRoute>(
-            &account,
-            mutation(),
-            Json(TableRoute {
+    let (directory_handle, publication) = bootstrap
+        .directory(
+            TableRoute {
                 table_id: data_table.id.clone(),
                 epoch: 1,
                 partitions: vec![spec],
-            }),
+            },
+            210,
+            &directory.path().join("directory.sqlite"),
         )
+        .await;
+    client
+        .command::<ActivateTableRoute>(&account, mutation(), Json(publication))
         .await
         .unwrap();
     let info = storage
@@ -366,15 +375,12 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
             Err(InvocationError::Rejected(result)) if result.output.0 == DeleteTableOutcome::TransactionConflict)
         );
     }
-    // The table is empty in the live image; only the prepared create fences activation.
-    assert!(
-        matches!(client.command::<ActivateTableRoute>(&account, mutation(), Json(TableRoute {
-        table_id: empty_table.id.clone(), epoch: 1, partitions: vec![PartitionSpec {
-            table: empty_table.clone(), partition_id: [219; 16], lower: None, upper: None, epoch: 1,
-        }],
-    })).await, Err(InvocationError::Rejected(result)) if result.output.0 == ActivateTableRouteOutcome::TransactionConflict)
-    );
-    for handle in [account_handle, data_handle, coordinator_handle] {
+    for handle in [
+        account_handle,
+        data_handle,
+        coordinator_handle,
+        directory_handle,
+    ] {
         handle.drain().await.unwrap();
     }
     host.shutdown().await.unwrap();
@@ -386,7 +392,17 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         .with_session(next_session)
         .build_unleased_for_maintenance()
         .unwrap();
-    for (target, incarnation) in [(&account, 211), (&data, 212), (&coordinator, 213)] {
+    let directory_target = beyonddb::directory_target(
+        account_id,
+        &beyonddb::DirectorySpec::root(data_table.id.clone()),
+    )
+    .unwrap();
+    for (target, incarnation) in [
+        (&account, 211),
+        (&data, 212),
+        (&coordinator, 213),
+        (&directory_target, 210),
+    ] {
         let proof = CellCatalog::new(layout.clone(), target.tenant())
             .lookup(target.cell_id())
             .await
@@ -402,7 +418,18 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
                     layout.clone(),
                     *target.cell_id().as_bytes(),
                     [incarnation; 16],
-                    Limits::default(),
+                    {
+                        let cell_type = application
+                            .cell_types()
+                            .iter()
+                            .find(|kind| kind.namespace() == target.namespace())
+                            .unwrap();
+                        Limits {
+                            max_database_bytes: cell_type.database_limit_bytes(),
+                            max_capture_bytes: cell_type.capture_limit_bytes(),
+                            ..Limits::default()
+                        }
+                    },
                 )
                 .unwrap(),
                 authority,

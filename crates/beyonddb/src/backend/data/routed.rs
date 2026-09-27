@@ -6,10 +6,9 @@ use extenddb_storage::error::StorageError;
 
 use super::{CellStorage, cell_error, segment_bounds, target};
 use crate::{
-    Json, PartitionDeleteOutcome, PartitionLookupInput, PartitionLookupOutcome,
-    PartitionPutOutcome, PartitionScan, PartitionScanInput, PartitionScanOutcome,
-    PartitionUpdateOutcome, ReadPartitionRoute, ReadRoutePage, RoutePageInput, RoutePageOutcome,
-    data_key_hash, data_target,
+    Json, PartitionDeleteOutcome, PartitionPutOutcome, PartitionScan, PartitionScanInput,
+    PartitionScanOutcome, PartitionUpdateOutcome, RoutePageInput, RoutePageOutcome, data_key_hash,
+    data_target,
 };
 
 impl CellStorage {
@@ -36,27 +35,27 @@ impl CellStorage {
         let hash = data_key_hash(&key_info.table_id, key, &key_info.base_key_schema)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
         let account = target(&key_info.account_id)?;
-        let response = self
-            .client
-            .query::<ReadPartitionRoute>(
-                &account,
-                None,
-                Json(PartitionLookupInput {
-                    table_id: key_info.table_id.clone(),
-                    hash,
-                }),
-            )
-            .await
-            .map_err(cell_error)?;
-        match response.output.0 {
-            PartitionLookupOutcome::Unrouted => {
+        match crate::read_route_page(
+            &self.client,
+            &account,
+            RoutePageInput {
+                table_id: key_info.table_id.clone(),
+                start_hash: Some(hash),
+                after_lower: None,
+                expected_epoch: None,
+            },
+        )
+        .await?
+        {
+            RoutePageOutcome::Unrouted => {
                 self.require_account_placement(key_info).await?;
                 Ok(None)
             }
-            PartitionLookupOutcome::Routed {
-                partition_id,
-                epoch,
-            } => Ok(Some((partition_id, epoch))),
+            RoutePageOutcome::Changed => Err(stale_partition()),
+            RoutePageOutcome::Page { partitions, .. } => {
+                let range = partitions.first().ok_or_else(stale_partition)?;
+                Ok(Some((range.partition_id, range.epoch)))
+            }
         }
     }
 
@@ -136,21 +135,7 @@ impl CellStorage {
         let mut bytes = 0_usize;
         let mut expected_lower = None;
         loop {
-            let page = if global.is_some() {
-                crate::read_global_index_route_page(
-                    &self.client,
-                    &key_info.account_id,
-                    route_page.clone(),
-                )
-                .await?
-            } else {
-                self.client
-                    .query::<ReadRoutePage>(&account, None, Json(route_page.clone()))
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0
-            };
+            let page = crate::read_route_page(&self.client, &account, route_page.clone()).await?;
             let (epoch, partitions, has_more) = match page {
                 RoutePageOutcome::Unrouted if route_page.expected_epoch.is_none() => {
                     self.require_account_placement(key_info).await?;

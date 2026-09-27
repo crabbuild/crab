@@ -5,8 +5,8 @@ use extenddb_storage::error::StorageError;
 
 use super::{InitialPartitionProvisioner, cell_error, mutation_identity};
 use crate::{
-    ActivateTableRoute, ActivateTableRouteOutcome, Json, ReadRoutePage, RoutePageInput,
-    RoutePageOutcome, TableRecord, TableRoute, account_target,
+    ActivateTableRoute, ActivateTableRouteOutcome, Json, RoutePageInput, RoutePageOutcome,
+    TableRecord, TableRoute, account_target,
 };
 
 pub(crate) async fn publish_initial_routes(
@@ -17,21 +17,17 @@ pub(crate) async fn publish_initial_routes(
 ) -> Result<(), StorageError> {
     let target =
         account_target(account_id).map_err(|error| StorageError::Internal(error.to_string()))?;
-    let page = client
-        .query::<ReadRoutePage>(
-            &target,
-            None,
-            Json(RoutePageInput {
-                table_id: record.id.clone(),
-                start_hash: None,
-                after_lower: None,
-                expected_epoch: None,
-            }),
-        )
-        .await
-        .map_err(cell_error)?
-        .output
-        .0;
+    let page = crate::read_route_page(
+        client,
+        &target,
+        RoutePageInput {
+            table_id: record.id.clone(),
+            start_hash: None,
+            after_lower: None,
+            expected_epoch: None,
+        },
+    )
+    .await?;
     if matches!(page, RoutePageOutcome::Page { .. }) {
         return Ok(());
     }
@@ -39,7 +35,7 @@ pub(crate) async fn publish_initial_routes(
         // An earlier attempt may have published this index before base admission
         // failed. Preserve that directory and its independently installed owners.
         let published = client
-            .query::<crate::ReadGlobalIndexDirectory>(&target, None, Json(index.id.clone()))
+            .query::<crate::ReadRouteDirectory>(&target, None, Json(index.id.clone()))
             .await
             .map_err(cell_error)?
             .output
@@ -59,7 +55,7 @@ pub(crate) async fn publish_initial_routes(
             })
             .collect();
         let receipt = provisioner
-            .provision_global_index_directory(client, account_id, &index.id, partitions.clone())
+            .provision_route_directory(client, account_id, &index.id, partitions.clone())
             .await?;
         client
             .command::<crate::ActivateGlobalIndexRoute>(
@@ -81,8 +77,25 @@ pub(crate) async fn publish_initial_routes(
         epoch: 1,
         partitions,
     };
+    let ranges = route
+        .partitions
+        .iter()
+        .map(|part| crate::RoutePagePartition {
+            partition_id: part.partition_id,
+            lower: part.lower.unwrap_or([0; 16]),
+            upper: part.upper,
+            epoch: part.epoch,
+        })
+        .collect();
+    let receipt = provisioner
+        .provision_route_directory(client, account_id, &record.id, ranges)
+        .await?;
     match client
-        .command::<ActivateTableRoute>(&target, mutation_identity()?, Json(route))
+        .command::<ActivateTableRoute>(
+            &target,
+            mutation_identity()?,
+            Json(crate::TableRoutePublication { route, receipt }),
+        )
         .await
     {
         Ok(committed) if committed.output.0 == ActivateTableRouteOutcome::Activated => {}

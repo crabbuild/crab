@@ -115,7 +115,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 28] = [
+static COMMANDS: [OperationDescriptor; 25] = [
     operation(1),
     operation(2),
     operation(3),
@@ -123,14 +123,9 @@ static COMMANDS: [OperationDescriptor; 28] = [
     operation(7),
     operation(8),
     operation(9),
-    operation(10),
     OperationDescriptor {
         codec_version: 2,
-        ..operation(11)
-    },
-    OperationDescriptor {
-        codec_version: 2,
-        ..operation(12)
+        ..operation(10)
     },
     operation(13),
     operation(14),
@@ -156,39 +151,23 @@ static COMMANDS: [OperationDescriptor; 28] = [
         ..participant::phase_operation(26)
     },
     OperationDescriptor {
-        codec_version: 2,
-        ..operation(30)
-    },
-    OperationDescriptor {
-        codec_version: 2,
+        codec_version: 3,
         ..operation(31)
     },
     operation(32),
     participant::phase_operation(33),
-    participant::phase_operation(34),
+    OperationDescriptor {
+        codec_version: 2,
+        ..participant::phase_operation(34)
+    },
 ];
-static QUERIES: [OperationDescriptor; 30] = [
+static QUERIES: [OperationDescriptor; 23] = [
     operation(4),
     operation(7),
     operation(8),
     operation(9),
     operation(10),
-    operation(11),
-    OperationDescriptor {
-        codec_version: 2,
-        ..operation(12)
-    },
     operation(13),
-    operation(14),
-    operation(15),
-    OperationDescriptor {
-        codec_version: 2,
-        ..operation(16)
-    },
-    OperationDescriptor {
-        codec_version: 2,
-        ..operation(17)
-    },
     operation(18),
     operation(20),
     operation(21),
@@ -200,15 +179,11 @@ static QUERIES: [OperationDescriptor; 30] = [
     operation(27),
     operation(28),
     OperationDescriptor {
-        codec_version: 2,
+        codec_version: 3,
         ..operation(29)
     },
     participant::phase_operation(30),
     global_index::outbox::chunk_operation(31),
-    OperationDescriptor {
-        codec_version: 2,
-        ..operation(32)
-    },
     operation(36),
     operation(37),
     operation(38),
@@ -347,7 +322,6 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
                 source.update(include_bytes!("items/scan.rs"));
                 source.update(include_bytes!("expression_wire.rs"));
                 source.update(include_bytes!("routing.rs"));
-                source.update(include_bytes!("routing/split_state.rs"));
                 source.update(include_bytes!("authorization.rs"));
                 source.update(include_bytes!("tags.rs"));
                 source.update(include_bytes!("ttl.rs"));
@@ -392,9 +366,6 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<UpdateTable>()?;
         registry.bind_command::<UpdateItem>()?;
         registry.bind_command::<ActivateTableRoute>()?;
-        registry.bind_command::<BeginSplit>()?;
-        registry.bind_command::<CommitSplit>()?;
-        registry.bind_command::<FinishSplit>()?;
         registry.bind_command::<authorization::PutUserPolicy>()?;
         registry.bind_command::<authorization::DeleteUserPolicy>()?;
         registry.bind_command::<tags::UpdateTags>()?;
@@ -413,13 +384,6 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<DescribeTableById>()?;
         registry.bind_query::<ScanItems>()?;
         registry.bind_query::<secondary_index::QueryAccountIndex>()?;
-        registry.bind_query::<ReadTableRoute>()?;
-        registry.bind_query::<ReadSplitPlan>()?;
-        registry.bind_query::<ReadPartitionSplitPlan>()?;
-        registry.bind_query::<ReadPartitionRoute>()?;
-        registry.bind_query::<ReadRoutePage>()?;
-        registry.bind_query::<ReadPublishedPartition>()?;
-        registry.bind_query::<ReadSplitRoute>()?;
         registry.bind_query::<authorization::ReadUserPolicies>()?;
         registry.bind_query::<tags::ReadTags>()?;
         registry.bind_query::<ttl::ReadTtl>()?;
@@ -427,7 +391,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<ttl::ReadTtlSweep>()?;
         registry.bind_query::<ttl::ReadTtlSchedule>()?;
         registry.bind_query::<ReadCoordinatorRegistration>()?;
-        registry.bind_query::<ReadGlobalIndexDirectory>()?;
+        registry.bind_query::<ReadRouteDirectory>()?;
         registry.bind_query::<ReadAccountIndexChange>()?;
         registry.bind_query::<ReadAccountIndexChangeChunk>()?;
         registry.bind_query::<ListCoordinatorShards>()

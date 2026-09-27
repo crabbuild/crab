@@ -20,41 +20,6 @@ CREATE TABLE ddb_items (
     PRIMARY KEY (table_id, item_key)
 );
 
-CREATE TABLE ddb_routes (
-    table_id TEXT PRIMARY KEY REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
-    route_epoch TEXT NOT NULL,
-    route_table BLOB NOT NULL
-);
-
-CREATE TABLE ddb_route_partitions (
-    table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
-    partition_id BLOB NOT NULL,
-    lower_bound BLOB NOT NULL,
-    upper_bound BLOB NOT NULL,
-    epoch TEXT NOT NULL,
-    PRIMARY KEY (table_id, partition_id)
-);
-
-CREATE UNIQUE INDEX ddb_route_partition_lookup
-    ON ddb_route_partitions (table_id, lower_bound);
-
-CREATE TABLE ddb_split_plans (
-    table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
-    source_partition_id BLOB NOT NULL,
-    plan BLOB NOT NULL,
-    PRIMARY KEY (table_id, source_partition_id)
-);
-
-CREATE TABLE ddb_split_members (
-    table_id TEXT NOT NULL,
-    partition_id BLOB NOT NULL,
-    source_partition_id BLOB NOT NULL,
-    PRIMARY KEY (table_id, partition_id),
-    FOREIGN KEY (table_id, source_partition_id)
-        REFERENCES ddb_split_plans(table_id, source_partition_id) ON DELETE CASCADE
-);
-CREATE INDEX ddb_split_source ON ddb_split_members (table_id, source_partition_id);
-
 CREATE TABLE ddb_iam_user_policies (
     user_name TEXT NOT NULL,
     policy_name TEXT NOT NULL,
@@ -98,13 +63,13 @@ CREATE INDEX ddb_account_transaction_locks_owner ON ddb_account_transaction_lock
 CREATE INDEX ddb_account_write_locks ON ddb_account_transaction_locks (table_id, item_key)
     WHERE write_lock = 1;
 
-CREATE TABLE ddb_global_index_routes (
+CREATE TABLE ddb_directory_roots (
     table_id TEXT PRIMARY KEY,
     base_table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
     initial_fingerprint BLOB,
     retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0, 1))
 );
-CREATE INDEX ddb_global_index_routes_base ON ddb_global_index_routes (base_table_id);
+CREATE INDEX ddb_directory_roots_base ON ddb_directory_roots (base_table_id);
 
 CREATE TABLE ddb_table_statistics (
     table_id TEXT PRIMARY KEY REFERENCES ddb_tables(table_id) ON DELETE CASCADE,

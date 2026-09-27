@@ -31,12 +31,8 @@ pub(crate) async fn abandon_commit(
             .output
             .0
             .unwrap();
-        let route = client
-            .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+        let route = crate::single_leaf_route(client, &account, &table.id.clone())
             .await
-            .unwrap()
-            .output
-            .0
             .unwrap();
         assert_eq!(route.partitions.len(), 1);
         let partition = &route.partitions[0];

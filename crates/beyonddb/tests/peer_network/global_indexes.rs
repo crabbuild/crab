@@ -71,20 +71,16 @@ impl IndexRecovery {
             .output
             .0
             .unwrap();
-        let route = client
-            .query::<ReadTableRoute>(&account, None, Json(record.id.clone()))
+        let route = crate::single_leaf_route(client, &account, &record.id.clone())
             .await
-            .unwrap()
-            .output
-            .0
             .unwrap();
         assert_eq!(route.partitions.len(), 1);
         let mut targets =
             vec![data_target(ACCOUNT, &record.id, &route.partitions[0].partition_id).unwrap()];
         let index = &record.global_secondary_indexes[0];
-        let page = beyonddb::read_global_index_route_page(
+        let page = beyonddb::read_route_page(
             client,
-            "123456789012",
+            &beyonddb::account_target("123456789012").unwrap(),
             RoutePageInput {
                 table_id: index.id.clone(),
                 start_hash: None,

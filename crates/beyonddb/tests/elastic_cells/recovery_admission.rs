@@ -88,12 +88,8 @@ async fn recovery_case(startup: bool, decision: CoordinatorDecision) {
             )
             .await
             .unwrap();
-        let route = client
-            .query::<ReadTableRoute>(&account, None, Json(table.table_id))
+        let route = crate::single_leaf_route(&client, &account, &table.table_id)
             .await
-            .unwrap()
-            .output
-            .0
             .unwrap();
         let spec = &route.partitions[0];
         let target = data_target(ACCOUNT, &spec.table.id, &spec.partition_id).unwrap();

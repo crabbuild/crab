@@ -1,8 +1,8 @@
 use super::provisioning::{Remote, wait_for_expiry};
 use super::*;
 use beyonddb::{
-    DirectoryInstall, DirectoryMode, DirectoryPage, DirectoryPageInput, DirectorySpec,
-    InstallDirectory, ReadDirectory, ReadDirectoryPage, RoutePagePartition, directory_target,
+    DirectoryMode, DirectoryPage, DirectoryPageInput, DirectorySpec, ReadDirectory,
+    ReadDirectoryPage, directory_target,
 };
 use crab_cell_runtime::{MutationIdentity, cell::catalog::CellCatalog, identity::RequestId};
 use std::time::Duration;
@@ -18,7 +18,7 @@ fn mutation() -> MutationIdentity {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn directory_split_and_retirement_follow_remote_owners() {
     const ACCOUNT: &str = "123456789012";
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::with_partition_count(4).await;
     let table = fixture
         .client
         .query::<DescribeTable>(
@@ -39,32 +39,6 @@ async fn directory_split_and_retirement_follow_remote_owners() {
         depth: 0,
     };
     let target = directory_target(ACCOUNT, &root).unwrap();
-    fixture
-        .provisioner
-        .admit_directory(ACCOUNT, &root)
-        .await
-        .unwrap();
-    let ranges = (0_u128..4)
-        .map(|position| RoutePagePartition {
-            partition_id: position.to_be_bytes(),
-            lower: (position << 126).to_be_bytes(),
-            upper: (position < 3).then(|| ((position + 1) << 126).to_be_bytes()),
-            epoch: 1,
-        })
-        .collect();
-    fixture
-        .client
-        .command::<InstallDirectory>(
-            &target,
-            mutation(),
-            Json(DirectoryInstall {
-                spec: root.clone(),
-                ranges,
-                source: None,
-            }),
-        )
-        .await
-        .unwrap();
     let remote = Remote::new(&fixture).await;
     // Use real signed capacity to place the copies on the empty node. The
     // controller must create, copy and open through authenticated admission.
@@ -222,7 +196,7 @@ async fn directory_split_and_retirement_follow_remote_owners() {
 async fn sdk_index_reads_follow_split_metadata_and_generation_retirement() {
     const ACCOUNT: &str = "123456789012";
     const TABLE: &str = "ResidencyDirectory";
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::with_partition_count(4).await;
     let remote = Remote::new(&fixture).await;
     let sdk = super::provisioning::sdk_without_retries(&fixture);
     super::provisioning::create(&sdk, TABLE, true)
@@ -240,13 +214,8 @@ async fn sdk_index_reads_follow_split_metadata_and_generation_retirement() {
         .unwrap();
     let index = &table.global_secondary_indexes[0];
     let root = DirectorySpec::root(index.id.clone());
-    let ranges = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+    let ranges = crate::single_leaf_route(&fixture.client, &account, &table.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap()
         .partitions;
     let mut expected = Vec::new();
@@ -514,13 +483,8 @@ async fn unavailable_index_directory_does_not_starve_healthy_index_maintenance()
         "healthy index split must publish despite the other directory outage"
     );
 
-    let route = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+    let route = crate::single_leaf_route(&fixture.client, &account, &table.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let source =
         beyonddb::data_target(ACCOUNT, &table.id, &route.partitions[0].partition_id).unwrap();
@@ -649,5 +613,78 @@ async fn unavailable_index_directory_does_not_starve_healthy_index_maintenance()
             .unwrap();
         assert_eq!(result.items(), [item("third")]);
     }
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unavailable_base_directory_does_not_starve_next_table_capacity() {
+    const ACCOUNT: &str = "123456789012";
+    let fixture = Fixture::with_capacity(2, 12).await;
+    let sdk = super::provisioning::sdk_without_retries(&fixture);
+    super::reclamation::create(&sdk, "ResidencyHealthy", false).await;
+    let account = account_target(ACCOUNT).unwrap();
+    let mut tables = Vec::new();
+    for name in ["Residency", "ResidencyHealthy"] {
+        tables.push(
+            fixture
+                .client
+                .query::<DescribeTable>(&account, None, Json(name.into()))
+                .await
+                .unwrap()
+                .output
+                .0
+                .unwrap(),
+        );
+    }
+    let unavailable = Arc::new(UnavailableDirectory {
+        target: directory_target(ACCOUNT, &DirectorySpec::root(tables[0].id.clone())).unwrap(),
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+        enabled: std::sync::atomic::AtomicBool::new(true),
+    });
+    let client = fixture.client.clone().with_local_resolver(unavailable);
+    let mut cursor = None;
+    assert!(
+        fixture
+            .provisioner
+            .reconcile_account_capacity(ACCOUNT, client.clone(), 1, &mut cursor)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        cursor.as_ref().map(|cursor| cursor.table_name.as_str()),
+        Some("Residency")
+    );
+    assert!(
+        fixture
+            .provisioner
+            .reconcile_account_capacity(ACCOUNT, client, 1, &mut cursor)
+            .await
+            .unwrap()
+    );
+    let route = crate::single_leaf_route(&fixture.client, &account, &tables[1].id)
+        .await
+        .unwrap();
+    assert_eq!(route.partitions.len(), 3);
+    sdk.put_item()
+        .table_name("ResidencyHealthy")
+        .item("id", AwsAttributeValue::S("after-split".into()))
+        .send()
+        .await
+        .unwrap();
+    let result = sdk
+        .get_item()
+        .table_name("ResidencyHealthy")
+        .consistent_read(true)
+        .key("id", AwsAttributeValue::S("after-split".into()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        result.item,
+        Some(HashMap::from([(
+            "id".into(),
+            AwsAttributeValue::S("after-split".into())
+        )]))
+    );
     fixture.shutdown().await;
 }

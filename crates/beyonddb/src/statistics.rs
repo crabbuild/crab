@@ -139,7 +139,7 @@ impl Query for ReadGlobalIndexStatistics {
 pub(crate) struct StatisticsSnapshot {
     pub table_id: String,
     pub sampled_at: i64,
-    pub base_epoch: Option<u64>,
+    pub base_routed: bool,
     pub index_generations: BTreeSet<String>,
     pub statistics: TableStatistics,
 }
@@ -148,7 +148,7 @@ pub(crate) struct PublishStatistics;
 impl Command for PublishStatistics {
     const MODULE: &'static str = crate::MODULE;
     const ID: u32 = 31;
-    const CODEC_VERSION: u32 = 2;
+    const CODEC_VERSION: u32 = 3;
     type Input = Json<StatisticsSnapshot>;
     type Output = Json<bool>;
     fn execute(
@@ -163,24 +163,19 @@ impl Command for PublishStatistics {
             return Ok(CommandResult::Rejected(Json(false)));
         };
         let rows = context.sql(&statement(
-            "SELECT route_epoch FROM ddb_routes WHERE table_id = ?1",
+            "SELECT 1 FROM ddb_directory_roots WHERE table_id = ?1 AND initial_fingerprint IS NOT NULL AND retired = 0",
             vec![SqlValue::Text(input.table_id.clone())],
         ))?;
-        let epoch = rows[0]
-            .rows
-            .first()
-            .map(|row| parse_epoch(row))
-            .transpose()?;
-        // The sample follows one directory generation. A cutover invalidates
-        // the whole sample, preventing old-source and child double counting.
-        if epoch != input.base_epoch
+        // Each routed leaf was validated before the sampler left its interval.
+        // Account publication checks lifecycle and generation, not a global epoch.
+        if !rows[0].rows.is_empty() != input.base_routed
             || table.global_secondary_indexes.len() != input.index_generations.len()
         {
             return Ok(CommandResult::Rejected(Json(false)));
         }
         for index in &table.global_secondary_indexes {
             let rows = context.sql(&statement(
-                "SELECT 1 FROM ddb_global_index_routes WHERE table_id = ?1 AND retired = 0 AND initial_fingerprint IS NOT NULL",
+                "SELECT 1 FROM ddb_directory_roots WHERE table_id = ?1 AND retired = 0 AND initial_fingerprint IS NOT NULL",
                 vec![SqlValue::Text(index.id.clone())],
             ))?;
             // Index samples validate membership in each directory leaf and cross
@@ -198,15 +193,6 @@ impl Command for PublishStatistics {
         ))?;
         Ok(CommandResult::Success(Json(true)))
     }
-}
-
-fn parse_epoch(row: &[SqlValue]) -> Result<u64> {
-    let [SqlValue::Text(epoch)] = row else {
-        return Err(Error::Command("invalid statistics route epoch"));
-    };
-    epoch
-        .parse()
-        .map_err(|_| Error::Command("invalid statistics route epoch"))
 }
 
 pub(crate) struct ReadTableStatistics;

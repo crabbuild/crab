@@ -1,5 +1,38 @@
 include!("support/transaction_transport.rs");
 
+include!("support/routes.rs");
+
+async fn point_range(
+    client: &crab_cell_runtime::client::CellClient,
+    account: &crab_cell_runtime::identity::CellTarget,
+    table_id: &str,
+    hash: [u8; 16],
+) -> Option<([u8; 16], u64)> {
+    use beyonddb::{RoutePageInput, RoutePageOutcome};
+    match beyonddb::read_route_page(
+        client,
+        account,
+        RoutePageInput {
+            table_id: table_id.into(),
+            start_hash: Some(hash),
+            after_lower: None,
+            expected_epoch: None,
+        },
+    )
+    .await
+    .unwrap()
+    {
+        RoutePageOutcome::Unrouted => None,
+        RoutePageOutcome::Page { partitions, .. } => {
+            let range = partitions
+                .first()
+                .expect("published coverage must contain the key");
+            Some((range.partition_id, range.epoch))
+        }
+        RoutePageOutcome::Changed => panic!("fixture route changed while inspecting key"),
+    }
+}
+
 mod elastic_cells {
     mod account_participant;
     mod coordinator_checkpoints;
@@ -43,19 +76,18 @@ use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
 use beyonddb::{
     ActivateImportedPartition, ActivateImportedPartitionInput, ActivateImportedPartitionOutcome,
     ActivateTableRoute, ActivateTableRouteOutcome, BeginCrossCellTransaction,
-    BeginCrossCellTransactionInput, BeginCrossCellTransactionOutcome, BeginSplit,
-    BeginSplitOutcome, Beyonddb, BeyonddbPeerScope, CellAuthorizationStore, CellCredentialStore,
-    CellInitialPartitionProvisioner, CellSplitController, CellStorage, CommitSplit,
-    CommitSplitOutcome, CoordinatorDecision, CoordinatorParticipant, CoordinatorParticipantTarget,
-    CoordinatorPhaseInput, CoordinatorPhaseOutcome, CreateTable, CreateTableOutcome,
-    DecideCrossCellTransaction, DecideCrossCellTransactionInput, DecideCrossCellTransactionOutcome,
-    DeleteItem, DeleteItemInput, DeleteTable, DeleteTableOutcome, DescribeTable, GetItem,
-    GetItemInput, GetItemOutcome, ImportPartitionItem, ImportSummary, IndexedTransactionOperation,
-    InitialPartitionProvisioner, InstallPartition, InstallPartitionOutcome, ItemMutationOutcome,
-    Json, ListCoordinatorShards, ListCoordinatorShardsInput, NodeLeasePublisher,
-    ParticipantTransactionState, PartitionDelete, PartitionDeleteInput, PartitionDeleteOutcome,
-    PartitionExport, PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionImportInput,
-    PartitionImportOutcome, PartitionInstall, PartitionLookupInput, PartitionLookupOutcome,
+    BeginCrossCellTransactionInput, BeginCrossCellTransactionOutcome, Beyonddb, BeyonddbPeerScope,
+    CellAuthorizationStore, CellCredentialStore, CellInitialPartitionProvisioner,
+    CellSplitController, CellStorage, CoordinatorDecision, CoordinatorParticipant,
+    CoordinatorParticipantTarget, CoordinatorPhaseInput, CoordinatorPhaseOutcome, CreateTable,
+    CreateTableOutcome, DecideCrossCellTransaction, DecideCrossCellTransactionInput,
+    DecideCrossCellTransactionOutcome, DeleteItem, DeleteItemInput, DeleteTable,
+    DeleteTableOutcome, DescribeTable, GetItem, GetItemInput, GetItemOutcome, ImportPartitionItem,
+    ImportSummary, IndexedTransactionOperation, InitialPartitionProvisioner, InstallPartition,
+    InstallPartitionOutcome, ItemMutationOutcome, Json, ListCoordinatorShards,
+    ListCoordinatorShardsInput, NodeLeasePublisher, ParticipantTransactionState, PartitionDelete,
+    PartitionDeleteInput, PartitionDeleteOutcome, PartitionExport, PartitionGet, PartitionGetInput,
+    PartitionGetOutcome, PartitionImportInput, PartitionImportOutcome, PartitionInstall,
     PartitionPut, PartitionPutInput, PartitionPutOutcome, PartitionScan, PartitionScanInput,
     PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState, PartitionTransactWrite,
     PartitionTransactWriteInput, PartitionTransactWriteOutcome, PartitionUpdate,
@@ -63,16 +95,14 @@ use beyonddb::{
     PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
     PublishedNodeLease, PutItem, PutItemInput, ReadCoordinatorParticipant,
     ReadCoordinatorParticipantInput, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
-    ReadPartitionRoute, ReadPartitionState, ReadPartitionTransaction,
-    ReadPendingCrossCellTransactions, ReadPendingCrossCellTransactionsInput, ReadRoutePage,
-    ReadSplitPlan, ReadSplitRoute, ReadTableRoute, ReadTransactionInput, ReadTtlSchedule,
-    ReadTtlSweep, ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare,
-    RecordParticipantResolution, ResolvePartitionTransaction, ResolveTransactionInput,
-    ResolveTransactionOutcome, RoutePageInput, RoutePageOutcome, SealPartition,
-    SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute, TableSpec, TransactionOperation,
-    TransactionToken, UpdateTtl, UpdateTtlInput, account_target, build_http_state,
-    coordinator_target, credential_target, data_key_hash, data_target, initialize_account,
-    initialize_coordinator, initialize_partition,
+    ReadPartitionState, ReadPartitionTransaction, ReadPendingCrossCellTransactions,
+    ReadPendingCrossCellTransactionsInput, ReadTransactionInput, ReadTtlSchedule, ReadTtlSweep,
+    ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare, RecordParticipantResolution,
+    ResolvePartitionTransaction, ResolveTransactionInput, ResolveTransactionOutcome,
+    RoutePageInput, RoutePageOutcome, SealPartition, SealPartitionOutcome, SplitPlan, TableRoute,
+    TableSpec, TransactionOperation, TransactionToken, UpdateTtl, UpdateTtlInput, account_target,
+    build_http_state, coordinator_target, credential_target, data_key_hash, data_target,
+    initialize_account, initialize_coordinator, initialize_partition,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::CellNodeBuilder;
@@ -172,7 +202,7 @@ struct FailOnceProvisioner {
 }
 
 impl InitialPartitionProvisioner for FailOnceProvisioner {
-    fn provision_global_index_directory<'a>(
+    fn provision_route_directory<'a>(
         &'a self,
         client: &'a CellClient,
         account_id: &'a str,
@@ -180,7 +210,7 @@ impl InitialPartitionProvisioner for FailOnceProvisioner {
         ranges: Vec<beyonddb::RoutePagePartition>,
     ) -> BoxedFuture<'a, Result<beyonddb::DirectoryCopyReceipt, StorageError>> {
         self.inner
-            .provision_global_index_directory(client, account_id, index_id, ranges)
+            .provision_route_directory(client, account_id, index_id, ranges)
     }
 
     fn initial_partition_count(&self) -> u16 {
@@ -249,6 +279,67 @@ impl Bootstrap<'_> {
     ) -> CellHandle {
         self.cell_with_storage(target, module, byte, (file, Limits::default()), initialize)
             .await
+    }
+
+    async fn directory(
+        &self,
+        route: TableRoute,
+        byte: u8,
+        file: &std::path::Path,
+    ) -> (CellHandle, beyonddb::TableRoutePublication) {
+        let spec = beyonddb::DirectorySpec::root(route.table_id.clone());
+        let target = beyonddb::directory_target("123456789012", &spec).unwrap();
+        let handle = self
+            .cell_with_storage(
+                &target,
+                "beyonddb-directory",
+                byte,
+                (
+                    file,
+                    Limits {
+                        max_database_bytes: 16 * 1024 * 1024,
+                        max_capture_bytes: 4 * 1024 * 1024,
+                        ..Limits::default()
+                    },
+                ),
+                beyonddb::initialize_directory,
+            )
+            .await;
+        let client = CellClient::local(self.registry.clone(), handle.clone());
+        let installed = client
+            .command::<beyonddb::InstallDirectory>(
+                &target,
+                identity(byte),
+                Json(beyonddb::DirectoryInstall {
+                    spec,
+                    source: None,
+                    ranges: route
+                        .partitions
+                        .iter()
+                        .map(|part| beyonddb::RoutePagePartition {
+                            partition_id: part.partition_id,
+                            lower: part.lower.unwrap_or([0; 16]),
+                            upper: part.upper,
+                            epoch: part.epoch,
+                        })
+                        .collect(),
+                }),
+            )
+            .await
+            .unwrap();
+        let state = client
+            .query::<beyonddb::ReadDirectory>(&target, Some(installed.receipt), Json(()))
+            .await
+            .unwrap()
+            .output
+            .0
+            .unwrap();
+        let receipt = beyonddb::DirectoryCopyReceipt {
+            cell_id: *target.cell_id().as_bytes(),
+            sequence: installed.receipt.commit_sequence,
+            fingerprint: state.initial_fingerprint,
+        };
+        (handle, beyonddb::TableRoutePublication { route, receipt })
     }
 
     async fn cell_with_storage(
@@ -502,19 +593,15 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
         initialize_account,
     )
     .await;
-    let client = host
-        .application_handle::<Beyonddb>(
-            CellClient::local(Arc::clone(&registry), handle.clone()),
-            account.tenant(),
-            account.application(),
-        )
-        .unwrap();
+    let client = CellClient::local_runtime(registry.clone(), host.runtime(), layout.clone());
     let table = match client
         .command::<CreateTable>(
             &account,
             identity(77),
             Json(TableSpec {
-                placement: beyonddb::TablePlacement::Account,
+                placement: beyonddb::TablePlacement::Routed {
+                    initial_partitions: 64,
+                },
                 local_secondary_indexes: Vec::new(),
                 global_secondary_indexes: Vec::new(),
                 table_name: "ManyRanges".into(),
@@ -541,6 +628,8 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
         CreateTableOutcome::Created(table) => table,
         other => panic!("unexpected table creation: {other:?}"),
     };
+    // Install a native metadata fixture across the 64-entry page boundary;
+    // public creation uses the persisted power-of-two placement policy.
     let width = u128::MAX / 65;
     let partitions = (0_u128..65)
         .map(|index| PartitionSpec {
@@ -551,79 +640,83 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
             epoch: 1,
         })
         .collect::<Vec<_>>();
-    client
-        .command::<ActivateTableRoute>(
-            &account,
-            identity(78),
-            Json(TableRoute {
+    let bootstrap = Bootstrap {
+        runtime: host.runtime(),
+        registry: &registry,
+        layout: &layout,
+        session,
+    };
+    let (directory_handle, publication) = bootstrap
+        .directory(
+            TableRoute {
                 table_id: table.id.clone(),
                 epoch: 1,
                 partitions: partitions.clone(),
-            }),
+            },
+            74,
+            &directory.path().join("routes.sqlite"),
         )
+        .await;
+    client
+        .command::<ActivateTableRoute>(&account, identity(78), Json(publication))
         .await
         .unwrap();
-    let first = client
-        .query::<ReadRoutePage>(
-            &account,
-            None,
-            Json(RoutePageInput {
-                table_id: table.id.clone(),
-                start_hash: None,
-                after_lower: None,
-                expected_epoch: None,
-            }),
-        )
-        .await
-        .unwrap();
+    let first = beyonddb::read_route_page(
+        &client,
+        &account,
+        RoutePageInput {
+            table_id: table.id.clone(),
+            start_hash: None,
+            after_lower: None,
+            expected_epoch: None,
+        },
+    )
+    .await
+    .unwrap();
     let RoutePageOutcome::Page {
         epoch: 1,
         partitions: first,
         has_more: true,
-    } = first.output.0
+    } = first
     else {
         panic!("expected first route page")
     };
     assert_eq!(first.len(), 64);
-    let second = client
-        .query::<ReadRoutePage>(
-            &account,
-            None,
-            Json(RoutePageInput {
-                table_id: table.id.clone(),
-                start_hash: None,
-                after_lower: Some(first[63].lower),
-                expected_epoch: Some(1),
-            }),
-        )
-        .await
-        .unwrap();
+    let second = beyonddb::read_route_page(
+        &client,
+        &account,
+        RoutePageInput {
+            table_id: table.id.clone(),
+            start_hash: None,
+            after_lower: Some(first[63].lower),
+            expected_epoch: Some(1),
+        },
+    )
+    .await
+    .unwrap();
     let RoutePageOutcome::Page {
         epoch: 1,
         partitions: second,
         has_more: false,
-    } = second.output.0
+    } = second
     else {
         panic!("expected final route page")
     };
     assert_eq!(second[0].partition_id, partitions[64].partition_id);
     assert_eq!(first[63].upper, Some(second[0].lower));
     assert_eq!(
-        client
-            .query::<ReadRoutePage>(
-                &account,
-                None,
-                Json(RoutePageInput {
-                    table_id: table.id.clone(),
-                    start_hash: None,
-                    after_lower: Some(second[0].lower),
-                    expected_epoch: None,
-                }),
-            )
-            .await
-            .unwrap()
-            .output
-            .0,
+        beyonddb::read_route_page(
+            &client,
+            &account,
+            RoutePageInput {
+                table_id: table.id.clone(),
+                start_hash: None,
+                after_lower: Some(second[0].lower),
+                expected_epoch: None,
+            }
+        )
+        .await
+        .unwrap(),
         RoutePageOutcome::Page {
             epoch: 1,
             partitions: vec![],
@@ -631,21 +724,18 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
         }
     );
     assert_eq!(
-        client
-            .query::<ReadRoutePage>(
-                &account,
-                None,
-                Json(RoutePageInput {
-                    table_id: table.id.clone(),
-                    start_hash: Some((64 * width + 1).to_be_bytes()),
-                    after_lower: None,
-                    expected_epoch: None,
-                }),
-            )
-            .await
-            .unwrap()
-            .output
-            .0,
+        beyonddb::read_route_page(
+            &client,
+            &account,
+            RoutePageInput {
+                table_id: table.id.clone(),
+                start_hash: Some((64 * width + 1).to_be_bytes()),
+                after_lower: None,
+                expected_epoch: None,
+            }
+        )
+        .await
+        .unwrap(),
         RoutePageOutcome::Page {
             epoch: 1,
             partitions: second,
@@ -653,21 +743,18 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
         }
     );
     assert_eq!(
-        client
-            .query::<ReadRoutePage>(
-                &account,
-                None,
-                Json(RoutePageInput {
-                    table_id: table.id.clone(),
-                    start_hash: None,
-                    after_lower: Some(first[63].lower),
-                    expected_epoch: Some(2),
-                }),
-            )
-            .await
-            .unwrap()
-            .output
-            .0,
+        beyonddb::read_route_page(
+            &client,
+            &account,
+            RoutePageInput {
+                table_id: table.id.clone(),
+                start_hash: None,
+                after_lower: Some(first[63].lower),
+                expected_epoch: Some(2),
+            }
+        )
+        .await
+        .unwrap(),
         RoutePageOutcome::Changed
     );
     let bootstrap = Bootstrap {
@@ -676,7 +763,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
         layout: &layout,
         session,
     };
-    let mut handles = vec![handle];
+    let mut handles = vec![handle, directory_handle];
     for (index, spec) in partitions.iter().enumerate() {
         let data = data_target("123456789012", &table.id, &spec.partition_id).unwrap();
         let byte = u8::try_from(index + 100).unwrap();
@@ -700,7 +787,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
         handles.push(handle);
     }
     let storage = CellStorage::new(
-        CellClient::local_many(registry, handles).unwrap(),
+        CellClient::local_many(registry.clone(), handles).unwrap(),
         "us-east-1",
     );
     let key_info = storage
@@ -869,7 +956,9 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
             &account,
             identity(79),
             Json(TableSpec {
-                placement: beyonddb::TablePlacement::Account,
+                placement: beyonddb::TablePlacement::Routed {
+                    initial_partitions: 256,
+                },
                 local_secondary_indexes: Vec::new(),
                 global_secondary_indexes: Vec::new(),
                 table_name: "MoreRanges".into(),
@@ -890,33 +979,47 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
         CreateTableOutcome::Created(table) => table,
         other => panic!("unexpected table creation: {other:?}"),
     };
-    let width = u128::MAX / 1_025;
+    let width = u128::MAX / 1_024;
     let large_route = TableRoute {
         table_id: large_table.id.clone(),
         epoch: 1,
-        partitions: (0_u128..1_025)
+        partitions: (0_u128..1_024)
             .map(|index| PartitionSpec {
                 table: large_table.clone(),
                 partition_id: index.to_be_bytes(),
                 lower: (index > 0).then(|| (index * width).to_be_bytes()),
-                upper: (index < 1_024).then(|| ((index + 1) * width).to_be_bytes()),
+                upper: (index < 1_023).then(|| ((index + 1) * width).to_be_bytes()),
                 epoch: 1,
             })
             .collect(),
     };
+    let provisioner = Arc::new(
+        CellInitialPartitionProvisioner::new(
+            host.runtime(),
+            Arc::clone(&application),
+            layout.clone(),
+            session,
+            "https://beyonddb-partition.internal:8081".into(),
+            directory.path().join("large-route-provisioner"),
+        )
+        .unwrap(),
+    );
+    let (_, publication) = bootstrap
+        .directory(
+            large_route.clone(),
+            73,
+            &directory.path().join("large-routes.sqlite"),
+        )
+        .await;
     client
-        .command::<ActivateTableRoute>(&account, identity(80), Json(large_route.clone()))
+        .command::<ActivateTableRoute>(&account, identity(80), Json(publication))
         .await
         .unwrap();
-    assert_eq!(
-        client
-            .query::<ReadTableRoute>(&account, None, Json(large_table.id.clone()))
-            .await
-            .unwrap()
-            .output
-            .0,
-        Some(large_route.clone())
-    );
+    let root = beyonddb::DirectorySpec::root(large_table.id.clone());
+    provisioner
+        .split_directory(&client, "123456789012", &root)
+        .await
+        .unwrap();
     let source = large_route.partitions[512].clone();
     let lower = u128::from_be_bytes(source.lower.unwrap());
     let upper = u128::from_be_bytes(source.upper.unwrap());
@@ -933,63 +1036,69 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
         source,
         children: [left.clone(), right.clone()],
     };
+    let leaf = beyonddb::route_directory_target(
+        &client,
+        &account,
+        &large_table.id,
+        plan.source.lower.unwrap(),
+    )
+    .await
+    .unwrap();
     client
-        .command::<BeginSplit>(&account, identity(81), Json(plan.clone()))
+        .command::<beyonddb::BeginDirectoryTransfer>(&leaf, identity(81), Json(plan.clone().into()))
         .await
         .unwrap();
-    assert_eq!(
-        client
-            .query::<ReadSplitRoute>(&account, None, Json(plan.clone()))
-            .await
-            .unwrap()
-            .output
-            .0,
-        SplitRouteState::Before
-    );
-    assert_eq!(
-        client
-            .query::<ReadSplitPlan>(&account, None, Json(large_table.id.clone()))
-            .await
-            .unwrap()
-            .output
-            .0,
-        Some(plan.clone())
-    );
-    client
-        .command::<CommitSplit>(&account, identity(82), Json(plan.clone()))
-        .await
-        .unwrap();
-    assert_eq!(
-        client
-            .query::<ReadSplitRoute>(&account, None, Json(plan))
-            .await
-            .unwrap()
-            .output
-            .0,
-        SplitRouteState::After
-    );
-    let mut large_next_route = large_route;
-    large_next_route.epoch = 2;
-    large_next_route.partitions.splice(512..=512, [left, right]);
-    assert_eq!(
-        client
-            .query::<ReadTableRoute>(&account, None, Json(large_table.id.clone()))
-            .await
-            .unwrap()
-            .output
-            .0,
-        Some(large_next_route)
-    );
-    let provisioner = Arc::new(
-        CellInitialPartitionProvisioner::new(
-            host.runtime(),
-            Arc::clone(&application),
-            layout.clone(),
-            session,
-            "https://beyonddb-partition.internal:8081".into(),
-            directory.path().join("large-route-provisioner"),
+    let pending = client
+        .query::<beyonddb::ReadDirectoryTransfer>(
+            &leaf,
+            None,
+            Json(beyonddb::DirectoryPartitionInput {
+                table_id: large_table.id.clone(),
+                partition_id: plan.source.partition_id,
+            }),
         )
-        .unwrap(),
+        .await
+        .unwrap()
+        .output
+        .0;
+    assert_eq!(pending, Some(plan.clone().into()));
+    client
+        .command::<beyonddb::PublishDirectoryTransfer>(&leaf, identity(82), Json(plan.into()))
+        .await
+        .unwrap();
+    let mut expected = large_route.partitions;
+    expected.splice(512..=512, [left, right]);
+    let mut actual = Vec::new();
+    let mut page = RoutePageInput {
+        table_id: large_table.id.clone(),
+        start_hash: None,
+        after_lower: None,
+        expected_epoch: None,
+    };
+    loop {
+        let RoutePageOutcome::Page {
+            epoch,
+            partitions,
+            has_more,
+        } = beyonddb::read_route_page(&client, &account, page.clone())
+            .await
+            .unwrap()
+        else {
+            panic!("stable metadata tree must remain pageable")
+        };
+        page.after_lower = partitions.last().map(|range| range.lower);
+        page.expected_epoch = Some(epoch);
+        actual.extend(partitions.into_iter().map(|range| range.partition_id));
+        if !has_more {
+            break;
+        }
+    }
+    assert_eq!(
+        actual,
+        expected
+            .iter()
+            .map(|range| range.partition_id)
+            .collect::<Vec<_>>()
     );
     let adapter = CellStorage::new(
         CellClient::local_runtime(application.registry(), host.runtime(), layout.clone()),
@@ -1292,12 +1401,9 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         .unwrap();
     let capacity_client =
         CellClient::local_runtime(registry.clone(), host.runtime(), layout.clone());
-    let creator = CellStorage::new(
-        CellClient::local(Arc::clone(&registry), account_handle.clone()),
-        "us-east-1",
-    )
-    .with_initial_partitions(provisioner.clone())
-    .with_transaction_coordinators(provisioner.clone());
+    let creator = CellStorage::new(capacity_client.clone(), "us-east-1")
+        .with_initial_partitions(provisioner.clone())
+        .with_transaction_coordinators(provisioner.clone());
     let created = creator
         .create_table(
             "123456789012",
@@ -1330,19 +1436,8 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         .await
         .unwrap();
     assert_eq!(created.table_status, TableStatus::Active);
-    let account_client = host
-        .application_handle::<Beyonddb>(
-            CellClient::local(Arc::clone(&registry), account_handle.clone()),
-            account.tenant(),
-            account.application(),
-        )
-        .unwrap();
-    let route = account_client
-        .query::<ReadTableRoute>(&account, None, Json(created.table_id.clone()))
+    let route = crate::single_leaf_route(&capacity_client, &account, &created.table_id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let data = data_target(
         "123456789012",
@@ -1641,18 +1736,26 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
     let grown = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             assert!(host.is_ready(), "capacity loop stopped serving");
-            if let Some(route) = account_client
-                .query::<ReadTableRoute>(&account, None, Json(created.table_id.clone()))
-                .await
-                .unwrap()
-                .output
-                .0
+            if let Some(route) =
+                crate::single_leaf_route(&capacity_client, &account, &created.table_id.clone())
+                    .await
                 && route.epoch == 2
             {
                 // Publication precedes child opening. The capacity task's
                 // terminal boundary is the durable Finish, not the new epoch.
-                if account_client
-                    .query::<ReadSplitPlan>(&account, None, Json(created.table_id.clone()))
+                if capacity_client
+                    .query::<beyonddb::ReadDirectoryTransfer>(
+                        &beyonddb::directory_target(
+                            "123456789012",
+                            &beyonddb::DirectorySpec::root(created.table_id.clone()),
+                        )
+                        .unwrap(),
+                        None,
+                        Json(beyonddb::DirectoryPartitionInput {
+                            table_id: created.table_id.clone(),
+                            partition_id: route.partitions[0].partition_id,
+                        }),
+                    )
                     .await
                     .unwrap()
                     .output
@@ -1719,12 +1822,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         .unwrap();
     assert!(capacity_cursor.is_none());
     assert_eq!(
-        account_client
-            .query::<ReadTableRoute>(&account, None, Json(created.table_id.clone()))
-            .await
-            .unwrap()
-            .output
-            .0,
+        crate::single_leaf_route(&capacity_client, &account, &created.table_id.clone()).await,
         Some(grown.clone())
     );
     let completed = provisioner
@@ -1733,6 +1831,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
             capacity_client.clone(),
             &created.table_id,
             route.partitions[0].partition_id,
+            route.partitions[0].lower.unwrap_or([0; 16]),
             1,
         )
         .await
@@ -1760,17 +1859,14 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
             capacity_client.clone(),
             &created.table_id,
             owner.partition_id,
+            owner.lower.unwrap_or([0; 16]),
         )
         .await
         .unwrap();
     assert_eq!(split.source.partition_id, owner.partition_id);
     assert_eq!(split.children[0].epoch, owner.epoch + 1);
-    let grown = account_client
-        .query::<ReadTableRoute>(&account, None, Json(created.table_id.clone()))
+    let grown = crate::single_leaf_route(&capacity_client, &account, &created.table_id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     assert_eq!(grown.partitions.len(), 3);
     assert_eq!(grown.epoch, 3);
@@ -2034,12 +2130,8 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         .and_then(|table| table.table_id())
         .unwrap()
         .to_owned();
-    let new_route = account_client
-        .query::<ReadTableRoute>(&account, None, Json(new_table_id.clone()))
+    let new_route = crate::single_leaf_route(&capacity_client, &account, &new_table_id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let mut capacity_cursor = None;
     provisioner
@@ -2593,7 +2685,9 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &account,
             identity(13),
             Json(TableSpec {
-                placement: beyonddb::TablePlacement::Account,
+                placement: beyonddb::TablePlacement::Routed {
+                    initial_partitions: 2,
+                },
                 local_secondary_indexes: Vec::new(),
                 global_secondary_indexes: Vec::new(),
                 table_name: "Books".into(),
@@ -2673,7 +2767,11 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     let storage = CellStorage::new(cell_client.clone(), "us-east-1")
         .with_transaction_coordinators(Arc::new(coordinator_admission));
     let client = host
-        .application_handle::<Beyonddb>(cell_client, account.tenant(), account.application())
+        .application_handle::<Beyonddb>(
+            cell_client.clone(),
+            account.tenant(),
+            account.application(),
+        )
         .unwrap();
     let shard = u32::from_be_bytes(coordinator_target.partition().try_into().unwrap());
     let registered = client
@@ -2710,7 +2808,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             partition_id: right_id,
             lower: Some(split),
             upper: None,
-            epoch: 2,
+            epoch: 1,
         },
     ];
     for (target, spec, byte) in [
@@ -2729,24 +2827,24 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     }
     let route = TableRoute {
         table_id: table.id.clone(),
-        epoch: 2,
+        epoch: 1,
         partitions: partitions.to_vec(),
     };
+    let route_target = beyonddb::directory_target(
+        "123456789012",
+        &beyonddb::DirectorySpec::root(table.id.clone()),
+    )
+    .unwrap();
+    let (directory_handle, publication) = bootstrap
+        .directory(
+            route.clone(),
+            18,
+            &directory.path().join("directory.sqlite"),
+        )
+        .await;
     assert_eq!(
-        client
-            .query::<ReadPartitionRoute>(
-                &account,
-                None,
-                Json(PartitionLookupInput {
-                    table_id: table.id.clone(),
-                    hash: [0; 16],
-                }),
-            )
-            .await
-            .unwrap()
-            .output
-            .0,
-        PartitionLookupOutcome::Unrouted
+        crate::point_range(&cell_client, &account, &table.id, [0; 16]).await,
+        None
     );
     let old_account_key = key_in_range(&table.id, &table.key_schema, true, 500);
     client
@@ -2763,7 +2861,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .await
         .unwrap();
     let unsafe_cutover = client
-        .command::<ActivateTableRoute>(&account, identity(28), Json(route.clone()))
+        .command::<ActivateTableRoute>(&account, identity(28), Json(publication.clone()))
         .await;
     assert!(matches!(
         unsafe_cutover,
@@ -2784,8 +2882,8 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
-    let mut gap = route.clone();
-    gap.partitions[1].lower = Some([0x81, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let mut gap = publication.clone();
+    gap.route.partitions[1].lower = Some([0x81, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let invalid = client
         .command::<ActivateTableRoute>(&account, identity(22), Json(gap))
         .await;
@@ -2795,34 +2893,16 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             if result.output.0 == ActivateTableRouteOutcome::InvalidRoute
     ));
     let active = client
-        .command::<ActivateTableRoute>(&account, identity(23), Json(route.clone()))
+        .command::<ActivateTableRoute>(&account, identity(23), Json(publication))
         .await
         .unwrap();
     assert_eq!(active.output.0, ActivateTableRouteOutcome::Activated);
-    let published = client
-        .query::<ReadTableRoute>(&account, Some(active.receipt), Json(table.id.clone()))
-        .await
-        .unwrap();
-    assert_eq!(published.output.0, Some(route.clone()));
-    for (hash, partition_id, epoch) in [([0; 16], left_id, 1), (split, right_id, 2)] {
+    let published = crate::single_leaf_route(&cell_client, &account, &table.id.clone()).await;
+    assert_eq!(published, Some(route.clone()));
+    for (hash, partition_id, epoch) in [([0; 16], left_id, 1), (split, right_id, 1)] {
         assert_eq!(
-            client
-                .query::<ReadPartitionRoute>(
-                    &account,
-                    Some(active.receipt),
-                    Json(PartitionLookupInput {
-                        table_id: table.id.clone(),
-                        hash,
-                    }),
-                )
-                .await
-                .unwrap()
-                .output
-                .0,
-            PartitionLookupOutcome::Routed {
-                partition_id,
-                epoch,
-            }
+            crate::point_range(&cell_client, &account, &table.id, hash).await,
+            Some((partition_id, epoch))
         );
     }
     let cross_left = key_in_range(&table.id, &table.key_schema, true, 600);
@@ -2841,13 +2921,13 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         ),
         (
             right_target.clone(),
-            2_u64,
+            1_u64,
             cross_right.clone(),
             1_u8,
             CoordinatorParticipantTarget::Data {
                 table_id: table.id.clone(),
                 partition_id: right_id,
-                epoch: 2,
+                epoch: 1,
             },
         ),
     ];
@@ -3242,7 +3322,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     };
     let next_route = TableRoute {
         table_id: table.id.clone(),
-        epoch: 3,
+        epoch: 2,
         partitions: vec![
             children[0].clone(),
             children[1].clone(),
@@ -3253,40 +3333,63 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     empty_child.children[0].upper = Some([0; 16]);
     empty_child.children[1].lower = Some([0; 16]);
     let invalid = client
-        .command::<BeginSplit>(&account, identity(40), Json(empty_child))
+        .command::<beyonddb::BeginDirectoryTransfer>(
+            &route_target,
+            identity(40),
+            Json(empty_child.into()),
+        )
         .await;
     assert!(matches!(
         invalid,
         Err(InvocationError::Rejected(result))
-            if result.output.0 == BeginSplitOutcome::InvalidPlan
+            if !result.output.0
     ));
     let begun = client
-        .command::<BeginSplit>(&account, identity(41), Json(plan.clone()))
+        .command::<beyonddb::BeginDirectoryTransfer>(
+            &route_target,
+            identity(41),
+            Json(plan.clone().into()),
+        )
         .await
         .unwrap();
-    assert_eq!(begun.output.0, BeginSplitOutcome::Planned);
+    assert!(begun.output.0);
     let replayed = client
-        .command::<BeginSplit>(&account, identity(42), Json(plan.clone()))
+        .command::<beyonddb::BeginDirectoryTransfer>(
+            &route_target,
+            identity(42),
+            Json(plan.clone().into()),
+        )
         .await
         .unwrap();
-    assert_eq!(replayed.output.0, BeginSplitOutcome::Planned);
+    assert!(replayed.output.0);
     let mut conflict = plan.clone();
     let different_boundary = [0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     conflict.children[0].upper = Some(different_boundary);
     conflict.children[1].lower = Some(different_boundary);
     let competing = client
-        .command::<BeginSplit>(&account, identity(43), Json(conflict))
+        .command::<beyonddb::BeginDirectoryTransfer>(
+            &route_target,
+            identity(43),
+            Json(conflict.into()),
+        )
         .await;
     assert!(matches!(
         competing,
         Err(InvocationError::Rejected(result))
-            if result.output.0 == BeginSplitOutcome::Conflict
+            if !result.output.0
     ));
     let pending = client
-        .query::<ReadSplitPlan>(&account, Some(begun.receipt), Json(table.id.clone()))
+        .query::<beyonddb::ReadDirectoryTransfer>(
+            &route_target,
+            Some(begun.receipt),
+            Json(beyonddb::DirectoryPartitionInput {
+                table_id: table.id.clone(),
+                partition_id: plan.source.partition_id,
+            }),
+        )
         .await
         .unwrap();
-    assert_eq!(pending.output.0, Some(plan.clone()));
+    assert_eq!(pending.output.0, Some(plan.clone().into()));
     let fenced_write = client
         .command::<PutItem>(
             &account,
@@ -3307,8 +3410,8 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     let left_key = key_in_range(&table.id, &table.key_schema, true, 0);
     let right_key = key_in_range(&table.id, &table.key_schema, false, 0);
     for (target, key, epoch, byte) in [
-        (&left_target, &left_key, 1, 18),
-        (&right_target, &right_key, 2, 19),
+        (&left_target, &left_key, partitions[0].epoch, 18),
+        (&right_target, &right_key, partitions[1].epoch, 19),
     ] {
         let written = client
             .command::<PartitionPut>(
@@ -3425,7 +3528,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             identity(20),
             Json(PartitionPutInput {
                 table_id: table.id.clone(),
-                epoch: 2,
+                epoch: 1,
                 item: left_key.clone(),
                 condition: None,
             }),
@@ -3741,7 +3844,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             identity(24),
             Json(PartitionUpdateInput::from_expression(
                 table.id.clone(),
-                2,
+                partitions[1].epoch,
                 right_key.clone(),
                 &actions,
                 None,
@@ -3766,7 +3869,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             Json(PartitionDeleteInput {
                 return_old: true,
                 table_id: table.id.clone(),
-                epoch: 2,
+                epoch: 1,
                 key: right_key.clone(),
                 condition: None,
             }),
@@ -3783,7 +3886,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             Some(deleted.receipt),
             Json(PartitionGetInput {
                 table_id: table.id.clone(),
-                epoch: 2,
+                epoch: 1,
                 key: right_key,
             }),
         )
@@ -4362,22 +4465,24 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     wrong_source.source.partition_id = [9; 16];
     let mut wrong_children = plan.clone();
     wrong_children.children[0].partition_id = [9; 16];
-    for (request, submitted, expected) in [
-        (64, wrong_source, CommitSplitOutcome::PlanNotFound),
-        (138, wrong_children, CommitSplitOutcome::PlanMismatch),
-    ] {
+    for (request, submitted) in [(64, wrong_source), (138, wrong_children)] {
         let wrong_commit = client
-            .command::<CommitSplit>(&account, identity(request), Json(submitted))
+            .command::<beyonddb::PublishDirectoryTransfer>(
+                &route_target,
+                identity(request),
+                Json(submitted.into()),
+            )
             .await;
         assert!(matches!(
             wrong_commit,
-            Err(InvocationError::Rejected(result)) if result.output.0 == expected
+            Err(InvocationError::Rejected(result)) if !result.output.0
         ));
     }
     let controller_client = CellClient::local_many(
         Arc::clone(&registry),
         [
             account_handle.clone(),
+            directory_handle.clone(),
             left_handle.clone(),
             right_handle.clone(),
         ]
@@ -4402,39 +4507,16 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .resume("123456789012", &plan)
         .await
         .unwrap();
-    let replayed = client
-        .command::<CommitSplit>(&account, identity(66), Json(plan.clone()))
-        .await
-        .unwrap();
-    assert_eq!(replayed.output.0, CommitSplitOutcome::Committed);
-    let current_route = client
-        .query::<ReadTableRoute>(&account, Some(replayed.receipt), Json(table.id.clone()))
-        .await
-        .unwrap();
-    assert_eq!(current_route.output.0, Some(next_route.clone()));
+    let current_route = crate::single_leaf_route(&cell_client, &account, &table.id.clone()).await;
+    assert_eq!(current_route, Some(next_route.clone()));
     for (hash, partition) in [
         ([0; 16], &next_route.partitions[0]),
         (boundary, &next_route.partitions[1]),
         (split, &next_route.partitions[2]),
     ] {
         assert_eq!(
-            client
-                .query::<ReadPartitionRoute>(
-                    &account,
-                    Some(replayed.receipt),
-                    Json(PartitionLookupInput {
-                        table_id: table.id.clone(),
-                        hash,
-                    }),
-                )
-                .await
-                .unwrap()
-                .output
-                .0,
-            PartitionLookupOutcome::Routed {
-                partition_id: partition.partition_id,
-                epoch: partition.epoch,
-            }
+            crate::point_range(&cell_client, &account, &table.id, hash).await,
+            Some((partition.partition_id, partition.epoch))
         );
     }
     let opened = child_client
@@ -4451,9 +4533,13 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     let published_storage = CellStorage::new(
         CellClient::local_many(
             Arc::clone(&registry),
-            [account_handle.clone(), right_handle.clone()]
-                .into_iter()
-                .chain(child_handles.iter().cloned()),
+            [
+                account_handle.clone(),
+                directory_handle.clone(),
+                right_handle.clone(),
+            ]
+            .into_iter()
+            .chain(child_handles.iter().cloned()),
         )
         .unwrap(),
         "us-east-1",
@@ -4663,6 +4749,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     left_handle.drain().await.unwrap();
     right_handle.drain().await.unwrap();
     account_handle.drain().await.unwrap();
+    directory_handle.drain().await.unwrap();
     host.shutdown().await.unwrap();
 
     let next_session = SessionId::from_bytes([21; 16]);
@@ -4820,11 +4907,19 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
+    let restored_directory = restored_provisioner
+        .admit_existing_directory(
+            "123456789012",
+            &beyonddb::DirectorySpec::root(table.id.clone()),
+        )
+        .await
+        .unwrap();
     let restored_cell_client = CellClient::local_many(
         application.registry(),
         [
             restored_data,
             restored_account,
+            restored_directory,
             restored_child,
             restored_coordinator,
         ],
@@ -4833,7 +4928,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     let restored_storage = CellStorage::new(restored_cell_client.clone(), "us-east-1");
     let restored_client = restored_host
         .application_handle::<Beyonddb>(
-            restored_cell_client,
+            restored_cell_client.clone(),
             left_target.tenant(),
             left_target.application(),
         )
@@ -5178,32 +5273,25 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     assert_eq!(recovered_items.len(), 2);
     assert!(recovered_items.contains(&left_key));
     assert!(recovered_items.contains(&second_left_key));
-    let persisted_route = restored_client
-        .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
-        .await
-        .unwrap();
-    assert_eq!(persisted_route.output.0, Some(next_route.clone()));
+    let persisted_route =
+        crate::single_leaf_route(&restored_cell_client, &account, &table.id.clone()).await;
+    assert_eq!(persisted_route, Some(next_route.clone()));
     assert_eq!(
-        restored_client
-            .query::<ReadPartitionRoute>(
-                &account,
-                None,
-                Json(PartitionLookupInput {
-                    table_id: table.id.clone(),
-                    hash: boundary,
-                }),
-            )
-            .await
-            .unwrap()
-            .output
-            .0,
-        PartitionLookupOutcome::Routed {
-            partition_id: next_route.partitions[1].partition_id,
-            epoch: next_route.partitions[1].epoch,
-        }
+        crate::point_range(&restored_cell_client, &account, &table.id, boundary).await,
+        Some((
+            next_route.partitions[1].partition_id,
+            next_route.partitions[1].epoch
+        ))
     );
     let persisted_plan = restored_client
-        .query::<ReadSplitPlan>(&account, None, Json(table.id.clone()))
+        .query::<beyonddb::ReadDirectoryTransfer>(
+            &route_target,
+            None,
+            Json(beyonddb::DirectoryPartitionInput {
+                table_id: table.id.clone(),
+                partition_id: plan.source.partition_id,
+            }),
+        )
         .await
         .unwrap();
     assert_eq!(persisted_plan.output.0, None);
@@ -5267,20 +5355,14 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         DeleteTableOutcome::Deleted(_)
     ));
     assert_eq!(
-        restored_client
-            .query::<ReadPartitionRoute>(
-                &account,
-                None,
-                Json(PartitionLookupInput {
-                    table_id: next_route.table_id,
-                    hash: boundary,
-                }),
-            )
-            .await
-            .unwrap()
-            .output
-            .0,
-        PartitionLookupOutcome::Unrouted
+        crate::point_range(
+            &restored_cell_client,
+            &account,
+            &next_route.table_id,
+            boundary
+        )
+        .await,
+        None
     );
     let second_key = (0..u16::MAX)
         .map(|suffix| format!("second-shard-{suffix}"))
@@ -5384,7 +5466,7 @@ async fn create_table_retries_two_data_cells_before_reporting_active() {
         .unwrap(),
     );
     let creator = CellStorage::new(
-        CellClient::local(Arc::clone(&registry), account_handle.clone()),
+        CellClient::local_runtime(registry.clone(), host.runtime(), layout.clone()),
         "us-east-1",
     )
     .with_initial_partitions(Arc::new(FailOnceProvisioner {
@@ -5439,13 +5521,13 @@ async fn create_table_retries_two_data_cells_before_reporting_active() {
         .output
         .0
         .unwrap();
-    let route = account_client
-        .query::<ReadTableRoute>(&account, None, Json(record.id.clone()))
-        .await
-        .unwrap()
-        .output
-        .0
-        .unwrap();
+    let route = crate::single_leaf_route(
+        &CellClient::local_runtime(registry.clone(), host.runtime(), layout.clone()),
+        &account,
+        &record.id.clone(),
+    )
+    .await
+    .unwrap();
     assert_eq!(route.partitions.len(), 2);
     assert_eq!(route.partitions[0].upper, route.partitions[1].lower);
     let data = data_target(
@@ -5491,15 +5573,7 @@ async fn create_table_retries_two_data_cells_before_reporting_active() {
         .unwrap()
         .unwrap();
     let storage = CellStorage::new(
-        CellClient::local_many(
-            Arc::clone(&registry),
-            [
-                account_handle.clone(),
-                data_handle.clone(),
-                second_handle.clone(),
-            ],
-        )
-        .unwrap(),
+        CellClient::local_runtime(registry.clone(), host.runtime(), layout.clone()),
         "us-east-1",
     )
     .with_initial_partitions(provisioner.clone())

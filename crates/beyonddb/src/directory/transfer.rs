@@ -122,6 +122,16 @@ impl TryFrom<DirectoryTransfer> for GlobalIndexSplitPlan {
     }
 }
 
+impl TryFrom<DirectoryTransfer> for SplitPlan {
+    type Error = Error;
+    fn try_from(plan: DirectoryTransfer) -> Result<Self> {
+        match plan {
+            DirectoryTransfer::Base(plan) => Ok(*plan),
+            DirectoryTransfer::GlobalIndex(_) => Err(Error::Command("expected base transfer")),
+        }
+    }
+}
+
 impl SplitPlan {
     pub(crate) fn directory_change(&self) -> crate::DirectoryChange {
         let range = |spec: &PartitionSpec| RoutePagePartition {
@@ -138,7 +148,7 @@ impl SplitPlan {
 }
 
 impl DirectoryTransfer {
-    fn table_id(&self) -> &str {
+    pub(crate) fn table_id(&self) -> &str {
         match self {
             Self::Base(plan) => &plan.source.table.id,
             Self::GlobalIndex(plan) => &plan.source.index.id,
@@ -152,7 +162,7 @@ impl DirectoryTransfer {
         }
     }
 
-    fn directory_change(&self) -> crate::DirectoryChange {
+    pub(crate) fn directory_change(&self) -> crate::DirectoryChange {
         match self {
             Self::Base(plan) => plan.directory_change(),
             Self::GlobalIndex(plan) => plan.directory_change(),

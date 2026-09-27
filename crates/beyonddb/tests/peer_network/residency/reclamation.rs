@@ -47,8 +47,8 @@ pub(super) async fn create(sdk: &aws_sdk_dynamodb::Client, name: &str, index: bo
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
-    // One directory owner is additional to the original eight-slot workload.
-    let fixture = Fixture::with_capacity(1, 9).await;
+    // Base roots for both initial tables add two owners to the prior nine-slot workload.
+    let fixture = Fixture::with_capacity(1, 11).await;
     let sdk = aws_sdk_dynamodb::Client::from_conf(
         fixture
             .sdk
@@ -73,13 +73,8 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
         );
     }
     let table = &records[0];
-    let range = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+    let range = crate::single_leaf_route(&fixture.client, &account, &table.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap()
         .partitions
         .remove(0);
@@ -90,19 +85,15 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
             fixture.client.clone(),
             &table.id,
             range.partition_id,
+            range.lower.unwrap_or([0; 16]),
         )
         .await
         .unwrap();
-    assert_eq!(fixture.node.runtime().stats().active_cells(), 8);
+    assert_eq!(fixture.node.runtime().stats().active_cells(), 10);
     let indexed = &records[1];
     let index = &indexed.global_secondary_indexes[0];
-    let index_range = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(indexed.id.clone()))
+    let index_range = crate::single_leaf_route(&fixture.client, &account, &indexed.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap()
         .partitions
         .remove(0);
@@ -139,7 +130,7 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
     let released = authority.load(source.cell_id()).await.unwrap().unwrap();
     assert!(released.value().owner.is_none());
     assert!(released.value().root.is_some());
-    assert_eq!(fixture.node.runtime().stats().active_cells(), 9);
+    assert_eq!(fixture.node.runtime().stats().active_cells(), 11);
     // Finished-plan replay must not reacquire historical sources when every
     // slot belongs to a live range. Only unfinished transfers need their exports.
     fixture
@@ -228,16 +219,19 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
         .await
         .unwrap()
         .unwrap();
-        fixture
+        if let Some(handle) = fixture
             .node
             .runtime()
             .local_handle(proof, &observed)
             .await
             .unwrap()
-            .unwrap()
-            .drain()
-            .await
-            .unwrap();
+        {
+            handle.drain().await.unwrap();
+        }
+        // Admission may already have released a child while restoring history.
+        // Both paths must leave a recoverable root for the following SDK scan.
+        let released = authority.load(target.cell_id()).await.unwrap().unwrap();
+        assert!(released.value().owner.is_none() && released.value().root.is_some());
     }
     assert_eq!(
         sdk.scan()
@@ -251,7 +245,7 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
     );
     // Every slot is occupied again, including both retired sources. Ordinary
     // reads must reclaim those slots before placement can restore live children.
-    assert_eq!(fixture.node.runtime().stats().active_cells(), 9);
+    assert_eq!(fixture.node.runtime().stats().active_cells(), 11);
     assert_eq!(
         sdk.scan()
             .table_name("Residency")
@@ -280,6 +274,165 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
                 .as_ref(),
             Some(item)
         );
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn participant_restore_at_capacity_does_not_require_resident_account_metadata() {
+    let fixture = Fixture::with_capacity(2, 5).await;
+    let source = fixture.data[0].0.clone();
+    let account = account_target(ACCOUNT).unwrap();
+    let table = fixture
+        .client
+        .query::<DescribeTable>(&account, None, Json("Residency".into()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    let range = crate::single_leaf_route(&fixture.client, &account, &table.id)
+        .await
+        .unwrap()
+        .partitions
+        .remove(0);
+    let target = data_target(ACCOUNT, &table.id, &range.partition_id).unwrap();
+    fixture
+        .provisioner
+        .admit_account(ACCOUNT)
+        .await
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
+    source.drain().await.unwrap();
+    let mut blockers = Vec::new();
+    for key in ["AKIAPARTICIPANTRESTOREONE", "AKIAPARTICIPANTRESTORETWO"] {
+        blockers.push(fixture.provisioner.admit_credential(key).await.unwrap());
+    }
+    assert_eq!(fixture.node.runtime().stats().active_cells(), 5);
+    // Persisted transactions address original participants directly. Restoring
+    // one must not depend on catalog residency or recursively admit metadata.
+    let restored = fixture
+        .client
+        .query::<ReadPartitionState>(&target, None, Json(()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert_eq!(restored.spec.partition_id, range.partition_id);
+    assert!(
+        CellAuthority::new(fixture.layout.clone())
+            .load(account.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .owner
+            .is_none()
+    );
+    for blocker in blockers {
+        blocker.drain().await.unwrap();
+    }
+    let sdk = super::provisioning::sdk_without_retries(&fixture);
+    for (_, item) in &fixture.data {
+        let observed = sdk
+            .get_item()
+            .table_name("Residency")
+            .key("id", item["id"].clone())
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(observed.item.as_ref(), Some(item));
+    }
+    fixture.shutdown().await;
+}
+
+struct ReleaseRangesDuringMetadataRead {
+    account: crab_cell_runtime::identity::CellTarget,
+    ranges: Vec<CellHandle>,
+    fired: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crab_cell_runtime::client::LocalCellResolver for ReleaseRangesDuringMetadataRead {
+    fn resolve(
+        &self,
+        target: crab_cell_runtime::identity::CellTarget,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = crab_cell_runtime::Result<Option<CellHandle>>>
+                + Send
+                + 'static,
+        >,
+    > {
+        let selected = target == self.account;
+        let ranges = self.ranges.clone();
+        let fired = self.fired.clone();
+        Box::pin(async move {
+            if selected && !fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                for handle in ranges {
+                    handle.drain().await?;
+                }
+            }
+            Ok(None)
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn creation_reclamation_tolerates_owner_release_during_metadata_lookup() {
+    let fixture = Fixture::with_capacity(2, 5).await;
+    let sdk = super::provisioning::sdk_without_retries(&fixture);
+    assert!(
+        super::provisioning::create(&sdk, "ResidencyPending", false)
+            .send()
+            .await
+            .is_err()
+    );
+    let account = account_target(ACCOUNT).unwrap();
+    let table = fixture
+        .client
+        .query::<DescribeTable>(&account, None, Json("ResidencyPending".into()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let client =
+        fixture
+            .client
+            .clone()
+            .with_local_resolver(Arc::new(ReleaseRangesDuringMetadataRead {
+                account,
+                ranges: fixture
+                    .data
+                    .iter()
+                    .map(|(handle, _)| handle.clone())
+                    .collect(),
+                fired: fired.clone(),
+            }));
+    // A concurrent release, or metadata restoration itself, can close ranges
+    // after discovery. Reclamation must not read them from a stale local list.
+    let partitions = fixture
+        .provisioner
+        .provision(&client, ACCOUNT, &table)
+        .await
+        .unwrap();
+    assert_eq!(partitions.len(), 2);
+    assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
+    for (_, item) in &fixture.data {
+        let observed = sdk
+            .get_item()
+            .table_name("Residency")
+            .key("id", item["id"].clone())
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(observed.item.as_ref(), Some(item));
     }
     fixture.shutdown().await;
 }

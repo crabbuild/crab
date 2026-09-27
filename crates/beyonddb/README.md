@@ -145,7 +145,7 @@ Ordinary `cargo test` does not run the ignored process tests.
 
 This server uses an explicit list of locally owned account and credential
 Cells. On startup it recovers configured account and credential Cells, then
-pages the account's routes and coordinator registry. Idle or expired owners can
+pages base/index directory leaves and the account coordinator registry. Idle or expired owners can
 be recovered at a new peer endpoint; live remote owners remain in place. Every
 takeover still requires node-session fencing and a Cell authority CAS. Recovery
 also resumes a published root already claimed by this boot session if activation
@@ -314,7 +314,7 @@ Cells. The directory version can advance while unaffected data Cells retain
 their own epochs. A durable split plan must replace one range with two fresh,
 contiguous child ranges while leaving every other range unchanged. Plans are
 owned by source range: independent splits can remain pending and publish
-concurrently. Each publication advances the directory epoch without changing
+concurrently. Each publication advances its leaf version without changing
 unrelated source or planned child epochs. Route validation requires complete,
 nonoverlapping hash coverage and the table's immutable key schema. Route
 publication currently trusts the provisioner to have installed and published
@@ -334,7 +334,7 @@ child. An opened child cannot start a new split until its parent plan finishes.
 The host provisioner can choose a range
 midpoint, record the plan, and repeat the split on an already opened child. Repeated calls
 resume this sequence after interruption.
-The account command itself cannot inspect other Cells; serving code must use
+The directory command cannot inspect other Cells; serving code must use
 the controller rather than calling route publication directly.
 `DescribeTable` reports periodically sampled item counts and logical item bytes
 for the table and its indexes. Each mutation maintains local counters; the server
@@ -343,28 +343,29 @@ and route generations still match. Published totals survive account-owner restar
 The values can lag writes and index projection, and do not measure billed storage
 or SQLite/object-store usage. See [statistics semantics and proof](SCALING.md#table-and-index-statistics).
 
-Routed keyed CRUD and Scan use the published directory. The account Cell
-stores the route epoch and table snapshot alongside indexed range rows, so
-keyed requests read one owner row instead of transferring the complete route.
-Table status checks use a bounded route page. Scan reads at most 64 owner ranges
-per directory page and pins the route epoch while advancing through pages in
-one request. Query reads the HASH key's owner Cell through a local ordered
-RANGE-key index, including numeric sort keys and page continuation.
-Public transactional writes share the coordinator protocol for single-Cell and
-cross-Cell requests. Transactional reads confined to one Cell use one snapshot;
-cross-Cell transactional reads capture a consistent set of images under
-shared locks through the same coordinator. Split
-plans persist only the source range, two children, and expected epoch; route
-publication does not rewrite a route-sized blob. Host split selection,
-publication checks, and results use indexed rows and compact plans. The account Cell's
-declared 512 MiB database budget and single writer cannot represent a
-production DynamoDB account. The host's LTX limits are separate admission
-settings. Production placement needs online route transitions and elastic
-data Cell provisioning. A transaction crossing Cells needs durable prepare
-intents, one authoritative decision record, idempotent resolution, and
-recovery after owner loss. Routing writes to several Cells without that
-protocol cannot implement `TransactWriteItems`. See [the elastic topology
-design](SCALING.md) for split, routing, recovery, and validation requirements.
+Routed keyed CRUD and Scan use independently owned base and GSI directory trees.
+The account retains a publication anchor for each generation; bounded leaves own
+range membership and full split plans. Point requests follow one tree path.
+Scan reads at most 64 ranges per page, validates the previous leaf's version,
+and adopts the neighbouring leaf's version when crossing its immutable boundary.
+Query reads the HASH key's owner through its local ordered RANGE-key index,
+including numeric sort keys and continuation.
+
+Public transactional writes use durable coordinator decisions and idempotent
+participant resolution. Transactional reads within one Cell use one snapshot;
+cross-Cell reads capture images under shared locks. An admitted transaction
+retains its original coordinator and participants across directory changes.
+Base and GSI splits advance only the source's epoch and the owning leaf's
+membership version. Unfinished plans prevent metadata movement until both
+children open.
+
+The base directory cutover is under verification. Focused signed SDK split,
+restore, pagination and replay tests pass. Native fixtures compile and the
+data-range owner-restart check passes; broader runtime and CI gates remain
+incomplete. The account catalog and publication anchors still share
+a 512 MiB Cell and one writer. Hot partition-key groups, coordinator/history
+bounds and 10,000-Cell/multi-TB fleet qualification remain open. See
+[metadata ownership](METADATA_SHARDING.md) and [scaling requirements](SCALING.md).
 Transaction request/intent payloads use bounded SQL chunks while remaining in
 one local command. Item and saved-read images also use bounded BLOB transfers,
 including JSON images larger than 1 MiB after escaping. The signed SDK fixtures

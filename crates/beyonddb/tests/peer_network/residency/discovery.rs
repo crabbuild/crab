@@ -30,13 +30,8 @@ async fn sdk_placement_accepts_heartbeats_renewed_during_discovery() {
         .unwrap();
     let table = super::provisioning::table_id(&fixture, "ResidencyDiscovery").await;
     let account = account_target("123456789012").unwrap();
-    let route = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(table.clone()))
+    let route = crate::single_leaf_route(&fixture.client, &account, &table.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let mut remote_ranges = 0;
     for range in route.partitions {

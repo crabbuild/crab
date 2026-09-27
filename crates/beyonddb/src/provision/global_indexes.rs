@@ -49,8 +49,7 @@ impl CellInitialPartitionProvisioner {
         }
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
         let account = account_target(account_id).map_err(provision_error)?;
-        let directory =
-            crate::global_index_directory_target(&client, &account, index_id, lower).await?;
+        let directory = crate::route_directory_target(&client, &account, index_id, lower).await?;
         let pending = client
             .query::<ReadDirectoryTransfer>(
                 &directory,
@@ -98,8 +97,8 @@ impl CellInitialPartitionProvisioner {
         Box::pin(async move {
             let client = client.with_read_policy(ReadPolicy::CurrentOwner);
             let account = account_target(account_id).map_err(provision_error)?;
-            let mut directory =
-                crate::global_index_directory_target(&client, &account, index_id, lower).await?;
+            let directory =
+                crate::route_directory_target(&client, &account, index_id, lower).await?;
             let input = DirectoryPartitionInput {
                 table_id: index_id.to_owned(),
                 partition_id,
@@ -153,34 +152,9 @@ impl CellInitialPartitionProvisioner {
             {
                 return Err(changed());
             }
-            let mut ready = false;
-            for _ in 0..128 {
-                let state = client
-                    .query::<crate::ReadDirectory>(&directory, None, Json(()))
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0
-                    .ok_or_else(changed)?;
-                let full = client
-                    .query::<crate::DirectoryNeedsSplit>(&directory, None, Json(()))
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0;
-                if matches!(state.mode, crate::DirectoryMode::Leaf) && !full {
-                    ready = true;
-                    break;
-                }
-                self.split_directory(&client, account_id, &state.spec)
-                    .await?;
-                directory =
-                    crate::global_index_directory_target(&client, &account, index_id, lower)
-                        .await?;
-            }
-            if !ready {
-                return Err(changed());
-            }
+            let directory = self
+                .split_ready_directory(&client, account_id, index_id, lower)
+                .await?;
             let boundary = split_boundary(source.lower, source.upper)?;
             let epoch = published.epoch.checked_add(1).ok_or_else(|| {
                 StorageError::LimitExceeded("index directory epoch exhausted".into())
@@ -226,7 +200,7 @@ impl CellInitialPartitionProvisioner {
             let client = client.with_read_policy(ReadPolicy::CurrentOwner);
             let account = account_target(account_id).map_err(provision_error)?;
             let index = &plan.source.index;
-            let directory = crate::global_index_directory_target(
+            let directory = crate::route_directory_target(
                 &client,
                 &account,
                 &index.id,
@@ -249,7 +223,7 @@ impl CellInitialPartitionProvisioner {
                 .map(GlobalIndexSplitPlan::try_from)
                 .transpose()
                 .map_err(provision_error)?;
-            let state = crate::global_index_split_route(&client, account_id, plan).await?;
+            let state = crate::split_route_state(&client, account_id, &plan.clone().into()).await?;
             // Finish is durable proof that the exact replacement ranges opened.
             // Completed replay needs no historical source or admission capacity.
             if pending.is_none() && state == SplitRouteState::After {
@@ -372,7 +346,7 @@ impl CellInitialPartitionProvisioner {
                     )
                     .await,
             )?;
-            if crate::global_index_split_route(&client, account_id, plan).await?
+            if crate::split_route_state(&client, account_id, &plan.clone().into()).await?
                 != SplitRouteState::After
             {
                 return Err(changed());

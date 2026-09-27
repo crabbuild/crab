@@ -77,7 +77,7 @@ async fn activation_replay_compares_large_base_and_index_directories() {
         .collect::<Vec<_>>();
     let index = table.global_secondary_indexes[0].clone();
     let receipt = provisioner
-        .provision_global_index_directory(&client, ACCOUNT, &index.id, partitions.clone())
+        .provision_route_directory(&client, ACCOUNT, &index.id, partitions.clone())
         .await
         .unwrap();
     let route = GlobalIndexRoute {
@@ -105,6 +105,14 @@ async fn activation_replay_compares_large_base_and_index_directories() {
             })
             .collect(),
     };
+    let receipt = provisioner
+        .provision_route_directory(&client, ACCOUNT, &base.table_id, route.partitions.clone())
+        .await
+        .unwrap();
+    let base = beyonddb::TableRoutePublication {
+        route: base,
+        receipt,
+    };
     client
         .command::<ActivateTableRoute>(&account, mutation(), Json(base.clone()))
         .await
@@ -128,8 +136,8 @@ async fn activation_replay_compares_large_base_and_index_directories() {
             .output
             .0
     );
-    // Same-sized, still contiguous proposals must compare all pages, not just
-    // the first page or directory size. IDs and range bounds both matter.
+    // The receipt fingerprint covers every range. Changing an identity or
+    // boundary anywhere must invalidate publication, including on replay.
     for position in [0, 63, 64, 1_023] {
         let mut changed = route.clone();
         changed.partitions[position].partition_id = [0xf0; 16];
@@ -138,12 +146,12 @@ async fn activation_replay_compares_large_base_and_index_directories() {
             .await;
         assert!(matches!(rejected, Err(InvocationError::Rejected(result)) if !result.output.0));
         let mut changed = base.clone();
-        changed.partitions[position].partition_id = [0xf0; 16];
+        changed.route.partitions[position].partition_id = [0xf0; 16];
         let rejected = client
             .command::<ActivateTableRoute>(&account, mutation(), Json(changed))
             .await;
         assert!(
-            matches!(rejected, Err(InvocationError::Rejected(result)) if result.output.0 == ActivateTableRouteOutcome::AlreadyActive)
+            matches!(rejected, Err(InvocationError::Rejected(result)) if result.output.0 == ActivateTableRouteOutcome::InvalidRoute)
         );
     }
     let mut shortened = route.clone();
@@ -154,13 +162,13 @@ async fn activation_replay_compares_large_base_and_index_directories() {
         .await;
     assert!(matches!(rejected, Err(InvocationError::Rejected(result)) if !result.output.0));
     let mut shortened = base.clone();
-    shortened.partitions.pop();
-    shortened.partitions.last_mut().unwrap().upper = None;
+    shortened.route.partitions.pop();
+    shortened.route.partitions.last_mut().unwrap().upper = None;
     let rejected = client
         .command::<ActivateTableRoute>(&account, mutation(), Json(shortened))
         .await;
     assert!(
-        matches!(rejected, Err(InvocationError::Rejected(result)) if result.output.0 == ActivateTableRouteOutcome::AlreadyActive)
+        matches!(rejected, Err(InvocationError::Rejected(result)) if result.output.0 == ActivateTableRouteOutcome::InvalidRoute)
     );
     host.shutdown().await.unwrap();
 }

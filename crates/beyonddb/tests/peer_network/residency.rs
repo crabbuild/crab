@@ -242,12 +242,8 @@ impl Fixture {
             .output
             .0
             .unwrap();
-        let route = app
-            .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+        let route = crate::single_leaf_route(&client, &account, &table.id.clone())
             .await
-            .unwrap()
-            .output
-            .0
             .unwrap();
 
         assert_eq!(route.partitions.len(), usize::from(partitions));

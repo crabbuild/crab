@@ -364,12 +364,8 @@ async fn abort_during_upload_fences_delayed_account_and_data_prepares() {
             .unwrap();
         infos.push(store.table_key_info(account_id, name).await.unwrap());
     }
-    let partition = client
-        .query::<ReadTableRoute>(&account, None, Json(infos[1].table_id.clone()))
+    let partition = crate::single_leaf_route(&client, &account, &infos[1].table_id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap()
         .partitions
         .remove(0);

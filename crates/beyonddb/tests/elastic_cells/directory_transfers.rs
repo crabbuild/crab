@@ -1,10 +1,9 @@
 use super::global_indexes::{ACCOUNT, mutation, owner};
 use crate::*;
 use beyonddb::{
-    BeginDirectoryTransfer, DirectoryInstall, DirectoryPartitionInput, DirectorySpec,
-    DirectoryTransfer, FinishDirectoryTransfer, FreezeDirectory, InstallDirectory,
-    PublishDirectoryTransfer, ReadDirectory, ReadDirectoryRange, ReadDirectoryTransfer,
-    directory_target,
+    BeginDirectoryTransfer, DirectoryPartitionInput, DirectorySpec, DirectoryTransfer,
+    FinishDirectoryTransfer, FreezeDirectory, PublishDirectoryTransfer, ReadDirectory,
+    ReadDirectoryRange, ReadDirectoryTransfer, directory_target,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -49,34 +48,17 @@ async fn base_transfer_retains_exact_contract_through_publication_and_owner_rest
         .output
         .0
         .unwrap();
-    let route = client
-        .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+    let route = crate::single_leaf_route(&client, &account, &table.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let spec = DirectorySpec::root(table.id.clone());
     let directory = directory_target(ACCOUNT, &spec).unwrap();
-    provisioner.admit_directory(ACCOUNT, &spec).await.unwrap();
     let range = |part: &PartitionSpec| beyonddb::RoutePagePartition {
         partition_id: part.partition_id,
         lower: part.lower.unwrap_or([0; 16]),
         upper: part.upper,
         epoch: part.epoch,
     };
-    client
-        .command::<InstallDirectory>(
-            &directory,
-            mutation(),
-            Json(DirectoryInstall {
-                spec: spec.clone(),
-                ranges: route.partitions.iter().map(range).collect(),
-                source: None,
-            }),
-        )
-        .await
-        .unwrap();
     let source = route.partitions[0].clone();
     let boundary = (u128::from_be_bytes(source.upper.unwrap()) / 2).to_be_bytes();
     let mut children = [source.clone(), source.clone()];

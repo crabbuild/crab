@@ -182,11 +182,16 @@ impl Command for CreateTable {
         if matches!(record.placement, TablePlacement::Routed { .. }) {
             // Persist lifecycle ownership before provisioning independent roots.
             // Deletion must fence even an installer that never publishes its copy.
-            for index in &record.global_secondary_indexes {
+            for id in std::iter::once(&record.id).chain(
+                record
+                    .global_secondary_indexes
+                    .iter()
+                    .map(|index| &index.id),
+            ) {
                 context.sql(&statement(
-                    "INSERT INTO ddb_global_index_routes (table_id, base_table_id) VALUES (?1, ?2)",
+                    "INSERT INTO ddb_directory_roots (table_id, base_table_id) VALUES (?1, ?2)",
                     vec![
-                        SqlValue::Text(index.id.clone()),
+                        SqlValue::Text(id.clone()),
                         SqlValue::Text(record.id.clone()),
                     ],
                 ))?;
@@ -269,7 +274,7 @@ impl Command for UpdateTable {
         // route publication so a retry cannot conflict with installed owners.
         if matches!(table.placement, TablePlacement::Routed { .. })
             && context.sql(&statement(
-                "SELECT 1 FROM ddb_routes WHERE table_id = ?1",
+                "SELECT 1 FROM ddb_directory_roots WHERE table_id = ?1 AND initial_fingerprint IS NOT NULL",
                 vec![SqlValue::Text(table.id.clone())],
             ))?[0]
                 .rows
@@ -461,7 +466,7 @@ pub(super) fn command_unrouted_table(
     // Route publication transfers item authority; account writes must fail closed.
     decode_table(
         &context.sql(&statement(
-            "SELECT t.record FROM ddb_live_tables t LEFT JOIN ddb_routes r ON t.table_id = r.table_id \
+            "SELECT t.record FROM ddb_live_tables t LEFT JOIN ddb_directory_roots r ON t.table_id = r.table_id AND r.initial_fingerprint IS NOT NULL \
              WHERE t.table_name = ?1 AND r.table_id IS NULL",
             vec![SqlValue::Text(name.to_owned())],
         ))?[0],
@@ -475,7 +480,7 @@ pub(super) fn query_unrouted_table(
     // The account item image is no longer authoritative after activation.
     decode_table(
         &context.sql(&statement(
-            "SELECT t.record FROM ddb_live_tables t LEFT JOIN ddb_routes r ON t.table_id = r.table_id \
+            "SELECT t.record FROM ddb_live_tables t LEFT JOIN ddb_directory_roots r ON t.table_id = r.table_id AND r.initial_fingerprint IS NOT NULL \
              WHERE t.table_name = ?1 AND r.table_id IS NULL",
             vec![SqlValue::Text(name.to_owned())],
         ))?[0],
