@@ -29,6 +29,7 @@ pub(super) fn handle_activated(
         tasks,
         shutdown,
         node_lease,
+        publications,
         ..
     } = context;
     match result {
@@ -98,6 +99,9 @@ pub(super) fn handle_activated(
                     crate::primitives::maintenance::PersistedWorkInventory::unknown()
                 }
             };
+            // A restored or bootstrapped owner can already have a reader policy.
+            // Its hint is advisory; receivers still reload the new authority.
+            let _ = publications.send(catalog.entry().clone());
             cells.insert(
                 cell,
                 ActiveCell {

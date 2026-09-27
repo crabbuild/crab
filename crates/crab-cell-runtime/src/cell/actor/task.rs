@@ -12,6 +12,7 @@ pub(super) async fn run(
     node_lease: Arc<RuntimeNodeLease>,
     unpublished_node_log_bytes: Arc<AtomicU64>,
     telemetry: crate::fleet::telemetry::CellTelemetryHandle,
+    publications: broadcast::Sender<CatalogEntry>,
 ) {
     let mut cells = HashMap::<CellId, ActiveCell>::new();
     let mut transitioning = HashSet::<CellId>::new();
@@ -62,6 +63,7 @@ pub(super) async fn run(
                 &mut shutdown,
                 &node_lease,
                 &unpublished_node_log_bytes,
+                &publications,
                 &mut movement,
                 &mut movement_permits,
             );
@@ -130,7 +132,7 @@ pub(super) async fn run(
                     }
                     while let Some(result) = tasks.join_next().await {
                         let Ok(result) = result else { return; };
-                        super::tasks::handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &unpublished_node_log_bytes, &mut movement, &mut movement_permits);
+                        super::tasks::handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &unpublished_node_log_bytes, &publications, &mut movement, &mut movement_permits);
                     }
                     break;
                 };
@@ -140,7 +142,7 @@ pub(super) async fn run(
                 let Some(Ok(result)) = result else {
                     return;
                 };
-                super::tasks::handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &unpublished_node_log_bytes, &mut movement, &mut movement_permits);
+                super::tasks::handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &unpublished_node_log_bytes, &publications, &mut movement, &mut movement_permits);
             }
             _ = renewal_tick.tick() => {
                 start_due_renewals(&pool, &mut cells, &mut tasks, &node_lease);

@@ -56,6 +56,8 @@ descriptor, digest, and identity contracts).
 The reference suite also runs three `CellNode` hosts to test ambiguous results,
 duplicate delivery, owner loss, and overlap between two release IDs with
 unchanged module contracts through the public APIs.
+The public-host reader checks also verify publication-triggered recruitment
+and cancellation of a storage-stalled activation during drain.
 
 `CellType::new` declares a fixed-shard namespace. For independently addressed
 entity Cells, declare one namespace shard and call

@@ -46,6 +46,14 @@ Pending activation hints recheck the selected boot at its observed lease
 expiry. A renewal preserves the in-flight request; an expired or withdrawn
 session releases the wait so a later pass can recruit its replacement.
 
+Successful object publication, activation, and schema migration also notify
+recruitment through a bounded runtime channel. The host coalesces queued hints
+per Cell and refreshes through the same signed peer path without waiting for
+the next tick. Commands never await readers. Fleet-only acknowledgement sends
+no publication hint until its root reaches object storage. Periodic scans
+still repair dropped hints and reconcile membership and target changes; this
+does not create a bounded-staleness guarantee.
+
 The task group owns recruitment alongside refresh; cancellation interrupts
 provider and peer waits before drain. Explicit operator hints can use the
 returned recruiter's `reconcile` method. HTTP authentication, administrative

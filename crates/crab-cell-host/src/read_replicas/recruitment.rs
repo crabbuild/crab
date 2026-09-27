@@ -2,9 +2,12 @@
 
 use super::*;
 use crab_cell_runtime::{
-    cell::application::ApplicationIdentity, client::CellDescription, peer::ReplicaPeerClient,
+    cell::{application::ApplicationIdentity, catalog::CatalogEntry},
+    client::CellDescription,
+    peer::ReplicaPeerClient,
 };
 use futures_util::{StreamExt, stream};
+use tokio::sync::broadcast;
 
 const ACTIVATION_CONCURRENCY: usize = 16;
 
@@ -146,19 +149,7 @@ impl ReadReplicaRecruiter {
             // Advance before I/O; an interrupted or corrupt Cell cannot hold
             // every later Cell behind the same bounded pass indefinitely.
             *cursor = (index + 1) % entries.len();
-            let result = async {
-                let target = CellTarget::new(
-                    self.identity.tenant(),
-                    self.identity.application(),
-                    entry.namespace(),
-                    entry.partition(),
-                )?;
-                if target.cell_id() != entry.cell() {
-                    return Ok(());
-                }
-                self.reconcile(target).await
-            }
-            .await;
+            let result = self.reconcile_entry(entry).await;
             if let Err(error) = result {
                 tracing::warn!(cell = ?entry.cell(), error = %error, "read replica recruitment failed");
             }
@@ -166,19 +157,73 @@ impl ReadReplicaRecruiter {
         Ok(())
     }
 
+    async fn reconcile_entry(&self, entry: &CatalogEntry) -> Result<()> {
+        let target = CellTarget::new(
+            self.identity.tenant(),
+            self.identity.application(),
+            entry.namespace(),
+            entry.partition(),
+        )?;
+        if target.cell_id() != entry.cell() {
+            return Ok(());
+        }
+        self.reconcile(target).await
+    }
+
+    async fn reconcile_published(
+        &self,
+        entry: CatalogEntry,
+        publications: &mut broadcast::Receiver<CatalogEntry>,
+    ) -> Result<()> {
+        // Bound both retained notifications and work per pass. Repeated writes
+        // coalesce to one fresh authority read; periodic scans repair lost hints.
+        let mut entries = HashMap::from([(entry.cell(), entry)]);
+        for _ in 1..RECONCILE_BATCH {
+            match publications.try_recv() {
+                Ok(entry) => {
+                    entries.insert(entry.cell(), entry);
+                }
+                Err(_) => break,
+            }
+        }
+        for entry in entries.values() {
+            if let Err(error) = self.reconcile_entry(entry).await {
+                tracing::warn!(cell = ?entry.cell(), error = %error, "published Cell reader hint failed");
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn run(&self, cancellation: CancellationToken) -> Result<()> {
+        let mut publications = self.readers.runtime.subscribe_publications();
         let mut tick = tokio::time::interval(RECONCILE_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            let published = tokio::select! {
+                () = cancellation.cancelled() => return Ok(()),
+                () = self.readers.closed.cancelled() => return Ok(()),
+                _ = tick.tick() => None,
+                published = publications.recv() => match published {
+                    Ok(entry) => Some(entry),
+                    Err(broadcast::error::RecvError::Lagged(_)) => None,
+                    Err(broadcast::error::RecvError::Closed) => return Ok(()),
+                },
+            };
+            let reconcile = async {
+                match published {
+                    Some(entry) => tokio::time::timeout(
+                        RECONCILE_DEADLINE,
+                        self.reconcile_published(entry, &mut publications),
+                    )
+                    .await
+                    .map_err(|_| Error::Deadline)?,
+                    None => self.reconcile_active().await,
+                }
+            };
             tokio::select! {
                 () = cancellation.cancelled() => return Ok(()),
                 () = self.readers.closed.cancelled() => return Ok(()),
-                _ = tick.tick() => {}
-            }
-            tokio::select! {
-                () = cancellation.cancelled() => return Ok(()),
-                () = self.readers.closed.cancelled() => return Ok(()),
-                result = self.reconcile_active() => {
+                result = reconcile => {
                     if let Err(error) = result {
                         tracing::warn!(error = %error, "read replica recruitment pass failed");
                     }

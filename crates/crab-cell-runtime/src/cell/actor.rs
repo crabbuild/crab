@@ -9,7 +9,7 @@ use std::{
 };
 
 use tokio::{
-    sync::{Semaphore, mpsc, oneshot},
+    sync::{Semaphore, broadcast, mpsc, oneshot},
     task::JoinSet,
 };
 
@@ -63,6 +63,7 @@ use crate::publication::{CellDurabilitySubmitter, NodeDurabilitySlot, PendingDur
 use crate::registry::MigrationPlan;
 
 const INGRESS_REQUESTS: usize = 1_024;
+const PUBLICATION_NOTIFICATIONS: usize = 64;
 pub(crate) const CELL_REQUESTS: usize = 64;
 // A repository attribution read may reserve a 1 MiB result plus its encoded
 // request. Allow a normal burst of concurrent reads; node-wide retained-byte
