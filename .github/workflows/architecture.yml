@@ -251,6 +251,10 @@ jobs:
           run_test cargo test -p crab-ltx --locked --features replica --test cell \
             cell::roots::lifecycle::exact_root_inventory_verifies_every_remote_dependency \
             -- --exact --nocapture
+          CRAB_CELL_TEST_PREFIX="${CRAB_CELL_TEST_PREFIX}/scheduler-discovery" \
+            run_test cargo test -p crab-cell-runtime --locked --test fleet \
+            fleet::takeover::rustfs_scheduler_membership_and_recovery_share_one_fresh_directory_scan \
+            -- --ignored --exact --nocapture
           run_test cargo test -p crab-cell-runtime --locked --test runtime \
             runtime::lifecycle::ownership::recovery::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
             -- --ignored --exact --nocapture

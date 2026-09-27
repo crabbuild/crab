@@ -7,6 +7,28 @@
 use super::*;
 
 impl NodeDirectory {
+    /// Reads live scheduler membership and primes the advisory recovery scan.
+    ///
+    /// Each call reads fresh signed records. Recovery claims still reload their
+    /// claimant and failed session before the fencing CAS.
+    /// Invalid bounds, incompatible records and storage failures return errors.
+    pub async fn live_for_recovery(
+        &self,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<NodeAdvertisement>> {
+        if now_ms < 0 || !(1..=MAX_LIVE_NODE_RECORDS).contains(&limit) {
+            return Err(Error::Node("node recovery membership bound is invalid"));
+        }
+        let mut cached = self.recovery_scan.write().await;
+        // A scheduler cycle needs a fresh view. Clear the old observation so
+        // cancellation or failure cannot leave it serving recovery discovery.
+        cached.take();
+        let (snapshot, live) = self.scan_recovery_records(now_ms, true, limit).await?;
+        *cached = Some(Arc::new(snapshot));
+        Ok(live)
+    }
+
     /// Fences one expired boot session with an ETag CAS before any Cell takeover.
     ///
     /// Missing, live, malformed, or foreign records fail closed. The tombstone
@@ -348,11 +370,25 @@ impl NodeDirectory {
             return Ok(Arc::clone(snapshot));
         }
 
+        let (snapshot, _) = self
+            .scan_recovery_records(now_ms, include_live_nodes, MAX_LIVE_NODE_RECORDS)
+            .await?;
+        let snapshot = Arc::new(snapshot);
+        *cached = Some(Arc::clone(&snapshot));
+        Ok(snapshot)
+    }
+
+    async fn scan_recovery_records(
+        &self,
+        now_ms: i64,
+        include_live_nodes: bool,
+        live_node_limit: usize,
+    ) -> Result<(RecoveryScanSnapshot, Vec<NodeAdvertisement>)> {
         let prefix = self.layout.node_directory_path();
         let stream = self.layout.store().inner().list(Some(&prefix));
         let mut live_nodes = HashSet::new();
         let mut live_sessions = HashSet::new();
-        let mut live_count = 0_usize;
+        let mut live = Vec::new();
         let mut records = stream
             .map(|item| {
                 let prefix = prefix.clone();
@@ -373,16 +409,6 @@ impl NodeDirectory {
                             {
                                 return Err(Error::Node("advertised node issue time differs"));
                             }
-                            let live = if include_live_nodes && advertisement.expires_at_ms > now_ms
-                            {
-                                self.validate(&advertisement, now_ms)?;
-                                Some((
-                                    advertisement.node(),
-                                    recovery_executor_eligible(&advertisement),
-                                ))
-                            } else {
-                                None
-                            };
                             let candidate =
                                 advertisement
                                     .log
@@ -396,6 +422,13 @@ impl NodeDirectory {
                                         phase: log.phase(),
                                         members: log.members().to_vec(),
                                     });
+                            let live = if include_live_nodes && advertisement.expires_at_ms > now_ms
+                            {
+                                self.validate(&advertisement, now_ms)?;
+                                Some(advertisement)
+                            } else {
+                                None
+                            };
                             Ok(Some((candidate, live)))
                         }
                         NodeRecord::Tombstone(tombstone) => {
@@ -417,18 +450,19 @@ impl NodeDirectory {
             .buffer_unordered(NODE_DIRECTORY_READ_CONCURRENCY);
         let mut candidates = Vec::new();
         while let Some(record) = records.next().await {
-            if let Some((record, live)) = record? {
-                if let Some((node, eligible)) = live {
-                    live_count = live_count.saturating_add(1);
-                    if live_count > MAX_LIVE_NODE_RECORDS {
+            if let Some((record, advertisement)) = record? {
+                if let Some(advertisement) = advertisement {
+                    if live.len() == live_node_limit {
                         return Err(Error::Node("live node directory exceeds its limit"));
                     }
+                    let node = advertisement.node();
                     if !live_sessions.insert(node) {
                         return Err(Error::Node("multiple live sessions advertise one node"));
                     }
-                    if eligible {
+                    if recovery_executor_eligible(&advertisement) {
                         live_nodes.insert(node);
                     }
+                    live.push(*advertisement);
                 }
                 let Some(record) = record else {
                     continue;
@@ -439,14 +473,14 @@ impl NodeDirectory {
                 candidates.push(record);
             }
         }
-        let snapshot = Arc::new(RecoveryScanSnapshot {
+        live.sort_unstable_by(|left, right| left.session.as_bytes().cmp(right.session.as_bytes()));
+        let snapshot = RecoveryScanSnapshot {
             observed_at_ms: now_ms,
             includes_live_nodes: include_live_nodes,
             live_nodes,
             records: candidates,
-        });
-        *cached = Some(Arc::clone(&snapshot));
-        Ok(snapshot)
+        };
+        Ok((snapshot, live))
     }
 
     /// Extends an exact recovery claim while its claimant remains live.

@@ -312,6 +312,14 @@ forever.
 
 A Tick advances at most 128 ledger, expiry, lease, timer, or retention items. Protected shares prevent one maintenance class from starving another, and a Tick that reserves a share for a class it does not run fails instead of silently shrinking its usable work.
 
+When node-log recovery is configured, each scheduler cycle uses
+`NodeDirectory::live_for_recovery` to read live membership and expired-log
+candidates in one fresh directory scan. Candidate selection reuses that bounded
+observation for its existing one-second lifetime; claimant admission and the
+fencing CAS still reload authoritative records. Failed or cancelled fresh scans
+discard the previous observation. Peer authentication, release activation and
+ordinary `live` calls retain their direct reads.
+
 ## Shed under node pressure
 
 The actor samples its own reservation ledger four times a second: memory is resident plus retained bytes, disk is the replica budget, and jobs are the worker, primitive, and hydration aggregate the placement block advertises. The sample therefore reports what this node admits, not a host guess.

@@ -1699,6 +1699,20 @@ async fn hinted_tick_spends_a_bounded_metadata_budget() {
 #[tokio::test(flavor = "multi_thread")]
 async fn foreground_cycle_ticks_hints_without_the_backstop() {
     let mut fixture = due_scheduler_fixture(121, 1, false).await;
+    let node =
+        crab_cell_runtime::identity::NodeId::from_bytes(*fixture.scheduler.session.as_bytes());
+    let followers = crab_cell_runtime::FollowerStore::open(
+        fixture._directory.path().join("followers"),
+        super::super::repository_replica_limits(),
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    fixture.scheduler = fixture
+        .scheduler
+        .with_node_recovery(Arc::new(
+            crab_cell_runtime::node::log_transport::LocalFollowerTransport::new(node, followers),
+        ))
+        .with_node(node);
     let target = fixture.targets[0].clone();
     let now_ms = super::super::unix_now_ms().unwrap();
     crab_cell_runtime::cell::due::publish(
