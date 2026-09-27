@@ -15,6 +15,8 @@ import re
 import subprocess
 import time
 
+from entities import verify_entities
+
 
 def verify_mixed_load(control: Path, nodes: int, label: str = "mixed") -> dict:
     def rows(name):
@@ -123,7 +125,9 @@ def verify_reader_loss(control: Path, killed_node: int) -> dict:
 
 
 class Fleet:
-    def __init__(self, state: Path, project: str, overrides: list[Path]):
+    def __init__(self, state: Path, project: str, overrides: list[Path], workload: str = "readers"):
+        assert workload in ("readers", "entities")
+        self.workload = workload
         self.state = state.resolve(strict=True)
         self.project = project
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,55}", project):
@@ -132,7 +136,7 @@ class Fleet:
         existing = self.run("docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={project}")
         if existing.strip():
             raise ValueError("project already has containers; retain it and choose a fresh project")
-        self.evidence = self.state / "evidence" / "scaling"
+        self.evidence = self.state / "evidence" / ("scaling" if workload == "readers" else "entity-scaling")
         self.evidence.mkdir(mode=0o1777)
         self.evidence.chmod(0o1777)
         self.control = self.evidence / "control"
@@ -153,7 +157,11 @@ class Fleet:
                 CRAB_CELL_PERF_PROCESS_ADVERTISE=f"node-{index}:8080",
             )
             config["services"][f"node-{index}"] = added
-        config["services"]["driver"]["command"] = ["scale"]
+        config["services"]["driver"]["command"] = ["scale" if workload == "readers" else "entity-scale"]
+        if workload == "entities":
+            for name, service in config["services"].items():
+                if name.startswith("node-"):
+                    service["command"] = ["entity-node"]
         for service in config["services"].values():
             for volume in service.get("volumes", []):
                 if volume["target"] == "/evidence":
@@ -262,7 +270,7 @@ class Fleet:
         self.verify()
 
     def verify(self) -> None:
-        assert len(self.active) == 20 and len(self.killed) == 1
+        assert len(self.active) == 20 and len(self.killed) == (1 if self.workload == "readers" else 0)
         assert [(event["action"], event["argument"]) for event in self.events if event["action"] == "scale"] == [
             ("scale", 3), ("scale", 5), ("scale", 10), ("scale", 20)
         ]
@@ -282,7 +290,8 @@ class Fleet:
             if role != "driver":
                 node = role.split("-")[1]
                 assert re.search(rf"node_{node}_session_withdrawn: generation=\d+", log)
-                assert f"node_{node}_reader_drained: activation_closed=1 resolver_closed=1" in log
+                if self.workload == "readers":
+                    assert f"node_{node}_reader_drained: activation_closed=1 resolver_closed=1" in log
             counters = (self.evidence / f"{role}-kernel-after.txt").read_text()
             assert "cpu.max\n100000 100000\n" in counters
             assert "memory.max\n1073741824\n" in counters
@@ -292,13 +301,19 @@ class Fleet:
             reports[role] = dict(exit_code=observed["State"]["ExitCode"], memory_peak_bytes=peak)
             binaries.add((self.evidence / f"{role}-binary.sha256").read_text().split()[0])
         assert len(binaries) == 1
+        source = (self.state / "evidence/source-revision.txt").read_text().strip()
+        if self.workload == "entities":
+            result = dict(workload=self.workload, source=source, binary_sha256=binaries.pop(),
+                          roles=reports, events=self.events, **verify_entities(self.control))
+            (self.evidence / "verification.json").write_text(json.dumps(result, indent=2) + "\n")
+            print(f"Verified entity integrity and resources at 3/5/10/20 nodes; evidence: {self.evidence}", flush=True)
+            return
         killed = next(iter(self.killed))
         driver_log = (self.evidence / "driver.log").read_text()
         for nodes, readers in [(3, 2), (5, 3), (10, 9), (20, 19)]:
             assert f"PERF reader_scale: nodes={nodes} readers={readers} " in driver_log
         mixed = [verify_mixed_load(self.control, nodes) for nodes in (3, 5, 10, 20)]
         assert f"killed_node={killed} ready_readers=3 exact_queries=12 " in driver_log
-        source = (self.state / "evidence/source-revision.txt").read_text().strip()
         result = dict(verified=True, source=source, binary_sha256=binaries.pop(),
                       roles=reports, killed_node=killed, events=self.events, mixed_load=mixed,
                       reader_loss_load=verify_reader_loss(self.control, killed))
@@ -318,8 +333,9 @@ def main() -> None:
     parser.add_argument("--state", type=Path, required=True, help="prepared source, binary and evidence directory")
     parser.add_argument("--project", required=True, help="fresh Compose project; stopped containers are retained")
     parser.add_argument("--compose-file", type=Path, action="append", default=[], help="explicit image/cache override")
+    parser.add_argument("--workload", choices=("readers", "entities"), default="readers", help="reader replacement or scheduled writable entity traffic")
     args = parser.parse_args()
-    fleet = Fleet(args.state, args.project, args.compose_file)
+    fleet = Fleet(args.state, args.project, args.compose_file, args.workload)
     try:
         fleet.execute()
     finally:
