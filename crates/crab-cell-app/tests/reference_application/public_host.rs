@@ -335,8 +335,13 @@ async fn run_public_host_action_performance(fixture: PerfFixture) {
         fixture.registry.release_digest(),
         signer.verifying_key(),
     ));
-    let (owner_address, owner_server) =
-        start_peer_server(&fixture.registry, Arc::clone(&verifier), vec![sql_handle]).await;
+    let (owner_address, owner_server) = start_peer_server(
+        &fixture.registry,
+        Arc::clone(&verifier),
+        vec![sql_handle],
+        None,
+    )
+    .await;
     let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gateway_address = gateway_listener.local_addr().unwrap();
     let gateway_stats = Arc::new(GatewayStats::default());
@@ -347,6 +352,7 @@ async fn run_public_host_action_performance(fixture: PerfFixture) {
         fixture.owned_handles[1].clone(),
         HashMap::from([(fixture.sql_target.cell_id(), owner_address)]),
         Arc::clone(&gateway_stats),
+        None,
     );
     let forwarded = signed_client(
         &fixture,

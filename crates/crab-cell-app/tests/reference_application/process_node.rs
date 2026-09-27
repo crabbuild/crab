@@ -7,26 +7,36 @@ use crab_cell_runtime::node::lease::NodeLeaseGuard;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+pub(super) fn directory(layout: &CellStorageLayout, registry: &Registry) -> NodeDirectory {
+    NodeDirectory::new(
+        layout.clone(),
+        Digest::from_bytes([90; 32]),
+        Digest::from_bytes([91; 32]),
+        registry.release_digest(),
+    )
+}
+
 pub(super) async fn start(
     node: usize,
     application: Arc<crab_cell_app::CompiledApplication>,
     layout: &CellStorageLayout,
 ) -> (CellNode, Arc<DurabilityRecorder>) {
     let registry = application.registry();
+    // Keep writer admission at 32 Cells while charging both the old and new
+    // immutable snapshots during a refresh under the same node ledger.
+    let pool = SqlWorkerPool::new(4, 32)
+        .unwrap()
+        .with_native_memory_limit(32 << 20)
+        .unwrap();
     let host = CellNodeBuilder::new(application)
-        .with_runtime(SqlWorkerPool::new(4, 32).unwrap(), 64 * 1024 * 1024)
+        .with_runtime(pool, 64 * 1024 * 1024)
         .with_session(node_session(node))
         .with_replica_host(reference_host())
         .build()
         .unwrap();
     let durability = Arc::new(DurabilityRecorder::default());
     host.install_telemetry(durability.clone()).unwrap();
-    let directory = NodeDirectory::new(
-        layout.clone(),
-        Digest::from_bytes([90; 32]),
-        Digest::from_bytes([91; 32]),
-        registry.release_digest(),
-    );
+    let directory = directory(layout, &registry);
     let signer = SigningKey::from_bytes(&[93; 32]);
     let advertisement = move |now: i64, progress| {
         NodeAdvertisement::sign(

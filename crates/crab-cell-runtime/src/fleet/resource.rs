@@ -380,6 +380,19 @@ impl ResourceLedger {
         Ok(())
     }
 
+    pub(crate) fn set_resident_limit(&self, bytes: usize) -> Result<()> {
+        let mut state = self
+            .state
+            .snapshot
+            .lock()
+            .map_err(|_| Error::Control("resource ledger lock poisoned"))?;
+        if bytes == 0 || state.used.resident_bytes() > bytes {
+            return Err(Error::Capacity("resource ledger resident bytes"));
+        }
+        state.limit = state.limit.with_resident_bytes(bytes);
+        Ok(())
+    }
+
     pub(crate) fn set_disk_limit(&self, bytes: u64) -> Result<()> {
         let mut state = self
             .state

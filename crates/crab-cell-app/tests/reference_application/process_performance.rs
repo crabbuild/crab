@@ -54,6 +54,15 @@ async fn fleet_process_role() {
     let (host, durability) =
         super::process_node::start(node, Arc::clone(&application), &layout).await;
     let runtime = host.runtime();
+    let reader = Arc::new(super::process_replica::Reader::new(
+        CellTarget::new(
+            tenant,
+            application_id,
+            SQL_NAMESPACE,
+            &partition_for_shard(0),
+        )
+        .unwrap(),
+    ));
     let mut handles = Vec::new();
     for (index, (namespace, role, module, incarnation, schema)) in
         perf_cells().into_iter().enumerate()
@@ -126,19 +135,44 @@ async fn fleet_process_role() {
             handles,
             routes,
             Arc::clone(&stats),
+            Some(reader.clone()),
         );
         std::fs::write(Path::new(&sync).join(format!("node-{node}.serving")), []).unwrap();
         server
     } else {
-        let (address, server) = start_peer_server(&registry, verifier, handles).await;
+        let (address, server) =
+            start_peer_server(&registry, verifier, handles, Some(reader.clone())).await;
         publish_address(&marker, address);
         server
     };
     let stop = Path::new(&sync).join("stop");
+    let mut refresh = 0;
     while !stop.exists() {
+        if Path::new(&sync)
+            .join(format!("readers-{refresh}.refresh"))
+            .exists()
+        {
+            if node != 0 {
+                reader
+                    .refresh(
+                        &runtime,
+                        &registry,
+                        &layout,
+                        &directory.path().join(format!("reader-{refresh}.sqlite")),
+                    )
+                    .await;
+            }
+            std::fs::write(
+                Path::new(&sync).join(format!("node-{node}-readers-{refresh}.ready")),
+                [],
+            )
+            .unwrap();
+            refresh += 1;
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     server.abort();
+    reader.close();
     println!(
         "PERF node_{node}: active_cells={} retained_bytes={} local_disk_reserved_bytes={}",
         host.stats().active_cells(),
@@ -272,6 +306,13 @@ async fn run_three_process_fleet(balanced: bool) {
     };
     run_reference_primitive_performance(&fixture, true, label).await;
     generated_action(&fixture).await;
+    super::process_replica::verify(
+        &fixture,
+        &sync_dir,
+        &root,
+        [owners[0], owners[1], owners[2]],
+    )
+    .await;
     if let Some((_, server, stats)) = balancer {
         server.abort();
         let counts = stats.counts();
@@ -342,6 +383,7 @@ async fn reference_compose_fleet_end_to_end_performance() {
     );
     run_reference_primitive_performance(&fixture, true, "compose_three_node_mixed").await;
     generated_action(&fixture).await;
+    super::process_replica::verify(&fixture, sync, &env::var(ROOT_ENV).unwrap(), owners).await;
     server.abort();
     let counts = stats.counts();
     assert!(counts.iter().all(|count| *count > 0));
@@ -357,7 +399,7 @@ async fn reference_compose_fleet_end_to_end_performance() {
     }
 }
 
-async fn wait_for_marker(marker: &Path) {
+pub(super) async fn wait_for_marker(marker: &Path) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     while !marker.exists() {
         assert!(

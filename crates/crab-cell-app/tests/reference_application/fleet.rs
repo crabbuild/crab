@@ -9,8 +9,8 @@ use std::{
 
 use crab_cell_runtime::identity::CellId;
 use crab_cell_runtime::peer::{
-    MAX_PEER_REQUEST_BYTES, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerRoundTrip,
-    PeerVerifier, VerifiedPeerRequest,
+    MAX_PEER_REQUEST_BYTES, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerReplicaResolver,
+    PeerRoundTrip, PeerVerifier, VerifiedPeerRequest, wire,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -151,7 +151,11 @@ async fn serve_balancer(mut socket: TcpStream, entry: SocketAddr) -> Result<()> 
     Ok(())
 }
 
-async fn send_tcp(address: SocketAddr, request: Vec<u8>, remaining_ms: u32) -> Result<Vec<u8>> {
+pub(super) async fn send_tcp(
+    address: SocketAddr,
+    request: Vec<u8>,
+    remaining_ms: u32,
+) -> Result<Vec<u8>> {
     tokio::time::timeout(Duration::from_millis(u64::from(remaining_ms)), async {
         let mut socket =
             TcpStream::connect(address)
@@ -198,7 +202,8 @@ pub(super) async fn start_peer_servers(
     let mut servers = Vec::new();
     for handles in owned {
         let ids = handles.iter().map(CellHandle::cell_id).collect::<Vec<_>>();
-        let (address, server) = start_peer_server(registry, Arc::clone(&verifier), handles).await;
+        let (address, server) =
+            start_peer_server(registry, Arc::clone(&verifier), handles, None).await;
         // Pin routing for this run; the receiving resolver rejects a target
         // it does not own, so a wrong route cannot pass the action checks.
         for id in ids {
@@ -213,16 +218,21 @@ pub(super) async fn start_peer_server(
     registry: &Arc<Registry>,
     verifier: Arc<PeerVerifier>,
     handles: Vec<CellHandle>,
+    replicas: Option<Arc<dyn PeerReplicaResolver>>,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-    let dispatcher = dispatcher(registry, handles);
+    let dispatcher = dispatcher(registry, handles, replicas);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = serve_listener(listener, verifier, dispatcher, None);
     (address, server)
 }
 
-fn dispatcher(registry: &Arc<Registry>, handles: Vec<CellHandle>) -> Arc<PeerDispatcher> {
-    Arc::new(PeerDispatcher::new(
+fn dispatcher(
+    registry: &Arc<Registry>,
+    handles: Vec<CellHandle>,
+    replicas: Option<Arc<dyn PeerReplicaResolver>>,
+) -> Arc<PeerDispatcher> {
+    let dispatcher = PeerDispatcher::new(
         Arc::clone(registry),
         Arc::new(FleetResolver(Arc::new(
             handles
@@ -231,7 +241,11 @@ fn dispatcher(registry: &Arc<Registry>, handles: Vec<CellHandle>) -> Arc<PeerDis
                 .collect(),
         ))),
         Arc::new(FleetAuthorizer),
-    ))
+    );
+    Arc::new(match replicas {
+        Some(replicas) => dispatcher.with_replica_resolver(replicas),
+        None => dispatcher,
+    })
 }
 
 struct Gateway {
@@ -247,6 +261,7 @@ pub(super) fn start_gateway_peer_server(
     handles: Vec<CellHandle>,
     owners: HashMap<CellId, SocketAddr>,
     stats: Arc<GatewayStats>,
+    replicas: Option<Arc<dyn PeerReplicaResolver>>,
 ) -> tokio::task::JoinHandle<()> {
     let gateway = Arc::new(Gateway {
         local: handles.iter().map(CellHandle::cell_id).collect(),
@@ -256,7 +271,7 @@ pub(super) fn start_gateway_peer_server(
     serve_listener(
         listener,
         verifier,
-        dispatcher(registry, handles),
+        dispatcher(registry, handles, replicas),
         Some(gateway),
     )
 }
@@ -296,8 +311,12 @@ async fn serve_peer(
     socket.read_exact(&mut request).await.map_err(peer_io)?;
     let now = now_ms();
     let verified = verifier.verify(&request, now)?;
+    let replica = matches!(verified.operation(), Some(wire::peer_request::Operation::Read(read))
+        if matches!(read.operation, Some(wire::read_request::Operation::ReplicaQuery(_))));
     let reply = match gateway {
-        Some(gateway) if !gateway.local.contains(&verified.target().cell_id()) => {
+        // A selected secondary must execute its snapshot locally. Forwarding
+        // an explicit replica query would hide missing reader admission.
+        Some(gateway) if !replica && !gateway.local.contains(&verified.target().cell_id()) => {
             let address = gateway
                 .owners
                 .get(&verified.target().cell_id())

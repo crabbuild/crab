@@ -335,7 +335,10 @@ async fn exercise_replica_read(fixture: &Fixture) {
     let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 << 20, session).unwrap();
     // Hold one old-view query while a second admitted SQL job opens its replacement.
     let reader_runtime = CellRuntime::new_with_replica_host(
-        SqlWorkerPool::new(2, 512).unwrap(),
+        SqlWorkerPool::new(2, 2)
+            .unwrap()
+            .with_native_memory_limit(32 << 20)
+            .unwrap(),
         8 << 20,
         SessionId::from_bytes([14; 16]),
         crab_ltx::Host::default().with_local_disk_budget(crab_ltx::DiskBudget::new(8 << 20)),

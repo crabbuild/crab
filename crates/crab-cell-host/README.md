@@ -14,6 +14,16 @@ maintenance, allowing session withdrawal. Both phases share the original task
 limit and absolute shutdown deadline. Ordinary tasks stop on the work
 cancellation token; lease maintenance stops on the node-shutdown token.
 
+Hosts admitting snapshot readers must also provision native-memory admission
+on the `SqlWorkerPool` passed to `CellNodeBuilder::with_runtime`. The default
+budget covers the configured writer count at 64 KiB per writer. Use
+`SqlWorkerPool::with_native_memory_limit` to supply a larger explicit envelope
+without increasing writer or file-descriptor capacity. Each read snapshot
+currently reserves 12 MiB; refreshing can retain both old and replacement
+snapshots. The reference Compose host reserves 32 MiB for native admission
+and 64 MiB for retained cuts within its 1 GiB container limit. Admission
+reservations are separate from measured RSS and the container memory ceiling.
+
 ## Module map
 
 | Module | Responsibility |
