@@ -1,7 +1,11 @@
 //! Read-only Cell snapshots and their authority response gate.
 
 use super::*;
-use std::sync::{Barrier, OnceLock};
+use std::{
+    collections::BTreeMap,
+    sync::{OnceLock, atomic::AtomicU64},
+};
+use tokio::sync::oneshot;
 
 use crab_cell_runtime::cell::actor::CellHandle;
 use crab_cell_runtime::client::CellReadReplica;
@@ -27,7 +31,60 @@ const MIGRATED_SCHEMA: &str =
     "ALTER TABLE counter ADD COLUMN label TEXT; UPDATE counter SET value = value + 10";
 const CODE: Digest = Digest::from_bytes([5; 32]);
 const NAMESPACE: NamespaceId = NamespaceId::from_bytes([6; 16]);
-static QUERY_BARRIERS: OnceLock<(Barrier, Barrier)> = OnceLock::new();
+static PAUSED_QUERIES: Mutex<BTreeMap<u64, PausedQuery>> = Mutex::new(BTreeMap::new());
+
+struct PausedQuery {
+    entered: Arc<Notify>,
+    released: oneshot::Receiver<()>,
+}
+
+struct QueryPause {
+    id: u64,
+    entered: Arc<Notify>,
+    release: Option<oneshot::Sender<()>>,
+}
+
+impl QueryPause {
+    fn new() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let entered = Arc::new(Notify::new());
+        let (release, released) = oneshot::channel();
+        // Typed handlers are static functions. A unique input token connects
+        // each callback to its fixture without letting concurrent cases rendezvous.
+        let previous = PAUSED_QUERIES.lock().unwrap().insert(
+            id,
+            PausedQuery {
+                entered: entered.clone(),
+                released,
+            },
+        );
+        assert!(previous.is_none());
+        Self {
+            id,
+            entered,
+            release: Some(release),
+        }
+    }
+
+    async fn entered(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.entered.notified())
+            .await
+            .unwrap();
+    }
+
+    fn release(mut self) {
+        self.release.take().unwrap().send(()).unwrap();
+    }
+}
+
+impl Drop for QueryPause {
+    fn drop(&mut self) {
+        // A failed assertion must release blocked SQL, or discard a gate whose
+        // query never started, before the test runtime waits for its workers.
+        PAUSED_QUERIES.lock().unwrap().remove(&self.id);
+    }
+}
 
 #[derive(Default)]
 struct ControlReads(AtomicUsize);
@@ -121,10 +178,6 @@ impl PeerRoundTrip for LoopbackReplica {
     }
 }
 
-fn query_barriers() -> &'static (Barrier, Barrier) {
-    QUERY_BARRIERS.get_or_init(|| (Barrier::new(2), Barrier::new(2)))
-}
-
 struct CounterModule;
 
 impl CellModule for CounterModule {
@@ -196,14 +249,13 @@ impl Query for ReadCounter {
         context: &mut QueryContext<'_>,
         input: Self::Input,
     ) -> crab_cell_runtime::Result<Self::Output> {
-        if input == 99 {
-            let (entered, release) = query_barriers();
-            entered.wait();
-            release.wait();
-        } else if input == 98 {
-            let (entered, release) = lifecycle::migration_query_barriers();
-            entered.wait();
-            release.wait();
+        if input != 0 {
+            let paused = PAUSED_QUERIES.lock().unwrap().remove(&input).unwrap();
+            paused.entered.notify_one();
+            paused
+                .released
+                .blocking_recv()
+                .map_err(|_| crab_cell_runtime::Error::Command("query pause was dropped"))?;
         }
         let result = context.sql(&SqlBatch {
             statements: vec![SqlStatement {
@@ -228,6 +280,16 @@ impl Query for ReadCounter {
 async fn replica_reads_exact_snapshot_and_fences_after_release() {
     let fixture = fixture_for(b"read-replica");
     exercise_replica_read(&fixture).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_replica_lifecycles_keep_snapshot_and_drain_gates_separate() {
+    let first = fixture_for(b"concurrent-read-replica");
+    let second = fixture_for(b"concurrent-read-replica");
+    tokio::join!(
+        exercise_replica_read(&first),
+        exercise_replica_read(&second)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -617,11 +679,12 @@ async fn exercise_replica_read(fixture: &Fixture) {
         0
     );
     std::fs::remove_file(&refreshed_path).unwrap();
+    let pause = QueryPause::new();
+    let pause_id = pause.id;
     let pending_reader = reader.clone();
-    let pending = tokio::spawn(async move { pending_reader.query::<ReadCounter>(None, 99).await });
-    tokio::task::spawn_blocking(|| query_barriers().0.wait())
-        .await
-        .unwrap();
+    let pending =
+        tokio::spawn(async move { pending_reader.query::<ReadCounter>(None, pause_id).await });
+    pause.entered().await;
     let refreshed = reader.clone();
     let refresh = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -632,9 +695,7 @@ async fn exercise_replica_read(fixture: &Fixture) {
     let during_refresh = reader_runtime.stats();
     // Release the SQL callback before asserting progress, so an admission
     // regression fails instead of leaving the test's blocking task parked.
-    tokio::task::spawn_blocking(|| query_barriers().1.wait())
-        .await
-        .unwrap();
+    pause.release();
     let old = pending.await.unwrap().unwrap();
     assert_eq!(
         refresh.unwrap().unwrap().commit_sequence,

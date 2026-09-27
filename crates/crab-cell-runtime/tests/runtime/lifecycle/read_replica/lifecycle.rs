@@ -138,11 +138,6 @@ async fn concurrent_refreshes_coalesce_after_the_first_authority_read() {
     runtime.shutdown().await.unwrap();
 }
 
-pub(super) fn migration_query_barriers() -> &'static (Barrier, Barrier) {
-    static BARRIERS: OnceLock<(Barrier, Barrier)> = OnceLock::new();
-    BARRIERS.get_or_init(|| (Barrier::new(2), Barrier::new(2)))
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_fences_an_inflight_old_snapshot_query() {
     exercise_schema_change(fixture_for(b"read-replica-migration")).await;
@@ -178,11 +173,12 @@ pub(super) async fn exercise_schema_change(fixture: Fixture) {
         .await
         .unwrap()
         .unwrap();
+    let pause = QueryPause::new();
+    let pause_id = pause.id;
     let pending_reader = reader.clone();
-    let pending = tokio::spawn(async move { pending_reader.query::<ReadCounter>(None, 98).await });
-    tokio::task::spawn_blocking(|| migration_query_barriers().0.wait())
-        .await
-        .unwrap();
+    let pending =
+        tokio::spawn(async move { pending_reader.query::<ReadCounter>(None, pause_id).await });
+    pause.entered().await;
     let plan = registry
         .next_migration(NAMESPACE, handle.code(), handle.schema())
         .unwrap()
@@ -192,9 +188,7 @@ pub(super) async fn exercise_schema_change(fixture: Fixture) {
         handle.migrate(plan, now_ms()),
     )
     .await;
-    tokio::task::spawn_blocking(|| migration_query_barriers().1.wait())
-        .await
-        .unwrap();
+    pause.release();
     let migrated = migrated.unwrap().unwrap();
     assert!(matches!(
         pending.await.unwrap(),
@@ -284,12 +278,12 @@ async fn drain_query(
     )
     .await
     .unwrap();
+    let pause = QueryPause::new();
+    let pause_id = pause.id;
     let pending_reader = reader.clone();
     let mut pending =
-        tokio::spawn(async move { pending_reader.query::<ReadCounter>(None, 99).await });
-    tokio::task::spawn_blocking(|| query_barriers().0.wait())
-        .await
-        .unwrap();
+        tokio::spawn(async move { pending_reader.query::<ReadCounter>(None, pause_id).await });
+    pause.entered().await;
     reader.close();
     drop(reader);
     let cancelled = if cancel {
@@ -309,9 +303,7 @@ async fn drain_query(
     let jobs_during_drain = runtime.stats().worker_jobs();
     // Always release the SQL callback before asserting the drain result, so a
     // regression cannot strand a blocking worker and hang the test process.
-    tokio::task::spawn_blocking(|| query_barriers().1.wait())
-        .await
-        .unwrap();
+    pause.release();
     let output = match cancelled {
         Some(error) => {
             assert!(error.is_cancelled());
