@@ -308,8 +308,13 @@ The run exposed that a 32-writer pool's default native admission budget is only
 2 MiB, below one 12 MiB read snapshot. Hosts can now explicitly set the pool's
 native-memory ceiling without increasing writer or descriptor capacity. The
 reference host uses 32 MiB so old and replacement snapshots remain charged
-during refresh. The constrained Compose proof and protected gates remain
-separate evidence. See the reference application's `PERFORMANCE.md` commands.
+during refresh. The same generated proof also passed on three constrained
+Compose nodes with GA RustFS: each node had 1 CPU, 1 GiB, and zero swap; all
+exited zero and withdrew renewed sessions. The
+[source-bound receipt](../crates/crab-cell-app/performance/2026-09-27-replica-compose.md)
+records the 7/6 successful reader split and cgroup evidence. Protected capacity
+and fault gates remain open. See the reference application's `PERFORMANCE.md`
+commands.
 
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed
 against a local RustFS bucket with an isolated prefix. It exercised real S3
