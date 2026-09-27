@@ -291,6 +291,10 @@ freshness, continuous fault availability or an owner-loss SLO. A one-CPU cap
 does not reserve a physical core; record Docker VM resources and contention
 before comparing latency across sizes. The Compose CI runs this profile after
 the three-node lifecycle smoke using the same compiled binary.
+The [2026-09-27 run](performance/2026-09-27-reader-scaling.md) records all four
+sizes, 990 measured generated reads, a 34.830-second reader replacement sample,
+roughly five-second refresh observations, and successful drain of all twenty
+survivors. Query latency and freshness are reported separately.
 
 ## Native RustFS sanity check
 

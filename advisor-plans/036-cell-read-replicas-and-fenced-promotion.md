@@ -344,6 +344,20 @@ replacement time is one sample. Native processes had no individual CPU/memory
 limits; constrained application capacity at 5/10/20 nodes, sustained freshness
 and throughput, owner loss during arrivals, and protected gates remain open.
 
+The reference application now also has a constrained
+[3/5/10/20-node reader run](../crates/crab-cell-app/performance/2026-09-27-reader-scaling.md).
+It verifies thirty generated queries per selected reader, two acknowledged
+writes per stage, automatic refresh, an actual reader-container kill at five
+nodes, replacement without changing writer ownership, target-zero eviction,
+and drain of all twenty surviving hosts. Each node had one CPU / 1 GiB / zero
+swap; the complete Colima VM had four CPUs. The seven writer Cells remained
+on three owners, so this is reader scaling rather than writer redistribution.
+Ready-query p99 ranged from 1.802 to 4.781 ms in short serial samples, while
+the second write took about five seconds to reach all readers. Replacement
+took 34.830 s in one sample and needs latency investigation. Sustained
+capacity/freshness, many-Cell admission, arrivals during faults and protected
+qualification remain open.
+
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed
 against a local RustFS bucket with an isolated prefix. It exercised real S3
 root reads, atomic snapshot refresh, fencing after release, and a policy
