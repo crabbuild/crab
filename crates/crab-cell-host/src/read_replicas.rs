@@ -17,13 +17,17 @@ use crab_cell_runtime::{
     identity::{CellId, CellTarget, IncarnationId, SessionId},
     ltx::{CellReplica, CellStorageLayout, Limits},
     node::NodeDirectory,
-    peer::PeerReplicaResolver,
+    peer::{PeerReplicaControl, PeerReplicaResolver},
     read_policy::{ReadPolicy, ReadPolicyStore},
     registry::Registry,
 };
+use futures_util::future::BoxFuture;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+mod recruitment;
+pub use recruitment::ReadReplicaRecruiter;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 const RECONCILE_BATCH: usize = 64;
@@ -398,5 +402,21 @@ impl PeerReplicaResolver for ReadReplicaManager {
                 .cloned()
                 .ok_or(Error::ReplicaUnavailable)
         })
+    }
+}
+
+impl PeerReplicaControl for ReadReplicaManager {
+    fn activate(
+        &self,
+        target: CellTarget,
+        origin: SessionId,
+    ) -> BoxFuture<'static, Result<Receipt>> {
+        let manager = self.clone();
+        Box::pin(async move { manager.activate(target, origin).await })
+    }
+
+    fn status(&self, target: CellTarget) -> BoxFuture<'static, Result<(Receipt, bool)>> {
+        let manager = self.clone();
+        Box::pin(async move { manager.status(target).await })
     }
 }

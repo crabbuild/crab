@@ -1,4 +1,6 @@
-use super::fleet::{GatewayStats, start_balancer, start_gateway_peer_server, start_peer_server};
+use super::fleet::{
+    GatewayStats, start_balancer, start_bound_peer_server, start_gateway_peer_server,
+};
 use super::performance::run_reference_primitive_performance;
 use super::performance_fixture::{
     PerfFixture, node_session, owner_routes, perf_cells, rustfs_store,
@@ -20,7 +22,7 @@ const ROOT_ENV: &str = "CRAB_CELL_PERF_PROCESS_ROOT";
 const SYNC_ENV: &str = "CRAB_CELL_PERF_PROCESS_SYNC";
 const GATEWAY_ENV: &str = "CRAB_CELL_PERF_PROCESS_GATEWAY";
 
-struct ChildGuard(Child);
+pub(super) struct ChildGuard(pub(super) Child);
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -34,7 +36,7 @@ impl Drop for ChildGuard {
 async fn fleet_process_role() {
     let node = env::var(ROLE_ENV).unwrap();
     let node: usize = node.parse().unwrap();
-    assert!(node < 3);
+    assert!(node < 5);
     let root = env::var(ROOT_ENV).unwrap();
     let sync = env::var(SYNC_ENV).unwrap();
     let store = rustfs_store();
@@ -51,8 +53,24 @@ async fn fleet_process_role() {
     // this process/container and cannot be used by another owner.
     let directory = tempfile::TempDir::new().unwrap();
     let started = std::time::Instant::now();
-    let (host, durability, readers) =
-        super::process_node::start(node, Arc::clone(&application), &layout, directory.path()).await;
+    let bind = env::var("CRAB_CELL_PERF_PROCESS_BIND").unwrap_or_else(|_| "127.0.0.1:0".into());
+    let listener = TcpListener::bind(&bind).await.unwrap();
+    let advertised = match env::var("CRAB_CELL_PERF_PROCESS_ADVERTISE") {
+        Ok(endpoint) => tokio::net::lookup_host(endpoint)
+            .await
+            .unwrap()
+            .next()
+            .unwrap(),
+        Err(_) => listener.local_addr().unwrap(),
+    };
+    let (host, durability, readers) = super::process_node::start(
+        node,
+        Arc::clone(&application),
+        &layout,
+        directory.path(),
+        format!("https://{advertised}"),
+    )
+    .await;
     let runtime = host.runtime();
     let reader = Arc::new(readers);
     let read_target = CellTarget::new(
@@ -102,16 +120,6 @@ async fn fleet_process_role() {
     let gateway = env::var_os(GATEWAY_ENV).is_some();
     let stats = Arc::new(GatewayStats::default());
     let server = if gateway {
-        let bind = env::var("CRAB_CELL_PERF_PROCESS_BIND").unwrap_or_else(|_| "127.0.0.1:0".into());
-        let listener = TcpListener::bind(&bind).await.unwrap();
-        let advertised = match env::var("CRAB_CELL_PERF_PROCESS_ADVERTISE") {
-            Ok(endpoint) => tokio::net::lookup_host(endpoint)
-                .await
-                .unwrap()
-                .next()
-                .unwrap(),
-            Err(_) => listener.local_addr().unwrap(),
-        };
         publish_address(&marker, advertised);
         let mut owners = Vec::new();
         for owner in 0..3 {
@@ -134,37 +142,42 @@ async fn fleet_process_role() {
             handles,
             routes,
             Arc::clone(&stats),
-            Some(reader.clone()),
+            Some((
+                reader.clone(),
+                super::process_node::directory(&layout, &registry),
+            )),
         );
         std::fs::write(Path::new(&sync).join(format!("node-{node}.serving")), []).unwrap();
         server
     } else {
-        let (address, server) =
-            start_peer_server(&registry, verifier, handles, Some(reader.clone())).await;
-        publish_address(&marker, address);
+        let server = start_bound_peer_server(
+            listener,
+            &registry,
+            verifier,
+            handles,
+            Some((
+                reader.clone(),
+                super::process_node::directory(&layout, &registry),
+            )),
+        );
+        publish_address(&marker, advertised);
         server
     };
     let stop = Path::new(&sync).join("stop");
-    let activate = Path::new(&sync).join("readers.activate");
     let activated = Path::new(&sync).join(format!("node-{node}-readers.ready"));
     let evict = Path::new(&sync).join("readers.evicted");
     let evicted = Path::new(&sync).join(format!("node-{node}-readers.evicted"));
     let minimum = Path::new(&sync).join("readers.minimum");
     let refreshed = Path::new(&sync).join(format!("node-{node}-readers.refreshed"));
     while !stop.exists() {
-        if activate.exists() && !activated.exists() {
-            if node != 0 {
-                assert!(matches!(
-                    reader
-                        .activate(read_target.clone(), node_session(node))
-                        .await,
-                    Err(Error::Fenced)
-                ));
-                reader
-                    .activate(read_target.clone(), node_session(0))
+        if !activated.exists()
+            && (node == 0
+                || reader
+                    .status(read_target.clone())
                     .await
-                    .unwrap();
-            }
+                    .is_ok_and(|(_, ready)| ready))
+        {
+            // Readiness observes authenticated owner recruitment; no fixture hint is sent.
             std::fs::write(&activated, []).unwrap();
         }
         if node != 0 && minimum.exists() && !refreshed.exists() {
@@ -206,14 +219,16 @@ async fn fleet_process_role() {
     println!("PERF node_{node}_reader_drained: activation_closed=1 resolver_closed=1");
     let mut waits = durability.object_waits();
     assert!(
-        !waits.is_empty(),
+        node >= 3 || !waits.is_empty(),
         "node {node} did not prove an object-backed mutation"
     );
-    super::performance::report_samples(
-        &format!("node_{node}_object_proof_wait"),
-        &mut waits,
-        started.elapsed(),
-    );
+    if !waits.is_empty() {
+        super::performance::report_samples(
+            &format!("node_{node}_object_proof_wait"),
+            &mut waits,
+            started.elapsed(),
+        );
+    }
     if gateway {
         let (local, forwarded) = stats.counts();
         std::fs::write(

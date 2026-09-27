@@ -56,8 +56,7 @@ impl PeerRoundTrip for ReaderTransport {
     }
 }
 
-async fn activate(sync: &Path) {
-    std::fs::write(sync.join("readers.activate"), []).unwrap();
+async fn wait_for_readers(sync: &Path) {
     for node in 0..3 {
         super::process_performance::wait_for_marker(
             &sync.join(format!("node-{node}-readers.ready")),
@@ -79,10 +78,6 @@ pub(super) async fn verify(fixture: &PerfFixture, sync: &Path, root: &str, nodes
         control.value().owner.as_ref().unwrap().session,
         node_session(0)
     );
-    ReadPolicyStore::new(layout.clone())
-        .create(target.cell_id(), control.value().incarnation, 2)
-        .await
-        .unwrap();
     let successes = Arc::new(std::array::from_fn(|_| AtomicUsize::new(0)));
     let transport = Arc::new(ReaderTransport {
         nodes,
@@ -128,7 +123,11 @@ pub(super) async fn verify(fixture: &PerfFixture, sync: &Path, root: &str, nodes
         order.receipt_count(None, ()).await,
         Err(InvocationError::NotStarted(Error::ReplicaUnavailable))
     ));
-    activate(sync).await;
+    ReadPolicyStore::new(layout.clone())
+        .create(target.cell_id(), control.value().incarnation, 2)
+        .await
+        .unwrap();
+    wait_for_readers(sync).await;
     let before = order.receipt_count(None, ()).await.unwrap();
     for _ in 0..5 {
         assert_eq!(
@@ -193,6 +192,6 @@ pub(super) async fn verify(fixture: &PerfFixture, sync: &Path, root: &str, nodes
     assert_eq!(counts[1] + counts[2], 12);
     assert!(counts[1].abs_diff(counts[2]) <= 1);
     println!(
-        "PERF generated_replica_reads: successful_by_node={counts:?} unavailable_before_open=1 automatic_refresh=2 evicted_readers=2 duplicate_effects=0"
+        "PERF generated_replica_reads: successful_by_node={counts:?} unavailable_before_open=1 automatic_recruitment=2 automatic_refresh=2 evicted_readers=2 duplicate_effects=0"
     );
 }

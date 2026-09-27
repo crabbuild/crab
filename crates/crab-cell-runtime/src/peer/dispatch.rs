@@ -1,5 +1,6 @@
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Instant};
 
+use futures_util::future::BoxFuture;
 use prost::Message;
 
 use crate::cell::actor::CellHandle;
@@ -12,7 +13,7 @@ use crate::client::{
 use crate::fleet::telemetry::{
     CellTelemetryHandle, PrimitiveOperationKind, PrimitiveOperationOutcome,
 };
-use crate::identity::{CellTarget, Digest, IncarnationId, RequestId};
+use crate::identity::{CellTarget, Digest, IncarnationId, RequestId, SessionId};
 use crate::primitives::effects::InboxDelivery;
 use crate::registry::{CommandInvocation, Registry};
 use crate::{Error, Result};
@@ -39,6 +40,19 @@ pub trait PeerReplicaResolver: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<CellReadReplica>> + Send + 'static>>;
 }
 
+/// Controls admitted snapshots after the receiver authorizes the peer operation.
+pub trait PeerReplicaControl: Send + Sync + 'static {
+    /// Admits a selected snapshot only on a current owner's authenticated hint.
+    fn activate(
+        &self,
+        target: CellTarget,
+        origin: SessionId,
+    ) -> BoxFuture<'static, Result<Receipt>>;
+
+    /// Reports the exact admitted position and current owner readiness.
+    fn status(&self, target: CellTarget) -> BoxFuture<'static, Result<(Receipt, bool)>>;
+}
+
 /// Rechecks current product authorization after peer authentication.
 pub trait PeerAuthorizer: Send + Sync + 'static {
     /// Rechecks product authorization for one verified request.
@@ -50,6 +64,7 @@ pub struct PeerDispatcher {
     registry: Arc<Registry>,
     resolver: Arc<dyn PeerCellResolver>,
     replicas: Option<Arc<dyn PeerReplicaResolver>>,
+    replica_control: Option<Arc<dyn PeerReplicaControl>>,
     authorizer: Arc<dyn PeerAuthorizer>,
     telemetry: CellTelemetryHandle,
 }
@@ -67,6 +82,7 @@ impl PeerDispatcher {
             registry,
             resolver,
             replicas: None,
+            replica_control: None,
             authorizer,
             telemetry: CellTelemetryHandle::default(),
         }
@@ -86,6 +102,13 @@ impl PeerDispatcher {
         self
     }
 
+    /// Binds owner-hinted activation and readiness to the node's reader lifecycle.
+    #[must_use]
+    pub fn with_replica_control(mut self, control: Arc<dyn PeerReplicaControl>) -> Self {
+        self.replica_control = Some(control);
+        self
+    }
+
     /// Authorizes, resolves and dispatches one verified request without a second SQL path.
     pub async fn dispatch(&self, request: &VerifiedPeerRequest, now_ms: i64) -> wire::PeerReply {
         if let Err(error) = self.authorizer.authorize(request) {
@@ -94,7 +117,11 @@ impl PeerDispatcher {
         let resolved = if matches!(
             request.operation(),
             Some(wire::peer_request::Operation::Read(wire::ReadRequest {
-                operation: Some(wire::read_request::Operation::ReplicaQuery(_)),
+                operation: Some(
+                    wire::read_request::Operation::ReplicaQuery(_)
+                        | wire::read_request::Operation::ReplicaActivate(_)
+                        | wire::read_request::Operation::ReplicaStatus(_)
+                ),
                 ..
             }))
         ) {
@@ -129,6 +156,43 @@ impl PeerDispatcher {
         now_ms: i64,
         resolved: Result<CellHandle>,
     ) -> wire::PeerReply {
+        if let Some(wire::peer_request::Operation::Read(read)) = request.operation()
+            && matches!(
+                read.operation,
+                Some(
+                    wire::read_request::Operation::ReplicaActivate(true)
+                        | wire::read_request::Operation::ReplicaStatus(true)
+                )
+            )
+        {
+            let result = async {
+                let control = self
+                    .replica_control
+                    .as_ref()
+                    .ok_or(Error::ReplicaUnavailable)?;
+                if matches!(
+                    read.operation,
+                    Some(wire::read_request::Operation::ReplicaActivate(true))
+                ) {
+                    control
+                        .activate(request.target().clone(), request.origin_session())
+                        .await
+                        .map(|receipt| (receipt, true))
+                } else {
+                    control.status(request.target().clone()).await
+                }
+            }
+            .await;
+            return match result {
+                Ok((receipt, ready)) => wire::PeerReply {
+                    outcome: Some(wire::peer_reply::Outcome::Read(wire::ReadReply {
+                        receipt: Some(wire_receipt(receipt)),
+                        result: Some(wire::read_reply::Result::ReplicaReady(ready)),
+                    })),
+                },
+                Err(error) => error_reply(error),
+            };
+        }
         if let Some(wire::peer_request::Operation::Read(read)) = request.operation()
             && let Some(wire::read_request::Operation::ReplicaQuery(query)) =
                 read.operation.as_ref()

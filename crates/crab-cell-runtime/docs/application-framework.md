@@ -307,6 +307,14 @@ validation still use the owner. Replica queries
 report their actual snapshot receipt, reject a newer minimum with
 `ReplicaBehind`, and never fall back when readers are unavailable.
 
+The public host installs `ReadReplicaManager` for admitted-view refresh and
+drain, and `CellNode::install_read_replica_recruitment` for owner recruitment
+across the application's compiled namespaces. Products supply scope, signed
+membership, and an authenticated activation client. Both the reference app
+and repository service use this host loop and the shared peer activation/status
+dispatch. Reader selection remains advisory; each recipient rechecks owner,
+policy, membership, and resource admission before opening a snapshot.
+
 Host code supplies `CellClient::with_read_replicas` with the shared runtime
 `ReplicaReadRouter` built from its existing instrumented `CellAuthority` and
 live directory, an authenticated peer client, and an optional local

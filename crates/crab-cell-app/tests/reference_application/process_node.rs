@@ -21,6 +21,7 @@ pub(super) async fn start(
     application: Arc<crab_cell_app::CompiledApplication>,
     layout: &CellStorageLayout,
     root: &std::path::Path,
+    endpoint: String,
 ) -> (
     CellNode,
     Arc<DurabilityRecorder>,
@@ -47,7 +48,7 @@ pub(super) async fn start(
         NodeAdvertisement::sign(
             NodeId::from_bytes(*node_session(node).as_bytes()),
             node_session(node),
-            format!("https://reference-{node}.internal:8081"),
+            endpoint.clone(),
             Digest::from_bytes([90; 32]),
             Digest::from_bytes([94; 32]),
             Digest::from_bytes([91; 32]),
@@ -131,6 +132,58 @@ pub(super) async fn start(
             Limits::default(),
         )
         .unwrap();
+    host.install_read_replica_recruitment(
+        crab_cell_runtime::cell::application::ApplicationIdentity::new(
+            TenantId::from_bytes([81; 16]),
+            ApplicationId::from_bytes([82; 16]),
+        ),
+        crab_cell_runtime::peer::ReplicaPeerClient::new(
+            host.application().registry(),
+            Arc::new(crab_cell_runtime::peer::PeerSigner::new(
+                node_session(node),
+                host.application().registry().release_digest(),
+                SigningKey::from_bytes(&[93; 32]),
+            )),
+            crab_cell_runtime::peer::PeerPrincipal {
+                issuer: "reference-runtime".into(),
+                subject: format!("node-{node}"),
+                actions: vec!["cell.replica.activate".into()],
+            },
+            Arc::new(EnrolledReplicaTransport),
+        ),
+    )
+    .unwrap();
     host.start().unwrap();
     (host, durability, readers)
+}
+
+pub(super) struct EnrolledReplicaTransport;
+
+impl crab_cell_runtime::peer::PeerRoundTrip for EnrolledReplicaTransport {
+    fn send(
+        &self,
+        _: CellTarget,
+        _: Vec<u8>,
+        _: u32,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'static>> {
+        Box::pin(async { Err(Error::Peer("reader activation requires an enrolled node")) })
+    }
+
+    fn send_to_node(
+        &self,
+        _: CellTarget,
+        node: NodeAdvertisement,
+        request: Vec<u8>,
+        remaining_ms: u32,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'static>> {
+        let endpoint = node.endpoint().to_owned();
+        Box::pin(async move {
+            let address = endpoint
+                .strip_prefix("https://")
+                .ok_or(Error::Peer("reader endpoint is invalid"))?
+                .parse()
+                .map_err(|_| Error::Peer("reader endpoint has no socket address"))?;
+            super::fleet::send_tcp(address, request, remaining_ms).await
+        })
+    }
 }

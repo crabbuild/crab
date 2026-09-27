@@ -75,6 +75,7 @@ mod reference_application {
     pub mod primitives;
     pub mod process_node;
     pub mod process_performance;
+    pub mod process_recruitment;
     pub mod process_replica;
     pub mod public_host;
 }

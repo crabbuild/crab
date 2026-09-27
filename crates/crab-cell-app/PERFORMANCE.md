@@ -109,11 +109,11 @@ After the measured action lanes, the generated-client proof admits two SQL
 snapshot readers on the other node processes through the host-owned
 `ReadReplicaManager`. It verifies missing readers do not fall back to the owner,
 then issues a new owner mutation twice. The supervisor must discover its exact
-newer receipt without a refresh hint; both readers return one additional effect.
+newer receipt without a fixture refresh hint; both readers return one additional effect.
 Changing the desired-reader policy to zero must evict both views automatically.
 Each node proves its retained manager rejects activation and resolution after
-host shutdown. Initial admission is triggered by fixture markers; recruitment
-after node loss remains separate product qualification.
+host shutdown. Initial admission uses signed owner hints from the host-owned
+recruiter; marker files only observe readiness.
 
 Successful direct peer replies are counted by selected physical node: six
 per reader, zero on the writer. Each receiver executes the explicit query
@@ -151,7 +151,29 @@ The historical September 21 filesystem measurements remain in
 and [`performance/2026-09-21-balanced-three-process-local.md`](performance/2026-09-21-balanced-three-process-local.md).
 They do not describe the current RustFS path.
 
-### Three constrained Compose nodes
+### Reader recruitment and process loss
+
+The ignored `owner_replaces_killed_reader_through_public_hosts` case uses the
+same GA RustFS environment as the process runs. It starts three public hosts,
+exercises the reference primitives, admits two readers through signed owner
+hints, then starts two more independent processes. It kills one selected
+reader, waits for two current readers, and verifies twelve generated queries
+against the acknowledged receipt. Writer session, epoch, and incarnation must
+remain unchanged. The four survivors must drain successfully.
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/<checkout>" \
+  CRAB_CELL_PERF_ITERATIONS=5 cargo test -p crab-cell-app --locked \
+  --test reference_application owner_replaces_killed_reader_through_public_hosts \
+  -- --ignored --nocapture
+```
+
+This native fault run does not impose container CPU or memory limits. The
+three-node Compose proof below independently verifies the shared recruitment
+path under those limits. Neither run establishes sustained capacity or a
+recovery SLO.
+
+## Three constrained Compose nodes
 
 [`qualification/compose.yaml`](qualification/compose.yaml) pins GA RustFS 1.0.0
 and the build image by digest. It runs three independent nodes plus a driver

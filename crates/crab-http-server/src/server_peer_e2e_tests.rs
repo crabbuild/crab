@@ -339,6 +339,8 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         crate::cells::repository_replica_limits(),
     );
 
+    let owner_router = owner_router.with_read_replicas(Some(owner_read_replicas.clone()));
+
     owner_runtime
         .install_telemetry(receiver_reads.clone())
         .unwrap();

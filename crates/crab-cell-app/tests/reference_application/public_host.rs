@@ -132,6 +132,35 @@ async fn public_host_drain_cancels_reader_activation_waiting_on_storage() {
         &partition_for_shard(0),
     )
     .unwrap();
+    let recruiter = node
+        .install_read_replica_recruitment(
+            crab_cell_runtime::cell::application::ApplicationIdentity::new(
+                target.tenant(),
+                target.application(),
+            ),
+            crab_cell_runtime::peer::ReplicaPeerClient::new(
+                application.registry(),
+                Arc::new(PeerSigner::new(
+                    node_session(1),
+                    application.registry().release_digest(),
+                    SigningKey::from_bytes(&[93; 32]),
+                )),
+                crab_cell_runtime::peer::PeerPrincipal {
+                    issuer: "reference-runtime".into(),
+                    subject: "drain".into(),
+                    actions: vec!["cell.replica.activate".into()],
+                },
+                Arc::new(super::process_node::EnrolledReplicaTransport),
+            ),
+        )
+        .unwrap();
+    let recruitment = recruiter.reconcile(target.clone());
+    tokio::pin!(recruitment);
+    std::future::poll_fn(|cx| {
+        assert!(recruitment.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
     let activation = manager.activate(target.clone(), node_session(0));
     tokio::pin!(activation);
     // Poll into the provider delay while activation owns its lane; no sleep
@@ -141,13 +170,18 @@ async fn public_host_drain_cancels_reader_activation_waiting_on_storage() {
         Poll::Ready(())
     })
     .await;
-    let (activated, drained) = tokio::time::timeout(Duration::from_secs(1), async {
-        tokio::join!(&mut activation, node.shutdown())
+    let (activated, recruited, drained) = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(&mut activation, &mut recruitment, node.shutdown())
     })
     .await
     .expect("reader drain waited for stalled storage");
     assert!(matches!(activated, Err(Error::RuntimeClosed)));
     drained.unwrap();
+    assert!(matches!(recruited, Err(Error::RuntimeClosed)));
+    assert!(matches!(
+        recruiter.reconcile_active().await,
+        Err(Error::RuntimeClosed)
+    ));
     assert!(matches!(
         manager.activate(target, node_session(0)).await,
         Err(Error::RuntimeClosed)

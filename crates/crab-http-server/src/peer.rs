@@ -992,63 +992,6 @@ async fn dispatch_forwarded_request(
             Err(_) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
         };
     }
-    let replica_status = matches!(
-        request.operation(),
-        Some(peer_wire::peer_request::Operation::Read(
-            peer_wire::ReadRequest {
-                operation: Some(peer_wire::read_request::Operation::ReplicaStatus(true)),
-                ..
-            }
-        ))
-    );
-    if replica_status
-        || matches!(
-            request.operation(),
-            Some(peer_wire::peer_request::Operation::Read(
-                peer_wire::ReadRequest {
-                    operation: Some(peer_wire::read_request::Operation::ReplicaActivate(true)),
-                    ..
-                }
-            ))
-        )
-    {
-        let Some(manager) = receiver.read_replicas.as_ref() else {
-            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
-        };
-        let readiness = if replica_status {
-            manager.status(request.target().clone()).await
-        } else {
-            manager
-                .activate(request.target().clone(), request.origin_session())
-                .await
-                .map(|receipt| (receipt, true))
-        };
-        let (receipt, ready) = match readiness {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                if replica_status {
-                    tracing::debug!(error = %error, "read replica is not ready");
-                } else {
-                    tracing::warn!(error = %error, "read replica activation failed");
-                }
-                return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
-            }
-        };
-        let reply = peer_wire::PeerReply {
-            outcome: Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
-                receipt: Some(peer_wire::Receipt {
-                    cell_id: receipt.cell.as_bytes().to_vec(),
-                    incarnation: receipt.incarnation.as_bytes().to_vec(),
-                    commit_sequence: receipt.commit_sequence,
-                }),
-                result: Some(peer_wire::read_reply::Result::ReplicaReady(ready)),
-            })),
-        };
-        return match encode_peer_reply(&reply) {
-            Ok(body) => peer_http_reply(body),
-            Err(_) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
-        };
-    }
     if matches!(
         request.operation(),
         Some(peer_wire::peer_request::Operation::Migrate(_))
@@ -1065,16 +1008,20 @@ async fn dispatch_forwarded_request(
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         }
     }
-    let replica_query = matches!(
+    let replica_operation = matches!(
         request.operation(),
         Some(peer_wire::peer_request::Operation::Read(
             peer_wire::ReadRequest {
-                operation: Some(peer_wire::read_request::Operation::ReplicaQuery(_)),
+                operation: Some(
+                    peer_wire::read_request::Operation::ReplicaQuery(_)
+                        | peer_wire::read_request::Operation::ReplicaActivate(_)
+                        | peer_wire::read_request::Operation::ReplicaStatus(_)
+                ),
                 ..
             }
         ))
     );
-    let mut local_resolution = if replica_query {
+    let mut local_resolution = if replica_operation {
         Err(CellError::CellNotActive)
     } else {
         receiver.resolver.resolve(request.target().clone()).await
@@ -1086,7 +1033,7 @@ async fn dispatch_forwarded_request(
         &local_resolution,
         Err(CellError::CellNotActive | CellError::Fenced | CellError::CellDraining)
     );
-    if !replica_query && local_unavailable && request.permits("cell.activate") {
+    if !replica_operation && local_unavailable && request.permits("cell.activate") {
         let Some(router) = server.repository_cells() else {
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         };
@@ -1100,7 +1047,7 @@ async fn dispatch_forwarded_request(
         // Activation changed the local handle; resolve its exact catalog and
         // control once before dispatch instead of reusing the earlier miss.
         local_resolution = receiver.resolver.resolve(request.target().clone()).await;
-    } else if !replica_query && local_unavailable && request.hop_count() < 2 {
+    } else if !replica_operation && local_unavailable && request.hop_count() < 2 {
         let remaining_ms = match remaining_timeout(started, request.remaining_ms()) {
             Ok(remaining_ms) => remaining_ms.saturating_sub(1),
             Err(_) => return peer_http_error(StatusCode::GATEWAY_TIMEOUT),
@@ -1133,7 +1080,9 @@ async fn dispatch_forwarded_request(
     )
     .with_telemetry(runtime.telemetry_handle());
     if let Some(manager) = receiver.read_replicas.as_ref() {
-        dispatcher = dispatcher.with_replica_resolver(Arc::new(manager.clone()));
+        dispatcher = dispatcher
+            .with_replica_resolver(Arc::new(manager.clone()))
+            .with_replica_control(Arc::new(manager.clone()));
     }
     let now_ms = match now_ms() {
         Ok(now_ms) => now_ms,
