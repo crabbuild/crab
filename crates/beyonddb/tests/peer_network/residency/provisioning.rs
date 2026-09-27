@@ -9,17 +9,17 @@ use crab_cell_runtime::{
     identity::{CellTarget, IncarnationId},
 };
 
-struct Remote {
-    node: CellNode,
+pub(super) struct Remote {
+    pub(super) node: CellNode,
     _tasks: Arc<CellNodeTaskGroup>,
-    session: SessionId,
+    pub(super) session: SessionId,
     endpoint: String,
     lease: CancellationToken,
     server: tokio::task::JoinHandle<()>,
 }
 
 impl Remote {
-    async fn new(fixture: &Fixture) -> Self {
+    pub(super) async fn new(fixture: &Fixture) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("https://{}", listener.local_addr().unwrap());
         let session = SessionId::from_bytes([96; 16]);
@@ -83,6 +83,11 @@ impl Remote {
             lease,
             server,
         }
+    }
+    pub(super) async fn shutdown(self) {
+        self.node.shutdown().await.unwrap();
+        self.server.abort();
+        let _ = self.server.await;
     }
 }
 

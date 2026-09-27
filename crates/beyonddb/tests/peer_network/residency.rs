@@ -1,3 +1,4 @@
+mod index_splits;
 mod placement;
 mod provisioning;
 mod splits;

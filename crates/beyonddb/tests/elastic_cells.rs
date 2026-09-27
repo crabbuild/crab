@@ -1659,7 +1659,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         )
         .await
         .unwrap();
-    assert!(first_range.is_none());
+    assert!(!first_range);
     assert_eq!(capacity_cursor.as_ref().unwrap().after_lower, Some([0; 16]));
     let second_range = provisioner
         .reconcile_account_capacity(
@@ -1670,7 +1670,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         )
         .await
         .unwrap();
-    assert!(second_range.is_none());
+    assert!(!second_range);
     assert_eq!(capacity_cursor.as_ref().unwrap().after_lower, None);
     provisioner
         .reconcile_account_capacity(

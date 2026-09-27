@@ -792,7 +792,7 @@ pub(crate) fn read_route_page(
     }))
 }
 
-fn decode_page_partition(row: &Vec<SqlValue>) -> Result<RoutePagePartition> {
+pub(crate) fn decode_page_partition(row: &Vec<SqlValue>) -> Result<RoutePagePartition> {
     let [
         SqlValue::Blob(id),
         SqlValue::Blob(lower),
@@ -828,7 +828,7 @@ fn decode_page_partition(row: &Vec<SqlValue>) -> Result<RoutePagePartition> {
     })
 }
 
-fn parse_epoch(epoch: &str) -> Result<u64> {
+pub(crate) fn parse_epoch(epoch: &str) -> Result<u64> {
     let parsed = epoch
         .parse::<u64>()
         .map_err(|_| crate::Error::Command("invalid route partition epoch"))?;

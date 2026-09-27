@@ -17,13 +17,13 @@ use crate::split::split_contract;
 use crate::{
     BeginSplit, BeginSplitOutcome, CellSplitController, DescribeTable, Json, ListTables,
     ListTablesInput, ListTablesOutcome, PartitionState, PartitionUsage, PublishedPartitionInput,
-    PublishedPartitionOutcome, ReadPartitionState, ReadPublishedPartition, ReadRoutePage,
-    ReadSourceSplitPlan, ReadSplitPlan, ReadSplitRoute, RoutePageInput, RoutePageOutcome,
-    SplitPlan, SplitRouteState, account_target, data_target,
+    PublishedPartitionOutcome, ReadGlobalIndexRoutePage, ReadPartitionState,
+    ReadPublishedPartition, ReadRoutePage, ReadSourceSplitPlan, ReadSplitPlan, ReadSplitRoute,
+    RoutePageInput, RoutePageOutcome, SplitPlan, SplitRouteState, account_target, data_target,
 };
 
 impl CellInitialPartitionProvisioner {
-    /// Inspect one table range or resume one pending split.
+    /// Inspect one base/index range or resume its pending split; return whether a split completed.
     ///
     /// `None` starts a new pass. Once a range is selected, the cursor advances
     /// even if its split fails; its durable plan remains for the next pass.
@@ -34,7 +34,7 @@ impl CellInitialPartitionProvisioner {
         client: CellClient,
         max_database_bytes: u64,
         cursor: &mut Option<CapacityCursor>,
-    ) -> Result<Option<SplitPlan>, StorageError> {
+    ) -> Result<bool, StorageError> {
         if max_database_bytes == 0 {
             return Err(StorageError::Validation(
                 "database byte split threshold must be positive".into(),
@@ -42,10 +42,10 @@ impl CellInitialPartitionProvisioner {
         }
         let account = account_target(account_id).map_err(provision_error)?;
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
-        let (name, after_lower) = if let Some(cursor) = cursor.as_ref()
-            && cursor.after_lower.is_some()
+        let (name, after_lower, index) = if let Some(cursor) = cursor.as_ref()
+            && (cursor.after_lower.is_some() || cursor.index.is_some())
         {
-            (cursor.table_name.clone(), cursor.after_lower)
+            (cursor.table_name.clone(), cursor.after_lower, cursor.index)
         } else {
             let page = client
                 .query::<ListTables>(
@@ -65,9 +65,9 @@ impl CellInitialPartitionProvisioner {
             };
             let Some(name) = page.names.into_iter().next() else {
                 *cursor = None;
-                return Ok(None);
+                return Ok(false);
             };
-            (name, None)
+            (name, None, None)
         };
         let Some(table) = client
             .query::<DescribeTable>(&account, None, Json(name.clone()))
@@ -79,36 +79,56 @@ impl CellInitialPartitionProvisioner {
             *cursor = Some(CapacityCursor {
                 table_name: name,
                 after_lower: None,
+                index: None,
             });
-            return Ok(None);
+            return Ok(false);
         };
-        let page = client
-            .query::<ReadRoutePage>(
-                &account,
-                None,
-                Json(RoutePageInput {
-                    table_id: table.id.clone(),
-                    start_hash: None,
-                    after_lower,
-                    expected_epoch: None,
-                }),
-            )
-            .await
-            .map_err(cell_error)?
-            .output
-            .0;
+        let index_record = match index {
+            Some(position) => match table.global_secondary_indexes.get(position) {
+                Some(index) => Some(index),
+                None => {
+                    *cursor = Some(CapacityCursor {
+                        table_name: name,
+                        after_lower: None,
+                        index: None,
+                    });
+                    return Ok(false);
+                }
+            },
+            None => None,
+        };
+        let input = Json(RoutePageInput {
+            table_id: index_record.map_or_else(|| table.id.clone(), |index| index.id.clone()),
+            start_hash: None,
+            after_lower,
+            expected_epoch: None,
+        });
+        let page = if index_record.is_some() {
+            client
+                .query::<ReadGlobalIndexRoutePage>(&account, None, input)
+                .await
+        } else {
+            client.query::<ReadRoutePage>(&account, None, input).await
+        }
+        .map_err(cell_error)?
+        .output
+        .0;
         let (partitions, has_more) = match page {
             RoutePageOutcome::Page {
                 partitions,
                 has_more,
                 ..
             } => (partitions, has_more),
+            RoutePageOutcome::Unrouted if index.is_some() => (Vec::new(), false),
             RoutePageOutcome::Unrouted => {
+                // Do not resize indexes while CreateTable is still publishing
+                // its initial base route and may retry index installation.
                 *cursor = Some(CapacityCursor {
                     table_name: name,
                     after_lower: None,
+                    index: None,
                 });
-                return Ok(None);
+                return Ok(false);
             }
             RoutePageOutcome::Changed => {
                 return Err(StorageError::Transient(
@@ -117,28 +137,48 @@ impl CellInitialPartitionProvisioner {
             }
         };
         let partition = partitions.first();
-        let after_lower = if partitions.len() > 1 || has_more {
-            partition.map(|partition| partition.lower)
+        let more = partitions.len() > 1 || has_more;
+        let next_index = if more {
+            index
         } else {
-            None
+            let next = index.map_or(0, |index| index + 1);
+            (next < table.global_secondary_indexes.len()).then_some(next)
         };
-        // Keep retry state in the durable source plan, not the scan position.
-        // Otherwise a transaction or unavailable owner starves unrelated ranges.
+        // Durable source/child reservations retain retry state. Advance before
+        // attempting a range so unavailable owners cannot starve other ranges.
         *cursor = Some(CapacityCursor {
             table_name: name,
-            after_lower,
+            after_lower: if more {
+                partition.map(|partition| partition.lower)
+            } else {
+                None
+            },
+            index: next_index,
         });
         let Some(partition) = partition else {
-            return Ok(None);
+            return Ok(false);
         };
-        self.split_if_over_database_bytes(
-            account_id,
-            client,
-            &table.id,
-            partition.partition_id,
-            max_database_bytes,
-        )
-        .await
+        if let Some(index) = index_record {
+            self.split_global_index_if_over_database_bytes(
+                account_id,
+                client,
+                &index.id,
+                partition.partition_id,
+                max_database_bytes,
+            )
+            .await
+            .map(|plan| plan.is_some())
+        } else {
+            self.split_if_over_database_bytes(
+                account_id,
+                client,
+                &table.id,
+                partition.partition_id,
+                max_database_bytes,
+            )
+            .await
+            .map(|plan| plan.is_some())
+        }
     }
 
     /// Repeat bounded account sweeps until cancellation or an actionable error.
@@ -173,9 +213,10 @@ impl CellInitialPartitionProvisioner {
                 .await;
             match result {
                 Ok(_) => {}
-                // A selected range has already advanced the cursor. Its durable
-                // plan survives pressure while later ranges continue serving.
-                Err(StorageError::Transient(error)) => {
+                // The cursor advances before work; durable plans retain retries.
+                // Fleet pressure or an indivisible range must not terminate
+                // healthy serving while other ranges can still make progress.
+                Err(StorageError::Transient(error) | StorageError::LimitExceeded(error)) => {
                     tracing::warn!(account_id, %error, "capacity sweep deferred");
                 }
                 Err(error) => return Err(error),

@@ -1,12 +1,13 @@
 use super::global_indexes::{ACCOUNT, mutation, owner};
 use crate::*;
 use beyonddb::{
-    ActivateGlobalIndexImport, ApplyGlobalIndexMutation, ExportGlobalIndexEntries,
-    GlobalIndexApplyOutcome, GlobalIndexEntry, GlobalIndexExport, GlobalIndexFingerprint,
-    GlobalIndexImport, GlobalIndexImportComplete, GlobalIndexMutation, GlobalIndexQuery,
-    GlobalIndexScan, GlobalIndexSplitPlan, GlobalIndexState, ImportGlobalIndexEntry,
-    OpenGlobalIndexImport, PrepareGlobalIndexSplit, ProjectionVersion, ReadGlobalIndexPartition,
-    ReadGlobalIndexRoutePage, ReadGlobalIndexState, global_index_target, initialize_global_index,
+    ActivateGlobalIndexImport, ApplyGlobalIndexMutation, BeginGlobalIndexSplit,
+    CommitGlobalIndexSplit, ExportGlobalIndexEntries, GlobalIndexApplyOutcome, GlobalIndexEntry,
+    GlobalIndexExport, GlobalIndexFingerprint, GlobalIndexImport, GlobalIndexImportComplete,
+    GlobalIndexMutation, GlobalIndexPartitionInput, GlobalIndexQuery, GlobalIndexScan,
+    GlobalIndexSplitPlan, GlobalIndexState, ImportGlobalIndexEntry, OpenGlobalIndexImport,
+    PrepareGlobalIndexSplit, ProjectionVersion, ReadGlobalIndexPartition, ReadGlobalIndexRoutePage,
+    ReadGlobalIndexSplitPlan, ReadGlobalIndexState, global_index_target, initialize_global_index,
 };
 
 async fn fenced(
@@ -68,8 +69,12 @@ async fn restored(
     directory: &std::path::Path,
     session: SessionId,
     targets: &[CellTarget],
-) -> (crab_cell_host::CellNode, CellClient) {
-    let (host, _, client, _) = owner(application, layout, session, directory);
+) -> (
+    crab_cell_host::CellNode,
+    Arc<CellInitialPartitionProvisioner>,
+    CellClient,
+) {
+    let (host, provisioner, client, _) = owner(application, layout, session, directory);
     for (i, target) in targets.iter().enumerate() {
         let proof = CellCatalog::new(layout.clone(), target.tenant())
             .lookup(target.cell_id())
@@ -99,7 +104,7 @@ async fn restored(
             .await
             .unwrap();
     }
-    (host, client)
+    (host, provisioner, client)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -181,6 +186,14 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
         children,
         expected_epoch: epoch,
     };
+    assert!(
+        client
+            .command::<BeginGlobalIndexSplit>(&account, mutation(), Json(plan.clone()))
+            .await
+            .unwrap()
+            .output
+            .0
+    );
     let targets = plan
         .children
         .each_ref()
@@ -371,12 +384,17 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
         }
         if position == 12 {
             host.shutdown().await.unwrap();
-            (host, client) = restored(
+            (host, _, client) = restored(
                 &application,
                 &layout,
                 &directory.path().join("partial"),
                 SessionId::from_bytes([98; 16]),
-                &[targets[0].clone(), targets[1].clone(), source.clone()],
+                &[
+                    targets[0].clone(),
+                    targets[1].clone(),
+                    source.clone(),
+                    account.clone(),
+                ],
             )
             .await;
             for (i, target) in targets.iter().enumerate() {
@@ -442,13 +460,44 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
         );
         fenced(&client, target, &plan, epoch + 1, &entries[1].key).await;
     }
+    assert!(
+        client
+            .command::<CommitGlobalIndexSplit>(&account, mutation(), Json(plan.clone()))
+            .await
+            .unwrap()
+            .output
+            .0
+    );
+    for spec in [&plan.source, &plan.children[0], &plan.children[1]] {
+        assert_eq!(
+            client
+                .query::<ReadGlobalIndexSplitPlan>(
+                    &account,
+                    None,
+                    Json(GlobalIndexPartitionInput {
+                        index_id: index.id.clone(),
+                        partition_id: spec.partition_id
+                    })
+                )
+                .await
+                .unwrap()
+                .output
+                .0,
+            Some(plan.clone())
+        );
+    }
     host.shutdown().await.unwrap();
-    let (host, client) = restored(
+    let (host, _, client) = restored(
         &application,
         &layout,
         &directory.path().join("activated"),
         SessionId::from_bytes([99; 16]),
-        &[targets[0].clone(), targets[1].clone(), source.clone()],
+        &[
+            targets[0].clone(),
+            targets[1].clone(),
+            source.clone(),
+            account.clone(),
+        ],
     )
     .await;
     fenced(&client, &source, &plan, epoch, &entries[1].key).await;
@@ -465,29 +514,31 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
                 summary: summaries[i].clone()
             })
         );
-        let complete = GlobalIndexImportComplete {
-            plan: plan.clone(),
-            expected: summaries[i].clone(),
-        };
+    }
+    // Resume after directory publication but before either child opens. The
+    // retained account plan and sealed source drive recovery without old owners.
+    provisioner
+        .resume_global_index_split(ACCOUNT, client.clone(), &plan)
+        .await
+        .unwrap();
+    for spec in [&plan.source, &plan.children[0], &plan.children[1]] {
         assert!(
             client
-                .command::<ActivateGlobalIndexImport>(target, mutation(), Json(complete.clone()))
+                .query::<ReadGlobalIndexSplitPlan>(
+                    &account,
+                    None,
+                    Json(GlobalIndexPartitionInput {
+                        index_id: index.id.clone(),
+                        partition_id: spec.partition_id
+                    })
+                )
                 .await
                 .unwrap()
                 .output
                 .0
-        );
-        assert!(
-            client
-                .command::<OpenGlobalIndexImport>(target, mutation(), Json(complete))
-                .await
-                .unwrap()
-                .output
-                .0
+                .is_none()
         );
     }
-    // This test exercises the transfer protocol only. Directory publication is
-    // a separate controller boundary; no application routing claim is made here.
     for entry in &copied {
         let child = usize::from(
             data_key_hash(&index.id, &entry.key, &index.specification.key_schema).unwrap()

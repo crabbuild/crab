@@ -95,3 +95,22 @@ CREATE TABLE ddb_global_index_partitions (
 );
 CREATE UNIQUE INDEX ddb_global_index_partition_lookup
     ON ddb_global_index_partitions (table_id, lower_bound);
+
+
+CREATE TABLE ddb_global_index_split_plans (
+    table_id TEXT NOT NULL REFERENCES ddb_global_index_routes(table_id) ON DELETE CASCADE,
+    source_partition_id BLOB NOT NULL,
+    plan BLOB NOT NULL,
+    PRIMARY KEY (table_id, source_partition_id)
+);
+
+CREATE TABLE ddb_global_index_split_members (
+    table_id TEXT NOT NULL,
+    partition_id BLOB NOT NULL,
+    source_partition_id BLOB NOT NULL,
+    PRIMARY KEY (table_id, partition_id),
+    FOREIGN KEY (table_id, source_partition_id)
+        REFERENCES ddb_global_index_split_plans(table_id, source_partition_id) ON DELETE CASCADE
+);
+CREATE INDEX ddb_global_index_split_source
+    ON ddb_global_index_split_members (table_id, source_partition_id);

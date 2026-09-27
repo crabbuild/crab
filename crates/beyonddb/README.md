@@ -177,8 +177,10 @@ provisioner installs 1–256 initial data Cells per table during CreateTable and
 resumes after an interrupted setup. The initial count must stay fixed across
 retries. A host-backed controller can resume a recorded split. A cancellable
 account capacity loop can trigger a split, and the serving binary starts that
-loop for locally owned accounts. It visits ranges in order and advances past
-transient split failures, retaining each source plan for a later pass. Prepared
+loop for locally owned accounts. It visits base ranges and then GSI ranges in
+order, advancing past transient failures and capacity refusals. GSI plans remain
+discoverable through their source and children until both replacements open;
+adding a node can resume a pending split onto remote owners. Prepared
 transactions and pending index projections defer sealing without stopping the
 serving task. Inspection and split replay use the routed client, so published sources and children can stay on remote owners. New table ranges, GSI ranges, and split
 children use signed fleet placement in the serving binary. There is no merge controller or complete

@@ -110,10 +110,12 @@ acknowledgement must follow durable destination application across cutover.
 Base-table transaction atomicity does not turn asynchronous GSIs into an atomic
 multi-key read view.
 
-Index Cells now implement fenced, version-preserving transfer primitives with
-fingerprints that include tombstones. Recovery tests cover partial import and
-activated children. Account plan publication, automatic GSI capacity sweeps, and
-SDK cutover/recovery proof remain unfinished; see [global indexes](GLOBAL_INDEXES.md).
+Index Cells now implement fenced, version-preserving transfers with fingerprints
+that include tombstones. Account plans survive publication until both children
+open, and automatic sweeps visit base and index ranges. SDK proof covers a full
+node, adding capacity, remote child placement, independent plans, and restored
+read availability. Single-HASH-group growth and fleet-scale qualification remain
+open; see [global indexes](GLOBAL_INDEXES.md).
 
 ### Coordinator expansion and retirement
 
@@ -1307,7 +1309,7 @@ collected in `src/provision/capacity.rs`, replacing the local-handle composition
 inside `provision.rs`. Metadata route CAS, sealed-source fingerprints, and
 participant transaction barriers remain in their existing Cell commands.
 
-This fixes automatic data-range growth after cold placement. Proactive ownership movement, GSI splitting, and distributed capacity
+This fixes automatic data-range growth after cold placement. Proactive ownership movement and distributed capacity
 controller ownership remain unfinished.
 
 The pre-fix remote-source regression fails in 1.95 seconds. After routing the
@@ -1458,8 +1460,9 @@ to transient deferral. Invalid contracts and unexpected results retain their
 existing error handling. Expected source work must neither stop the supervised
 serving task nor prevent another range's independent split from progressing.
 
-`reconcile_account_capacity` now takes `&mut Option<CapacityCursor>` and returns
-only the optional completed split. The redundant `CapacitySweep` result type
+`reconcile_account_capacity` takes `&mut Option<CapacityCursor>` and now returns
+a boolean indicating that a base or index split completed. The cursor carries
+an optional index position as well as the range boundary. The redundant `CapacitySweep` result type
 was removed; all workspace callers use the canonical cursor ownership. These
 APIs are unreleased. The explicit one-shot table reconciliation method retains
 its first-pending-plan behavior and reports a blocked attempt to its caller.
@@ -1480,3 +1483,38 @@ restart coverage passes in 3.01s. Strict all-target BeyondDB Clippy passes in
 production Rust lines. It adds no storage, wire, dependency, or configuration
 change. Distributed controller ownership, metadata sharding, and fleet-scale
 throughput qualification remain open.
+
+
+## Automatic index-range growth
+
+The account sweep visits base ranges and then each GSI directory, applying the
+same occupied-page threshold. GSI planning reserves the source and both children
+in account-local indexed rows. A source or child can discover its pending plan
+without scanning another range's history. Publication replaces exactly one
+source, advances the current directory epoch, and retains the plan until both
+children are open. Retention closes the crash window between route publication
+and child availability. Participant reservations prevent overlapping transfers
+and premature child splits; table deletion cascades through the plan rows.
+
+The controller copies versions and tombstones through the fenced index lifecycle,
+verifies fingerprints, publishes, opens, and finishes. Recovery can resume through
+a published child. The existing base and new index planners share midpoint
+calculation. Initial placement and foreground requests continue through the
+existing peer admission boundary; no new configuration or dependency is added.
+
+The new SDK test exposed a supervisor failure: an exhausted fleet returned
+`LimitExceeded`, stopping its task and making the node unready. Capacity limits
+now defer a selected range just like transient owner pressure. Explicit one-shot
+calls still report the limit. The cursor advances and the durable plan remains;
+adding a node lets the next pass place children remotely and finish the split.
+
+Evidence: the regression failed before this classification change in 3.26s and
+passed after it in 13.06s. It covers an eight-slot node, a second node joining,
+independent plans across epoch changes, overlapping participant rejection,
+administrative metadata updates, stale route pages, SDK Query/Scan after owner
+restoration, tombstone replay protection, later projection key moves, and table
+deletion with a pending split. The transfer test also restores during import and
+after route publication before either child opens. These are bounded fixtures;
+10,000 active Cells, multi-TB storage throughput, unclean fleet recovery, and
+cutover latency qualification remain outstanding. An indivisible HASH group can
+still exhaust one Cell; sort-key subranges remain necessary.

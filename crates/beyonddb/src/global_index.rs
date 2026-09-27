@@ -4,9 +4,11 @@ pub(crate) mod outbox;
 pub use outbox::*;
 mod read;
 mod routing;
+mod split_routing;
 mod transfer;
 pub use read::*;
 pub use routing::*;
+pub use split_routing::*;
 pub use transfer::*;
 
 use std::sync::OnceLock;
@@ -48,12 +50,13 @@ const fn status_operation(id: u32) -> crab_cell_runtime::registry::OperationDesc
     }
 }
 
-static QUERIES: [crab_cell_runtime::registry::OperationDescriptor; 5] = [
+static QUERIES: [crab_cell_runtime::registry::OperationDescriptor; 6] = [
     crate::operation(1),
     crate::operation(2),
     crate::operation(3),
     crate::operation(4),
     crate::operation(5),
+    status_operation(6),
 ];
 
 /// One immutable index generation within a base table.
@@ -242,6 +245,7 @@ impl crab_cell_runtime::registry::CellModule for GlobalIndexModule {
         registry.bind_query::<ReadGlobalIndexState>()?;
         registry.bind_query::<ExportGlobalIndexEntries>()?;
         registry.bind_query::<ReadGlobalIndexPartition>()?;
+        registry.bind_query::<GlobalIndexUsage>()?;
         registry.bind_query::<GlobalIndexQuery>()?;
         registry.bind_query::<GlobalIndexScan>()
     }
@@ -458,4 +462,17 @@ fn apply(
         StoredValue::GlobalIndex(&key).write(context, &item)?;
     }
     Ok(Outcome::Applied)
+}
+
+/// Report occupied SQLite pages, including retained index tombstones and runtime state.
+pub struct GlobalIndexUsage;
+impl Query for GlobalIndexUsage {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 6;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<()>;
+    type Output = Json<u64>;
+    fn execute(context: &mut QueryContext<'_>, _: Self::Input) -> Result<Self::Output> {
+        Ok(Json(context.database_used_bytes()?))
+    }
 }

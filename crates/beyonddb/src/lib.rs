@@ -112,7 +112,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 23] = [
+static COMMANDS: [OperationDescriptor; 26] = [
     operation(1),
     operation(2),
     operation(3),
@@ -140,8 +140,11 @@ static COMMANDS: [OperationDescriptor; 23] = [
     },
     operation(25),
     participant::phase_operation(26),
+    operation(27),
+    operation(28),
+    operation(29),
 ];
-static QUERIES: [OperationDescriptor; 26] = [
+static QUERIES: [OperationDescriptor; 29] = [
     operation(4),
     operation(7),
     operation(8),
@@ -168,6 +171,9 @@ static QUERIES: [OperationDescriptor; 26] = [
     participant::phase_operation(30),
     global_index::outbox::chunk_operation(31),
     operation(32),
+    operation(33),
+    operation(34),
+    operation(35),
 ];
 
 /// Statically linked account application.
@@ -284,6 +290,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
                 source.update(include_bytes!("global_index.rs"));
                 source.update(include_bytes!("global_index/outbox.rs"));
                 source.update(include_bytes!("global_index/routing.rs"));
+                source.update(include_bytes!("global_index/split_routing.rs"));
+                source.update(include_bytes!("global_index/transfer.rs"));
                 source.update(include_bytes!("items.rs"));
                 source.update(include_bytes!("secondary_index.rs"));
                 source.update(include_bytes!("secondary_index/read.rs"));
@@ -345,6 +353,9 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<RegisterCoordinatorShard>()?;
         registry.bind_command::<transaction_coordinator::RecordSettledCoordinators>()?;
         registry.bind_command::<ActivateGlobalIndexRoute>()?;
+        registry.bind_command::<BeginGlobalIndexSplit>()?;
+        registry.bind_command::<CommitGlobalIndexSplit>()?;
+        registry.bind_command::<FinishGlobalIndexSplit>()?;
         registry.bind_command::<AckAccountIndexChange>()?;
         registry.bind_query::<GetItem>()?;
         registry.bind_query::<ReadAccountTransaction>()?;
@@ -369,6 +380,9 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<ttl::ReadTtlSchedule>()?;
         registry.bind_query::<ReadCoordinatorRegistration>()?;
         registry.bind_query::<ReadGlobalIndexRoutePage>()?;
+        registry.bind_query::<ReadGlobalIndexSplitPlan>()?;
+        registry.bind_query::<ReadGlobalIndexSplitRoute>()?;
+        registry.bind_query::<ReadPublishedGlobalIndexPartition>()?;
         registry.bind_query::<ReadAccountIndexChange>()?;
         registry.bind_query::<ReadAccountIndexChangeChunk>()?;
         registry.bind_query::<ListCoordinatorShards>()

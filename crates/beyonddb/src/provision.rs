@@ -1,6 +1,7 @@
 //! Initial table data Cell admission through the existing Cell runtime.
 
 mod capacity;
+mod global_indexes;
 mod ranges;
 mod residency;
 mod transactions;
@@ -37,10 +38,12 @@ use crate::{
 /// Position in an account capacity sweep.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapacityCursor {
-    /// Table being inspected; no range cursor resumes after this table.
+    /// Table being inspected; absent range and index cursors resume after it.
     pub table_name: String,
     /// Lower bound of the last range inspected in this table.
     pub after_lower: Option<[u8; 16]>,
+    /// Index position being inspected, or the base table when absent.
+    pub index: Option<usize>,
 }
 
 /// Admits initial data Cells per table on a leased or private Cell runtime.
@@ -762,9 +765,12 @@ async fn wait_for_expired(nodes: &NodeDirectory, former: SessionId) -> Result<()
     .map_err(|_| StorageError::Transient("previous Cell owner remains live".into()))?
 }
 
-fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, StorageError> {
-    let lower = u128::from_be_bytes(source.lower.unwrap_or([0; 16]));
-    let upper = source.upper.map(u128::from_be_bytes);
+fn split_boundary(
+    lower: Option<[u8; 16]>,
+    upper: Option<[u8; 16]>,
+) -> Result<[u8; 16], StorageError> {
+    let lower = u128::from_be_bytes(lower.unwrap_or([0; 16]));
+    let upper = upper.map(u128::from_be_bytes);
     let midpoint = match upper {
         Some(upper) => upper
             .checked_sub(lower)
@@ -773,6 +779,11 @@ fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, Sto
     }
     .filter(|middle| *middle > lower && upper.is_none_or(|upper| *middle < upper))
     .ok_or_else(|| StorageError::LimitExceeded("partition range cannot be split further".into()))?;
+    Ok(midpoint.to_be_bytes())
+}
+
+fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, StorageError> {
+    let boundary = split_boundary(source.lower, source.upper)?;
     let next_epoch = route_epoch
         .checked_add(1)
         .ok_or_else(|| StorageError::LimitExceeded("table route epoch exhausted".into()))?;
@@ -784,7 +795,6 @@ fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, Sto
     };
     let left_id = fresh_id(None);
     let right_id = fresh_id(Some(left_id));
-    let boundary = midpoint.to_be_bytes();
     let mut left = source.clone();
     left.partition_id = left_id;
     left.upper = Some(boundary);
