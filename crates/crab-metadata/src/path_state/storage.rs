@@ -34,13 +34,9 @@ async fn load_path_state_descriptor_with_size(
     )?;
     let descriptor_path = layout.bulk_manifest_path("path-state", descriptor_hash);
     let expected = decode_hash(descriptor_hash, descriptor_path.as_ref())?;
-    let descriptor_bytes = store.verify(&descriptor_path, &expected).await?;
-    if descriptor_bytes.len() as u64 > max_bytes {
-        return corrupt_at(
-            descriptor_path.as_ref(),
-            "path-state descriptor exceeds its byte limit",
-        );
-    }
+    let descriptor_bytes = store
+        .verify_bounded(&descriptor_path, &expected, max_bytes)
+        .await?;
     let descriptor_bytes_len = descriptor_bytes.len() as u64;
     let descriptor = serde_json::from_slice(&descriptor_bytes).map_err(|source| {
         MetadataError::CorruptObject {
@@ -100,7 +96,9 @@ async fn load_path_state_bound(
         }
         let path = layout.repo_path(&reference.path);
         let expected = decode_hash(&reference.hash, path.as_ref())?;
-        let bytes = store.verify(&path, &expected).await?;
+        let bytes = store
+            .verify_bounded(&path, &expected, reference.bytes)
+            .await?;
         if bytes.len() as u64 != reference.bytes {
             return corrupt_at(path.as_ref(), "path-state layer length mismatch");
         }
@@ -259,34 +257,21 @@ pub async fn upload_path_state(
     write: &PathStateWrite,
 ) -> Result<()> {
     for layer in &write.layers {
-        upload_if_absent(
+        crate::derived_index::upload(
             store,
             &layout.repo_path(&layer.reference.path),
+            &layer.reference.hash,
             &layer.bytes,
         )
         .await?;
     }
-    upload_if_absent(
+    crate::derived_index::upload(
         store,
         &layout.bulk_manifest_path("path-state", &write.descriptor_hash),
+        &write.descriptor_hash,
         &write.descriptor_bytes,
     )
     .await
-}
-
-async fn upload_if_absent(
-    store: &Store,
-    path: &object_store::path::Path,
-    bytes: &[u8],
-) -> Result<()> {
-    match store.head(path).await {
-        Ok(_) => Ok(()),
-        Err(StorageError::NotFound { .. }) => {
-            store.put(path, Bytes::copy_from_slice(bytes)).await?;
-            Ok(())
-        }
-        Err(error) => Err(error.into()),
-    }
 }
 
 fn decode_hash(value: &str, path: &str) -> Result<[u8; 32]> {

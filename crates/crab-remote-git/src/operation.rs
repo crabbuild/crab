@@ -631,10 +631,17 @@ impl OperationContext {
         &self,
         pack_id: crab_xet::hash::MerkleHash,
         object_ids: &[gix_hash::ObjectId],
+        allowed_external_bases: &[gix_hash::ObjectId],
     ) -> Result<Option<[u8; 20]>> {
         let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
         let checksum = reader
-            .pack_checksum_for_exact_objects(pack_id, object_ids, &self.budget, &self.cancellation)
+            .pack_checksum_for_exact_objects(
+                pack_id,
+                object_ids,
+                allowed_external_bases,
+                &self.budget,
+                &self.cancellation,
+            )
             .await?;
         if checksum.is_some() {
             self.budget
@@ -1051,6 +1058,22 @@ impl OperationContext {
             .await
     }
 
+    /// Return metadata authenticated by this snapshot's exact object locators.
+    ///
+    /// Missing kind or size fields remain `None`; callers must fall back to
+    /// bounded object reads when the publication did not prove what they need.
+    pub async fn pinned_object_metadata(
+        &self,
+        oids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<crab_metadata::git_object_locator::GitObjectMetadata>> {
+        Ok(self
+            .lookup_packed_entry_locators(oids)
+            .await?
+            .into_iter()
+            .map(|locator| locator.metadata)
+            .collect())
+    }
+
     pub(crate) async fn read_packed_entries_with_locators(
         &self,
         oids: &[gix_hash::ObjectId],
@@ -1401,6 +1424,7 @@ mod tests {
                 .expect("repository identity"),
             options: crate::RepositoryOptions::default(),
             generation: 1,
+            pack_index_hash: Arc::from("pack-index"),
             git_validation_digest: Arc::from("validation"),
             manifest_etag: "etag".to_owned(),
             shard_index_hash: Arc::from("shards"),
@@ -1464,6 +1488,7 @@ mod tests {
                 .expect("repository identity"),
             options: crate::RepositoryOptions::default(),
             generation: 1,
+            pack_index_hash: Arc::from("pack-index"),
             git_validation_digest: Arc::from("validation"),
             manifest_etag: "etag".to_owned(),
             shard_index_hash: Arc::from("shards"),

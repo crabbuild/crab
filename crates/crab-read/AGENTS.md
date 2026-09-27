@@ -14,6 +14,7 @@ Owns read selection, fetch admission, term resolution, and verified hydration. V
 3. `crates/crab-read/src/hydrator.rs` — `ShardHydrator / ReadRuntimeBuilder`: whole-file versus range reconstruction.
 4. `crates/crab-read/src/term_resolver.rs` — `TermResolver::resolve_batch`: file-index/shard lookup and session closure.
 5. `crates/crab-read/src/store_client.rs` — `StoreClient`: cache-aware object reads.
+6. `crates/crab-read/src/capsule_protocol.rs` — verified root and bounded capsule-frontier loading.
 
 Trace one path: `crates/crab-vfs/src/hydration.rs` →
 `ShardHydrator::reconstruct_range_from_pointer` in

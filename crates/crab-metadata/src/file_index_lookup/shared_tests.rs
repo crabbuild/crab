@@ -11,6 +11,135 @@ use std::time::Duration;
 use tokio::sync::{Notify, Semaphore};
 use tokio::time::timeout;
 
+#[tokio::test]
+async fn current_lookup_preserves_missing_capsule_dependency_errors() {
+    use crate::capsule_protocol::{
+        Capsule, CapsulePointer, CapsuleRefEdit, CapsuleRefHead, CapsuleRun, CapsuleTransaction,
+        CapsuleTransactionRecord, RepositoryRoot, RootRecord, capsule_ref_name_key, create_root,
+        load_pointer_catalog,
+    };
+
+    for use_acceleration in [false, true] {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let prefix = "shared/protocol-authority";
+        let file = hash_from_seed(42);
+        let (body, shard) = shard_with_file(file);
+        seed_file_index(Arc::clone(&inner), prefix, &[(file, shard)]).await;
+        let storage = crab_storage::Store::new(inner);
+        let router = crab_storage::StoreLayout::new(storage.clone(), prefix.to_owned());
+        storage
+            .put(&router.shard_path(&shard), Bytes::from(body))
+            .await
+            .unwrap();
+
+        let legacy =
+            SharedFileIndexLookup::new_with_mode(storage.clone(), prefix, use_acceleration);
+        let result = legacy.lookup(&file).await;
+        legacy.close().await.unwrap();
+        assert_eq!(
+            result.unwrap(),
+            Some(shard),
+            "v1 remains readable without a v2 root"
+        );
+
+        let root = create_root(
+            &router,
+            RootRecord::encode(
+                RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let ref_name = "refs/tags/release";
+        let transaction = CapsuleTransaction::new(
+            root.record().digest(),
+            vec![CapsuleRefEdit::new(
+                ref_name,
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let run = CapsuleRun::leaf(Capsule::build(&transaction, vec![], vec![]).unwrap()).unwrap();
+        storage
+            .put(&router.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let pointer = CapsulePointer::new(
+            run.hash(),
+            run.bytes().len() as u64,
+            run.control_offset(),
+            run.control_size(),
+            run.footer_hash(),
+            run.level(),
+            run.transaction_ids().to_vec(),
+            run.newest_base_root_digest(),
+        )
+        .unwrap();
+        let head = CapsuleRefHead::from_root(
+            ref_name,
+            root.record().root().ref_epoch().to_owned(),
+            None,
+            None,
+        )
+        .unwrap();
+        let state = head
+            .successor_state(
+                &Default::default(),
+                Some("2".repeat(40)),
+                None,
+                transaction.id().unwrap(),
+                vec![pointer],
+            )
+            .unwrap();
+        let activation =
+            CapsuleTransactionRecord::preparing("3".repeat(64), transaction.id().unwrap()).unwrap();
+        let head = head
+            .prepare(
+                head.visible(&Default::default()).clone(),
+                activation.activation_id().to_owned(),
+                state,
+            )
+            .unwrap();
+        storage
+            .put(
+                &router.capsule_ref_head_path(&capsule_ref_name_key(ref_name)),
+                head.encode().unwrap(),
+            )
+            .await
+            .unwrap();
+        let missing_path = router.capsule_transaction_path(activation.activation_id());
+        assert!(matches!(
+            load_pointer_catalog(&router).await,
+            Err(MetadataError::Storage { source: crab_storage::StorageError::NotFound { path } })
+                if path == missing_path.to_string()
+        ));
+
+        // A present v2 root owns protocol selection even when older v1 data remains.
+        // Retrying the same lazy handle after repair must not reuse a v1 fallback.
+        let lookup =
+            SharedFileIndexLookup::new_with_mode(storage.clone(), prefix, use_acceleration);
+        let missing = lookup.lookup(&file).await;
+        storage
+            .put(&missing_path, activation.abort().unwrap().encode().unwrap())
+            .await
+            .unwrap();
+        let repaired = lookup.lookup_batch(&[file]).await;
+        lookup.close().await.unwrap();
+        assert!(
+            matches!(
+                &missing,
+                Err(MetadataError::Storage { source: crab_storage::StorageError::NotFound { path } })
+                    if path == &missing_path.to_string()
+            ),
+            "missing v2 activation was hidden: {missing:?}"
+        );
+        assert_eq!(repaired.unwrap(), vec![None]);
+    }
+}
+
 #[derive(Debug)]
 struct PausedLookupStore {
     inner: Arc<dyn ObjectStore>,

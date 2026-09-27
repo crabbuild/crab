@@ -116,55 +116,76 @@ fn classify_object_store(err: &object_store::Error) -> RetryClass {
 }
 
 /// Runs `op` with retries according to `policy`.
-pub async fn retry<F, Fut, T>(policy: &RetryPolicy, mut op: F) -> Result<T>
+pub async fn retry<F, Fut, T>(policy: &RetryPolicy, op: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    retry_with_cancel(policy, None, op).await
+}
+
+pub(crate) async fn retry_with_cancel<F, Fut, T>(
+    policy: &RetryPolicy,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    mut op: F,
+) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
     let mut attempt: u32 = 0;
     loop {
+        if cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+            return Err(StorageError::Cancelled);
+        }
+        // The operation owns cleanup; cancellation may stop its network waits,
+        // but must not drop file writes or other work requiring an explicit drain.
         let err = match op().await {
             Ok(value) => return Ok(value),
             Err(error) => error,
         };
 
-        match retry_class(&err) {
+        let delay = match retry_class(&err) {
             RetryClass::Fatal => return Err(err),
             RetryClass::InspectErrno | RetryClass::Transient => {
                 if attempt + 1 >= policy.max_attempts {
                     return Err(err);
                 }
-                sleep(backoff_delay(policy, attempt)).await;
-                attempt += 1;
+                backoff_delay(policy, attempt)
             }
             RetryClass::FatalAfterOneRetry => {
                 if attempt >= 1 {
                     return Err(err);
                 }
-                sleep(small_jitter(policy.base)).await;
-                attempt += 1;
+                small_jitter(policy.base)
             }
             RetryClass::Throttled { retry_after } => {
                 if attempt + 1 >= policy.max_attempts {
                     return Err(err);
                 }
                 let jitter = backoff_delay(policy, attempt);
-                let delay = match retry_after {
+                match retry_after {
                     Some(retry_after) => retry_after.saturating_add(jitter),
                     None => jitter,
-                };
-                sleep(delay).await;
-                attempt += 1;
+                }
             }
             RetryClass::StateDependent => {
                 let budget = RetryPolicy::STATE_DEPENDENT.max_attempts;
                 if attempt + 1 >= budget {
                     return Err(err);
                 }
-                sleep(small_jitter(policy.base)).await;
-                attempt += 1;
+                small_jitter(policy.base)
             }
+        };
+        match cancel {
+            Some(cancel) => tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(StorageError::Cancelled),
+                () = sleep(delay) => {},
+            },
+            None => sleep(delay).await,
         }
+        attempt += 1;
     }
 }
 
@@ -430,5 +451,29 @@ mod tests {
                 policy.cap
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_stops_retry_wait_without_dropping_the_attempt() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut calls = 0;
+        let drained = std::sync::atomic::AtomicBool::new(false);
+        let started = tokio::time::Instant::now();
+        let result: Result<()> = retry_with_cancel(&RetryPolicy::DEFAULT, Some(&cancel), || {
+            calls += 1;
+            async {
+                cancel.cancel();
+                sleep(Duration::from_secs(1)).await;
+                drained.store(true, Ordering::SeqCst);
+                Err(StorageError::Throttled {
+                    retry_after: Some(Duration::from_secs(60)),
+                    source: None,
+                })
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(StorageError::Cancelled)));
+        assert_eq!((calls, drained.load(Ordering::SeqCst)), (1, true));
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
     }
 }

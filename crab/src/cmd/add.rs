@@ -193,7 +193,6 @@ struct CandidateFingerprint {
 #[derive(Debug)]
 struct CandidateFingerprintRecord {
     path: PathBuf,
-    size: u64,
     fingerprint: CandidateFingerprint,
 }
 
@@ -2045,11 +2044,14 @@ fn add_execution_plans(candidates: &[(PathBuf, u64)], total_bytes: u64) -> AddEx
             )
         })
         .map(|push_config| {
-            let enabled_paths = stream_prepared_xorb_enabled_paths_from_fingerprints(
-                candidates,
-                push_config.min_xorb_size,
-                &fingerprints,
-            );
+            // Sampled matches only defer work until full-file verification.
+            // A rejected match must retain direct prepared authority rather
+            // than copying its entire body into raw staging segments.
+            let enabled_paths = candidates
+                .iter()
+                .filter(|(_, size)| *size > 0)
+                .map(|(path, _)| path.clone())
+                .collect();
             StreamPreparedXorbPlan {
                 builder: crate::cmd::stream_stage::StreamStageXorbBuilder::new(
                     ADD_STREAM_XORB_BUILDERS,
@@ -2150,7 +2152,6 @@ fn repeated_candidate_fingerprints(
         };
         fingerprints.push(CandidateFingerprintRecord {
             path: path.clone(),
-            size: *size,
             fingerprint,
         });
     }
@@ -2189,46 +2190,6 @@ fn stream_prepared_xorbs_are_efficient(
         has_small_file |= size < min_xorb_size;
     }
     non_empty_files <= 1 || !has_small_file
-}
-
-#[cfg(test)]
-fn stream_prepared_xorb_enabled_paths(
-    candidates: &[(PathBuf, u64)],
-    min_xorb_size: u64,
-    fingerprint_bytes: usize,
-) -> HashSet<PathBuf> {
-    let fingerprints =
-        repeated_candidate_fingerprints(candidates, min_xorb_size, fingerprint_bytes);
-    stream_prepared_xorb_enabled_paths_from_fingerprints(candidates, min_xorb_size, &fingerprints)
-}
-
-fn stream_prepared_xorb_enabled_paths_from_fingerprints(
-    candidates: &[(PathBuf, u64)],
-    min_xorb_size: u64,
-    fingerprints: &[CandidateFingerprintRecord],
-) -> HashSet<PathBuf> {
-    let mut enabled: HashSet<PathBuf> = candidates
-        .iter()
-        .filter_map(|(path, size)| (*size > 0).then(|| path.clone()))
-        .collect();
-    if enabled.len() <= 1 {
-        return enabled;
-    }
-
-    let mut first_path_by_fingerprint = HashMap::<CandidateFingerprint, PathBuf>::new();
-    for record in fingerprints {
-        if record.size < min_xorb_size {
-            continue;
-        }
-        if first_path_by_fingerprint
-            .insert(record.fingerprint.clone(), record.path.clone())
-            .is_some()
-        {
-            enabled.remove(&record.path);
-        }
-    }
-
-    enabled
 }
 
 fn candidate_fingerprint(
@@ -4778,28 +4739,135 @@ mod tests {
         assert!(plans.stream_xorb_plan.is_none());
     }
 
-    #[test]
-    fn stream_prepared_xorb_enabled_paths_skips_likely_duplicate_payloads() {
+    #[tokio::test]
+    async fn duplicate_hint_miss_preserves_prepared_authority_without_segment_copy() {
         let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("first.bin");
-        let second = dir.path().join("second.bin");
-        let unique = dir.path().join("unique.bin");
-        std::fs::write(&first, vec![0xAB; 4 * 1024 * 1024]).unwrap();
-        std::fs::copy(&first, &second).unwrap();
-        let mut unique_bytes = vec![0xAB; 4 * 1024 * 1024];
-        unique_bytes[2 * 1024 * 1024] = 0xCD;
-        std::fs::write(&unique, unique_bytes).unwrap();
+        let names = ["first.bin", "edited.bin", "copied.bin"];
+        let paths = names.map(|name| dir.path().join(name));
+        let original = (0..4 * 1024 * 1024_u32)
+            .map(|index| (index.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect::<Vec<_>>();
+        let mut edited = original.clone();
+        // Outside the head, middle and tail samples, but inside the full hash.
+        edited[11 * 1024 * 1024 / 4] ^= 1;
+        let contents = [&original, &edited, &original];
+        for (path, bytes) in paths.iter().zip(contents) {
+            std::fs::write(path, bytes).unwrap();
+        }
+        std::fs::create_dir(dir.path().join(".crab")).unwrap();
+        std::fs::write(
+            dir.path().join(crate::core::config::REPO_CONFIG_REL),
+            "[push]\nmin_xorb_size = 1048576\nxorb_target_size = 4194304\nmax_xorb_size = 8388608\n",
+        )
+        .unwrap();
+        let candidates = paths
+            .iter()
+            .map(|path| (path.clone(), original.len() as u64))
+            .collect::<Vec<_>>();
+        let mut plans = {
+            let _cwd_guard = CWD_LOCK.lock().unwrap();
+            let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+            assert!(init_git_repo(dir.path()));
+            let _dir_guard = CurrentDirGuard::enter(dir.path());
+            assert_eq!(
+                crate::core::config::Config::resolve_local()
+                    .unwrap()
+                    .min_xorb_size,
+                1024 * 1024
+            );
+            add_execution_plans(&candidates, 3 * original.len() as u64)
+        };
+        for path in &paths[1..] {
+            assert_eq!(
+                plans.duplicate_plan.representative_for(path),
+                Some(paths[0].as_path())
+            );
+        }
+        let staging_root = dir.path().join(".crab/staging");
+        let staging = StagingArea::open(staging_root.clone()).await.unwrap();
+        let plan = plans.stream_xorb_plan.as_mut().unwrap();
+        plan.bind_preparation(staging.create_add_preparation().unwrap());
+        let progress = Arc::new(AddProgress::new(
+            names
+                .iter()
+                .map(|name| AddFileProgressSpec {
+                    name: (*name).to_owned(),
+                    total_bytes: original.len() as u64,
+                })
+                .collect(),
+        ));
+        let cancel = CancellationToken::new();
+        let representative = process_file(
+            &paths[0],
+            dir.path(),
+            &staging,
+            &progress,
+            &progress.file_progress(0).unwrap(),
+            plan.builder_for(&paths[0]),
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap();
 
-        let candidates = vec![
-            (first.clone(), 4 * 1024 * 1024),
-            (second.clone(), 4 * 1024 * 1024),
-            (unique.clone(), 4 * 1024 * 1024),
-        ];
-        let enabled = stream_prepared_xorb_enabled_paths(&candidates, 1024 * 1024, 1024 * 1024);
-
-        assert!(enabled.contains(&first));
-        assert!(!enabled.contains(&second));
-        assert!(enabled.contains(&unique));
+        let mut results = vec![representative];
+        for index in 1..paths.len() {
+            let reusable = ReusableStagedFile {
+                file_hash: results[0].file_hash,
+                size: results[0].size,
+                recipe: results[0].recipe.clone(),
+            };
+            let result = process_duplicate_candidate(
+                &paths[index],
+                dir.path(),
+                &staging,
+                &progress,
+                &progress.file_progress(index).unwrap(),
+                Some(reusable),
+                plan.builder_for(&paths[index]),
+                None,
+                &cancel,
+            )
+            .await
+            .unwrap();
+            results.push(result);
+        }
+        staging
+            .finalize_add_preparation(plan.preparation_id().unwrap())
+            .unwrap();
+        staging.close().await.unwrap();
+        let reopened = StagingAreaReadOnly::open(staging_root.clone())
+            .await
+            .unwrap();
+        for (result, expected) in results.iter().zip(contents) {
+            assert_eq!(result.file_hash, *blake3::hash(expected).as_bytes());
+            // Add has not published its Git index yet. Read the explicit sealed
+            // recipe, including repeated occurrences, rather than a visible file.
+            let mut restored = Vec::new();
+            let mut next = 0;
+            while next < result.recipe.chunk_count() {
+                let page = reopened.recipe_page(&result.recipe, next).unwrap();
+                assert!(!page.chunks.is_empty());
+                next = page.next_occurrence();
+                for chunk in page.chunks {
+                    restored.extend_from_slice(
+                        &reopened
+                            .get_chunk(&chunk.chunk_hash)
+                            .await
+                            .unwrap()
+                            .unwrap(),
+                    );
+                }
+            }
+            assert_eq!(restored.as_slice(), expected.as_slice());
+        }
+        assert_eq!(
+            std::fs::metadata(staging_root.join("segments/current.seg"))
+                .unwrap()
+                .len(),
+            0,
+            "a false duplicate hint must not disable direct prepared staging"
+        );
     }
 
     #[test]
@@ -4815,12 +4883,10 @@ mod tests {
         let plan = duplicate_reuse_plan_from_fingerprints(&[
             CandidateFingerprintRecord {
                 path: first.clone(),
-                size: fingerprint.size,
                 fingerprint: fingerprint.clone(),
             },
             CandidateFingerprintRecord {
                 path: second.clone(),
-                size: fingerprint.size,
                 fingerprint,
             },
         ]);

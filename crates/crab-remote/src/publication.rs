@@ -560,6 +560,36 @@ where
     .await
 }
 
+/// Admit an unattempted capsule publication plan under its operation lease.
+pub async fn with_capsule_plan<T, E, F, Fut>(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    plan_id: &str,
+    ttl: Duration,
+    cancel: &CancellationToken,
+    operation: F,
+) -> Result<T, E>
+where
+    E: From<Error> + From<crab_metadata::error::MetadataError>,
+    F: FnOnce(CancellationToken) -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let resource = format!("publication-plan-{plan_id}");
+    with_internal_lease(store, layout, &resource, ttl, cancel, |cancel| async move {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(E::from(Error::Cancelled)),
+            result = crab_metadata::capsule_protocol::ensure_capsule_plan_unattempted(
+                store,
+                layout,
+                plan_id,
+            ) => result?,
+        }
+        operation(cancel).await
+    })
+    .await
+}
+
 /// Run publication under sorted ref leases and global then repository GC fences.
 ///
 /// Authorize before entering; hold any operation-identity lease outside this

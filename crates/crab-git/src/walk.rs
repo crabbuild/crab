@@ -13,8 +13,9 @@ use gix_hash::ObjectId;
 use gix_object::{Find, FindExt, FindHeader};
 use tracing::{debug, warn};
 
-use crab_types::pointer::Pointer;
 use thiserror::Error;
+
+use crate::{LfsPointer, MAX_LFS_POINTER_SIZE, PointerKind, classify};
 
 mod scan;
 pub use scan::{PointerScan, PointerScanLimits, scan_pointers};
@@ -71,6 +72,15 @@ pub struct PointerBlob {
     pub size: u64,
 }
 
+/// A blob that parses as a Git LFS pointer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LfsPointerBlob {
+    /// The git object ID (SHA-1) of the blob.
+    pub oid: [u8; 20],
+    /// The exact LFS identity and declared size from the blob.
+    pub pointer: LfsPointer,
+}
+
 /// The set of all reachable git objects discovered by [`walk_reachable`].
 #[derive(Debug, Clone)]
 pub struct ReachableSet {
@@ -84,6 +94,8 @@ pub struct ReachableSet {
     pub tags: HashSet<[u8; 20]>,
     /// Blobs that parse as crab pointers.
     pub pointers: Vec<PointerBlob>,
+    /// Blobs that parse as Git LFS pointers.
+    pub lfs_pointers: Vec<LfsPointerBlob>,
 }
 
 impl ReachableSet {
@@ -94,6 +106,7 @@ impl ReachableSet {
             blobs: HashSet::new(),
             tags: HashSet::new(),
             pointers: Vec::new(),
+            lfs_pointers: Vec::new(),
         }
     }
 
@@ -222,7 +235,8 @@ fn walk_commits(
         commits = result.commits.len(),
         trees = result.trees.len(),
         blobs = result.blobs.len(),
-        pointers = result.pointers.len(),
+        crab_pointers = result.pointers.len(),
+        lfs_pointers = result.lfs_pointers.len(),
         "walk complete"
     );
 
@@ -448,6 +462,7 @@ fn merge_reachable(target: &mut ReachableSet, source: ReachableSet) {
     target.blobs.extend(source.blobs);
     target.tags.extend(source.tags);
     target.pointers.extend(source.pointers);
+    target.lfs_pointers.extend(source.lfs_pointers);
 }
 
 fn collect_annotated_tag_chain(
@@ -547,7 +562,7 @@ fn walk_tree(
     Ok(())
 }
 
-/// Check whether a blob is a crab pointer and record it if so.
+/// Classify a reachable pointer blob and retain its exact Git object identity.
 fn check_blob_for_pointer(
     odb: &(impl Find + FindHeader),
     blob_id: &ObjectId,
@@ -570,7 +585,7 @@ fn check_blob_for_pointer(
             source: Box::new(std::io::Error::other("Git object kind mismatch")),
         });
     }
-    if header.size > crab_types::pointer::MAX_POINTER_SIZE as u64 {
+    if header.size >= MAX_LFS_POINTER_SIZE as u64 {
         return Ok(());
     }
     let mut buf = Vec::new();
@@ -589,15 +604,17 @@ fn check_blob_for_pointer(
             source: Box::new(source),
         })?;
 
-    // Only attempt pointer parse on small blobs (pointers are ≤256 bytes).
-    if data.data.len() <= crab_types::pointer::MAX_POINTER_SIZE
-        && let Ok(ptr) = Pointer::parse(data.data)
-    {
-        result.pointers.push(PointerBlob {
+    match classify(data.data) {
+        PointerKind::Crab(pointer) => result.pointers.push(PointerBlob {
             oid: oid_to_bytes(blob_id),
-            file_hash: ptr.file_hash,
-            size: ptr.size,
-        });
+            file_hash: pointer.file_hash,
+            size: pointer.size,
+        }),
+        PointerKind::Lfs(pointer) => result.lfs_pointers.push(LfsPointerBlob {
+            oid: oid_to_bytes(blob_id),
+            pointer,
+        }),
+        PointerKind::NotAPointer => {}
     }
     Ok(())
 }

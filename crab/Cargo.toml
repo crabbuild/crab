@@ -72,8 +72,8 @@ tier = ["tier-s3", "tier-gcs", "tier-azure"]
 
 # Per-provider lifecycle/restore SDKs (object_store lacks these APIs).
 tier-s3 = ["dep:aws-config", "dep:aws-credential-types", "dep:aws-sdk-s3"]
-tier-gcs = ["dep:google-cloud-storage"]
-tier-azure = ["dep:azure_core", "dep:azure_mgmt_storage", "dep:azure_storage", "dep:azure_storage_blobs"]
+tier-gcs = ["dep:google-cloud-storage", "dep:google-cloud-token"]
+tier-azure = ["dep:azure_core", "dep:azure_identity", "dep:azure_mgmt_storage", "dep:azure_storage", "dep:azure_storage_blobs"]
 
 # Managed active-active coordinator control planes.
 coordinator-dynamodb = ["dep:aws-config", "dep:aws-sdk-dynamodb", "crab-coordination/coordinator-dynamodb"]

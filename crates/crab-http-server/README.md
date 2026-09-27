@@ -6,6 +6,13 @@ serves repositories from the operator's object storage.
 **Development status:** production qualification is incomplete. Read the
 [completion matrix](REFERENCE.md#completion-requirements) before deployment.
 
+Capsule browse indexing is background work, independent of native Git receive.
+Canonical attribution is available without a Cell projection; configured Cells
+project one captured snapshot and promote only if its complete source identity
+still matches. Missing/stale indexes return HTTP 202 with retry guidance;
+corrupt derived records or path metadata return 503 and schedule repair. Native
+Git and mutation validation do not load the optional browse-index record.
+
 ## Architecture
 
 ![Crab HTTP server and pinned Cellule architecture](../../diagram/crab-http-next-architecture/cellule-boundary.svg)

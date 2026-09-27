@@ -179,12 +179,34 @@ identity, and exact object inventory. Tests compare these artifacts byte for
 byte with native `git index-pack`, repair external-base packs through native Git,
 and reconstruct every object with Git.
 
+Native thin-pack installation uses one private repair workspace and an explicit
+destination object directory for base lookup. `install_thin_pack_with_content_identity`
+also checks the repaired index against the caller's exact source-plus-base OID
+set, names the result by its new Blake3 hash, and verifies existing artifacts on
+repeat installation. Source hashes must not name repaired bytes. Neither this
+repair nor temporary base availability changes the remote selected pack set.
+
 Bounded consolidation structurally concatenates disjoint pack inventories. If
 selected packs overlap, callers provide the REF_DELTA bases discovered by the
 header scan; consolidation installs those verified objects temporarily, repairs
 the selected thin packs with native Git, and emits a self-contained pack whose
 index must equal the selected OID set. This preserves cross-pack deduplication
 without requiring the stable pack prefix to participate in the rewrite.
+Overlapping consolidation feeds Git the verified index OID union directly,
+avoiding `--stdin-packs`' revision/tree walk for optional packing name hints.
+Maintenance and response consolidation retain exact output-set checks; loss of
+those hints can change compression/layout and must be included in qualification.
+
+Complete response inventories with duplicate OIDs can also retain compressed
+entries: structural assembly emits the first occurrence and checks every source
+entry CRC, including discarded entries. Intact source bodies retain their OFS
+links byte-for-byte; bodies that lose entries rewrite them as OID-based REF
+links without recompression. This requires each
+overlapping source to be self-contained; mixing independently thin source
+representations could introduce a delta cycle. Disjoint sources retain the
+whole-body copy path, including proven cross-pack REF dependencies. The caller
+still proves that the source OID union equals the authorized response set, and
+native Git validates the received response before making its objects visible.
 
 This is an integrity boundary, not a Git publisher. It validates the complete pack
 checksum, compressed streams, entry framing and delta reconstruction. Callers

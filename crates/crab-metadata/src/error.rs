@@ -6,6 +6,18 @@ pub type Result<T> = std::result::Result<T, MetadataError>;
 /// Errors raised by metadata schema and local index helpers.
 #[derive(thiserror::Error, Debug)]
 pub enum MetadataError {
+    /// A locally constructed capsule-protocol record violates its wire contract.
+    #[error("invalid capsule-protocol {record}: {reason}")]
+    CapsuleContract {
+        record: &'static str,
+        reason: String,
+    },
+    /// The derived capsule browse-index record could not be encoded or decoded.
+    #[error("invalid capsule browse-index JSON")]
+    BrowseIndexRecord {
+        #[source]
+        source: serde_json::Error,
+    },
     /// A file lookup could not acquire process-wide execution capacity.
     #[cfg(feature = "file-index-reader")]
     #[error("file lookup admission closed")]

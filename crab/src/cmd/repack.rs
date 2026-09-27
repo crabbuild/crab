@@ -1,4 +1,4 @@
-//! File-backed consolidation of the Git packs selected by a repository manifest.
+//! Git pack maintenance for manifest and layered-checkpoint repositories.
 
 use crab_write::generation::CommittedManifestAnchor;
 use std::collections::{BTreeSet, HashSet};
@@ -130,9 +130,9 @@ pub struct RepackOutcome {
     pub bytes_before: u64,
     /// Total bytes across all packs after repack.
     pub bytes_after: u64,
-    /// Pack body bytes downloaded by this bounded roll-up.
+    /// Selected pack body bytes processed by this bounded roll-up.
     pub bytes_read: u64,
-    /// New pack body bytes uploaded by this bounded roll-up.
+    /// Replacement pack body bytes submitted to immutable publication.
     pub bytes_written: u64,
     /// Wall-clock time for the operation.
     pub elapsed: Duration,
@@ -164,10 +164,10 @@ pub struct RepackSummary {
     pub bytes_before: u64,
     /// Total bytes across all packs after repack.
     pub bytes_after: u64,
-    /// Pack body bytes read from object storage.
+    /// Selected pack body bytes processed, excluding sidecars and transport overhead.
     #[serde(default)]
     pub bytes_read: u64,
-    /// New pack body bytes written to object storage.
+    /// Replacement body bytes submitted, including verified identical-object reuse.
     #[serde(default)]
     pub bytes_written: u64,
     /// Wall-clock duration in milliseconds.
@@ -191,6 +191,95 @@ pub async fn run_repack(
         RepackRunResult::Deferred { .. } => Err(CrabError::Internal(
             "unbounded repack unexpectedly exceeded a maintenance budget".to_owned(),
         )),
+    }
+}
+
+/// Checkpoint a repository using an already authenticated protocol-v2 root.
+pub async fn run_repack_from_root(
+    store: &Store,
+    prefix: &str,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    config: &RepackConfig,
+    cancel: &CancellationToken,
+) -> Result<RepackOutcome> {
+    const MAX_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+    let started = Instant::now();
+    check_cancelled(cancel)?;
+    let router = StoreLayout::new(store.clone(), prefix.to_owned());
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let view = open_repack_view(&layout, root, MAX_CHECKPOINT_BYTES).await?;
+    if view.refs().is_empty() {
+        return Err(CrabError::Protocol(
+            "cannot checkpoint an unborn repository".to_owned(),
+        ));
+    }
+    let packs_before = view.git_pack_count();
+    let bytes_before = view.git_pack_bytes()?;
+    let (work, packs_after, bytes_after) = if config.dry_run {
+        (
+            crab_remote::checkpoint::CheckpointOutcome::default(),
+            packs_before,
+            bytes_before,
+        )
+    } else {
+        check_cancelled(cancel)?;
+        let maintenance = crab_remote::checkpoint::maintain_capsule_repository_from_view(
+            &layout,
+            &view,
+            1,
+            MAX_CHECKPOINT_BYTES,
+            cancel,
+        )
+        .await
+        .map_err(map_checkpoint_error)?;
+        // Report this pass's exact publication, not a later ref capture that
+        // could attribute another writer's packs to our repack.
+        (
+            maintenance
+                .checkpointed
+                .combine(maintenance.repacked)
+                .map_err(map_checkpoint_error)?,
+            maintenance.packs_after,
+            maintenance.bytes_after,
+        )
+    };
+    Ok(RepackOutcome {
+        packs_before,
+        packs_after,
+        bytes_before,
+        bytes_after,
+        bytes_read: work.pack_bytes_read,
+        bytes_written: work.pack_bytes_written,
+        elapsed: started.elapsed(),
+    })
+}
+
+async fn open_repack_view(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    maximum_bytes: u64,
+) -> crab_read::Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
+    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+        max_capsule_bytes: maximum_bytes,
+        max_frontier_bytes: maximum_bytes,
+    };
+    crab_read::capsule_protocol::open_view_from_root_for_checkpoint(layout, root, limits).await
+}
+
+fn map_checkpoint_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {
+    match error {
+        crab_remote::checkpoint::CheckpointError::Cancelled => CrabError::Cancelled,
+        crab_remote::checkpoint::CheckpointError::Read(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Repack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Pack(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Metadata(source) => source.into(),
+        crab_remote::checkpoint::CheckpointError::Io(source) => source.into(),
+        other => CrabError::Internal(other.to_string()),
     }
 }
 
@@ -1361,6 +1450,10 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let year = if month <= 2 { year + 1 } else { year };
     (year, month, day)
 }
+
+#[cfg(test)]
+#[path = "repack/capsule_tests.rs"]
+mod capsule_tests;
 
 #[cfg(test)]
 mod tests {

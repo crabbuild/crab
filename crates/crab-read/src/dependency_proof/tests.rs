@@ -6,11 +6,23 @@ use std::sync::{
 use bytes::Bytes;
 use crab_git::lfs_pointer::LfsPointer;
 use crab_metadata::{
+    capsule_protocol::{
+        FileCatalogEntry, PointerCatalog, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
+    },
     manifest_store,
     manifests::{BulkData, Manifest, compact_shard_index},
 };
 use crab_types::pointer::Pointer;
-use crab_xet::shard::{FileDataSequenceHeader, MDBFileInfo, ShardWriter};
+use crab_xet::{
+    shard::{
+        FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo, ShardWriter,
+        XorbChunkSequenceEntry, XorbChunkSequenceHeader,
+    },
+    xorb::{
+        builder::{RunId, XorbBuilder},
+        format::Chunk,
+    },
+};
 use futures_util::TryStreamExt;
 use object_store::{
     ObjectStore,
@@ -304,4 +316,131 @@ async fn batch_deadline_covers_pending_lfs_and_cancellation() {
             Err(DependencyProofError::Deadline)
         )
     ));
+}
+
+#[tokio::test]
+async fn capsule_catalog_selects_and_verifies_crab_content() {
+    let layout = StoreLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        "capsule-dependency-test".to_owned(),
+    );
+    let chunk = Chunk::new(Bytes::from_static(b"capsule dependency"));
+    let mut builder = XorbBuilder::new();
+    builder.push(&chunk, RunId(1)).unwrap();
+    let xorb = builder.finalize().unwrap().pop().unwrap();
+    let xorb_hash = xorb.hash.hex();
+    let mut writer = ShardWriter::new();
+    writer
+        .add_xorb(Arc::new(MDBXorbInfo {
+            metadata: XorbChunkSequenceHeader::new(xorb.hash, 1usize, chunk.data.len()),
+            chunks: vec![XorbChunkSequenceEntry::new(
+                chunk.hash,
+                chunk.data.len(),
+                0u32,
+            )],
+        }))
+        .unwrap();
+    let file_hash = *blake3::hash(&chunk.data).as_bytes();
+    writer
+        .add_file(MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(MerkleHash::from(file_hash), 1, false, false),
+            segments: vec![FileDataSequenceEntry::new(
+                xorb.hash,
+                chunk.data.len() as u32,
+                0u32,
+                1u32,
+            )],
+            verification: vec![],
+            metadata_ext: None,
+        })
+        .unwrap();
+    let (shard_body, shard_hash) = writer.finalize().unwrap();
+    layout
+        .store()
+        .put(&layout.xorb_path(&xorb.hash), xorb.bytes.clone())
+        .await
+        .unwrap();
+    layout
+        .store()
+        .put(
+            &layout.shard_path(&shard_hash),
+            Bytes::from(shard_body.clone()),
+        )
+        .await
+        .unwrap();
+    let mut catalog = PointerCatalog::new();
+    catalog
+        .insert_xorb(
+            xorb_hash.clone(),
+            XorbCatalogEntry::new(
+                xorb.bytes.len() as u64,
+                blake3::hash(&xorb.bytes).to_hex().to_string(),
+                vec![XorbChunkEntry::new(
+                    chunk.hash.hex(),
+                    chunk.data.len() as u32,
+                )],
+            ),
+        )
+        .unwrap();
+    catalog
+        .insert_shard(
+            shard_hash.hex(),
+            ShardCatalogEntry::new(shard_body.len() as u64, vec![xorb_hash]),
+        )
+        .unwrap();
+    catalog
+        .insert_file(
+            MerkleHash::from(file_hash).hex(),
+            FileCatalogEntry::new(chunk.data.len() as u64, shard_hash.hex()),
+        )
+        .unwrap();
+    catalog.encode().unwrap();
+    let dependency = PointerDependency {
+        blob: ObjectId::from_bytes_or_panic(&[3; 20]),
+        pointer: PointerKind::Crab(Pointer {
+            file_hash,
+            size: chunk.data.len() as u64,
+            shard_hint: Some([9; 32]),
+        }),
+    };
+    verify_capsule_dependencies_except_crab(
+        &layout,
+        &catalog,
+        &[dependency],
+        &BTreeSet::new(),
+        limits(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn capsule_catalog_rejects_missing_content_before_origin_reads() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&reads);
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+        }));
+    let layout = StoreLayout::new(store, "capsule-missing-test".to_owned());
+    let dependency = PointerDependency {
+        blob: ObjectId::from_bytes_or_panic(&[4; 20]),
+        pointer: PointerKind::Crab(Pointer {
+            file_hash: [7; 32],
+            size: 10,
+            shard_hint: Some([8; 32]),
+        }),
+    };
+    let result = verify_capsule_dependencies_except_crab(
+        &layout,
+        &PointerCatalog::new(),
+        &[dependency],
+        &BTreeSet::new(),
+        limits(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(result, Err(DependencyProofError::Invalid { .. })));
+    assert_eq!(reads.load(Ordering::Relaxed), 0);
 }

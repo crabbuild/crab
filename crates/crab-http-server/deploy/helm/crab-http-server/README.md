@@ -381,8 +381,10 @@ initial SQLite/LTX root before marking the record `cell_ready`. Every healthy
 replica discovers that ready record on its next five-second catalog poll. A
 pending record fails the refresh readiness gate and is never routed. Use
 `repository adopt` when the target prefix already contains a canonical Crab Git
-repository; it creates a new empty application Cell and does not import old
-collaboration data.
+repository. Adoption authenticates its capsule-v2 view, embedded Git packs, and
+complete shard/xorb closure before catalog publication; missing or corrupt data
+leaves the catalog unchanged. It creates a new empty application Cell and does
+not import old collaboration data.
 
 Use the same private-file pattern to replace membership later:
 

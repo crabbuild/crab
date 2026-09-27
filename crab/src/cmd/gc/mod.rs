@@ -20,14 +20,20 @@ pub mod journal;
 pub mod marks;
 pub mod parallel_enum;
 
+#[cfg(test)]
+mod capsule_cleanup_tests;
+
 use std::collections::HashSet;
+#[cfg(test)]
 use std::future::Future;
 use std::io::Stdout;
+#[cfg(test)]
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(test)]
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::path::Path as ObjectPath;
@@ -59,6 +65,7 @@ const REPO_GC_PREFIXES: &[&str] = &[
 ];
 const DEFAULT_DELETE_CONCURRENCY: usize = 64;
 const DEFAULT_LIST_CONCURRENCY: usize = 32;
+#[cfg(test)]
 const GENERATED_PACK_DESCRIPTOR_MAX_BYTES: u64 = 4 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -70,8 +77,8 @@ const GENERATED_PACK_DESCRIPTOR_MAX_BYTES: u64 = 4 * 1024;
 pub struct GcArgs {
     /// List unreachable objects without deleting anything.
     pub dry_run: bool,
-    /// Bypass the grace period — delete all unreachable objects regardless
-    /// of age. Requires `yes` or interactive confirmation.
+    /// Bypass v1 grace; protocol-v2 repository GC preserves reader grace.
+    /// Requires `yes` or interactive confirmation.
     pub force: bool,
     /// Skip interactive confirmation when `--force` is used.
     pub yes: bool,
@@ -239,6 +246,10 @@ pub struct ListOutcome {
 }
 
 /// Terminal result payload for `--json` / `--jsonl` structured output.
+///
+/// Capsule source-byte classes describe pre-sweep storage: complete run and
+/// pack-layer objects, including embedded indexes, but not checkpoint/history
+/// records. Shared sources count once, with active reachability taking priority.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct GcSummary {
     /// Number of pack objects deleted (or would-be-deleted in dry-run).
@@ -268,16 +279,16 @@ pub struct GcSummary {
     /// Whether post-delete metadata reconciliation failed.
     #[serde(default)]
     pub reconciliation_failed: bool,
-    /// Current-manifest Git pack bytes.
+    /// Physical bytes of currently reachable Git source objects.
     #[serde(default)]
     pub active_pack_bytes: u64,
-    /// Pack bytes retained only by history, workflows, or other recovery roots.
+    /// Source bytes retained only by history or other protection roots.
     #[serde(default)]
     pub retained_history_pack_bytes: u64,
-    /// Unreachable pack bytes retained by the grace period.
+    /// Unreachable source bytes retained by the grace period.
     #[serde(default)]
     pub grace_period_pack_bytes: u64,
-    /// Unreachable pack bytes eligible for collection.
+    /// Unreachable source bytes eligible for collection.
     #[serde(default)]
     pub collectible_pack_bytes: u64,
 }
@@ -440,7 +451,9 @@ fn confirm_force(args: &GcArgs) -> Result<bool> {
         return Ok(true);
     }
 
-    warn!("--force bypasses the grace period; concurrent pushes may lose data");
+    warn!(
+        "--force may bypass v1 grace and endanger concurrent pushes; protocol-v2 repository GC retains reader grace"
+    );
 
     if args.yes {
         return Ok(true);
@@ -511,6 +524,7 @@ pub struct DeletePolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "retained candidates must not be counted as deleted"]
 pub enum CandidateDelete {
     Deleted,
     Retained,
@@ -675,6 +689,7 @@ async fn list_repo_gc_candidates_with_concurrency(
 /// Streams repo-local LIST results directly into the durable candidate plan.
 /// The old helper remains available to callers that need a preview vector;
 /// destructive runs never retain the full candidate namespace in memory.
+#[cfg(test)]
 async fn plan_repo_gc_candidates_streaming(
     store: &Store,
     router: &StoreLayout,
@@ -786,6 +801,7 @@ pub async fn run_gc(
     clippy::too_many_arguments,
     reason = "The durable GC execution seam keeps storage, policy, cancellation, and output explicit"
 )]
+#[cfg(test)]
 async fn finish_repo_gc_from_marks(
     args: &GcArgs,
     store: &Store,
@@ -934,6 +950,7 @@ async fn finish_repo_gc_from_marks(
     clippy::too_many_arguments,
     reason = "The repository sweep boundary keeps the durable journal, root walk, policy, and lease explicit"
 )]
+#[cfg(test)]
 async fn run_repo_gc_durable_streaming_roots(
     args: &GcArgs,
     store: &Store,
@@ -1376,6 +1393,7 @@ async fn execute_journaled_deletes(
     aggregate
 }
 
+#[cfg(test)]
 async fn resume_gc_run(
     args: &GcArgs,
     journal: &mut journal::GcRunJournal,
@@ -1865,6 +1883,7 @@ async fn list_shallow_closure_entry_keys(
 }
 
 /// Read the manifest and build the repo-local object set that must survive GC.
+#[cfg(test)]
 pub async fn reachable_repo_objects_from_manifest(
     store: &Store,
     router: &StoreLayout,
@@ -1878,6 +1897,7 @@ pub async fn reachable_repo_objects_from_manifest(
     Ok((snapshot.manifest, snapshot.reachable_keys))
 }
 
+#[cfg(test)]
 struct RepoGcReachability {
     manifest: crate::metadata::manifest::Manifest,
     reachable_keys: HashSet<String>,
@@ -1886,12 +1906,14 @@ struct RepoGcReachability {
 }
 
 #[derive(Default)]
+#[cfg(test)]
 struct ReachabilityDigest {
     count: u64,
     xor: [u8; 32],
     sum: [u8; 32],
 }
 
+#[cfg(test)]
 impl ReachabilityDigest {
     fn add(&mut self, category: &str, value: &str) {
         let mut hasher = blake3::Hasher::new();
@@ -1918,12 +1940,14 @@ impl ReachabilityDigest {
 /// Streams repository roots into a run-owned mark set while computing the
 /// sealed root identity. The optional writer is absent when a deleting run is
 /// resumed; in that case the same walk only revalidates the identity.
+#[cfg(test)]
 struct RepoReachabilitySink<'a> {
     writer: Option<&'a mut marks::DurableMarkWriter>,
     digest: &'a mut ReachabilityDigest,
     cancel: &'a CancellationToken,
 }
 
+#[cfg(test)]
 impl RepoReachabilitySink<'_> {
     async fn add(&mut self, key: String) -> Result<()> {
         check_cancelled(self.cancel)?;
@@ -1935,12 +1959,14 @@ impl RepoReachabilitySink<'_> {
     }
 }
 
+#[cfg(test)]
 struct StreamedRepoRootSnapshot {
     root_identity: String,
 }
 
 /// Walks the repository roots without constructing a process-wide reachable
 /// key set. Mark chunks are flushed by [`DurableMarkWriter`] as they fill.
+#[cfg(test)]
 async fn stream_repo_reachability(
     store: &Store,
     router: &StoreLayout,
@@ -2047,6 +2073,7 @@ async fn stream_repo_reachability(
     })
 }
 
+#[cfg(test)]
 fn generated_pack_cache_artifact_key(
     router: &StoreLayout,
     descriptor_key: &str,
@@ -2081,6 +2108,7 @@ fn generated_pack_cache_artifact_key(
         .to_owned())
 }
 
+#[cfg(test)]
 async fn extend_generated_pack_cache_reachable(
     store: &Store,
     router: &StoreLayout,
@@ -2142,6 +2170,7 @@ async fn extend_generated_pack_cache_reachable(
     }
 }
 
+#[cfg(test)]
 async fn stream_generated_pack_cache_reachable(
     store: &Store,
     router: &StoreLayout,
@@ -2203,6 +2232,7 @@ async fn stream_generated_pack_cache_reachable(
     }
 }
 
+#[cfg(test)]
 async fn resolve_generated_pack_cache_descriptor(
     store: Store,
     router: StoreLayout,
@@ -2232,6 +2262,7 @@ async fn resolve_generated_pack_cache_descriptor(
     Ok(Some((descriptor_key, artifact_key)))
 }
 
+#[cfg(test)]
 async fn stream_reachable_bulk_objects(
     store: &Store,
     router: &StoreLayout,
@@ -2393,6 +2424,7 @@ async fn stream_reachable_bulk_objects(
     Ok(())
 }
 
+#[cfg(test)]
 async fn stream_shallow_closure_reachable(
     store: &Store,
     router: &StoreLayout,
@@ -2431,6 +2463,7 @@ async fn stream_shallow_closure_reachable(
     Ok(())
 }
 
+#[cfg(test)]
 fn pack_object_keys(router: &StoreLayout, pack_id: &str) -> [String; 5] {
     [
         router.pack_path(pack_id).as_ref().to_owned(),
@@ -2441,11 +2474,13 @@ fn pack_object_keys(router: &StoreLayout, pack_id: &str) -> [String; 5] {
     ]
 }
 
+#[cfg(test)]
 struct PackReachabilityVisitor<'router, 'sink, 'roots> {
     router: &'router StoreLayout,
     sink: &'sink mut RepoReachabilitySink<'roots>,
 }
 
+#[cfg(test)]
 impl
     crab_metadata::segmented_store::AsyncRecordVisitor<
         crate::metadata::manifest::PackManifestEntry,
@@ -2465,10 +2500,12 @@ impl
     }
 }
 
+#[cfg(test)]
 struct WorkflowArtifactReachabilityVisitor<'sink, 'roots> {
     sink: &'sink mut RepoReachabilitySink<'roots>,
 }
 
+#[cfg(test)]
 impl crab_workflow::RemoteArtifactReachabilityVisitor<CrabError>
     for WorkflowArtifactReachabilityVisitor<'_, '_>
 {
@@ -2477,8 +2514,10 @@ impl crab_workflow::RemoteArtifactReachabilityVisitor<CrabError>
     }
 }
 
+#[cfg(test)]
 const MAX_WORKFLOW_ROOT_BODY_BYTES: usize = 8 * 1024 * 1024;
 
+#[cfg(test)]
 async fn stream_reachable_workflow_objects(
     store: &Store,
     router: &StoreLayout,
@@ -2593,6 +2632,7 @@ async fn stream_reachable_workflow_objects(
     Ok(())
 }
 
+#[cfg(test)]
 async fn stream_workflow_stage_manifest(
     store: &Store,
     router: &StoreLayout,
@@ -2670,6 +2710,7 @@ async fn stream_workflow_stage_manifest(
     Ok(manifest_path)
 }
 
+#[cfg(test)]
 async fn reachable_repo_objects_from_manifest_with_concurrency(
     store: &Store,
     router: &StoreLayout,
@@ -2685,6 +2726,7 @@ async fn reachable_repo_objects_from_manifest_with_concurrency(
     .await
 }
 
+#[cfg(test)]
 async fn reachable_repo_objects_from_manifest_with_options(
     store: &Store,
     router: &StoreLayout,
@@ -2769,6 +2811,7 @@ async fn reachable_repo_objects_from_manifest_with_options(
     })
 }
 
+#[cfg(test)]
 async fn extend_reachable_pack_objects(
     store: &Store,
     router: &StoreLayout,
@@ -2790,6 +2833,7 @@ async fn extend_reachable_pack_objects(
     Ok(())
 }
 
+#[cfg(test)]
 fn insert_pack_objects(router: &StoreLayout, pack_id: &str, reachable: &mut HashSet<String>) {
     reachable.insert(router.pack_path(pack_id).as_ref().to_owned());
     reachable.insert(router.pack_index_path(pack_id).as_ref().to_owned());
@@ -2802,6 +2846,7 @@ fn insert_pack_objects(router: &StoreLayout, pack_id: &str, reachable: &mut Hash
 /// Workflow refs are the authoritative roots for stage-cache and experiment
 /// namespaces; malformed roots abort the mark phase instead of allowing a
 /// partially parsed live set to authorize deletion.
+#[cfg(test)]
 async fn extend_reachable_workflow_objects(
     store: &Store,
     router: &StoreLayout,
@@ -2916,6 +2961,7 @@ async fn extend_reachable_workflow_objects(
     Ok(())
 }
 
+#[cfg(test)]
 async fn protect_workflow_stage_manifest(
     store: &Store,
     router: &StoreLayout,
@@ -2998,21 +3044,292 @@ pub async fn run_repo_remote_gc(
     coordinator_protected_keys: &HashSet<String>,
     cancel: &CancellationToken,
     grace_period: Duration,
-    jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+    _jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
 ) -> Result<GcOutcome> {
-    run_repo_remote_gc_under_maintenance(
+    run_capsule_gc(
         args,
         store,
         router,
         coordinator_protected_keys,
         cancel,
         grace_period,
-        jsonl_stream,
-        None,
     )
     .await
 }
 
+async fn run_capsule_gc(
+    args: &GcArgs,
+    store: &Store,
+    router: &StoreLayout,
+    coordinator_protected_keys: &HashSet<String>,
+    cancel: &CancellationToken,
+    grace_period: Duration,
+) -> Result<GcOutcome> {
+    const FENCE_TTL: Duration = Duration::from_secs(60 * 60);
+
+    if args.resume_run_id.is_some() {
+        return Err(CrabError::Configuration {
+            key: "gc.resume".to_owned(),
+            origin: "protocol-v2 GC completes under one root fence and has no journal resume mode"
+                .to_owned(),
+        });
+    }
+    if args.force && !confirm_force(args)? {
+        return Ok(GcOutcome::default());
+    }
+    check_cancelled(cancel)?;
+    let started = Instant::now();
+    let snapshot_at = SystemTime::now();
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let sweep_lease = if args.dry_run {
+        None
+    } else {
+        Some(crate::maintenance::GcSweepLease::acquire(store, router.repo_prefix(), cancel).await?)
+    };
+    let operation = async {
+        let base = crab_write::capsule_protocol::open_root(&layout).await?;
+        let fence_id = blake3::hash(uuid::Uuid::now_v7().as_bytes())
+            .to_hex()
+            .to_string();
+        let expires_at_unix = snapshot_at
+            .checked_add(FENCE_TTL)
+            .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .ok_or_else(|| {
+                CrabError::Internal("GC fence expiry cannot be represented".to_owned())
+            })?;
+        let fenced = if args.dry_run {
+            base
+        } else {
+            crab_write::capsule_protocol::begin_gc(
+                &layout,
+                base,
+                crab_metadata::capsule_protocol::GcFence::new(&fence_id, expires_at_unix)?,
+            )
+            .await?
+        };
+        // View loading can fail on missing or corrupt dependencies. Keep it
+        // inside the cleanup boundary so failed admission cannot fence all
+        // later publications indefinitely.
+        let sweep = async {
+            let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+                &layout,
+                fenced.clone(),
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: u64::MAX,
+                    max_frontier_bytes: u64::MAX,
+                },
+            )
+            .await?;
+            sweep_capsule_objects(
+                args,
+                store,
+                &layout,
+                fenced.record().root(),
+                view.capsule_run_pointers(),
+                coordinator_protected_keys,
+                cancel,
+                snapshot_at,
+                grace_period,
+                started,
+            )
+            .await
+        }
+        .await;
+        if args.dry_run {
+            return sweep;
+        }
+        let release = crab_write::capsule_protocol::end_gc(&layout, fenced, &fence_id).await;
+        match (sweep, release) {
+            (Ok(outcome), Ok(_)) => Ok(outcome),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error.into()),
+        }
+    }
+    .await;
+    let release = match sweep_lease {
+        Some(lease) => lease.release().await,
+        None => Ok(()),
+    };
+    match (operation, release) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "GC sweep keeps its safety snapshot and policy explicit"
+)]
+async fn sweep_capsule_objects(
+    args: &GcArgs,
+    store: &Store,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
+    capsule_runs: &[crab_metadata::capsule_protocol::CapsulePointer],
+    coordinator_protected_keys: &HashSet<String>,
+    cancel: &CancellationToken,
+    snapshot_at: SystemTime,
+    grace_period: Duration,
+    started: Instant,
+) -> Result<GcOutcome> {
+    let mut reachable = HashSet::new();
+    if let Some(checkpoint) = root.checkpoint() {
+        reachable.insert(
+            layout
+                .capsule_checkpoint_path(checkpoint.hash())
+                .to_string(),
+        );
+        mark_layered_checkpoint_sources(layout, checkpoint, &mut reachable).await?;
+    }
+    reachable.extend(
+        capsule_runs
+            .iter()
+            .map(|run| layout.capsule_path(run.hash()).to_string()),
+    );
+    let active_keys = reachable.clone();
+    if let Some(history) = root.history() {
+        let segments = crab_metadata::capsule_protocol::load_history_chain(
+            layout,
+            history,
+            crab_metadata::capsule_protocol::MAX_HISTORY_CHAIN_SEGMENTS,
+            crab_metadata::capsule_protocol::MAX_HISTORY_CHAIN_BYTES,
+        )
+        .await?;
+        for segment in segments {
+            reachable.insert(
+                layout
+                    .capsule_history_segment_path(segment.hash())
+                    .to_string(),
+            );
+            reachable.insert(
+                layout
+                    .capsule_checkpoint_path(segment.checkpoint().hash())
+                    .to_string(),
+            );
+            mark_layered_checkpoint_sources(layout, segment.checkpoint(), &mut reachable).await?;
+            reachable.extend(
+                segment
+                    .capsule_runs()
+                    .iter()
+                    .map(|run| layout.capsule_path(run.hash()).to_string()),
+            );
+        }
+    }
+    reachable.extend(coordinator_protected_keys.iter().cloned());
+
+    let capsule_prefix = layout.repo_path("v2/capsules/");
+    let checkpoint_prefix = layout.repo_path("v2/checkpoints/");
+    let pack_layer_prefix = layout.repo_path("v2/pack-layers/");
+    let history_prefix = layout.repo_path("v2/history/");
+    let (capsules, checkpoints, pack_layers, history) = tokio::try_join!(
+        store.list_prefix(&capsule_prefix),
+        store.list_prefix(&checkpoint_prefix),
+        store.list_prefix(&pack_layer_prefix),
+        store.list_prefix(&history_prefix),
+    )?;
+    let cutoff = snapshot_at - grace_period.max(MIN_GRACE_PERIOD);
+    // Classify the same unique source objects used by the sweep, not members
+    // repeated across checkpoints. Provider sizes avoid extra payload reads.
+    let mut accounting = GcOutcome::default();
+    for object in capsules.iter().chain(&pack_layers) {
+        let bytes = if active_keys.contains(object.location.as_ref()) {
+            &mut accounting.active_pack_bytes
+        } else if reachable.contains(object.location.as_ref()) {
+            &mut accounting.retained_history_pack_bytes
+        } else if SystemTime::from(object.last_modified) >= cutoff {
+            &mut accounting.grace_period_pack_bytes
+        } else {
+            &mut accounting.collectible_pack_bytes
+        };
+        *bytes = bytes.saturating_add(object.size);
+    }
+    let candidates = capsules
+        .into_iter()
+        .chain(checkpoints)
+        .chain(pack_layers)
+        .chain(history)
+        .filter(|object| !reachable.contains(object.location.as_ref()))
+        // Per-ref publications do not register in one shared writer object.
+        // Snapshot readers may still hold an older head, so even forced GC
+        // retains the immutable-object grace period instead of racing them.
+        .filter(|object| SystemTime::from(object.last_modified) < cutoff)
+        .collect::<Vec<_>>();
+    if args.dry_run {
+        accounting.packs_deleted = candidates.len() as u64;
+        accounting.bytes_reclaimed = candidates
+            .iter()
+            .fold(0u64, |bytes, object| bytes.saturating_add(object.size));
+    } else {
+        let deleter = StoreObjectDeleter::new(store.clone());
+        let policy = DeletePolicy {
+            snapshot_at,
+            grace_period,
+            // Keep the v2 reader grace at HEAD too: a same-content rewrite
+            // may refresh Last-Modified without changing its ETag or size.
+            force: false,
+        };
+        let concurrency = args.delete_concurrency.max(1);
+        let mut deletes = futures_util::stream::iter(candidates.iter().map(|object| {
+            let meta = ObjectMeta {
+                key: object.location.to_string(),
+                size: object.size,
+                last_modified: SystemTime::from(object.last_modified),
+                e_tag: object.e_tag.clone(),
+                version: object.version.clone(),
+                storage_class: None,
+                transitioned_at: None,
+            };
+            let deleter = &deleter;
+            async move { (meta.size, deleter.delete_candidate(&meta, policy).await) }
+        }))
+        .buffer_unordered(concurrency);
+        while let Some((size, result)) = deletes.next().await {
+            check_cancelled(cancel)?;
+            // HEAD may retain a candidate whose identity or freshness changed
+            // after LIST. Planned bytes are not reclaimed in that case.
+            if result? == CandidateDelete::Deleted {
+                accounting.packs_deleted += 1;
+                accounting.bytes_reclaimed = accounting.bytes_reclaimed.saturating_add(size);
+            }
+        }
+    }
+    Ok(GcOutcome {
+        list_requests: 4,
+        list_parallelism: 4,
+        list_wall_seconds: started.elapsed().as_secs_f64(),
+        dry_run: args.dry_run,
+        ..accounting
+    })
+}
+
+async fn mark_layered_checkpoint_sources(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    pointer: &crab_metadata::capsule_protocol::CheckpointPointer,
+    reachable: &mut HashSet<String>,
+) -> Result<()> {
+    let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(layout, pointer)
+        .await
+        .map_err(CrabError::from)?;
+    for source in checkpoint.sources() {
+        let path = match source.kind() {
+            crab_metadata::capsule_protocol::PackSourceKind::CapsuleRun => {
+                layout.capsule_path(source.object_hash())
+            }
+            crab_metadata::capsule_protocol::PackSourceKind::PackLayer => {
+                layout.capsule_pack_layer_path(source.object_hash())
+            }
+        };
+        reachable.insert(path.to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 async fn run_repo_remote_gc_under_maintenance(
     args: &GcArgs,
     store: &Store,
@@ -3094,6 +3411,7 @@ async fn run_repo_remote_gc_under_maintenance(
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg(test)]
 struct PackStorageClasses {
     active: u64,
     retained: u64,
@@ -3101,6 +3419,7 @@ struct PackStorageClasses {
     collectible: u64,
 }
 
+#[cfg(test)]
 fn classify_pack_storage(
     objects: &[ObjectMeta],
     current_pack_keys: &HashSet<String>,
@@ -4119,13 +4438,14 @@ mod tests {
             yes: true,
             ..GcArgs::default()
         };
-        run_repo_remote_gc(
+        run_repo_remote_gc_under_maintenance(
             &args,
             &store,
             &router,
             &HashSet::new(),
             &CancellationToken::new(),
             Duration::from_secs(3600),
+            None,
             None,
         )
         .await
@@ -4230,13 +4550,14 @@ mod tests {
             yes: true,
             ..GcArgs::default()
         };
-        let outcome = run_repo_remote_gc(
+        let outcome = run_repo_remote_gc_under_maintenance(
             &args,
             &store,
             &router,
             &HashSet::new(),
             &CancellationToken::new(),
             Duration::from_secs(3600),
+            None,
             None,
         )
         .await
@@ -4532,7 +4853,7 @@ mod tests {
             .put(&garbage, bytes::Bytes::from_static(b"unreferenced"))
             .await
             .unwrap();
-        let outcome = run_repo_remote_gc(
+        let outcome = run_repo_remote_gc_under_maintenance(
             &GcArgs {
                 force: true,
                 yes: true,
@@ -4543,6 +4864,7 @@ mod tests {
             &HashSet::new(),
             &CancellationToken::new(),
             Duration::from_secs(3600),
+            None,
             None,
         )
         .await
@@ -4766,13 +5088,14 @@ mod tests {
         let protected: HashSet<String> = [protected_key.to_owned()].into_iter().collect();
         let cancel = CancellationToken::new();
 
-        let outcome = run_repo_remote_gc(
+        let outcome = run_repo_remote_gc_under_maintenance(
             &args,
             &store,
             &router,
             &protected,
             &cancel,
             Duration::from_secs(3600),
+            None,
             None,
         )
         .await
@@ -4813,7 +5136,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        let error = run_repo_remote_gc(
+        let error = run_repo_remote_gc_under_maintenance(
             &GcArgs::default(),
             &store,
             &router,
@@ -4821,14 +5144,88 @@ mod tests {
             &CancellationToken::new(),
             Duration::from_secs(3600),
             None,
+            None,
         )
         .await
         .unwrap_err();
         assert!(matches!(error, CrabError::PushLockHeld { .. }));
 
-        let preview = run_repo_remote_gc(
+        let preview = run_repo_remote_gc_under_maintenance(
             &GcArgs {
                 dry_run: true,
+                ..GcArgs::default()
+            },
+            &store,
+            &router,
+            &HashSet::new(),
+            &CancellationToken::new(),
+            Duration::from_secs(3600),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(preview.dry_run);
+        writer.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn capsule_protocol_gc_retains_visible_runs_and_fresh_orphans() {
+        use bytes::Bytes;
+        use crab_metadata::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleTransaction};
+        use object_store::memory::InMemory;
+        use object_store::path::Path as ObjectPath;
+        use std::sync::Arc;
+
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/v2-gc".to_owned());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let base =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 1024 * 1024,
+                max_frontier_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+        let live = layout.capsule_path(view.capsule_run_pointers()[0].hash());
+        let orphan = layout.capsule_path(&"f".repeat(64));
+        store
+            .put(
+                &ObjectPath::from(orphan.to_string()),
+                Bytes::from_static(b"orphan"),
+            )
+            .await
+            .unwrap();
+
+        let outcome = run_repo_remote_gc(
+            &GcArgs {
+                force: true,
+                yes: true,
                 ..GcArgs::default()
             },
             &store,
@@ -4840,8 +5237,207 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(preview.dry_run);
-        writer.release().await.unwrap();
+
+        assert_eq!(outcome.packs_deleted, 0);
+        assert!(store.head(&live).await.is_ok());
+        assert!(store.head(&orphan).await.is_ok());
+        let root = crab_write::capsule_protocol::open_root(&layout)
+            .await
+            .unwrap();
+        assert!(root.record().root().gc_fence().is_none());
+        let view = crab_read::capsule_protocol::open_view_from_root(
+            &layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 1024 * 1024,
+                max_frontier_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.refs().get("refs/heads/main"), Some(&"2".repeat(40)));
+    }
+
+    #[tokio::test]
+    async fn capsule_protocol_gc_retains_layered_checkpoint_history_and_sources() {
+        use bytes::Bytes;
+        use crab_metadata::capsule_protocol::{
+            Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction, LayeredCheckpoint,
+            PackLayer, PointerCatalog,
+        };
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/v2-layer-gc".to_owned());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let base =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        let captured = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 1024 * 1024,
+                max_frontier_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+        let layer = PackLayer::build(
+            &CapsuleGitPack::new(
+                Bytes::from_static(b"PACK"),
+                Bytes::from_static(b"index"),
+                Bytes::from_static(b"reverse"),
+                Bytes::from_static(b"locator"),
+                "3".repeat(40),
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let source = layer.source_descriptor().unwrap();
+        let checkpoint = LayeredCheckpoint::build(
+            captured.root().root().generation(),
+            captured.root().digest(),
+            vec![source],
+            PointerCatalog::new(),
+            None,
+        )
+        .unwrap();
+        let live_layer = layout.capsule_pack_layer_path(layer.hash());
+        store.put(&live_layer, layer.bytes().clone()).await.unwrap();
+        let root = crab_write::capsule_protocol::publish_ref_layered_checkpoint(
+            &layout,
+            captured.root_snapshot().clone(),
+            &checkpoint,
+            captured.refs().clone(),
+            captured.peeled_refs().clone(),
+            captured.visible_ref_transactions().clone(),
+            captured.capsule_run_pointers().to_vec(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            root.record().root().compacted_ref_transactions(),
+            captured.visible_ref_transactions()
+        );
+        let history = root.record().root().history().unwrap();
+        let history_path = layout.capsule_history_segment_path(history.hash());
+        let run_path = layout.capsule_path(captured.capsule_run_pointers()[0].hash());
+        let checkpoint_path = layout.capsule_checkpoint_path(checkpoint.hash());
+        let orphans = [
+            layout.capsule_pack_layer_path(&"f".repeat(64)),
+            layout.capsule_checkpoint_path(&"e".repeat(64)),
+            layout.capsule_path(&"a".repeat(64)),
+            layout.capsule_history_segment_path(&"c".repeat(64)),
+        ];
+        for path in &orphans {
+            store
+                .put(path, Bytes::from_static(b"orphan"))
+                .await
+                .unwrap();
+        }
+
+        let protected_layer = layout.capsule_pack_layer_path(&"b".repeat(64));
+        store
+            .put(&protected_layer, Bytes::from_static(b"protected"))
+            .await
+            .unwrap();
+        let protected = HashSet::from([protected_layer.to_string()]);
+        let active_bytes = layer.bytes().len() as u64;
+        let retained_bytes = captured.capsule_run_pointers()[0].size() + 9;
+        for force in [false, true] {
+            let preview = sweep_capsule_objects(
+                &GcArgs {
+                    dry_run: true,
+                    force,
+                    ..GcArgs::default()
+                },
+                &store,
+                &layout,
+                root.record().root(),
+                &[],
+                &protected,
+                &CancellationToken::new(),
+                SystemTime::now(),
+                Duration::from_secs(3600),
+                Instant::now(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                (
+                    preview.active_pack_bytes,
+                    preview.retained_history_pack_bytes,
+                    preview.grace_period_pack_bytes,
+                    preview.collectible_pack_bytes,
+                ),
+                (active_bytes, retained_bytes, 12, 0),
+            );
+            assert_eq!(preview.packs_deleted, 0);
+        }
+
+        let outcome = sweep_capsule_objects(
+            &GcArgs::default(),
+            &store,
+            &layout,
+            root.record().root(),
+            &[],
+            &protected,
+            &CancellationToken::new(),
+            SystemTime::now() + Duration::from_secs(2 * 3600),
+            Duration::from_secs(3600),
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            (
+                outcome.active_pack_bytes,
+                outcome.retained_history_pack_bytes,
+                outcome.grace_period_pack_bytes,
+                outcome.collectible_pack_bytes,
+            ),
+            (active_bytes, retained_bytes, 0, 12),
+        );
+        assert_eq!(outcome.packs_deleted, 4);
+        for path in [
+            live_layer,
+            history_path,
+            run_path,
+            checkpoint_path,
+            protected_layer,
+        ] {
+            assert!(store.head(&path).await.is_ok());
+        }
+        for path in orphans {
+            assert!(matches!(
+                store.head(&path).await,
+                Err(CrabError::NotFound { .. })
+            ));
+        }
+        assert_eq!(outcome.list_requests, 4);
+        assert_eq!(outcome.list_parallelism, 4);
     }
 
     #[tokio::test]

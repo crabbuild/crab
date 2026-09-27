@@ -8,9 +8,7 @@ use crate::error::{MetadataError, Result};
 use crate::validation::validate_content_hash;
 
 #[cfg(feature = "storage")]
-use bytes::Bytes;
-#[cfg(feature = "storage")]
-use crab_storage::{StorageError, Store, StoreLayout};
+use crab_storage::{Store, StoreLayout};
 
 const LAYER_MAGIC: &[u8; 8] = b"CRABCG01";
 const LAYER_VERSION: u32 = 1;
@@ -794,7 +792,9 @@ pub async fn load_split_commit_graph(
         }
         let path = router.repo_path(&reference.path);
         let expected = decode_hash(&reference.hash, path.as_ref())?;
-        let bytes = store.verify(&path, &expected).await?;
+        let bytes = store
+            .verify_bounded(&path, &expected, reference.bytes)
+            .await?;
         if bytes.len() as u64 != reference.bytes {
             return Err(MetadataError::CorruptObject {
                 path: path.to_string(),
@@ -833,14 +833,10 @@ async fn read_split_commit_graph_descriptor(
     )?;
     let descriptor_path = router.bulk_manifest_path("commit-graph", descriptor_hash);
     let expected = decode_hash(descriptor_hash, descriptor_path.as_ref())?;
-    let descriptor_bytes = store.verify(&descriptor_path, &expected).await?;
+    let descriptor_bytes = store
+        .verify_bounded(&descriptor_path, &expected, max_bytes)
+        .await?;
     let fetched_bytes = descriptor_bytes.len() as u64;
-    if fetched_bytes > max_bytes {
-        return Err(MetadataError::CorruptObject {
-            path: descriptor_path.to_string(),
-            reason: format!("commit graph exceeds {max_bytes} byte limit"),
-        });
-    }
     let descriptor = decode_commit_graph_descriptor(&descriptor_bytes, descriptor_path.as_ref())?;
     Ok((descriptor, fetched_bytes))
 }
@@ -853,35 +849,21 @@ pub async fn upload_split_commit_graph(
     write: &CommitGraphWrite,
 ) -> Result<()> {
     for layer in &write.layers {
-        upload_if_absent(
+        crate::derived_index::upload(
             store,
             &router.repo_path(&layer.reference.path),
+            &layer.reference.hash,
             &layer.bytes,
         )
         .await?;
     }
-    upload_if_absent(
+    crate::derived_index::upload(
         store,
         &router.bulk_manifest_path("commit-graph", &write.descriptor_hash),
+        &write.descriptor_hash,
         &write.descriptor_bytes,
     )
     .await
-}
-
-#[cfg(feature = "storage")]
-async fn upload_if_absent(
-    store: &Store,
-    path: &object_store::path::Path,
-    bytes: &[u8],
-) -> Result<()> {
-    match store.head(path).await {
-        Ok(_) => Ok(()),
-        Err(StorageError::NotFound { .. }) => store
-            .put(path, Bytes::copy_from_slice(bytes))
-            .await
-            .map_err(MetadataError::from),
-        Err(error) => Err(MetadataError::from(error)),
-    }
 }
 
 #[cfg(feature = "storage")]
@@ -1065,6 +1047,104 @@ fn corrupt_at<T>(path: &str, reason: &str) -> Result<T> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn commit_graph_byte_budget_rejects_before_excess_body_reads() {
+        use object_store::ObjectStoreExt;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        };
+
+        let observed = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&observed);
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_read_byte_observer(Arc::new(move |bytes| {
+                counter.fetch_add(bytes, Ordering::Relaxed);
+            }));
+        let layout = StoreLayout::new(store.clone(), "bounded-graph".to_owned());
+        let (write, expected) = append(None, 1, &[oid(1)], vec![input(1, 10, &[])]);
+        upload_split_commit_graph(&store, &layout, &write)
+            .await
+            .unwrap();
+        let descriptor_bytes = write.descriptor_bytes.len() as u64;
+        let layer = &write.layers[0];
+        let total = descriptor_bytes + layer.bytes.len() as u64;
+        for (budget, oversized_layer, expected_read) in [
+            (descriptor_bytes - 1, false, 0),
+            (total - 1, false, descriptor_bytes),
+            (total, true, descriptor_bytes),
+        ] {
+            if oversized_layer {
+                store
+                    .inner()
+                    .put(
+                        &layout.repo_path(&layer.reference.path),
+                        bytes::Bytes::from(vec![b'!'; layer.bytes.len() + 1]).into(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            observed.store(0, Ordering::Relaxed);
+            assert!(
+                load_split_commit_graph(&store, &layout, &write.descriptor_hash, budget)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                observed.load(Ordering::Relaxed),
+                expected_read,
+                "budget={budget}, oversized_layer={oversized_layer}"
+            );
+        }
+        upload_split_commit_graph(&store, &layout, &write)
+            .await
+            .unwrap();
+        observed.store(0, Ordering::Relaxed);
+        let actual = load_split_commit_graph(&store, &layout, &write.descriptor_hash, total)
+            .await
+            .unwrap();
+        assert_eq!(actual.record(0), expected.record(0));
+        assert_eq!(observed.load(Ordering::Relaxed), total);
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn rebuilding_commit_graph_repairs_corrupt_immutable_bytes() {
+        use object_store::ObjectStoreExt;
+        let store = Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+        let layout = StoreLayout::new(store.clone(), "repair".to_owned());
+        let (write, expected) = append(None, 1, &[oid(1)], vec![input(1, 10, &[])]);
+        upload_split_commit_graph(&store, &layout, &write)
+            .await
+            .unwrap();
+        for path in [
+            layout.bulk_manifest_path("commit-graph", &write.descriptor_hash),
+            layout.repo_path(&write.layers[0].reference.path),
+        ] {
+            for size in [1, 4096] {
+                store
+                    .inner()
+                    .put(&path, bytes::Bytes::from(vec![b'!'; size]).into())
+                    .await
+                    .unwrap();
+                assert!(
+                    load_split_commit_graph(&store, &layout, &write.descriptor_hash, 1 << 20)
+                        .await
+                        .is_err()
+                );
+                upload_split_commit_graph(&store, &layout, &write)
+                    .await
+                    .unwrap();
+                let actual =
+                    load_split_commit_graph(&store, &layout, &write.descriptor_hash, 1 << 20)
+                        .await
+                        .unwrap();
+                assert_eq!(actual.record(0), expected.record(0));
+            }
+        }
+    }
 
     fn oid(value: u8) -> [u8; 20] {
         [value; 20]

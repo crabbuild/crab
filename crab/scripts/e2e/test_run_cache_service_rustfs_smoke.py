@@ -114,6 +114,12 @@ class OriginFixtureSafetyTests(unittest.TestCase):
         self.assertTrue(specs)
         self.assertTrue(all(key.startswith("e2e-cache-service/owned-run/") for _, key, _ in specs))
 
+    def test_cache_only_route_specs_are_run_scoped(self) -> None:
+        specs = self.smoke.synthetic_cache_only_route_specs()
+        self.assertTrue(specs)
+        self.assertTrue(all(key.startswith(".crab/chunk_index_db/") for _, key, _ in specs))
+        self.assertTrue(all("owned-run" in key for _, key, _ in specs))
+
     def test_global_route_selection_uses_observed_nonempty_origin_bytes(self) -> None:
         self.smoke.check = Mock()
         prefix = ".crab/chunk_index_db/wal/"
@@ -209,14 +215,14 @@ class CacheServiceRecoveryTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_only_first_metadata_put_fails_and_forwarding_preserves_auth(self):
+    def test_only_first_xorb_put_fails_and_forwarding_preserves_auth(self):
         origin = SimpleNamespace(bucket="owned", record=Mock())
-        with self.upstream() as (upstream, seen), smoke_module.recovering_cache_service(origin, upstream, gate_seconds=0) as (url, snapshot):
+        with self.upstream() as (upstream, seen), smoke_module.recovering_cache_service(origin, upstream) as (url, snapshot):
             for method, path, expected in (
                 ("GET", "/v1/health", 200),
-                ("PUT", "/v1/.crab/xorbs/hash", 201),
-                ("PUT", "/v1/repo/file_index_db/manifest/1.manifest?token=private-query", 503),
-                ("PUT", "/v1/repo/file_index_db/manifest/2.manifest", 201),
+                ("PUT", "/v1/repo/file_index_db/manifest/1.manifest?token=private-query", 201),
+                ("PUT", "/v1/.crab/xorbs/first", 503),
+                ("PUT", "/v1/.crab/xorbs/second", 201),
             ):
                 with self.subTest(path=path):
                     self.assertEqual(self.request(url, method, path), expected)
@@ -226,44 +232,24 @@ class CacheServiceRecoveryTests(unittest.TestCase):
             self.assertEqual(sum(bool(row.get("injected")) for row in evidence["requests"]), 1)
             self.assertNotIn("private-", json.dumps(evidence))
 
-    def test_origin_gates_are_sequential_metadata_only_and_restore_recorder(self):
+    def test_recovery_proxy_does_not_replace_origin_recorder(self):
         original = Mock()
         origin = SimpleNamespace(bucket="owned", record=original)
-        with self.upstream() as (upstream, _), smoke_module.recovering_cache_service(origin, upstream, gate_seconds=0) as (url, snapshot):
-            self.request(url, "PUT", "/v1/repo/file_index_db/manifest/1.manifest")
-            for method, path in (
-                ("PUT", "/other/repo/file_index_db/wal/1.sst"),
-                ("PUT", "/owned/repo/locks/main"),
-                ("GET", "/owned/repo/file_index_db/wal/1.sst"),
-                ("PUT", "/owned/repo/file_index_db/wal/1.sst"),
-                ("PUT", "/owned/.crab/chunk_index_db/manifest/1.manifest"),
-                ("PUT", "/owned/repo/file_index_db/wal/2.sst"),
-            ):
-                origin.record(method, path)
-            gates = snapshot()["origin_gates"]
-            self.assertEqual(len(gates), 2)
-            self.assertTrue(all(row["cancelled"] is False for row in gates))
-            self.assertLessEqual(gates[0]["end_s"], gates[1]["start_s"])
-            self.assertEqual(original.call_count, 6)
+        with self.upstream() as (upstream, _), smoke_module.recovering_cache_service(origin, upstream) as (url, snapshot):
+            self.request(url, "PUT", "/v1/.crab/xorbs/first")
+            self.assertEqual(len(snapshot()["requests"]), 1)
+            self.assertIs(origin.record, original)
+            original.assert_not_called()
         self.assertIs(origin.record, original)
 
-    def test_failure_teardown_releases_held_origin_and_closes_endpoint(self):
+    def test_failure_teardown_closes_endpoint(self):
         original = Mock()
         origin = SimpleNamespace(bucket="owned", record=original)
         with self.upstream() as (upstream, _):
             with self.assertRaisesRegex(RuntimeError, "workload failed"):
-                with smoke_module.recovering_cache_service(origin, upstream, gate_seconds=60) as (url, snapshot):
-                    self.request(url, "PUT", "/v1/repo/file_index_db/manifest/1.manifest")
-                    worker = threading.Thread(target=origin.record, args=("PUT", "/owned/repo/file_index_db/wal/1.sst"))
-                    worker.start()
-                    deadline = time.monotonic() + 2
-                    while not snapshot()["origin_gates"] and time.monotonic() < deadline:
-                        time.sleep(0.001)
-                    self.assertTrue(snapshot()["origin_gates"])
+                with smoke_module.recovering_cache_service(origin, upstream) as (url, _):
+                    self.request(url, "PUT", "/v1/.crab/xorbs/first")
                     raise RuntimeError("workload failed")
-            worker.join(timeout=2)
-            self.assertFalse(worker.is_alive())
-            self.assertTrue(snapshot()["origin_gates"][0]["cancelled"])
             self.assertIs(origin.record, original)
             with self.assertRaises(ConnectionRefusedError):
                 self.request(url, "GET", "/v1/health")

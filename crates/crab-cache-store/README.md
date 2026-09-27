@@ -42,6 +42,21 @@ entries are bypassed even when eviction fails; corrupt origin bytes return
 `CacheStoreError::OriginIntegrity` with their verification error retained.
 Transport retry policy remains owned by `crab-storage`.
 
+`git_pack::read_pack_ranges` supplies the file-backed native-pack path. It
+uses the caller's selected origin, even when the cache was constructed around
+another store. A verified local hit copies the immutable pack body and reads
+sidecars from that selected origin. A miss retains the existing signed-stream
+or bounded parallel-range transport, verifies the pack hash, and attempts local
+retention before returning. Corrupt/unavailable caches use origin; destination
+write failures are terminal, while optional cache persistence failures do not
+discard verified output. The caller owns destination cleanup after cancellation,
+sidecar authentication, Git index checks, visibility, and authorization. This
+path does not add capsule/layer admission to the remote cache service.
+Its operation token reaches signed and ordinary range reads. Cancellation stops
+network waits, then drains file I/O and any already-started verified cache fill.
+Callers await the result before removing private staging; a completed immutable
+cache fill is reusable even if the surrounding Git operation is cancelled.
+
 `CacheStoreError::Cache` and `Storage` preserve the domain error itself as
 `Error::source()`, including source-free failures such as access denial.
 Display text stays unchanged. Reconstruction consumers can classify the typed

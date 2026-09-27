@@ -1,16 +1,12 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crab_git::{
-    PointerKind, classify,
-    lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE},
-};
-use crab_types::pointer::Pointer;
-
 use crate::error::{AuthServerError, Result};
+#[cfg(test)]
+use crate::git_pointer_scan::scan_reachable_pointers;
 use crate::view::ViewS3Credentials;
 
 pub(super) struct ViewGitWorkspace {
@@ -88,12 +84,6 @@ impl ViewGitWorkspace {
     }
 }
 
-#[derive(Debug, Default)]
-pub(super) struct ReachablePointerScan {
-    pub(super) crab_pointers: Vec<Pointer>,
-    pub(super) lfs_pointers: Vec<LfsPointer>,
-}
-
 pub(super) fn clone_bare(
     source_url: &str,
     target: &Path,
@@ -110,6 +100,9 @@ pub(super) struct GeneratedViewPack {
     pub(super) bytes: Vec<u8>,
     pub(super) index: Vec<u8>,
     pub(super) reverse_index: Vec<u8>,
+    pub(super) locator: Vec<u8>,
+    pub(super) git_checksum: String,
+    pub(super) object_count: u64,
 }
 
 pub(super) fn generate_view_pack(filtered_git: &Path) -> Result<GeneratedViewPack> {
@@ -128,6 +121,9 @@ pub(super) fn generate_view_pack(filtered_git: &Path) -> Result<GeneratedViewPac
             bytes: Vec::new(),
             index: Vec::new(),
             reverse_index: Vec::new(),
+            locator: Vec::new(),
+            git_checksum: String::new(),
+            object_count: 0,
         });
     }
 
@@ -180,10 +176,44 @@ pub(super) fn generate_view_pack(filtered_git: &Path) -> Result<GeneratedViewPac
     let reverse_index_path = validation_pack.with_extension("rev");
     crab_git::pack_locator::write_pack_reverse_index(&index_path, &reverse_index_path)
         .map_err(crab_git::pack::PackError::from)?;
+    let index = std::fs::read(&index_path)?;
+    let reverse_index = std::fs::read(&reverse_index_path)?;
+    let mut locations = crab_git::pack_locator::PackLocationIter::open(
+        &index_path,
+        &reverse_index_path,
+        output.stdout.len() as u64,
+    )
+    .map_err(crab_git::pack::PackError::from)?;
+    let object_count = locations.object_count();
+    let object_ids = locations
+        .by_ref()
+        .map(|location| location.map(|location| location.oid))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(crab_git::pack::PackError::from)?;
+    let kinds = crab_git::object_kinds_from_git_dir(filtered_git, &object_ids)?;
+    let ordered_kinds = object_ids
+        .iter()
+        .map(|oid| {
+            kinds.get(oid).copied().ok_or_else(|| {
+                AuthServerError::Internal(
+                    "filtered view pack kind metadata omitted an object".to_owned(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let git_checksum = locations.pack_checksum().to_string();
+    let locator = crab_git::pack_locator::encode_pack_kind_metadata(
+        locations.pack_checksum(),
+        &ordered_kinds,
+    )
+    .map_err(crab_git::pack::PackError::from)?;
     Ok(GeneratedViewPack {
         bytes: output.stdout,
-        index: std::fs::read(index_path)?,
-        reverse_index: std::fs::read(reverse_index_path)?,
+        index,
+        reverse_index,
+        locator,
+        git_checksum,
+        object_count,
     })
 }
 
@@ -250,66 +280,6 @@ pub(super) fn resolve_view_head(
         .ok_or_else(|| {
             AuthServerError::Internal("view refs disappeared while resolving HEAD".to_owned())
         })
-}
-
-pub(super) fn scan_reachable_pointers(git_dir: &Path) -> Result<ReachablePointerScan> {
-    let output = run_git_capture(
-        [
-            "--git-dir",
-            path_str(git_dir)?,
-            "rev-list",
-            "--objects",
-            "--all",
-        ],
-        None,
-    )?;
-    let mut seen_objects = HashSet::new();
-    let mut seen_lfs_oids = HashSet::new();
-    let mut scan = ReachablePointerScan::default();
-
-    for line in output.lines() {
-        let Some(oid) = line.split_whitespace().next() else {
-            continue;
-        };
-        if !seen_objects.insert(oid.to_owned()) {
-            continue;
-        }
-
-        let kind = run_git_capture(
-            ["--git-dir", path_str(git_dir)?, "cat-file", "-t", oid],
-            None,
-        )?;
-        if kind.trim() != "blob" {
-            continue;
-        }
-
-        let size = run_git_capture(
-            ["--git-dir", path_str(git_dir)?, "cat-file", "-s", oid],
-            None,
-        )?
-        .trim()
-        .parse::<usize>()
-        .map_err(|e| AuthServerError::Internal(format!("git cat-file returned bad size: {e}")))?;
-        if size > MAX_LFS_POINTER_SIZE {
-            continue;
-        }
-
-        let bytes = run_git_capture_bytes(
-            ["--git-dir", path_str(git_dir)?, "cat-file", "blob", oid],
-            None,
-        )?;
-        match classify(&bytes) {
-            PointerKind::Crab(pointer) => scan.crab_pointers.push(pointer),
-            PointerKind::Lfs(pointer) if pointer.size > 0 => {
-                if seen_lfs_oids.insert(pointer.oid) {
-                    scan.lfs_pointers.push(pointer);
-                }
-            }
-            PointerKind::Lfs(_) | PointerKind::NotAPointer => {}
-        }
-    }
-
-    Ok(scan)
 }
 
 fn export_filtered_history(

@@ -37,6 +37,7 @@ pub struct ReadRuntimeBuilder {
     download_concurrency: usize,
     buffer_budget_bytes: u64,
     availability: Option<Arc<dyn XorbAvailability>>,
+    file_index_lookup: Option<SharedFileIndexLookup>,
 }
 
 impl ReadRuntimeBuilder {
@@ -51,6 +52,7 @@ impl ReadRuntimeBuilder {
             // also retain bytes. Reserve headroom for those overlapping allocations.
             buffer_budget_bytes: 128 * 1024 * 1024,
             availability: None,
+            file_index_lookup: None,
         }
     }
 
@@ -64,6 +66,13 @@ impl ReadRuntimeBuilder {
     #[must_use]
     pub fn with_availability(mut self, availability: Arc<dyn XorbAvailability>) -> Self {
         self.availability = Some(availability);
+        self
+    }
+
+    /// Bind reconstruction to a caller-captured immutable file-index view.
+    #[must_use]
+    pub fn with_file_index_lookup(mut self, lookup: SharedFileIndexLookup) -> Self {
+        self.file_index_lookup = Some(lookup);
         self
     }
 
@@ -102,6 +111,7 @@ impl ReadRuntimeBuilder {
             chunk_cache,
             metrics: None,
             availability: self.availability,
+            file_index_lookup: self.file_index_lookup,
         })
     }
 }
@@ -116,6 +126,7 @@ pub struct ShardHydrator {
     chunk_cache: Option<Arc<dyn xet_client::chunk_cache::ChunkCache>>,
     metrics: Option<Arc<dyn ReadMetrics>>,
     availability: Option<Arc<dyn XorbAvailability>>,
+    file_index_lookup: Option<SharedFileIndexLookup>,
 }
 
 impl ShardHydrator {
@@ -174,6 +185,13 @@ impl ShardHydrator {
     #[must_use]
     pub fn with_availability(mut self, availability: Arc<dyn XorbAvailability>) -> Self {
         self.availability = Some(availability);
+        self
+    }
+
+    /// Bind reconstruction to a caller-captured immutable file-index view.
+    #[must_use]
+    pub fn with_file_index_lookup(mut self, lookup: SharedFileIndexLookup) -> Self {
+        self.file_index_lookup = Some(lookup);
         self
     }
 
@@ -328,7 +346,9 @@ impl ShardHydrator {
             .map_or(ptr.size, |range| range.end - range.start);
         let full = range.is_none();
         let file_hash = MerkleHash::from(ptr.file_hash);
-        let client = self.store_client_for_pointer(ptr, file_index_lookup);
+        let client = self
+            .store_client_for_pointer(ptr, file_index_lookup)
+            .with_cancellation(cancel.clone());
         if full {
             self.preflight_shard_coverage(&client, ptr).await?;
         }
@@ -404,8 +424,11 @@ impl ShardHydrator {
     ) -> StoreClient {
         let file_hash = MerkleHash::from(ptr.file_hash);
         let mut client = self.store_client();
-        if let Some(lookup) = file_index_lookup {
-            client = client.with_file_index_lookup(lookup.clone());
+        if let Some(lookup) = file_index_lookup
+            .cloned()
+            .or_else(|| self.file_index_lookup.clone())
+        {
+            client = client.with_file_index_lookup(lookup);
         }
         match ptr.shard_hint {
             Some(hint) => client.with_shard_hint(file_hash, MerkleHash::from(hint)),
@@ -908,6 +931,9 @@ mod tests {
     #[async_trait::async_trait]
     impl crate::XorbAvailability for FailingAvailability {
         async fn ensure_available(&self, path: &object_store::path::Path) -> crate::Result<()> {
+            if path.to_string().contains("shards/") {
+                return Ok(());
+            }
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(cancel) = &self.cancel {
                 cancel.cancel();
@@ -1157,6 +1183,44 @@ mod tests {
                 .await
                 .unwrap(),
             original
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_file_index_lookup_keeps_reconstruction_on_captured_catalog() {
+        let directory = tempfile::tempdir().unwrap();
+        let (hydrator, mut pointer, expected) =
+            reconstruction_fixture(&directory.path().join("cache"), false).await;
+        let shard_hash = pointer.shard_hint.expect("fixture shard hint");
+        pointer.shard_hint = None;
+        let file_hash = crab_xet::hash::MerkleHash::from(pointer.file_hash);
+        let mut catalog = crab_metadata::capsule_protocol::PointerCatalog::new();
+        catalog
+            .insert_file(
+                file_hash.hex(),
+                crab_metadata::capsule_protocol::FileCatalogEntry::new(
+                    pointer.size,
+                    crab_xet::hash::MerkleHash::from(shard_hash).hex(),
+                ),
+            )
+            .unwrap();
+        let router = crab_storage::StoreLayout::with_global_prefix(
+            hydrator.store.origin().clone(),
+            hydrator.router.repo_prefix().to_owned(),
+            hydrator.router.global_prefix().to_owned(),
+        );
+        let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+            router, &catalog,
+        )
+        .unwrap();
+        let hydrator = hydrator.with_file_index_lookup(lookup);
+
+        assert_eq!(
+            hydrator
+                .reconstruct_from_pointer(&pointer.serialize())
+                .await
+                .unwrap(),
+            expected
         );
     }
 

@@ -100,3 +100,22 @@ _Avoid_: Cache-warm or sparse-active Cell
 An advisory, revision-pinned ranking or movement decision derived from signed
 fleet capacity. It never grants ownership; Cell authority remains decisive.
 _Avoid_: Ownership record or scheduler assignment
+## Capsule protocol language
+
+**Capsule**:
+A content-addressed immutable object that co-locates one ref transaction with
+its Git pack, authenticated indexes, and external Xorb/Shard dependency evidence.
+Large-file payloads remain outside the capsule.
+_Avoid_: Pack, because a capsule contains a Git pack plus non-pack evidence
+
+**Repository root**:
+The bounded mutable record for checkpoint, symbolic HEAD, GC, and maintenance
+transitions. Ordinary branch publication uses independently conditional per-ref
+heads rather than contending on this record.
+_Avoid_: Manifest, when referring to the capsule-protocol storage protocol
+
+**Checkpoint**:
+An immutable repository view binding refs, indexes, and a layered pack set.
+Stable pack bodies remain in their immutable sources; maintenance compacts a
+bounded suffix instead of rewriting the complete repository.
+_Avoid_: Snapshot, when referring to the stored capsule-protocol artifact

@@ -11,6 +11,53 @@ fn git_oid(byte: u8) -> String {
     format!("{byte:02x}").repeat(20)
 }
 
+fn lfs_remote_context(
+    store: &crate::storage::Store,
+    prefix: &str,
+) -> crate::cmd::lfs::store_setup::LfsRemoteContext {
+    crate::cmd::lfs::store_setup::LfsRemoteContext {
+        store: std::sync::Arc::new(crab_lfs::LfsObjectStore::new(
+            store.as_storage().clone(),
+            prefix,
+        )),
+        local_lfs_dir: std::path::PathBuf::new(),
+        config: crate::lfs::config::LfsConfig::default(),
+        prefix: prefix.to_owned(),
+    }
+}
+
+fn create_v1_manifest(store: &crate::storage::Store, prefix: &str, oid: &str) {
+    let router = crate::storage::StoreLayout::new(store.clone(), prefix.to_owned());
+    let mut manifest = crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main");
+    manifest
+        .refs
+        .insert("refs/heads/main".to_owned(), oid.to_owned());
+    manifest.seal_git_validation();
+    crate::cmd::lfs::block_on_runtime(async move {
+        crate::metadata::manifest::create_manifest(&store, &router, &manifest).await
+    })
+    .unwrap();
+}
+
+fn create_v2_root(store: &crate::storage::Store, prefix: &str) {
+    let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), prefix.to_owned());
+    let root = crab_metadata::capsule_protocol::RootRecord::encode(
+        crab_metadata::capsule_protocol::RepositoryRoot::initial(
+            &"1".repeat(64),
+            "refs/heads/main",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    crate::cmd::lfs::block_on_runtime(async move {
+        crab_metadata::capsule_protocol::create_root(&layout, root)
+            .await
+            .map(|_| ())
+            .map_err(CrabError::from)
+    })
+    .unwrap();
+}
+
 #[test]
 fn pre_push_revisions_preserve_updates_and_skip_deletes() {
     let input = format!(
@@ -46,20 +93,61 @@ fn pre_push_revisions_use_oids_for_tags_and_differently_named_destinations() {
 }
 
 #[test]
-fn missing_remote_manifest_is_an_empty_base_tip_set() {
+fn missing_remote_authority_is_an_empty_base_tip_set() {
     let store =
         crate::storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
-    let context = crate::cmd::lfs::store_setup::LfsRemoteContext {
-        store: std::sync::Arc::new(crab_lfs::LfsObjectStore::new(
-            store.into(),
-            "org/lfs-pre-push",
-        )),
-        local_lfs_dir: std::path::PathBuf::new(),
-        config: crate::lfs::config::LfsConfig::default(),
-        prefix: "org/lfs-pre-push".to_owned(),
-    };
+    let context = lfs_remote_context(&store, "org/lfs-pre-push");
 
-    assert!(load_remote_manifest_ref_tips(&context).unwrap().is_empty());
+    assert!(load_remote_ref_tips(&context).unwrap().is_empty());
+}
+
+#[test]
+fn remote_ref_tips_fall_back_to_v1_manifest() {
+    let store =
+        crate::storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+    let prefix = "org/lfs-pre-push-v1";
+    let expected = git_oid(1);
+    create_v1_manifest(&store, prefix, &expected);
+    let context = lfs_remote_context(&store, prefix);
+
+    assert_eq!(load_remote_ref_tips(&context).unwrap(), vec![expected]);
+}
+
+#[test]
+fn v2_root_is_authoritative_over_v1_manifest() {
+    let store =
+        crate::storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+    let prefix = "org/lfs-pre-push-v2";
+    create_v1_manifest(&store, prefix, &git_oid(1));
+    create_v2_root(&store, prefix);
+    let context = lfs_remote_context(&store, prefix);
+
+    assert!(load_remote_ref_tips(&context).unwrap().is_empty());
+}
+
+#[test]
+fn corrupt_v2_root_does_not_fall_back_to_v1_manifest() {
+    let store =
+        crate::storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+    let prefix = "org/lfs-pre-push-corrupt-v2";
+    create_v1_manifest(&store, prefix, &git_oid(1));
+    let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), prefix.to_owned());
+    let write_store = store.clone();
+    crate::cmd::lfs::block_on_runtime(async move {
+        write_store
+            .put(
+                &layout.capsule_root_path(),
+                bytes::Bytes::from_static(b"not a capsule root"),
+            )
+            .await
+    })
+    .unwrap();
+    let context = lfs_remote_context(&store, prefix);
+
+    assert!(matches!(
+        load_remote_ref_tips(&context),
+        Err(CrabError::CorruptObject { .. })
+    ));
 }
 
 #[test]

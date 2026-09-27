@@ -158,6 +158,22 @@ def verify_full_visibility_telemetry(stages: dict[str, Any]) -> None:
     owner_telemetry = owner_stage.get("telemetry", {})
     visibility_duration = owner_telemetry.get("visibility_duration_ms", 0)
     owner_actions = owner_stage.get("actions", [])
+    acceleration = stages.get("acceleration_seed", {})
+    if acceleration.get("protocol") == "capsule-v2":
+        require(
+            isinstance(owner_actions, list)
+            and owner_actions
+            and owner_actions[-1] == "none",
+            "full report capsule owner did not converge",
+        )
+        visibility_states = owner_stage.get("visibility_states")
+        require(
+            isinstance(visibility_states, list)
+            and visibility_states
+            and visibility_states[-1] == "embedded",
+            "full report capsule owner did not finish with embedded visibility",
+        )
+        return
     if "catalog_visibility_handoff" in owner_actions:
         require(
             isinstance(owner_actions, list)
@@ -705,6 +721,26 @@ def verify_report(
             require_nonnegative_int(stage.get("active_packs"), f"stages.{name}.active_packs")
             require_nonnegative_int(stage.get("active_pack_bytes"), f"stages.{name}.active_pack_bytes")
         if name.startswith("acceleration_"):
+            if stage.get("protocol") == "capsule-v2":
+                require_nonnegative_int(
+                    stage.get("generation"),
+                    f"stages.{name}.generation",
+                )
+                require(stage.get("action") == "none", f"stages.{name} did not converge")
+                require(
+                    stage.get("visibility") == "embedded",
+                    f"stages.{name} visibility is not embedded",
+                )
+                require(
+                    stage.get("superseded") is False,
+                    f"stages.{name} is superseded",
+                )
+                actions = stage.get("owner_actions")
+                require(
+                    isinstance(actions, list) and actions and actions[-1] == "none",
+                    f"stages.{name} owner actions did not converge",
+                )
+                continue
             generation = require_nonnegative_int(
                 stage.get("manifest_generation"),
                 f"stages.{name}.manifest_generation",

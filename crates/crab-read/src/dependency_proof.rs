@@ -7,6 +7,7 @@ use std::{
 
 use crab_git::{pointer_detect::PointerKind, receive_plan::PointerDependency};
 use crab_metadata::{
+    capsule_protocol::PointerCatalog,
     file_index_lookup::{FileIndexLookupLimits, FileIndexLookupSession},
     manifest_store::RepositorySnapshot,
 };
@@ -156,6 +157,80 @@ pub async fn verify_dependencies_except_crab(
         }
         Ok(())
     };
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(DependencyProofError::Cancelled),
+        result = tokio::time::timeout(limits.max_duration, proof) => {
+            result.map_err(|_| DependencyProofError::Deadline)?
+        }
+    }
+}
+
+/// Verify dependencies against one authenticated capsule pointer catalog.
+///
+/// Crab files supplied by the same fenced publication may be excluded only
+/// after their local xorb and shard closure has been validated. Every other
+/// Crab pointer is resolved through the captured catalog; pointer hints cannot
+/// select content outside that view. LFS remains repository-scoped immutable
+/// content and is verified from the origin store.
+pub async fn verify_capsule_dependencies_except_crab(
+    layout: &StoreLayout<Store>,
+    catalog: &PointerCatalog,
+    dependencies: &[PointerDependency],
+    excluded_crab: &BTreeSet<[u8; 32]>,
+    limits: DependencyProofLimits,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    let cancellation = cancellation.child_token();
+    let _guard = cancellation.clone().drop_guard();
+    let proof =
+        async {
+            let unique = normalize(dependencies, excluded_crab, limits)?;
+            let lfs = crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix());
+            for dependency in unique.values() {
+                if cancellation.is_cancelled() {
+                    return Err(DependencyProofError::Cancelled);
+                }
+                let blob = dependency.blob;
+                match &dependency.pointer {
+                    PointerKind::Crab(pointer) => {
+                        let file_hash = MerkleHash::from(pointer.file_hash).hex();
+                        let entry = catalog.files().get(&file_hash).ok_or(
+                            DependencyProofError::Invalid {
+                                blob,
+                                reason: "content is absent from the captured pointer catalog",
+                            },
+                        )?;
+                        if entry.size() != pointer.size {
+                            return Err(DependencyProofError::Invalid {
+                                blob,
+                                reason: "pointer size differs from the captured pointer catalog",
+                            });
+                        }
+                        let shard = MerkleHash::from_hex(entry.shard_hash()).map_err(|_| {
+                        DependencyProofError::Invalid {
+                            blob,
+                            reason: "captured pointer catalog contains an invalid shard identity",
+                        }
+                    })?;
+                        verify_crab_pointer(layout, pointer, shard, limits.content, &cancellation)
+                            .await
+                            .map_err(|source| DependencyProofError::Crab { blob, source })?;
+                    }
+                    PointerKind::Lfs(pointer) => lfs
+                        .verify_origin(&pointer.oid, pointer.size)
+                        .await
+                        .map_err(|source| DependencyProofError::Lfs { blob, source })?,
+                    PointerKind::NotAPointer => {
+                        return Err(DependencyProofError::Invalid {
+                            blob,
+                            reason: "not a recognized pointer",
+                        });
+                    }
+                }
+            }
+            Ok(())
+        };
     tokio::select! {
         biased;
         () = cancellation.cancelled() => Err(DependencyProofError::Cancelled),

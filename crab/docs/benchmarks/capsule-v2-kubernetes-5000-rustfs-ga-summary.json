@@ -1,0 +1,797 @@
+{
+  "schema": "crab.capsule-protocol-ga-qualification-summary",
+  "version": 1,
+  "run_id": "capsule-v2-ga-2721-20260927-r1",
+  "status": "failed",
+  "error": "qualification performance gates failed; see report metrics",
+  "started_at": "2026-09-27T07:35:54+00:00",
+  "finished_at": "2026-09-27T08:20:26+00:00",
+  "environment": {
+    "host": "Apple M2 Max",
+    "logical_cpus": 12,
+    "memory_bytes": 34359738368,
+    "os": "macOS 26.5.2",
+    "architecture": "arm64",
+    "runtime": "Colima",
+    "rustfs_version": "1.0.0",
+    "rustfs_image": "rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858",
+    "container_cpus": 4,
+    "container_memory_bytes": 4294967296,
+    "container_restarts": 0,
+    "container_oom_killed": false
+  },
+  "provenance": {
+    "binary_unchanged": true,
+    "crab_sha256": "62ee1929ede2154d3d54e36f7d7975b49d4aab1ac7eaf1716b8f470c876932f6",
+    "crab_version": "crab 1.2.4",
+    "git_version": "git version 2.50.1 (Apple Git-155)",
+    "harness_sha256": "1a31f2c94d771d4090e81fc660a0832f51e37679fcbab1c89dbe170d6a6a02a7",
+    "request_proxy_sha256": "bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879",
+    "source_checkout_head": "c76c1c8ffc9901c38d3eb1e62be9c91b19ef6de2",
+    "uncommitted_candidate": true,
+    "report_sha256": "d32b06633379fa6ceb39ffddf27c35419b80062fdf196a9df8f7068bba4fd88f",
+    "requests_sha256": "aa1b808ccb42e01a882c74f0c4c9cc9c80260c778beb2929e5b73c4a10e05dc7"
+  },
+  "source": {
+    "repository": "kubernetes/kubernetes",
+    "head": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+    "base": "76f1c595bafaa8db583d511c95b7e54790fd5ca5",
+    "clean_after_run": true,
+    "shallow": false
+  },
+  "workload": {
+    "commits": 5000,
+    "fetch_interval": 500,
+    "repack_interval": 500,
+    "push_command": "crab push --json origin main:refs/heads/main",
+    "fetch_command": "git fetch origin",
+    "clone_command": "crab clone --lazy",
+    "fetch_before_repack": true
+  },
+  "correctness": {
+    "cold_clone_sampled_blob_bytes": "matched source",
+    "cold_clone_strict_full_git_fsck": "passed",
+    "expected_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+    "final_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+    "incremental_fetches": 10,
+    "remote_crab_fsck": "passed",
+    "sampled_blob_count": 32,
+    "seed_remote_crab_fsck": "passed",
+    "seed_strict_full_git_fsck": "passed",
+    "seed_tip": "76f1c595bafaa8db583d511c95b7e54790fd5ca5",
+    "warm_clone_sampled_blob_bytes": "matched source",
+    "warm_clone_strict_full_git_fsck": "passed",
+    "warm_clone_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1"
+  },
+  "metrics": {
+    "fetch": {
+      "count": 10,
+      "latency_ms": {
+        "max": 15948,
+        "mean": 7606.2,
+        "p50": 5427,
+        "p95": 15948,
+        "p99": 15948
+      },
+      "max_new_local_packs": 1,
+      "new_local_pack_count": 10,
+      "object_store_requests": {
+        "max": 90,
+        "mean": 82.7,
+        "p50": 82,
+        "p95": 90,
+        "p99": 90
+      },
+      "request_body_bytes": 1930,
+      "response_body_bytes": 597444243
+    },
+    "git_fetch_repack_events": [],
+    "incremental_push_count": 5000,
+    "performance_gates": {
+      "500_commit_fetch": {
+        "latency_p95_ms_lte_10000": false,
+        "requests_p95_lte_10": false,
+        "required_interval": 500,
+        "status": "failed"
+      },
+      "push_mean_latency_ms_under_1000": true,
+      "push_mean_requests_under_10": true,
+      "status": "failed"
+    },
+    "push_latency_ms": {
+      "max": 4663,
+      "mean": 258.1,
+      "p50": 208,
+      "p95": 531,
+      "p99": 967
+    },
+    "push_object_store_requests": {
+      "max": 42,
+      "mean": 7.012,
+      "p50": 6,
+      "p95": 6,
+      "p99": 40,
+      "total": 35060,
+      "under_10_average": true
+    },
+    "push_windows": [
+      {
+        "children_max_rss": 104595456,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 500,
+        "latency_ms": {
+          "max": 1913,
+          "mean": 296.06,
+          "p50": 215,
+          "p95": 680,
+          "p99": 1182
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 215593164,
+        "resource_sample_count": 1,
+        "response_body_bytes": 353407017,
+        "start_ordinal": 1,
+        "system_cpu_ms": 90,
+        "user_cpu_ms": 30
+      },
+      {
+        "children_max_rss": 103399424,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 1000,
+        "latency_ms": {
+          "max": 1738,
+          "mean": 262.65,
+          "p50": 207,
+          "p95": 519,
+          "p99": 842
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 122025498,
+        "resource_sample_count": 1,
+        "response_body_bytes": 195217701,
+        "start_ordinal": 501,
+        "system_cpu_ms": 100,
+        "user_cpu_ms": 30
+      },
+      {
+        "children_max_rss": 35946496,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 1500,
+        "latency_ms": {
+          "max": 1072,
+          "mean": 241.36,
+          "p50": 206,
+          "p95": 490,
+          "p99": 746
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 182802336,
+        "resource_sample_count": 1,
+        "response_body_bytes": 298030413,
+        "start_ordinal": 1001,
+        "system_cpu_ms": 10,
+        "user_cpu_ms": 10
+      },
+      {
+        "children_max_rss": 100171776,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 2000,
+        "latency_ms": {
+          "max": 1202,
+          "mean": 238.44,
+          "p50": 206,
+          "p95": 433,
+          "p99": 701
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 143633003,
+        "resource_sample_count": 1,
+        "response_body_bytes": 231300053,
+        "start_ordinal": 1501,
+        "system_cpu_ms": 70,
+        "user_cpu_ms": 30
+      },
+      {
+        "children_max_rss": 107069440,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 2500,
+        "latency_ms": {
+          "max": 2954,
+          "mean": 266.75,
+          "p50": 206,
+          "p95": 605,
+          "p99": 1092
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 188146681,
+        "resource_sample_count": 1,
+        "response_body_bytes": 307955812,
+        "start_ordinal": 2001,
+        "system_cpu_ms": 70,
+        "user_cpu_ms": 30
+      },
+      {
+        "children_max_rss": 49889280,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 3000,
+        "latency_ms": {
+          "max": 958,
+          "mean": 222.57,
+          "p50": 201,
+          "p95": 408,
+          "p99": 571
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 167345627,
+        "resource_sample_count": 1,
+        "response_body_bytes": 267934550,
+        "start_ordinal": 2501,
+        "system_cpu_ms": 20,
+        "user_cpu_ms": 20
+      },
+      {
+        "children_max_rss": 106266624,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 3500,
+        "latency_ms": {
+          "max": 1552,
+          "mean": 244.45,
+          "p50": 205,
+          "p95": 519,
+          "p99": 812
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 206209686,
+        "resource_sample_count": 1,
+        "response_body_bytes": 338923425,
+        "start_ordinal": 3001,
+        "system_cpu_ms": 70,
+        "user_cpu_ms": 30
+      },
+      {
+        "children_max_rss": 82526208,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 4000,
+        "latency_ms": {
+          "max": 4663,
+          "mean": 252.32,
+          "p50": 209,
+          "p95": 472,
+          "p99": 660
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 163936049,
+        "resource_sample_count": 1,
+        "response_body_bytes": 265476213,
+        "start_ordinal": 3501,
+        "system_cpu_ms": 20,
+        "user_cpu_ms": 20
+      },
+      {
+        "children_max_rss": 115359744,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 4500,
+        "latency_ms": {
+          "max": 3175,
+          "mean": 276.34,
+          "p50": 214,
+          "p95": 540,
+          "p99": 943
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 245458093,
+        "resource_sample_count": 1,
+        "response_body_bytes": 391000946,
+        "start_ordinal": 4001,
+        "system_cpu_ms": 100,
+        "user_cpu_ms": 50
+      },
+      {
+        "children_max_rss": 96862208,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 5000,
+        "latency_ms": {
+          "max": 2020,
+          "mean": 280.03,
+          "p50": 212,
+          "p95": 629,
+          "p99": 1093
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 253222956,
+        "resource_sample_count": 1,
+        "response_body_bytes": 417658014,
+        "start_ordinal": 4501,
+        "system_cpu_ms": 70,
+        "user_cpu_ms": 30
+      }
+    ],
+    "seed": {
+      "elapsed_ms": 199946,
+      "object_store_requests": 9
+    },
+    "git_auto_maintenance_event_count": 10
+  },
+  "operations": [
+    {
+      "operation": "repack-seed",
+      "ordinal": 0,
+      "elapsed_ms": 4787,
+      "requests": 11,
+      "request_body_bytes": 35408488,
+      "response_body_bytes": 139608109,
+      "repack": {
+        "bytes_after": 1099723385,
+        "bytes_before": 1099723385,
+        "bytes_read": 0,
+        "bytes_written": 0,
+        "elapsed_ms": 4644,
+        "packs_after": 1,
+        "packs_before": 1
+      }
+    },
+    {
+      "operation": "incremental-clone",
+      "ordinal": 0,
+      "elapsed_ms": 13845,
+      "requests": 13,
+      "request_body_bytes": 157,
+      "response_body_bytes": 1148161746
+    },
+    {
+      "operation": "remote-crab-fsck-seed",
+      "ordinal": 0,
+      "elapsed_ms": 151301,
+      "requests": 17,
+      "request_body_bytes": 0,
+      "response_body_bytes": 2506734300
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 500,
+      "elapsed_ms": 15948,
+      "requests": 80,
+      "request_body_bytes": 159,
+      "response_body_bytes": 65998456,
+      "new_local_packs": [
+        "6ad8928f6fdbdf561564e95dd62406e9dfa3deff"
+      ],
+      "local_pack_count": 2,
+      "tip": "595516a14968ece55edfdc4945cd2e6a58183978"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 500,
+      "elapsed_ms": 17377,
+      "requests": 63,
+      "request_body_bytes": 95249170,
+      "response_body_bytes": 195627464,
+      "repack": {
+        "bytes_after": 1120031979,
+        "bytes_before": 1157151391,
+        "bytes_read": 57428006,
+        "bytes_written": 20308594,
+        "elapsed_ms": 17328,
+        "packs_after": 2,
+        "packs_before": 501
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 1000,
+      "elapsed_ms": 3889,
+      "requests": 90,
+      "request_body_bytes": 244,
+      "response_body_bytes": 38698182,
+      "new_local_packs": [
+        "6b72ce595372582eea751ab19395c9f696bcbb77"
+      ],
+      "local_pack_count": 3,
+      "tip": "d3296eac97e4f39ca39926555677b8d098fcf96d"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 1000,
+      "elapsed_ms": 12312,
+      "requests": 64,
+      "request_body_bytes": 107553018,
+      "response_body_bytes": 202421247,
+      "repack": {
+        "bytes_after": 1130586656,
+        "bytes_before": 1149954004,
+        "bytes_read": 50230619,
+        "bytes_written": 30863271,
+        "elapsed_ms": 12270,
+        "packs_after": 2,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 1500,
+      "elapsed_ms": 4186,
+      "requests": 80,
+      "request_body_bytes": 159,
+      "response_body_bytes": 55858242,
+      "new_local_packs": [
+        "6a6cc5a33d6fee2b46138f0041e5e4595de33e8e"
+      ],
+      "local_pack_count": 4,
+      "tip": "63337a8b413b9b5db63b2d201de07557fc6189da"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 1500,
+      "elapsed_ms": 14807,
+      "requests": 64,
+      "request_body_bytes": 123414964,
+      "response_body_bytes": 247133577,
+      "repack": {
+        "bytes_after": 1145110642,
+        "bytes_before": 1177533435,
+        "bytes_read": 77810050,
+        "bytes_written": 45387257,
+        "elapsed_ms": 14760,
+        "packs_after": 2,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 2000,
+      "elapsed_ms": 13777,
+      "requests": 82,
+      "request_body_bytes": 159,
+      "response_body_bytes": 43346156,
+      "new_local_packs": [
+        "7d8728cdf3e7bc68ccdb9492c985084f2e701f32"
+      ],
+      "local_pack_count": 5,
+      "tip": "82e2a3e1176c90cac050e915e568928539bfc1c5"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 2000,
+      "elapsed_ms": 15168,
+      "requests": 64,
+      "request_body_bytes": 136566600,
+      "response_body_bytes": 263336656,
+      "repack": {
+        "bytes_after": 1156300677,
+        "bytes_before": 1179230083,
+        "bytes_read": 79506698,
+        "bytes_written": 56577292,
+        "elapsed_ms": 14403,
+        "packs_after": 2,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 2500,
+      "elapsed_ms": 4826,
+      "requests": 83,
+      "request_body_bytes": 159,
+      "response_body_bytes": 58239975,
+      "new_local_packs": [
+        "0f9e2093f4265cf124612ddcadc9d4098e3279af"
+      ],
+      "local_pack_count": 6,
+      "tip": "31cdb5de610508094507ef84b66068b2717ef26c"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 2500,
+      "elapsed_ms": 15567,
+      "requests": 64,
+      "request_body_bytes": 153389067,
+      "response_body_bytes": 307290875,
+      "repack": {
+        "bytes_after": 1171499042,
+        "bytes_before": 1205128244,
+        "bytes_read": 105404859,
+        "bytes_written": 71775657,
+        "elapsed_ms": 15516,
+        "packs_after": 2,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 3000,
+      "elapsed_ms": 4820,
+      "requests": 80,
+      "request_body_bytes": 159,
+      "response_body_bytes": 54410265,
+      "new_local_packs": [
+        "2a124f16b93866a3dcdb501e403703131e46bcbb"
+      ],
+      "local_pack_count": 7,
+      "tip": "cfc79e6d64395ddd6d3a7999b438eda0a75e1813"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 3000,
+      "elapsed_ms": 17997,
+      "requests": 64,
+      "request_body_bytes": 166648033,
+      "response_body_bytes": 333094952,
+      "repack": {
+        "bytes_after": 1183242384,
+        "bytes_before": 1216743140,
+        "bytes_read": 117019755,
+        "bytes_written": 83518999,
+        "elapsed_ms": 17911,
+        "packs_after": 2,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 3500,
+      "elapsed_ms": 5427,
+      "requests": 84,
+      "request_body_bytes": 244,
+      "response_body_bytes": 63198622,
+      "new_local_packs": [
+        "c7dcd854a234f88fd3c2975051916b56622b7bdc"
+      ],
+      "local_pack_count": 8,
+      "tip": "6a72fbc01bca6f667561c8062a11ca2cb1021c71"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 3500,
+      "elapsed_ms": 17604,
+      "requests": 64,
+      "request_body_bytes": 187619661,
+      "response_body_bytes": 375571471,
+      "repack": {
+        "bytes_after": 1200778922,
+        "bytes_before": 1236282337,
+        "bytes_read": 136558952,
+        "bytes_written": 101055537,
+        "elapsed_ms": 17553,
+        "packs_after": 2,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 4000,
+      "elapsed_ms": 10278,
+      "requests": 85,
+      "request_body_bytes": 244,
+      "response_body_bytes": 52210612,
+      "new_local_packs": [
+        "f0b1d98834bfdd981f98c93766deead29baacab6"
+      ],
+      "local_pack_count": 9,
+      "tip": "1a7b207665b037ec5c5d79f50d23b0b920df4e34"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 4000,
+      "elapsed_ms": 16695,
+      "requests": 63,
+      "request_body_bytes": 101231717,
+      "response_body_bytes": 192432466,
+      "repack": {
+        "bytes_after": 1219419045,
+        "bytes_before": 1243493121,
+        "bytes_read": 42714199,
+        "bytes_written": 18640123,
+        "elapsed_ms": 16132,
+        "packs_after": 3,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 4500,
+      "elapsed_ms": 6898,
+      "requests": 83,
+      "request_body_bytes": 244,
+      "response_body_bytes": 88889977,
+      "new_local_packs": [
+        "ff1fd195a3fb0072586bab309b8652e26d45041c"
+      ],
+      "local_pack_count": 10,
+      "tip": "3b58e6f95d2656770ac0c0a2036163fcce113b59"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 4500,
+      "elapsed_ms": 23687,
+      "requests": 65,
+      "request_body_bytes": 226703609,
+      "response_body_bytes": 479084458,
+      "repack": {
+        "bytes_after": 1236053679,
+        "bytes_before": 1297402693,
+        "bytes_read": 197679308,
+        "bytes_written": 136330294,
+        "elapsed_ms": 23634,
+        "packs_after": 2,
+        "packs_before": 503
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 5000,
+      "elapsed_ms": 6013,
+      "requests": 80,
+      "request_body_bytes": 159,
+      "response_body_bytes": 76593756,
+      "new_local_packs": [
+        "a55755ecd0ebb7e6055da90b68c97055dd9577ea"
+      ],
+      "local_pack_count": 11,
+      "tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 5000,
+      "elapsed_ms": 12902,
+      "requests": 63,
+      "request_body_bytes": 107070231,
+      "response_body_bytes": 223623743,
+      "repack": {
+        "bytes_after": 1257920667,
+        "bytes_before": 1302866776,
+        "bytes_read": 66813097,
+        "bytes_written": 21866988,
+        "elapsed_ms": 12846,
+        "packs_after": 3,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "cold-final-clone",
+      "ordinal": 5000,
+      "elapsed_ms": 28847,
+      "requests": 17,
+      "request_body_bytes": 244,
+      "response_body_bytes": 1313776600
+    },
+    {
+      "operation": "warm-final-clone",
+      "ordinal": 5000,
+      "elapsed_ms": 29181,
+      "requests": 15,
+      "request_body_bytes": 159,
+      "response_body_bytes": 1313776362
+    },
+    {
+      "operation": "remote-crab-fsck-final",
+      "ordinal": 5000,
+      "elapsed_ms": 176510,
+      "requests": 295,
+      "request_body_bytes": 0,
+      "response_body_bytes": 4262015837
+    }
+  ],
+  "independent_checks": {
+    "push_ordinals_contiguous": true,
+    "push_oids_match_frozen_sequence": true,
+    "all_5001_push_request_counts_match_raw_log": true,
+    "capsule_sources_per_incremental_fetch": 24,
+    "repeated_successful_exact_capsule_gets_across_incremental_fetches": 0,
+    "seed_source_requests_during_incremental_fetch_and_interval_repack": 0
+  },
+  "v1_baseline_follow_up": {
+    "run_id": "capsule-v1-ga-2721-20260927-r1",
+    "release": "v1.2.4",
+    "release_commit": "76977b2af1970aa0bf88dee50c5f12a2006c626c",
+    "started_at": "2026-09-27T09:05:22+00:00",
+    "finished_at": "2026-09-27T12:13:35+00:00",
+    "status": "failed",
+    "failure_scope": "Original performance gates; complete correctness workload passed",
+    "binary_sha256": "dcc490af030e9b9dfba94310db210eccd7c4562b103dfdc09f4452270791af07",
+    "binary_unchanged": true,
+    "report_sha256": "a08e19321d7d3f43e27c652f0d68fe619ac75dd8266d3536db6ad5173d032d87",
+    "requests_sha256": "0acaa62db743b44f1252ebb149749365393a15a096812665aa4ac19ae0e05e2a",
+    "incremental_pushes": 5000,
+    "incremental_fetches": 10,
+    "push_latency_ms": {"mean": 446.55, "p50": 373, "p95": 822, "p99": 1262, "max": 8791},
+    "push_requests": {"mean": 32.9998, "p50": 33, "p95": 33, "total": 164999},
+    "fetch_latency_ms": {"mean": 661428.5, "p95": 846473},
+    "fetch_requests": {"mean": 251652.2, "p95": 370771},
+    "fetch_response_body_bytes": 1662446231070,
+    "cold_clone": {"elapsed_ms": 34426, "requests": 86, "response_body_bytes": 1413787132},
+    "warm_clone": {"elapsed_ms": 42397, "requests": 86, "response_body_bytes": 1413787132},
+    "correctness": "Exact seed/final tips, ten pre-maintenance fetches, one new pack per fetch, strict seed/final Git and Crab fsck, 32 sampled cold/warm blob digests match",
+    "controlled_latency_comparison": false,
+    "all_5001_push_request_counts_match_raw_log": true,
+    "push_ordinals_contiguous": true,
+    "proxy_errors": {"RemoteDisconnected": 8, "operation": "incremental-fetch-04000", "retained_in_totals": true},
+    "caveat": "Unrelated host load and task-owned low-priority single-job builds overlapped from 09:58 UTC; no controlled speedup claim"
+  },
+  "scope_limits": [
+    "No matched v1 performance result yet",
+    "No full 100 GiB Xet qualification",
+    "No complete failure/concurrency/product/provider matrix or green CI",
+    "Warm clone reuses CRAB_CACHE_DIR but redownloads all three physical pack ranges",
+    "v1 retirement not qualified"
+  ]
+}

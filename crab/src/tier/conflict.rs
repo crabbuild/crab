@@ -5,9 +5,8 @@
 //! at the rule-ID level: two rules conflict when they share the same
 //! ID but have different bodies.
 //!
-//! [`merge`] replaces rules whose ID starts with `crab-` while
-//! preserving every user-managed rule. It never silently drops
-//! non-`crab-` rules.
+//! [`merge`] replaces Crab-managed rules while preserving every
+//! user-managed rule. It never silently drops a rule it cannot classify.
 
 use crate::core::error::{CrabError, Result};
 
@@ -55,7 +54,7 @@ pub fn detect_conflicts(
                 conflicts.push(Conflict {
                     existing_id: new_id.clone(),
                     new_id: new_id.clone(),
-                    reason: format!("rule '{}' exists with a different body", new_id,),
+                    reason: format!("rule '{new_id}' exists with a different body"),
                 });
             }
         }
@@ -66,9 +65,10 @@ pub fn detect_conflicts(
 
 /// Merge a new lifecycle configuration into an existing one.
 ///
-/// Replaces all rules whose ID starts with `crab-` with the rules
-/// from `new`. Preserves every rule whose ID does NOT start with
-/// `crab-`. Never silently drops user-managed rules.
+/// Replaces Crab-managed rules with the rules from `new` and preserves every
+/// user-managed rule. S3 uses the XML rule ID namespace, Azure uses the rule
+/// name namespace, and GCS uses the exact `.crab/xorbs/` prefix because its
+/// wire format has no rule IDs. Never silently drops an unclassified rule.
 ///
 /// The merged result uses the same format as `new`.
 pub fn merge(existing: &RenderedLifecycle, new: &RenderedLifecycle) -> Result<RenderedLifecycle> {
@@ -81,11 +81,185 @@ pub fn merge(existing: &RenderedLifecycle, new: &RenderedLifecycle) -> Result<Re
 
     match new.format {
         Format::Xml => merge_s3_xml(existing, new),
-        Format::Json => Err(CrabError::Internal(
-            "provider-aware JSON lifecycle merge is not wired; refusing to risk dropping existing rules"
-                .into(),
-        )),
+        Format::Json => merge_json(existing, new),
     }
+}
+
+/// Merge the JSON lifecycle shapes used by GCS and Azure.
+///
+/// GCS has no wire-level rule ID, so its exact `.crab/xorbs/` prefix is the
+/// managed namespace. Azure carries a rule name and reserves the `crab-`
+/// prefix. Any malformed or ambiguous document fails closed before a write;
+/// silently treating an unknown rule as managed could delete user policy.
+fn merge_json(existing: &RenderedLifecycle, new: &RenderedLifecycle) -> Result<RenderedLifecycle> {
+    let existing_value: serde_json::Value =
+        serde_json::from_slice(&existing.body).map_err(|e| CrabError::CorruptObject {
+            path: "tier/lifecycle/existing".to_owned(),
+            reason: format!("existing lifecycle is not valid JSON: {e}"),
+        })?;
+    let new_value: serde_json::Value =
+        serde_json::from_slice(&new.body).map_err(|e| CrabError::Configuration {
+            key: "tier.lifecycle".to_owned(),
+            origin: format!("intended lifecycle is not valid JSON: {e}"),
+        })?;
+
+    if let (Some(existing_lifecycle), Some(new_lifecycle)) =
+        (existing_value.get("lifecycle"), new_value.get("lifecycle"))
+    {
+        let existing_rules = json_rule_array(existing_lifecycle, "lifecycle.rule", true)?;
+        let new_rules = json_rule_array(new_lifecycle, "lifecycle.rule", false)?;
+        let mut merged_rules = Vec::with_capacity(existing_rules.len() + new_rules.len());
+        let mut user_ids = Vec::new();
+        for (index, rule) in existing_rules.iter().enumerate() {
+            if !gcs_rule_is_managed(rule)? {
+                merged_rules.push(rule.clone());
+                let id = existing
+                    .rule_ids
+                    .get(index)
+                    .ok_or_else(|| CrabError::CorruptObject {
+                        path: "tier/lifecycle/existing".to_owned(),
+                        reason: "GCS lifecycle rule IDs do not match rule count".to_owned(),
+                    })?;
+                user_ids.push(id.clone());
+            }
+        }
+        merged_rules.extend(new_rules.iter().cloned());
+
+        let body = serde_json::to_vec_pretty(&serde_json::json!({
+            "lifecycle": { "rule": merged_rules },
+        }))
+        .map_err(|e| {
+            CrabError::Internal(format!("GCS lifecycle merge serialization failed: {e}"))
+        })?;
+        let mut rule_ids = user_ids;
+        rule_ids.extend(new.rule_ids.iter().cloned());
+        return Ok(RenderedLifecycle {
+            format: Format::Json,
+            body,
+            rule_ids,
+        });
+    }
+
+    if let (Some(existing_rules), Some(new_rules)) =
+        (existing_value.get("rules"), new_value.get("rules"))
+    {
+        let existing_rules = existing_rules
+            .as_array()
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: "tier/lifecycle/existing".to_owned(),
+                reason: "Azure lifecycle rules is not an array".to_owned(),
+            })?;
+        let new_rules = new_rules
+            .as_array()
+            .ok_or_else(|| CrabError::Configuration {
+                key: "tier.lifecycle".to_owned(),
+                origin: "Azure lifecycle rules is not an array".to_owned(),
+            })?;
+        let mut merged_rules = Vec::with_capacity(existing_rules.len() + new_rules.len());
+        let mut user_ids = Vec::new();
+        for rule in existing_rules {
+            let name = rule
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: "tier/lifecycle/existing".to_owned(),
+                    reason: "Azure lifecycle rule has no non-empty name".to_owned(),
+                })?;
+            if !is_crab_managed(name) {
+                merged_rules.push(rule.clone());
+                user_ids.push(name.to_owned());
+            }
+        }
+        for rule in new_rules {
+            let name = rule
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| CrabError::Configuration {
+                    key: "tier.lifecycle".to_owned(),
+                    origin: "Azure lifecycle rule has no non-empty name".to_owned(),
+                })?;
+            if !is_crab_managed(name) {
+                return Err(CrabError::Configuration {
+                    key: "tier.lifecycle".to_owned(),
+                    origin: format!(
+                        "intended Azure lifecycle rule {name:?} is outside Crab's namespace"
+                    ),
+                });
+            }
+            merged_rules.push(rule.clone());
+        }
+
+        let body = serde_json::to_vec_pretty(&serde_json::json!({ "rules": merged_rules }))
+            .map_err(|e| {
+                CrabError::Internal(format!("Azure lifecycle merge serialization failed: {e}"))
+            })?;
+        let mut rule_ids = user_ids;
+        rule_ids.extend(new.rule_ids.iter().cloned());
+        return Ok(RenderedLifecycle {
+            format: Format::Json,
+            body,
+            rule_ids,
+        });
+    }
+
+    Err(CrabError::CorruptObject {
+        path: "tier/lifecycle/existing".to_owned(),
+        reason: "JSON lifecycle documents use neither GCS lifecycle.rule nor Azure rules"
+            .to_owned(),
+    })
+}
+
+fn json_rule_array<'a>(
+    lifecycle: &'a serde_json::Value,
+    field: &str,
+    existing: bool,
+) -> Result<&'a [serde_json::Value]> {
+    lifecycle
+        .get("rule")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| {
+            let error = format!("GCS lifecycle {field} is not an array");
+            if existing {
+                CrabError::CorruptObject {
+                    path: "tier/lifecycle/existing".to_owned(),
+                    reason: error,
+                }
+            } else {
+                CrabError::Configuration {
+                    key: "tier.lifecycle".to_owned(),
+                    origin: error,
+                }
+            }
+        })
+}
+
+fn gcs_rule_is_managed(rule: &serde_json::Value) -> Result<bool> {
+    let Some(prefixes) = rule
+        .get("condition")
+        .and_then(|condition| condition.get("matchesPrefix"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(false);
+    };
+    if prefixes.is_empty() {
+        return Ok(false);
+    }
+    if prefixes
+        .iter()
+        .all(|prefix| prefix.as_str() == Some(".crab/xorbs/"))
+    {
+        return Ok(true);
+    }
+    if prefixes.iter().any(|prefix| prefix.as_str().is_none()) {
+        return Err(CrabError::CorruptObject {
+            path: "tier/lifecycle/existing".to_owned(),
+            reason: "GCS lifecycle matchesPrefix contains a non-string value".to_owned(),
+        });
+    }
+    Ok(false)
 }
 
 /// Check whether a rule ID is managed by crab.
@@ -378,6 +552,87 @@ mod tests {
 
         assert_eq!(merged.rule_ids.len(), 1);
         assert_eq!(merged.rule_ids[0], "crab-xorbs-to-ia");
+    }
+
+    #[test]
+    fn merge_gcs_json_preserves_user_rules_and_replaces_xorb_rules() {
+        let existing_body = serde_json::json!({
+            "lifecycle": { "rule": [
+                {
+                    "action": { "type": "Delete" },
+                    "condition": { "age": 7, "matchesPrefix": ["backups/"] }
+                },
+                {
+                    "action": { "type": "SetStorageClass", "storageClass": "NEARLINE" },
+                    "condition": { "age": 30, "matchesPrefix": [".crab/xorbs/"] }
+                }
+            ] }
+        });
+        let new_body = serde_json::json!({
+            "lifecycle": { "rule": [
+                {
+                    "action": { "type": "SetStorageClass", "storageClass": "ARCHIVE" },
+                    "condition": { "age": 365, "matchesPrefix": [".crab/xorbs/"] }
+                }
+            ] }
+        });
+        let existing = RenderedLifecycle {
+            format: Format::Json,
+            body: serde_json::to_vec(&existing_body).unwrap(),
+            rule_ids: vec!["gcs-user-rule".into(), "crab-gcs-old".into()],
+        };
+        let new = RenderedLifecycle {
+            format: Format::Json,
+            body: serde_json::to_vec(&new_body).unwrap(),
+            rule_ids: vec!["crab-xorbs-to-archive".into()],
+        };
+
+        let merged = merge(&existing, &new).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&merged.body).unwrap();
+        let rules = value["lifecycle"]["rule"].as_array().unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0]["condition"]["matchesPrefix"][0], "backups/");
+        assert_eq!(rules[1]["action"]["storageClass"], "ARCHIVE");
+        assert_eq!(
+            merged.rule_ids,
+            vec!["gcs-user-rule", "crab-xorbs-to-archive"]
+        );
+    }
+
+    #[test]
+    fn merge_azure_json_preserves_named_user_rules_and_replaces_crab_rules() {
+        let existing = rendered(
+            &["user-cleanup", "crab-xorbs-to-cool"],
+            br#"{"rules":[
+                {"enabled":true,"name":"user-cleanup","type":"Lifecycle","definition":{}},
+                {"enabled":true,"name":"crab-xorbs-to-cool","type":"Lifecycle","definition":{}}
+            ]}"#,
+        );
+        let new = rendered(
+            &["crab-xorbs-to-archive"],
+            br#"{"rules":[
+                {"enabled":true,"name":"crab-xorbs-to-archive","type":"Lifecycle","definition":{}}
+            ]}"#,
+        );
+
+        let merged = merge(&existing, &new).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&merged.body).unwrap();
+        let rules = value["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0]["name"], "user-cleanup");
+        assert_eq!(rules[1]["name"], "crab-xorbs-to-archive");
+        assert_eq!(
+            merged.rule_ids,
+            vec!["user-cleanup", "crab-xorbs-to-archive"]
+        );
+    }
+
+    #[test]
+    fn merge_json_rejects_ambiguous_shape() {
+        let existing = rendered(&["user"], br#"{"rules":{}}"#);
+        let new = rendered(&["crab-rule"], br#"{"rules":[]}"#);
+        let error = merge(&existing, &new).unwrap_err();
+        assert!(matches!(error, CrabError::CorruptObject { .. }));
     }
 
     // ── is_crab_managed ───────────────────────────────────────────

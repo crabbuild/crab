@@ -135,9 +135,12 @@ class ProtocolV2PartialCloneSmoke:
         self.run_root = args.root / self.run_id
         if self.run_root.exists():
             raise SmokeError(f"run root already exists: {self.run_root}")
-        self.run_root.mkdir(parents=True)
+        self.run_root.mkdir(parents=True, mode=0o700)
+        self.run_root.chmod(0o700)
         self.temp_root = self.run_root / "tmp"
         self.temp_root.mkdir()
+        self.cache_root = self.run_root / "cache"
+        self.cache_root.mkdir(mode=0o700)
         self.logs = self.run_root / "logs"
         self.artifacts = self.run_root / "artifacts"
         self.bin_dir = self.run_root / "bin"
@@ -273,6 +276,8 @@ class ProtocolV2PartialCloneSmoke:
         env["TMPDIR"] = str(self.temp_root)
         env["TMP"] = str(self.temp_root)
         env["TEMP"] = str(self.temp_root)
+        env["XDG_CACHE_HOME"] = str(self.cache_root)
+        env["CRAB_CACHE_DIR"] = str(self.cache_root)
         env["PATH"] = str(self.bin_dir) + os.pathsep + env.get("PATH", "")
         return env
 
@@ -2852,7 +2857,7 @@ class ProtocolV2PartialCloneSmoke:
         )
 
     def mirror_metadata_staleness_check(self, source: Path, destination: str, label: str) -> None:
-        """A metadata-only CAS must invalidate plans even when Git refs do not move."""
+        """A metadata-only v2 checkpoint must invalidate plans without moving refs."""
         plan = self.artifacts / f"mirror-{label}-metadata-plan.json"
         before = self.run_cmd(
             f"save {label} mirror plan before metadata change",
@@ -2872,24 +2877,15 @@ class ProtocolV2PartialCloneSmoke:
         ):
             raise SmokeError("metadata staleness fixture requires a fully verified plan")
 
-        # This is the isolated smoke repository, never a user-selected prefix.
-        # Preserve Git/data roots and use CAS so the fixture cannot overwrite a
-        # concurrent commit. The old Git-only digest deliberately does not move.
-        key = f"{REMOTE_PREFIX}/{self.run_id}-mirror/manifest"
-        original = self.artifacts / f"mirror-{label}-manifest-before.json"
-        current = self.run_aws(
-            ["get-object", "--bucket", self.args.bucket, "--key", key, str(original)],
-            name=f"capture {label} mirror manifest identity",
+        refs_before = self.git_value(
+            self.run_root,
+            ["ls-remote", "--refs", destination],
+            name=f"capture {label} mirror refs before checkpoint",
         )
-        etag = json.loads(self.stdout(current))["ETag"]
-        manifest = json.loads(original.read_bytes())
-        manifest["session_id"] = f"mirror-metadata-{self.run_id}-{label}"
-        changed = self.artifacts / f"mirror-{label}-manifest-changed.json"
-        changed.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
-        self.run_aws(
-            ["put-object", "--bucket", self.args.bucket, "--key", key,
-             "--if-match", etag, "--body", str(changed)],
-            name=f"CAS {label} mirror metadata without changing refs",
+        self.run_cmd(
+            f"publish {label} mirror metadata checkpoint",
+            [str(self.crab_bin), "repack", "--json"],
+            source,
         )
         refused = self.run_cmd(
             f"refuse stale {label} mirror metadata plan",
@@ -2905,10 +2901,10 @@ class ProtocolV2PartialCloneSmoke:
             self.run_root,
         )
         after_data = self.json_data(after, "mirror.check")
-        confirmed = self.artifacts / f"mirror-{label}-manifest-after.json"
-        self.run_aws(
-            ["get-object", "--bucket", self.args.bucket, "--key", key, str(confirmed)],
-            name=f"verify {label} stale plan preserved canonical metadata",
+        refs_after = self.git_value(
+            self.run_root,
+            ["ls-remote", "--refs", destination],
+            name=f"verify {label} mirror refs after checkpoint",
         )
         pointer_proof = after_data.get("pointers", {})
         self.check(
@@ -2920,8 +2916,8 @@ class ProtocolV2PartialCloneSmoke:
             and pointer_proof.get("recipe_digest") == plan_data["recipe_digest"]
             and pointer_proof.get("state") == "verified"
             and pointer_proof.get("verified") == 1
-            and plan.read_bytes() == plan_bytes
-            and confirmed.read_bytes() == changed.read_bytes(),
+            and refs_after == refs_before
+            and plan.read_bytes() == plan_bytes,
             {
                 "exit_code": refused["exit_code"],
                 "error": refusal.get("error"),
@@ -2932,97 +2928,83 @@ class ProtocolV2PartialCloneSmoke:
             },
         )
 
-    def mirror_layout_identity_check(self, source: Path, destination: str) -> None:
-        """Plan identity follows validated layout semantics, never missing/corrupt layout."""
-        plan = self.artifacts / "mirror-layout-plan.json"
+    def mirror_root_identity_check(self, source: Path, destination: str) -> None:
+        """Plan identity requires one valid authenticated v2 root."""
+        plan = self.artifacts / "mirror-root-plan.json"
         checked = self.run_cmd(
-            "save mirror plan before layout changes",
+            "save mirror plan before root corruption",
             [str(self.crab_bin), "mirror", str(source), destination,
              "--check", "--write-plan", str(plan), "--json"], self.run_root,
         )
         before = self.json_data(checked, "mirror.check")
         plan_bytes = plan.read_bytes()
         if json.loads(plan_bytes).get("blocked") or before.get("state") != "equal":
-            raise SmokeError("layout identity fixture requires a verified equal plan")
+            raise SmokeError("root identity fixture requires a verified equal plan")
 
         # Only the generated smoke repository is modified, always through CAS.
-        # Restore its exact descriptor in finally; do not repair through Crab.
+        # Restore its exact authenticated root in finally; do not repair through Crab.
         prefix = f"{REMOTE_PREFIX}/{self.run_id}-mirror"
-        key = f"{prefix}/layout"
-        original = self.artifacts / "mirror-layout-original.json"
+        key = f"{prefix}/v2/root"
+        original = self.artifacts / "mirror-root-original.bin"
         fetched = self.run_aws(
             ["get-object", "--bucket", self.args.bucket, "--key", key, str(original)],
-            name="capture mirror layout identity",
+            name="capture mirror authenticated root",
         )
-        etag = json.loads(self.stdout(fetched))["ETag"]
-        manifest_before = self.artifacts / "mirror-layout-manifest-before.json"
-        self.run_aws(
-            ["get-object", "--bucket", self.args.bucket, "--key", f"{prefix}/manifest", str(manifest_before)],
-            name="capture canonical manifest before layout fixture",
-        )
-        layout = json.loads(original.read_bytes())
-        formatted = self.artifacts / "mirror-layout-formatted.json"
-        formatted.write_text(json.dumps(layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if not json.loads(self.stdout(fetched)).get("ETag"):
+            raise SmokeError("mirror root fixture has no object-store identity")
+        root = bytearray(original.read_bytes())
+        if len(root) < 12 or root[:8] != b"CRBROOT2":
+            raise SmokeError("mirror root fixture is not a v2 root envelope")
+        root[8:12] = (0xFFFFFFFF).to_bytes(4, "big")
+        invalid = self.artifacts / "mirror-root-unsupported.bin"
+        invalid.write_bytes(root)
         updated = self.run_aws(
             ["put-object", "--bucket", self.args.bucket, "--key", key,
-             "--if-match", etag, "--body", str(formatted)], name="change only layout JSON formatting",
+             "--body", str(invalid)], name="install unsupported root envelope",
         )
-        etag = json.loads(self.stdout(updated))["ETag"]
+        if not json.loads(self.stdout(updated)).get("ETag"):
+            raise SmokeError("invalid mirror root fixture has no object-store identity")
         try:
-            equivalent = self.run_cmd(
-                "verify equivalent layout preserves mirror identity",
-                [str(self.crab_bin), "mirror", str(source), destination, "--check", "--json"], self.run_root,
-            )
-            equivalent_data = self.json_data(equivalent, "mirror.check")
-            self.check(
-                "mirror-layout-formatting-preserves-plan-identity",
-                before.get("destination_identity") == equivalent_data.get("destination_identity")
-                and before.get("destination_snapshot") == equivalent_data.get("destination_snapshot")
-                and equivalent_data.get("pointers", {}).get("state") == "verified"
-                and equivalent_data.get("pointers", {}).get("verified") == 1,
-            )
-            layout["schema_version"] += 1
-            unsupported = self.artifacts / "mirror-layout-unsupported.json"
-            unsupported.write_text(json.dumps(layout) + "\n", encoding="utf-8")
-            updated = self.run_aws(
-                ["put-object", "--bucket", self.args.bucket, "--key", key,
-                 "--if-match", etag, "--body", str(unsupported)], name="install unsupported fixture layout",
-            )
-            etag = json.loads(self.stdout(updated))["ETag"]
-            blocked_plan = self.artifacts / "mirror-layout-blocked-plan.json"
+            blocked_plan = self.artifacts / "mirror-root-blocked-plan.json"
             blocked = self.run_cmd(
-                "invalid layout blocks mirror check and planning",
+                "invalid root blocks mirror check and planning",
                 [str(self.crab_bin), "mirror", str(source), destination,
                  "--check", "--ci", "--write-plan", str(blocked_plan), "--json"],
                 self.run_root, check=False,
             )
             refused = self.run_cmd(
-                "invalid layout refuses saved mirror plan replay",
+                "invalid root refuses saved mirror plan replay",
                 [str(self.crab_bin), "mirror", str(source), destination,
                  "--apply-plan", str(plan), "--json"], self.run_root, check=False,
             )
-            after_layout = self.artifacts / "mirror-layout-after-refusal.json"
-            manifest_after = self.artifacts / "mirror-layout-manifest-after.json"
-            for object_key, output in [(key, after_layout), (f"{prefix}/manifest", manifest_after)]:
-                self.run_aws(
-                    ["get-object", "--bucket", self.args.bucket, "--key", object_key, str(output)],
-                    name=f"verify canonical {output.stem} after layout refusal",
-                )
+            after_root = self.artifacts / "mirror-root-after-refusal.bin"
+            self.run_aws(
+                ["get-object", "--bucket", self.args.bucket, "--key", key, str(after_root)],
+                name="verify invalid root after mirror refusal",
+            )
             blocked_data = self.json_data(blocked, "mirror.check")
             self.check(
-                "mirror-invalid-layout-blocks-check-plan-and-replay",
+                "mirror-invalid-root-blocks-check-plan-and-replay",
                 blocked["exit_code"] != 0 and refused["exit_code"] != 0
                 and blocked_data.get("state") == "unverifiable"
                 and blocked_data.get("ci_passed") is False
                 and json.loads(blocked_plan.read_bytes()).get("blocked") is True
-                and after_layout.read_bytes() == unsupported.read_bytes()
-                and manifest_after.read_bytes() == manifest_before.read_bytes()
+                and before.get("destination_identity") is not None
+                and before.get("destination_snapshot") is not None
+                and after_root.read_bytes() == invalid.read_bytes()
                 and plan.read_bytes() == plan_bytes,
             )
         finally:
+            current = self.artifacts / "mirror-root-before-restore.bin"
+            self.run_aws(
+                ["get-object", "--bucket", self.args.bucket, "--key", key, str(current)],
+                name="guard isolated root restoration",
+            )
+            if current.read_bytes() != invalid.read_bytes():
+                raise SmokeError("mirror root changed outside the isolated fault fixture")
             self.run_aws(
                 ["put-object", "--bucket", self.args.bucket, "--key", key,
-                 "--if-match", etag, "--body", str(original)], name="restore isolated fixture layout through CAS",
+                 "--body", str(original)], name="restore isolated fixture root",
             )
 
     def mirror_oversized_header_check(self, source: Path, destination: str) -> None:
@@ -3212,10 +3194,12 @@ class ProtocolV2PartialCloneSmoke:
             name="inventory isolated mirror acceleration before fault",
         )
         index_keys = [entry["Key"] for entry in json.loads(self.stdout(index_listing)).get("Contents", [])]
-        if not index_keys or any(not key.startswith(index_prefix) for key in index_keys):
-            raise SmokeError("mirror index fault requires a nonempty exact-prefix inventory")
+        if any(not key.startswith(index_prefix) for key in index_keys):
+            raise SmokeError("mirror index fault inventory escaped its exact prefix")
         # Remove only this disposable repository's derived file index. Canonical
-        # manifest/shards/xorbs remain intact; inspection must not recreate a DB.
+        # v2 root/capsules/shards/xorbs remain intact. A v2-only repository may
+        # have no derived file index at all; inspection must not require or
+        # recreate one in either case.
         for key in index_keys:
             self.run_aws(
                 ["delete-object", "--bucket", self.args.bucket, "--key", key],
@@ -3250,7 +3234,7 @@ class ProtocolV2PartialCloneSmoke:
             {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()},
         )
         self.run_git(mirror_clone, ["fsck", "--strict", "--full"], name="strict fsck mirrored data clone")
-        self.mirror_layout_identity_check(mirror_source, mirror_url)
+        self.mirror_root_identity_check(mirror_source, mirror_url)
         self.mirror_oversized_header_check(mirror_source, mirror_url)
         self.mirror_metadata_staleness_check(mirror_source, mirror_url, "equal")
 

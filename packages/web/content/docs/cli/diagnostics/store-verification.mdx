@@ -9,7 +9,7 @@ meta:
 
 ## Verifying Remote Store Consistency
 
-The store verification layer within `crab fsck` queries your remote object storage directly to detect inconsistencies between manifests and actual stored objects. While the broader integrity check covers the full data chain, store verification focuses specifically on what's physically present in S3, GCS, or Azure versus what the manifests claim should be there.
+The store verification layer within `crab fsck` queries your remote object storage directly to detect inconsistencies between authoritative repository metadata and actual stored objects. For protocol v2, that authority is the checksummed capsule root and its authenticated frontier; legacy repositories use manifests. While the broader integrity check covers the full data chain, store verification focuses specifically on what's physically present in S3, GCS, or Azure versus what the repository root claims should be there.
 
 ```mermaid
 flowchart LR
@@ -39,6 +39,12 @@ Same cross-reference for shard objects under `.crab/shards/`. Divergence is repo
 ### Data chain integrity
 
 For each file-index entry, the verifier confirms the referenced shard exists either in the shard-list or directly in storage. Missing shards are reported as `MissingFileIndex` issues.
+
+For protocol v2, the verifier instead materializes the complete pointer catalog
+from the pinned checkpoint and capsule frontier. It verifies each external xorb
+body digest, logical xorb identity, and chunk descriptor, then parses every
+catalogued shard and checks exact xorb closure plus complete file recipes.
+Missing or corrupt dependencies are hard errors.
 
 ### Push lock expiry
 

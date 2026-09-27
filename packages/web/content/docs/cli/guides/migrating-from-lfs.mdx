@@ -26,8 +26,10 @@ crab migrate export [OPTIONS]
 provides an analysis tool (info) to identify which file types would benefit from
 migration.
 
-This is the crab equivalent of `git lfs migrate`. It uses `git-filter-repo`
-for the actual history rewrite.
+This is the Crab equivalent of `git lfs migrate`. It uses Git's built-in
+fast-export/fast-import engine for the history rewrite; no `git-filter-repo`
+installation is required. Import stages verified Crab chunks locally, while
+export reads and verifies content through the configured Crab remote.
 
 ## Subcommands
 
@@ -145,12 +147,12 @@ crab migrate export --include '*.bin' --dry-run
 
 ## Prerequisites
 
-- `git-filter-repo` must be installed:
-  ```bash
-  pip install git-filter-repo
-  ```
-- The repository must be initialized with `crab init` (for import).
-- AWS credentials must be configured (for import, to upload converted objects).
+- A clean Git working tree is required for both rewrite commands.
+- `migrate import` needs a writable `.crab/staging` directory and can run
+  before `crab init`; staged chunks are uploaded when the rewritten refs are
+  pushed.
+- `migrate export` needs a configured Crab remote and read access to the
+  selected pointer recipes and shard/xorb objects.
 
 ## Workflow
 
@@ -179,7 +181,7 @@ crab migrate export --include '*.bin' --dry-run
 
 5. Force-push the rewritten history:
    ```bash
-   git push --force origin --all
+   git push --force-with-lease origin --all
    ```
 
 6. Notify collaborators to re-clone.

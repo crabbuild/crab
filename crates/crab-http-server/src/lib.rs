@@ -15,6 +15,7 @@ mod contents;
 mod git;
 mod git_import;
 mod git_objects;
+mod integrity;
 mod issues;
 mod labels;
 mod lfs;
@@ -33,6 +34,8 @@ mod server;
 mod state_stream;
 mod statuses;
 mod storage_root;
+#[cfg(test)]
+mod test_git;
 mod transfer_admission;
 
 pub use config::{
@@ -208,8 +211,12 @@ pub enum Error {
     },
     #[error("repository initialization failed")]
     Remote(#[from] crab_remote_git::Error),
+    #[error("capsule repository read failed")]
+    Read(#[source] Box<crab_read::ReadError>),
+    #[error("repository browse index record is corrupt")]
+    BrowseIndexes(#[source] Box<crab_metadata::error::MetadataError>),
     #[error("repository maintenance failed")]
-    Maintenance(#[from] crab_write::WriteError),
+    Maintenance(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("repository catalog operation failed")]
     Catalog(#[from] catalog::CatalogError),
     #[error("server metrics setup failed")]
@@ -237,3 +244,15 @@ pub enum Error {
 
 /// Server startup or lifecycle result.
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<crab_read::ReadError> for Error {
+    fn from(source: crab_read::ReadError) -> Self {
+        Self::Read(Box::new(source))
+    }
+}
+
+impl From<maintenance::Error> for Error {
+    fn from(source: maintenance::Error) -> Self {
+        Self::Maintenance(Box::new(source))
+    }
+}

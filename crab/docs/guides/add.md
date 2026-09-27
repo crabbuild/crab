@@ -42,15 +42,19 @@ For each file matching the provided patterns:
 2. A Blake3 hash of the full content is computed while streaming.
 3. Content-defined chunking (CDC) using gearhash splits the stream into
    variable-size chunks.
-4. Each chunk is hashed and written to the local staging area
-   (`.crab/staging/`).
+4. Each chunk is hashed and recorded in the local staging area
+   (`.crab/staging/`). When the file sizes support efficient Xorb packing,
+   unique missing chunks go directly into prepared Xorbs; smaller-file batches
+   use raw segments and defer packing to push.
 5. The ordered chunk sequence is sealed as an immutable
-   `xet-gear-v1-64k` recipe and leased to this add batch. Add does not build a
-   second full prepared-xorb copy by default; push proves remote membership and
-   packs only the unique missing chunks.
+   `xet-gear-v1-64k` recipe and leased to this add batch. Prepared Xorbs are
+   durable local authority, not a second raw-segment copy. Push verifies
+   remote membership before publishing the file.
 6. Large same-size files with matching bounded fingerprints are checked as
    possible duplicates. Crab still hashes the full candidate file before
-   reusing a representative's staged chunk layout.
+   reusing a representative's staged chunk layout. A full-hash mismatch keeps
+   the same direct-Xorb preparation policy as an ordinary file; a sampled
+   match alone never forces the entire file into raw segments.
 7. Pointer blobs are inserted into Git's index. The pointer contains the file
    hash, chunk count, and total size.
 

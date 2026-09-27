@@ -598,14 +598,27 @@ verified data; authorization and mutable ref resolution are not permanently
 cached along with it. Missing path visibility follows the selected permission
 contract, including distinctions between access denial and absence.
 
-The implemented repository read view is keyed by both compacted generation and
-the validated committed-journal digest. Concurrent refreshes and branch-tip
+The implemented repository read view selects a present capsule-protocol root as
+the exclusive authority and keys it by root generation plus the authenticated
+per-ref state digest. Missing v2 authority selects the canonical v1 manifest;
+malformed or incomplete v2 state fails closed without legacy fallback. V1 views
+remain keyed by compacted generation and the validated committed-journal digest.
+Concurrent refreshes and branch-tip
 snapshot resolution use singleflight cells; Git trees reuse the generation-bound
 remote-read cache, and attributes are cached per immutable commit. The gateway
 invalidates its mutable-ref view after publication. HEAD and attributed LIST
 resolve size and ETag from committed attributes without opening blob payloads.
-Committed journal packs remain readable through this path before locator/catalog
-publication completes.
+Committed journal packs and authenticated v2 capsule packs remain readable
+through their respective canonical paths before derived locator/catalog
+publication completes. For v2 repositories, gateway mutations embed the
+generated pack sidecars and exact visibility edit in one capsule, upload S3
+attributes before ref visibility, and commit through the per-ref head CAS.
+Multipart completion uses deterministic v2 intent/receipt recovery. Idle
+gateway and HTTP-server maintenance share the same root-pinned, verified
+complete-pack checkpoint implementation. Warm per-ref state tracks frontier
+length and forces a checkpoint at 56 capsules, retaining headroom below the
+hard 64-entry bound even when the write stream never becomes idle. V1 repositories retain their existing
+manifest/journal write path.
 
 GET uses logical content opening for Git, Crab and LFS content. Raw `read_blob`
 is not a substitute. Read symlinks/submodules only according to phase 0; never

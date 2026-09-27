@@ -404,10 +404,12 @@ locator and all-object visibility coverage. The accepted forms are
 repeated/combine intersections; see the support table above for semantics.
 RustFS lifecycle qualification is green; AWS/provider and released-artifact
 qualification remain before this is a released support claim.
-The planner authorizes raw OIDs from that immutable proof before reading bytes;
-the local helper produces a standard Git pack, and Git owns its promisor config,
-pack installation, and `.promisor` sidecars. A later `git cat-file`, checkout,
-diff, or merge can request missing blobs through a new helper session.
+The planner authorizes raw OIDs from that immutable proof before reading bytes.
+Git owns the repository's promisor/filter configuration and installs the
+initial protocol-v2 response. A later `git cat-file`, checkout, diff, or merge
+re-enters the line-oriented helper with raw OIDs; Crab pins the authenticated
+capsule view, generates only the authorized selection, and atomically installs
+the pack and `.promisor` sidecar into Git's object database.
 
 The `crab clone` wrapper's default lazy mode is different: it configures Crab's
 pointer checkout and does not request a Git partial clone. Use ordinary Git

@@ -1,8 +1,8 @@
 use crate::active_active::*;
 use crate::error::CoordinationError;
 use crate::write_coordinator::{
-    CoordinatedRefUpdate, CoordinatorMaterializationGap, CoordinatorRepairSnapshot,
-    ManagedCoordinatorProvider,
+    CoordinatedCapsulePublication, CoordinatedRefUpdate, CoordinatorMaterializationGap,
+    CoordinatorRepairSnapshot, ManagedCoordinatorProvider,
 };
 
 fn active_active_replication() -> ActiveActiveReplicationConfig {
@@ -44,6 +44,16 @@ fn ref_update(name: &str, expected: Option<&str>, new: Option<&str>) -> Coordina
         expected: expected.map(str::to_owned),
         new: new.map(str::to_owned),
         force: false,
+    }
+}
+
+fn capsule_publication() -> CoordinatedCapsulePublication {
+    CoordinatedCapsulePublication {
+        base_root_digest: "1".repeat(64),
+        transaction_id: "2".repeat(64),
+        activation_id: "3".repeat(64),
+        run_hash: "4".repeat(64),
+        run_size: 1024,
     }
 }
 
@@ -225,6 +235,71 @@ fn active_active_push_operation_id_changes_for_uploaded_objects() {
 }
 
 #[test]
+fn active_active_capsule_plan_binds_exact_publication() {
+    let replication = active_active_replication();
+    let publication = capsule_publication();
+    let refs = vec![ref_update("refs/heads/main", Some("a"), Some("b"))];
+
+    let plan = plan_active_active_capsule_push(
+        &replication,
+        Some("east"),
+        publication.clone(),
+        refs,
+        vec![format!("repo/v2/capsules/44/{}", &publication.run_hash)],
+    )
+    .unwrap();
+
+    assert_eq!(plan.request.capsule_publication, Some(publication));
+    assert_eq!(plan.request.manifest_generation, 0);
+    assert!(plan.request.operation_id.starts_with("crab-op-"));
+}
+
+#[test]
+fn active_active_capsule_operation_id_changes_with_run_identity() {
+    let replication = active_active_replication();
+    let refs = vec![ref_update("refs/heads/main", Some("a"), Some("b"))];
+    let publication = capsule_publication();
+    let first = plan_active_active_capsule_push(
+        &replication,
+        Some("east"),
+        publication.clone(),
+        refs.clone(),
+        vec![format!("repo/v2/capsules/44/{}", &publication.run_hash)],
+    )
+    .unwrap();
+    let mut changed = capsule_publication();
+    changed.run_hash = "5".repeat(64);
+    let second = plan_active_active_capsule_push(
+        &replication,
+        Some("east"),
+        changed.clone(),
+        refs,
+        vec![format!("repo/v2/capsules/55/{}", &changed.run_hash)],
+    )
+    .unwrap();
+
+    assert_ne!(first.request.operation_id, second.request.operation_id);
+}
+
+#[test]
+fn active_active_capsule_plan_rejects_unbound_run() {
+    let replication = active_active_replication();
+    let mut publication = capsule_publication();
+    publication.run_size = 0;
+
+    let error = plan_active_active_capsule_push(
+        &replication,
+        Some("east"),
+        publication,
+        vec![ref_update("refs/heads/main", Some("a"), Some("b"))],
+        Vec::new(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, CoordinationError::Configuration { .. }));
+}
+
+#[test]
 fn active_active_writer_name_matches_remote_url() {
     let replication = active_active_replication();
 
@@ -254,20 +329,24 @@ fn active_active_repair_plan_maps_gaps_to_enabled_writers() {
             CoordinatorMaterializationGap {
                 operation_id: "op-2".into(),
                 manifest_generation: 12,
+                commit_sequence: 2,
                 region: "us-west-2".into(),
                 writer: "east".into(),
                 source_region: "us-east-1".into(),
                 refs: Vec::new(),
                 uploaded_objects: Vec::new(),
+                capsule_publication: None,
             },
             CoordinatorMaterializationGap {
                 operation_id: "op-1".into(),
                 manifest_generation: 11,
+                commit_sequence: 1,
                 region: "us-east-1".into(),
                 writer: "west".into(),
                 source_region: "us-west-2".into(),
                 refs: Vec::new(),
                 uploaded_objects: Vec::new(),
+                capsule_publication: None,
             },
         ],
     };

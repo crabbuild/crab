@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use object_store::aws::{
-    AmazonS3, AmazonS3Builder, AmazonS3ConfigKey, AwsCredentialProvider, S3CopyIfNotExists,
+    AmazonS3, AmazonS3Builder, AmazonS3ConfigKey, AwsCredentialProvider, Checksum,
+    S3CopyIfNotExists,
 };
 use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
 use object_store::gcp::{GcpCredential, GoogleCloudStorageBuilder, GoogleConfigKey};
@@ -15,7 +16,7 @@ use crate::identity::{BucketIdentity, StorageProviderKind};
 use crate::provider_options::{
     default_client_options, s3_endpoint_from_env, s3_virtual_hosted_style_from_env,
 };
-use crate::store::Store;
+use crate::store::{ImmutableWriteVerification, Store};
 
 mod target;
 
@@ -96,6 +97,8 @@ pub struct BuiltObjectStore {
     pub multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
     /// Credential-free identity of the resolved transport configuration.
     pub target_identity: [u8; 32],
+    /// Provider evidence available after an acknowledged immutable write.
+    pub immutable_write_verification: ImmutableWriteVerification,
 }
 
 /// Object-store handle parsed from a URL plus the path prefix embedded in that URL.
@@ -413,6 +416,7 @@ fn build_object_store_inner(
                 signer: None,
                 multipart: Some(gcs),
                 target_identity,
+                immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             })
         }
         ObjectStoreCredentials::Azure { account, token } => {
@@ -446,6 +450,7 @@ fn build_object_store_inner(
                 signer: None,
                 multipart: None,
                 target_identity,
+                immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             })
         }
     }
@@ -487,7 +492,8 @@ pub fn build_explicit_store(
 fn store_from_built(identity: BucketIdentity, built: BuiltObjectStore) -> Store {
     let mut store = Store::new(built.inner)
         .with_bucket_identity(identity)
-        .with_target_identity(built.target_identity);
+        .with_target_identity(built.target_identity)
+        .with_immutable_write_verification(built.immutable_write_verification);
     if let Some(signer) = built.signer {
         store = store.with_signer(signer);
     }
@@ -586,6 +592,7 @@ fn build_static_env_object_store(
                 signer: None,
                 multipart: Some(gcs),
                 target_identity,
+                immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             })
         }
         StorageProviderKind::Azure => {
@@ -606,6 +613,7 @@ fn build_static_env_object_store(
                 signer: None,
                 multipart: None,
                 target_identity,
+                immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             })
         }
         StorageProviderKind::Local => Err(StorageError::UnsupportedProvider { provider }),
@@ -632,6 +640,14 @@ fn build_s3_object_store(
     }
     let multipart_identity = s3_multipart_identity(&builder, bucket);
     let target_identity = target::s3(&builder, bucket)?;
+    let (builder, immutable_write_verification) = if endpoint.is_none() {
+        (
+            builder.with_checksum_algorithm(Checksum::SHA256),
+            ImmutableWriteVerification::Sha256Checksum,
+        )
+    } else {
+        (builder, ImmutableWriteVerification::ReadbackRequired)
+    };
     let s3 = builder
         .with_copy_if_not_exists(S3CopyIfNotExists::Multipart)
         .with_http_connector(crate::transport_read_admission::ReadAdmissionConnector::default())
@@ -645,6 +661,7 @@ fn build_s3_object_store(
         signer: Some(s3.clone() as Arc<dyn object_store::signer::Signer>),
         multipart: Some(s3),
         target_identity,
+        immutable_write_verification,
     })
 }
 
@@ -804,6 +821,54 @@ mod tests {
 
         assert_eq!(built.provider, StorageProviderKind::S3);
         assert!(built.signer.is_some());
+    }
+
+    #[test]
+    fn aws_checksum_qualification_excludes_custom_s3_endpoints() {
+        let credentials = || ObjectStoreCredentials::Aws {
+            access_key_id: "access".into(),
+            secret_access_key: "secret".into(),
+            session_token: None,
+            region: "us-east-1".into(),
+        };
+        let aws = build_object_store_with_endpoint("bucket", credentials(), None)
+            .expect("AWS builder construction does not perform network I/O");
+        let custom = build_object_store_with_endpoint(
+            "bucket",
+            credentials(),
+            Some("https://objects.example.test"),
+        )
+        .expect("custom S3 builder construction does not perform network I/O");
+
+        assert_eq!(
+            aws.immutable_write_verification,
+            ImmutableWriteVerification::Sha256Checksum
+        );
+        assert_eq!(
+            custom.immutable_write_verification,
+            ImmutableWriteVerification::ReadbackRequired
+        );
+    }
+
+    #[test]
+    fn explicit_store_propagates_checksum_qualification() {
+        let store = build_explicit_store(
+            "bucket",
+            ObjectStoreCredentials::Aws {
+                access_key_id: "access".into(),
+                secret_access_key: "secret".into(),
+                session_token: None,
+                region: "us-east-1".into(),
+            },
+            None,
+            false,
+        )
+        .expect("AWS builder construction does not perform network I/O");
+
+        assert_eq!(
+            store.immutable_write_verification(),
+            ImmutableWriteVerification::Sha256Checksum
+        );
     }
 
     #[test]

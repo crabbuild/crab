@@ -300,17 +300,16 @@ fn run_lfs_pre_push_batch(
         cancel,
     ))?;
 
-    // Ref updates contain only the refs Git is changing. Excluding the
-    // compacted manifest's complete ref-tip set prevents a multi-branch push
-    // from rescanning pointers that are already reachable from another remote
-    // branch or tag.
-    let base_manifest_refs = load_remote_manifest_ref_tips(&ctx)?;
+    // Ref updates contain only the refs Git is changing. Excluding every
+    // published remote tip prevents a multi-branch push from rescanning
+    // pointers already reachable from another remote branch or tag.
+    let published_ref_tips = load_remote_ref_tips(&ctx)?;
 
     // Collect LFS pointers from the commits being pushed.
     let pointers = collect_pointers_from_range_with_base_refs(
         &local_shas,
         &remote_shas,
-        &base_manifest_refs,
+        &published_ref_tips,
         cancel,
     )?;
 
@@ -417,12 +416,27 @@ fn collect_pointers_from_range_with_base_refs(
     )
 }
 
-fn load_remote_manifest_ref_tips(
-    ctx: &super::store_setup::LfsRemoteContext,
-) -> Result<Vec<String>> {
+fn load_remote_ref_tips(ctx: &super::store_setup::LfsRemoteContext) -> Result<Vec<String>> {
     let store = crate::storage::Store::from_storage(ctx.store.store().clone());
     let router = crate::storage::StoreLayout::new(store.clone(), ctx.prefix.clone());
+    let capsule_layout =
+        crab_storage::StoreLayout::new(store.as_storage().clone(), ctx.prefix.clone());
     super::block_on_runtime(async move {
+        match crab_metadata::capsule_protocol::load_root(&capsule_layout).await {
+            Ok(root) => {
+                return crab_read::capsule_protocol::read_visible_refs_from_root(
+                    &capsule_layout,
+                    &root,
+                )
+                .await
+                .map(|refs| refs.into_values().collect())
+                .map_err(CrabError::from);
+            }
+            Err(crab_metadata::error::MetadataError::Storage {
+                source: crab_storage::StorageError::NotFound { .. },
+            }) => {}
+            Err(error) => return Err(error.into()),
+        }
         match crate::metadata::manifest::read_manifest(&store, &router).await {
             Ok((manifest, _)) => Ok(manifest.refs.into_values().collect()),
             Err(CrabError::NotFound { .. }) => Ok(Vec::new()),

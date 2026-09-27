@@ -84,11 +84,8 @@ async fn disconnected_receive_drains_intake_and_returns_transfer_capacity() {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap();
-    let snapshot =
-        crab_metadata::manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
-            .await
-            .unwrap();
-    assert!(snapshot.manifest.refs.is_empty() && snapshot.journal.transactions.is_empty());
+    let view = repo.open_view().await.unwrap();
+    assert!(view.refs().is_empty() && view.capsules().is_empty());
     server.cancellation.cancel();
     server.shutdown_runtimes().await.unwrap();
 }
@@ -237,9 +234,13 @@ async fn native_http_push_rustfs() {
         crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
             .unwrap();
     let layout = StoreLayout::new(store.clone(), prefix.clone());
-    crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
-        .await
-        .unwrap();
+    crab_write::capsule_protocol::initialize(
+        &layout,
+        blake3::hash(prefix.as_bytes()).to_hex().as_ref(),
+        "refs/heads/main",
+    )
+    .await
+    .unwrap();
     let mut server = maintenance_tests::fixture().await;
     let repo = Arc::get_mut(&mut server)
         .unwrap()
@@ -301,10 +302,9 @@ async fn exercise(server: Arc<Server>, branch: &str) {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap();
-    let before = crab_metadata::manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
-        .await
-        .unwrap();
-    assert!(before.journal.refs.is_empty());
+    let before = repo.open_view().await.unwrap();
+    assert!(before.refs().is_empty());
+    assert!(before.capsules().is_empty());
     assert!(
         repo.store
             .list_prefix(&repo.layout.repo_path("packs"))
@@ -327,12 +327,26 @@ async fn exercise(server: Arc<Server>, branch: &str) {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap();
-    let (mut manifest, etag) =
-        crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout)
-            .await
-            .unwrap();
-    assert!(manifest.commit_graph_hash.is_some());
-    assert!(manifest.path_state_hash.is_some());
+    let tag_view = repo.open_view().await.unwrap();
+    assert!(!tag_view.capsules().is_empty());
+    assert_eq!(tag_view.head(), "refs/heads/main");
+    assert!(matches!(
+        crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout).await,
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. }
+        })
+    ));
+    repo.schedule_maintenance(&server).await.unwrap();
+    server.finish_maintenance().await.unwrap();
+    repo.invalidate().await;
+    let indexes = crab_metadata::capsule_protocol::load_browse_indexes(&repo.layout)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        indexes.state_digest(),
+        repo.open_view().await.unwrap().state_digest()
+    );
     let attribution_url = format!(
         "http://127.0.0.1:{port}/api/repos/team/repo/tree-attribution?rev={first}&limit=100"
     );
@@ -343,8 +357,8 @@ async fn exercise(server: Arc<Server>, branch: &str) {
     assert_eq!(attribution["state"], "ready");
     assert_eq!(attribution["items"][0]["last_commit"]["oid"], first);
 
-    manifest.path_state_hash = None;
-    crab_metadata::manifest_store::write_manifest_cas(&repo.store, &repo.layout, &manifest, &etag)
+    repo.store
+        .delete(&repo.layout.capsule_browse_indexes_path())
         .await
         .unwrap();
     repo.invalidate().await;
@@ -371,39 +385,74 @@ async fn exercise(server: Arc<Server>, branch: &str) {
     .await
     .unwrap();
 
-    let (manifest, _) = crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout)
+    let indexes = crab_metadata::capsule_protocol::load_browse_indexes(&repo.layout)
         .await
+        .unwrap()
         .unwrap();
-    let path_state_hash = manifest.path_state_hash.unwrap();
-    repo.store
-        .delete(
-            &repo
-                .layout
-                .bulk_manifest_path("path-state", &path_state_hash),
-        )
-        .await
-        .unwrap();
-    repo.invalidate().await;
-    let corrupt = reqwest::get(&attribution_url).await.unwrap();
-    assert_eq!(corrupt.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let corrupt: serde_json::Value =
-        serde_json::from_slice(&corrupt.bytes().await.unwrap()).unwrap();
-    assert_eq!(corrupt["error"]["code"], "path_state_corrupt");
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let response = reqwest::get(&attribution_url).await.unwrap();
-            if response.status() == StatusCode::OK {
-                break;
+    let path_state_hash = indexes.path_state_hash();
+    for corruption in [
+        "missing descriptor",
+        "corrupt descriptor",
+        "malformed record",
+        "oversized record",
+    ] {
+        let descriptor = repo
+            .layout
+            .bulk_manifest_path("path-state", path_state_hash);
+        match corruption {
+            "missing descriptor" => repo.store.delete(&descriptor).await.unwrap(),
+            "corrupt descriptor" => repo
+                .store
+                .put_overwrite(&descriptor, bytes::Bytes::from_static(b"corrupt"))
+                .await
+                .unwrap(),
+            _ => {
+                let size = if corruption == "oversized record" {
+                    8192
+                } else {
+                    1
+                };
+                repo.store
+                    .put_overwrite(
+                        &repo.layout.capsule_browse_indexes_path(),
+                        bytes::Bytes::from(vec![b'!'; size]),
+                    )
+                    .await
+                    .unwrap();
             }
-            assert!(matches!(
-                response.status(),
-                StatusCode::ACCEPTED | StatusCode::SERVICE_UNAVAILABLE
-            ));
         }
-    })
-    .await
-    .unwrap();
+        repo.invalidate().await;
+        let corrupt = reqwest::get(&attribution_url).await.unwrap();
+        assert_eq!(
+            corrupt.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{corruption}"
+        );
+        let corrupt: serde_json::Value =
+            serde_json::from_slice(&corrupt.bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            corrupt["error"]["code"], "path_state_corrupt",
+            "{corruption}"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let response = reqwest::get(&attribution_url).await.unwrap();
+                if response.status() == StatusCode::OK {
+                    let attribution: serde_json::Value =
+                        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+                    assert_eq!(attribution["items"][0]["last_commit"]["oid"], first);
+                    break;
+                }
+                assert!(matches!(
+                    response.status(),
+                    StatusCode::ACCEPTED | StatusCode::SERVICE_UNAVAILABLE
+                ));
+            }
+        })
+        .await
+        .unwrap();
+    }
     let reader = tempfile::tempdir().unwrap();
     success(
         reader.path(),

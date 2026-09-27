@@ -1,9 +1,11 @@
 # crab migrate
 
 Inspect large-file history and convert DVC workflow state into Crab metadata.
-The history-rewrite commands are currently dry-run only: non-dry-run requests
-fail explicitly without changing the repository. Use `crab adopt` for the
-supported working-tree cutover path.
+The history-rewrite commands use Git's built-in fast-export/fast-import engine.
+They require a clean working tree, stage verified Crab content locally, and
+rewrite the selected refs atomically from Git's point of view. Back up the
+repository before running them; after a rewrite, collaborators must re-clone
+and the rewritten refs require a force push.
 
 ## Synopsis
 
@@ -15,12 +17,12 @@ crab migrate export [OPTIONS]
 
 ## Description
 
-`crab migrate` provides an analysis tool (info) and dry-run previews for
-history conversion. Applying the history rewrite is not yet supported and
-returns an explicit error without changing the repository.
-
-Use `crab adopt` for the supported working-tree conversion path. Keep a
-repository backup before any future history-rewrite implementation is used.
+`crab migrate` provides an analysis tool (`info`), dry-run previews, and
+verified history conversion. `migrate import` replaces selected regular Git
+blobs with Crab pointers and stages their Xet chunks in `.crab/staging`.
+`migrate export` reconstructs selected Crab pointers through the configured
+Crab remote, verifies their file hashes, and writes regular Git blobs back to
+history. Neither command requires `git-filter-repo`.
 
 ## Subcommands
 
@@ -34,7 +36,7 @@ tracking.
 | `--above` | `1048576` (1 MB) | Only consider files above this size in bytes |
 | `--top` | `10` | Show the top N file extensions |
 
-### crab migrate import (dry-run only)
+### crab migrate import
 
 Convert large files in history to crab pointers.
 
@@ -43,17 +45,17 @@ Convert large files in history to crab pointers.
 | `--include` | (required) | Glob patterns for files to convert |
 | `--exclude` | | Glob patterns to exclude from migration |
 | `--above` | `1048576` (1 MB) | Only migrate files above this size |
-| `--dry-run` | `required` | Report what would be migrated; applying the rewrite is unsupported |
-| `--everything` | `false` | Include all branches in the dry-run report |
+| `--dry-run` | `false` | Report what would be migrated without changing refs or staging objects |
+| `--everything` | `false` | Include all refs instead of the current branch |
 
-### crab migrate export (dry-run only)
+### crab migrate export
 
 Convert crab pointers back to full files in history.
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--include` | (required) | Glob patterns for files to convert back |
-| `--dry-run` | `required` | Report what would be exported; applying the rewrite is unsupported |
+| `--dry-run` | `false` | Report what would be exported without changing refs |
 
 ## Examples
 
@@ -138,12 +140,12 @@ crab migrate export --include '*.bin' --dry-run
 
 ## Prerequisites
 
-- `git-filter-repo` must be installed:
-  ```bash
-  pip install git-filter-repo
-  ```
-- The repository must be initialized with `crab init` (for import).
-- AWS credentials must be configured (for import, to upload converted objects).
+- A clean Git working tree is required for both rewrite commands.
+- `migrate import` needs a writable `.crab/staging` directory; it can be run
+  before `crab init` and uploads occur later when the rewritten refs are
+  pushed.
+- `migrate export` needs a configured Crab remote and read access to the
+  selected pointer recipes and shard/xorb objects.
 
 ## Workflow
 
@@ -172,7 +174,7 @@ crab migrate export --include '*.bin' --dry-run
 
 5. Force-push the rewritten history:
    ```bash
-   git push --force origin --all
+   git push --force-with-lease origin --all
    ```
 
 6. Notify collaborators to re-clone.

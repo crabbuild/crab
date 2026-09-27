@@ -1,12 +1,68 @@
 //! Origin-only integrity checks over a caller-pinned recipe.
 
+use crab_metadata::capsule_protocol::FileCatalogEntry;
 use crab_types::pointer::Pointer;
 use crab_xet::hash::MerkleHash;
-use crab_xet::shard::MDBFileInfo;
+use crab_xet::shard::{MDBFileInfo, ShardReader};
 use crab_xet::xorb::{format::MAX_XORB_SIZE, parser::XorbParser};
 use tokio_util::sync::CancellationToken;
 
 use crate::{ReadError, ReadStoreLayout, Result};
+
+/// Verify a catalog-selected shard recipe and its complete file bytes at origin.
+///
+/// The caller must bind `entry` to this file in a pinned authoritative catalog
+/// and protect its lifetime. Pointer hints never choose the shard. The returned
+/// recipe is authenticated and reconstructs exactly the pointer's hash and size.
+pub async fn verify_catalog_file_recipe(
+    layout: &ReadStoreLayout,
+    pointer: &Pointer,
+    entry: &FileCatalogEntry,
+    cancel: &CancellationToken,
+) -> Result<MDBFileInfo> {
+    if cancel.is_cancelled() {
+        return Err(ReadError::Cancelled);
+    }
+    let file_hash = MerkleHash::from(pointer.file_hash);
+    if entry.size() != pointer.size {
+        return Err(ReadError::CorruptObject {
+            path: file_hash.hex(),
+            reason: "pointer length differs from catalog length".to_owned(),
+        });
+    }
+    let shard_hash =
+        MerkleHash::from_hex(entry.shard_hash()).map_err(|error| ReadError::CorruptObject {
+            path: entry.shard_hash().to_owned(),
+            reason: format!("catalog shard identity is invalid: {error}"),
+        })?;
+    let path = layout.shard_path(&shard_hash);
+    let (body, _) = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(ReadError::Cancelled),
+        result = layout.store().get_with_etag_bounded(
+            &path, crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES as u64,
+        ) => result?,
+    };
+    let recipe = tokio::task::spawn_blocking(move || {
+        let actual = crab_xet::hash::compute_data_hash(&body);
+        if actual != shard_hash {
+            return Err(ReadError::HashMismatch {
+                requested: shard_hash.hex(),
+                actual: actual.hex(),
+            });
+        }
+        ShardReader::from_bytes(body, shard_hash)
+            .get_file_info(&file_hash)?
+            .ok_or_else(|| ReadError::CorruptObject {
+                path: path.to_string(),
+                reason: format!("catalog-selected shard lacks file {}", file_hash.hex()),
+            })
+    })
+    .await
+    .map_err(|error| ReadError::Io(std::io::Error::other(error)))??;
+    verify_origin_recipe(layout, pointer, &recipe, cancel).await?;
+    Ok(recipe)
+}
 
 /// Verify every byte of a pinned recipe against origin and the pointer hash/size.
 ///

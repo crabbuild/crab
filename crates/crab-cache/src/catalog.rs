@@ -861,6 +861,7 @@ pub(crate) fn classify_family(relative: &str) -> &'static str {
         "chunks" => "decoded-range",
         "xorbs" => "xorb",
         "shards" => "shard",
+        "git-packs" => "git-pack",
         "manifests" => "manifest",
         "stages" => "stage",
         "buckets" | "repos" => "chunk-index",

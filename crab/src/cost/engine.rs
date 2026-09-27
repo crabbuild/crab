@@ -42,6 +42,7 @@ pub struct ReportOptions {
 pub async fn build_report(
     config: &Config,
     store: &Store,
+    repository_prefix: &str,
     options: &ReportOptions,
     cancel: &CancellationToken,
 ) -> Result<CostReport> {
@@ -113,6 +114,7 @@ pub async fn build_report(
             sample_ratio: (sample_ratio < 1.0).then_some(sample_ratio),
             top_k_cold,
             provider,
+            repository_prefix: Some(repository_prefix.to_owned()),
         },
         cancel,
     )

@@ -1777,6 +1777,7 @@ mod tests {
             writer: "east".to_owned(),
             region: "us-east-1".to_owned(),
             manifest_generation: 7,
+            capsule_publication: None,
             refs: vec![crate::write_coordinator::CoordinatedRefUpdate {
                 name: "refs/heads/main".to_owned(),
                 expected: expected.map(str::to_owned),

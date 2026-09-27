@@ -209,6 +209,29 @@ struct PackIndexFlightKey {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PackIndexBatchFlightKey {
+    identity: RepositoryIdentity,
+    source_ranges: [u8; 32],
+    max_source_bytes: u64,
+}
+
+impl PackIndexBatchFlightKey {
+    pub(crate) fn new(
+        identity: &RepositoryIdentity,
+        source_ranges: [u8; 32],
+        max_source_bytes: u64,
+    ) -> Self {
+        Self {
+            identity: identity.clone(),
+            source_ranges,
+            max_source_bytes,
+        }
+    }
+}
+
+pub(crate) type PackIndexes = Vec<(MerkleHash, Arc<PackIndex>)>;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct GeneratedPackFlightKey {
     request: GeneratedPackCacheKey,
     options: RepositoryOptions,
@@ -289,6 +312,7 @@ pub struct RemoteGitRuntime {
     pack_index_size_cache: Mutex<BoundedLru<PackIndexCacheKey, u64>>,
     pack_index_size_flights: Arc<ReadFlights<PackIndexCacheKey, u64>>,
     pack_index_flights: Arc<ReadFlights<PackIndexFlightKey, Arc<PackIndex>>>,
+    pack_index_batch_flights: Arc<ReadFlights<PackIndexBatchFlightKey, PackIndexes>>,
     generated_pack_flights: Mutex<HashMap<GeneratedPackFlightKey, GeneratedPackFlight>>,
     negative_cache: Mutex<BoundedLru<ObjectCacheKey, Instant>>,
     tasks: TaskTracker,
@@ -346,6 +370,7 @@ impl RemoteGitRuntime {
             )),
             pack_index_size_flights: ReadFlights::new(),
             pack_index_flights: ReadFlights::new(),
+            pack_index_batch_flights: ReadFlights::new(),
             generated_pack_flights: Mutex::new(HashMap::new()),
             negative_cache: Mutex::new(BoundedLru::new(
                 options.max_negative_cache_entries,
@@ -406,7 +431,8 @@ impl RemoteGitRuntime {
                 .pack_index_size_flights
                 .len()
                 .await
-                .saturating_add(self.pack_index_flights.len().await),
+                .saturating_add(self.pack_index_flights.len().await)
+                .saturating_add(self.pack_index_batch_flights.len().await),
             active_generated_pack_flights: self.generated_pack_flights.lock().await.len(),
         }
     }
@@ -843,6 +869,43 @@ impl RemoteGitRuntime {
                     let index = Arc::new(work(cancellation, budget).await?);
                     runtime.insert_pack_index(key, index.clone()).await;
                     Ok(index)
+                },
+            )
+            .await
+    }
+
+    pub(crate) async fn load_pack_indexes_singleflight<F, Fut>(
+        self: &Arc<Self>,
+        key: PackIndexBatchFlightKey,
+        cancellation: &CancellationToken,
+        budget: &crate::budget::OperationBudget,
+        work: F,
+    ) -> Result<PackIndexes>
+    where
+        F: FnOnce(CancellationToken, Arc<crate::budget::SharedBudget>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<PackIndexes>> + Send + 'static,
+    {
+        let runtime = self.clone();
+        self.pack_index_batch_flights
+            .run(
+                self,
+                key.clone(),
+                cancellation,
+                budget,
+                &self.pack_index_flight_admission,
+                move |cancellation, budget| async move {
+                    let indexes = work(cancellation, budget).await?;
+                    // Publish only after every member passed its descriptor and
+                    // index checks. A corrupt sibling must not populate the cache.
+                    for (pack_id, index) in &indexes {
+                        runtime
+                            .insert_pack_index(
+                                PackIndexCacheKey::new(&key.identity, *pack_id),
+                                Arc::clone(index),
+                            )
+                            .await;
+                    }
+                    Ok(indexes)
                 },
             )
             .await

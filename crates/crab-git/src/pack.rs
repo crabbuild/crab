@@ -210,6 +210,8 @@ pub fn initialize_bare_git_dir(path: &Path) -> Result<()> {
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
         .output()
         .map_err(|source| {
             io_error(
@@ -296,6 +298,210 @@ pub fn install_pack_file_from_path(
         fsck_objects,
         None,
     )
+}
+
+/// Install a thin pack whose external delta bases are already present locally.
+///
+/// Git repairs the pack with `index-pack --fix-thin` while reading it from
+/// stdin, then Crab atomically installs the repaired pack and its sidecars
+/// under `canonical_name`. The owning repository is derived from
+/// `pack_dir` (`<git-dir>/objects/pack`) so base lookup cannot use ambient
+/// process state.
+pub fn install_thin_pack_file_from_path(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    fsck_objects: bool,
+) -> Result<InstalledPack> {
+    install_thin_pack(
+        pack_dir,
+        pack_tmp_path,
+        Some(canonical_name),
+        max_input_size,
+        fsck_objects,
+        None,
+    )
+}
+
+/// Repair a thin pack and install it under its repaired Blake3 content identity.
+///
+/// External bases must already be readable from `pack_dir`'s object database.
+/// `expected_objects` includes the source objects and the declared external bases.
+/// Existing repaired artifacts are verified before an idempotent return.
+pub fn install_thin_pack_with_content_identity(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    max_input_size: u64,
+    expected_objects: &std::collections::BTreeSet<gix_hash::ObjectId>,
+) -> Result<InstalledPack> {
+    install_thin_pack(
+        pack_dir,
+        pack_tmp_path,
+        None,
+        max_input_size,
+        false,
+        Some(expected_objects),
+    )
+}
+
+fn install_thin_pack(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    canonical_name: Option<&str>,
+    max_input_size: u64,
+    fsck_objects: bool,
+    expected_objects: Option<&std::collections::BTreeSet<gix_hash::ObjectId>>,
+) -> Result<InstalledPack> {
+    let size = std::fs::metadata(pack_tmp_path)
+        .map_err(|source| io_error(format!("metadata {}", pack_tmp_path.display()), source))?
+        .len();
+    if max_input_size > 0 && size > max_input_size {
+        return Err(PackError::PackTooLarge {
+            size,
+            limit: max_input_size,
+        });
+    }
+    if let Some(name) = canonical_name
+        && !valid_canonical_pack_name(name)
+    {
+        return Err(PackError::InvalidCanonicalName {
+            name: name.to_owned(),
+        });
+    }
+
+    std::fs::create_dir_all(pack_dir)
+        .map_err(|source| io_error(format!("create {}", pack_dir.display()), source))?;
+    let objects_dir = pack_dir
+        .parent()
+        .filter(|objects_dir| {
+            objects_dir
+                .file_name()
+                .is_some_and(|name| name == "objects")
+        })
+        .ok_or_else(|| PackError::InvalidPackFile {
+            path: pack_dir.to_owned(),
+            reason: "thin-pack installation requires a Git objects/pack directory".to_owned(),
+        })?;
+    let workspace = tempfile::Builder::new()
+        .prefix(".crab-thin-repaired-")
+        .tempdir_in(pack_dir)
+        .map_err(|source| io_error("create repaired thin-pack workspace", source))?;
+    initialize_bare_git_dir(workspace.path())?;
+    let objects_dir = std::fs::canonicalize(objects_dir)
+        .map_err(|source| io_error("resolve thin-pack base object directory", source))?;
+    let repaired_pack = workspace.path().join("repaired.pack");
+    let repaired_idx = repaired_pack.with_extension("idx");
+    let repaired_rev = repaired_pack.with_extension("rev");
+
+    let input = std::fs::File::open(pack_tmp_path)
+        .map_err(|source| io_error(format!("open {}", pack_tmp_path.display()), source))?;
+    let mut index_pack = Command::new("git");
+    index_pack
+        .arg("--git-dir")
+        .arg(workspace.path())
+        // The private repository owns command configuration; only this explicit
+        // object database may supply bases, including metadata-free read caches.
+        .env("GIT_OBJECT_DIRECTORY", objects_dir)
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .arg("index-pack")
+        .arg("--fix-thin");
+    if fsck_objects {
+        index_pack.arg("--fsck-objects");
+    }
+    let output = index_pack
+        .arg("--stdin")
+        .arg(&repaired_pack)
+        .stdin(input)
+        .output()
+        .map_err(|source| io_error("spawn git index-pack --fix-thin", source))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        return Err(if fsck_objects {
+            PackError::ObjectFsckFailed {
+                git_sha1: canonical_name.unwrap_or("thin").to_owned(),
+                stderr,
+            }
+        } else {
+            PackError::IndexPackFailed {
+                git_sha1: canonical_name.unwrap_or("thin").to_owned(),
+                stderr,
+            }
+        });
+    }
+    if !repaired_pack.exists() || !repaired_idx.exists() {
+        return Err(PackError::IndexMissing { path: repaired_idx });
+    }
+    let (git_sha1, content_hash, repaired_size) = verify_and_hash_pack_file(&repaired_pack)?;
+    let indexed_sha1 = parse_idx_pack_hash(&repaired_idx)?;
+    if indexed_sha1 != git_sha1 {
+        return Err(PackError::PackHashMismatch {
+            trailer: git_sha1,
+            index: indexed_sha1,
+        });
+    }
+    if !repaired_rev.exists() {
+        crate::pack_locator::write_pack_reverse_index(&repaired_idx, &repaired_rev)?;
+    }
+    let locations =
+        crate::pack_locator::PackLocationIter::open(&repaired_idx, &repaired_rev, repaired_size)?;
+    if let Some(expected) = expected_objects {
+        let actual = locations
+            .map(|entry| entry.map(|entry| entry.oid))
+            .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()?;
+        if &actual != expected {
+            return Err(PackError::InvalidPackFile {
+                path: repaired_pack,
+                reason: "repaired pack does not match the authenticated object and base set"
+                    .to_owned(),
+            });
+        }
+    }
+    let content_name = blake3::Hash::from_bytes(content_hash).to_hex().to_string();
+    let canonical_name = canonical_name.unwrap_or(&content_name);
+    let final_pack = pack_dir.join(format!("pack-{canonical_name}.pack"));
+    let final_idx = pack_dir.join(format!("pack-{canonical_name}.idx"));
+    let final_rev = pack_dir.join(format!("pack-{canonical_name}.rev"));
+
+    if final_pack.exists() || final_idx.exists() || final_rev.exists() {
+        let same_sidecar = |left: &Path, right: &Path| -> Result<bool> {
+            Ok(
+                std::fs::read(left).map_err(|source| io_error("read installed sidecar", source))?
+                    == std::fs::read(right)
+                        .map_err(|source| io_error("read repaired sidecar", source))?,
+            )
+        };
+        if verify_and_hash_pack_file(&final_pack)?.1 != content_hash
+            || !same_sidecar(&final_idx, &repaired_idx)?
+            || !same_sidecar(&final_rev, &repaired_rev)?
+        {
+            return Err(PackError::InvalidPackFile {
+                path: final_pack,
+                reason: "installed repaired pack differs from the verified input".to_owned(),
+            });
+        }
+    } else {
+        std::fs::rename(&repaired_idx, &final_idx)
+            .map_err(|source| io_error("install repaired index", source))?;
+        if let Err(source) = std::fs::rename(&repaired_rev, &final_rev) {
+            let _ = std::fs::remove_file(&final_idx);
+            return Err(io_error("install repaired reverse index", source));
+        }
+        if let Err(source) = std::fs::rename(&repaired_pack, &final_pack) {
+            let _ = std::fs::remove_file(&final_idx);
+            let _ = std::fs::remove_file(&final_rev);
+            return Err(io_error("install repaired pack", source));
+        }
+    }
+
+    Ok(InstalledPack {
+        git_sha1,
+        pack_path: final_pack,
+        idx_path: final_idx,
+        rev_path: final_rev,
+    })
 }
 
 pub(crate) fn install_pack_file_from_path_with_identity(
@@ -425,6 +631,69 @@ pub fn install_pack_files_from_paths_with_identity(
     expected_object_count: u64,
     verified_identity: Option<VerifiedPackIdentity>,
 ) -> Result<InstalledPack> {
+    let verification = verified_identity.map_or(
+        PackInstallVerification::Unverified,
+        PackInstallVerification::Body,
+    );
+    install_pack_files_from_paths_impl(
+        pack_dir,
+        pack_tmp_path,
+        index_tmp_path,
+        reverse_index_tmp_path,
+        canonical_name,
+        max_input_size,
+        expected_object_count,
+        verification,
+    )
+}
+
+/// Install an indexed pack after its sidecar pair has already been validated.
+///
+/// The caller must pass the same temporary index and reverse-index paths used
+/// for the prior validation. This keeps the atomic install path from
+/// reopening and revalidating a large sidecar pair that was just checked by
+/// the caller, while the pack identity and sidecar bounds remain enforced.
+pub fn install_pack_files_from_paths_with_verified_sidecars(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    index_tmp_path: &Path,
+    reverse_index_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    expected_object_count: u64,
+    verified_identity: VerifiedPackIdentity,
+) -> Result<InstalledPack> {
+    let verification = PackInstallVerification::BodyAndSidecars(verified_identity);
+    install_pack_files_from_paths_impl(
+        pack_dir,
+        pack_tmp_path,
+        index_tmp_path,
+        reverse_index_tmp_path,
+        canonical_name,
+        max_input_size,
+        expected_object_count,
+        verification,
+    )
+}
+
+// Skipping sidecar validation requires the matching immutable body's identity;
+// keep that proof attached instead of admitting independent flags.
+enum PackInstallVerification {
+    Unverified,
+    Body(VerifiedPackIdentity),
+    BodyAndSidecars(VerifiedPackIdentity),
+}
+
+fn install_pack_files_from_paths_impl(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    index_tmp_path: &Path,
+    reverse_index_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    expected_object_count: u64,
+    verification: PackInstallVerification,
+) -> Result<InstalledPack> {
     let pack_size = std::fs::metadata(pack_tmp_path)
         .map_err(|source| io_error(format!("metadata {}", pack_tmp_path.display()), source))?
         .len();
@@ -440,6 +709,11 @@ pub fn install_pack_files_from_paths_with_identity(
         });
     }
 
+    let verified_identity = match &verification {
+        PackInstallVerification::Unverified => None,
+        PackInstallVerification::Body(identity)
+        | PackInstallVerification::BodyAndSidecars(identity) => Some(*identity),
+    };
     let (git_sha1, content_hash, verified_size) = match verified_identity {
         Some(identity) => (to_hex(&identity.git_sha1), identity.content_hash, pack_size),
         None => verify_and_hash_pack_file(pack_tmp_path)?,
@@ -494,21 +768,31 @@ pub fn install_pack_files_from_paths_with_identity(
         });
     }
 
-    let locations = crate::pack_locator::PackLocationIter::open(
-        index_tmp_path,
-        reverse_index_tmp_path,
-        pack_size,
-    )?;
-    if locations.object_count() != expected_object_count {
+    let (indexed_object_count, indexed_sha1) = match verification {
+        PackInstallVerification::BodyAndSidecars(identity) => {
+            (expected_object_count, to_hex(&identity.git_sha1))
+        }
+        PackInstallVerification::Unverified | PackInstallVerification::Body(_) => {
+            let locations = crate::pack_locator::PackLocationIter::open(
+                index_tmp_path,
+                reverse_index_tmp_path,
+                pack_size,
+            )?;
+            (
+                locations.object_count(),
+                locations.pack_checksum().to_string(),
+            )
+        }
+    };
+    if indexed_object_count != expected_object_count {
         return Err(PackError::InvalidPackFile {
             path: index_tmp_path.to_owned(),
             reason: format!(
                 "index has {} objects but caller expects {expected_object_count}",
-                locations.object_count()
+                indexed_object_count
             ),
         });
     }
-    let indexed_sha1 = locations.pack_checksum().to_string();
     if indexed_sha1 != git_sha1 {
         return Err(PackError::PackHashMismatch {
             trailer: git_sha1,
@@ -1104,8 +1388,10 @@ pub fn object_kinds_from_git_dir(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::Write;
     use std::process::{Command, Stdio};
+    use std::sync::atomic::AtomicBool;
 
     use super::*;
 
@@ -1377,7 +1663,7 @@ mod tests {
         };
         let destination = dir.path().join("installed-with-identity");
 
-        let installed = install_pack_files_from_paths_with_identity(
+        let installed = install_pack_files_from_paths_with_verified_sidecars(
             &destination,
             &pack_path,
             &idx_path,
@@ -1385,7 +1671,7 @@ mod tests {
             &blake3::hash(&bytes).to_hex(),
             pack_size,
             locations.object_count(),
-            Some(identity),
+            identity,
         )
         .expect("install indexed pack with streamed identity");
 
@@ -1394,6 +1680,52 @@ mod tests {
             std::fs::read(&installed.pack_path).expect("read installed pack"),
             bytes
         );
+    }
+
+    #[test]
+    fn streamed_body_identity_does_not_bypass_sidecar_validation() {
+        let (dir, idx_path, _) = pack_index_fixture();
+        let pack_path = idx_path.with_extension("pack");
+        let reverse_path = idx_path.with_extension("rev");
+        crate::pack_locator::write_pack_reverse_index(&idx_path, &reverse_path).unwrap();
+        let bytes = std::fs::read(&pack_path).unwrap();
+        let pack_size = bytes.len() as u64;
+        let locations =
+            crate::pack_locator::PackLocationIter::open(&idx_path, &reverse_path, pack_size)
+                .unwrap();
+        let identity = VerifiedPackIdentity {
+            git_sha1: locations.pack_checksum().as_bytes().try_into().unwrap(),
+            content_hash: *blake3::hash(&bytes).as_bytes(),
+        };
+        let object_count = locations.object_count();
+        drop(locations);
+        let canonical_id = blake3::hash(&bytes).to_hex().to_string();
+        let mut index = std::fs::read(&idx_path).unwrap();
+        *index.last_mut().unwrap() ^= 1;
+        let corrupt_index = dir.path().join("corrupt.idx");
+        std::fs::write(&corrupt_index, index).unwrap();
+
+        for (ordinal, body_identity) in [None, Some(identity)].into_iter().enumerate() {
+            let destination = dir.path().join(format!("rejected-{ordinal}"));
+            let error = install_pack_files_from_paths_with_identity(
+                &destination,
+                &pack_path,
+                &corrupt_index,
+                &reverse_path,
+                &canonical_id,
+                pack_size,
+                object_count,
+                body_identity,
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                PackError::ReverseIndex {
+                    source: crate::pack_locator::PackLocatorError::IndexChecksum { .. }
+                }
+            ));
+            assert!(!destination.exists());
+        }
     }
 
     #[test]
@@ -1512,6 +1844,150 @@ mod tests {
                 .len(),
         )
         .expect("verified reverse index");
+    }
+
+    #[test]
+    fn install_thin_pack_repairs_only_with_a_present_external_base() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base_data = vec![b'a'; 16 * 1024];
+        let mut target_data = base_data.clone();
+        target_data[7_000..7_100].fill(b'b');
+        let base = crate::incoming_pack::object_id(gix_object::Kind::Blob, &base_data);
+        let target = crate::incoming_pack::object_id(gix_object::Kind::Blob, &target_data);
+        let incoming = crate::incoming_pack::IncomingPack::from_generated_objects(
+            [(gix_object::Kind::Blob, target_data.clone())],
+            dir.path(),
+            crate::incoming_pack::ReceiveLimits {
+                max_pack_bytes: 16 * 1024 * 1024,
+                max_objects: 4,
+                max_object_bytes: 2 * 1024 * 1024,
+                max_inflated_bytes: 4 * 1024 * 1024,
+                max_delta_depth: 8,
+            },
+            || false,
+        )
+        .expect("spool generated target");
+        let prepared = incoming
+            .prepare_with_external_delta_bases(
+                dir.path(),
+                16 * 1024 * 1024,
+                &AtomicBool::new(false),
+                &BTreeMap::from([(target, base)]),
+                &BTreeMap::from([(
+                    target,
+                    crate::incoming_pack::ExternalDeltaBase::new(
+                        base,
+                        gix_object::Kind::Blob,
+                        base_data.clone(),
+                        0,
+                    ),
+                )]),
+                8,
+                2 * 1024 * 1024,
+            )
+            .expect("prepare external thin pack")
+            .expect("prepared pack");
+        assert_eq!(prepared.external_delta_count(), 1);
+        let thin_path = dir.path().join("thin.pack");
+        std::fs::copy(prepared.pack_path(), &thin_path).expect("copy thin pack");
+
+        let destination_git = dir.path().join("destination.git");
+        git(
+            &[
+                "init",
+                "--bare",
+                destination_git.to_str().expect("destination path UTF-8"),
+            ],
+            None,
+        );
+        let written_base = git(
+            &[
+                "--git-dir",
+                destination_git.to_str().expect("destination path UTF-8"),
+                "hash-object",
+                "-w",
+                "--stdin",
+            ],
+            Some(&base_data),
+        );
+        assert_eq!(written_base, format!("{base}\n").into_bytes());
+        let installed = install_thin_pack_file_from_path(
+            &destination_git.join("objects/pack"),
+            &thin_path,
+            "incremental-thin",
+            0,
+            false,
+        )
+        .expect("repair thin pack");
+        assert!(installed.pack_path.exists());
+        assert_eq!(
+            git(
+                &[
+                    "--git-dir",
+                    destination_git.to_str().expect("destination path UTF-8"),
+                    "cat-file",
+                    "blob",
+                    &target.to_string(),
+                ],
+                None,
+            ),
+            target_data
+        );
+
+        let missing_base_git = dir.path().join("missing-base.git");
+        git(
+            &[
+                "init",
+                "--bare",
+                missing_base_git.to_str().expect("missing-base path UTF-8"),
+            ],
+            None,
+        );
+        let error = install_thin_pack_file_from_path(
+            &missing_base_git.join("objects/pack"),
+            &thin_path,
+            "incremental-thin",
+            0,
+            false,
+        )
+        .expect_err("missing thin base must fail closed");
+        assert!(matches!(error, PackError::IndexPackFailed { .. }));
+        assert!(
+            !missing_base_git
+                .join("objects/pack/pack-incremental-thin.pack")
+                .exists()
+        );
+
+        let pack_dir = destination_git.join("objects/pack");
+        let before = std::fs::read_dir(&pack_dir).unwrap().count();
+        let expected = std::collections::BTreeSet::from([base, target]);
+        assert!(
+            install_thin_pack_with_content_identity(
+                &pack_dir,
+                &thin_path,
+                0,
+                &std::collections::BTreeSet::from([target]),
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_dir(&pack_dir).unwrap().count(), before);
+        let repaired = install_thin_pack_with_content_identity(&pack_dir, &thin_path, 0, &expected)
+            .expect("install using repaired content identity");
+        let hash = verify_and_hash_pack_file(&repaired.pack_path).unwrap().1;
+        assert_eq!(
+            repaired.pack_path.file_name().unwrap().to_str().unwrap(),
+            format!("pack-{}.pack", blake3::Hash::from_bytes(hash).to_hex())
+        );
+        let repeated = install_thin_pack_with_content_identity(&pack_dir, &thin_path, 0, &expected)
+            .expect("verified repeat installation");
+        assert_eq!(repeated.pack_path, repaired.pack_path);
+        let mut corrupt = std::fs::read(&repaired.idx_path).unwrap();
+        corrupt[0] ^= 1;
+        std::fs::remove_file(&repaired.idx_path).unwrap();
+        std::fs::write(&repaired.idx_path, corrupt).unwrap();
+        assert!(
+            install_thin_pack_with_content_identity(&pack_dir, &thin_path, 0, &expected).is_err()
+        );
     }
 
     #[test]

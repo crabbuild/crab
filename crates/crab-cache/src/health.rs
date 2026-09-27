@@ -16,6 +16,7 @@ const FAMILIES: &[&str] = &[
     "decoded-range",
     "xorb",
     "shard",
+    "git-pack",
     "manifest",
     "stage",
     "chunk-index",

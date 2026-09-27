@@ -82,6 +82,7 @@ pub struct PreparedPack {
     content_hash: blake3::Hash,
     delta_depths: BTreeMap<ObjectId, u32>,
     external_delta_count: u32,
+    external_delta_bases: Vec<ObjectId>,
 }
 
 struct WrittenPack {
@@ -148,6 +149,12 @@ impl PreparedPack {
     #[must_use]
     pub fn external_delta_count(&self) -> u32 {
         self.external_delta_count
+    }
+
+    /// Returns the unique base IDs required by external `REF_DELTA` entries.
+    #[must_use]
+    pub fn external_delta_bases(&self) -> &[ObjectId] {
+        &self.external_delta_bases
     }
 }
 
@@ -260,7 +267,7 @@ impl IncomingPack {
             mut index_entries,
             delta_depths,
             external_delta_count,
-            external_delta_bases,
+            external_delta_bases: external_delta_map,
         } = self.write_normalized(
             &staging_pack,
             max_pack_bytes,
@@ -272,6 +279,12 @@ impl IncomingPack {
         )?;
 
         check(cancelled)?;
+        let external_delta_bases = external_delta_map
+            .values()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let pack = directory.path().join(format!("pack-{git_sha1}.pack"));
         std::fs::rename(staging_pack, &pack)?;
         let index = pack.with_extension("idx");
@@ -296,7 +309,7 @@ impl IncomingPack {
                 .get(&location.oid)
                 .ok_or(PreparePackError::Mismatch("unknown indexed object"))?
                 .kind;
-            metadata.push((kind, external_delta_bases.get(&location.oid).copied()));
+            metadata.push((kind, external_delta_map.get(&location.oid).copied()));
         }
         let kinds_path = pack.with_extension("kinds");
         std::fs::write(
@@ -326,6 +339,7 @@ impl IncomingPack {
             content_hash: content_hash.finalize(),
             delta_depths,
             external_delta_count,
+            external_delta_bases,
         }))
     }
 

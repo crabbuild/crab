@@ -45,9 +45,25 @@ writes, bounded reads, byte/request observers, and provider-neutral
 `StorageError` values. `put_if_absent` distinguishes a new immutable object
 from an identical retry without a preceding HEAD, and streamed size/hash
 verification uses the GET response metadata instead of a separate HEAD.
+`Store::verify_bounded` combines that content-hash contract with pre-body size
+admission and streamed length checks. It uses one GET for a successful read;
+the limit applies to buffered encoded bytes, not the caller's decoded objects.
 
 The admission token cancels pending admission, response headers, streamed
 body reads and pending listings without retrying the cancellation.
+
+Signed-range acceleration is used only when no object-store read wrapper is
+required. Routed reads, caller admission/cancellation, and lifecycle observers
+keep the canonical transport path; direct HTTP must not bypass their policy or
+accounting. Attaching a signer later does not change that choice. Explicit URL
+signing remains available, and unwrapped reads retain the accelerated path.
+Signed responses require one valid `Content-Range` matching the requested
+offsets before any payload is exposed. Missing, ambiguous, overflowing, or
+wrong-offset headers are corruption even when the body length is correct.
+Signed file extraction also takes the operation cancellation token. Network and
+retry waits stop cooperatively; sibling failures cancel the other downloads and
+all local writers flush before return. This is a drain-on-return contract, not
+permission to drop the enclosing future before removing its private destination.
 
 `Store::with_read_admission` adds caller-owned asynchronous GET/HEAD/listing admission
 after read-route configuration. The supplied policy is shared by clones and
@@ -72,6 +88,11 @@ credentials, so file rotation cannot redirect an already identified target.
 This digest is separate from the established `BucketIdentity` used for logical
 cross-scheme comparison and cache keys. Raw `Store::new` wrappers have no target
 identity; integrity callers must not infer one from their display text.
+
+Official AWS S3 builders send an explicit SHA-256 upload checksum and expose
+that provider-validated integrity evidence through `Store`. Custom S3
+endpoints, GCS, Azure, URL-parsed stores, and raw `Store::new` wrappers remain
+readback-required; endpoint names and ETags never qualify an immutable write.
 
 Non-resumable multipart uploads use one bounded part queue with or without a
 progress callback. Part and completion failures attempt abort before returning;

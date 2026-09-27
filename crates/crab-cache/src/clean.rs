@@ -83,9 +83,10 @@ pub(crate) fn entry_kind(relative: &Path) -> EntryKind {
 
 pub(crate) fn object_entry_kind(parts: &[&str]) -> EntryKind {
     match parts {
-        ["chunks" | "xorbs" | "shards" | "ref-transactions" | "stages" | "manifests" | "hints"] => {
-            EntryKind::Directory
-        }
+        [
+            "chunks" | "xorbs" | "shards" | "ref-transactions" | "git-packs" | "stages"
+            | "manifests" | "hints",
+        ] => EntryKind::Directory,
         ["hints", "clean-bloom.bin"] => EntryKind::Payload,
         ["manifests", name]
             if [".json", ".etag"].iter().any(|suffix| {
@@ -96,11 +97,11 @@ pub(crate) fn object_entry_kind(parts: &[&str]) -> EntryKind {
             EntryKind::Payload
         }
         [
-            "chunks" | "xorbs" | "shards" | "ref-transactions" | "stages",
+            "chunks" | "xorbs" | "shards" | "ref-transactions" | "git-packs" | "stages",
             prefix,
         ] if hex(prefix, 2) => EntryKind::Directory,
         [
-            "chunks" | "xorbs" | "shards" | "ref-transactions" | "stages",
+            "chunks" | "xorbs" | "shards" | "ref-transactions" | "git-packs" | "stages",
             prefix,
             hash,
         ] if hex(prefix, 2) && hex(hash, 64) && hash.starts_with(prefix) => EntryKind::Payload,

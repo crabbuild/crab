@@ -167,9 +167,9 @@ Clone complete. Matched files hydrated, rest are pointers.
 
 Direct S3-compatible remotes support ordinary clone, fetch, shallow clone,
 deepen/unshallow, lazy pointer checkout, full hydration, and connectivity
-checks. A missing, malformed, or unreadable canonical layout descriptor or
-manifest is an error and clone stops. New empty repositories exist only after
-`crab init` publishes the generation-0 manifest.
+checks. A missing, malformed, or unreadable v2 root or authenticated checkpoint
+view is an error and clone stops. New empty repositories exist only after
+`crab init` publishes the generation-0 v2 root.
 
 Shallow traversal uses a bounded remote commit-graph summary. If a requested
 tip or deepen operation is outside that retained window, Crab safely downloads
