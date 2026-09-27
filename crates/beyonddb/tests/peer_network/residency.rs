@@ -2,6 +2,7 @@ mod index_splits;
 mod placement;
 mod provisioning;
 mod reclamation;
+mod recovery;
 mod splits;
 
 use crate::*;

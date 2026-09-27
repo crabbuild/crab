@@ -10,7 +10,7 @@ use beyonddb::{
 
 const ACCOUNT: &str = "123456789012";
 
-async fn create(sdk: &aws_sdk_dynamodb::Client, name: &str, index: bool) {
+pub(super) async fn create(sdk: &aws_sdk_dynamodb::Client, name: &str, index: bool) {
     let key = KeySchemaElement::builder()
         .attribute_name("id")
         .key_type(KeyType::Hash)

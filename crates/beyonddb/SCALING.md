@@ -1668,3 +1668,46 @@ blocked-source case passed alone in 2.19s. The final selection above ran after
 completed-replay and fresh local-count fixes; no test timeout or assertion was
 relaxed. CI and fleet-scale qualification remain required. The older recorded
 idle-owner regression was not included in this selection and remains unresolved.
+
+### Resume ownership claims during configured and background recovery
+
+Request routing already resumed a published root left in `Recovering` after
+this boot session claimed ownership. Configured admission and background
+discovery did not: `admit_initialized` rejected that root, and
+`recover_discovered_owner` treated its own ownership as completed activation.
+Both behaviors also exist in the inspected `origin/main` at `311105eb864`.
+The initial regression run failed both cases: configured recovery returned
+“Cell has another owner or is still activating”; discovered recovery returned
+success with authority still `Recovering` and no serving actor.
+
+Configured admission now restores both Idle published roots and published roots
+claimed by this session through `activate_published`, shared with request
+routing. Discovery checks the local handle before declaring recovery complete;
+missing actors use canonical admission. Existing local actors avoid the admission
+mutex. Live remote owners and expired-owner takeover keep their existing paths.
+No coordinator decision, split state, account schema, or dependency changes.
+
+| Evidence boundary | Source and behavior |
+| --- | --- |
+| Entry points | `src/bin/beyonddb.rs` configured startup, registered route/coordinator recovery, and the transaction/GSI background workers. |
+| Product owner | `src/provision.rs::recover_discovered_owner` verifies an actor; `admit_initialized` distinguishes initial bootstrap from published restoration. |
+| Shared mechanism | `src/provision/residency.rs::activate_published` restores while the caller holds admission; it tracks coordinator residency only after activation succeeds. |
+| Runtime contract | `crab-cell-runtime/src/cell/actor/acquire.rs`: `local_handle` checks actual dispatcher residency; `acquire_idle_restored` reserves capacity before claiming; `activate_restored` validates local ownership and restores the authoritative LTX root. Lease, capacity, and authority checks remain in the runtime. |
+| Siblings | Account, credential, base range, GSI range, and coordinator use this admission path. Peer request restoration shares the same helper. The ordinary peer dispatcher still refuses an inactive owner. |
+| Regression | `tests/peer_network/residency/recovery.rs` commits SDK data, drains owners, publishes only their takeover claims, and invokes configured/discovered recovery. It verifies Serving authority and a local actor before SDK reads, including a restored GSI image. Coordinator discovery uses a local-only client so request routing cannot conceal a skipped activation. |
+
+This increment closes an interrupted-activation recovery gap. It does not prove
+fleet recovery throughput, rebalancing, a larger metadata budget, hot-key
+partitioning, or the 10,000-active-Cell/multi-TB target. Ordinary restoration under
+a full local pool still depends on coordinator reclamation or spare capacity;
+retired-range reclamation remains on explicit provisioning/splitting paths.
+
+Focused verification for this increment: 13 peer-network residency cases passed
+in 23.20 seconds, including signed SDK reads, cross-Cell transactional writes
+and reads, base/GSI split recovery, reclamation, and remote placement. The two
+transaction admission-failure cases passed in 10.55 seconds; settled-coordinator
+restart/checkpoint recovery passed in 1.28 seconds. Strict all-target BeyondDB
+Clippy passed. The new regression module adds coverage for the interrupted claim
+without production fault injection or weaker assertions/timeouts. Production
+code grows by 38 net lines to share restoration and verify discovery readiness.
+These are focused local results; the broader process qualification remains in CI.

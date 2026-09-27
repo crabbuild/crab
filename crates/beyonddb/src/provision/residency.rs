@@ -62,6 +62,20 @@ impl CellInitialPartitionProvisioner {
         self.reclaim_coordinator_capacity()
             .await
             .map_err(admission_error)?;
+        self.activate_published(target, proof, observed)
+            .await
+            .map(Some)
+    }
+
+    // Callers hold admission and have checked Idle or our Recovering claim.
+    // Sharing activation keeps request and background recovery on the same root.
+    pub(super) async fn activate_published(
+        &self,
+        target: &CellTarget,
+        proof: CatalogProof,
+        observed: VersionedControl,
+    ) -> crab_cell_runtime::Result<CellHandle> {
+        let authority = CellAuthority::new(self.layout.clone());
         let replica = CellReplica::new(
             self.layout.clone(),
             *target.cell_id().as_bytes(),
@@ -103,7 +117,7 @@ impl CellInitialPartitionProvisioner {
                 .await?
         };
         self.track_coordinator(target).map_err(admission_error)?;
-        Ok(Some(handle))
+        Ok(handle)
     }
 
     pub(super) async fn reclaim_retired_ranges(

@@ -255,7 +255,20 @@ impl CellInitialPartitionProvisioner {
             .as_ref()
             .map(|owner| (owner.session, owner.endpoint.clone()));
         match former {
-            Some((session, _)) if session == self.session => {}
+            Some((session, _)) if session == self.session => {
+                // Ownership can outlive a canceled activation. Discovery must
+                // restore the actor before its caller starts resolving work.
+                let proof = self.cataloged(target, module).await?;
+                if self
+                    .runtime
+                    .local_handle(proof.clone(), &observed)
+                    .await
+                    .map_err(provision_error)?
+                    .is_none()
+                {
+                    self.admit_initialized(target, proof, initialize).await?;
+                }
+            }
             Some((session, endpoint)) => {
                 if endpoint == self.endpoint {
                     wait_for_expired(nodes, session).await?;
@@ -704,6 +717,22 @@ impl CellInitialPartitionProvisioner {
             return Ok(handle);
         }
         self.reclaim_coordinator_capacity().await?;
+        let control = observed.value();
+        if control.root.is_some()
+            && match control.state {
+                ControlState::Idle => control.owner.is_none(),
+                ControlState::Recovering => control
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.session == self.session),
+                _ => false,
+            }
+        {
+            return self
+                .activate_published(target, proof, observed)
+                .await
+                .map_err(provision_error);
+        }
         let replica = CellReplica::new(
             self.layout.clone(),
             *target.cell_id().as_bytes(),
@@ -723,11 +752,6 @@ impl CellInitialPartitionProvisioner {
                     .await
                     .map_err(provision_error)
             }
-            ControlState::Idle if observed.value().root.is_some() => self
-                .runtime
-                .acquire_idle_restored(proof, replica, authority, observed, destination, owner)
-                .await
-                .map_err(provision_error),
             _ => Err(StorageError::Transient(
                 "Cell has another owner or is still activating".into(),
             )),

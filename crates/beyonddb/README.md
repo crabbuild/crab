@@ -120,8 +120,11 @@ This server uses an explicit list of locally owned account and credential
 Cells. On startup it recovers configured account and credential Cells, then
 pages the account's routes and coordinator registry. Idle or expired owners can
 be recovered at a new peer endpoint; live remote owners remain in place. Every
-takeover still requires node-session fencing and a Cell authority CAS. This
-requires the account to be configured on the replacement and enough local
+takeover still requires node-session fencing and a Cell authority CAS. Recovery
+also resumes a published root already claimed by this boot session if activation
+was interrupted. Discovery verifies a local actor exists before reporting the
+Cell recovered; configured admission and request routing share root restoration.
+This requires the account to be configured on the replacement and enough local
 capacity for its recovered ranges. While serving, it also discovers expired
 coordinator owners through configured accounts and restores their original
 participants. Data-only-node discovery and general fleet placement still need
