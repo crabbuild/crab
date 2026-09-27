@@ -750,6 +750,17 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         )
         .unwrap(),
     );
+    // Startup recovery traverses independently owned directories and needs
+    // the same restoring peer client as ordinary request routing.
+    let replacement_peers = BeyonddbPeers::new(
+        &replacement,
+        layout.clone(),
+        peer_directory.clone(),
+        replacement_session,
+        &replacement_tls,
+    )
+    .unwrap();
+    let replacement_client = replacement_peers.client(replacement_provisioner.clone());
     let replacement_account = replacement_provisioner
         .takeover_expired_account("123456789012", &peer_directory)
         .await
@@ -758,11 +769,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .recover_registered_partitions(
             "123456789012",
             replacement_account.clone(),
-            &CellClient::local_runtime(
-                application.registry(),
-                replacement.runtime(),
-                layout.clone(),
-            ),
+            &replacement_client,
             &peer_directory,
         )
         .await
@@ -816,15 +823,6 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .await
         .unwrap();
     let (replacement_shutdown, replacement_cancel) = tokio::sync::oneshot::channel();
-    let replacement_peers = BeyonddbPeers::new(
-        &replacement,
-        layout.clone(),
-        peer_directory.clone(),
-        replacement_session,
-        &replacement_tls,
-    )
-    .unwrap();
-    let replacement_client = replacement_peers.client(replacement_provisioner.clone());
     let replacement_router = replacement_peers.router(replacement_provisioner.clone());
     let replacement_server = tokio::spawn(async move {
         axum::serve(

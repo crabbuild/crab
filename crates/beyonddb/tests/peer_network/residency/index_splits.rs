@@ -62,8 +62,9 @@ async fn settled(sdk: &aws_sdk_dynamodb::Client, expected: &[SdkItem]) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restore() {
-    // One directory owner is additional to the original eight-slot workload.
-    let fixture = Fixture::with_capacity(2, 9).await;
+    // Two base directories and the index directory add three owners to the
+    // original eight-slot workload; the fleet must still be full before splitting.
+    let fixture = Fixture::with_capacity(2, 11).await;
     let sdk = aws_sdk_dynamodb::Client::from_conf(
         fixture
             .sdk
@@ -332,7 +333,7 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
         }
     })
     .await
-    .expect("fixture should advertise all nine slots occupied");
+    .expect("fixture should advertise every slot occupied");
     let mut cursor = None;
     let mut deferred = false;
     for _ in 0..12 {

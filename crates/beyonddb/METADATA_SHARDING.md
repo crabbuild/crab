@@ -611,3 +611,40 @@ it explicitly interrupts. Its old eight-slot budget let coordinator admission
 release a data owner before the interruption, leaving only three observed targets.
 The expected four-owner coverage is retained. These are local owner-restoration
 tests with in-memory object storage, not process-loss or fleet qualification.
+
+### Expanded qualification follow-up
+
+CI run `36336572025` on the earlier `abeb98ca53f` failed: six capacity library
+tests passed, native tests aborted on a test-thread stack overflow, peer tests
+passed 34/40 and process tests passed 2/3. Qualification now supplies the measured
+16-MiB stack only to the native Cargo command. Peer/server tests and their child
+processes retain their normal stack environment. The shell still runs both
+commands after a failure and returns failure if either fails; stub-command
+probes verified both failure cases and stack isolation.
+
+Fixture corrections preserve the new ownership contract:
+
+- GSI capacity refusal still requires a full node, now eleven owners including
+  both base directories and the index directory. The separate directory-growth
+  scenario provides space for its 21-owner peak across two nodes.
+- Single-leaf fixture inspection takes its membership version from its first
+  route page, then checks subsequent pages. A prior shape read is a separate
+  snapshot and can precede the capacity worker's publication.
+- Peer startup recovery uses the restoring peer client to traverse directories.
+- Process recreation waits for the SDK's table-not-exists waiter. DeleteTable
+  acknowledges DELETING; name reuse follows durable directory retirement.
+
+Directory-growth and cold-placement SDK checks pass (6.71 s and 20.46 s).
+The GSI capacity test progressed past creation but later observed one SDK Scan
+503 while maintenance was active; its diagnostic run passed (11.98 s) without
+observing the failure. That transient is not claimed fixed. The temporary probe
+was removed. Full peer startup and process recreation require the next CI run.
+
+The previously overflowing native owner-restart scenario passes with the scoped
+16-MiB test stack (6.01 s). Strict all-target Clippy and format checks pass.
+
+After rebasing onto `322ba3ed4f0` (including node-session retirement), four
+recovery tests pass in 8.03 s, five reclamation tests in 7.84 s and the native
+deletion/recreation test in 11.14 s. Strict all-target Clippy and the standalone
+server build pass. The rebase retains main's supervised lifecycle worker and
+RustFS GA container; native coverage includes its node-session tests.

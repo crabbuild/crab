@@ -48,6 +48,11 @@ async fn single_leaf_route(
         else {
             panic!("fixture route changed while inspected");
         };
+        // The first page establishes this scan version. A capacity worker can
+        // change membership after the separate leaf-shape inspection above.
+        if input.after_lower.is_none() {
+            route.epoch = epoch;
+        }
         assert_eq!(epoch, route.epoch);
         input.expected_epoch = Some(epoch);
         input.after_lower = partitions.last().map(|part| part.lower);

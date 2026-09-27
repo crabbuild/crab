@@ -21,6 +21,7 @@ use std::{
 };
 
 use aws_credential_types::Credentials;
+use aws_sdk_dynamodb::client::Waiters;
 use aws_sdk_dynamodb::types::{
     AttributeValue, ConditionCheck, KeysAndAttributes, PutRequest, TimeToLiveSpecification,
     TransactWriteItem, Update, WriteRequest,
@@ -1049,6 +1050,13 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     sdk.delete_table()
         .table_name("ProcessData")
         .send()
+        .await
+        .unwrap();
+    // Name reuse follows durable retirement of every directory, which continues
+    // after DeleteTable has returned its DELETING acknowledgement.
+    sdk.wait_until_table_not_exists()
+        .table_name("ProcessData")
+        .wait(Duration::from_secs(60))
         .await
         .unwrap();
     sdk.create_table()

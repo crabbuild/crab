@@ -196,7 +196,9 @@ async fn directory_split_and_retirement_follow_remote_owners() {
 async fn sdk_index_reads_follow_split_metadata_and_generation_retirement() {
     const ACCOUNT: &str = "123456789012";
     const TABLE: &str = "ResidencyDirectory";
-    let fixture = Fixture::with_partition_count(4).await;
+    // The original ranges, directory children and GSI split children peak at
+    // 21 owners across this node and its eight-slot peer.
+    let fixture = Fixture::with_capacity(4, 16).await;
     let remote = Remote::new(&fixture).await;
     let sdk = super::provisioning::sdk_without_retries(&fixture);
     super::provisioning::create(&sdk, TABLE, true)
