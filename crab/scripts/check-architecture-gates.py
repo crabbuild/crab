@@ -2572,13 +2572,27 @@ def check_standalone_ltx_hard_cut(root: Path) -> bool:
             if candidate.name in RETIRED_STANDALONE_LTX_FILENAMES:
                 violations.append(f"{rel(root, candidate)}: retired standalone LTX module")
             text = candidate.read_text(encoding="utf-8")
+            state: dict[str, object] = {}
+            depth = 0
+            catalog_head_base: int | None = None
             for number, line in enumerate(text.splitlines(), start=1):
+                delta = rust_brace_delta(line, state)
+                if (
+                    candidate == root / "crates/crab-ltx/src/cell_layout.rs"
+                    and re.match(r"\s*pub fn catalog_head_path\(", line)
+                    and delta > 0
+                ):
+                    catalog_head_base = depth
+                # Catalog heads name immutable Cell catalog pages. Permit their
+                # head marker here while checking every other marker and symbol.
+                markers = line.replace("head.json", "") if catalog_head_base is not None else line
+                depth += delta
+                if catalog_head_base is not None and depth <= catalog_head_base:
+                    catalog_head_base = None
                 if line.lstrip().startswith("//"):
                     continue
-                if candidate.name == "cell_layout.rs" and "catalog/{shard:02x}/head.json" in line:
-                    continue
                 if RETIRED_STANDALONE_LTX_SYMBOLS.search(line) or RETIRED_STANDALONE_LTX_MARKERS.search(
-                    line
+                    markers
                 ):
                     violations.append(f"{rel(root, candidate)}:{number}: {line.strip()}")
 

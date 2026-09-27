@@ -131,6 +131,12 @@ Also run plan 015's exact provider/fault qualification for the selected branch.
 For hard removal, `rg` every retired symbol/module/prefix from plan 016 and
 classify the zero or historical-only results in the PR.
 
+The architecture guard permits the Cell catalog's `head.json` marker only
+inside `CellStorageLayout::catalog_head_path` in its canonical source file.
+The method's tenant-scoped path may use format arguments or layout helpers;
+retired symbols and other storage markers remain forbidden even inside that
+method. Identically named files and neighboring methods receive no exemption.
+
 ## Acceptance criteria
 
 - [x] The implemented branch exactly matches the approved decision record.
