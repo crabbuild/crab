@@ -29,6 +29,28 @@ use crate::{
     CellStorage, DATA_NAMESPACE, NAMESPACE, credentials, transaction_coordinator,
 };
 
+/// Drain a serving node and retire its advertised boot session.
+///
+/// The session and directory must belong to this node. Drain or withdrawal
+/// failures propagate; callers must retain scratch state on failure.
+pub async fn shutdown_serving_node(
+    node: &CellNode,
+    directory: &NodeDirectory,
+    session: SessionId,
+) -> crab_cell_runtime::Result<()> {
+    // Retirement fences publication authority. Drain closes owners/logs and
+    // joins heartbeat maintenance before we read the last authoritative version.
+    node.shutdown().await?;
+    if let Some(observed) = directory.load(session, node_lease::unix_time_ms()?).await? {
+        // A late heartbeat CAS cannot replace the tombstone. If it wins first,
+        // withdrawal fails rather than reporting a clean session retirement.
+        directory
+            .withdraw(&observed, node_lease::unix_time_ms()?)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Restricts peer forwarding to BeyondDB's compiled Cell namespaces.
 ///
 /// Account tenants are derived per account, while credential Cells use a

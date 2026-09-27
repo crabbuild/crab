@@ -2056,3 +2056,37 @@ capacity case returned one HTTP 503 during Scan when run with the base cases;
 an unchanged isolated rerun passed in 15.79s. That intermittent failure is not
 resolved by this deletion change. Large routed/GSI deletion and process-level
 recovery still require their broader qualification gates.
+
+## Graceful node-session retirement
+
+CI run `36313605590` passed all 20 peer-network cases but failed the standalone
+bootstrap/restart test when CreateTable after a graceful restart received HTTP
+503. Placement reported `multiple live sessions advertise one node`. The old
+server had successfully drained and stopped its heartbeat while leaving its
+signed 15-second advertisement alive. A new boot reused the configured node ID
+with a fresh session; authoritative discovery correctly rejected both live
+sessions.
+
+A focused regression using the real host task group and signed directory
+reproduced that exact error in 0.03s. `shutdown_serving_node` now owns the product
+ordering: successful host drain, heartbeat join, read the final session version,
+then conditional withdrawal. The binary calls this boundary before removing its
+scratch directory. Host drain or withdrawal errors propagate and preserve that
+directory. If a cancelled in-flight heartbeat wins its CAS first, withdrawal can
+fail; this is an unsuccessful shutdown, not proof that the advertisement retired.
+No error is converted into successful retirement.
+
+| Boundary | Evidence |
+| --- | --- |
+| Caller | `src/bin/beyonddb.rs` uses the shared shutdown boundary after the serving loop returns. |
+| Lifecycle owner | `crab-cell-host/src/node/lifecycle.rs` closes runtime publication/logs before cancelling and joining lease maintenance. Failed drain must not authorize retirement. |
+| Authority contract | `NodeDirectory::withdraw` replaces the exact observed version with a tombstone, refuses unsealed node logs, and propagates version conflicts; a later heartbeat with an older CAS cannot revive the session. |
+| Sibling | `crab-http-server/src/peer.rs` already withdraws its advertisement after shutdown. Its log/observed-version ownership remains unchanged. |
+| Prior behavior | Both current main and pre-fix BeyondDB stop the publisher without withdrawal. Directory `live` reads authoritative records; reader-cache expiry cannot repair the omitted write. |
+| Regression | Immediate same-node republication sees only the replacement session and a retired original. Failed host drain preserves the advertisement. The existing stalled-heartbeat cancellation regression remains unchanged. |
+
+The focused successful-shutdown case passed in 0.03s and stalled refresh
+cancellation/fencing passed in 6.04s. The original standalone process scenario
+must still pass on the new PR head in CI before this failure is considered fully
+qualified. Hard-kill recovery and automatic fleet rebalancing retain their
+separate requirements.

@@ -8,6 +8,7 @@ mod elastic_cells {
     mod global_index_splits;
     mod global_indexes;
     mod local_indexes;
+    mod node_sessions;
     mod public_transactions;
     mod read_resolution;
     mod recovery_admission;

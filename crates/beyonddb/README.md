@@ -18,9 +18,10 @@ AWS SDK / DynamoDB JSON client
 ## Running the current server
 
 The server writes warnings and errors to stderr.
-Serving nodes publish a 15-second lease and renew every three seconds. Owner
-replacement waits for authoritative expiry; storage stalls that exhaust the
-lease still fence serving. See [measured lease qualification](SCALING.md#large-transaction-transfer-qualification).
+Serving nodes publish a 15-second lease and renew every three seconds. Graceful
+shutdown drains the runtime and joins heartbeat maintenance before withdrawing
+the boot-session advertisement. After an unclean exit, owner replacement waits
+for authoritative expiry; storage stalls that exhaust the lease still fence serving. See [measured lease qualification](SCALING.md#large-transaction-transfer-qualification).
 
 Each renewal measures RAM and scratch-filesystem availability on a blocking
 worker, caps them by runtime reservations, and signs Cell/job counts and backlog

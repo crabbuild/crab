@@ -5,7 +5,7 @@ use std::{error::Error, io, io::Read, net::SocketAddr, path::PathBuf, sync::Arc,
 use beyonddb::{
     APPLICATION_ID, Beyonddb, BeyonddbPeers, CellAuthorizationStore, CellCredentialStore,
     CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, build_http_state,
-    measured_node_capacity,
+    measured_node_capacity, shutdown_serving_node,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::{CellNode, CellNodeBuilder, CellNodeTaskGroup};
@@ -249,7 +249,7 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
         &config,
         session_dir.clone(),
         layout,
-        directory,
+        directory.clone(),
         application,
         session,
         tls,
@@ -260,7 +260,7 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
         bootstrap_secret,
     )
     .await;
-    let shutdown = node.shutdown().await;
+    let shutdown = shutdown_serving_node(&node, &directory, session).await;
     let cleanup = if shutdown.is_ok() {
         std::fs::remove_dir_all(session_dir)
     } else {
