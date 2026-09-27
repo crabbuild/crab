@@ -1,5 +1,9 @@
 # Cell-runtime qualification profiles
 
+For a local worker-scheduling diagnostic with real RustFS and enforced one-vCPU,
+one-GiB limits, use [the Compose worker profile](worker-profile.md). Its raw
+measurements inform performance work; they do not produce protected receipts.
+
 The JSON files in `profiles/` are canonical, versioned threshold inputs. The
 receipt signer binds the profile digest; changing a threshold therefore makes
 old evidence unusable. Profile schema 2 also binds workload thresholds to the

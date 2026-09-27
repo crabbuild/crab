@@ -283,6 +283,16 @@ async fn background_hydration_leaves_both_workers_query_admission_available() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires isolated RustFS credentials; reports injected-delay worker interference"]
 async fn rustfs_sparse_reads_report_worker_interference() {
+    rustfs_worker_interference(2).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires isolated RustFS credentials; reports single-worker demand interference"]
+async fn rustfs_single_worker_reports_sparse_read_interference() {
+    rustfs_worker_interference(1).await;
+}
+
+async fn rustfs_worker_interference(worker_count: usize) {
     fn payload_digest(connection: &crab_ltx::rusqlite::Connection) -> Result<Vec<u8>> {
         let value: Vec<u8> =
             connection.query_row("SELECT value FROM payload", [], |row| row.get(0))?;
@@ -333,10 +343,16 @@ async fn rustfs_sparse_reads_report_worker_interference() {
     let cold = sparse_activation(0, store.clone(), 4 << 20).await;
     let same = sparse_activation(2, store.clone(), 262_144).await;
     let other = sparse_activation(1, store, 262_144).await;
-    let pool = SqlWorkerPool::new(2, 3).unwrap();
+    let pool = SqlWorkerPool::new(worker_count, 3).unwrap();
     pool.configure_retained_capacity(1 << 20).unwrap();
-    assert_eq!(worker_index(cold.cell, 2), worker_index(same.cell, 2));
-    assert_ne!(worker_index(cold.cell, 2), worker_index(other.cell, 2));
+    assert_eq!(
+        worker_index(cold.cell, worker_count),
+        worker_index(same.cell, worker_count)
+    );
+    assert_eq!(
+        worker_index(cold.cell, worker_count) == worker_index(other.cell, worker_count),
+        worker_count == 1,
+    );
     for activation in [&cold, &same, &other] {
         pool.activate_restored(
             activation.cell,
@@ -512,7 +528,7 @@ async fn rustfs_sparse_reads_report_worker_interference() {
         demand_samples.push(serde_json::json!({
             "trial": trial, "injected_get_delay_ms": delay_ms,
             "demand_query_us": elapsed.as_micros(), "resident_payload_query_us": warm_started.elapsed().as_micros(),
-            "same_worker": same_wait, "other_worker": other_wait,
+            "same_worker": same_wait, "comparison_cell": other_wait,
             "origin_requests": demand_requests, "origin_bytes": demand_bytes,
         }));
         pool.deactivate(cold.cell).await.unwrap();
@@ -524,21 +540,27 @@ async fn rustfs_sparse_reads_report_worker_interference() {
     eprintln!(
         "worker-interference {}",
         serde_json::json!({
-            "schema": 2,
+            "schema": 3,
             "prefix": prefix,
             "build_profile": if cfg!(debug_assertions) { "debug" } else { "release" },
             "sqlite_version": crab_ltx::rusqlite::version(),
             "payload_bytes": 4 << 20,
-            "sql_workers": 2,
+            "sql_workers": worker_count,
+            "available_parallelism": std::thread::available_parallelism().unwrap().get(),
+            "worker_assignment": {
+                "cold": worker_index(cold.cell, worker_count),
+                "same_worker": worker_index(same.cell, worker_count),
+                "comparison_cell": worker_index(other.cell, worker_count),
+            },
             "cold_root": {"cell": cold.root.cell, "incarnation": cold.root.incarnation,
                           "digest": cold.root.digest, "txid": cold.root.position.txid,
                           "checksum": cold.root.position.checksum, "commit_sequence": cold.root.commit_sequence},
             "payload_digest": expected_digest,
             "injected_get_delay_ms": 500,
             "same_worker_baseline": same_baseline,
-            "other_worker_baseline": other_baseline,
+            "comparison_cell_baseline": other_baseline,
             "same_worker_during_hydration": same_wait,
-            "other_worker_during_hydration": other_wait,
+            "comparison_cell_during_hydration": other_wait,
             "hydration_and_queries_us": hydration_and_queries.as_micros(),
             "origin_requests_during_hydration": hydration_requests,
             "origin_bytes_during_hydration": hydration_bytes,

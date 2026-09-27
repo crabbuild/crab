@@ -1229,6 +1229,46 @@ connection or turn a VFS error into a resumable SQL result. SQLite's
 [VFS method contract](https://www.sqlite.org/c3ref/io_methods.html) returns an
 I/O result synchronously, and Crab's `paged_io::receive` waits for that result.
 
+**One-vCPU follow-up, 2026-09-27:** the
+[Compose worker profile](../qualification/worker-profile.md) runs the same
+diagnostic with one and two SQL workers. Both release processes passed against
+pinned RustFS 1.0 GA on ARM64 Colima. Kernel counters and Docker inspection
+confirm one vCPU (`100000/100000` quota), 1 GiB memory and zero swap for each
+process. Rust detected one available CPU. The builder exited before measurement.
+
+| SQL workers | Same-worker query median, no added delay / +20 ms per GET | Comparison Cell median, no delay / +20 ms per GET | Largest same-worker query, +20 ms per GET |
+| --- | ---: | ---: | ---: |
+| 1 | 20.773 / 423.385 ms | 20.828 / 423.452 ms (same worker) | 510.334 ms |
+| 2 | 23.887 / 427.773 ms | 0.077 / 0.070 ms (other worker) | 445.042 ms |
+
+These are three samples per condition in each process, not p99. Resident SQL
+callbacks took 6–43 microseconds across demand and hydration observations;
+the demand interference remains before callback entry. During the separate
+500 ms/GET hydration phase, same-worker queries took 0.060 and 0.062 ms while
+hydration plus queries took 1.015 and 1.011 seconds. All twelve cold reads
+performed 16 observed origin reads and transferred 4,008,092 bytes. Payload
+digests matched; repeated payload reads made zero new origin requests.
+
+Peak cgroup memory was 91.4 / 89.9 MiB for one / two workers; both had zero
+CPU throttling and zero OOM events. Charged cgroup memory includes cache and
+is not process RSS. Three Cells and this I/O-bound workload cannot establish
+per-worker memory cost, sustained CPU capacity or a production worker default.
+The shared-worker stall persists even when CPU quota is not exhausted; an
+available second worker can serve its resident Cell during the provider wait.
+This supports testing bounded extra blocking capacity and idle-Cell scheduling
+alongside prefetch, while preserving one owner per SQLite connection.
+
+Source: production parent `f33f7b94387b` plus the worker diagnostic wrappers;
+the separately staged app-to-host relocation was excluded from the build input.
+The pinned compiler image reports Rust 1.97.1. Evidence is retained in
+`worker-profile-20260927/evidence/` under the checkout's external target:
+`source.json`, the adjacent source tree, `single.json`, `paired.json`, full logs,
+binary SHA-256, container/image inspection, kernel counters and `summary.json`.
+The initial unshared-mount build failure is retained; it ran no tests. Each
+process creates a different random root, so this is not a byte-identical A/B
+comparison. Public actions, first activation, durable confirmations, sustained
+load and independent failure domains remain unqualified by this diagnostic.
+
 ### 10. Published-cut cleanup occupies the SQL worker after durability
 
 **Confirmed at audited revision:** [CellExecutor::confirm_published](../src/cell/executor.rs) calls
