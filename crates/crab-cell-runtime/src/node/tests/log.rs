@@ -113,6 +113,12 @@ async fn node_log_enrollment_activation_and_coverage_are_authoritative() {
             .await
             .is_err()
     );
+    assert!(
+        directory
+            .withdraw_after_drain(&created, NOW_MS + 1_005)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

@@ -145,7 +145,7 @@ async fn start_node(
     endpoint: String,
     tls: &LoadedPeerTls,
     node_byte: u8,
-    node_shutdown: CancellationToken,
+    crash: CancellationToken,
 ) -> (CellNode, Arc<CellNodeTaskGroup>) {
     let node = CellNodeBuilder::new(Arc::clone(&application))
         .with_runtime(
@@ -156,10 +156,11 @@ async fn start_node(
         .with_session(session)
         .build()
         .unwrap();
-    // The caller simulates process loss by canceling both phases. Ordinary
-    // host drain cancels only the child until runtime publication finishes.
+    // Process loss drops renewal without retiring the boot session. Ordinary
+    // host shutdown uses its separate token only after runtime drain finishes.
+    let node_shutdown = CancellationToken::new();
     let tasks = node
-        .install_task_group(node_shutdown.child_token(), node_shutdown.clone())
+        .install_task_group(crash.child_token(), node_shutdown.clone())
         .unwrap();
     let certificate = tls.certificate();
     let signing_key = tls.signing_key().clone();
@@ -194,7 +195,12 @@ async fn start_node(
     node.install_node_lease_for_startup(published.guard())
         .unwrap();
     tasks
-        .spawn_lease_maintenance(async move { published.run(&node_shutdown).await })
+        .spawn_lease_maintenance(async move {
+            tokio::select! {
+                () = crash.cancelled() => Ok(()),
+                result = published.run(&node_shutdown) => result,
+            }
+        })
         .unwrap();
     node.start().unwrap();
     (node, tasks)

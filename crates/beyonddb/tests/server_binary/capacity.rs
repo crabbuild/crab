@@ -12,7 +12,7 @@ use crab_cell_runtime::{
 use crab_storage::Store;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires local rustfs, aws CLI, and observable host memory limits"]
+#[ignore = "requires Docker, aws CLI, and observable host memory limits"]
 async fn process_publishes_measured_signed_placement() {
     let mut fixture = process_fixture(1).await;
     fixture.sdk.list_tables().send().await.unwrap();

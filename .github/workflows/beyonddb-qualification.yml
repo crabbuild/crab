@@ -60,20 +60,10 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y pipx unzip openssl
+          sudo apt-get install -y pipx openssl
           pipx install awscli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          tools_dir="$RUNNER_TEMP/beyonddb-tools"
-          mkdir -p "$tools_dir"
-          archive=rustfs-linux-x86_64-gnu-v1.0.0-rc.1.zip
-          curl --fail --location --retry 3 \
-            "https://github.com/rustfs/rustfs/releases/download/1.0.0-rc.1/$archive" \
-            --output "$tools_dir/$archive"
-          echo "01c03ba58adfca757578729501f4f886a98f13acfb18be5a2db60e04f5cbb595  $tools_dir/$archive" | sha256sum --check
-          unzip -q "$tools_dir/$archive" -d "$tools_dir"
-          chmod +x "$tools_dir/rustfs"
-          "$tools_dir/rustfs" --version
-          echo "$tools_dir" >> "$GITHUB_PATH"
+          docker info
       - name: Verify signed SDK requests and owner recovery
         shell: bash
         run: |

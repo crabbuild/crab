@@ -11,7 +11,7 @@ mod server_binary {
 
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     ops::{Deref, DerefMut},
@@ -204,9 +204,71 @@ fn stop(child: &mut Child, log: &Path) {
     panic!("server did not stop: {}", fs::read_to_string(log).unwrap());
 }
 
+struct RustfsContainer {
+    name: String,
+    log: PathBuf,
+}
+
+impl RustfsContainer {
+    fn start(address: SocketAddr, log: PathBuf) -> Self {
+        let container = Self {
+            name: format!("beyonddb-test-{}", uuid::Uuid::now_v7()),
+            log,
+        };
+        run(Command::new("docker").args([
+            "run",
+            "--detach",
+            "--name",
+            &container.name,
+            "--publish",
+            &format!("{address}:9000"),
+            "--env",
+            "RUSTFS_ACCESS_KEY=crab",
+            "--env",
+            "RUSTFS_SECRET_KEY=crab",
+            "--env",
+            "RUSTFS_CONSOLE_ENABLE=false",
+            "--env",
+            "RUSTFS_OBS_LOG_DIRECTORY=/data/logs",
+            "--volume",
+            "/data",
+            "ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858",
+        ]));
+        container
+    }
+
+    fn is_running(&self) -> bool {
+        let output = Command::new("docker")
+            .args(["inspect", "--format", "{{.State.Running}}", &self.name])
+            .output()
+            .unwrap();
+        output.status.success() && output.stdout == b"true\n"
+    }
+}
+
+impl Drop for RustfsContainer {
+    fn drop(&mut self) {
+        if let Ok(output) = Command::new("docker").args(["logs", &self.name]).output() {
+            let mut log = output.stdout;
+            log.extend_from_slice(&output.stderr);
+            let _ = fs::write(&self.log, &log);
+        }
+        let mut command = Command::new("docker");
+        if std::thread::panicking() {
+            // Failed recovery fixtures retain their object data for startup
+            // replay. Stop serving, but preserve the named container and volume.
+            eprintln!("retained RustFS container for replay: {}", self.name);
+            command.args(["stop", &self.name]);
+        } else {
+            command.args(["rm", "--force", "--volumes", &self.name]);
+        }
+        let _ = command.output();
+    }
+}
+
 struct ProcessFixture {
     child: ManagedChild,
-    rustfs: ManagedChild,
+    rustfs: RustfsContainer,
     sdk: aws_sdk_dynamodb::Client,
     config: PathBuf,
     log: PathBuf,
@@ -220,20 +282,8 @@ struct ProcessFixture {
 async fn process_fixture(initial_partitions: u32) -> ProcessFixture {
     let root = tempfile::tempdir().unwrap();
     tls_files(root.path());
-    fs::create_dir(root.path().join("objects")).unwrap();
     let s3 = free_addr();
-    let rustfs = Command::new("rustfs")
-        .arg("server")
-        .arg("--address")
-        .arg(s3.to_string())
-        .arg(root.path().join("objects"))
-        .env("RUSTFS_ACCESS_KEY", "crab")
-        .env("RUSTFS_SECRET_KEY", "crab")
-        .stdout(Stdio::null())
-        .stderr(File::create(root.path().join("rustfs.log")).unwrap())
-        .spawn()
-        .unwrap();
-    let mut rustfs = ManagedChild(rustfs, root.path().join("rustfs.log"));
+    let rustfs = RustfsContainer::start(s3, root.path().join("rustfs.log"));
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let ready = Command::new("aws")
@@ -251,10 +301,7 @@ async fn process_fixture(initial_partitions: u32) -> ProcessFixture {
         if ready.status.success() {
             break;
         }
-        assert!(
-            rustfs.try_wait().unwrap().is_none(),
-            "RustFS exited before S3 readiness"
-        );
+        assert!(rustfs.is_running(), "RustFS exited before S3 readiness");
         assert!(Instant::now() < deadline, "RustFS did not become S3 ready");
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -351,11 +398,11 @@ async fn process_fixture(initial_partitions: u32) -> ProcessFixture {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires local rustfs and aws CLI"]
+#[ignore = "requires Docker, aws CLI, and the pinned RustFS GA image"]
 async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     let ProcessFixture {
         root: _root,
-        mut rustfs,
+        rustfs,
         peer,
         public,
         config,
@@ -1055,6 +1102,5 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .await
         .unwrap();
     stop(&mut drained, &log);
-    rustfs.kill().unwrap();
-    rustfs.wait().unwrap();
+    drop(rustfs);
 }

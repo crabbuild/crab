@@ -694,7 +694,8 @@ The new regression counts entry into a PUT before a throttled store stalls it,
 then cancels renewal or fences the guard. Before the fix, cancellation failed
 its one-second completion bound (test failed in 4.03 seconds). An outer select
 now covers the whole renewal loop, including storage and retry waits.
-Cancellation retains the current deadline; fencing remains terminal. Dropping
+That revision retained the current deadline on cancellation; the retirement
+follow-up below supersedes this cancellation behavior. Fencing remains terminal. Dropping
 the request cannot establish whether its remote CAS committed and never grants
 a new local lease.
 
@@ -2326,3 +2327,55 @@ DEBUG events alongside other server warnings. It logs neither request bodies
 nor credentials, and changes no admission, deadline or retry behavior. The two
 existing codec/enrollment tests pass (4.52s). These diagnostics are intended to
 make the next CI recurrence actionable; passing repeats do not close the failure.
+### Graceful session retirement and immediate restart
+
+The process gate on main `311105eb864` later failed after an orderly restart:
+table recreation encountered `multiple live sessions advertise one node`.
+`PublishedNodeLease::run` stopped heartbeats without withdrawing the old
+advertisement. The replacement's fresh session overlapped its predecessor's
+remaining lease. A focused public-directory regression reproduced the same
+error in 0.01 seconds, without a provider delay or unfinished runtime drain.
+
+After runtime drain, cancellation now fences the local guard and waits for
+authoritative session retirement. `NodeDirectory::withdraw_after_drain` reuses
+the existing exact withdrawal CAS and reconciles only a newer observation of
+the same signed boot identity. This handles renewal committed before its
+response was lost or canceled. It cannot withdraw another identity, erase an
+unsealed log, override a recovery claim, or revive a retired session. The exact
+`withdraw` API retains its previous stale-observation rejection contract.
+
+One lease lifetime bounds retirement I/O. Cancellation still fences a stalled
+renewal promptly, but successful shutdown now requires the tombstone. A stalled
+withdrawal returns `Deadline`; the former test expecting cancellation to leave
+a usable guard is replaced by fencing and retirement assertions. This changes
+shutdown's success contract, not lease length or owner takeover timing.
+
+The HTTP server sibling already withdraws after runtime drain and awaits each
+heartbeat response before processing shutdown. Its path is unchanged. BeyondDB
+cancels pending renewal I/O, which requires the explicit reconciliation boundary.
+The node host's existing lease-maintenance phase owns the ordering; no second
+lifecycle or authority is introduced. The added production surface is 46 net
+lines, primarily the shared directory reconciliation contract.
+
+The process fixture and its CI workflow now use the existing pinned RustFS
+1.0 GA Docker image instead of a native 1.0.0-rc.1 binary. Successful fixtures
+remove their private object-store container and volume; failures retain a
+stopped container for replay. This exercises the production S3 adapter and the
+actual signed SDK/server process path. It does not turn a local process test
+into multi-host or sustained-capacity qualification.
+
+The immediate-restart regression passes after the fix. Twelve directory-session
+tests and four node-log tests pass, preserving exact withdrawal, claim fencing,
+and log sealing. Five selected lease/residency tests pass, including an
+eight-second successful refresh and a sixty-second stalled PUT whose shutdown
+returns a bounded failure. The full signed SDK process scenario passes on the
+GA container in 211.84 seconds, including hard restart at a changed peer address,
+graceful restart, and table recreation. Strict runtime/BeyondDB all-target
+Clippy, layout, policy-entry, documentation, YAML parsing, and diff checks pass.
+
+The peer fixture now separates simulated process loss from graceful shutdown:
+crash drops renewal without writing a tombstone, preserving expiry-based
+takeover. Its long peer recovery scenario is still being verified. Current-main
+architecture checks independently fail on the catalog-head marker and the
+BeyondDB dev-dependency inventory; this change does not edit either inventory
+or weaken the checks. Linux CI and the remaining fleet gates are still open.

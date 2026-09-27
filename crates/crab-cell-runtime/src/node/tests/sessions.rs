@@ -255,6 +255,12 @@ async fn expired_session_claim_is_atomic_idempotent_and_blocks_refresh() {
             .await
             .is_err()
     );
+    assert!(matches!(
+        directory
+            .withdraw_after_drain(&observed, NOW_MS + 10_001)
+            .await,
+        Err(Error::Fenced)
+    ));
     assert_eq!(
         directory
             .claim_expired(session, claimant, NOW_MS + 10_002)
@@ -323,6 +329,71 @@ async fn stale_collection_preserves_a_session_refreshed_before_fencing() {
             .is_live(SessionId::from_bytes([1; 16]), collection_ms + 1)
             .await
             .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn drained_withdrawal_reconciles_an_unobserved_heartbeat() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let session = SessionId::from_bytes([1; 16]);
+    let created = directory
+        .create(advertisement(&key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let refreshed = directory
+        .refresh(&created, advertisement(&key, 2, NOW_MS + 1), NOW_MS + 1)
+        .await
+        .unwrap();
+    directory
+        .withdraw_after_drain(&created, NOW_MS + 2)
+        .await
+        .unwrap();
+    assert!(directory.is_retired(session).await.unwrap());
+    assert!(
+        directory
+            .refresh(&refreshed, advertisement(&key, 3, NOW_MS + 3), NOW_MS + 3)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn drained_withdrawal_rejects_a_changed_boot_identity() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let created = directory
+        .create(advertisement(&key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let replacement_key = SigningKey::from_bytes(&[8; 32]);
+    let mut changed = advertisement(&replacement_key, 2, NOW_MS + 1);
+    changed.generation = 2;
+    let path = directory.layout.node_path(changed.session.as_bytes());
+    directory
+        .layout
+        .store()
+        .update(
+            &path,
+            Bytes::from(changed.encode().unwrap()),
+            created.token.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        directory
+            .withdraw_after_drain(&created, NOW_MS + 2)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        directory
+            .load_canonical(changed.session)
+            .await
+            .unwrap()
+            .unwrap()
+            .0,
+        changed
     );
 }
 

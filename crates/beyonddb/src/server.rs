@@ -33,6 +33,7 @@ use crate::{
 ///
 /// The session and directory must belong to this node. Drain or withdrawal
 /// failures propagate; callers must retain scratch state on failure.
+/// Retirement I/O after drain is bounded by one node lease lifetime.
 pub async fn shutdown_serving_node(
     node: &CellNode,
     directory: &NodeDirectory,
@@ -41,14 +42,21 @@ pub async fn shutdown_serving_node(
     // Retirement fences publication authority. Drain closes owners/logs and
     // joins heartbeat maintenance before we read the last authoritative version.
     node.shutdown().await?;
-    if let Some(observed) = directory.load(session, node_lease::unix_time_ms()?).await? {
-        // A late heartbeat CAS cannot replace the tombstone. If it wins first,
-        // withdrawal fails rather than reporting a clean session retirement.
-        directory
-            .withdraw(&observed, node_lease::unix_time_ms()?)
-            .await?;
-    }
-    Ok(())
+    tokio::time::timeout(
+        std::time::Duration::from_millis(node_lease::LEASE_MS as u64),
+        async {
+            if let Some(observed) = directory.load(session, node_lease::unix_time_ms()?).await? {
+                // A canceled heartbeat may still win its remote CAS. Reconcile
+                // only this drained boot; the tombstone fences later refreshes.
+                directory
+                    .withdraw_after_drain(&observed, node_lease::unix_time_ms()?)
+                    .await?;
+            }
+            Ok(())
+        },
+    )
+    .await
+    .map_err(|_| crab_cell_runtime::Error::Deadline)?
 }
 
 /// Restricts peer forwarding to BeyondDB's compiled Cell namespaces.

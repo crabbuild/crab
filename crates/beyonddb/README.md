@@ -27,6 +27,14 @@ shutdown drains the runtime and joins heartbeat maintenance before withdrawing
 the boot-session advertisement. After an unclean exit, owner replacement waits
 for authoritative expiry; storage stalls that exhaust the lease still fence serving. See [measured lease qualification](SCALING.md#large-transaction-transfer-qualification).
 
+Graceful shutdown keeps renewal running through Cell drain, then fences local
+admission and conditionally retires the boot session before returning success.
+A replacement may reuse the physical node ID immediately after that retirement.
+An unknown heartbeat CAS is reconciled only within the same signed boot identity;
+unsealed logs and recovery claims still reject retirement. Cleanup exceeding
+one lease lifetime returns an error, so provider outage cannot masquerade as a
+successful graceful stop.
+
 Each renewal measures RAM and scratch-filesystem availability on a blocking
 worker, caps them by runtime reservations, and signs Cell/job counts and backlog
 pressure for the placement planner. Failed measurements and shutdown advertise
@@ -111,7 +119,10 @@ BatchWriteItem, BatchGetItem, paginated parallel Scan, and TTL expiry across fou
 initial data Cells before the crash. It checks batch reads and TTL configuration
 after recovery, then disables TTL and verifies that state through another
 restart. Run it in a
-dedicated environment with `rustfs`, `aws`, and `openssl` available:
+dedicated environment with Docker, `aws`, and `openssl` available. The fixture
+starts a digest-pinned RustFS 1.0 GA container with an isolated Docker volume
+and a random loopback port; no native RustFS installation is used. Colima users
+can select their daemon with `DOCKER_CONTEXT=colima`.
 
 ```bash
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-beyonddb \
@@ -122,14 +133,16 @@ The `settled_history_beyond_residency` process test isolates coordinator recover
 70 distinct coordinator shards update two small items in separate data Cells,
 then the server is killed and restarted at another peer address. It uses the
 same 45-second readiness gate as the full smoke test. On a readiness failure,
-it retains the fixture and prints its path for startup-only replay. This test
+it retains the fixture and prints its path for startup-only replay. A failed
+process test stops but retains its RustFS container and volume, printing the
+container name; successful tests remove both. This test
 does not cover large payloads or index restoration; both remain in the full
 scenario. See [scaling qualification](SCALING.md) for actual results and open gates.
 
 The dedicated [SDK qualification workflow](../../.github/workflows/beyonddb-qualification.yml)
-selects both process tests explicitly, alongside the peer-network SDK suite, on
-relevant pull requests and main changes. It uses Ubuntu 24.04 and a checksum-pinned
-RustFS 1.0.0-rc.1 binary, runs tests serially, and retains the test log on failure.
+selects the process tests explicitly, alongside the peer-network SDK suite, on
+relevant pull requests and main changes. It uses Ubuntu 24.04 and the same
+digest-pinned RustFS GA container, runs tests serially, and retains the test log on failure.
 Ordinary `cargo test` does not run the ignored process tests.
 
 This server uses an explicit list of locally owned account and credential
