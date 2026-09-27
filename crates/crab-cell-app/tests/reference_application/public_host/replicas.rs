@@ -2,8 +2,24 @@
 
 use super::*;
 use crate::reference_application::{performance_fixture, process_node};
+use futures_util::FutureExt;
 
-struct ReaderHints(tokio::sync::mpsc::UnboundedSender<crab_cell_runtime::CellId>);
+struct ReaderHints {
+    sent: tokio::sync::mpsc::UnboundedSender<(
+        crab_cell_runtime::CellId,
+        crab_cell_runtime::SessionId,
+    )>,
+    stalled: Option<crab_cell_runtime::SessionId>,
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct PendingHint(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for PendingHint {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 impl PeerRoundTrip for ReaderHints {
     fn send(
@@ -18,11 +34,21 @@ impl PeerRoundTrip for ReaderHints {
     fn send_to_node(
         &self,
         target: CellTarget,
-        _: NodeAdvertisement,
+        node: NodeAdvertisement,
         _: Vec<u8>,
         _: u32,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'static>> {
-        let _ = self.0.send(target.cell_id());
+        let session = node.session();
+        let _ = self.sent.send((target.cell_id(), session));
+        if Some(session) == self.stalled {
+            self.pending
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let pending = PendingHint(self.pending.clone());
+            return Box::pin(async move {
+                let _pending = pending;
+                std::future::pending().await
+            });
+        }
         Box::pin(async move {
             use crab_cell_runtime::peer::{encode_peer_reply, wire};
             encode_peer_reply(&wire::PeerReply {
@@ -41,6 +67,20 @@ impl PeerRoundTrip for ReaderHints {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn published_command_wakes_reader_recruitment_before_periodic_scan() {
+    publication_hints(1, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stalled_reader_does_not_delay_healthy_reader_publication_hints() {
+    publication_hints(2, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_hints_reach_readers_beyond_the_activation_concurrency() {
+    publication_hints(20, true).await;
+}
+
+async fn publication_hints(readers: usize, stalled_reader: bool) {
     use crab_cell_runtime::{
         cell::application::ApplicationIdentity, node::lease::NodeLeaseGuard,
         peer::ReplicaPeerClient, read_policy::ReadPolicyStore,
@@ -59,7 +99,8 @@ async fn published_command_wakes_reader_recruitment_before_periodic_scan() {
     );
     let directory = process_node::directory(&layout, &registry);
     let now = now_ms();
-    for node in 0..2 {
+    let count = readers + 1;
+    for node in 0..count {
         directory
             .create(
                 NodeAdvertisement::sign(
@@ -121,7 +162,11 @@ async fn published_command_wakes_reader_recruitment_before_periodic_scan() {
     .unwrap();
     let target = CellTarget::new(tenant, app, SQL_NAMESPACE, &partition_for_shard(0)).unwrap();
     ReadPolicyStore::new(layout.clone())
-        .create(target.cell_id(), IncarnationId::from_bytes([40; 16]), 1)
+        .create(
+            target.cell_id(),
+            IncarnationId::from_bytes([40; 16]),
+            count as u16 - 1,
+        )
         .await
         .unwrap();
     node.install_read_replicas(
@@ -132,6 +177,7 @@ async fn published_command_wakes_reader_recruitment_before_periodic_scan() {
     )
     .unwrap();
     let (sent, mut hints) = tokio::sync::mpsc::unbounded_channel();
+    let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     node.install_read_replica_recruitment(
         ApplicationIdentity::new(tenant, app),
         ReplicaPeerClient::new(
@@ -146,34 +192,76 @@ async fn published_command_wakes_reader_recruitment_before_periodic_scan() {
                 subject: "owner".into(),
                 actions: vec!["cell.replica.activate".into()],
             },
-            Arc::new(ReaderHints(sent)),
+            Arc::new(ReaderHints {
+                sent,
+                stalled: stalled_reader.then_some(node_session(2)),
+                pending: pending.clone(),
+            }),
         ),
     )
     .unwrap();
     node.start().unwrap();
-    // Consume the immediate periodic pass before publishing. The next tick is
-    // five seconds away, so only a publication wake-up can satisfy this bound.
-    tokio::time::timeout(Duration::from_secs(2), hints.recv())
+    // Always drain the host before propagating a failed assertion. A regression
+    // must not leave the intentionally stalled transport alive in the suite.
+    let observed = std::panic::AssertUnwindSafe(async {
+        // Consume the immediate periodic pass before publishing. The next tick is
+        // five seconds away, so only a publication wake-up can satisfy this bound.
+        for _ in 1..count {
+            tokio::time::timeout(Duration::from_secs(2), hints.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let client = CellClient::local(registry, handle);
+        let typed = node
+            .application_handle::<ReferenceApplication>(client, tenant, app)
+            .unwrap();
+        let generated = ReferenceClient::new(typed).unwrap();
+        let healthy = (1..count)
+            .filter(|node| !stalled_reader || *node != 2)
+            .map(node_session)
+            .collect::<std::collections::HashSet<_>>();
+        for occurrence in 1..=3 {
+            generated
+                .orders(&OrderId(b"publication-hints".to_vec()))
+                .unwrap()
+                .receive_cron(identity(108, occurrence, 0), invocation(occurrence as u64))
+                .await
+                .unwrap();
+            let notified = tokio::time::timeout(Duration::from_secs(2), async {
+                let mut received = std::collections::HashSet::new();
+                for _ in 0..healthy.len() {
+                    let (cell, session) = hints.recv().await.unwrap();
+                    assert_eq!(cell, target.cell_id());
+                    assert!(
+                        received.insert(session),
+                        "duplicate activation in one publication pass"
+                    );
+                }
+                received
+            })
+            .await;
+            assert_eq!(
+                notified.unwrap(),
+                healthy,
+                "publication was blocked or repeated a pending activation"
+            );
+            assert_eq!(
+                pending.load(std::sync::atomic::Ordering::Relaxed),
+                usize::from(stalled_reader)
+            );
+        }
+    })
+    .catch_unwind()
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), node.shutdown())
         .await
         .unwrap()
         .unwrap();
-    let client = CellClient::local(registry, handle);
-    let typed = node
-        .application_handle::<ReferenceApplication>(client, tenant, app)
-        .unwrap();
-    let generated = ReferenceClient::new(typed).unwrap();
-    generated
-        .orders(&OrderId(b"publication-hints".to_vec()))
-        .unwrap()
-        .receive_cron(identity(108, 0, 0), invocation(1))
-        .await
-        .unwrap();
-    let notified = tokio::time::timeout(Duration::from_secs(2), hints.recv()).await;
-    node.shutdown().await.unwrap();
-    assert!(
-        matches!(notified, Ok(Some(cell)) if cell == target.cell_id()),
-        "published command waited for the periodic reader scan: {notified:?}"
-    );
+    assert_eq!(pending.load(std::sync::atomic::Ordering::Relaxed), 0);
+    if let Err(failure) = observed {
+        std::panic::resume_unwind(failure);
+    }
 }
 
 #[tokio::test]

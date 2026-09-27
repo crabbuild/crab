@@ -38,9 +38,12 @@ The supervisor refreshes admitted views from published roots and removes views
 that are no longer selected. Call `CellNode::install_read_replica_recruitment`
 with the application identity and an activation-authorized `ReplicaPeerClient`
 to recruit readers automatically for locally owned Cells. Recruitment scans
-all compiled namespace roles, advances its cursor before I/O, and bounds each
-pass to 64 Cells, 16 concurrent hints per Cell, and 30 seconds. The five-second
-poll interval is not a freshness or replacement SLO. Expired readers are
+all compiled namespace roles and advances its cursor before I/O. The supervisor
+retains at most 64 dirty Cells, one discovered candidate list, and 16 concurrent
+activation hints across Cells. Discovery, queued hints, and activation share a
+30-second deadline per prepared Cell. Explicit operator passes visit at most
+64 Cells within 30 seconds. The five-second poll interval is not a freshness
+or replacement SLO. Expired readers are
 replaced through signed live membership and the same receiver admission path.
 Pending activation hints recheck the selected boot at its observed lease
 expiry. A renewal preserves the in-flight request; an expired or withdrawn
@@ -49,7 +52,9 @@ session releases the wait so a later pass can recruit its replacement.
 Successful object publication, activation, and schema migration also notify
 recruitment through a bounded runtime channel. The host coalesces queued hints
 per Cell and refreshes through the same signed peer path without waiting for
-the next tick. Commands never await readers. Fleet-only acknowledgement sends
+the next tick. Pending hints coalesce by Cell and node session; a stalled reader
+does not prevent completed healthy readers from receiving subsequent hints.
+Commands never await readers. Fleet-only acknowledgement sends
 no publication hint until its root reaches object storage. Periodic scans
 still repair dropped hints and reconcile membership and target changes; this
 does not create a bounded-staleness guarantee.
