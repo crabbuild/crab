@@ -104,6 +104,24 @@ impl GlobalIndexRecord {
         {
             return None;
         }
+        // Rows can predate an online index's key contract. The same eligibility
+        // rule applies to backfill and old mutation images; an invalid old key
+        // must not prevent projecting a later valid replacement.
+        let keys = [extenddb_core::validation::IndexKeyRef {
+            index_name: &self.specification.index_name,
+            key_schema: &self.specification.key_schema,
+        }];
+        if extenddb_core::validation::validate_index_keys(item, &keys, &table.attribute_definitions)
+            .is_err()
+            || extenddb_core::validation::validate_key_sizes(
+                item,
+                &self.specification.key_schema,
+                &Default::default(),
+            )
+            .is_err()
+        {
+            return None;
+        }
         if self.specification.projection.projection_type == ProjectionType::All {
             return Some(item.clone());
         }

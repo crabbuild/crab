@@ -134,6 +134,33 @@ impl CellSplitController {
         }) {
             return Err(split_state("source seal differs from split plan"));
         }
+        // Installation contracts remain immutable while index policy changes.
+        // Read policy only after sealing; otherwise a concurrent schema change
+        // could disappear when the children become the serving ranges.
+        let indexes = self
+            .client
+            .query::<crate::ReadPartitionIndexes>(&source_target, Some(sealed.receipt), Json(()))
+            .await
+            .map_err(cell_error)?
+            .output
+            .0;
+        for target in &child_targets {
+            let inherited = self
+                .client
+                .command::<crate::InheritPartitionIndexes>(
+                    target,
+                    mutation_identity()?,
+                    Json(crate::InheritPartitionIndexesInput {
+                        source: seal.clone(),
+                        state: indexes.clone(),
+                    }),
+                )
+                .await
+                .map_err(cell_error)?;
+            if !inherited.output.0 {
+                return Err(split_state("child index policy differs from sealed source"));
+            }
+        }
         let mut expected = [ImportSummary::default(), ImportSummary::default()];
         let mut cursor = None;
         loop {

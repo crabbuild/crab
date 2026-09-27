@@ -43,6 +43,7 @@ mod elastic_cells {
     mod directory_tree;
     mod global_index_splits;
     mod global_indexes;
+    mod index_backfill;
     mod local_indexes;
     mod node_sessions;
     mod public_transactions;

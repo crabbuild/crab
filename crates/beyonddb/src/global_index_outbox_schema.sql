@@ -3,6 +3,9 @@ CREATE TABLE ddb_index_changes (
     table_id TEXT NOT NULL,
     sequence BLOB NOT NULL CHECK (length(sequence) = 8),
     attempt_sequence BLOB NOT NULL CHECK (length(attempt_sequence) = 8),
-    item BLOB NOT NULL
+    item BLOB NOT NULL,
+    backfill_index_id TEXT
 );
 CREATE INDEX ddb_index_changes_pending ON ddb_index_changes (table_id, attempt_sequence, sequence, id);
+CREATE INDEX ddb_index_changes_backfill ON ddb_index_changes (backfill_index_id)
+    WHERE backfill_index_id IS NOT NULL;

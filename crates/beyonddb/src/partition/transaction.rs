@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AccessState, DATA_MODULE, Json, PartitionSpec, Result, SqlValue, command_access, command_item,
-    data_key_hash, decode_spec, item_key, statement, valid_item, valid_key, write_item,
+    data_key_hash, item_key, statement, valid_item, valid_key, write_item,
 };
 use crate::PrepareTransactionOutcome;
 use crate::items::{TransactionFailure, TransactionOperation};
@@ -63,11 +63,7 @@ impl Command for PartitionTransactWrite {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let rows = context.sql(&statement(
-            "SELECT spec FROM ddb_partition WHERE singleton = 1",
-            vec![],
-        ))?;
-        let Some(spec) = decode_spec(&rows[0])? else {
+        let Some(spec) = super::indexes::command_spec(context)? else {
             return Ok(rejected(PartitionTransactWriteOutcome::NotInstalled));
         };
         if spec.table.id != input.table_id {

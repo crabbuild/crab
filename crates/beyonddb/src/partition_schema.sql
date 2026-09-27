@@ -4,6 +4,17 @@ CREATE TABLE ddb_partition (
     state BLOB NOT NULL
 );
 
+CREATE TABLE ddb_partition_index_policy (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    policy BLOB NOT NULL
+);
+
+CREATE TABLE ddb_partition_index_backfills (
+    index_id TEXT PRIMARY KEY,
+    cursor BLOB,
+    scanned INTEGER NOT NULL CHECK (scanned IN (0, 1))
+);
+
 CREATE TABLE ddb_partition_items (
     item_key BLOB PRIMARY KEY,
     partition_key BLOB NOT NULL,

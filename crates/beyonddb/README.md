@@ -551,6 +551,17 @@ asynchronous maintenance, and ALL/KEYS_ONLY/INCLUDE projected Query and Scan.
 See [global-index implementation and limits](GLOBAL_INDEXES.md) for journal
 replay, transaction boundaries, restart evidence, and unfinished index splitting
 and collection.
+
+Data Cells also provide an internal foundation for online index backfill:
+revisioned write policies, bounded durable scan cursors, a historical-journal
+delivery barrier, and inheritance of unfinished work through splits. Policy
+changes wait for prepared transactions to resolve, preserving their capacity
+reservations. Native Cell tests cover restart, invalid historical keys, delivery
+tracking, and split inheritance. Account lifecycle orchestration and SDK
+`UpdateTable` create/delete remain unimplemented; these commands do not make
+online index changes a supported API. The foundation extends the unreleased
+initial SQL schema; upgrading roots written by earlier binaries is unqualified.
+
 `tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,
 receipt-based reads, conditional writes, update expressions, scan pagination, rollback of a
