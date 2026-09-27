@@ -3152,6 +3152,68 @@ after an acknowledged body update, rejection of old/corrupt payloads, and both
 entry points rejecting a wrong-source image before starting nodes. These are
 harness regressions; full live reader and rollout qualification remains open.
 
+### 33. Planning at the discovery start time suppresses fresh heartbeats
+
+**Reproduced:** the [repository router](../../crab-http-server/src/cells/router.rs)
+read its clock before awaiting the signed node-directory scan. A heartbeat
+published during that scan has an issue time later than the captured clock.
+The directory permits bounded clock skew, but the
+[placement planner](../src/fleet/placement.rs) deliberately rejects observations
+from the future. Its complete-fleet count rule consequently returns no balance
+when even one otherwise current member was published during discovery. The
+same sequencing exists on `origin/main` at `396e0ab1b40`.
+
+A deterministic router regression advances its injected clock by one second
+across discovery. The fixture uses real signed advertisements, settled SQLite
+Cells and the ordinary release, authority and receiver-activation paths.
+Before the fix, it releases zero Cells instead of one. This is a reproduced
+clock-boundary defect; the test does not attribute the whole fleet delay to it.
+
+**Fix:** rebalance and initial ownership selection now share one private
+placement snapshot. Discovery starts with the current clock, then observations
+are evaluated against a new clock sample after the read. Expired advertisements
+are excluded at that point; a partial view still cannot justify count balancing.
+The planner's future-time rejection, freshness window, source residence,
+settlement, transfer limits and authority gates remain intact. Initial placement
+still reloads its selected canonical advertisement, and remote activation uses
+a fresh request timestamp. No public API, deadline, concurrency limit or
+serialized contract changes.
+
+The separate public `NodeDirectory::choose_advertised_placement` helper retains
+its explicit caller-supplied logical-time contract. The live server paths use
+the shared snapshot so they can sample time after I/O; reader selection and
+recovery discovery have their own expiry/authority gates and do not invoke
+the count-balancing planner. Their cached observations are not converted into
+ownership authority by this change.
+
+**Fleet evidence:** [run 36291618746, attempt 2](https://github.com/crabbuild/crab/actions/runs/36291618746/attempts/2)
+used the prior a62 AMD64 image. Eight of twelve load points at 3/5/10 nodes
+passed; all 14,256 admitted pairs succeeded and passed integrity/recovery checks.
+The four failed points omitted 144 scheduled arrivals at the generator. At
+20 nodes, the first balanced sample arrived at 554 seconds, the next had
+28 seconds of stability at 582 seconds, and the final had 62 seconds at
+616 seconds. The strict 600-second gate rejected that final observation.
+No 20-node load or unpublished-tail fault ran. The failure is retained; it
+cannot establish that ownership never balanced or that this clock fix closes
+the convergence budget. Report SHA-256:
+`486e7c277d0ee154810d8d95c8acdb6b907d6064572e934d8338728c18bf421c`.
+
+**Verification:** all three focused router transfer tests pass, including the
+new regression and the existing stale-generation/restored-value checks. The
+same transfer regression passes against pinned RustFS 1.0 GA (2.69 seconds).
+The full public HTTP/mTLS fixture also passes against GA (178.63 seconds):
+application mutations, duplicate outcomes, owner takeover, restored collaboration
+and native Git reads. Its archive race records 24 outcomes, 8 creates and
+16 rejections, with identical duplicate/recovered receipts. This shared-host
+run duration is not a service latency or fleet-capacity result. The exact
+ignored regression is added to the existing CI RustFS recovery job with its
+own object prefix; no dependency or inventory changes are required.
+
+**Best-fix assessment:** refreshing time at the consuming server boundary
+corrects both live placement callers without relaxing the pure planner or
+extending the qualifier deadline. Exact-source 20-node convergence and load
+remain required before claiming a latency improvement.
+
 ## Safety and proof retained by the audit
 
 Both the [ARM64 image/Compose run](https://github.com/crabbuild/crab/actions/runs/36239430827)

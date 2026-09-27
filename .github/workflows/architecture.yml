@@ -264,6 +264,10 @@ jobs:
           run_test cargo test -p crab-http-server --locked --lib \
             server::peer_e2e_tests::rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx \
             -- --ignored --exact --nocapture
+          CRAB_HTTP_CELL_TEST_PREFIX="${CRAB_HTTP_CELL_TEST_PREFIX}/placement-clock" \
+            run_test cargo test -p crab-http-server --locked --lib \
+            cells::router::tests::rustfs_rebalance_accepts_heartbeats_published_during_discovery \
+            -- --ignored --exact --nocapture
           run_test cargo test -p crab-http-server --release --locked --test public_cell_qualification \
             rustfs_public_cell_node_runs_typed_primitive_workload \
             -- --ignored --exact --nocapture

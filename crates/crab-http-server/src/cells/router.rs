@@ -61,6 +61,12 @@ struct RebalanceEvidence {
     samples: u8,
 }
 
+struct PlacementSnapshot {
+    live: Vec<NodeAdvertisement>,
+    observations: Vec<PlacementObservation>,
+    now_ms: i64,
+}
+
 #[derive(Default)]
 struct RebalanceProgress {
     released: usize,
@@ -173,7 +179,7 @@ impl RepositoryCellRouter {
             tokio::select! {
                 () = cancellation.cancelled() => return Ok(()),
                 _ = tick.tick() => {
-                    match self.rebalance_once().await {
+                    match self.rebalance_once(super::unix_now_ms).await {
                         Ok(progress) if progress.released > 0 => {
                             tracing::info!(released = progress.released, activated = progress.activated, "Cell rebalance tick completed");
                         }
@@ -185,19 +191,37 @@ impl RepositoryCellRouter {
         }
     }
 
-    async fn rebalance_once(&self) -> crate::Result<RebalanceProgress> {
-        let now_ms = super::unix_now_ms()?;
-        self.rebalance_once_at(now_ms).await
-    }
-
-    async fn rebalance_once_at(&self, now_ms: i64) -> crate::Result<RebalanceProgress> {
-        let live = self.peer.directory.live(now_ms, 1_024).await?;
+    async fn placement_snapshot(
+        &self,
+        clock: impl Fn() -> crate::Result<i64>,
+    ) -> crate::Result<PlacementSnapshot> {
+        let live = self.peer.directory.live(clock()?, 1_024).await?;
+        // Heartbeats can advance during discovery. Evaluate freshness after
+        // the read so current samples do not suppress balancing as "future",
+        // and advertisements that expired during the read cannot receive work.
+        let now_ms = clock()?;
         let observations = live
             .iter()
             .filter_map(|node| {
                 PlacementObservation::from_signed_advertisement(node, now_ms, false).ok()
             })
-            .collect::<Vec<_>>();
+            .collect();
+        Ok(PlacementSnapshot {
+            live,
+            observations,
+            now_ms,
+        })
+    }
+
+    async fn rebalance_once(
+        &self,
+        clock: impl Fn() -> crate::Result<i64>,
+    ) -> crate::Result<RebalanceProgress> {
+        let PlacementSnapshot {
+            live,
+            observations,
+            now_ms,
+        } = self.placement_snapshot(clock).await?;
         // Ownership balancing counts the whole fleet. One live node that
         // cannot publish the signed placement block leaves a partial total that
         // lowers every target, so balancing waits for a complete view; drains
@@ -817,11 +841,10 @@ impl RepositoryCellRouter {
         } else if let Some(node) = self.preferred_warm_reader(target, observed).await? {
             node
         } else {
-            let Some(score) = self
-                .peer
-                .directory
-                .choose_advertised_placement(&self.placement, target.cell_id(), now_ms, 1_024)
-                .await?
+            let snapshot = self.placement_snapshot(super::unix_now_ms).await?;
+            let Some(score) =
+                self.placement
+                    .choose(target.cell_id(), snapshot.now_ms, &snapshot.observations)?
             else {
                 // A fully legacy fleet has no placement contract yet. Preserve
                 // ordinary local acquisition until the rollout has one signed
@@ -830,7 +853,7 @@ impl RepositoryCellRouter {
             };
             self.peer
                 .directory
-                .load(score.session, now_ms)
+                .load(score.session, snapshot.now_ms)
                 .await?
                 .ok_or(crab_cell_runtime::Error::CellNotActive)?
                 .advertisement()
@@ -839,6 +862,7 @@ impl RepositoryCellRouter {
         if node.session() == self.peer.owner.session {
             return Ok(false);
         }
+        let now_ms = super::unix_now_ms()?;
         match self
             .peer
             .activate_remote(target.clone(), node, principal, now_ms)
@@ -1908,6 +1932,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires an isolated RustFS prefix and test credentials"]
     async fn rustfs_different_successors_restore_cells_from_one_fenced_node() {
+        let (store, root) = rustfs_test_storage();
+        restore_cells_from_one_fenced_node(store, &root).await;
+    }
+
+    fn rustfs_test_storage() -> (Store, String) {
         let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
         let store = crab_storage::build_explicit_store(
             &required("CRAB_HTTP_CELL_TEST_BUCKET"),
@@ -1921,7 +1950,7 @@ mod tests {
             true,
         )
         .unwrap();
-        restore_cells_from_one_fenced_node(store, &required("CRAB_HTTP_CELL_TEST_PREFIX")).await;
+        (store, required("CRAB_HTTP_CELL_TEST_PREFIX"))
     }
 
     async fn restore_cells_from_one_fenced_node(store: Store, root: &str) {
@@ -2152,13 +2181,43 @@ mod tests {
 
     #[tokio::test]
     async fn fleet_rebalance_donates_ownership_surplus_without_headroom_gain() {
+        assert_rebalance_donation_after_discovery(
+            Store::new(Arc::new(InMemory::new())),
+            "fleet-ownership-balance",
+            0,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn fleet_rebalance_accepts_heartbeats_published_during_discovery() {
+        assert_rebalance_donation_after_discovery(
+            Store::new(Arc::new(InMemory::new())),
+            "fleet-ownership-balance",
+            1_000,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated RustFS prefix and test credentials"]
+    async fn rustfs_rebalance_accepts_heartbeats_published_during_discovery() {
+        let (store, root) = rustfs_test_storage();
+        assert_rebalance_donation_after_discovery(store, &root, 1_000).await;
+    }
+
+    async fn assert_rebalance_donation_after_discovery(
+        store: Store,
+        root: &str,
+        scan_elapsed_ms: i64,
+    ) {
         let identity = ApplicationIdentity::new(
             TenantId::from_bytes([51; 16]),
             ApplicationId::from_bytes([52; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
-            ObjectPath::from("fleet-ownership-balance"),
+            store,
+            ObjectPath::from(root),
             *identity.application().as_bytes(),
         );
         let registry = Arc::new(crate::cells::compiled_registry().unwrap());
@@ -2306,15 +2365,26 @@ mod tests {
                 );
             }
         }
-        // The larger peer is below its weighted share, so exactly one Cell
-        // moves: the donor's surplus, not the whole batch.
-        let progress = source_router.rebalance_once_at(now_ms).await.unwrap();
+        // Discovery starts before these signed heartbeats are issued. Planning
+        // must use the clock after the read, otherwise one fresh member makes
+        // the complete fleet snapshot ineligible for a count-balancing move.
+        let sampled = std::cell::Cell::new(false);
+        let progress = source_router
+            .rebalance_once(|| {
+                Ok(if sampled.replace(true) {
+                    now_ms
+                } else {
+                    now_ms - scan_elapsed_ms
+                })
+            })
+            .await
+            .unwrap();
         assert_eq!((progress.released, progress.activated), (1, 1));
         assert_eq!(source_runtime.stats().active_cells(), 1);
         assert_eq!(receiver_runtime.stats().active_cells(), 1);
         // The same samples cannot describe the fleet after the batch, so the
         // next tick moves nothing instead of releasing from a stale count.
-        let repeated = source_router.rebalance_once_at(now_ms).await.unwrap();
+        let repeated = source_router.rebalance_once(|| Ok(now_ms)).await.unwrap();
         assert_eq!((repeated.released, repeated.activated), (0, 0));
         // Fresh samples show the fleet at its weighted target, so convergence
         // does not depend on the movement cooldown.
@@ -2341,7 +2411,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let converged = source_router.rebalance_once_at(settled).await.unwrap();
+        let converged = source_router.rebalance_once(|| Ok(settled)).await.unwrap();
         assert_eq!((converged.released, converged.activated), (0, 0));
         assert_eq!(source_runtime.stats().active_cells(), 1);
         receiver_runtime.shutdown().await.unwrap();
@@ -2531,7 +2601,7 @@ mod tests {
                 samples: 2,
             },
         );
-        let cold = source_router.rebalance_once_at(now_ms).await.unwrap();
+        let cold = source_router.rebalance_once(|| Ok(now_ms)).await.unwrap();
         assert_eq!(cold.released, 0);
         source_router.rebalance_evidence.lock().await.insert(
             target.cell_id(),
@@ -2542,7 +2612,7 @@ mod tests {
                 samples: 2,
             },
         );
-        let progress = source_router.rebalance_once_at(now_ms).await.unwrap();
+        let progress = source_router.rebalance_once(|| Ok(now_ms)).await.unwrap();
         assert_eq!((progress.released, progress.activated), (1, 1));
         assert_eq!(source_runtime.stats().active_cells(), 0);
         assert_eq!(receiver_runtime.stats().active_cells(), 1);
