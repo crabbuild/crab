@@ -147,7 +147,7 @@ pub(super) async fn verify(fixture: &PerfFixture, sync: &Path, root: &str, nodes
     let duplicate = order.receive_cron(identity, input).await.unwrap();
     assert_eq!(duplicate.receipt, committed.receipt);
     assert!(committed.receipt.commit_sequence > before.receipt.commit_sequence);
-    // Host-owned reconciliation must discover the new root without a refresh hint.
+    // The host must discover the new root without a fixture-issued refresh hint.
     std::fs::write(
         sync.join("readers.minimum"),
         committed.receipt.commit_sequence.to_string(),
