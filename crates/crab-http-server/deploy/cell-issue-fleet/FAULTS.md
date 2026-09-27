@@ -31,12 +31,19 @@ all failed, rejected and missed arrivals before comparing latency.
    object PUTs for the target Cell incarnation. An explicit `AccessDenied`
    probe must confirm it; a timeout or a missing bucket does not count.
    An existing bucket policy makes the driver refuse to start.
+   Before installing the policy, the driver binds each node to its exact
+   container and persisted identity, and verifies ownership of the disposable
+   Cell volume. This fleet-wide inspection must not consume publication grace.
 3. Scheduled arrivals continue. A received HTTP 201, its server request ID,
    application request ID and owner action trace bind one result to a fleet
    durability proof ahead of the published commit sequence.
 4. The owner and its active follower cohort are rechecked immediately before
    `SIGKILL`. Only that project's named Cell volume is removed. The policy is
    then cleared so a survivor can publish the recovered tail.
+   Only the received write's ingress and owner logs are collected before the
+   kill. The trace join still requires every acknowledgement, identity and
+   durability phase; the complete fleet logs are collected after recovery.
+   The original owner and selected follower containers must still be running.
 5. Public readback exposes the exact acknowledged issue from a new serving
    owner at a higher ownership epoch and a root covering the acknowledged
    commit. Arrivals must span recovery and continue afterward; Cells initially
@@ -62,6 +69,13 @@ fault target. Acknowledgement, action, control and node observations are saved
 as they arrive, before their guards run. A rejected owner or cohort therefore
 retains the differing snapshots even when no kill occurs; missing `killed_ns`
 means the driver never confirmed a successful kill command.
+`fault.preflight` retains the inspected container IDs, physical node mapping,
+named volume and inspection duration. `fault.acknowledgement_to_kill_ms`
+measures the received acknowledgement through completion of the kill command.
+If the fault worker fails, scheduled arrivals stop, accepted pairs drain with
+their raw evidence retained, and policy cleanup runs without waiting for the
+remaining workload duration. `load.stopped_externally` records this stop;
+the fault error still fails the run.
 Phases use client dispatch time relative to the kill and verified-recovery
 observations. Pair and observation timestamps use the load process's monotonic
 clock; they are not comparable with server clocks.
@@ -101,6 +115,23 @@ python3 -B -W error::ResourceWarning -m unittest discover \
 
 The container workflow discovers this same test set. Real RustFS fault proof
 must be recorded separately with its image, harness source and raw evidence.
+
+## Earlier failed trigger
+
+[Run 36301066285](https://github.com/crabbuild/crab/actions/runs/36301066285)
+completed the 16 offered-rate points and their integrity/recovery checks, but
+the unpublished-tail fault refused to kill because the selected owner changed.
+Its pre-kill serial collection of 20 node logs took approximately 27 seconds
+before the first authority recheck. The owner recorded a failed publication
+after 10,240 ms, consistent with the runtime's bounded publication grace.
+No owner-kill or owner-disk-loss proof was produced by that fault run.
+
+Replaying its saved acknowledgement against only the ingress (`node-10`) and
+owner (`node-06`) logs yields the exact same joined fleet proof at commit 1320
+as the full collection. The driver now moves fleet inspection before policy
+installation and keeps this two-node trace collection on the trigger path.
+That replay proves equivalent acknowledgement attribution; a fresh live run
+is still required to qualify the corrected trigger and recovery timing.
 
 ## Run on a fresh CI worker
 
