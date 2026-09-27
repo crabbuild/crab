@@ -55,11 +55,13 @@ retains the planner's residence and settlement gates, and releases at most two
 ranges per pass. Account, credential and coordinator Cells retain their existing
 ownership policies. Fleet load and failure qualification remain open; see
 [range movement](SCALING.md#automatic-movement-of-settled-ranges).
-When the local Cell pool is full, request restoration and authenticated range
-admission can release retired base/GSI sources before placement. Current-owner
-account metadata must prove the table generation is deleted, or that the sealed
-source is absent from both routes and unfinished split plans. The durable root
-remains recoverable; active ranges and pending exports are retained.
+When the local Cell pool is full, new range admission can release obsolete
+base/GSI sources after current-owner metadata proves retirement. Restoration of
+published owners and metadata admission can also release settled data/GSI owners,
+preferring sealed sources, then live directory owners if no range can yield.
+Restoration does not require the account to be resident. Runtime generation and
+settled-work checks gate release; durable roots retain items, intents, directory
+membership and unfinished transfers for later restoration.
 
 `cargo run -p beyonddb --bin beyonddb -- config.json --bootstrap` starts one
 leased Cell node, a private mTLS peer listener, and ExtendDB's public DynamoDB
@@ -138,7 +140,7 @@ does not cover large payloads or index restoration; both remain in the full
 scenario. See [scaling qualification](SCALING.md) for actual results and open gates.
 
 The dedicated [SDK qualification workflow](../../.github/workflows/beyonddb-qualification.yml)
-selects the process tests explicitly, alongside the peer-network SDK suite, on
+selects the native elastic-Cell, peer-network SDK and process suites on
 relevant pull requests and main changes. It uses Ubuntu 24.04 and the same
 digest-pinned RustFS GA container, runs tests serially, and retains the test log on failure.
 Ordinary `cargo test` does not run the ignored process tests.

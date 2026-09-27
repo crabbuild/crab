@@ -99,13 +99,28 @@ A successful token replay must still find the old decision after catalog, table
 and directory owners have all changed. Delayed prepares remain fenced by the
 participant's retained terminal record.
 
-Metadata nodes require product admission, signed peer scope, configured and
-expired-owner recovery, and capacity reclamation. A tree that can be created but
-cannot restore its path when a node's pool is full is incomplete. Immutable
-branches and inactive leaves need a qualified residency policy; metadata must
+Metadata nodes use product admission, signed peer scope, configured and
+expired-owner recovery, and capacity reclamation. Restoration and metadata
+admission prefer releasing settled data/GSI owners, then allow settled directory
+owners to yield. This lets a lookup path outlive its local residency without
+requiring every directory node to remain active. Generation checks and fresh
+runtime settlement preflight precede worker close and authoritative release;
+membership and unfinished transfers stay in the durable root. New data/GSI
+bootstrap still requires free capacity or proven retirement. Metadata must
 not be silently bootstrapped when authority is missing. General fleet ownership
 and discovery must cover metadata nodes without centralizing all recovery work
 in one account writer.
+
+The signed SDK regression
+`sdk_reads_restore_data_and_live_directory_with_one_available_slot` fills four
+resident slots with account, credentials and a live directory after draining
+its data owner. Before directory reclamation, GetItem fails with no eligible
+placement destination. After the change, repeated GetItem calls restore the
+data owner, and subsequent directory reads restore exactly the previous metadata
+state. The directory authority retains its root while idle. The four focused
+reclamation tests pass in 7.59 seconds, including account-independent participant
+restoration and historical base/GSI source recovery. This small fixture does not
+qualify deep-tree churn, concurrent movement or fleet-scale recovery.
 
 ## Integration gates
 

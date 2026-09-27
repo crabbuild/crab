@@ -133,7 +133,7 @@ impl CellInitialPartitionProvisioner {
             }
             return Ok(());
         }
-        self.release_range_for_admission(target).await?;
+        self.release_recoverable_for_admission(target).await?;
         // The admission boundary reports exhausted capacity in its native error
         // type, so peer placement retains ResourceExhausted rather than Internal.
         Ok(())

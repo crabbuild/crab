@@ -6,8 +6,8 @@ account-owned routing APIs. See [current metadata ownership and base cutover
 status](METADATA_SHARDING.md#base-serving-cutover) for the serving path and its
 remaining verification gates.
 
-Global indexes now use independent initial ranges and a durable projection
-journal. Automatic index range splitting, bounded tombstone retention, projection
+Global indexes now use independent initial ranges, automatic HASH-range splits
+and a durable projection journal. Bounded tombstone retention, projection
 throughput, and index-owner fleet recovery remain open scale gates. See
 [global indexes](GLOBAL_INDEXES.md).
 
@@ -37,8 +37,9 @@ The binary now signs fresh memory, disk, Cell/job, and backlog observations on
 each lease renewal. OS availability is capped by runtime admission and current
 reservations. Probe failures and shutdown advertise no placement capacity; old
 samples are never re-signed with a fresh timestamp. These observations now select destinations for request-driven restoration of
-idle, published data/GSI Cells. A distributed movement controller remains
-unimplemented.
+idle, published data/GSI and directory Cells. A serving-node loop also moves
+settled data/GSI owners using the runtime transfer planner; distributed controller
+discovery and recovery qualification remain incomplete.
 Reservations also reduce OS-available bytes because they can include future
 allocation. This conservatively counts already materialized reservations twice
 and protects unallocated bytes already held by accepted work.
@@ -83,13 +84,12 @@ weaken table deletion or the existing immediate credential/policy revocation
 contract. Listing and scan continuation must remain correct through directory
 splits; no request may fetch all table routes as its normal path.
 
-Base-route owners remain `src/routing.rs`, `src/routing/split_state.rs`, and the
-account schema. Their callers include keyed routing, Query/Scan, TTL, split
-publication, table deletion, and transaction admission. GSI routes and split
-plans now use independently owned directory leaves; the serving cutover is
-under verification. See [metadata ownership](METADATA_SHARDING.md) for current
-contracts, lifecycle proof and remaining qualification. Base routes and the
-table-name catalog still require extraction. Existing transactions continue resolving their original
+Base/GSI routes and split plans now use independently owned directory leaves.
+Their callers include keyed routing, Query/Scan, TTL, split publication, table
+deletion and transaction admission. The account retains publication anchors
+and the table-name catalog. The serving cutover is under verification; see
+[metadata ownership](METADATA_SHARDING.md) for lifecycle proof and remaining
+qualification. The table-name catalog still requires extraction. Existing transactions continue resolving their original
 participants rather than rerouting through a changed directory.
 
 ### Large collections and index ranges

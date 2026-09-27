@@ -279,6 +279,63 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_reads_restore_data_and_live_directory_with_one_available_slot() {
+    let fixture = Fixture::with_capacity(1, 4).await;
+    let account = account_target(ACCOUNT).unwrap();
+    let table = fixture
+        .client
+        .query::<DescribeTable>(&account, None, Json("Residency".into()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    let directory =
+        beyonddb::directory_target(ACCOUNT, &beyonddb::DirectorySpec::root(table.id)).unwrap();
+    let before = fixture
+        .client
+        .query::<beyonddb::ReadDirectory>(&directory, None, Json(()))
+        .await
+        .unwrap()
+        .output;
+    let (data, item) = &fixture.data[0];
+    data.drain().await.unwrap();
+    let blocker = fixture
+        .provisioner
+        .admit_credential("AKIADIRECTORYRESIDENCY")
+        .await
+        .unwrap();
+    assert_eq!(fixture.node.runtime().stats().active_cells(), 4);
+    let sdk = super::provisioning::sdk_without_retries(&fixture);
+    let authority = CellAuthority::new(fixture.layout.clone());
+    // Only one slot remains after account and credential ownership. Each SDK
+    // read needs the directory, then data, without keeping either owner pinned.
+    for _ in 0..2 {
+        let result = sdk
+            .get_item()
+            .table_name("Residency")
+            .key("id", item["id"].clone())
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(result.item.as_ref(), Some(item));
+        let released = authority.load(directory.cell_id()).await.unwrap().unwrap();
+        assert!(released.value().owner.is_none());
+        assert!(released.value().root.is_some());
+        let restored = fixture
+            .client
+            .query::<beyonddb::ReadDirectory>(&directory, None, Json(()))
+            .await
+            .unwrap()
+            .output;
+        assert_eq!(restored, before);
+    }
+    blocker.drain().await.unwrap();
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn participant_restore_at_capacity_does_not_require_resident_account_metadata() {
     let fixture = Fixture::with_capacity(2, 5).await;
     let source = fixture.data[0].0.clone();

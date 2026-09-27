@@ -1,4 +1,4 @@
-//! Reclaim obsolete range residency while retaining durable history.
+//! Reclaim range and directory residency while retaining durable history.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -28,7 +28,7 @@ impl CellInitialPartitionProvisioner {
     // Admission is held. Metadata and existing published owners must remain
     // reachable when durable Cells outnumber resident slots. New range creation
     // still requires free capacity so placement can choose another node.
-    pub(super) async fn release_range_for_admission(
+    pub(super) async fn release_recoverable_for_admission(
         &self,
         target: &CellTarget,
     ) -> Result<(), StorageError> {
@@ -46,15 +46,19 @@ impl CellInitialPartitionProvisioner {
         {
             return Ok(());
         }
-        let ranges: HashMap<_, _> = self
+        let targets: HashMap<_, _> = self
             .runtime
             .active_cell_targets()
             .await
             .map_err(provision_error)?
             .into_iter()
             .filter(|target| {
-                [crate::DATA_NAMESPACE, crate::global_index::NAMESPACE]
-                    .contains(&target.namespace())
+                [
+                    crate::DATA_NAMESPACE,
+                    crate::global_index::NAMESPACE,
+                    crate::directory::NAMESPACE,
+                ]
+                .contains(&target.namespace())
             })
             .map(|target| (target.cell_id(), target))
             .collect();
@@ -70,13 +74,21 @@ impl CellInitialPartitionProvisioner {
             self.layout.clone(),
         );
         let mut candidate = None;
+        let mut directory = None;
         for (cell, generation, _, _) in candidates {
             if cell == target.cell_id() {
                 continue;
             }
-            let Some(range) = ranges.get(&cell) else {
+            let Some(range) = targets.get(&cell) else {
                 continue;
             };
+            if range.namespace() == crate::directory::NAMESPACE {
+                // Keep lookup paths resident when a data owner can yield. A
+                // metadata-only pool must still restore published owners; the
+                // directory root retains membership and unfinished transfers.
+                directory.get_or_insert((cell, generation));
+                continue;
+            }
             // Prefer immutable sources over serving ranges. Restoration cannot
             // depend on account/directory residency; all candidates retain their
             // durable roots, including exports needed by unfinished transfers.
@@ -106,7 +118,7 @@ impl CellInitialPartitionProvisioner {
                 break;
             }
         }
-        if let Some((cell, generation)) = candidate {
+        if let Some((cell, generation)) = candidate.or(directory) {
             // Release changes residency only. Durable items, intents, and range
             // fences restore through ordinary owner resolution; busy work stays.
             self.release_capacity(cell, generation).await?;
