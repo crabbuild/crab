@@ -14,6 +14,129 @@ async fn replace(h: &Harness, cookie: &str, csrf: &str, body: Value) -> reqwest:
 }
 
 #[tokio::test]
+async fn delayed_catalog_materialization_cannot_restore_revoked_http_access() {
+    delayed_catalog_materialization_preserves_http_denial(Harness::new(false).await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a pre-created RustFS bucket, prefix and test credentials"]
+async fn rustfs_delayed_catalog_materialization_cannot_restore_revoked_http_access() {
+    let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    let store = crab_storage::build_explicit_store(
+        &required("CRAB_HTTP_CELL_TEST_BUCKET"),
+        crab_storage::ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&required("CRAB_HTTP_CELL_TEST_ENDPOINT")),
+        true,
+    )
+    .unwrap();
+    let prefix = format!(
+        "{}/catalog-ordering-{}",
+        required("CRAB_HTTP_CELL_TEST_PREFIX"),
+        uuid::Uuid::now_v7(),
+    );
+    let scoped = object_store::prefix::PrefixStore::new(Arc::clone(store.inner()), prefix);
+    let h = Harness::new_with_store(false, false, Store::new(Arc::new(scoped))).await;
+    delayed_catalog_materialization_preserves_http_denial(h).await;
+}
+
+async fn delayed_catalog_materialization_preserves_http_denial(h: Harness) {
+    let admin_cookie = h.login().await;
+    let session = h.json("/api/session", &admin_cookie).await;
+    *h.provider.mode.lock().await = "member".into();
+    let member_cookie = h.login().await;
+    h.json("/api/repos/team/private/labels", &member_cookie)
+        .await;
+    let catalog = h.server.catalog().unwrap();
+    let repository = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
+    catalog.mark_cell_ready(repository.id).await.unwrap();
+    let (delayed, _) = catalog.load().await.unwrap();
+    let members = delayed.repositories[0]
+        .members
+        .iter()
+        .filter(|member| member.subject != "bob-id")
+        .cloned()
+        .collect::<Vec<_>>();
+    let response = replace(
+        &h,
+        &admin_cookie,
+        session["csrf"].as_str().unwrap(),
+        json!({"expected_revision":delayed.version, "members":members}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let (current, _) = catalog.load().await.unwrap();
+    h.server.install_catalog(current).await.unwrap();
+    let denied = h
+        .http
+        .get(format!("{}/api/repos/team/private/labels", h.origin))
+        .header(header::COOKIE, &member_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+    // Resume an import holding the pre-revocation snapshot after refresh has
+    // already installed the membership mutation accepted through public HTTP.
+    h.server
+        .repositories
+        .replace(materialize_catalog(&catalog, delayed).await.unwrap());
+    let response = h
+        .http
+        .get(format!("{}/api/repos/team/private/labels", h.origin))
+        .header(header::COOKIE, member_cookie)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    h.close().await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn catalog_installation_keeps_current_revision_when_a_ready_cell_has_no_root() {
+    let h = Harness::new(false).await;
+    let catalog = h.server.catalog().unwrap();
+    let original = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
+    catalog.mark_cell_ready(original.id).await.unwrap();
+    let (current, _) = catalog.load().await.unwrap();
+    let version = current.version;
+    h.server.install_catalog(current).await.unwrap();
+    let invalid = catalog
+        .create_repository(
+            "team".into(),
+            "rootless".into(),
+            "rootless".into(),
+            "main".into(),
+            String::new(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    catalog.mark_cell_ready(invalid.id).await.unwrap();
+    let (candidate, _) = catalog.load().await.unwrap();
+    let result = h.server.install_catalog(candidate).await;
+    let observed = (
+        result.is_err(),
+        h.server.repositories.version(),
+        h.server.repositories.by_id(invalid.id).is_none(),
+    );
+    h.close().await;
+    assert_eq!(observed, (true, version, true));
+}
+
+#[tokio::test]
 async fn membership_cas_audit_and_current_authorization() {
     let h = Harness::new(false).await;
     let cookie = h.login().await;

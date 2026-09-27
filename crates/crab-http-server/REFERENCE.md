@@ -414,6 +414,12 @@ same mounts. Creation and adoption initialize a new empty Cell before returning;
 adoption intentionally does not preserve old collaboration data. A running
 server rejects changed catalog versions containing pending or rootless repositories and marks
 readiness unhealthy; it swaps in ready changes without a restart.
+Catalog snapshots retain their durable revision. Import completion and periodic
+refresh validate Cell readiness through the same installation path and publish
+only newer revisions, so a delayed import cannot restore revoked membership or
+hide repositories installed by a newer refresh. This prevents local regression;
+new repositories and membership changes still propagate through the existing
+five-second catalog poll on other nodes.
 
 The binary's `healthcheck` command calls `/readyz` on the management listener.
 `SIGTERM` and Ctrl-C start the same graceful drain. Repository, catalog,

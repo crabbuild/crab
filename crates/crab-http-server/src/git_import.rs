@@ -573,10 +573,10 @@ async fn import_repository(
         .map_err(ImportError::Setup)?;
 
     let (document, _) = catalog.load().await.map_err(ImportError::Catalog)?;
-    let repositories = crate::server::materialize_catalog(&catalog, document)
+    server
+        .install_catalog(document)
         .await
         .map_err(ImportError::Setup)?;
-    server.repositories.replace(repositories);
 
     context
         .jobs

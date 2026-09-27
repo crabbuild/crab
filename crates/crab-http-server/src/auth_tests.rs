@@ -235,6 +235,11 @@ impl Harness {
     }
 
     async fn new_with_auth(confidential: bool, github: bool) -> Self {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        Self::new_with_store(confidential, github, store).await
+    }
+
+    async fn new_with_store(confidential: bool, github: bool, store: Store) -> Self {
         let (provider, provider_task) = start_provider(0).await;
         provider.confidential.store(confidential, Ordering::SeqCst);
         let secret_file = confidential.then(|| {
@@ -245,7 +250,6 @@ impl Harness {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let origin = format!("http://{address}");
-        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
         let root = crate::storage_root::StorageRoot::memory(store.clone(), "");
         let auth_config = if github {
             crate::OidcConfig {
