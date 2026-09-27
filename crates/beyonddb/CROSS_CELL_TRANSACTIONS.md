@@ -2355,3 +2355,35 @@ Focused validation: the read-release restart/public-Storage regression passed
 fixture passed (27.81 s). Strict all-target Clippy passed. The signed SDK/process
 workflow now includes the new regression; the new revision still requires its
 CI run. These local checks do not establish fleet-scale or full API compatibility.
+
+### Read-cleanup residency qualification
+
+The earlier Linux run `36345812330` failed this fixture at its raw
+`BeginReadResultRelease` invocation with `target Cell is not locally owned`.
+The unchanged fixture also failed locally (2.56 s). Its four-slot runtime holds
+the account, base range and directory, leaving one coordinator slot. Recovery
+can therefore release the tested, fully resolved coordinator while visiting a
+later registered shard. The pending-work boundary correctly excludes read images
+that the initiating reader has not yet acknowledged.
+
+This is a fixture ownership error: `CellClient::local_runtime` explicitly requires
+the caller to arrange residency. The serving `LocalResolver` restores published
+Idle roots before dispatch; `CoordinatorProvisioner::ensure` also separates
+registration from admission. The fixture now registers a later shard to force
+the release, asserts Idle authority without an owner, and calls
+`admit_coordinator` before the raw acknowledgement. All cleanup, restart,
+checkpoint invalidation and delayed-prepare assertions remain. The deterministic
+case failed before that admission step and passed afterward (5.74 s).
+
+Is this the best fix? Preserve bounded recovery and its ownership contract;
+correct the raw caller rather than pinning every historical coordinator in
+memory. The sibling checkpoint fixture fits three coordinators plus its account
+in four slots, and the coordinator-residency tests already arrange admission.
+No production behavior, runtime limits or dependencies change. Evidence logs:
+`/tmp/beyonddb-read-cleanup-current.log`, `/tmp/beyonddb-read-cleanup-repro.log`
+and `/tmp/beyonddb-read-cleanup-fixed.log`. This local result does not resolve
+the other Linux peer failures or replace current-head CI qualification.
+
+Three further runs passed (7.04 s, 5.57 s, 5.53 s); the sibling settled-checkpoint
+regression passed (0.48 s). Strict Clippy for the native integration target passed
+(11.12 s), as did formatting and diff checks. Temporary diagnostics were removed.
