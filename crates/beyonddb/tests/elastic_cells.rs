@@ -1038,6 +1038,64 @@ async fn published_node_lease_renews_before_drain() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn published_node_lease_survives_slow_authoritative_refresh() {
+    use object_store::throttle::{ThrottleConfig, ThrottledStore};
+
+    let slow = Arc::new(ThrottledStore::new(
+        InMemory::new(),
+        ThrottleConfig::default(),
+    ));
+    let layout = CellStorageLayout::new(
+        Store::new(slow.clone()),
+        object_store::path::Path::from("slow-node-lease"),
+        [42; 16],
+    );
+    let session = SessionId::from_bytes([90; 16]);
+    let directory = NodeDirectory::new(
+        layout.clone(),
+        Digest::from_bytes([80; 32]),
+        Digest::from_bytes([81; 32]),
+        Digest::from_bytes([82; 32]),
+    );
+    let published = published_test_node_lease(&layout, session).await;
+    let guard = published.guard();
+    // Loaded storage consumed the old lease's remaining seven-second window.
+    // A successful, slow CAS must fit the serving policy's renewal allowance.
+    slow.config_mut(|config| config.wait_put_per_call = Duration::from_secs(8));
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let mut task = tokio::spawn(async move { published.run(&run_cancellation).await });
+    let renewed = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let now_ms = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            )
+            .unwrap();
+            if directory
+                .load(session, now_ms)
+                .await
+                .unwrap()
+                .is_some_and(|record| record.advertisement().generation() > 1)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    tokio::select! {
+        result = &mut task => panic!("renewal ended before the slow publication: {result:?}"),
+        result = renewed => result.unwrap(),
+    }
+    cancellation.cancel();
+    task.await.unwrap().unwrap();
+    guard.check().unwrap();
+    guard.fence();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stalled_lease_refresh_yields_to_shutdown_and_fencing() {
     use crab_storage::test_support::CountingObjectStore;
     use object_store::throttle::{ThrottleConfig, ThrottledStore};
@@ -2966,6 +3024,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .0;
     assert_eq!(unresolved.len(), 1);
     assert_eq!(unresolved[0].position, 1);
+    assert!(unresolved[0].prepared);
     assert_eq!(
         storage
             .get_item(&visibility_key_info, &sides[1].2)

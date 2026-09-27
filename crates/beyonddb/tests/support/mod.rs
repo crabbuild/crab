@@ -87,7 +87,14 @@ impl LargeTransaction {
 
     pub async fn assert_recovered(&self, sdk: &Client) {
         for case in &self.cases {
-            case.assert_recovered(sdk).await;
+            case.apply(sdk).await;
+        }
+        self.assert_state(sdk).await;
+    }
+
+    pub async fn assert_state(&self, sdk: &Client) {
+        for case in &self.cases {
+            case.assert_state(sdk).await;
         }
     }
 }
@@ -157,7 +164,7 @@ impl PayloadTransaction {
         }
     }
 
-    pub async fn assert_recovered(&self, sdk: &Client) {
+    async fn apply(&self, sdk: &Client) {
         // Replaying the original Put must not revert the later Update, even
         // after replacing an owner or hard-restarting the serving process.
         sdk.transact_write_items()
@@ -165,13 +172,16 @@ impl PayloadTransaction {
             .set_transact_items(Some(self.puts.clone()))
             .send()
             .await
-            .unwrap();
+            .expect(self.put_token);
         sdk.transact_write_items()
             .client_request_token(self.update_token)
             .set_transact_items(Some(self.updates.clone()))
             .send()
             .await
-            .unwrap();
+            .expect(self.update_token);
+    }
+
+    async fn assert_state(&self, sdk: &Client) {
         if self.expected.len() == 2 {
             let get = self.reads[0].get().unwrap();
             let failed = TransactWriteItem::builder()

@@ -490,15 +490,16 @@ impl Query for ReadCoordinatorParticipant {
 pub struct UnresolvedCoordinatorParticipant {
     pub position: u8,
     pub target: CoordinatorParticipantTarget,
+    pub prepared: bool,
 }
 
-/// Read unresolved participant targets without loading request images.
+/// Read unresolved participant targets and prepare progress without request images.
 pub struct ReadUnresolvedCoordinatorParticipants;
 
 impl Query for ReadUnresolvedCoordinatorParticipants {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 4;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<ReadCrossCellTransactionInput>;
     type Output = Json<Vec<UnresolvedCoordinatorParticipant>>;
 
@@ -510,7 +511,7 @@ impl Query for ReadUnresolvedCoordinatorParticipants {
             ));
         }
         let rows = context.sql(&statement(
-            "SELECT p.position, p.target FROM ddb_coordinator_participants p \
+            "SELECT p.position, p.target, p.prepared_sequence FROM ddb_coordinator_participants p \
              JOIN ddb_coordinator_transactions t ON t.transaction_id = p.transaction_id \
              WHERE t.transaction_id = ?1 AND t.account_id = ?2 \
              AND p.resolved_sequence IS NULL ORDER BY p.position",
@@ -521,13 +522,19 @@ impl Query for ReadUnresolvedCoordinatorParticipants {
         ))?;
         let mut targets = Vec::with_capacity(rows[0].rows.len());
         for row in &rows[0].rows {
-            let [SqlValue::Integer(position), SqlValue::Blob(target)] = row.as_slice() else {
+            let [
+                SqlValue::Integer(position),
+                SqlValue::Blob(target),
+                prepared,
+            ] = row.as_slice()
+            else {
                 return Err(Error::Command("invalid coordinator participant target"));
             };
             targets.push(UnresolvedCoordinatorParticipant {
                 position: u8::try_from(*position)
                     .map_err(|_| Error::Command("invalid participant position"))?,
                 target: serde_json::from_slice(target)?,
+                prepared: optional_sequence(prepared)?.is_some(),
             });
         }
         Ok(Json(targets))

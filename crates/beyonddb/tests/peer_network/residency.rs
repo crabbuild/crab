@@ -1,0 +1,426 @@
+use crate::*;
+use crab_cell_runtime::cell::actor::CellHandle;
+use extenddb_core::types::{AttributeValue, Item};
+
+type SdkItem = HashMap<String, AwsAttributeValue>;
+
+struct Fixture {
+    _files: tempfile::TempDir,
+    node: CellNode,
+    provisioner: Arc<CellInitialPartitionProvisioner>,
+    layout: CellStorageLayout,
+    session: SessionId,
+    endpoint: String,
+    sdk: aws_sdk_dynamodb::Client,
+    data: Vec<(CellHandle, SdkItem)>,
+    public_server: tokio::task::JoinHandle<()>,
+    peer_server: tokio::task::JoinHandle<()>,
+}
+
+impl Fixture {
+    async fn new() -> Self {
+        let files = tempfile::tempdir().unwrap();
+        let (certificate, key, _, _, ca) = tls_files(files.path());
+        let tls = LoadedPeerTls::load(&certificate, &key, &ca, "localhost").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("https://{}", listener.local_addr().unwrap());
+        let application = Arc::new(
+            Beyonddb::compile(BuildDescriptor {
+                source_revision: "residency-test".into(),
+                cargo_lock_digest: Digest::from_bytes([92; 32]),
+            })
+            .unwrap(),
+        );
+        let account = account_target("123456789012").unwrap();
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            object_store::path::Path::from("beyonddb-residency"),
+            *account.application().as_bytes(),
+        );
+        let directory = NodeDirectory::new(
+            layout.clone(),
+            tls.fleet(),
+            Digest::from_bytes([90; 32]),
+            application.registry().release_digest(),
+        );
+        let session = SessionId::from_bytes([93; 16]);
+        let lease = CancellationToken::new();
+        let (node, _tasks) = start_node(
+            Arc::clone(&application),
+            directory.clone(),
+            session,
+            endpoint.clone(),
+            tls.certificate(),
+            tls.signing_key().clone(),
+            95,
+            lease.clone(),
+        )
+        .await;
+        let provisioner = Arc::new(
+            CellInitialPartitionProvisioner::new(
+                node.runtime(),
+                Arc::clone(&application),
+                layout.clone(),
+                session,
+                endpoint.clone(),
+                files.path().join("data"),
+            )
+            .unwrap()
+            .with_initial_partition_count(2)
+            .unwrap(),
+        );
+        provisioner.admit_account("123456789012").await.unwrap();
+        const ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
+        const SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+        const ENCRYPTION_KEY: [u8; 32] = [38; 32];
+        let credential = provisioner.admit_credential(ACCESS_KEY).await.unwrap();
+        CellCredentialStore::new(
+            CellClient::local(application.registry(), credential),
+            layout.clone(),
+            ENCRYPTION_KEY,
+        )
+        .put_credential(
+            ACCESS_KEY,
+            StoredCredential {
+                secret_key: SECRET_KEY.into(),
+                account_id: "123456789012".into(),
+                principal_name: "network-user".into(),
+                session_name: None,
+                is_session: false,
+                session_token: None,
+                is_active: true,
+                expires_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        let client = build_peer_client(
+            &node,
+            layout.clone(),
+            directory.clone(),
+            session,
+            &tls,
+            provisioner.clone(),
+        )
+        .unwrap();
+        CellAuthorizationStore::new(client.clone())
+            .put_user_policy(
+                "123456789012",
+                "network-user",
+                "tables",
+                &serde_json::json!({
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Action": "dynamodb:*",
+                        "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/Residency"
+                    }]
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+        let router = peer_router(&node, layout.clone(), directory);
+        let peer_server = tokio::spawn(async move {
+            axum::serve(
+                tls.listener(listener),
+                router.into_make_service_with_connect_info::<PeerTlsIdentity>(),
+            )
+            .await
+            .unwrap();
+        });
+        let public_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let public_endpoint = format!("http://{}", public_listener.local_addr().unwrap());
+        let state = build_http_state(
+            &node,
+            client.clone(),
+            layout.clone(),
+            provisioner.clone(),
+            ENCRYPTION_KEY,
+            "us-east-1",
+            public_endpoint.clone(),
+        )
+        .unwrap();
+        let public_server = tokio::spawn(async move {
+            extenddb_server::start_server(public_listener, state, None, None)
+                .await
+                .unwrap();
+        });
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("us-east-1"))
+            .credentials_provider(Credentials::new(
+                ACCESS_KEY,
+                SECRET_KEY,
+                None,
+                None,
+                "beyonddb-residency-test",
+            ))
+            .endpoint_url(public_endpoint)
+            .load()
+            .await;
+        let sdk = aws_sdk_dynamodb::Client::new(&config);
+        sdk.create_table()
+            .table_name("Residency")
+            .key_schema(
+                aws_sdk_dynamodb::types::KeySchemaElement::builder()
+                    .attribute_name("id")
+                    .key_type(aws_sdk_dynamodb::types::KeyType::Hash)
+                    .build()
+                    .unwrap(),
+            )
+            .attribute_definitions(
+                aws_sdk_dynamodb::types::AttributeDefinition::builder()
+                    .attribute_name("id")
+                    .attribute_type(aws_sdk_dynamodb::types::ScalarAttributeType::S)
+                    .build()
+                    .unwrap(),
+            )
+            .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
+            .send()
+            .await
+            .unwrap();
+        let app = node
+            .application_handle::<Beyonddb>(client, account.tenant(), account.application())
+            .unwrap();
+        let table = app
+            .query::<DescribeTable>(&account, None, Json("Residency".into()))
+            .await
+            .unwrap()
+            .output
+            .0
+            .unwrap();
+        let route = app
+            .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+            .await
+            .unwrap()
+            .output
+            .0
+            .unwrap();
+
+        assert_eq!(route.partitions.len(), 2);
+        let mut data = Vec::new();
+        for partition in route.partitions {
+            let id = (0..1_000)
+                .map(|index| format!("persisted-{index}"))
+                .find(|id| {
+                    let key = Item::from([("id".into(), AttributeValue::S(id.clone()))]);
+                    let hash = beyonddb::data_key_hash(&table.id, &key, &table.key_schema).unwrap();
+                    partition.lower.is_none_or(|lower| hash >= lower)
+                        && partition.upper.is_none_or(|upper| hash < upper)
+                })
+                .unwrap();
+            let item = HashMap::from([
+                ("id".into(), AwsAttributeValue::S(id)),
+                ("value".into(), AwsAttributeValue::S("committed".into())),
+            ]);
+            sdk.put_item()
+                .table_name("Residency")
+                .set_item(Some(item.clone()))
+                .send()
+                .await
+                .unwrap();
+            let handle = provisioner
+                .admit_existing_partition("123456789012", &table.id, &partition.partition_id)
+                .await
+                .unwrap();
+            data.push((handle, item));
+        }
+        Self {
+            _files: files,
+            node,
+            provisioner,
+            layout,
+            session,
+            endpoint,
+            sdk,
+            data,
+            public_server,
+            peer_server,
+        }
+    }
+
+    async fn shutdown(self) {
+        self.public_server.abort();
+        self.peer_server.abort();
+        let _ = self.public_server.await;
+        let _ = self.peer_server.await;
+        self.node.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_read_reacquires_released_cells() {
+    read_after_release(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_read_resumes_interrupted_cell_acquisition() {
+    read_after_release(true).await;
+}
+
+async fn read_after_release(interrupted_acquisition: bool) {
+    let fixture = Fixture::new().await;
+    let mut handles = fixture
+        .data
+        .iter()
+        .cloned()
+        .map(|(handle, item)| ("data", handle, item))
+        .collect::<Vec<_>>();
+    let expected = fixture.data[0].1.clone();
+    handles.push((
+        "account",
+        fixture
+            .provisioner
+            .admit_account("123456789012")
+            .await
+            .unwrap(),
+        expected.clone(),
+    ));
+    handles.push((
+        "credentials",
+        fixture
+            .provisioner
+            .admit_credential("AKIAIOSFODNN7EXAMPLE")
+            .await
+            .unwrap(),
+        expected,
+    ));
+    let mut reads = Vec::new();
+    for (role, handle, item) in handles {
+        let cell = handle.cell_id();
+        handle.drain().await.unwrap();
+        if interrupted_acquisition {
+            // Leave the durable boundary a canceled acquisition can expose:
+            // ownership claimed, published root unchanged, actor not admitted.
+            let authority = CellAuthority::new(fixture.layout.clone());
+            let observed = authority.load(cell).await.unwrap().unwrap();
+            let claimed = observed
+                .value()
+                .takeover(crab_cell_runtime::control::Owner {
+                    session: fixture.session,
+                    endpoint: fixture.endpoint.clone(),
+                })
+                .unwrap();
+            authority
+                .transition(
+                    &observed,
+                    claimed,
+                    crab_cell_runtime::control::Transition::Takeover,
+                )
+                .await
+                .unwrap();
+        }
+        let read = fixture
+            .sdk
+            .get_item()
+            .table_name("Residency")
+            .key("id", item["id"].clone())
+            .consistent_read(true)
+            .send()
+            .await;
+        let owner = CellAuthority::new(fixture.layout.clone())
+            .load(cell)
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .owner
+            .as_ref()
+            .map(|owner| owner.session);
+        let failed = read.is_err();
+        reads.push((role, read, item, owner));
+        if failed {
+            break;
+        }
+    }
+    let session = fixture.session;
+    fixture.shutdown().await;
+    for (role, read, item, owner) in reads {
+        assert_eq!(
+            read.unwrap_or_else(|error| panic!("{role}: {error:?}"))
+                .item,
+            Some(item)
+        );
+        assert_eq!(owner, Some(session), "{role} must regain ownership");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_transaction_reacquires_both_released_participants() {
+    use aws_sdk_dynamodb::types::{Get, TransactGetItem, TransactWriteItem, Update};
+
+    let fixture = Fixture::new().await;
+    assert_ne!(fixture.data[0].0.cell_id(), fixture.data[1].0.cell_id());
+    let mut writes = Vec::new();
+    let mut reads = Vec::new();
+    for (handle, item) in &fixture.data {
+        handle.drain().await.unwrap();
+        writes.push(
+            TransactWriteItem::builder()
+                .update(
+                    Update::builder()
+                        .table_name("Residency")
+                        .key("id", item["id"].clone())
+                        .update_expression("SET #v = :after")
+                        .condition_expression("#v = :before")
+                        .expression_attribute_names("#v", "value")
+                        .expression_attribute_values(
+                            ":before",
+                            AwsAttributeValue::S("committed".into()),
+                        )
+                        .expression_attribute_values(
+                            ":after",
+                            AwsAttributeValue::S("transaction".into()),
+                        )
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        );
+        reads.push(
+            TransactGetItem::builder()
+                .get(
+                    Get::builder()
+                        .table_name("Residency")
+                        .key("id", item["id"].clone())
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        );
+    }
+    // Both original participants are idle when BEGIN starts. Prepare and
+    // resolution must restore them through the same request routing path.
+    let write = fixture
+        .sdk
+        .transact_write_items()
+        .client_request_token("released-participants")
+        .set_transact_items(Some(writes))
+        .send()
+        .await;
+    let read = fixture
+        .sdk
+        .transact_get_items()
+        .set_transact_items(Some(reads))
+        .send()
+        .await;
+    let expected = fixture
+        .data
+        .iter()
+        .map(|(_, item)| {
+            let mut item = item.clone();
+            item.insert("value".into(), AwsAttributeValue::S("transaction".into()));
+            item
+        })
+        .collect::<Vec<_>>();
+    fixture.shutdown().await;
+    write.unwrap();
+    let actual = read
+        .unwrap()
+        .responses
+        .unwrap()
+        .into_iter()
+        .map(|response| response.item.unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}

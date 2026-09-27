@@ -52,7 +52,10 @@ static QUERIES: [OperationDescriptor; 6] = [
         ..operation(2)
     },
     operation(3),
-    operation(4),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(4)
+    },
     operation(5),
     operation(6),
 ];

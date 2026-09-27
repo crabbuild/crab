@@ -201,16 +201,18 @@ pub(crate) async fn create(sdk: &Client) {
         .send()
         .await
         .unwrap();
-    assert_recovered(sdk).await;
-}
-
-pub(crate) async fn assert_recovered(sdk: &Client) {
+    // Verify replay while the token is fresh; recovery assertions below must
+    // not repair lost state by re-executing an expired transaction.
     sdk.transact_write_items()
         .client_request_token("local-index-process")
         .set_transact_items(Some(transaction()))
         .send()
         .await
         .unwrap();
+    assert_recovered(sdk).await;
+}
+
+pub(crate) async fn assert_recovered(sdk: &Client) {
     let described = sdk.describe_table().table_name(TABLE).send().await.unwrap();
     assert_eq!(
         described.table().unwrap().local_secondary_indexes()[0]

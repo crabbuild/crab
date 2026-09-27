@@ -9,7 +9,9 @@ use crab_cell_runtime::node::{NodeAdvertisement, NodeDirectory, VersionedNodeAdv
 use crab_cell_runtime::{Error, NodeLeaseGuard, Result};
 use tokio_util::sync::CancellationToken;
 
-const LEASE_MS: i64 = 10_000;
+// Use the runtime's maximum advertisement lifetime for storage refresh headroom.
+// Takeover still requires expiry, and a refresh cannot revive a fenced guard.
+const LEASE_MS: i64 = 15_000;
 const HEARTBEAT: Duration = Duration::from_secs(3);
 const RETRY: Duration = Duration::from_millis(500);
 const FENCE_MARGIN: Duration = Duration::from_secs(1);

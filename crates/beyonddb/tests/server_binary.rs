@@ -3,17 +3,18 @@
 mod support;
 
 mod server_binary {
+    mod coordinator_recovery;
     pub(super) mod global_indexes;
     pub(super) mod local_indexes;
 }
 
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     ops::{Deref, DerefMut},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -25,7 +26,7 @@ use aws_sdk_dynamodb::types::{
 };
 use serde_json::json;
 
-struct ManagedChild(Child);
+struct ManagedChild(Child, PathBuf);
 
 impl Deref for ManagedChild {
     type Target = Child;
@@ -43,9 +44,20 @@ impl DerefMut for ManagedChild {
 
 impl Drop for ManagedChild {
     fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
+        let status = self.0.try_wait();
+        if std::thread::panicking() {
+            eprintln!("child {} status before cleanup: {status:?}", self.0.id());
+        }
+        if !matches!(status, Ok(Some(_))) {
             let _ = self.0.kill();
             let _ = self.0.wait();
+        }
+        // TempDir is dropped after the children. Preserve the cause of an
+        // SDK failure before cleanup removes the serving process's diagnostics.
+        if std::thread::panicking()
+            && let Ok(log) = fs::read_to_string(&self.1)
+        {
+            eprintln!("child {} log:\n{log}", self.0.id());
         }
     }
 }
@@ -113,7 +125,12 @@ fn free_addr() -> SocketAddr {
 }
 
 fn start(config: &Path, log: &Path, bootstrap: bool, s3: SocketAddr) -> ManagedChild {
-    let output = File::create(log).unwrap();
+    // Preserve the original owner's diagnostics when a replacement starts.
+    let output = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_beyonddb"));
     command
         .arg(config)
@@ -137,7 +154,7 @@ fn start(config: &Path, log: &Path, bootstrap: bool, s3: SocketAddr) -> ManagedC
             .write_all(b"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n")
             .unwrap();
     }
-    ManagedChild(child)
+    ManagedChild(child, log.to_owned())
 }
 
 #[track_caller]
@@ -186,9 +203,20 @@ fn stop(child: &mut Child, log: &Path) {
     panic!("server did not stop: {}", fs::read_to_string(log).unwrap());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires local rustfs and aws CLI"]
-async fn bootstrap_sdk_write_survives_unclean_server_restart() {
+struct ProcessFixture {
+    child: ManagedChild,
+    rustfs: ManagedChild,
+    sdk: aws_sdk_dynamodb::Client,
+    config: PathBuf,
+    log: PathBuf,
+    s3: SocketAddr,
+    peer: SocketAddr,
+    public: SocketAddr,
+    // Children must stop before their object store and temporary files disappear.
+    root: tempfile::TempDir,
+}
+
+async fn process_fixture(initial_partitions: u32) -> ProcessFixture {
     let root = tempfile::tempdir().unwrap();
     tls_files(root.path());
     fs::create_dir(root.path().join("objects")).unwrap();
@@ -204,7 +232,7 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .stderr(File::create(root.path().join("rustfs.log")).unwrap())
         .spawn()
         .unwrap();
-    let mut rustfs = ManagedChild(rustfs);
+    let mut rustfs = ManagedChild(rustfs, root.path().join("rustfs.log"));
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let ready = Command::new("aws")
@@ -280,7 +308,7 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
             "public_endpoint": format!("http://{public}"),
             "owned_accounts": ["123456789012"],
             "owned_access_keys": ["AKIAIOSFODNN7EXAMPLE"],
-            "initial_partitions": 4,
+            "initial_partitions": initial_partitions,
             "bootstrap": {
                 "account_id": "123456789012",
                 "access_key_id": "AKIAIOSFODNN7EXAMPLE",
@@ -308,6 +336,33 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .load()
         .await;
     let sdk = aws_sdk_dynamodb::Client::new(&sdk_config);
+    ProcessFixture {
+        child,
+        rustfs,
+        sdk,
+        config,
+        log,
+        s3,
+        peer,
+        public,
+        root,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires local rustfs and aws CLI"]
+async fn bootstrap_sdk_write_survives_unclean_server_restart() {
+    let ProcessFixture {
+        root: _root,
+        mut rustfs,
+        peer,
+        public,
+        config,
+        log,
+        s3,
+        mut child,
+        sdk,
+    } = process_fixture(4).await;
     server_binary::local_indexes::create(&sdk).await;
     server_binary::global_indexes::create(&sdk).await;
     let created = sdk
@@ -750,8 +805,33 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
             .transact_items(update(&second_write_key, "updated"))
             .send()
             .await
-            .unwrap();
+            .expect(token);
     }
+    // The churn can exceed DynamoDB's ten-minute token window. Historical
+    // payloads prove durability; this fresh conditional write proves replay.
+    let restart_items = [range("process"), range(&second_write_key)].map(|side| {
+        let id = (0..1_000)
+            .map(|n| format!("restart-{n}"))
+            .find(|id| range(id) == side)
+            .unwrap();
+        TransactWriteItem::builder()
+            .put(
+                aws_sdk_dynamodb::types::Put::builder()
+                    .table_name("ProcessData")
+                    .item("id", AttributeValue::S(id))
+                    .item("value", AttributeValue::S("committed".into()))
+                    .condition_expression("attribute_not_exists(id)")
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+    });
+    let restart_write = sdk
+        .transact_write_items()
+        .client_request_token("fresh-process-restart")
+        .set_transact_items(Some(restart_items.to_vec()));
+    restart_write.clone().send().await.unwrap();
+    let restart_completed = Instant::now();
     child.kill().unwrap();
     child.wait().unwrap();
     // A replacement process can receive a new private address. Durable Cell
@@ -769,6 +849,23 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     fs::write(&config, replacement_config.to_string()).unwrap();
     let mut restarted = start(&config, &log, false, s3);
     wait_healthy(&mut restarted, public, &log);
+    assert!(
+        restart_completed.elapsed() < Duration::from_secs(600),
+        "restart replay must be tested within the client-token validity window"
+    );
+    restart_write.send().await.unwrap();
+    for item in &restart_items {
+        let put = item.put().unwrap();
+        let recovered = sdk
+            .get_item()
+            .table_name("ProcessData")
+            .key("id", put.item()["id"].clone())
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(recovered.item(), Some(put.item()));
+    }
     for id in ["delete-none", "delete-old", "delete-capacity"] {
         let deleted = sdk
             .get_item()
@@ -781,23 +878,8 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     }
     server_binary::local_indexes::assert_recovered(&sdk).await;
     server_binary::global_indexes::assert_recovered(&sdk).await;
-    large.assert_recovered(&sdk).await;
-    large_read.assert_recovered(&sdk).await;
-    sdk.transact_write_items()
-        .client_request_token("process-update-check")
-        .transact_items(update("process", "updated"))
-        .transact_items(update(&second_write_key, "updated"))
-        .transact_items(check("attribute_not_exists(id)"))
-        .send()
-        .await
-        .unwrap();
-    sdk.transact_write_items()
-        .client_request_token(&resident_tokens[0])
-        .transact_items(update("process", "updated"))
-        .transact_items(update(&second_write_key, "updated"))
-        .send()
-        .await
-        .unwrap();
+    large.assert_state(&sdk).await;
+    large_read.assert_state(&sdk).await;
     let read = sdk
         .get_item()
         .table_name("ProcessData")

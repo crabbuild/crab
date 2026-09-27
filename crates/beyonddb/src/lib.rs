@@ -133,7 +133,11 @@ static COMMANDS: [OperationDescriptor; 23] = [
     operation(21),
     participant::phase_operation(22),
     crate::transaction_transport::upload_operation(23),
-    participant::phase_operation(24),
+    OperationDescriptor {
+        codec_version: 2,
+        input_limit: 64 * 1024,
+        ..participant::phase_operation(24)
+    },
     operation(25),
     participant::phase_operation(26),
 ];
@@ -338,7 +342,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<ttl::AdvanceTtlSweep>()?;
         registry.bind_command::<ttl::AdvanceTtlSchedule>()?;
         registry.bind_command::<RegisterCoordinatorShard>()?;
-        registry.bind_command::<transaction_coordinator::RecordSettledCoordinator>()?;
+        registry.bind_command::<transaction_coordinator::RecordSettledCoordinators>()?;
         registry.bind_command::<ActivateGlobalIndexRoute>()?;
         registry.bind_command::<AckAccountIndexChange>()?;
         registry.bind_query::<GetItem>()?;

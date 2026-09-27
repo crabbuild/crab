@@ -49,6 +49,12 @@ impl CellStorage {
             .output
             .0;
         for participant in participants {
+            // Durable prepare evidence survives driver and owner replacement.
+            // Keep these participants in recovery's list until resolution, but
+            // do not re-upload their payloads or publish another prepare receipt.
+            if participant.prepared {
+                continue;
+            }
             let payload = self
                 .coordinator_participant(
                     &coordinator,
@@ -97,7 +103,8 @@ impl CellStorage {
             let (outcome, receipt) =
                 match self.prepare_transaction_participant(&target, input).await {
                     Ok(prepared) => prepared,
-                    Err(PhaseError::Capacity(_)) => {
+                    Err(PhaseError::Capacity(error)) => {
+                        tracing::warn!(%error, "transaction participant capacity refused");
                         let operation = payload.operations.first().ok_or_else(|| {
                             StorageError::Internal("participant has no operations".into())
                         })?;

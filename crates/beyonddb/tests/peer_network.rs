@@ -7,6 +7,7 @@ mod peer_network {
     pub(super) mod concurrency;
     pub(super) mod global_indexes;
     pub(super) mod recovery;
+    mod residency;
     pub(super) mod table_residency;
 }
 
@@ -311,6 +312,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         peer_directory.clone(),
         remote_session,
         &client_tls,
+        remote_provisioner.clone(),
     )
     .unwrap();
     let remote_account = remote
@@ -652,7 +654,18 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     shutdown_tx.send(()).unwrap();
     server.await.unwrap().unwrap();
     owner_lease.cancel();
-    tokio::time::sleep(std::time::Duration::from_secs(11)).await;
+    // Takeover requires authoritative expiry, independent of the lease policy.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while peer_directory
+            .is_live(owner_session, now_ms())
+            .await
+            .unwrap()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
 
     let replacement_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let replacement_endpoint = format!("https://{}", replacement_listener.local_addr().unwrap());
@@ -748,6 +761,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         peer_directory.clone(),
         replacement_session,
         &replacement_tls,
+        replacement_provisioner.clone(),
     )
     .unwrap();
     let replacement_router = peer_router(&replacement, layout.clone(), peer_directory.clone());

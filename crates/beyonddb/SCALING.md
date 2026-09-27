@@ -5,6 +5,130 @@ journal. Automatic index range splitting, bounded tombstone retention, projectio
 throughput, and index-owner fleet recovery remain open scale gates. See
 [global indexes](GLOBAL_INDEXES.md).
 
+## Horizontal scaling delivery gates
+
+The agreed target is 10,000 active Cells and multi-TB stored data. The following
+six workstreams are required; increasing database budgets or node count alone
+does not satisfy them. These are implementation requirements, not delivered
+capabilities. Per-Cell and per-node resource admission remains bounded.
+
+| Constraint | Required ownership change | Acceptance evidence |
+| --- | --- | --- |
+| Placement and rebalancing | BeyondDB composes signed measured capacity, the runtime placement planner, and durable fenced transfers into a distributed controller. | Add and remove nodes under SDK load without manually assigning Cells; observe ownership and traffic redistribute, reject stale owners, and recover interrupted transfers. |
+| Account metadata | A sharded table catalog and independently partitioned table directories replace the account Cell's growing route inventory. | One account and one table can each outgrow a metadata Cell; route lookups and split updates stay bounded, and unrelated directory owners write concurrently. |
+| Large partition-key groups | Tables without LSIs support ordered sort-key subranges within a partition-key group. | One partition key with many sort keys grows beyond one data Cell; forward/reverse Query, pagination, conditions, transactions, and restart preserve results across splits. |
+| Transaction coordination | Coordinator ownership can expand without changing admitted transaction identity; recovery is distributed and retained state has a safe collection protocol. | Expand while tokens and transactions are live, lose owners, replay old requests, and run sustained churn with bounded retained bytes and recovery lag. |
+| Index growth | GSI directories and range owners split independently, transferring version and tombstone state as well as projected items. | Force splits during writes, deletes, key changes, delayed projection, and owner loss; the final index converges with no resurrected entries or lost journal acknowledgements. |
+| Operational capacity | Measured resource budgets and fleet admission cover restoration, publication, scratch disk, network, and object-store work. | Exercise 1,000 then 10,000 active Cells with real multi-TB data; record throughput, tail latency, overload behavior, backlog age, recovery time, and storage cost on declared hardware. |
+
+### Fleet controller boundary
+
+`crab-cell-runtime/src/fleet/placement.rs` already supplies signed-observation
+validation, ranking, fleet balance, and transfer planning. BeyondDB must compose
+these primitives with enrollment, scheduling, durable movement, and recovery;
+duplicating a placement algorithm inside its table adapter is unnecessary.
+The current binary advertises fixed free-memory and job-credit values and the
+configured disk budget. Those are not measured fleet placement headroom. The
+planner requires a signed placement snapshot and treats missing data as
+ineligible, so simply invoking it against today's advertisements is insufficient.
+
+Controllers need bounded ownership of discovery/scheduling ranges, controller
+lease fencing, and durable progress. One fleet leader must not scan every Cell
+or become the writer for every move. Admission and ownership CAS remain the
+authority even after a planner selects a destination. Existing Cell identities
+survive movement; moving an owner does not itself repartition table keys.
+
+### Metadata topology
+
+Keep account bootstrap descriptors small. Put table-name lookup and table
+lifecycle state in a sharded catalog. Put each table's routing records in
+directory Cells that can split recursively with bounded fanout. A single
+per-table directory Cell would only move the same size and writer constraint
+to a different owner.
+
+Keyed requests resolve one directory path, and split publication updates the
+affected source/children under a fenced directory epoch. Cached routes require
+owner/epoch validation and bounded refresh after rejection. A cache must not
+weaken table deletion or the existing immediate credential/policy revocation
+contract. Listing and scan continuation must remain correct through directory
+splits; no request may fetch all table routes as its normal path.
+
+Current owners are `src/routing.rs`, `src/routing/split_state.rs`, and the account
+schema. Their callers include keyed routing, Query/Scan, TTL, GSI projection,
+split publication, table deletion, and transaction admission. Each must use the
+new directory contract. Existing transactions continue resolving their original
+participants rather than rerouting through a changed directory.
+
+### Large collections and index ranges
+
+`src/partition/key.rs::data_key_hash` deliberately hashes only the partition
+key. Hash-range splitting therefore cannot divide a large item collection.
+For tables without LSIs, ownership needs a composite ordered boundary containing
+the partition-key hash, canonical partition-key identity, and encoded sort key.
+Retaining the actual partition identity avoids treating hash collisions as one
+collection. Query must visit intersecting sort-key ranges in order with bounded
+pagination; point requests route the full primary key. Reuse the existing
+canonical numeric and binary/string ordering rather than introducing another
+key encoding.
+
+DynamoDB can distribute collections without LSIs across partitions. With LSIs,
+its item collection stays colocated and is limited to 10 GB, including projected
+index data ([partition distribution](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.Partitions.html),
+[LSI limits](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/LSI.html)).
+BeyondDB needs an explicit LSI storage/admission design that supports that
+contract; its current 512-MiB Cell budget is an earlier implementation limit.
+One indivisible hot item still requires a single serialized write authority.
+
+GSI growth uses the directory and fenced range-migration protocol but has an
+additional replay invariant: migrate entry versions, deletion tombstones, and
+projection progress so old journal work cannot undo newer results. Journal
+acknowledgement must follow durable destination application across cutover.
+Base-table transaction atomicity does not turn asynchronous GSIs into an atomic
+multi-key read view.
+
+### Coordinator expansion and retirement
+
+Changing the current 4,096-shard modulus would strand token and decision lookup.
+Expansion needs versioned ownership that preserves lookup for admitted tokens,
+immutable participant/coordinator identities, and decisions during migration.
+New admission must check the authoritative token owner before publishing BEGIN.
+Recovery scheduling must partition unfinished work across owners and give active
+backlogs priority over settled history; startup cost cannot grow indefinitely
+with every transaction shard ever used.
+
+The ten-minute client-token window alone does not authorize garbage collection.
+Collection must account for unresolved participants, delayed phase messages,
+runtime replay receipts, saved read images, and backup/restore references. A
+retirement fence must prevent a delayed old prepare from recreating a transaction
+after its terminal records are removed. Demonstrate both safe deletion and a
+bounded steady-state footprint before claiming sustained scalability.
+
+### Delivery order
+
+1. Establish recovery/admission correctness and measured node observations. The
+   current hard-restart readiness failure remains an open gate.
+2. Partition metadata and integrate fleet placement through the existing runtime
+   authority and movement contracts.
+3. Extend fenced range migration to large non-LSI collections and GSI growth.
+4. Deliver coordinator expansion, distributed backlog recovery, and safe history
+   retirement; retain transaction identity through every topology change.
+5. Qualify the composed service at 1,000 and 10,000 active Cells with multi-TB
+   stored data, node additions/removals, skew, object-store delays, and owner loss.
+
+Record workload mix, durability mode, hardware, and latency/recovery acceptance
+thresholds before interpreting fleet measurements. The existing 45-second small
+fixture readiness gate is not a measured fleet RTO. Successful tests of one
+workstream do not close the other five or establish full DynamoDB API parity.
+
+Include maintenance traffic in the storage budget. The runtime publisher
+currently schedules an otherwise idle Cell's authority renewal three seconds
+after the previous successful renewal/publication. For 10,000 continuously
+resident, quiescent Cells, that implies a nominal ceiling near 3,333 renewal CAS
+operations per second, before client publications, node leases, and recovery
+traffic. Scheduling and storage latency reduce the achieved rate. This is a
+source-derived workload estimate, not measured fleet throughput; extending the
+interval or removing renewals requires proving the runtime fencing contract.
+
 ## Scope and present boundary
 
 "Unlimited" is not a literal capacity promise. DynamoDB requests, items, one
@@ -36,7 +160,7 @@ transaction per underlying Cell query when its durable decision is terminal, the
 the read. BEGIN, unavailable decisions, and further blockers fail retryably;
 transactional conflicts return ordered cancellation reasons. Committed read
 images remain retained without collection, another production capacity gate.
-BEGIN and prepare now upload bounded 256-KiB binary pieces before the phase
+BEGIN and prepare now upload bounded 768-KiB binary pieces before the phase
 atomically consumes and validates the complete input. Coordinator recovery reads
 operations in bounded pieces too. Temporary uploads expire and have a 32-MiB
 per-Cell aggregate payload ceiling; this does not reserve eventual apply capacity
@@ -581,3 +705,439 @@ Verification for this follow-up:
 The draft remains unqualified for sustained load and production scale. The
 large-transaction smoke failure needs underlying invocation evidence before
 assigning a cause or changing capacity, deadlines, or retry policy.
+
+### Large transaction transfer qualification
+
+Temporary probes reproduced the compiled-server failure in 515.27 seconds at
+`binary-transfer-put`. The coordinator had a durable COMMIT with an unresolved
+participant; later calls reported a SQLite wall deadline and a fenced executor.
+That run does not establish whether the deadline was spent in application work,
+worker queueing, or capture/storage work.
+
+A reduced SDK diagnostic retained the original binary/escaped transaction
+assertions on a fresh server. Binary image application took 175 ms for the put
+and 452 ms for the update. The subsequent escaped transfer repeatedly expired
+its 60-second upload reference and failed after 308.45 seconds. Every 256-KiB
+input piece required its own durable command before sealing.
+
+Transaction uploads and stored transaction payloads now share a 768-KiB chunk
+bound. This leaves 256 KiB for SQL text and typed parameter overhead under the
+runtime's existing 1-MiB SQL-call limit, reducing the durable upload count by
+about two thirds for large inputs. The reduced diagnostic passes in 166.44
+seconds. Upload lifetime, SQL deadline, SDK retries, digest checks, and atomic
+phase consumption are unchanged. Individual item and GSI journal chunk formats
+are unchanged. The abort-during-upload fixture uses a larger escaped item so
+its existing multi-piece assertion and abort-before-completion sequence still
+exercise that boundary.
+
+| Boundary | Evidence |
+| --- | --- |
+| Entry and callers | Signed TransactWriteItems reaches `admit_transaction`; BEGIN and account/data prepare all call `upload_transaction`. |
+| Owner | `transaction_transport::CHUNK_BYTES` bounds temporary inputs and stored transaction payload pieces. Registry upload and recovery-query limits derive from it. |
+| Callee contract | Runtime SQL batches bound both encoded inputs and results to 1 MiB. Upload SQL has one bounded payload plus fixed identity/position parameters. |
+| Siblings | Coordinator operations/abort reasons and participant staged images share `transaction_payload`; capacity claims use the resulting chunk count. Item storage and GSI outboxes keep their independent bounds. |
+| Baseline | Main has no BeyondDB. The preceding draft used 256-KiB upload and payload pieces; the reduced escaped-input workload exceeded their fixed lifetime. |
+
+**Is this the best fix?** Keep bounded SQL and durable phase ownership, but use
+more of the existing call budget for data. One shared chunk bound prevents the
+recovery reader and stored-payload writer from disagreeing. This improves the
+measured transfer case; it is not proof against arbitrary object-store latency,
+and the earlier execution deadline and sustained-load failures remain distinct
+qualification concerns.
+
+The first full clean SDK rerun failed in 242.20 seconds during a small
+TransactGetItems call, before the large-payload checks: the serving endpoint
+refused the connection. Its temporary log was removed during unwinding, so the
+exit cause is unavailable. The process fixture now prints child logs on panic
+before temporary-directory cleanup; workload assertions, retries, and timeouts
+are unchanged. This diagnostic change is required to classify any recurrence.
+
+Final focused upload safety checks pass (two tests, 3.26 seconds). Signed
+SDK peer routing and owner-replacement recovery pass (275.31 seconds), including
+the large binary/escaped cases and an interrupted committed transaction.
+
+The final clean server smoke failed in 1,188.30 seconds during the 70-token
+coordinator-residency loop, after the preceding binary/escaped transaction
+assertions. The public result was TransactionCanceledException with
+ThrottlingError for the first participant; its source is not present in the
+empty child logs. This is a capacity-refusal regression to diagnose, not a
+successful full-server qualification. A diagnostic rerun retains the same
+workload and records the exact capacity error at participant preparation.
+
+The capacity diagnostic ended earlier in 269.94 seconds with connection refused
+at the large-payload SDK Put. It did not reach residency churn or report a
+participant capacity error. Empty logs do not prove that the child exited:
+readiness loss can close the listener before node drain returns its error. The
+fixture now records child status before cleanup, and the next diagnostic logs
+supervised task failures and serving-loop exit before drain. This preserves the
+unchanged workload and distinguishes listener shutdown from process termination.
+
+The health diagnostic failed in 472.41 seconds during a large-payload Update.
+The child was still running (`try_wait` returned None), while a supervised task
+had returned Fenced and the serving loop reported lost node readiness. Thus
+this connection refusal followed listener shutdown; it was not an observed
+process crash. Lease renewal is the only installed task returning the runtime
+Fenced error directly in this composition. Renewal-start delay, storage time,
+clock deltas, and remaining lease time need measurement to distinguish why it
+fenced. This result does not classify the separate participant capacity refusal.
+
+The lease-timing run failed in 666.39 seconds on the first residency transaction.
+Its final refresh began with 7,344 ms on the existing guard and remained inside
+NodeDirectory storage refresh until fencing 7,348 ms later. Earlier successful
+refreshes reached 5,081 ms; no refresh error or renewal validation error was
+observed. The process sampler's maximum two-second sampling gap was 2.024
+seconds, and measured wall/monotonic deltas agreed, so this run supplies no
+host-pause or clock-step evidence. The child then exited with code 1 and Fenced.
+The existing ten-second publication policy leaves about seven seconds after its
+three-second heartbeat interval; slow storage can consume that entire window.
+A delayed authoritative-CAS regression now reproduces this policy boundary
+without the full SDK workload. It does not reproduce the separate participant
+capacity cancellation from the earlier run.
+
+The eight-second delayed-CAS regression fails with Fenced at 10.02 seconds
+under the old policy. The serving lease now lasts 15 seconds, with the same
+three-second heartbeat and terminal fencing rules. This allows roughly
+12 seconds for the initial renewal and adds up to five seconds to owner-loss
+detection. It remains below the provisioner's existing 30-second expiry wait
+and within the runtime's 15-second signed-advertisement lifetime contract.
+The peer fixture waits for
+authoritative expiry instead of sleeping eleven seconds; takeover authorization
+and its recovery assertions are unchanged. This is a measured availability
+policy change, not a cure for unbounded storage latency or a fleet RTO claim.
+
+The initial 20-second trial failed three lease tests at advertisement signing: the
+60-second guard ceiling is not the advertisement lifetime contract. The runtime
+limits signed advertisements to 15 seconds. The corrected product policy uses
+that existing limit; no runtime validation or takeover rule is widened. Repeated
+slow refreshes can still consume the remaining deadline and must fence serving.
+
+With the corrected policy, all three lease regressions pass. The seven-test
+selection finished with six passes and one GSI recovery read failure (owner
+not locally available); that test passed alone in 1.67 seconds. This remains
+unresolved intermittent evidence. Strict BeyondDB all-target Clippy passes
+(20.41 seconds). The server now initializes warning/error tracing on stderr,
+and participant capacity refusals retain their cause in server logs. The
+lockfile change adds only the already-pinned tracing-subscriber dependency edge.
+The unchanged signed peer SDK workload passes with the corrected policy
+(273.05 seconds). The full compiled-server SDK workload against RustFS fails in 1,858.61
+seconds during coordinator churn, before the hard restart. Its public error is
+InternalServerError during authorization; the child remains alive. The retained
+log first reports a SQLite wall deadline in the projection worker, followed by
+fenced-executor and inactive-Cell errors, then authorization cache-load failure.
+This run does not reproduce node-lease expiry or classify the earlier participant
+capacity refusal. Large payload writes completed; the last unique transaction
+snapshot had 47 churn commits and one pending BEGIN. The long run also exceeded
+an earlier token replay window, but did not reach that later assertion.
+
+A focused runtime regression now blocks a shared SQL worker with one Cell and
+queues a read of another Cell until its deadline. It tests whether queue expiry
+fences an untouched Cell; this is a candidate mechanism, not yet proof of where
+the full workload spent its deadline. SQL/page I/O and lifecycle timing still
+need distinction if that reproduction does not explain the observed path.
+
+### SQL queue expiry and collateral fencing
+
+The focused regression failed before the runtime change in 5.11 seconds:
+a query waiting behind another Cell returned Deadline, then its untouched Cell
+returned Fenced. The same unconditional timeout fencing exists on current
+`origin/main`. This establishes a runtime availability defect; the full server
+failure still needs a rerun to establish whether this mechanism explains it.
+
+SQL workers now arbitrate queued cancellation against native execution with one
+shared deadline state. Expired queued work cannot invoke its callback, and a
+queued command/effect cannot write after its caller receives Deadline. Started
+callbacks retain interruption, fencing, unknown-outcome, and recovery behavior.
+Worker and request reservations remain held until cancellation is acknowledged
+or the callback exits. Resolution returns Unknown without fencing on queue
+expiry. Hydration defers queued expiry without claiming completion. Migration
+still fences because its old handle has already been closed.
+
+| Surface | Evidence / ownership |
+| --- | --- |
+| Entry | CellHandle query, execute, effect delivery, and resolve feed actor requests. |
+| Start boundary | `SqlDeadline` in runtime worker; worker admission and native queue share the same state. |
+| Callee | `run_native_callback` checks the deadline before touching the executor or sparse VFS. |
+| Siblings | Commands, queries, effects, resolution, and hydration share the start guard; migration preserves closed-capability recovery. |
+| Inventory | Background inventory and transfer inspection do not fence on their timeout; their existing error handling remains unchanged. |
+| Regression | One worker exercises permit wait; two workers with same-lane Cells exercise native queue wait. Subsequent reads verify unchanged data and usable ownership. |
+| Existing contract | Running SQL interruption and native late-mutation recovery tests remain green. Ordinary waiter cancellation must still preserve accepted commands. |
+
+The eight handler tests passed together in 10.39 seconds. The final combined
+runtime selection passed all 22 tests in 10.52 seconds, covering queued expiry,
+accepted-waiter cancellation, migration, running-handler fencing, and hydration
+failure/owner-loss paths. All three worker tests passed in 0.34 seconds, including
+worker-side expiry before a callback starts and sparse hydration retry. Strict
+all-target Clippy for runtime and BeyondDB passed in 33.07 seconds; format,
+Cell/LTX layout, actor policy seams, and runtime documentation checks passed.
+The signed two-owner peer SDK test passed in 273.41 seconds with the queue
+fix. The compiled-server SDK workload failed in 2101.46 seconds after completing
+all 70 coordinator-churn writes and killing the original server. Its replacement
+remained alive but did not become healthy within the existing 45-second gate.
+The serving binary's SHA-256 was unchanged through the restart. No SQL deadline
+or fencing message was observed during pre-restart polling; this run does not
+prove the earlier availability failure fixed under all load conditions.
+Warnings now identify the Cell and whether SQL had started when a foreground
+deadline expired; no request payload is logged.
+
+During the queue-fix server rerun, all eight named large Put/Update transactions
+reached COMMIT with zero unresolved participants, and the SDK advanced into the
+70-coordinator churn phase. This is pre-restart evidence only. A read-only sample
+of the first 19 completed churn coordinators found 25 extra `Replay` phase
+receipts across 16 coordinators. Receipt decoding followed the runtime's
+big-endian length-prefixed `Json<T>` codec. Each sampled coordinator held one
+transaction; ordinary upload/BEGIN/decision/first phase receipts were counted
+separately. These are repeated durable phase commands, not duplicate item writes.
+
+Serving recovery can call `resume_cross_cell_transaction` while a foreground
+driver is still active. The current driver queries unresolved participants,
+including already-prepared participants, and each phase call uses a fresh runtime
+mutation identity. These paths explain how repeated commands are possible, but
+the sample does not identify the caller of every extra receipt. A three-transaction
+early timing sample measured 14.085 seconds median BEGIN-to-completion. A brief
+native stack sample found all four SQL workers waiting for jobs, so it does not
+support attributing that entire latency to SQL execution. Isolate overlapping
+drivers and storage publication before changing recovery scheduling or claiming
+a throughput improvement. The subsequent restart failed its readiness gate.
+
+A new driver fixture prepares and records only the first of two participants
+before resumption. It checks that completion adds only the remaining prepare,
+decision, and two resolution receipts. The existing lost-prepare-receipt and
+concurrent-driver cases remain. The regression fails on the existing driver in
+0.27 seconds: five coordinator commits instead of four. Compiling only the test
+changes left the live server executable's SHA-256 unchanged. The initial test
+filter selected zero tests; the fully qualified test was then run explicitly
+and produced this failure.
+
+The unresolved-participant query now returns whether a prepare receipt is
+recorded, and resumption skips that participant's payload and prepare commands.
+Query codec version 2 declares the changed response; the persisted schema is
+unchanged. Recovery and terminal resolution still receive every unresolved
+participant, including prepared ones. Their callers share the same query but
+do not use the new flag to filter ownership recovery or resolution. The existing
+partial-COMMIT visibility test additionally checks that its unresolved prepared
+participant remains listed. CellStorage uses current-owner reads; COMMIT still
+checks every participant's durable prepare evidence inside the coordinator.
+
+This fixes redundant resumption after a recorded prepare. Concurrent drivers
+whose snapshots both predate that receipt can still repeat work; their existing
+idempotency and decision rules remain necessary. The change avoids a process-local
+driver lock, which would not coordinate foreground and recovery clients on other
+nodes. The targeted driver test passes in 2.80 seconds. Its new coordinator
+scenario required one additional fixture Cell slot (17 instead of 16); the
+initial green attempt passed the new receipt assertion, then exhausted slots
+in the existing background-recovery setup. Production capacity is unchanged.
+All 16 transaction/coordinator tests pass in 57.90 seconds, including lost
+replies, reserved capacity, concurrent drivers, owner recovery, token expiry,
+terminal resolution, index maintenance, and TTL locks. The separate data-range
+visibility/restart test passes in 2.02 seconds, and strict all-target BeyondDB
+Clippy passes in 22.96 seconds. These tests do not establish an SDK latency gain
+or resolve the full server's restart-readiness failure.
+
+The readiness failure supplied no replacement-process diagnostics. The fixture
+previously truncated the shared log on each start, losing the former owner's
+messages; it now appends within the fresh fixture directory. Startup phase
+timing and a focused recovery reproduction are needed before attributing the
+45-second failure to lease expiry, partition restore, or coordinator discovery.
+The readiness deadline is unchanged.
+
+A diagnostic rerun recorded elapsed times around account, credential,
+partition, and coordinator recovery, plus coordinator shard progress and active
+Cell count. Its temporary probes used `[DEBUG-beyonddb-startup]`. The fixture was
+temporarily retained on the workspace
+volume so a failed restart can be replayed without another full SDK write pass.
+The new empty-store startup reached public-listener startup in 618 ms; this is
+not recovery evidence. The same 45-second hard-restart gate remains in force.
+
+The diagnostic replay helper copies stopped fixture storage into a separate
+workspace directory, uses fresh serving addresses, records the binary digest,
+and reports the original 45-second gate separately from a longer observation
+window. Its first active-process check missed the Workspace symlink and began
+copying the running store. That copy was interrupted before any replay server
+started and discarded; the source fixture was not modified. The corrected check
+recognizes both path spellings and refuses the live fixture. Copy I/O overlapped
+the write phase, so this rerun cannot supply a clean write-latency comparison.
+Replays start from the retained failure state, which may already contain
+partial recovery; they do not reproduce the original crash cut or its remaining
+lease lifetime by themselves.
+
+The instrumented SDK run failed in 1,269.38 seconds, before its hard restart.
+All eight named large transactions and 30 churn transactions completed; one
+churn transaction remained unfinished in the retained local coordinator images.
+TransactWriteItems returned HTTP 503 after repeated `CellNotActive` errors.
+The upstream log target names `create_table`, but the failing SDK call is the
+transaction loop. The test now includes the client token in that assertion so
+future failures identify the exact request without inferring it from log labels.
+This run does not demonstrate that the earlier availability failures are fixed.
+
+A separate replay copied that stopped fixture's object storage, started a fresh
+process with fresh addresses and local data, and used the same verified binary
+digest. It missed the unchanged 45-second readiness gate and remained unready
+through the 120-second observation window. Account and credential recovery
+finished in 575 ms combined; partition recovery then took 20.03 seconds.
+Coordinator restoration ran serially: the log reached shard 3,367 after
+92.97 seconds of coordinator recovery, with 50 active Cells. The immediately
+preceding restorations took approximately 21.51 and 7.54 seconds. These are
+startup progress intervals, not isolated SQL or object-store timings.
+
+The replay establishes a recovery reproduction without repeating the full SDK
+write workload. It does not yet isolate why individual restores slow down as
+residency grows, or why the original transaction encountered an inactive Cell.
+Those remain separate diagnosis gates. Neither a larger readiness timeout nor
+a larger Cell budget would establish bounded fleet recovery.
+
+The next replay added per-shard phase boundaries and resource snapshots. It
+became healthy after 110.69 seconds, still failing the 45-second gate. Across
+35 restored coordinator shards, owner acquisition consumed 31.40 seconds,
+participant discovery 0.62 seconds, transaction recovery 1.68 seconds, and
+settled-root observation/registry publication 43.43 seconds. Partition recovery
+took 31.75 seconds. Other builds were active on this workstation; these figures
+locate work on the startup path, not a production throughput or latency claim.
+Snapshots showed local disk reservations far below the 1-GiB budget, but do not
+exclude transient SQL, hydration, or filesystem contention between samples.
+
+Recovery now batches settled-root hints per discovery page instead of publishing
+one account command per shard. The existing checkpoint/restart test gained an
+account commit-sequence assertion: three recovered shards must require one
+registry publication. Before the fix it fails with three publications versus
+one in 0.29 seconds. Its existing checks still require unchanged settled shards
+to remain Idle, a stale hint to trigger BEGIN recovery, participant locks to be
+released, and old successful tokens to replay without applying writes again.
+The private command's vector input changes its codec to version 2 and its input
+bound to 64 KiB for at most 100 observations. See the transaction document for
+the unchanged authority checks. The new module digest prevents using the old
+retained fixture as post-fix end-to-end evidence; fresh-fixture SDK recovery is
+still required. This change does not resolve the inactive-Cell SDK failure or
+prove the overall restart gate passes.
+
+The batched checkpoint/restart regression passes in 0.49 seconds, including its
+stale-hint, raw participant recovery, and token replay assertions. Temporary
+startup probes and the fixture cleanup override have been removed; stopped
+diagnostic fixtures remain separate inputs on the workspace volume. The batch
+change adds 22 net production lines across the shared observation helper, command,
+and descriptor, replacing per-shard startup publication with bounded page writes.
+All seven focused coordinator/recovery tests pass in 19.65 seconds, including
+bounded residency, discovery convergence, admission failure, and healthy
+participant resolution during failed startup. Strict all-target BeyondDB Clippy
+passes in 50.79 seconds; format, diff, runtime layout, and policy checks pass.
+The fresh signed two-owner SDK test passes in 287.17 seconds, including remote
+routing and replacement-owner recovery. The standalone server's SDK test
+completed all 70 churn transactions, killed the original owner, and failed the
+replacement's 45-second readiness gate. Total test duration was 3,231.07 seconds.
+The replacement was still alive at cleanup. Appended logs preserve mailbox-byte
+pressure and inactive-Cell warnings from the original serving run, but do not
+identify the replacement's slow startup stage. This run includes the settled-hint
+batch fix and predates the resolver change below. Neither the focused tests nor
+the peer result closes the standalone-server recovery gate.
+
+The owner-routing audit identifies a separate availability gap that must be
+tested before attributing the SDK failure to it. Runtime
+`CellClient::runtime_with_peer` explicitly does not acquire Idle Cells, and
+`PeerHttpRoundTrip::owner` rejects a control with no owner. BeyondDB's
+`build_peer_client` previously used that transport directly. Foreground coordinator
+admission could reacquire an Idle coordinator, but normal keyed reads, Scan,
+credential lookup, and transaction phase requests had no shared admission path.
+Background transaction and index recovery cover subsets of those targets.
+Runtime pressure shedding can release a settled Cell independently of the
+product provisioner's admission mutex. A solution therefore needs a shared
+product resolver that validates catalog identity and scope, acquires only through
+runtime authority/admission, preserves live remote owners, and never creates an
+uncataloged Cell from a read. Adding retries solely to GetItem would leave the
+sibling paths uncovered. The source trace alone did not prove the prior failure's cause.
+
+A focused signed SDK regression now reproduces the missing reacquisition:
+CreateTable and PutItem succeed, the data owner drains, and GetItem returns
+503 ServiceUnavailable in 4.21 seconds. The test shuts down its listeners and
+runtime before reporting the failed read. This isolates a released-Cell request;
+it does not establish that pressure shedding caused the earlier churn failure.
+
+The pending fix supplies a product resolver to the shared runtime transport.
+Describe, command, query, and mutation resolution use the same local selection
+path. The resolver validates scope and catalog identity, preserves existing
+owners, and restores an Idle authority with a published root under the
+provisioner's admission gate. A Recovering authority already claimed by this
+session resumes its exact root and epoch after an interrupted acquisition. It never provisions missing catalog or authority
+records. Authenticated peer receivers still require the owner selected by the
+sender to be active; a raced release rejects instead of starting a second
+placement decision. Deleted-range reclamation performs metadata reads outside
+the admission gate so an idle account can be restored without a recursive lock.
+The regression now also releases account and credential Cells. A second case
+publishes only the ownership claim, then checks the SDK read resumes restoration.
+The final all-target compilation check passes, including the interrupted-claim
+case. Strict all-target BeyondDB/runtime Clippy passes in 1 minute 44 seconds.
+The expanded fixture uses two ranges in one table. A third SDK regression
+releases both data owners, conditionally updates one primary key in each through
+TransactWriteItems, and verifies both values through TransactGetItems. All three
+focused SDK regressions pass together in 1.23 seconds; focused strict Clippy passes
+in 1 minute 47 seconds. The original two read cases passed in 0.56 seconds before
+the fixture expansion. A temporary manifest
+compiled the exact peer-network test source against the current BeyondDB library
+without a server binary target; its dependency versions match the workspace
+lockfile. The standalone restart run's binary fingerprint remains unchanged.
+The existing two-node SDK scenario also passes against the new library in
+250.30 seconds, including live remote ownership, signed mTLS forwarding, and
+replacement-owner recovery. Standalone restart verification remains pending
+for the resolver change; the earlier standalone SDK run contains the settled-hint
+batch fix but predates the new resolver.
+The runtime resolver-refusal regression passes in 0.20 seconds: refusal remains
+NotStarted and the underlying owner sees no write. The existing local/remote
+owner-routing regression passes in 0.06 seconds. These tests cover dispatch
+selection, not the product's restore or interrupted-acquisition paths.
+
+A separate process regression now isolates coordinator history from large
+payloads and secondary indexes. It uses the same RustFS/bootstrap fixture,
+creates two data ranges, and commits 70 transactions through distinct coordinator
+shards before killing the server. The replacement must pass the unchanged
+45-second readiness gate at a new peer address and return version 69 from both
+data Cells. The fixture retains failed restart storage for replay. Strict Clippy
+for the process test passes in 26.23 seconds. The first RustFS run failed the
+replacement's 45-second readiness gate after all 70 transactions committed in
+1,403.94 seconds; total test duration was 1,452.44 seconds. A read-only snapshot
+during replacement startup found 48 coordinator databases and four other Cell
+databases in the new session. A simultaneous stack sample reached
+`takeover_restored` → `restore_exact` → `prepare_writable` → `load_checksums`,
+including file and parent-directory synchronization. This identifies an observed
+startup path, not a complete latency attribution. The failure therefore does not
+require large payloads or secondary indexes. That run started before the final
+test-only expression alias and failure-retention edits, so its temporary storage
+was removed; logs and stack samples remain. The server binary fingerprint stayed
+unchanged throughout. The full large-payload/index scenario remains a separate
+required gate.
+
+The full process test's recovery assertions now separate durability from token
+replay. AWS defines a ten-minute window after the first request completes
+([TransactWriteItems](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactWriteItems.html)).
+The observed 53-minute workload cannot require deduplication of its oldest
+conditional puts. It now checks historical payload and index state without
+rewriting it, and commits a fresh two-Cell conditional put immediately before
+the crash for replay immediately after readiness. Local/global index replay
+checks remain in setup, inside the fresh-token phase. The earlier post-restart
+rewrites could also conceal lost index or item state. Peer-owner coverage still
+replays the large payloads across replacement. Strict Clippy for both process
+and peer test targets passes in 20.12 seconds. The updated two-owner SDK test
+passes in 247.49 seconds, including large-payload replay and replacement-owner
+recovery. This corrects qualification semantics without changing the readiness
+deadline or treating the existing standalone startup failure as fixed.
+
+The dedicated BeyondDB SDK qualification workflow now includes both ignored
+process scenarios and the peer-network suite on relevant pull requests, main
+changes, and manual dispatch. It runs serially on Ubuntu 24.04 with the official
+RustFS 1.0.0-rc.1 Linux archive pinned by SHA-256 and retains the SDK log on failure.
+The archive contents and digest were verified locally, and Actionlint 1.7.11
+(including shell checks) passes for this workflow. Linux execution is still
+pending; adding the workflow does not establish an E2E pass.
+
+The sampled checksum path exposed synchronous local filesystem work on an async
+worker. A current-thread regression fails at the first filesystem existence
+check before the fix. Writable checksum preparation now dispatches creation,
+64-KiB buffered writes, durability barriers, and failure cleanup through the
+existing bounded LTX host executor. Its cancellation contract retains admission
+until dispatched work completes. The regression exercises more than 8,192 pages
+with one executor slot, then opens the sparse writer and verifies stored data.
+Injected write and synchronization failures retain their source errors and remove
+the checksum sidecar. All nine preparation tests pass in 1.16 seconds; the
+checksum-failure fencing test passes in 0.03 seconds, six sparse recovery cases
+pass in 0.36 seconds, and the executor cancellation regression passes. This fixes
+async-worker blocking; it does not establish the standalone readiness deadline
+or eliminate serial coordinator recovery. Strict all-target Clippy passes for
+LTX with `replica` in 14.39 seconds and for BeyondDB/runtime in 31.03 seconds;
+format, layout, and policy-entry checks pass. Process qualification must be rerun.

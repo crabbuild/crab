@@ -57,12 +57,15 @@ impl PeerTargetScope for BeyonddbPeerScope {
 ///
 /// The caller retains the node's published lease. The TLS identity's private
 /// key signs peer requests for the same boot session advertised by the node.
+/// The provisioner must belong to this node and layout. Ownerless cataloged
+/// Cells are restored through its admission gate; live peers retain ownership.
 pub fn build_peer_client(
     node: &CellNode,
     layout: CellStorageLayout,
     directory: NodeDirectory,
     session: SessionId,
     tls: &LoadedPeerTls,
+    provisioner: Arc<CellInitialPartitionProvisioner>,
 ) -> crab_cell_runtime::Result<CellClient> {
     if directory.fleet() != tls.fleet() {
         return Err(crab_cell_runtime::Error::PeerAuthorization(
@@ -82,14 +85,14 @@ pub fn build_peer_client(
         Arc::new(tls.client_identity()),
         session,
     ));
-    Ok(CellClient::runtime_with_peer(
-        node.application().registry(),
-        node.runtime(),
-        layout,
-        signer,
-        principal,
-        round_trip,
-    ))
+    Ok(
+        CellClient::peer(node.application().registry(), signer, principal, round_trip)
+            .with_local_resolver(Arc::new(peer_receiver::LocalResolver::serving(
+                node,
+                layout,
+                provisioner,
+            ))),
+    )
 }
 
 /// Build the signed DynamoDB request path for an already-ready leased Cell node.

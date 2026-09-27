@@ -65,10 +65,33 @@ async fn settled_recovery_survives_restart_but_later_begin_is_not_skipped() {
     }
     // Observe settled roots through the public startup recovery path. One of
     // those observations will deliberately become stale before this owner exits.
+    let authority = CellAuthority::new(layout.clone());
+    let before_recovery = authority
+        .load(account.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .root
+        .as_ref()
+        .unwrap()
+        .commit_sequence;
     provisioner
         .recover_registered_coordinators(ACCOUNT, &client, &storage, &nodes)
         .await
         .unwrap();
+    let after_recovery = authority.load(account.cell_id()).await.unwrap().unwrap();
+    assert_eq!(
+        after_recovery
+            .value()
+            .root
+            .as_ref()
+            .unwrap()
+            .commit_sequence
+            - before_recovery,
+        1,
+        "settled observations from one recovery page must share one account publication"
+    );
     let stale = coordinator_target(ACCOUNT, tokens[0].as_bytes()).unwrap();
     let id = (1_u128..100_000)
         .map(u128::to_be_bytes)

@@ -66,31 +66,36 @@ pub(crate) struct SettledCoordinatorRoot {
     pub schema: u32,
 }
 
-pub(crate) struct RecordSettledCoordinator;
+pub(crate) struct RecordSettledCoordinators;
 
-impl Command for RecordSettledCoordinator {
+impl Command for RecordSettledCoordinators {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 24;
-    const CODEC_VERSION: u32 = 1;
-    type Input = Json<CoordinatorShard>;
+    const CODEC_VERSION: u32 = 2;
+    type Input = Json<Vec<CoordinatorShard>>;
     type Output = Json<()>;
 
     fn execute(
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let Some(settled) = input.settled.filter(|_| input.shard < SHARDS) else {
-            return Err(Error::Command("invalid settled coordinator observation"));
-        };
+        if input.is_empty() || input.len() > 100 {
+            return Err(Error::Command("invalid settled coordinator batch size"));
+        }
         // Only the trusted recovery driver records observations. Updating an
         // existing registration cannot make an undiscoverable BEGIN legitimate.
-        context.sql(&statement(
-            "UPDATE ddb_coordinator_shards SET settled = ?1 WHERE shard = ?2",
-            vec![
-                SqlValue::Blob(serde_json::to_vec(&settled)?),
-                SqlValue::Integer(i64::from(input.shard)),
-            ],
-        ))?;
+        for entry in input {
+            let Some(settled) = entry.settled.filter(|_| entry.shard < SHARDS) else {
+                return Err(Error::Command("invalid settled coordinator observation"));
+            };
+            context.sql(&statement(
+                "UPDATE ddb_coordinator_shards SET settled = ?1 WHERE shard = ?2",
+                vec![
+                    SqlValue::Blob(serde_json::to_vec(&settled)?),
+                    SqlValue::Integer(i64::from(entry.shard)),
+                ],
+            ))?;
+        }
         Ok(CommandResult::Success(Json(())))
     }
 }

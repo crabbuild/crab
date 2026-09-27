@@ -17,6 +17,11 @@ AWS SDK / DynamoDB JSON client
 
 ## Running the current server
 
+The server writes warnings and errors to stderr.
+Serving nodes publish a 15-second lease and renew every three seconds. Owner
+replacement waits for authoritative expiry; storage stalls that exhaust the
+lease still fence serving. See [measured lease qualification](SCALING.md#large-transaction-transfer-qualification).
+
 `cargo run -p beyonddb --bin beyonddb -- config.json --bootstrap` starts one
 leased Cell node, a private mTLS peer listener, and ExtendDB's public DynamoDB
 listener. `--bootstrap` reads one access-key secret from stdin, stores it
@@ -77,8 +82,22 @@ dedicated environment with `rustfs`, `aws`, and `openssl` available:
 
 ```bash
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-beyonddb \
-  cargo test -p beyonddb --test server_binary -- --ignored
+  cargo test -p beyonddb --test server_binary -- --ignored --test-threads=1
 ```
+
+The `settled_history_beyond_residency` process test isolates coordinator recovery:
+70 distinct coordinator shards update two small items in separate data Cells,
+then the server is killed and restarted at another peer address. It uses the
+same 45-second readiness gate as the full smoke test. On a readiness failure,
+it retains the fixture and prints its path for startup-only replay. This test
+does not cover large payloads or index restoration; both remain in the full
+scenario. See [scaling qualification](SCALING.md) for actual results and open gates.
+
+The dedicated [SDK qualification workflow](../../.github/workflows/beyonddb-qualification.yml)
+selects both process tests explicitly, alongside the peer-network SDK suite, on
+relevant pull requests and main changes. It uses Ubuntu 24.04 and a checksum-pinned
+RustFS 1.0.0-rc.1 binary, runs tests serially, and retains the test log on failure.
+Ordinary `cargo test` does not run the ignored process tests.
 
 This server uses an explicit list of locally owned account and credential
 Cells. On startup it recovers configured account and credential Cells, then
@@ -185,6 +204,12 @@ round trip. `peer_router` authenticates incoming requests against live node
 advertisements, restricts targets to BeyondDB namespaces, and dispatches only
 to the current local owner. `build_peer_client` binds the owner-resolving HTTP
 transport and a fleet-scoped principal to account, credential, and data Cells.
+It takes the matching node provisioner to restore cataloged ownerless Cells on
+demand. An interrupted ownership claim by the same boot session resumes from
+its published root; existing remote owners retain authority. SDK regressions
+release data, account, and credential Cells and read the persisted item again,
+including the claimed-but-not-yet-restored state. This restores availability
+after release; fleet placement and automatic rebalancing remain separate work.
 `tests/peer_network.rs` uses separate mTLS identities on two leased nodes,
 denies a wrong peer principal, and sends signed AWS SDK CreateTable, PutItem,
 and GetItem requests through ExtendDB's public listener and the private peer
@@ -339,6 +364,20 @@ The closed-shard completion proposal and full Streams implementation boundaries
 are in [STREAMS_CONTRACT.md](STREAMS_CONTRACT.md). Its accompanying patch is
 unapplied and awaits explicit dependency-change approval. Public Streams
 operations remain unsupported.
+
+## API coverage boundary
+
+BeyondDB is not a complete DynamoDB replacement. In addition to the index,
+Streams, backup/PITR, IAM, and scale gaps described here, the pinned ExtendDB
+engine does not dispatch PartiQL or Global Tables operations. Its import/export
+handlers use local filesystem extensions rather than the DynamoDB S3 workflow
+([ImportTable](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_ImportTable.html),
+[ExportTableToPointInTime](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_ExportTableToPointInTime.html)).
+BeyondDB supplies empty import/export path lists in `src/server.rs`, so those
+handlers reject requests before file access. Enabling filesystem paths would
+not establish DynamoDB import/export compatibility. These operations need
+upstream protocol support and Cell-backed orchestration, followed by signed SDK
+and restart qualification, before they can be listed as supported.
 
 ## ExtendDB contract to implement
 

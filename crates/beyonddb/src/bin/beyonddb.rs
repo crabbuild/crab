@@ -78,6 +78,11 @@ const fn default_split_threshold() -> u64 {
 
 #[tokio::main]
 async fn main() -> ServerResult<()> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(io::stderr)
+        .with_ansi(false)
+        .try_init()?;
     let mut args = std::env::args_os().skip(1);
     let path = args
         .next()
@@ -298,7 +303,14 @@ async fn serve_ready(
             .recover_owned_credential(key_id, &directory)
             .await?;
     }
-    let client = build_peer_client(node, layout.clone(), directory.clone(), session, &tls)?;
+    let client = build_peer_client(
+        node,
+        layout.clone(),
+        directory.clone(),
+        session,
+        &tls,
+        provisioner.clone(),
+    )?;
     if let (Some(bootstrap), Some(secret)) = (config.bootstrap.as_ref(), bootstrap_secret) {
         let policy = std::fs::read_to_string(&bootstrap.policy_file)?;
         CellCredentialStore::new(client.clone(), layout.clone(), encryption_key)

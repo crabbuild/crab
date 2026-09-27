@@ -238,9 +238,9 @@ durable phase commands: one BEGIN, `P` prepares, `P` prepare-receipt records, on
 decision, `P` resolutions, and `P` resolution-receipt records. Registration,
 queries, activation, retries, and concurrent recovery add work. This is a
 command count, not an object-store request count; the runtime owns publication.
-Input transport adds one durable upload command per 256-KiB piece of BEGIN and
+Input transport adds one durable upload command per 768-KiB piece of BEGIN and
 each prepare input. If their serialized lengths are `B` and `S_i`, add
-`ceil(B / 256 KiB) + sum(ceil(S_i / 256 KiB))`. Recovery fetches coordinator
+`ceil(B / 768 KiB) + sum(ceil(S_i / 768 KiB))`. Recovery fetches coordinator
 operations one bounded piece at a time. When each input fits one chunk, the
 minimum total is `5P + 3`: eight commands for one participant, thirteen for two,
 and 503 for 100, before registration and retries.
@@ -315,7 +315,7 @@ recording the rejection.
 
 Coordinator participant operations, cancellation decisions, and participant
 staged images now use `ddb_transaction_payloads`, addressed by transaction,
-position, and chunk. Each chunk is at most 256 KiB. The owning record stores
+position, and chunk. Each chunk is at most 768 KiB. The owning record stores
 the chunk count, and reads require every named chunk. Participant positions
 are nonnegative; the coordinator reserves position -1 for its terminal abort
 reason, which can contain a large old item. A missing chunk is an error.
@@ -421,10 +421,13 @@ BEGIN, account prepare, and data prepare use the same upload protocol. Each
 phase receives a small reference containing a unique upload-attempt ID, the
 serialized length, Blake3 digest, and expiration time. Distinct drivers own
 distinct temporary inputs even when bytes and millisecond deadlines match;
-sealing one cannot consume the other. Its input arrives first as immutable 256-KiB pieces in
+sealing one cannot consume the other. Its input arrives first as immutable 768-KiB pieces in
 `ddb_transaction_uploads`. Chunk bytes use binary wire framing; the upload's
 small acknowledgment and bounded recovery-query result have matching registry
-limits, avoiding a 4-MiB result reservation for every chunk.
+limits, avoiding a 4-MiB result reservation for every chunk. The shared 768-KiB
+transaction chunk bound leaves 256 KiB for SQL text and typed parameters
+within the runtime's 1-MiB SQL-call limit. Larger pieces reduce independently
+published upload commands without extending the input lifetime.
 
 The receiving command checks the index and exact expected chunk length. A
 retry accepts identical bytes and rejects changed bytes. Each input and the
@@ -747,15 +750,17 @@ not permission to discard a prepared transaction.
 
 `CellStorage::resume_cross_cell_transaction` starts from an already-published
 coordinator record. It never reroutes participant keys or reconstructs the
-request from an HTTP retry. It reads one participant payload at a time and
-prepares them in their persisted Cell-ID order. Participant-local failures
+request from an HTTP retry. It skips participants whose prepare receipts are
+already recorded; unresolved prepared participants remain discoverable for
+owner recovery and resolution. For the others, it reads one payload at a time
+and prepares them in their persisted Cell-ID order. Participant-local failures
 map back to the original operation index before the abort decision is stored.
 The same indexed conflict outcome feeds single-Cell public requests and
 returns `TransactionCanceled` with ordered reasons instead of the single-item
 `TransactionConflictException`.
 
 `tests/elastic_cells/transaction_driver.rs` drives two real data Cells through
-commit, replay, a prepare without a recorded receipt, concurrent resumes,
+commit, replay, recorded and unrecorded prepare receipts, concurrent resumes,
 condition failure, competing locks, and stale routing. The signed peer
 transport drops replies after a published prepare and commit decision; the
 driver still completes from durable state. Aborted transactions release their
@@ -2097,6 +2102,20 @@ their existing routed client. They write only when the observed root changes;
 a shard evicted before either observes it has no hint and must be restored.
 Registry write errors propagate through the existing startup-readiness or
 serving-retry boundary. This avoids assuming that every clean eviction is cached.
+
+Startup gathers at most one discovery page of observations, then publishes them
+in one account command. Serving discovery uses the same command for its single
+observation. The command accepts 1–100 entries with a 64-KiB encoded input limit;
+an empty page produces no write. Every entry still requires the same empty-work
+receipt and exact published-root checks before collection, and readers recheck
+the authoritative Idle root before skipping recovery. A mutation or owner change
+while the batch is buffered only makes its hint stale. Transaction decisions and
+participant resolutions are never buffered in this batch.
+
+The private account command 24 now uses codec version 2 for the vector input;
+the registry descriptor and binding change together. No SQL schema or stored
+hint shape changes. The compiled module digest changes, so existing unreleased
+development fixtures need reprovisioning. This is not a rolling-upgrade proof.
 
 | Boundary | Evidence |
 | --- | --- |

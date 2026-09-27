@@ -3,9 +3,8 @@
 use crab_cell_runtime::registry::CommandContext;
 
 use crate::table::statement;
+use crate::transaction_transport::CHUNK_BYTES;
 use crate::{Error, Result, SqlBatch, SqlResultSet, SqlValue};
-
-const CHUNK_BYTES: usize = 256 * 1024;
 
 pub(crate) fn write(
     context: &CommandContext<'_, '_>,

@@ -20,7 +20,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
         *account.application().as_bytes(),
     );
     let host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 16).unwrap(), 16 * 1024 * 1024)
+        .with_runtime(SqlWorkerPool::new(1, 17).unwrap(), 16 * 1024 * 1024)
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(session)
         .build_unleased_for_maintenance()
@@ -110,7 +110,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
     for (position, (_, participant)) in participants.iter_mut().enumerate() {
         participant.operations[0].index = u8::try_from(1 - position).unwrap();
     }
-    for scenario in [181_u8, 182, 183, 184, 185, 186, 187] {
+    for scenario in [180_u8, 181, 182, 183, 184, 185, 186, 187] {
         let transaction_id = [scenario; 16];
         let coordinator = coordinator_target(account_id, &transaction_id).unwrap();
         bootstrap
@@ -128,7 +128,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             .iter()
             .map(|(_, participant)| participant.clone())
             .collect();
-        if !matches!(scenario, 181 | 185 | 186) {
+        if !matches!(scenario, 180 | 181 | 185 | 186) {
             for participant in &mut request {
                 let TransactionOperation::Put(input) = &mut participant.operations[0].operation
                 else {
@@ -168,20 +168,21 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
         )
         .await
         .unwrap();
-        if scenario == 181 || scenario == 183 {
-            // Resume a prepare whose receipt was never recorded, or collide
-            // with a different transaction on the second participant.
+        let mut recorded_sequence = None;
+        if matches!(scenario, 180 | 181 | 183) {
+            // Cover recorded and lost prepare receipts, plus a conflicting
+            // transaction on the second participant.
             let position = usize::from(scenario == 183);
             let held_id = if scenario == 183 {
                 [190; 16]
             } else {
                 transaction_id
             };
-            transaction_command!(
+            let prepared = transaction_command!(
                 client,
                 PreparePartitionTransaction,
                 &participants[position].0,
-                identity(scenario),
+                identity(if scenario == 180 { 177 } else { scenario }),
                 Json(PreparePartitionTransactionInput {
                     table_id: table.id.clone(),
                     epoch: 1,
@@ -197,6 +198,27 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             )
             .await
             .unwrap();
+            if scenario == 180 {
+                recorded_sequence = Some(
+                    client
+                        .command::<RecordParticipantPrepare>(
+                            &coordinator,
+                            identity(179),
+                            Json(CoordinatorPhaseInput {
+                                account_id: account_id.into(),
+                                transaction_id,
+                                routing_key: transaction_id.to_vec(),
+                                position: 0,
+                                participant_cell: *participants[0].0.cell_id().as_bytes(),
+                                sequence: prepared.receipt.commit_sequence,
+                            }),
+                        )
+                        .await
+                        .unwrap()
+                        .receipt
+                        .commit_sequence,
+                );
+            }
         }
         let decision = if scenario == 181 {
             let (first, second) = tokio::join!(
@@ -279,7 +301,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                 .unwrap()
         };
         match scenario {
-            181 | 185 | 186 => assert_eq!(decision, CoordinatorDecision::Commit),
+            180 | 181 | 185 | 186 => assert_eq!(decision, CoordinatorDecision::Commit),
             187 => assert_eq!(
                 decision,
                 CoordinatorDecision::Abort {
@@ -316,10 +338,13 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                 }),
             )
             .await
-            .unwrap()
-            .output
-            .0
             .unwrap();
+        if let Some(sequence) = recorded_sequence {
+            // Only the remaining prepare, decision, and two resolutions need
+            // coordinator commits; a durable prepare must not be recorded twice.
+            assert_eq!(status.receipt.commit_sequence - sequence, 4);
+        }
+        let status = status.output.0.unwrap();
         assert_eq!(status.resolved_count, 2);
         if scenario == 183 {
             client

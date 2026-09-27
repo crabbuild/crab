@@ -18,7 +18,7 @@ use extenddb_storage::error::StorageError;
 use super::{CellInitialPartitionProvisioner, provision_error};
 use crate::backend::{cell_error, mutation_identity};
 use crate::transaction_coordinator::{
-    CoordinatorShard, RecordSettledCoordinator, SettledCoordinatorRoot,
+    CoordinatorShard, RecordSettledCoordinators, SettledCoordinatorRoot,
 };
 use crate::{
     CellStorage, CoordinatorParticipantTarget, Json, ListCoordinatorShards,
@@ -233,9 +233,9 @@ impl CellInitialPartitionProvisioner {
                 nodes,
             )
             .await?
+            && let Some(settled) = self.settled_coordinator(&target, entry, client).await?
         {
-            self.record_settled_coordinator(&account, &target, entry, client)
-                .await?;
+            record_settled_coordinators(&account, vec![settled], client).await?;
         }
         Ok(())
     }
@@ -282,26 +282,25 @@ impl CellInitialPartitionProvisioner {
         })
     }
 
-    async fn record_settled_coordinator(
+    async fn settled_coordinator(
         &self,
-        account: &CellTarget,
         target: &CellTarget,
         entry: &CoordinatorShard,
         client: &CellClient,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Option<CoordinatorShard>, StorageError> {
         let pending = client
             .query::<crate::ReadPendingTransactionBoundary>(target, None, Json(()))
             .await
             .map_err(cell_error)?;
         if pending.output.0.is_some() {
-            return Ok(());
+            return Ok(None);
         }
         let observed = CellAuthority::new(self.layout.clone())
             .load(target.cell_id())
             .await
             .map_err(provision_error)?;
         let Some(control) = observed.as_ref().map(|record| record.value()) else {
-            return Ok(());
+            return Ok(None);
         };
         let receipt = pending.receipt;
         if control.cell != receipt.cell
@@ -311,28 +310,20 @@ impl CellInitialPartitionProvisioner {
                 .as_ref()
                 .is_none_or(|root| root.commit_sequence != receipt.commit_sequence)
         {
-            return Ok(());
+            return Ok(None);
         }
         let Some(settled) = self.settled_root(control) else {
-            return Ok(());
+            return Ok(None);
         };
         if entry.settled.as_ref() == Some(&settled) {
-            return Ok(());
+            return Ok(None);
         }
         // A concurrent BEGIN or new owner makes this observation stale, never
         // authoritative. Both discovery paths recheck the exact Idle root.
-        client
-            .command::<RecordSettledCoordinator>(
-                account,
-                mutation_identity()?,
-                Json(CoordinatorShard {
-                    shard: entry.shard,
-                    settled: Some(settled),
-                }),
-            )
-            .await
-            .map_err(cell_error)?;
-        Ok(())
+        Ok(Some(CoordinatorShard {
+            shard: entry.shard,
+            settled: Some(settled),
+        }))
     }
 
     async fn recover_next_transaction(
@@ -480,6 +471,7 @@ impl CellInitialPartitionProvisioner {
             if page.is_empty() {
                 return Ok(());
             }
+            let mut settled = Vec::new();
             for entry in page {
                 after = Some(entry.shard);
                 let target = CellTarget::new(
@@ -522,10 +514,16 @@ impl CellInitialPartitionProvisioner {
                     // remaining admission or resolution error.
                     let resolution = storage.recover_fenced_coordinator(&target).await;
                     admission.and(resolution)?;
-                    self.record_settled_coordinator(&account, &target, &entry, client)
-                        .await?;
+                    if let Some(observation) =
+                        self.settled_coordinator(&target, &entry, client).await?
+                    {
+                        settled.push(observation);
+                    }
                 }
             }
+            // These are exact-root hints, not decisions. Buffer at most one page;
+            // consumers still revalidate after any concurrent write or owner change.
+            record_settled_coordinators(&account, settled, client).await?;
         }
     }
 
@@ -708,4 +706,19 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
             Ok(())
         })
     }
+}
+
+async fn record_settled_coordinators(
+    account: &CellTarget,
+    observations: Vec<CoordinatorShard>,
+    client: &CellClient,
+) -> Result<(), StorageError> {
+    if observations.is_empty() {
+        return Ok(());
+    }
+    client
+        .command::<RecordSettledCoordinators>(account, mutation_identity()?, Json(observations))
+        .await
+        .map_err(cell_error)?;
+    Ok(())
 }

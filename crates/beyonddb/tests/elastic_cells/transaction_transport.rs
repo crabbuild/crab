@@ -389,7 +389,9 @@ async fn abort_during_upload_fences_delayed_account_and_data_prepares() {
                 table_id: info.table_id.clone(),
                 item: Item::from([
                     ("id".into(), AttributeValue::S("delayed".into())),
-                    ("payload".into(), AttributeValue::S("\0".repeat(96 * 1024))),
+                    // Escaped JSON spans upload pieces while the item remains
+                    // below the DynamoDB size limit, allowing abort mid-transfer.
+                    ("payload".into(), AttributeValue::S("\0".repeat(160 * 1024))),
                 ]),
                 condition: None,
             })

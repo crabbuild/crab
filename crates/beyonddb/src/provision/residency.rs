@@ -5,8 +5,16 @@ use std::{
     time::Duration,
 };
 
+use crab_cell_runtime::cell::{actor::CellHandle, catalog::CatalogProof};
 use crab_cell_runtime::client::{CellClient, ReadPolicy};
+use crab_cell_runtime::control::{
+    Control, ControlState, Owner,
+    authority::{CellAuthority, VersionedControl},
+};
 use crab_cell_runtime::identity::{CellId, CellTarget};
+use crab_cell_runtime::ltx::Limits;
+use crab_cell_runtime::recovery::manifest::RecoveryManifestStore;
+use crab_ltx::CellReplica;
 use extenddb_storage::error::StorageError;
 
 use super::{CellInitialPartitionProvisioner, provision_error};
@@ -16,12 +24,90 @@ use crate::{
 };
 
 impl CellInitialPartitionProvisioner {
+    pub(crate) async fn restore_idle(
+        &self,
+        target: &CellTarget,
+        proof: CatalogProof,
+        observed: VersionedControl,
+    ) -> crab_cell_runtime::Result<Option<CellHandle>> {
+        let restorable = |control: &Control| {
+            control.root.is_some()
+                && match control.state {
+                    ControlState::Idle => control.owner.is_none(),
+                    ControlState::Recovering => control
+                        .owner
+                        .as_ref()
+                        .is_some_and(|owner| owner.session == self.session),
+                    _ => false,
+                }
+        };
+        if !restorable(observed.value()) {
+            return Ok(None);
+        }
+        let _admission = self.admission.lock().await;
+        let authority = CellAuthority::new(self.layout.clone());
+        let observed = authority
+            .load(target.cell_id())
+            .await?
+            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+        if let Some(handle) = self.runtime.local_handle(proof.clone(), &observed).await? {
+            return Ok(Some(handle));
+        }
+        if !restorable(observed.value()) {
+            return Ok(None);
+        }
+        self.reclaim_coordinator_capacity()
+            .await
+            .map_err(admission_error)?;
+        let replica = CellReplica::new(
+            self.layout.clone(),
+            *target.cell_id().as_bytes(),
+            *observed.value().incarnation.as_bytes(),
+            Limits::default(),
+        )?;
+        let destination = self
+            .activation_destination(target)
+            .map_err(admission_error)?;
+        // Reads restore only an existing published root. Initial catalog and
+        // authority creation belong exclusively to explicit provisioning.
+        let handle = if observed.value().owner.is_some() {
+            // A canceled request can leave our ownership CAS published before
+            // restoration reaches the actor. Resume that exact root and epoch.
+            self.runtime
+                .activate_restored(
+                    proof,
+                    replica,
+                    authority,
+                    observed,
+                    RecoveryManifestStore::new(self.layout.clone(), Limits::default())
+                        .with_recovery_scratch(self.directory.clone()),
+                    destination,
+                )
+                .await?
+        } else {
+            self.runtime
+                .acquire_idle_restored(
+                    proof,
+                    replica,
+                    authority,
+                    observed,
+                    destination,
+                    Owner {
+                        session: self.session,
+                        endpoint: self.endpoint.clone(),
+                    },
+                )
+                .await?
+        };
+        self.track_coordinator(target).map_err(admission_error)?;
+        Ok(Some(handle))
+    }
+
     pub(super) async fn reclaim_deleted_ranges(
         &self,
         client: &CellClient,
         account_id: &str,
     ) -> Result<(), StorageError> {
-        let _admission = self.admission.lock().await;
         let stats = self.runtime.stats();
         if stats.active_cells() < stats.active_cell_capacity() {
             return Ok(());
@@ -123,6 +209,13 @@ impl CellInitialPartitionProvisioner {
         })
         .await
         .map_err(|_| StorageError::Transient("deleted table ranges have not settled".into()))??;
+        // Metadata lookup may itself restore an idle account. Hold the local
+        // admission gate only for release, avoiding recursive admission waits.
+        let _admission = self.admission.lock().await;
+        let stats = self.runtime.stats();
+        if stats.active_cells() < stats.active_cell_capacity() {
+            return Ok(());
+        }
         self.release_capacity(candidate.0, candidate.1).await
     }
 
@@ -148,5 +241,12 @@ impl CellInitialPartitionProvisioner {
             crab_cell_runtime::Error::Capacity(_) => StorageError::Transient(error.to_string()),
             _ => provision_error(error),
         })
+    }
+}
+
+fn admission_error(source: StorageError) -> crab_cell_runtime::Error {
+    crab_cell_runtime::Error::PeerTransport {
+        context: "BeyondDB owner admission",
+        source: Box::new(source),
     }
 }

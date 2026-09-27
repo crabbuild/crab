@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::table::statement;
 use crate::{Error, Json, Result, SqlValue};
 
-pub(crate) const CHUNK_BYTES: usize = 256 * 1024;
+// Leave room for SQL text and typed parameters under the runtime's 1 MiB
+// call bound. Every upload piece publishes separately, so smaller pieces
+// spend the fixed transfer lifetime on additional durable round trips.
+pub(crate) const CHUNK_BYTES: usize = 768 * 1024;
 pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
 // Runtime mutation and peer authorization permit five minutes of sender skew.
 // Add that tolerance to the adapter's one-minute absolute upload deadline.

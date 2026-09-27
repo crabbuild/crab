@@ -14,6 +14,7 @@ use crab_cell_runtime::cell::{
     actor::{CellHandle, CellRuntime},
     catalog::{CatalogRole, CellCatalog},
 };
+use crab_cell_runtime::client::LocalCellResolver;
 use crab_cell_runtime::control::authority::CellAuthority;
 use crab_cell_runtime::identity::{CellTarget, Digest, SessionId};
 use crab_cell_runtime::ltx::CellStorageLayout;
@@ -30,17 +31,33 @@ use crate::{DATA_MODULE, DATA_NAMESPACE, MODULE, NAMESPACE, credentials, transac
 const INVOKE_ACTION: &str = "beyonddb.cell.invoke";
 
 #[derive(Clone)]
-struct LocalResolver {
+pub(super) struct LocalResolver {
     runtime: CellRuntime,
     layout: CellStorageLayout,
     registry: Arc<Registry>,
+    provisioner: Option<Arc<crate::CellInitialPartitionProvisioner>>,
 }
 
-impl PeerCellResolver for LocalResolver {
+impl LocalResolver {
+    pub(super) fn serving(
+        node: &CellNode,
+        layout: CellStorageLayout,
+        provisioner: Arc<crate::CellInitialPartitionProvisioner>,
+    ) -> Self {
+        Self {
+            runtime: node.runtime(),
+            layout,
+            registry: node.application().registry(),
+            provisioner: Some(provisioner),
+        }
+    }
+}
+
+impl LocalCellResolver for LocalResolver {
     fn resolve(
         &self,
         target: CellTarget,
-    ) -> Pin<Box<dyn Future<Output = Result<CellHandle>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Option<CellHandle>>> + Send + 'static>> {
         let resolver = self.clone();
         Box::pin(async move {
             BeyonddbPeerScope.check_target(&target)?;
@@ -76,12 +93,28 @@ impl PeerCellResolver for LocalResolver {
                 .load(target.cell_id())
                 .await?
                 .ok_or(Error::CellNotActive)?;
-            resolver
+            let local = resolver
                 .runtime
-                .local_handle(proof, &control)
-                .await?
-                .ok_or(Error::CellNotActive)
+                .local_handle(proof.clone(), &control)
+                .await?;
+            if local.is_some() {
+                return Ok(local);
+            }
+            let Some(provisioner) = resolver.provisioner else {
+                return Ok(None);
+            };
+            provisioner.restore_idle(&target, proof, control).await
         })
+    }
+}
+
+impl PeerCellResolver for LocalResolver {
+    fn resolve(
+        &self,
+        target: CellTarget,
+    ) -> Pin<Box<dyn Future<Output = Result<CellHandle>> + Send + 'static>> {
+        let resolved = LocalCellResolver::resolve(self, target);
+        Box::pin(async move { resolved.await?.ok_or(Error::CellNotActive) })
     }
 }
 
@@ -133,6 +166,9 @@ pub fn peer_router(node: &CellNode, layout: CellStorageLayout, directory: NodeDi
             runtime: runtime.clone(),
             layout,
             registry: node.application().registry(),
+            // The sender selects ownership before forwarding. A receiver may
+            // only dispatch to that active owner; a raced release must reject.
+            provisioner: None,
         }),
         Arc::new(BeyondPeerAuthorizer {
             fleet: directory.fleet(),
