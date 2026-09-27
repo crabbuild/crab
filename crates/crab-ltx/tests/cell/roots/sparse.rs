@@ -704,3 +704,52 @@ async fn asynchronous_hydration_never_resurrects_truncated_pages_after_regrowth(
         .unwrap();
     writer.close().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hydrated_root_resumes_without_an_intervening_application_write() {
+    let (directory, mut writer, replica, root) =
+        hydration_writer(Store::new(Arc::new(InMemory::new()))).await;
+    while !writer.hydration().unwrap().unwrap().complete() {
+        let batch = writer
+            .prepare_hydration(64)
+            .unwrap()
+            .unwrap()
+            .fetch()
+            .await
+            .unwrap();
+        writer.install_hydration(batch).unwrap();
+    }
+    for cycle in 0..2 {
+        writer.persist_continuation().unwrap();
+        let source = writer.path().to_owned();
+        writer.close().unwrap();
+        let destination = directory.path().join(format!("resumed-{cycle}.sqlite"));
+        writer = replica.open_resumed(&source, &destination).unwrap();
+        assert_eq!(writer.position(), root.position);
+    }
+    writer
+        .transaction(|tx| tx.execute("INSERT INTO payload VALUES (?1)", [b"resumed".as_slice()]))
+        .unwrap();
+    let cut = writer.capture().unwrap();
+    assert_eq!(cut.segments[0].info().pre_checksum, root.position.checksum);
+    assert_eq!(cut.segments[0].info().min_txid, root.position.txid + 1);
+    let next = replica.prepare(Some(&root), &cut, 2, 1).await.unwrap();
+    writer.close().unwrap();
+    let restored = directory.path().join("restored.sqlite");
+    replica
+        .open_root(&next.root())
+        .await
+        .unwrap()
+        .restore(&restored)
+        .await
+        .unwrap();
+    let connection = crab_ltx::rusqlite::Connection::open(&restored).unwrap();
+    let lengths: Vec<u64> = connection
+        .prepare("SELECT length(value) FROM payload ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(lengths, [2_000_000, 7]);
+}

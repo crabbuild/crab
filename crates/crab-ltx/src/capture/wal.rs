@@ -446,8 +446,7 @@ impl CaptureEngine {
             LastL0Header {
                 wal_offset: info.offset,
                 wal_size: sz,
-                wal_salt1: rd_salt1,
-                wal_salt2: rd_salt2,
+                wal_salts: Some((rd_salt1, rd_salt2)),
                 commit,
                 final_pgno,
                 final_page,

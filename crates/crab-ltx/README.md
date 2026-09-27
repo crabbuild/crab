@@ -352,6 +352,13 @@ Ownership and root identity stay with the caller: only open a resumed database
 that a resume record has already matched against the authoritative
 control, and discard it (`CellReplica::discard_resumed`) on any mismatch.
 
+Opening a captured or restored database does not force a synthetic sequence
+write. If no application write occurs, a fully hydrated database can close and
+resume at the same exact position. The first capture creates a WAL frame only
+when needed, then binds the inherited checksum state to that WAL's complete
+committed prefix. Later captures retain the usual salt and committed-boundary
+checks; SQLite `synchronous=FULL` and resume verification are unchanged.
+
 ## Local durability boundaries
 
 | Operation | Local barrier | What it proves | May release a Cell response? |

@@ -68,8 +68,7 @@ const RELATIVE_TRUNCATE_PAGES: u32 = 1024;
 struct LastL0Header {
     wal_offset: i64,
     wal_size: i64,
-    wal_salt1: u32,
-    wal_salt2: u32,
+    wal_salts: Option<(u32, u32)>,
     commit: u32,
     final_pgno: u32,
     final_page: Vec<u8>,
@@ -251,9 +250,8 @@ impl CaptureEngine {
         // Ensure the meta directory exists (db.go:880-883).
         db.host.create_dir_all(&db.meta_path)?;
 
-        // Ensure the WAL has at least one frame (db.go:886-888).
-        db.ensure_wal_exists()?;
-
+        // Capture creates a WAL frame when needed. Writing it during open would
+        // change a restored root even if the application only reads then closes.
         Ok(db)
     }
 
@@ -476,7 +474,6 @@ impl CaptureEngine {
         {
             return Err(CrabError::ChecksumMismatch);
         }
-        let wal = self.wal_header_bytes()?;
         self.sealed_l0_segments.clear();
         #[cfg(feature = "replica")]
         {
@@ -487,8 +484,7 @@ impl CaptureEngine {
             LastL0Header {
                 wal_offset: WAL_HEADER_SIZE as i64,
                 wal_size: 0,
-                wal_salt1: be_u32(&wal[16..]),
-                wal_salt2: be_u32(&wal[20..]),
+                wal_salts: None,
                 commit: count,
                 final_pgno: 0,
                 final_page: Vec::new(),
@@ -541,8 +537,7 @@ impl CaptureEngine {
             let end = WAL_HEADER_SIZE as i64
                 + i64::from(required.frames)
                     * (i64::from(self.page_size) + WAL_FRAME_HEADER_SIZE as i64);
-            if header.wal_salt1 != required.salt1
-                || header.wal_salt2 != required.salt2
+            if header.wal_salts != Some((required.salt1, required.salt2))
                 || self.last_synced_wal_offset < end
             {
                 return Err(CrabError::LTXCorrupted);
