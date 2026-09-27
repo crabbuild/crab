@@ -572,6 +572,24 @@ inventory. Both the manifest and `check-architecture-gates.py` are unchanged
 from `origin/main`. This follow-up does not change the policy inventory to
 suppress that failure. Review readiness does not imply green merge gates.
 
+## Concurrent lifecycle qualification — 2026-09-27
+
+Running the in-memory and ignored RustFS replica cases together exposed shared
+process-global query barriers on `311105eb864`. One case could release another
+case's paused SQL, invalidating the snapshot-retention and drain observations.
+A new regression runs two complete replica lifecycles concurrently against
+independent stores with identical Cell identities. It fails on the old fixture
+at the retained-snapshot assertion.
+
+Each paused invocation now carries a unique test token. The static typed query
+handler consumes that token's notification and release channel; dropping the
+fixture also releases blocked SQL. Refresh, schema migration, and canceled and
+uncanceled drain use the same fixture-owned gate. All six replica cases pass
+together with six test threads, including local RustFS 1.0.0 GA. The existing
+provider CI job runs that concurrent command with an isolated object prefix.
+Production read paths, authority gates, and lifecycle assertions are unchanged.
+This closes test interference, not the fleet capacity or release gates below.
+
 ## Scope still open
 
 The container runs do not establish complete per-query S3 costs, production
