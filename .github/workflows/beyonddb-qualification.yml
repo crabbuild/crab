@@ -80,6 +80,8 @@ jobs:
           set -euo pipefail
           cargo test -p beyonddb --locked --lib server::capacity \
             2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/capacity.log"
+          cargo test -p beyonddb --locked --test elastic_cells directory_activation \
+            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/directory-activation.log"
           # Keep the two process workloads serial so their storage load does not
           # distort one another's unchanged readiness deadlines.
           cargo test -p beyonddb --locked --no-fail-fast \

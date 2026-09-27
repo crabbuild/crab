@@ -127,3 +127,17 @@ The extraction should replace the account routing path when integration passes.
 Keeping two authoritative route directories or a reader fallback would require a
 separate migration contract. No such compatibility requirement has been adopted
 for these unreleased schemas.
+
+## Activation comparison prerequisite
+
+Base and GSI activation replay now compare compact indexed pages of at most 64
+ranges in one Cell snapshot. Base replay compares its epoch and table snapshot
+once; neither replay path reconstructs a full directory result. This removes the
+GSI SQL-result overflow above 1,000 rows and bounds additional comparison memory
+independently of directory growth. A mismatch stops comparison immediately.
+
+The metadata regression installs 1,024 directory entries through native commands,
+restores the account owner, replays both base and GSI activation and rejects
+changed entries across page boundaries. These are directory entries, not 1,024
+active data Cells; public initial placement remains capped at 256. This is a
+prerequisite cleanup, not implementation of the sharded topology above.

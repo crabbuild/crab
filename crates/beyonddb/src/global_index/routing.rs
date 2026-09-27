@@ -64,24 +64,13 @@ impl Command for ActivateGlobalIndexRoute {
             vec![SqlValue::Text(input.index.id.clone())],
         ))?;
         if !existing[0].rows.is_empty() {
-            let actual = context.sql(&statement("SELECT partition_id, lower_bound, upper_bound, epoch FROM ddb_global_index_partitions WHERE table_id = ?1 ORDER BY lower_bound", vec![SqlValue::Text(input.index.id.clone())]))?;
-            let expected: Vec<_> = input
-                .partitions
-                .iter()
-                .map(|range| {
-                    vec![
-                        SqlValue::Blob(range.partition_id.to_vec()),
-                        SqlValue::Blob(range.lower.to_vec()),
-                        SqlValue::Blob(
-                            range
-                                .upper
-                                .map_or_else(|| vec![0xff; 17], |upper| upper.to_vec()),
-                        ),
-                        SqlValue::Text("1".into()),
-                    ]
-                })
-                .collect();
-            return Ok(if actual[0].rows == expected {
+            let matches = crate::routing::route_partitions_match(
+                context,
+                "ddb_global_index_partitions",
+                &input.index.id,
+                input.partitions.into_iter(),
+            )?;
+            return Ok(if matches {
                 CommandResult::Success(Json(true))
             } else {
                 CommandResult::Rejected(Json(false))

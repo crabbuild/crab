@@ -186,8 +186,28 @@ impl Command for ActivateTableRoute {
                 ActivateTableRouteOutcome::TableNotEmpty,
             )));
         }
-        if let Some(current) = load_route(&route.table_id, |batch| context.sql(batch))? {
-            let outcome = if current == route {
+        let existing = context.sql(&statement(
+            "SELECT route_epoch, route_table FROM ddb_routes WHERE table_id = ?1",
+            vec![SqlValue::Text(route.table_id.clone())],
+        ))?;
+        if let Some(row) = existing[0].rows.first() {
+            let [SqlValue::Text(epoch), SqlValue::Blob(table)] = row.as_slice() else {
+                return Err(crate::Error::Command("invalid table route row"));
+            };
+            let matches = parse_epoch(epoch)? == route.epoch
+                && serde_json::from_slice::<TableRecord>(table)? == route.partitions[0].table
+                && route_partitions_match(
+                    context,
+                    "ddb_route_partitions",
+                    &route.table_id,
+                    route.partitions.iter().map(|partition| RoutePagePartition {
+                        partition_id: partition.partition_id,
+                        lower: partition.lower.unwrap_or([0; 16]),
+                        upper: partition.upper,
+                        epoch: partition.epoch,
+                    }),
+                )?;
+            let outcome = if matches {
                 ActivateTableRouteOutcome::Activated
             } else {
                 ActivateTableRouteOutcome::AlreadyActive
@@ -552,6 +572,34 @@ pub(crate) fn read_route_page(
         partitions,
         has_more,
     }))
+}
+
+// Activation replay runs inside one snapshot. Compare compact indexed pages so
+// an existing large directory cannot exceed SQL result limits or duplicate its
+// table schema once per range in memory.
+pub(crate) fn route_partitions_match(
+    context: &CommandContext<'_, '_>,
+    partitions_table: &'static str,
+    table_id: &str,
+    mut expected: impl Iterator<Item = RoutePagePartition>,
+) -> Result<bool> {
+    let mut after = Vec::new();
+    loop {
+        let page = context.sql(&statement(
+            &format!("SELECT partition_id, lower_bound, upper_bound, epoch FROM {partitions_table} WHERE table_id = ?1 AND lower_bound > ?2 ORDER BY lower_bound LIMIT 64"),
+            vec![SqlValue::Text(table_id.to_owned()), SqlValue::Blob(after.clone())],
+        ))?;
+        for row in &page[0].rows {
+            let actual = decode_page_partition(row)?;
+            after = actual.lower.to_vec();
+            if expected.next().as_ref() != Some(&actual) {
+                return Ok(false);
+            }
+        }
+        if page[0].rows.len() < 64 {
+            return Ok(expected.next().is_none());
+        }
+    }
 }
 
 pub(crate) fn decode_page_partition(row: &Vec<SqlValue>) -> Result<RoutePagePartition> {

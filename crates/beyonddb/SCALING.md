@@ -2267,3 +2267,50 @@ cases (678.16s), and all three standalone process cases (288.38s). This qualifie
 the graceful node-session retirement fix on that head. It predates the codec,
 discovery-timing and range-rebalance increments and does not qualify those changes
 or establish the cause of the intermittent Scan failure.
+
+## Bounded activation replay
+
+Metadata review found two full-directory comparisons in the native activation
+commands. GSI replay selected every partition in a single SQL result, failing
+above the runtime's 1,000-row limit. Base replay paged SQL reads but reconstructed
+every `PartitionSpec`, copying the table schema for each range before comparison.
+
+Both now compare compact 64-row pages within the command's existing atomic
+snapshot. The base command checks its directory epoch and table schema once.
+Comparison stops at the first mismatch or when either sequence ends. Existing
+input validation, live-generation checks, index-before-base publication and
+transaction fencing remain in place. The diagnostic `ReadTableRoute` query still
+materializes a complete route; serving point and maintenance reads use indexed
+lookups or `ReadRoutePage` instead.
+
+The regression failed on `4f37a16fb8c` with `SQL result exceeds 1000 rows` after
+successful native GSI activation. With the change, base and GSI replay across
+1,024 entries passes after account-owner restoration, including rejection of
+changed first/middle/final entries and changed coverage (1.37s). This test installs
+metadata through native commands; it does not provision 1,024 data owners or
+change the public 256-range initial-placement limit. The focused regression is
+included in the qualification workflow.
+
+The signed SDK partial-creation recovery case also passes (1.22s): the serving
+worker restores the account, finishes base publication after index publication,
+then SDK writes, restored base reads and index reads succeed. Strict all-target
+Clippy passes (17.19s), and formatting/diff checks and the standalone build pass.
+
+| Boundary | Evidence |
+| --- | --- |
+| Entry | `ActivateTableRoute` and `ActivateGlobalIndexRoute`, called by `backend/table_creation.rs::publish_initial_routes` during creation and recovery. |
+| Owner | Account command snapshot owns both the route header and indexed rows, preserving atomic comparison. |
+| Dependency | Runtime `primitives/sql.rs::execute_batch` rejects more than 1,000 rows or 1 MiB per SQL result batch; a 64-row compact range page fits both. |
+| Siblings | Base and GSI activation share `route_partitions_match`; split publication already compares only source/child rows. Public point, Scan, TTL, projection and recovery use indexed or bounded directory queries. |
+| Main | Main and the preceding PR head retain full-directory activation comparisons. |
+
+The increment adds 37 net production lines to share bounded comparison; no
+schema, dependency or configuration changes. It does not shard account metadata.
+
+[Run 36317672700](https://github.com/crabbuild/crab/actions/runs/36317672700),
+head `48416adec32`, completed with six capacity cases and all three standalone
+process cases passing (273.86s). Peer tests finished 25 passed and one failed:
+`sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restore` received
+`Capacity("peer HTTP admission")` when reading the sealed source at line 417.
+This differs from the earlier post-drain Scan 503. The admission failure remains
+open; the run does not qualify a green peer suite or the newer rebalancing head.
