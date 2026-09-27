@@ -15,10 +15,13 @@ CREATE VIEW ddb_live_tables AS
 CREATE TABLE ddb_items (
     table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
     item_key BLOB NOT NULL,
+    partition_key BLOB NOT NULL,
+    sort_key BLOB NOT NULL,
     item BLOB NOT NULL,
     logical_bytes INTEGER NOT NULL CHECK (logical_bytes >= 0),
     PRIMARY KEY (table_id, item_key)
 );
+CREATE INDEX ddb_account_items_query ON ddb_items (table_id, partition_key, sort_key, item_key);
 
 CREATE TABLE ddb_iam_user_policies (
     user_name TEXT NOT NULL,

@@ -319,6 +319,33 @@ impl Query for GetItem {
     }
 }
 
+/// Read account-local sort-key items in DynamoDB key order.
+pub struct QueryAccountItems;
+
+impl Query for QueryAccountItems {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 40;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<crate::PartitionQueryInput>;
+    type Output = Json<crate::PartitionQueryOutcome>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        let Some(table) = crate::table::query_unrouted_table_by_id(context, &input.table_id)?
+        else {
+            return Ok(Json(crate::PartitionQueryOutcome::NotInstalled));
+        };
+        if input.index_name.is_some() {
+            return Ok(Json(crate::PartitionQueryOutcome::InvalidKey));
+        }
+        crate::partition::query::query_ordered(
+            context,
+            &table,
+            input,
+            crate::partition::query::QuerySource::Account,
+        )
+    }
+}
+
 /// An operation staged with other items under one coordinator decision.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TransactionOperation {
@@ -447,8 +474,14 @@ fn write_item(
         crate::global_index::outbox::enqueue(context, table, key, 0, old, Some(item.clone()))?;
     }
     context.sql(&statement(
-        "INSERT INTO ddb_items (table_id, item_key, item, logical_bytes) VALUES (?1, ?2, X'', ?3) ON CONFLICT(table_id, item_key) DO UPDATE SET item = excluded.item, logical_bytes = excluded.logical_bytes",
-        vec![SqlValue::Text(table_id.into()), SqlValue::Blob(key.to_vec()), SqlValue::Integer(crate::statistics::item_bytes(item)?)],
+        "INSERT INTO ddb_items (table_id, item_key, partition_key, sort_key, item, logical_bytes) VALUES (?1, ?2, ?3, ?4, X'', ?5) ON CONFLICT(table_id, item_key) DO UPDATE SET partition_key = excluded.partition_key, sort_key = excluded.sort_key, item = excluded.item, logical_bytes = excluded.logical_bytes",
+        vec![
+            SqlValue::Text(table_id.into()),
+            SqlValue::Blob(key.to_vec()),
+            SqlValue::Blob(crate::partition::key::partition_key_bytes(item, &table.key_schema)?),
+            SqlValue::Blob(crate::partition::key::index_key(item, &table.key_schema)?.1),
+            SqlValue::Integer(crate::statistics::item_bytes(item)?),
+        ],
     ))?;
     crate::item_storage::StoredValue::Account { table_id, key }.write(context, item)?;
     crate::secondary_index::write(context, table, key, item)

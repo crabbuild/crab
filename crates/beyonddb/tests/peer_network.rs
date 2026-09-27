@@ -5,6 +5,7 @@ include!("support/routes.rs");
 mod support;
 
 mod peer_network {
+    pub(super) mod account_query;
     pub(super) mod capacity;
     pub(super) mod concurrency;
     pub(super) mod global_indexes;
@@ -425,6 +426,49 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         )
         .await
         .unwrap();
+    remote_account
+        .command::<CreateTable>(
+            &account,
+            crab_cell_runtime::MutationIdentity {
+                request_id: crab_cell_runtime::identity::RequestId::from_bytes([109; 16]),
+                issued_at_ms: now_ms(),
+                expires_at_ms: now_ms() + 60_000,
+            },
+            Json(TableSpec {
+                table_class: Default::default(),
+                placement: beyonddb::TablePlacement::Account,
+                local_secondary_indexes: Vec::new(),
+                global_secondary_indexes: Vec::new(),
+                table_name: "AccountOrdered".into(),
+                key_schema: vec![
+                    KeySchemaElement {
+                        attribute_name: "pk".into(),
+                        key_type: KeyType::Hash,
+                    },
+                    KeySchemaElement {
+                        attribute_name: "sk".into(),
+                        key_type: KeyType::Range,
+                    },
+                ],
+                attribute_definitions: vec![
+                    AttributeDefinition {
+                        attribute_name: "pk".into(),
+                        attribute_type: ScalarAttributeType::S,
+                    },
+                    AttributeDefinition {
+                        attribute_name: "sk".into(),
+                        attribute_type: ScalarAttributeType::N,
+                    },
+                ],
+                billing_mode: BillingMode::PayPerRequest,
+                provisioned_throughput: None,
+                deletion_protection_enabled: false,
+                initial_tags: Vec::new(),
+                resource_arn: None,
+            }),
+        )
+        .await
+        .unwrap();
     let wrong_principal = CellClient::runtime_with_peer(
         application.registry(),
         remote.runtime(),
@@ -535,6 +579,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
                     "Resource": [
                         "arn:aws:dynamodb:us-east-1:123456789012:table/NetworkData",
                         "arn:aws:dynamodb:us-east-1:123456789012:table/RemoteTable",
+                        "arn:aws:dynamodb:us-east-1:123456789012:table/AccountOrdered",
                         "arn:aws:dynamodb:us-east-1:123456789012:table/ServingIndexFailover",
                         "arn:aws:dynamodb:us-east-1:123456789012:table/ServingIndexFailover/index/ByBucket",
                         "arn:aws:dynamodb:us-east-1:123456789012:table/RecreatedTable"
@@ -576,6 +621,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .load()
         .await;
     let sdk = aws_sdk_dynamodb::Client::new(&sdk_config);
+    peer_network::account_query::write_and_assert(&sdk).await;
     sdk.create_table()
         .table_name("NetworkData")
         .key_schema(
@@ -918,6 +964,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .load()
         .await;
     let replacement_sdk = aws_sdk_dynamodb::Client::new(&replacement_sdk_config);
+    peer_network::account_query::assert_restored(&replacement_sdk).await;
     peer_network::concurrency::assert_counter(&replacement_sdk).await;
     peer_network::capacity::assert_restored_retry(&replacement_sdk).await;
     // The restored account's registry leads a new frontend to the existing

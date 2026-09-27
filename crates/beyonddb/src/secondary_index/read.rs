@@ -6,7 +6,7 @@ use extenddb_core::types::{KeyType, extract_key, item_size_bytes};
 use crate::item_storage::StoredValue;
 use crate::partition::key::{index_key, partition_key_bytes};
 use crate::partition::query::index_bounds;
-use crate::table::{TableRecord, decode_table, statement};
+use crate::table::{TableRecord, query_unrouted_table_by_id, statement};
 use crate::{Error, Json, PartitionQueryInput, PartitionQueryOutcome, Result, SqlValue};
 
 pub(crate) struct QueryAccountIndex;
@@ -19,11 +19,7 @@ impl Query for QueryAccountIndex {
     type Output = Json<PartitionQueryOutcome>;
 
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
-        let rows = context.sql(&statement(
-            "SELECT t.record FROM ddb_live_tables t LEFT JOIN ddb_directory_roots r ON t.table_id = r.table_id AND r.initial_fingerprint IS NOT NULL WHERE t.table_id = ?1 AND r.table_id IS NULL",
-            vec![SqlValue::Text(input.table_id.clone())],
-        ))?;
-        let Some(table) = decode_table(&rows[0])? else {
+        let Some(table) = query_unrouted_table_by_id(context, &input.table_id)? else {
             return Ok(Json(PartitionQueryOutcome::NotInstalled));
         };
         query(context, &table, input, false)

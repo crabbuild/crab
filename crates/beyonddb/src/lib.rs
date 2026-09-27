@@ -161,7 +161,7 @@ static COMMANDS: [OperationDescriptor; 25] = [
         ..participant::phase_operation(34)
     },
 ];
-static QUERIES: [OperationDescriptor; 23] = [
+static QUERIES: [OperationDescriptor; 24] = [
     operation(4),
     operation(7),
     operation(8),
@@ -188,6 +188,7 @@ static QUERIES: [OperationDescriptor; 23] = [
     operation(37),
     operation(38),
     participant::phase_operation(39),
+    operation(40),
 ];
 
 /// Statically linked account application.
@@ -377,6 +378,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<ActivateGlobalIndexRoute>()?;
         registry.bind_command::<RecordAccountIndexDelivery>()?;
         registry.bind_query::<GetItem>()?;
+        registry.bind_query::<QueryAccountItems>()?;
         registry.bind_query::<ReadAccountTransaction>()?;
         registry.bind_query::<ReadAccountTransactionResult>()?;
         registry.bind_query::<DescribeTable>()?;

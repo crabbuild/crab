@@ -538,15 +538,17 @@ update expressions execute inside the Cell transaction. Base-table Scan uses
 bounded pages with stable continuation keys. Parallel Scan assigns contiguous
 hash intervals to segments and skips data Cell ranges outside each interval;
 cells crossing an interval boundary still scan and filter their items. Query
-supports hash-only tables
-and sort-key tables once their initial data route is published.
+supports hash-only and sort-key tables on both account-local and routed storage.
+Account-local sort-key Query uses a composite ordered key index and bounded
+pages; its transaction-intent fence conservatively covers the account table.
+The signed two-owner SDK test writes numeric sort keys, pages in both directions,
+and repeats the query after account-owner restoration.
 Low-level account and partition commands support local atomic transactions.
 The public adapter routes all transactional writes through the coordinator,
 including account participants before route activation. All transactional reads
 use durable shared locks and captured participant images, retrieved individually
 to avoid an aggregate Cell response limit. Same-Cell reads now pay the same
-coordinator protocol cost. Account-local
-base-table sort-key Query, online global-index changes, non-ALL local index projections,
+coordinator protocol cost. Online global-index changes, non-ALL local index projections,
 and streamed writes remain unsupported. Local secondary indexes with ALL
 projection support account/routed Query and Scan, strong reads, numeric sort
 ordering with base-sort tie-breakers, and base-plus-index continuation keys.
@@ -569,8 +571,9 @@ changes wait for prepared transactions to resolve, preserving their capacity
 reservations. Native Cell tests cover restart, invalid historical keys, delivery
 tracking, and split inheritance. Account lifecycle orchestration and SDK
 `UpdateTable` create/delete remain unimplemented; these commands do not make
-online index changes a supported API. The foundation extends the unreleased
-initial SQL schema; upgrading roots written by earlier binaries is unqualified.
+online index changes a supported API. The foundation and account-local ordered
+query index extend unreleased initial SQL schemas; upgrading roots written by
+earlier binaries is unqualified.
 
 `tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,

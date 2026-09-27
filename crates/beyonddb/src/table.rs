@@ -551,6 +551,19 @@ pub(super) fn query_unrouted_table(
     )
 }
 
+pub(super) fn query_unrouted_table_by_id(
+    context: &QueryContext<'_>,
+    id: &str,
+) -> Result<Option<TableRecord>> {
+    decode_table(
+        &context.sql(&statement(
+            "SELECT t.record FROM ddb_live_tables t LEFT JOIN ddb_directory_roots r ON t.table_id = r.table_id AND r.initial_fingerprint IS NOT NULL \
+             WHERE t.table_id = ?1 AND r.table_id IS NULL",
+            vec![SqlValue::Text(id.to_owned())],
+        ))?[0],
+    )
+}
+
 pub(super) fn decode_table(result: &SqlResultSet) -> Result<Option<TableRecord>> {
     let Some(row) = result.rows.first() else {
         return Ok(None);
