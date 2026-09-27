@@ -1,0 +1,92 @@
+name: BeyondDB SDK qualification
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/beyonddb-qualification.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/beyonddb/**"
+      - "crates/crab-cell-*/**"
+      - "crates/crab-ltx/**"
+      - "crates/crab-storage/**"
+      - "crates/crab-types/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/beyonddb-qualification.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/beyonddb/**"
+      - "crates/crab-cell-*/**"
+      - "crates/crab-ltx/**"
+      - "crates/crab-storage/**"
+      - "crates/crab-types/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beyonddb-sdk-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sdk:
+    name: Signed SDK and process recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+      - name: Prepare isolated build and fixture paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/beyonddb-target" "$RUNNER_TEMP/beyonddb-fixtures" "$RUNNER_TEMP/beyonddb-logs"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/beyonddb-target" >> "$GITHUB_ENV"
+          echo "TMPDIR=$RUNNER_TEMP/beyonddb-fixtures" >> "$GITHUB_ENV"
+      - name: Install qualification tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y pipx unzip openssl
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          tools_dir="$RUNNER_TEMP/beyonddb-tools"
+          mkdir -p "$tools_dir"
+          archive=rustfs-linux-x86_64-gnu-v1.0.0-rc.1.zip
+          curl --fail --location --retry 3 \
+            "https://github.com/rustfs/rustfs/releases/download/1.0.0-rc.1/$archive" \
+            --output "$tools_dir/$archive"
+          echo "01c03ba58adfca757578729501f4f886a98f13acfb18be5a2db60e04f5cbb595  $tools_dir/$archive" | sha256sum --check
+          unzip -q "$tools_dir/$archive" -d "$tools_dir"
+          chmod +x "$tools_dir/rustfs"
+          "$tools_dir/rustfs" --version
+          echo "$tools_dir" >> "$GITHUB_PATH"
+      - name: Verify signed SDK requests and owner recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep the two process workloads serial so their storage load does not
+          # distort one another's unchanged readiness deadlines.
+          cargo test -p beyonddb --locked --no-fail-fast \
+            --test peer_network --test server_binary \
+            -- --include-ignored --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/sdk.log"
+      - name: Retain qualification logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: beyonddb-sdk-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/beyonddb-logs/
+          if-no-files-found: warn
+          retention-days: 7
