@@ -77,11 +77,14 @@ jobs:
             test -n "$container"
             test "$(docker wait "$container")" = 0
           done
-          # This separate correctness gate hosts its runtimes in one container;
+          # These correctness gates host their runtimes in one container;
           # independent-process scaling remains the following qualification.
           compose run --no-deps --name cell-reference-rollout \
             -e CRAB_CELL_PERF_PROCESS_ROOT=reference-compose-additive-rollout \
             driver rollout
+          compose run --no-deps --name cell-reference-entities \
+            -e CRAB_CELL_TEST_PREFIX=reference-compose-entities \
+            driver entities
           compose stop
       - name: Scale readers across 3, 5, 10 and 20 constrained nodes
         run: |

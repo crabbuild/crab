@@ -5,7 +5,8 @@ case "${1:-}" in
   driver) role=driver; selected=process_performance::reference_compose_fleet_end_to_end_performance ;;
   scale) role=driver; selected=process_scaling::reference_compose_reader_scaling ;;
   rollout) role=rollout; selected=public_host::rollout::three_node_host_rustfs_additive_code_rollout ;;
-  *) printf 'usage: run.sh node|driver|scale|rollout\n' >&2; exit 2 ;;
+  entities) role=entities; selected=entities::hosts::entity_ledgers_are_isolated_across_three_rustfs_hosts ;;
+  *) printf 'usage: run.sh node|driver|scale|rollout|entities\n' >&2; exit 2 ;;
 esac
 binary=
 for candidate in /target/release/deps/reference_application-*; do

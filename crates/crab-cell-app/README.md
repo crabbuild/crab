@@ -65,10 +65,22 @@ and cancellation of a storage-stalled activation during drain.
 
 `CellType::new` declares a fixed-shard namespace. For independently addressed
 entity Cells, declare one namespace shard and call
-`CellType::with_entity_partitions`. Derive each 33-byte partition with
-`CellType::entity_partition`; the application handle validates that encoding.
+`CellType::with_entity_partitions`. Generated accessors and
+`ApplicationHandle::target_for_scope` derive the canonical 33-byte entity
+partition from the typed key. `CellType::entity_partition` exposes the same
+derivation for host provisioning; the application handle validates that encoding.
 The entity mode is part of the immutable application descriptor. It does not
 split SQLite state or remove Cell catalog and host admission bounds.
+Explicit SQL and effect capabilities accept entity targets. Namespace-level
+KV, Blob, Queue, Cron, Workflow, and activity capabilities require fixed shards
+and reject entity declarations before a call can start.
+
+The entity-ledger fixture provisions twelve SQL Cells across three public
+hosts, uses generated operations through the signed peer balancer, and verifies
+independent request ledgers, exact duplicate receipts, visible readback, and
+4/4/4 ownership read from object-store authority. Its ignored RustFS variant
+runs in the Compose workflow. These hosts share one process; this fixture is
+a correctness gate before the many-Cell process scaling workload.
 
 ```sh
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/<checkout> \

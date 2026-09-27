@@ -516,6 +516,13 @@ This seven-Cell, six-lane integration check is the starting point for this
 packet; the larger application distribution, fault, and capacity matrix remains
 open.
 
+The entity-ledger correctness gate additionally provisions twelve SQL entity
+Cells across three public hosts. It verifies generated targeting, per-Cell
+request deduplication, visible receipt-bound readback, and stored 4/4/4 ownership
+through a signed load balancer and GA RustFS. Its hosts share one process;
+the many-Cell process, workload-shape, resource, and capacity matrix above
+remains open. See [the runnable gate](../../crab-cell-app/PERFORMANCE.md#entity-targeting-correctness).
+
 Run these before the scaled load, then repeat the relevant cases after any
 change to routing, admission, VFS, or durability. Build and broad provider
 proof belong in CI or a dedicated test environment.

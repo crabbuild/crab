@@ -397,7 +397,7 @@ pub trait CellApplication: Send + Sync + 'static {
 /// Implementations must return the same bounded bytes for the same logical key
 /// across compatible releases; changing them moves the key to another Cell.
 pub trait CellKey {
-    /// Returns the stored canonical bytes used by the declared shard function.
+    /// Returns the stored canonical bytes used by the declared partition function.
     fn canonical_bytes(&self) -> &[u8];
 }
 
@@ -478,7 +478,7 @@ impl<A: CellApplication> ApplicationHandle<A> {
         &self.compiled
     }
 
-    /// Derives a scoped target from a declared stable namespace and shard key.
+    /// Derives a scoped target using the declared entity or fixed-shard topology.
     pub fn target_for_scope(&self, namespace: NamespaceId, scope: &[u8]) -> Result<CellTarget> {
         let cell_type = self
             .compiled
@@ -486,6 +486,10 @@ impl<A: CellApplication> ApplicationHandle<A> {
             .iter()
             .find(|cell_type| cell_type.namespace == namespace)
             .ok_or(Error::Registry("namespace is not declared by application"))?;
+        if cell_type.partition_version == ENTITY_PARTITION_VERSION {
+            let partition = cell_type.entity_partition(scope)?;
+            return CellTarget::new(self.tenant, self.application, namespace, &partition);
+        }
         let partition = cell_type.partition_for_scope(scope)?;
         CellTarget::new(self.tenant, self.application, namespace, &partition)
     }
@@ -545,9 +549,9 @@ impl<A: CellApplication> ApplicationHandle<A> {
         self.client.resolve(pending).await
     }
 
-    /// Returns the typed KV capability for a compiled KV module.
+    /// Returns the typed KV capability for a compiled fixed-shard KV module.
     pub fn kv<M: KvModule>(&self, namespace: NamespaceId) -> Result<KvNamespace<M>> {
-        self.validate_namespace(namespace, M::MODULE, CatalogRole::Kv)?;
+        self.validate_sharded_namespace(namespace, M::MODULE, CatalogRole::Kv)?;
         KvNamespace::new(
             self.client.clone(),
             self.tenant,
@@ -563,33 +567,33 @@ impl<A: CellApplication> ApplicationHandle<A> {
         SqlCell::new(self.client.clone(), target)
     }
 
-    /// Returns the typed Blob capability for a compiled Blob module.
+    /// Returns the typed Blob capability for a compiled fixed-shard Blob module.
     pub fn blob<M: BlobModule>(&self) -> Result<BlobNamespace<M>> {
-        self.validate_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Blob)?;
+        self.validate_sharded_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Blob)?;
         BlobNamespace::new(self.client.clone(), self.tenant, self.application)
     }
 
-    /// Returns the typed Queue capability for a compiled Queue module.
+    /// Returns the typed Queue capability for a compiled fixed-shard Queue module.
     pub fn queue<M: QueueModule>(&self) -> Result<QueueNamespace<M>> {
-        self.validate_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Queue)?;
+        self.validate_sharded_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Queue)?;
         QueueNamespace::new(self.client.clone(), self.tenant, self.application)
     }
 
-    /// Returns the typed Cron capability for a compiled Cron module.
+    /// Returns the typed Cron capability for a compiled fixed-shard Cron module.
     pub fn cron<M: CronModule>(&self) -> Result<CronNamespace<M>> {
-        self.validate_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Cron)?;
+        self.validate_sharded_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Cron)?;
         CronNamespace::new(self.client.clone(), self.tenant, self.application)
     }
 
-    /// Returns the typed Workflow capability for a compiled Workflow module.
+    /// Returns the typed Workflow capability for a compiled fixed-shard Workflow module.
     pub fn workflow<M: WorkflowModule>(&self) -> Result<WorkflowNamespace<M>> {
-        self.validate_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Workflow)?;
+        self.validate_sharded_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Workflow)?;
         WorkflowNamespace::new(self.client.clone(), self.tenant, self.application)
     }
 
-    /// Returns the native activity capability for one compiled Workflow module.
+    /// Returns the native activity capability for one compiled fixed-shard Workflow module.
     pub fn activities<M: WorkflowActivityModule>(&self) -> Result<WorkflowActivities<M>> {
-        self.validate_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Workflow)?;
+        self.validate_sharded_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Workflow)?;
         if !self.compiled.registry.has_activity_runner(M::NAMESPACE) {
             return Err(Error::Registry("activity runner is not registered"));
         }
@@ -636,12 +640,29 @@ impl<A: CellApplication> ApplicationHandle<A> {
         self.compiled.validate_module(target.namespace(), module)
     }
 
-    fn validate_namespace(
+    fn validate_sharded_namespace(
         &self,
         namespace: NamespaceId,
         module: &'static str,
         role: CatalogRole,
     ) -> Result<()> {
+        let cell_type = self.validate_namespace(namespace, module, role)?;
+        // Namespace helpers derive four-byte shard targets internally. Accepting
+        // an entity declaration here would bypass the application's topology.
+        if cell_type.partition_version == ENTITY_PARTITION_VERSION {
+            return Err(Error::Identity(
+                "namespace capability requires fixed shards",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_namespace(
+        &self,
+        namespace: NamespaceId,
+        module: &'static str,
+        role: CatalogRole,
+    ) -> Result<&CellType> {
         let Some(cell_type) = self
             .compiled
             .cell_types
@@ -660,7 +681,7 @@ impl<A: CellApplication> ApplicationHandle<A> {
         if contract.role != role {
             return Err(Error::Registry("namespace module differs from capability"));
         }
-        Ok(())
+        Ok(cell_type)
     }
 }
 
