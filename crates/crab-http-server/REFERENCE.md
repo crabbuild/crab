@@ -257,6 +257,14 @@ revision, serving session and endpoint, exact LTX root, code/schema pair, and
 next scheduler deadline. It reads object-store authority directly; it does not
 open SQLite, acquire ownership, or extend a lease.
 
+`cells status` and `cells node` validate the selected release descriptor and
+inspect only the requested control/session. They do not scan the fleet's Cell
+inventory on every observation. Full inventory compatibility remains a startup
+and release-activation gate; an unrelated incompatible Cell cannot prevent
+these status commands from inspecting a deployment whose release matches the
+binary. Status still reads fresh authority and signed session state, so this
+does not introduce cached ownership or relax placement qualification.
+
 `cells capacity --json --live` is a read-only mTLS request to the running
 process. It reports that process's retained startup memory limit, free Cell
 volume bytes, configured Cell-volume limit, available file descriptors,
