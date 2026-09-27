@@ -85,6 +85,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
                 &account,
                 mutation(),
                 Json(TableSpec {
+                    placement: beyonddb::TablePlacement::Account,
                     local_secondary_indexes: Vec::new(),
                     global_secondary_indexes: Vec::new(),
                     table_name: name.into(),
@@ -353,8 +354,15 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         Some(key("created"))
     );
     for name in ["AccountItems", "EmptyItems"] {
+        let record = client
+            .query::<beyonddb::DescribeTable>(&account, None, Json(name.into()))
+            .await
+            .unwrap()
+            .output
+            .0
+            .unwrap();
         assert!(
-            matches!(client.command::<DeleteTable>(&account, mutation(), Json(name.into())).await,
+            matches!(client.command::<DeleteTable>(&account, mutation(), Json(beyonddb::TableGeneration { table_name: name.into(), table_id: record.id })).await,
             Err(InvocationError::Rejected(result)) if result.output.0 == DeleteTableOutcome::TransactionConflict)
         );
     }

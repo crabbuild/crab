@@ -123,6 +123,8 @@ impl CatalogEntry {
 /// Verified proof that an immutable catalog page is reachable from a shard head.
 #[derive(Clone)]
 pub struct CatalogProof {
+    tenant: TenantId,
+    application: ApplicationId,
     entry: CatalogEntry,
     revision: u64,
 }
@@ -189,6 +191,8 @@ impl CatalogShardScan {
             }
             self.previous = Some(entry.cell);
             proofs.push(CatalogProof {
+                tenant: self.catalog.tenant,
+                application: self.catalog.application,
                 entry,
                 revision: self.revision,
             });
@@ -207,8 +211,22 @@ impl CatalogProof {
     /// Revision zero is intentional: this value is never written as catalog
     /// authority or used for retention; the actor lifecycle is the freshness
     /// boundary and the slow route still performs a verified catalog scan.
-    pub(crate) fn local(entry: CatalogEntry) -> Self {
-        Self { entry, revision: 0 }
+    pub(crate) fn local(entry: CatalogEntry, target: &CellTarget) -> Self {
+        Self {
+            entry,
+            revision: 0,
+            tenant: target.tenant(),
+            application: target.application(),
+        }
+    }
+
+    pub(crate) fn target(&self) -> Result<CellTarget> {
+        CellTarget::new(
+            self.tenant,
+            self.application,
+            self.entry.namespace,
+            &self.entry.partition,
+        )
     }
 
     /// Returns the catalog entry this proof carries.
@@ -281,6 +299,8 @@ impl CellCatalog {
             let observed = self.load_head(shard).await?;
             let Some(head) = self.insert_entry(shard, observed.as_ref(), &entry).await? else {
                 return Ok(CatalogProof {
+                    tenant: self.tenant,
+                    application: self.application,
                     entry,
                     revision: observed.as_ref().map_or(0, |head| head.head.revision),
                 });
@@ -303,7 +323,14 @@ impl CellCatalog {
                 }
             };
             match published {
-                Ok(_) => return Ok(CatalogProof { entry, revision }),
+                Ok(_) => {
+                    return Ok(CatalogProof {
+                        entry,
+                        revision,
+                        tenant: self.tenant,
+                        application: self.application,
+                    });
+                }
                 Err(error) => {
                     loop {
                         match self.lookup_after_failed_publish(&entry).await {
@@ -347,6 +374,8 @@ impl CellCatalog {
             .binary_search_by(|entry| entry.cell.as_bytes().cmp(cell.as_bytes()))
             .ok()
             .map(|index| CatalogProof {
+                tenant: self.tenant,
+                application: self.application,
                 entry: entries[index].clone(),
                 revision: observed.head.revision,
             }))

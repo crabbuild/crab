@@ -37,15 +37,20 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 5] = [
+static COMMANDS: [OperationDescriptor; 7] = [
     operation(1),
     crate::participant::phase_operation(2),
     operation(3),
     crate::participant::phase_operation(4),
     crate::transaction_transport::upload_operation(5),
+    crate::participant::phase_operation(6),
+    crate::participant::phase_operation(7),
 ];
 static QUERIES: [OperationDescriptor; 6] = [
-    operation(1),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(1)
+    },
     OperationDescriptor {
         input_limit: 4096,
         output_limit: crate::transaction_transport::CHUNK_BYTES as u32 + 4096,
@@ -53,7 +58,7 @@ static QUERIES: [OperationDescriptor; 6] = [
     },
     operation(3),
     OperationDescriptor {
-        codec_version: 2,
+        codec_version: 3,
         ..operation(4)
     },
     operation(5),
@@ -88,6 +93,7 @@ impl crab_cell_runtime::registry::CellModule for CoordinatorModule {
                 source.update(include_bytes!("transaction_payload.rs"));
                 source.update(include_bytes!("transaction_transport.rs"));
                 source.update(include_bytes!("transaction_coordinator/phase.rs"));
+                source.update(include_bytes!("transaction_coordinator/read_release.rs"));
                 source.update(include_bytes!("transaction_coordinator/token.rs"));
                 source.update(include_bytes!("transaction_token.rs"));
                 source.update(include_bytes!("items.rs"));
@@ -116,6 +122,8 @@ impl crab_cell_runtime::registry::CellModule for CoordinatorModule {
         registry.bind_command::<RecordParticipantPrepare>()?;
         registry.bind_command::<DecideCrossCellTransaction>()?;
         registry.bind_command::<RecordParticipantResolution>()?;
+        registry.bind_command::<BeginReadResultRelease>()?;
+        registry.bind_command::<RecordReadResultRelease>()?;
         registry.bind_query::<ReadCrossCellTransaction>()?;
         registry.bind_query::<ReadCoordinatorParticipant>()?;
         registry.bind_query::<ReadPendingCrossCellTransactions>()?;
@@ -345,6 +353,10 @@ impl Command for BeginCrossCellTransaction {
                 cell_id,
                 serde_json::to_vec(&participant.target)?,
                 serde_json::to_vec(&participant.operations)?,
+                participant
+                    .operations
+                    .iter()
+                    .any(|operation| matches!(operation.operation, TransactionOperation::Read(_))),
             ));
         }
         if indexes.is_empty()
@@ -388,7 +400,7 @@ impl Command for BeginCrossCellTransaction {
                 SqlValue::Integer(context.now_ms()),
             ],
         ))?;
-        for (position, cell_id, target, operations) in participants_rows {
+        for (position, cell_id, target, operations, retain_operations) in participants_rows {
             let position = i64::try_from(position)
                 .map_err(|_| Error::Command("participant index overflow"))?;
             let chunks = crate::transaction_payload::write(
@@ -399,13 +411,14 @@ impl Command for BeginCrossCellTransaction {
             )?;
             context.sql(&statement(
                 "INSERT INTO ddb_coordinator_participants \
-                 (transaction_id, position, cell_id, target, operation_chunks) VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (transaction_id, position, cell_id, target, operation_chunks, retain_operations) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 vec![
                     SqlValue::Blob(input.transaction_id.to_vec()),
                     SqlValue::Integer(position),
                     SqlValue::Blob(cell_id.to_vec()),
                     SqlValue::Blob(target),
                     SqlValue::Integer(chunks),
+                    SqlValue::Integer(i64::from(retain_operations)),
                 ],
             ))?;
         }
@@ -440,8 +453,10 @@ fn read_decision(
 }
 
 mod phase;
+mod read_release;
 mod registry;
 mod token;
 pub use phase::*;
+pub use read_release::*;
 pub use registry::*;
 pub use token::*;

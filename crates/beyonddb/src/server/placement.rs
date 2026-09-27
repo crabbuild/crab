@@ -1,4 +1,4 @@
-//! Advisory placement and authenticated admission of data and index Cells.
+//! Advisory placement and authenticated admission of range and directory Cells.
 
 use std::sync::Arc;
 
@@ -7,7 +7,7 @@ use crab_cell_runtime::{
     Error, Result,
     fleet::placement::{PlacementObservation, PlacementPlanner},
     identity::{CellTarget, SessionId},
-    node::NodeDirectory,
+    node::{NodeAdvertisement, NodeDirectory},
     peer::{PeerOperation, PeerRoundTrip, PeerSigner, decode_peer_reply, wire},
 };
 
@@ -17,7 +17,15 @@ pub(super) fn is_data_target(target: &CellTarget) -> bool {
     [crate::DATA_NAMESPACE, crate::global_index::NAMESPACE].contains(&target.namespace())
 }
 
+pub(super) fn is_placeable_target(target: &CellTarget) -> bool {
+    // Directory admission shares placement, but data-range reclamation cannot
+    // prove a directory's retirement. Keep that caller's narrower namespace gate.
+    is_data_target(target) || target.namespace() == crate::directory::NAMESPACE
+}
+
 pub(super) struct RangePlacement {
+    pub runtime: crab_cell_runtime::cell::actor::CellRuntime,
+    pub authority: crab_cell_runtime::control::authority::CellAuthority,
     pub directory: NodeDirectory,
     pub session: SessionId,
     pub signer: Arc<PeerSigner>,
@@ -34,39 +42,82 @@ impl RangePlacement {
         let observed_at = unix_time_ms()?;
         // Discovery fails on overflow instead of placing from a partial fleet.
         // Admission at the destination and ownership CAS remain authoritative.
-        let node = if let Some(session) = recovering {
+        if let Some(session) = recovering {
             if session == self.session {
                 return Ok(true);
             }
             // Resume a canceled activation only on its exact claimed owner.
             // Another destination needs the separate expired-lease takeover.
-            self.directory
+            let node = self
+                .directory
                 .load(session, observed_at)
                 .await?
                 .ok_or(Error::CellNotActive)?
                 .advertisement()
-                .clone()
-        } else {
-            let nodes = self.directory.live(observed_at, 1_024).await?;
-            let observations = nodes
-                .iter()
-                .filter_map(|node| {
-                    PlacementObservation::from_signed_advertisement(node, observed_at, false).ok()
-                })
-                .collect::<Vec<_>>();
+                .clone();
+            self.admit_remote(target, node, action).await?;
+            return Ok(false);
+        }
+        let nodes = self.directory.live(observed_at, 1_024).await?;
+        // Heartbeats can renew or expire while discovery waits on storage.
+        // Judge the returned samples now, not against the listing's start.
+        let observed_at = unix_time_ms()?;
+        let mut observations = nodes
+            .iter()
+            .filter_map(|node| {
+                let mut observation =
+                    PlacementObservation::from_signed_advertisement(node, observed_at, false)
+                        .ok()?;
+                if observation.session == self.session {
+                    // The local pool is authoritative after admission/release.
+                    // Waiting for its next heartbeat would reject a slot just
+                    // reclaimed here; other signed resource gates still apply.
+                    observation.active_cells = self.runtime.stats().placement_active_cells();
+                }
+                Some(observation)
+            })
+            .collect::<Vec<_>>();
+        loop {
             let selected = PlacementPlanner::default()
-                .choose(target.cell_id(), observed_at, &observations)?
+                .choose(target.cell_id(), unix_time_ms()?, &observations)?
                 .ok_or(Error::Capacity(
                     "no eligible BeyondDB placement destination",
                 ))?;
             if selected.session == self.session {
                 return Ok(true);
             }
-            nodes
-                .into_iter()
+            let node = nodes
+                .iter()
                 .find(|node| node.session() == selected.session)
                 .ok_or(Error::Node("selected placement session disappeared"))?
-        };
+                .clone();
+            match self.admit_remote(target, node, action).await {
+                Ok(()) => return Ok(false),
+                Err(error @ Error::Capacity(_)) => {
+                    // Signed capacity can lag real admission. Try each observed
+                    // destination at most once, only while authority proves
+                    // no owner was claimed by the rejected attempt.
+                    if self
+                        .authority
+                        .load(target.cell_id())
+                        .await?
+                        .is_some_and(|control| control.value().owner.is_some())
+                    {
+                        return Err(error);
+                    }
+                    observations.retain(|candidate| candidate.session != selected.session);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    pub(super) async fn admit_remote(
+        &self,
+        target: &CellTarget,
+        node: NodeAdvertisement,
+        action: &'static str,
+    ) -> Result<()> {
         let now_ms = unix_time_ms()?;
         let expires = now_ms
             .checked_add(60_000)
@@ -101,7 +152,7 @@ impl RangePlacement {
                 Some(wire::read_reply::Result::Description(description))
                     if description.cell_id.as_slice() == target.cell_id().as_bytes()) =>
             {
-                Ok(false)
+                Ok(())
             }
             Some(wire::peer_reply::Outcome::Error(error)) => {
                 tracing::debug!(code = error.code, "remote range admission rejected");

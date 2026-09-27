@@ -6,16 +6,16 @@ use beyonddb::{
 };
 use extenddb_core::types::TableKeyInfo;
 
-const ACCOUNT: &str = "123456789012";
+pub(super) const ACCOUNT: &str = "123456789012";
 
-fn mutation() -> MutationIdentity {
+pub(super) fn mutation() -> MutationIdentity {
     MutationIdentity {
         request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
         ..identity(89)
     }
 }
 
-fn owner(
+pub(super) fn owner(
     application: &Arc<crab_cell_app::CompiledApplication>,
     layout: &CellStorageLayout,
     session: SessionId,
@@ -303,7 +303,7 @@ async fn journal_recovers_partial_projection_and_fences_delayed_images() {
     );
     let account_handle = provisioner.admit_account(ACCOUNT).await.unwrap();
     provisioner
-        .recover_registered_partitions(ACCOUNT, account_handle, &nodes)
+        .recover_registered_partitions(ACCOUNT, account_handle, &client, &nodes)
         .await
         .unwrap();
     assert!(
@@ -456,21 +456,18 @@ async fn serving_worker_recovers_released_ranges_and_keeps_healthy_indexes_progr
     let source_target = data_target(ACCOUNT, &base.table_id, &source.partition_id).unwrap();
     let first = &source.table.global_secondary_indexes[0];
     let hash = data_key_hash(&first.id, &item, &first.specification.key_schema).unwrap();
-    let page = client
-        .query::<beyonddb::ReadGlobalIndexRoutePage>(
-            &account,
-            None,
-            Json(RoutePageInput {
-                table_id: first.id.clone(),
-                start_hash: Some(hash),
-                after_lower: None,
-                expected_epoch: None,
-            }),
-        )
-        .await
-        .unwrap()
-        .output
-        .0;
+    let page = beyonddb::read_global_index_route_page(
+        &client,
+        "123456789012",
+        RoutePageInput {
+            table_id: first.id.clone(),
+            start_hash: Some(hash),
+            after_lower: None,
+            expected_epoch: None,
+        },
+    )
+    .await
+    .unwrap();
     let RoutePageOutcome::Page { partitions, .. } = page else {
         panic!("index route missing")
     };
@@ -565,7 +562,15 @@ async fn serving_worker_recovers_released_ranges_and_keeps_healthy_indexes_progr
                 .await
                 .unwrap()
                 .unwrap();
-            if current.value().owner.is_some() && current.value().epoch > restored {
+            // Acquisition publishes ownership before restoring the actor. The
+            // recovery contract is read availability, not just the earlier CAS.
+            if current.value().owner.is_some()
+                && current.value().epoch > restored
+                && client
+                    .query::<beyonddb::ReadGlobalIndexState>(&destination, None, Json(()))
+                    .await
+                    .is_ok()
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;

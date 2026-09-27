@@ -29,6 +29,13 @@ pub struct IndexChangeHeader {
     pub bytes: u32,
 }
 
+/// Outcome of one projection attempt across all indexes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum IndexChangeDelivery {
+    Applied([u8; 32]),
+    Deferred([u8; 32]),
+}
+
 /// Read a bounded part of a previously observed immutable index change.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IndexChangeChunk {
@@ -66,7 +73,7 @@ pub(crate) fn enqueue(
     hash.update(key);
     let id = *hash.finalize().as_bytes();
     context.sql(&statement(
-        "INSERT INTO ddb_index_changes (id, table_id, sequence, item) VALUES (?1, ?2, ?3, X'')",
+        "INSERT INTO ddb_index_changes (id, table_id, sequence, attempt_sequence, item) VALUES (?1, ?2, ?3, ?3, X'')",
         vec![
             SqlValue::Blob(id.to_vec()),
             SqlValue::Text(table.id.clone()),
@@ -128,7 +135,7 @@ pub(crate) fn pending(context: &CommandContext<'_, '_>) -> Result<bool> {
 }
 
 fn peek(context: &QueryContext<'_>, table_id: String) -> Result<Json<Option<IndexChangeHeader>>> {
-    let rows = context.sql(&statement("SELECT id, length(item) FROM ddb_index_changes WHERE table_id = ?1 ORDER BY sequence, id LIMIT 1", vec![SqlValue::Text(table_id)]))?;
+    let rows = context.sql(&statement("SELECT id, length(item) FROM ddb_index_changes WHERE table_id = ?1 ORDER BY attempt_sequence, sequence, id LIMIT 1", vec![SqlValue::Text(table_id)]))?;
     let Some(row) = rows[0].rows.first() else {
         return Ok(Json(None));
     };
@@ -159,11 +166,30 @@ fn chunk(context: &QueryContext<'_>, input: IndexChangeChunk) -> Result<Json<Opt
     }
 }
 
-fn acknowledge(context: &CommandContext<'_, '_>, id: [u8; 32]) -> Result<CommandResult<Json<()>>> {
-    context.sql(&statement(
-        "DELETE FROM ddb_index_changes WHERE id = ?1",
-        vec![SqlValue::Blob(id.to_vec())],
-    ))?;
+fn record_delivery(
+    context: &CommandContext<'_, '_>,
+    delivery: IndexChangeDelivery,
+) -> Result<CommandResult<Json<()>>> {
+    match delivery {
+        IndexChangeDelivery::Applied(id) => {
+            context.sql(&statement(
+                "DELETE FROM ddb_index_changes WHERE id = ?1",
+                vec![SqlValue::Blob(id.to_vec())],
+            ))?;
+        }
+        IndexChangeDelivery::Deferred(id) => {
+            // Move failed work behind already-enqueued changes. The same source
+            // commit sequence orders new work and retries, preventing either from
+            // starving; immutable projection versions still fence late delivery.
+            context.sql(&statement(
+                "UPDATE ddb_index_changes SET attempt_sequence = ?2 WHERE id = ?1",
+                vec![
+                    SqlValue::Blob(id.to_vec()),
+                    SqlValue::Blob(context.sequence().to_be_bytes().to_vec()),
+                ],
+            ))?;
+        }
+    }
     Ok(CommandResult::Success(Json(())))
 }
 
@@ -199,19 +225,19 @@ macro_rules! handlers {
                 chunk(context, input)
             }
         }
-        /// Retire a journal entry after all its index mutations are durable.
+        /// Retire delivered work or defer a failed attempt without losing its journal.
         pub struct $ack;
         impl Command for $ack {
             const MODULE: &'static str = $module;
             const ID: u32 = $ack_id;
-            const CODEC_VERSION: u32 = 1;
-            type Input = Json<[u8; 32]>;
+            const CODEC_VERSION: u32 = 2;
+            type Input = Json<IndexChangeDelivery>;
             type Output = Json<()>;
             fn execute(
                 context: &mut CommandContext<'_, '_>,
-                Json(id): Self::Input,
+                Json(delivery): Self::Input,
             ) -> Result<CommandResult<Self::Output>> {
-                acknowledge(context, id)
+                record_delivery(context, delivery)
             }
         }
     };
@@ -220,7 +246,7 @@ macro_rules! handlers {
 handlers!(
     ReadAccountIndexChange,
     ReadAccountIndexChangeChunk,
-    AckAccountIndexChange,
+    RecordAccountIndexDelivery,
     crate::MODULE,
     30,
     31,
@@ -229,7 +255,7 @@ handlers!(
 handlers!(
     ReadPartitionIndexChange,
     ReadPartitionIndexChangeChunk,
-    AckPartitionIndexChange,
+    RecordPartitionIndexDelivery,
     crate::DATA_MODULE,
     12,
     13,

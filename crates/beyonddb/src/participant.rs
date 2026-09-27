@@ -220,7 +220,8 @@ fn reserve_apply(
     let payload = u64::try_from(staged.bytes.len()).map_err(|_| overflow())?;
     // Pinned SQLite permits 20 B-tree levels, adds at most two siblings per
     // level, and reuses old pages; 44 covers root expansion too. Per key, 16
-    // edits cover eight item edits, five lock edits, and two saved-read edits.
+    // edits cover eight item edits, five lock edits, two saved-read edits,
+    // and one account-statistics edit. Zero totals stay until table deletion.
     let edits = (staged.operations as u64 * 16)
         .checked_add(staged.index_edits)
         .and_then(|value| value.checked_add(chunks))
@@ -394,6 +395,26 @@ pub(crate) fn read_result(
     }
     .read(|batch| context.sql(batch))?;
     Ok(Json(TransactionReadResult::Item(item)))
+}
+
+pub(crate) fn release_read_result(
+    context: &mut CommandContext<'_, '_>,
+    input: ReadTransactionInput,
+) -> Result<CommandResult<Json<bool>>> {
+    let rows = context.sql(&statement(
+        "SELECT 1 FROM ddb_transactions WHERE transaction_id = ?1 AND coordinator_cell = ?2 AND state = 1",
+        vec![SqlValue::Blob(input.transaction_id.to_vec()), SqlValue::Blob(input.coordinator_cell.to_vec())],
+    ))?;
+    if rows[0].rows.is_empty() {
+        return Ok(CommandResult::Rejected(Json(false)));
+    }
+    // Retain the terminal identity/digest: delayed prepare and resolve must
+    // replay the decision without recreating images or reacquiring locks.
+    context.sql(&statement(
+        "DELETE FROM ddb_transaction_reads WHERE transaction_id = ?1",
+        vec![SqlValue::Blob(input.transaction_id.to_vec())],
+    ))?;
+    Ok(CommandResult::Success(Json(true)))
 }
 
 pub(crate) fn read(

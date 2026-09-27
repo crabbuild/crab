@@ -24,11 +24,11 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
     let application = &fixture.application;
     let (remote, _tasks) = start_node(
         application.clone(),
+        8,
         fixture.directory.clone(),
         session,
         endpoint.clone(),
-        fixture.remote_tls.certificate(),
-        fixture.remote_tls.signing_key().clone(),
+        &fixture.remote_tls,
         98,
         CancellationToken::new(),
     )

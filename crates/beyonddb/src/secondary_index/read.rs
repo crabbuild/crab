@@ -20,7 +20,7 @@ impl Query for QueryAccountIndex {
 
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
         let rows = context.sql(&statement(
-            "SELECT t.record FROM ddb_tables t LEFT JOIN ddb_routes r ON t.table_id = r.table_id WHERE t.table_id = ?1 AND r.table_id IS NULL",
+            "SELECT t.record FROM ddb_live_tables t LEFT JOIN ddb_routes r ON t.table_id = r.table_id WHERE t.table_id = ?1 AND r.table_id IS NULL",
             vec![SqlValue::Text(input.table_id.clone())],
         ))?;
         let Some(table) = decode_table(&rows[0])? else {

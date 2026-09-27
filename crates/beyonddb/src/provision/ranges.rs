@@ -1,4 +1,4 @@
-//! Initial range placement and fenced recovery after an interrupted admission.
+//! Range and directory placement with fenced recovery after interrupted admission.
 
 use crab_cell_runtime::{
     Error, Result,
@@ -24,8 +24,9 @@ fn range_module(target: &CellTarget) -> Result<(&'static str, Initializer)> {
         crate::global_index::NAMESPACE => {
             Ok((crate::global_index::MODULE, crate::initialize_global_index))
         }
+        crate::directory::NAMESPACE => Ok((crate::directory::MODULE, crate::initialize_directory)),
         _ => Err(Error::PeerAuthorization(
-            "bootstrap requires a data/index Cell",
+            "bootstrap requires a data, index or directory Cell",
         )),
     }
 }
@@ -37,6 +38,7 @@ impl CellInitialPartitionProvisioner {
         client: &CellClient,
     ) -> std::result::Result<CellClient, StorageError> {
         let (module, initialize) = range_module(target).map_err(provision_error)?;
+        self.reclaim_directory_capacity().await?;
         let code = self
             .application
             .registry()
@@ -63,7 +65,10 @@ impl CellInitialPartitionProvisioner {
             }) {
                 return Ok(client.clone());
             }
-            let handle = self.admit_initialized(target, proof, initialize).await?;
+            let handle = self
+                .admit_initialized(target, proof, initialize)
+                .await
+                .map_err(provision_error)?;
             return Ok(CellClient::local(self.application.registry(), handle));
         };
         let owner = observed
@@ -145,9 +150,7 @@ impl CellInitialPartitionProvisioner {
                     .ok_or(Error::CellNotActive);
             }
         }
-        self.admit_initialized(target, proof, initialize)
-            .await
-            .map_err(admission_error)
+        self.admit_initialized(target, proof, initialize).await
     }
 }
 

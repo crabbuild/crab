@@ -15,9 +15,9 @@ index keys. Scan uses the index directory and the index HASH distribution for
 parallel segments. The pinned ExtendDB engine rejects strongly consistent GSI
 reads and ALL_ATTRIBUTES on partial projections.
 
-This is an initial-index implementation. Online Create/Delete/Update index
-operations, automatic index range splits, index statistics, tombstone collection,
-and fleet-scale recovery qualification remain unfinished. Each index range has
+Indexes created with the table now support automatic HASH-range splits. Online
+Create/Delete/Update index operations, index statistics, tombstone collection,
+sealed-source storage collection, and fleet-scale recovery qualification remain unfinished. Each index range has
 a 512-MiB database budget and a 64-MiB capture budget. Adding initial ranges is
 not an unlimited scaling claim.
 
@@ -55,7 +55,13 @@ image. The source acknowledges the journal entry only after every required
 mutation has a durable successful result. A lost reply, failed index owner, or
 interrupted worker leaves the entry available for retry. A failed index does
 not suppress projection to later healthy indexes; acknowledgement still waits
-for all indexes. Concurrent workers may process the same entry safely.
+for all indexes. Failed delivery durably moves the entry behind work already
+queued on that source. Enqueue and deferral use the same monotonically increasing
+source commit sequence for scheduling, so retries and new changes cannot pin one
+another at the head. The immutable projection version remains unchanged. This
+lets later base writes reach healthy indexes while another index is unavailable.
+Concurrent workers may process the same entry safely; deferral after another
+worker acknowledges it is a no-op.
 
 Each index row retains a lexicographically ordered `(source_epoch, sequence)`
 version, a content digest, and either its projected image or a tombstone.
@@ -70,6 +76,56 @@ all of its GSI changes are already visible, or that index readers observe them
 atomically. This follows the [AWS propagation contract](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html).
 
 ## Splits and recovery
+
+The index Cell now has a durable transfer lifecycle: serving → sealed for the
+source, and importing → activated → opened for each replacement. Sealed sources
+and unopened children reject Query, Scan, and projection application with a
+stale-route result. Projection workers retain their source journal on that result.
+
+`PrepareGlobalIndexSplit` binds the source and both children to one exact plan.
+`ExportGlobalIndexEntries` reads only that sealed source, returning at most 64
+entries per page with an image-byte bound. Export includes the full index/base
+key, original source version, and image or tombstone. SQL image reads and writes
+use the existing 256-KiB BLOB chunks. Imports share ordinary projection validation
+and storage, but reject any conflicting version rather than replacing it.
+
+The imported row and its fingerprint commit in the same runtime command.
+The fingerprint covers canonical key bytes, source version, and the optional
+image; duplicate imports do not increment its count. Activation requires the
+complete expected fingerprint and still blocks serving traffic. Opening requires
+a trusted controller to observe the replacement directory route first.
+
+Each directory leaf records a per-source split plan and reserves its source and
+both children before fencing any owner. Independent leaves may split concurrently;
+publication compares exact source/child rows and advances that leaf's version. Administrative metadata changes do not invalidate an immutable
+key contract. Participant reservations reject overlapping plans.
+
+Publication retains the plan until both children are open. A sweep can discover
+that plan through either routed child after a crash at cutover. The controller
+replays the sealed export, verifies both fingerprints, publishes, opens both
+children, then removes the plan and reservations. Table deletion fences the
+account generation, retires its directory tree, and acknowledges retirement
+before removing the account anchor. Directory roots retain terminal fences.
+See [metadata ownership](METADATA_SHARDING.md) for cutover qualification.
+
+The serving account capacity loop visits base ranges, then each index's ranges.
+It uses occupied SQLite pages, including tombstones, and the existing configured
+byte threshold. Its cursor advances before attempts; capacity refusals and
+transient errors defer work without terminating healthy serving. When fleet
+capacity becomes available, pending plans resume through signed placement and
+peer admission. Source/child identities remain fixed across retries.
+
+At local admission pressure, completed sealed sources can release their SQL
+slots after the current directory leaf confirms route removal and no pending
+split reservation, or after the account confirms generation deletion. Their durable roots and tombstones remain for recovery; remote
+rebalancing and storage collection remain unfinished.
+
+Index reads and projection application can return transient failures between
+source sealing and child opening. Base mutations continue to retain projection
+journals for later delivery. HASH-range splitting does not divide one index HASH
+group across Cells; sort-key subranges and measured fleet recovery remain open.
+The unreleased account/index schemas changed in place; development roots require
+reprovisioning. No released-data migration is claimed.
 
 Base split sealing rejects pending projection entries as well as transaction
 locks. Split imports therefore copy already-projected images and do not emit
@@ -111,7 +167,7 @@ qualification.
 | Routed replay and acknowledgement | `src/backend/global_index.rs` |
 | Serving owner recovery | `src/provision.rs` → existing `recover_discovered_owner`, NodeDirectory proof, and runtime authority CAS |
 | Versioned index storage and reads | `src/global_index.rs`, `src/global_index/read.rs`, `src/global_index_schema.sql` |
-| Index directory | `src/global_index/routing.rs`, `src/routing.rs`, `src/schema.sql` |
+| Index directory | `src/global_index/routing.rs`, `src/directory.rs`, `src/directory/`, `src/directory/schema.sql`; fixed-size account anchors in `src/schema.sql` |
 | Server worker and peer reachability | `src/bin/beyonddb.rs`, `src/server/peer_receiver.rs` |
 | Focused recovery fixture | `tests/elastic_cells/global_indexes.rs` |
 | Signed peer-owner recovery | `tests/peer_network/global_indexes.rs`, `tests/peer_network.rs` |
@@ -172,3 +228,53 @@ two test threads), and strict all-target BeyondDB Clippy passed in 8.84 seconds.
 The compiled-server signed SDK/RustFS smoke passed in 317.32 seconds, including
 unclean restart, recovered index state, and transaction-token replay.
 These results cover selected recovery schedules, not a fleet-scale bound.
+
+## Transfer evidence
+
+| Boundary | Evidence |
+| --- | --- |
+| Serving caller | `bin/beyonddb.rs` installs the account capacity loop; `provision/capacity.rs` visits base and index ranges; `provision/global_indexes.rs` owns routed transfer orchestration. |
+| Directory leaf boundary | `global_index/split_routing.rs` owns per-source plans, source/child reservations, atomic route publication, and completion. The runtime command savepoint protects all leaf rows together. |
+| Cell entry points | `global_index/transfer.rs` commands and queries registered by `GlobalIndexModule`; `global_index_schema.sql` persists lifecycle state. |
+| Shared projection path | `ApplyGlobalIndexMutation` and `ImportGlobalIndexEntry` call the same key/image validator and versioned row writer; imports require exact replay. |
+| Reader siblings | Both `GlobalIndexQuery` and `GlobalIndexScan` require serving/opened state. `ReadGlobalIndexPartition` remains available for owner recovery and retired-table residency checks. |
+| Dependency contract | Runtime `cell/executor.rs` uses an application savepoint and rolls it back on command rejection. `StoredValue` chunks images. ExtendDB's `AttributeValue` deserializer normalizes numeric strings before canonical Cell encoding. |
+| Prior behavior | Main had no index lifecycle/export/import. The preceding transfer increment added those primitives but had no account plan storage, publication controller, or GSI capacity sweep. |
+| Transfer regression | `index_transfer_retains_versions_tombstones_and_fences_replay_after_restart`: 70 entries across both children, duplicate index keys, wide escaped keys, large binary images, tombstones, bounded export, exact replay, conflicting versions, wrong fingerprint, premature opening, restart during import and after activation, and delayed mutations after opening. |
+
+The transfer regression uses real Cell actors, host ownership, object-store roots,
+and restoration. It now publishes replacement routes, restarts after publication
+while both children are still activated, and resumes through the production
+controller; plans remain discoverable until both children open.
+
+The signed SDK capacity regression fills an eight-slot serving node, forces an
+index split, and verifies the durable plan survives capacity refusal. A supervised
+sweep stays healthy under pressure and resumes both independent plans after a
+second node joins. Children are placed remotely over mTLS. SDK Query/Scan with
+retries disabled survive metadata/child owner restoration; delayed projection
+cannot resurrect a copied tombstone, and a later key move converges. The test
+also covers participant reservation conflicts, metadata changes during a plan,
+stale page epochs, and deletion of a table with a pending plan.
+
+The transfer regression and existing journal replay regression passed. The existing
+idle-owner discovery test failed twice with `target Cell is not locally owned`
+and passed alone in 1.95 seconds. This repeats the intermittent result already
+recorded in `SCALING.md`: its final ownership observation can precede local
+activation (`acquire_idle_restored` claims authority before restoring the actor).
+The test assertions were not changed. This remains unresolved evidence, not an
+all-green GSI suite claim. Strict all-target Clippy, standalone server build,
+format, and Cell layout/policy checks pass.
+
+The capacity-pressure regression failed before supervisor classification changed:
+`LimitExceeded` stopped serving in 3.26s. It passes after the fix in 13.06s,
+including remote placement and SDK recovery. This is a two-node qualification;
+10,000 active Cells, multi-TB throughput, unclean fleet recovery, and a bounded
+cutover pause remain unproven.
+
+Latest focused proof: both base/index SDK capacity regressions pass (11.23s),
+publication-window recovery passes (11.05s), and the base numeric Query/Scan
+capacity regression passes (3.44s). Strict all-target Clippy passes (11.07s),
+the standalone server builds (19.21s), and format/layout/policy checks pass.
+The previously recorded intermittent idle-owner test has not been resolved by
+this work. Automatic GSI growth is demonstrated in bounded fixtures, not a
+full DynamoDB replacement or fleet-capacity guarantee.

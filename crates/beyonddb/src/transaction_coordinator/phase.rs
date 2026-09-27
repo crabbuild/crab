@@ -29,7 +29,11 @@ pub enum CoordinatorPhaseOutcome {
     WrongDecision,
 }
 
-fn phase_identity(context: &CommandContext<'_, '_>, account_id: &str, key: &[u8]) -> Result<()> {
+pub(super) fn phase_identity(
+    context: &CommandContext<'_, '_>,
+    account_id: &str,
+    key: &[u8],
+) -> Result<()> {
     if coordinator_target(account_id, key)? != *context.target() {
         return Err(Error::Identity(
             "transaction phase reached the wrong coordinator",
@@ -313,6 +317,28 @@ impl Command for RecordParticipantResolution {
                 SqlValue::Integer(i64::from(input.position)),
             ],
         ))?;
+        // Terminal write replay needs the digest, target and receipts, but no
+        // operation images. Committed reads still need their position mapping;
+        // aborted reads never return images. Keep the decision payload at -1.
+        context.sql(&statement(
+            "DELETE FROM ddb_transaction_payloads WHERE transaction_id = ?1 AND position = ?2 \
+             AND EXISTS (SELECT 1 FROM ddb_coordinator_participants \
+             WHERE transaction_id = ?1 AND position = ?2 AND (retain_operations = 0 OR ?3 = 2))",
+            vec![
+                SqlValue::Blob(input.transaction_id.to_vec()),
+                SqlValue::Integer(i64::from(input.position)),
+                SqlValue::Integer(state),
+            ],
+        ))?;
+        context.sql(&statement(
+            "UPDATE ddb_coordinator_participants SET operation_chunks = NULL \
+             WHERE transaction_id = ?1 AND position = ?2 AND (retain_operations = 0 OR ?3 = 2)",
+            vec![
+                SqlValue::Blob(input.transaction_id.to_vec()),
+                SqlValue::Integer(i64::from(input.position)),
+                SqlValue::Integer(state),
+            ],
+        ))?;
         // ExtendDB rolls back token claims on canceled writes. Release the slot
         // only after every abort resolution, so retries cannot race old intents.
         context.sql(&statement(
@@ -344,6 +370,7 @@ pub struct CrossCellTransactionStatus {
     pub participant_count: u8,
     pub prepared_count: u8,
     pub resolved_count: u8,
+    pub unreleased_read_results: u8,
 }
 
 /// Read the durable decision and bounded participant progress.
@@ -352,7 +379,7 @@ pub struct ReadCrossCellTransaction;
 impl Query for ReadCrossCellTransaction {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 1;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<ReadCrossCellTransactionInput>;
     type Output = Json<Option<CrossCellTransactionStatus>>;
 
@@ -364,7 +391,7 @@ impl Query for ReadCrossCellTransaction {
             ));
         }
         let rows = context.sql(&statement(
-            "SELECT t.state, t.abort_chunks, COUNT(p.position), COUNT(p.prepared_sequence), COUNT(p.resolved_sequence) \
+            "SELECT t.state, t.abort_chunks, COUNT(p.position), COUNT(p.prepared_sequence), COUNT(p.resolved_sequence), t.read_release_count \
              FROM ddb_coordinator_transactions t JOIN ddb_coordinator_participants p \
              ON p.transaction_id = t.transaction_id \
              WHERE t.transaction_id = ?1 AND t.account_id = ?2 GROUP BY t.transaction_id",
@@ -379,6 +406,7 @@ impl Query for ReadCrossCellTransaction {
             SqlValue::Integer(total),
             SqlValue::Integer(prepared),
             SqlValue::Integer(resolved),
+            SqlValue::Integer(releases),
         ] = row.as_slice()
         else {
             return Err(Error::Command("invalid coordinator status row"));
@@ -396,6 +424,7 @@ impl Query for ReadCrossCellTransaction {
             participant_count: count(*total)?,
             prepared_count: count(*prepared)?,
             resolved_count: count(*resolved)?,
+            unreleased_read_results: count(*releases)?,
         })))
     }
 }
@@ -433,7 +462,10 @@ impl WireValue for CoordinatorParticipantChunk {
     }
 }
 
-/// Read one immutable participant payload chunk for recovery.
+/// Read one participant payload chunk while its operations remain retained.
+///
+/// Returns none after resolution compacts its operation images. A driver
+/// that observed BEGIN earlier must re-read and finish the durable decision.
 pub struct ReadCoordinatorParticipant;
 
 impl Query for ReadCoordinatorParticipant {
@@ -463,8 +495,15 @@ impl Query for ReadCoordinatorParticipant {
         let Some(row) = rows[0].rows.first() else {
             return Ok(None);
         };
-        let [SqlValue::Blob(target), SqlValue::Integer(chunks)] = row.as_slice() else {
+        let [SqlValue::Blob(target), chunks] = row.as_slice() else {
             return Err(Error::Command("invalid coordinator payload"));
+        };
+        let SqlValue::Integer(chunks) = chunks else {
+            return if *chunks == SqlValue::Null {
+                Ok(None)
+            } else {
+                Err(Error::Command("invalid coordinator payload length"))
+            };
         };
         let chunks = u32::try_from(*chunks)
             .map_err(|_| Error::Command("invalid participant chunk count"))?;
@@ -491,15 +530,16 @@ pub struct UnresolvedCoordinatorParticipant {
     pub position: u8,
     pub target: CoordinatorParticipantTarget,
     pub prepared: bool,
+    pub release_read_result: bool,
 }
 
-/// Read unresolved participant targets and prepare progress without request images.
+/// Read participants needing resolution or acknowledged image cleanup without payloads.
 pub struct ReadUnresolvedCoordinatorParticipants;
 
 impl Query for ReadUnresolvedCoordinatorParticipants {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 4;
-    const CODEC_VERSION: u32 = 2;
+    const CODEC_VERSION: u32 = 3;
     type Input = Json<ReadCrossCellTransactionInput>;
     type Output = Json<Vec<UnresolvedCoordinatorParticipant>>;
 
@@ -511,10 +551,11 @@ impl Query for ReadUnresolvedCoordinatorParticipants {
             ));
         }
         let rows = context.sql(&statement(
-            "SELECT p.position, p.target, p.prepared_sequence FROM ddb_coordinator_participants p \
+            "SELECT p.position, p.target, p.prepared_sequence, p.resolved_sequence FROM ddb_coordinator_participants p \
              JOIN ddb_coordinator_transactions t ON t.transaction_id = p.transaction_id \
              WHERE t.transaction_id = ?1 AND t.account_id = ?2 \
-             AND p.resolved_sequence IS NULL ORDER BY p.position",
+             AND (p.resolved_sequence IS NULL OR (t.read_release_count > 0 \
+             AND p.retain_operations = 1 AND p.operation_chunks IS NOT NULL)) ORDER BY p.position",
             vec![
                 SqlValue::Blob(input.transaction_id.to_vec()),
                 SqlValue::Text(input.account_id),
@@ -526,6 +567,7 @@ impl Query for ReadUnresolvedCoordinatorParticipants {
                 SqlValue::Integer(position),
                 SqlValue::Blob(target),
                 prepared,
+                resolved,
             ] = row.as_slice()
             else {
                 return Err(Error::Command("invalid coordinator participant target"));
@@ -535,6 +577,7 @@ impl Query for ReadUnresolvedCoordinatorParticipants {
                     .map_err(|_| Error::Command("invalid participant position"))?,
                 target: serde_json::from_slice(target)?,
                 prepared: optional_sequence(prepared)?.is_some(),
+                release_read_result: optional_sequence(resolved)?.is_some(),
             });
         }
         Ok(Json(targets))
@@ -560,7 +603,7 @@ impl Query for ReadPendingTransactionBoundary {
     fn execute(context: &mut QueryContext<'_>, _: Self::Input) -> Result<Self::Output> {
         let rows = context.sql(&statement(
             "SELECT created_at_ms, transaction_id FROM ddb_coordinator_transactions \
-             INDEXED BY ddb_coordinator_pending WHERE unresolved_count > 0 \
+             INDEXED BY ddb_coordinator_pending WHERE (unresolved_count > 0 OR read_release_count > 0) \
              ORDER BY created_at_ms DESC, transaction_id DESC LIMIT 1",
             vec![],
         ))?;
@@ -602,7 +645,7 @@ pub enum PendingTransactionState {
     Abort,
 }
 
-/// Page unresolved transactions through one coordinator Cell's pending index.
+/// Page resolution and acknowledged cleanup work through one coordinator Cell's pending index.
 pub struct ReadPendingCrossCellTransactions;
 
 impl Query for ReadPendingCrossCellTransactions {
@@ -622,7 +665,7 @@ impl Query for ReadPendingCrossCellTransactions {
         let rows = context.sql(&statement(
             "SELECT transaction_id, account_id, token, state, created_at_ms \
              FROM ddb_coordinator_transactions INDEXED BY ddb_coordinator_pending \
-             WHERE unresolved_count > 0 AND (created_at_ms, transaction_id) > (?1, ?2) \
+             WHERE (unresolved_count > 0 OR read_release_count > 0) AND (created_at_ms, transaction_id) > (?1, ?2) \
              ORDER BY created_at_ms, transaction_id LIMIT ?3",
             vec![
                 SqlValue::Integer(after_ms),

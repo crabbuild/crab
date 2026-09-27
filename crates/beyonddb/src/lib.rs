@@ -4,6 +4,7 @@ mod authorization;
 mod backend;
 mod catalog;
 mod credentials;
+mod directory;
 mod expression_wire;
 mod global_index;
 mod item_storage;
@@ -15,6 +16,7 @@ mod routing;
 mod secondary_index;
 mod server;
 mod split;
+mod statistics;
 mod table;
 mod tags;
 mod transaction_coordinator;
@@ -22,6 +24,7 @@ mod transaction_payload;
 mod transaction_token;
 mod transaction_transport;
 mod ttl;
+pub use directory::*;
 
 pub use expression_wire::WireCondition;
 pub use global_index::*;
@@ -36,7 +39,7 @@ pub use provision::*;
 pub use routing::*;
 pub use server::{
     BeyonddbPeerScope, BeyonddbPeers, NodeLeasePublisher, PublishedNodeLease, build_http_state,
-    measured_node_capacity,
+    measured_node_capacity, shutdown_serving_node,
 };
 pub use split::*;
 pub use table::*;
@@ -112,7 +115,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 23] = [
+static COMMANDS: [OperationDescriptor; 28] = [
     operation(1),
     operation(2),
     operation(3),
@@ -138,10 +141,24 @@ static COMMANDS: [OperationDescriptor; 23] = [
         input_limit: 64 * 1024,
         ..participant::phase_operation(24)
     },
-    operation(25),
-    participant::phase_operation(26),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(25)
+    },
+    OperationDescriptor {
+        codec_version: 2,
+        ..participant::phase_operation(26)
+    },
+    operation(30),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(31)
+    },
+    operation(32),
+    participant::phase_operation(33),
+    participant::phase_operation(34),
 ];
-static QUERIES: [OperationDescriptor; 25] = [
+static QUERIES: [OperationDescriptor; 30] = [
     operation(4),
     operation(7),
     operation(8),
@@ -164,9 +181,17 @@ static QUERIES: [OperationDescriptor; 25] = [
     operation(26),
     operation(27),
     operation(28),
-    operation(29),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(29)
+    },
     participant::phase_operation(30),
     global_index::outbox::chunk_operation(31),
+    operation(32),
+    operation(36),
+    operation(37),
+    operation(38),
+    participant::phase_operation(39),
 ];
 
 /// Statically linked account application.
@@ -177,6 +202,7 @@ impl CellApplication for Beyonddb {
 
     fn register(builder: &mut ApplicationBuilder) -> Result<()> {
         builder.register(AccountModule)?;
+        builder.register(directory::DirectoryModule)?;
         builder.register(partition::DataModule)?;
         builder.register(global_index::GlobalIndexModule)?;
         builder.register(transaction_coordinator::CoordinatorModule)?;
@@ -186,6 +212,7 @@ impl CellApplication for Beyonddb {
                 .with_limits(512 * 1024 * 1024, 64 * 1024 * 1024)?,
         )?;
         builder.cell_type(data_cell_type()?)?;
+        builder.cell_type(directory::cell_type()?)?;
         builder.cell_type(global_index::cell_type()?)?;
         builder.cell_type(transaction_coordinator::cell_type()?)?;
         builder.cell_type(credentials::cell_type()?)
@@ -247,12 +274,11 @@ pub fn account_target(account_id: &str) -> Result<CellTarget> {
     let hash = hasher.finalize();
     let mut tenant = [0_u8; 16];
     tenant.copy_from_slice(&hash.as_bytes()[..16]);
-    CellTarget::new(
-        TenantId::from_bytes(tenant),
-        APPLICATION,
-        NAMESPACE,
-        &partition_for_shard(0),
-    )
+    account_for_tenant(TenantId::from_bytes(tenant))
+}
+
+fn account_for_tenant(tenant: TenantId) -> Result<CellTarget> {
+    CellTarget::new(tenant, APPLICATION, NAMESPACE, &partition_for_shard(0))
 }
 
 /// Installs the initial account schema during Cell bootstrap.
@@ -279,10 +305,14 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
             source_digest: {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("lib.rs"));
+                source.update(include_bytes!("statistics.rs"));
                 source.update(include_bytes!("table.rs"));
+                source.update(include_bytes!("table/deletion.rs"));
                 source.update(include_bytes!("global_index.rs"));
                 source.update(include_bytes!("global_index/outbox.rs"));
                 source.update(include_bytes!("global_index/routing.rs"));
+                source.update(include_bytes!("global_index/split_routing.rs"));
+                source.update(include_bytes!("global_index/transfer.rs"));
                 source.update(include_bytes!("items.rs"));
                 source.update(include_bytes!("secondary_index.rs"));
                 source.update(include_bytes!("secondary_index/read.rs"));
@@ -322,6 +352,9 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
+        registry.bind_command::<statistics::PublishStatistics>()?;
+        registry.bind_query::<statistics::ReadAccountStatistics>()?;
+        registry.bind_query::<statistics::ReadTableStatistics>()?;
         registry.bind_command::<CreateTable>()?;
         registry.bind_command::<PutItem>()?;
         registry.bind_command::<DeleteItem>()?;
@@ -329,12 +362,18 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<crate::UploadTransactionPayload<PrepareAccountTransaction>>()?;
         registry.bind_command::<PrepareAccountTransaction>()?;
         registry.bind_command::<ResolveAccountTransaction>()?;
+        registry.bind_command::<ReleaseAccountTransactionReads>()?;
         registry.bind_command::<DeleteTable>()?;
+        registry.bind_command::<ContinueTableDeletion>()?;
+        registry.bind_command::<RecordTableDirectoryRetirement>()?;
+        registry.bind_query::<ReadPendingDirectoryRetirement>()?;
+        registry.bind_query::<ReadTableLifecycle>()?;
         registry.bind_command::<UpdateTable>()?;
         registry.bind_command::<UpdateItem>()?;
         registry.bind_command::<ActivateTableRoute>()?;
         registry.bind_command::<BeginSplit>()?;
         registry.bind_command::<CommitSplit>()?;
+        registry.bind_command::<FinishSplit>()?;
         registry.bind_command::<authorization::PutUserPolicy>()?;
         registry.bind_command::<authorization::DeleteUserPolicy>()?;
         registry.bind_command::<tags::UpdateTags>()?;
@@ -344,7 +383,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<RegisterCoordinatorShard>()?;
         registry.bind_command::<transaction_coordinator::RecordSettledCoordinators>()?;
         registry.bind_command::<ActivateGlobalIndexRoute>()?;
-        registry.bind_command::<AckAccountIndexChange>()?;
+        registry.bind_command::<RecordAccountIndexDelivery>()?;
         registry.bind_query::<GetItem>()?;
         registry.bind_query::<ReadAccountTransaction>()?;
         registry.bind_query::<ReadAccountTransactionResult>()?;
@@ -355,6 +394,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<secondary_index::QueryAccountIndex>()?;
         registry.bind_query::<ReadTableRoute>()?;
         registry.bind_query::<ReadSplitPlan>()?;
+        registry.bind_query::<ReadPartitionSplitPlan>()?;
         registry.bind_query::<ReadPartitionRoute>()?;
         registry.bind_query::<ReadRoutePage>()?;
         registry.bind_query::<ReadPublishedPartition>()?;
@@ -366,7 +406,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<ttl::ReadTtlSweep>()?;
         registry.bind_query::<ttl::ReadTtlSchedule>()?;
         registry.bind_query::<ReadCoordinatorRegistration>()?;
-        registry.bind_query::<ReadGlobalIndexRoutePage>()?;
+        registry.bind_query::<ReadGlobalIndexDirectory>()?;
         registry.bind_query::<ReadAccountIndexChange>()?;
         registry.bind_query::<ReadAccountIndexChangeChunk>()?;
         registry.bind_query::<ListCoordinatorShards>()

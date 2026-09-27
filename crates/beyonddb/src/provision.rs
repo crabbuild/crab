@@ -1,7 +1,10 @@
 //! Initial table data Cell admission through the existing Cell runtime.
 
 mod capacity;
+mod directory;
+mod global_indexes;
 mod ranges;
+mod rebalance;
 mod residency;
 mod transactions;
 
@@ -37,19 +40,12 @@ use crate::{
 /// Position in an account capacity sweep.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapacityCursor {
-    /// Table being inspected; no range cursor resumes after this table.
+    /// Table being inspected; absent range and index cursors resume after it.
     pub table_name: String,
     /// Lower bound of the last range inspected in this table.
     pub after_lower: Option<[u8; 16]>,
-}
-
-/// Bounded progress from one account capacity sweep.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CapacitySweep {
-    /// Resume at this position on the next sweep, or restart at the beginning.
-    pub cursor: Option<CapacityCursor>,
-    /// Source and children of one completed split, if any.
-    pub split: Option<SplitPlan>,
+    /// Index position being inspected, or the base table when absent.
+    pub index: Option<usize>,
 }
 
 /// Admits initial data Cells per table on a leased or private Cell runtime.
@@ -105,8 +101,8 @@ impl CellInitialPartitionProvisioner {
 
     /// Start each new table with a power-of-two number of independently owned ranges.
     ///
-    /// Accepted counts are 1 through 256. The count must remain stable while
-    /// retrying an interrupted CreateTable, because range IDs are deterministic.
+    /// Accepted counts are 1 through 256. Each table persists its selected count;
+    /// configuration changes affect only new table generations.
     pub fn with_initial_partition_count(mut self, count: u16) -> Result<Self, StorageError> {
         if count == 0 || count > 256 || !count.is_power_of_two() {
             return Err(StorageError::Validation(
@@ -261,7 +257,22 @@ impl CellInitialPartitionProvisioner {
             .as_ref()
             .map(|owner| (owner.session, owner.endpoint.clone()));
         match former {
-            Some((session, _)) if session == self.session => {}
+            Some((session, _)) if session == self.session => {
+                // Ownership can outlive a canceled activation. Discovery must
+                // restore the actor before its caller starts resolving work.
+                let proof = self.cataloged(target, module).await?;
+                if self
+                    .runtime
+                    .local_handle(proof.clone(), &observed)
+                    .await
+                    .map_err(provision_error)?
+                    .is_none()
+                {
+                    self.admit_initialized(target, proof, initialize)
+                        .await
+                        .map_err(provision_error)?;
+                }
+            }
             Some((session, endpoint)) => {
                 if endpoint == self.endpoint {
                     wait_for_expired(nodes, session).await?;
@@ -281,7 +292,9 @@ impl CellInitialPartitionProvisioner {
             }
             None if observed.value().root.is_some() => {
                 let proof = self.cataloged(target, module).await?;
-                self.admit_initialized(target, proof, initialize).await?;
+                self.admit_initialized(target, proof, initialize)
+                    .await
+                    .map_err(provision_error)?;
             }
             _ => return Ok(false),
         }
@@ -320,6 +333,7 @@ impl CellInitialPartitionProvisioner {
         &self,
         account_id: &str,
         account_handle: CellHandle,
+        routed_client: &CellClient,
         nodes: &NodeDirectory,
     ) -> Result<(), StorageError> {
         let account = account_target(account_id).map_err(provision_error)?;
@@ -352,13 +366,20 @@ impl CellInitialPartitionProvisioner {
                 else {
                     continue;
                 };
-                self.recover_routed_table(account_id, &account, &client, &table.id, nodes, None)
-                    .await?;
+                self.recover_routed_table(
+                    account_id,
+                    &account,
+                    routed_client,
+                    &table.id,
+                    nodes,
+                    None,
+                )
+                .await?;
                 for index in &table.global_secondary_indexes {
                     self.recover_routed_table(
                         account_id,
                         &account,
-                        &client,
+                        routed_client,
                         &table.id,
                         nodes,
                         Some(index),
@@ -383,9 +404,25 @@ impl CellInitialPartitionProvisioner {
         index: Option<&crate::GlobalIndexRecord>,
     ) -> Result<(), StorageError> {
         let table_id = index.map_or(table_id, |index| index.id.as_str());
+        if index.is_some()
+            && client
+                .query::<crate::ReadGlobalIndexDirectory>(account, None, Json(table_id.into()))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0
+                .is_none()
+        {
+            return Ok(());
+        }
+
         let mut after_lower = None;
         let mut expected_epoch = None;
         loop {
+            if index.is_some() {
+                self.recover_index_directory_path(client, account_id, table_id, after_lower, nodes)
+                    .await?;
+            }
             let input = Json(RoutePageInput {
                 table_id: table_id.to_owned(),
                 start_hash: None,
@@ -393,15 +430,15 @@ impl CellInitialPartitionProvisioner {
                 expected_epoch,
             });
             let page = if index.is_some() {
-                client
-                    .query::<crate::ReadGlobalIndexRoutePage>(account, None, input)
-                    .await
+                crate::read_global_index_route_page(client, account_id, input.0).await?
             } else {
-                client.query::<ReadRoutePage>(account, None, input).await
-            }
-            .map_err(cell_error)?
-            .output
-            .0;
+                client
+                    .query::<ReadRoutePage>(account, None, input)
+                    .await
+                    .map_err(cell_error)?
+                    .output
+                    .0
+            };
             let (epoch, partitions, has_more) = match page {
                 RoutePageOutcome::Unrouted => return Ok(()),
                 RoutePageOutcome::Changed => {
@@ -477,6 +514,55 @@ impl CellInitialPartitionProvisioner {
             .await
     }
 
+    /// Admit a directory root or child whose creation is authorized by durable metadata.
+    pub async fn admit_directory(
+        &self,
+        account_id: &str,
+        spec: &crate::DirectorySpec,
+    ) -> Result<CellHandle, StorageError> {
+        let target = crate::directory_target(account_id, spec).map_err(provision_error)?;
+        self.admit_module(
+            &target,
+            crate::directory::MODULE,
+            crate::initialize_directory,
+        )
+        .await
+    }
+
+    /// Restore an existing directory without creating missing authority or an empty node.
+    pub async fn admit_existing_directory(
+        &self,
+        account_id: &str,
+        spec: &crate::DirectorySpec,
+    ) -> Result<CellHandle, StorageError> {
+        let (target, proof) = self.published_directory(account_id, spec).await?;
+        self.admit_initialized(&target, proof, crate::initialize_directory)
+            .await
+            .map_err(provision_error)
+    }
+
+    async fn published_directory(
+        &self,
+        account_id: &str,
+        spec: &crate::DirectorySpec,
+    ) -> Result<(CellTarget, CatalogProof), StorageError> {
+        let target = crate::directory_target(account_id, spec).map_err(provision_error)?;
+        let proof = self.cataloged(&target, crate::directory::MODULE).await?;
+        let observed = CellAuthority::new(self.layout.clone())
+            .load(target.cell_id())
+            .await
+            .map_err(provision_error)?;
+        if observed
+            .as_ref()
+            .is_none_or(|record| record.value().root.is_none())
+        {
+            return Err(StorageError::Transient(
+                "published directory root is missing".into(),
+            ));
+        }
+        Ok((target, proof))
+    }
+
     /// Reacquire one cataloged data range after its prior owner released it.
     ///
     /// The caller must first select this node as the new owner from the
@@ -519,7 +605,7 @@ impl CellInitialPartitionProvisioner {
         initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> crab_cell_runtime::Result<()>,
     ) -> Result<CellHandle, StorageError> {
         let _admission = self.admission.lock().await;
-        self.reclaim_coordinator_capacity().await?;
+        self.reclaim_settled_capacity(target).await?;
         let authority = CellAuthority::new(self.layout.clone());
         let observed = authority
             .load(target.cell_id())
@@ -552,7 +638,7 @@ impl CellInitialPartitionProvisioner {
             self.layout.clone(),
             *target.cell_id().as_bytes(),
             *observed.value().incarnation.as_bytes(),
-            Limits::default(),
+            self.replica_limits(target).map_err(provision_error)?,
         )
         .map_err(|error| StorageError::Transient(error.to_string()))?;
         let destination = self.activation_destination(target)?;
@@ -581,8 +667,11 @@ impl CellInitialPartitionProvisioner {
                     authority,
                     observed,
                     takeover,
-                    RecoveryManifestStore::new(self.layout.clone(), Limits::default())
-                        .with_recovery_scratch(self.directory.clone()),
+                    RecoveryManifestStore::new(
+                        self.layout.clone(),
+                        self.replica_limits(target).map_err(provision_error)?,
+                    )
+                    .with_recovery_scratch(self.directory.clone()),
                     destination,
                     owner,
                 )
@@ -591,6 +680,20 @@ impl CellInitialPartitionProvisioner {
         .map_err(provision_error)?;
         self.track_coordinator(target)?;
         Ok(handle)
+    }
+
+    fn replica_limits(&self, target: &CellTarget) -> crab_cell_runtime::Result<Limits> {
+        let cell_type = self
+            .application
+            .cell_types()
+            .iter()
+            .find(|cell_type| cell_type.namespace() == target.namespace())
+            .ok_or(CellError::Registry("Cell namespace is not compiled"))?;
+        Ok(Limits {
+            max_database_bytes: cell_type.database_limit_bytes(),
+            max_capture_bytes: cell_type.capture_limit_bytes(),
+            ..Limits::default()
+        })
     }
 
     fn activation_destination(&self, target: &CellTarget) -> Result<PathBuf, StorageError> {
@@ -650,7 +753,9 @@ impl CellInitialPartitionProvisioner {
             )
             .await
             .map_err(provision_error)?;
-        self.admit_initialized(target, proof, initialize).await
+        self.admit_initialized(target, proof, initialize)
+            .await
+            .map_err(provision_error)
     }
 
     async fn admit(
@@ -660,6 +765,7 @@ impl CellInitialPartitionProvisioner {
     ) -> Result<CellHandle, StorageError> {
         self.admit_initialized(target, proof, initialize_partition)
             .await
+            .map_err(provision_error)
     }
 
     async fn admit_initialized(
@@ -667,78 +773,78 @@ impl CellInitialPartitionProvisioner {
         target: &CellTarget,
         proof: CatalogProof,
         initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> crab_cell_runtime::Result<()>,
-    ) -> Result<CellHandle, StorageError> {
+    ) -> crab_cell_runtime::Result<CellHandle> {
         // Serialize local activation/reclamation. Authority CAS still decides
         // ownership against other nodes; this guard never fences peers.
         let _admission = self.admission.lock().await;
         let authority = CellAuthority::new(self.layout.clone());
+        let observed = authority.load(target.cell_id()).await?;
+        if let Some(observed) = &observed
+            && let Some(handle) = self.runtime.local_handle(proof.clone(), observed).await?
+        {
+            self.track_coordinator(target).map_err(admission_error)?;
+            return Ok(handle);
+        }
+        self.reclaim_settled_capacity(target)
+            .await
+            .map_err(admission_error)?;
+        let stats = self.runtime.stats();
+        if stats.active_cells() >= stats.active_cell_capacity() {
+            // A rejected placement must not claim a new Cell. Otherwise its
+            // live but full owner prevents placement on a peer with free slots.
+            return Err(CellError::Capacity("BeyondDB Cell admission"));
+        }
         let owner = Owner {
             session: self.session,
             endpoint: self.endpoint.clone(),
         };
-        let observed = match authority
-            .load(target.cell_id())
-            .await
-            .map_err(provision_error)?
-        {
+        let observed = match observed {
             Some(observed) => observed,
             None => {
                 let incarnation = IncarnationId::from_bytes(*uuid::Uuid::now_v7().as_bytes());
-                match authority
-                    .create_initial(&proof, incarnation, owner.clone())
-                    .await
-                {
+                match authority.create_initial(&proof, incarnation, owner).await {
                     Ok(observed) => observed,
                     Err(CellError::CellAlreadyActive) => authority
                         .load(target.cell_id())
-                        .await
-                        .map_err(provision_error)?
-                        .ok_or_else(|| {
-                            StorageError::Transient("concurrent Cell admission is pending".into())
-                        })?,
-                    Err(error) => return Err(provision_error(error)),
+                        .await?
+                        .ok_or(CellError::CellNotActive)?,
+                    Err(error) => return Err(error),
                 }
             }
         };
-        if let Some(handle) = self
-            .runtime
-            .local_handle(proof.clone(), &observed)
-            .await
-            .map_err(provision_error)?
+        let control = observed.value();
+        if control.root.is_some()
+            && match control.state {
+                ControlState::Idle => control.owner.is_none(),
+                ControlState::Recovering => control
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.session == self.session),
+                _ => false,
+            }
         {
-            self.track_coordinator(target)?;
-            return Ok(handle);
+            return self.activate_published(target, proof, observed).await;
         }
-        self.reclaim_coordinator_capacity().await?;
         let replica = CellReplica::new(
             self.layout.clone(),
             *target.cell_id().as_bytes(),
             *observed.value().incarnation.as_bytes(),
-            Limits::default(),
-        )
-        .map_err(|error| StorageError::Transient(error.to_string()))?;
-        let destination = self.activation_destination(target)?;
-        let handle = match observed.value().state {
-            ControlState::Recovering
-                if observed.value().root.is_none()
-                    && observed.value().owner.as_ref().map(|owner| owner.session)
-                        == Some(self.session) =>
-            {
-                self.runtime
-                    .bootstrap(proof, replica, authority, observed, destination, initialize)
-                    .await
-                    .map_err(provision_error)
-            }
-            ControlState::Idle if observed.value().root.is_some() => self
-                .runtime
-                .acquire_idle_restored(proof, replica, authority, observed, destination, owner)
-                .await
-                .map_err(provision_error),
-            _ => Err(StorageError::Transient(
-                "Cell has another owner or is still activating".into(),
-            )),
-        }?;
-        self.track_coordinator(target)?;
+            self.replica_limits(target)?,
+        )?;
+        let destination = self
+            .activation_destination(target)
+            .map_err(admission_error)?;
+        if observed.value().state != ControlState::Recovering
+            || observed.value().root.is_some()
+            || observed.value().owner.as_ref().map(|owner| owner.session) != Some(self.session)
+        {
+            return Err(CellError::CellNotActive);
+        }
+        let handle = self
+            .runtime
+            .bootstrap(proof, replica, authority, observed, destination, initialize)
+            .await?;
+        self.track_coordinator(target).map_err(admission_error)?;
         Ok(handle)
     }
 }
@@ -771,9 +877,12 @@ async fn wait_for_expired(nodes: &NodeDirectory, former: SessionId) -> Result<()
     .map_err(|_| StorageError::Transient("previous Cell owner remains live".into()))?
 }
 
-fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, StorageError> {
-    let lower = u128::from_be_bytes(source.lower.unwrap_or([0; 16]));
-    let upper = source.upper.map(u128::from_be_bytes);
+fn split_boundary(
+    lower: Option<[u8; 16]>,
+    upper: Option<[u8; 16]>,
+) -> Result<[u8; 16], StorageError> {
+    let lower = u128::from_be_bytes(lower.unwrap_or([0; 16]));
+    let upper = upper.map(u128::from_be_bytes);
     let midpoint = match upper {
         Some(upper) => upper
             .checked_sub(lower)
@@ -782,6 +891,11 @@ fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, Sto
     }
     .filter(|middle| *middle > lower && upper.is_none_or(|upper| *middle < upper))
     .ok_or_else(|| StorageError::LimitExceeded("partition range cannot be split further".into()))?;
+    Ok(midpoint.to_be_bytes())
+}
+
+fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, StorageError> {
+    let boundary = split_boundary(source.lower, source.upper)?;
     let next_epoch = route_epoch
         .checked_add(1)
         .ok_or_else(|| StorageError::LimitExceeded("table route epoch exhausted".into()))?;
@@ -793,7 +907,6 @@ fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, Sto
     };
     let left_id = fresh_id(None);
     let right_id = fresh_id(Some(left_id));
-    let boundary = midpoint.to_be_bytes();
     let mut left = source.clone();
     left.partition_id = left_id;
     left.upper = Some(boundary);
@@ -810,6 +923,48 @@ fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, Sto
 }
 
 impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
+    fn provision_global_index_directory<'a>(
+        &'a self,
+        client: &'a CellClient,
+        account_id: &'a str,
+        index_id: &'a str,
+        ranges: Vec<crate::RoutePagePartition>,
+    ) -> BoxedFuture<'a, Result<crate::DirectoryCopyReceipt, StorageError>> {
+        Box::pin(async move {
+            let spec = crate::DirectorySpec::root(index_id.into());
+            let target = crate::directory_target(account_id, &spec).map_err(provision_error)?;
+            let fingerprint =
+                crate::directory::fingerprint(&spec, &ranges).map_err(provision_error)?;
+            let client = self.provision_range(&target, client).await?;
+            let installed = client
+                .command::<crate::InstallDirectory>(
+                    &target,
+                    mutation_identity()?,
+                    Json(crate::DirectoryInstall {
+                        spec,
+                        ranges,
+                        source: None,
+                    }),
+                )
+                .await
+                .map_err(cell_error)?;
+            if !installed.output.0 {
+                return Err(StorageError::Transient(
+                    "index directory installation was rejected".into(),
+                ));
+            }
+            Ok(crate::DirectoryCopyReceipt {
+                cell_id: *target.cell_id().as_bytes(),
+                sequence: installed.receipt.commit_sequence,
+                fingerprint,
+            })
+        })
+    }
+
+    fn initial_partition_count(&self) -> u16 {
+        self.initial_partition_count
+    }
+
     fn provision_global_index<'a>(
         &'a self,
         client: &'a CellClient,
@@ -818,10 +973,16 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
         index: &'a crate::GlobalIndexRecord,
     ) -> BoxedFuture<'a, Result<Vec<crate::GlobalIndexPartitionSpec>, StorageError>> {
         Box::pin(async move {
-            let mut partitions = Vec::with_capacity(usize::from(self.initial_partition_count));
-            for ordinal in 0..self.initial_partition_count {
-                self.reclaim_deleted_ranges(client, account_id).await?;
-                let range = initial_partition(table, self.initial_partition_count, ordinal)?;
+            let account = account_target(account_id).map_err(provision_error)?;
+            let crate::TablePlacement::Routed { initial_partitions } = table.placement else {
+                return Err(StorageError::Validation(
+                    "account-local table has no initial ranges".into(),
+                ));
+            };
+            let mut partitions = Vec::with_capacity(usize::from(initial_partitions));
+            for ordinal in 0..initial_partitions {
+                self.reclaim_retired_ranges(client, &account, None).await?;
+                let range = initial_partition(table, initial_partitions, ordinal)?;
                 let spec = crate::GlobalIndexPartitionSpec {
                     table: table.clone(),
                     index: index.clone(),
@@ -861,10 +1022,16 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
         table: &'a TableRecord,
     ) -> BoxedFuture<'a, Result<Vec<PartitionSpec>, StorageError>> {
         Box::pin(async move {
-            let mut partitions = Vec::with_capacity(usize::from(self.initial_partition_count));
-            for index in 0..self.initial_partition_count {
-                self.reclaim_deleted_ranges(client, account_id).await?;
-                let spec = initial_partition(table, self.initial_partition_count, index)?;
+            let account = account_target(account_id).map_err(provision_error)?;
+            let crate::TablePlacement::Routed { initial_partitions } = table.placement else {
+                return Err(StorageError::Validation(
+                    "account-local table has no initial ranges".into(),
+                ));
+            };
+            let mut partitions = Vec::with_capacity(usize::from(initial_partitions));
+            for index in 0..initial_partitions {
+                self.reclaim_retired_ranges(client, &account, None).await?;
+                let spec = initial_partition(table, initial_partitions, index)?;
                 let target = data_target(account_id, &table.id, &spec.partition_id)
                     .map_err(provision_error)?;
                 let client = self.provision_range(&target, client).await?;
@@ -933,5 +1100,12 @@ fn provision_error(error: CellError) -> StorageError {
         | CellError::Registry(_)
         | CellError::Release(_) => StorageError::Internal(error.to_string()),
         _ => StorageError::Transient(error.to_string()),
+    }
+}
+
+fn admission_error(source: StorageError) -> CellError {
+    CellError::PeerTransport {
+        context: "BeyondDB Cell admission",
+        source: Box::new(source),
     }
 }

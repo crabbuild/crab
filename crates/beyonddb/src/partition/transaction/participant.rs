@@ -209,6 +209,22 @@ impl Query for ReadPartitionTransaction {
     }
 }
 
+/// Release assembled read images while retaining the partition's terminal decision.
+pub struct ReleasePartitionTransactionReads;
+impl Command for ReleasePartitionTransactionReads {
+    const MODULE: &'static str = DATA_MODULE;
+    const ID: u32 = 16;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<ReadTransactionInput>;
+    type Output = Json<bool>;
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        crate::participant::release_read_result(context, input)
+    }
+}
+
 /// Read one committed immutable image after a transactional read releases locks.
 pub struct ReadPartitionTransactionResult;
 impl Query for ReadPartitionTransactionResult {

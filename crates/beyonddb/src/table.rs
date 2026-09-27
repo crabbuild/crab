@@ -1,9 +1,28 @@
+mod deletion;
+
+pub use deletion::{
+    ContinueTableDeletion, DeleteTable, DeleteTableOutcome, PendingDirectoryRetirement,
+    ReadPendingDirectoryRetirement, ReadTableLifecycle, RecordTableDirectoryRetirement,
+    TableDirectoryRetirement, TableGeneration, TableLifecycle,
+};
+
 use super::*;
 use extenddb_core::types::{LsiInput, Tag};
+
+/// Immutable placement selected before a table's first range is installed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TablePlacement {
+    /// Items are stored directly in the account Cell.
+    Account,
+    /// Base and index directories start with this many ranges each.
+    Routed { initial_partitions: u16 },
+}
 
 /// An ExtendDB table's key contract stored in the account Cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TableSpec {
+    /// Placement policy persisted with the new generation.
+    pub placement: TablePlacement,
     /// Table name unique within the account.
     pub table_name: String,
     /// Primary key schema already validated by ExtendDB's operation engine.
@@ -28,6 +47,8 @@ pub struct TableSpec {
 
 impl TableSpec {
     pub(crate) fn matches_record(&self, record: &TableRecord) -> bool {
+        // Placement is service policy. A matching user retry keeps the original
+        // generation's policy even if the serving node's configuration changed.
         self.table_name == record.table_name
             && self.key_schema == record.key_schema
             && self.attribute_definitions == record.attribute_definitions
@@ -56,6 +77,8 @@ pub enum CreateTableOutcome {
 /// Durable identity and key contract for one account table.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TableRecord {
+    /// Original placement policy, unaffected by later server configuration.
+    pub placement: TablePlacement,
     /// Fresh ID assigned by the account Cell.
     pub id: String,
     /// Logical creation time assigned by the Cell runtime.
@@ -129,6 +152,7 @@ impl Command for CreateTable {
             }
         }
         let record = TableRecord {
+            placement: input.placement,
             id: table_id.clone(),
             created_at_ms: context.now_ms(),
             table_name: input.table_name.clone(),
@@ -155,6 +179,19 @@ impl Command for CreateTable {
                 SqlValue::Blob(serde_json::to_vec(&record)?),
             ],
         ))?;
+        if matches!(record.placement, TablePlacement::Routed { .. }) {
+            // Persist lifecycle ownership before provisioning independent roots.
+            // Deletion must fence even an installer that never publishes its copy.
+            for index in &record.global_secondary_indexes {
+                context.sql(&statement(
+                    "INSERT INTO ddb_global_index_routes (table_id, base_table_id) VALUES (?1, ?2)",
+                    vec![
+                        SqlValue::Text(index.id.clone()),
+                        SqlValue::Text(record.id.clone()),
+                    ],
+                ))?;
+            }
+        }
         if let Some(arn) = input.resource_arn {
             for tag in input.initial_tags {
                 context.sql(&statement(
@@ -171,91 +208,6 @@ impl Command for CreateTable {
         }
         Ok(CommandResult::Success(Json(CreateTableOutcome::Created(
             record,
-        ))))
-    }
-}
-
-/// Result of removing a table and all its items.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum DeleteTableOutcome {
-    /// Prepared account transactions still reference this table.
-    TransactionConflict,
-    /// The removed table's last description.
-    Deleted(TableRecord),
-    /// No table has this name.
-    TableNotFound,
-    /// The table's deletion protection is enabled.
-    DeletionProtected,
-}
-
-/// Remove a table and all its items in one durable command.
-pub struct DeleteTable;
-
-impl Command for DeleteTable {
-    const MODULE: &'static str = MODULE;
-    const ID: u32 = 7;
-    const CODEC_VERSION: u32 = 1;
-    type Input = Json<String>;
-    type Output = Json<DeleteTableOutcome>;
-
-    fn execute(
-        context: &mut CommandContext<'_, '_>,
-        Json(name): Self::Input,
-    ) -> Result<CommandResult<Self::Output>> {
-        let Some(table) = command_table(context, &name)? else {
-            return Ok(CommandResult::Rejected(Json(
-                DeleteTableOutcome::TableNotFound,
-            )));
-        };
-        if table.deletion_protection_enabled {
-            return Ok(CommandResult::Rejected(Json(
-                DeleteTableOutcome::DeletionProtected,
-            )));
-        }
-        // Deletion must not discard the table required to apply a durable COMMIT.
-        if crate::items::transaction::table_locked(context, &table.id)? {
-            return Ok(CommandResult::Rejected(Json(
-                DeleteTableOutcome::TransactionConflict,
-            )));
-        }
-        context.sql(&SqlBatch {
-            statements: vec![
-                SqlStatement {
-                    sql: "DELETE FROM ddb_route_partitions WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_split_plans WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_routes WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_local_index_items WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_items WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_table_tags WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_table_ttl WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_tables WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-            ],
-        })?;
-        Ok(CommandResult::Success(Json(DeleteTableOutcome::Deleted(
-            table,
         ))))
     }
 }
@@ -280,6 +232,8 @@ pub enum UpdateTableOutcome {
     Updated(TableRecord),
     /// No table has this name.
     TableNotFound,
+    /// Initial routed placement has not been published yet.
+    TableNotActive,
     /// Billing and capacity settings are inconsistent.
     InvalidUpdate,
 }
@@ -298,11 +252,33 @@ impl Command for UpdateTable {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let Some(mut table) = command_table(context, &input.table_name)? else {
-            return Ok(CommandResult::Rejected(Json(
-                UpdateTableOutcome::TableNotFound,
-            )));
+        let mut table = match deletion::command_lifecycle(context, &input.table_name)? {
+            TableLifecycle::Live(table) => table,
+            TableLifecycle::Deleting(_) => {
+                return Ok(CommandResult::Rejected(Json(
+                    UpdateTableOutcome::TableNotActive,
+                )));
+            }
+            TableLifecycle::Missing => {
+                return Ok(CommandResult::Rejected(Json(
+                    UpdateTableOutcome::TableNotFound,
+                )));
+            }
         };
+        // Initial owners persist this record verbatim. Keep it immutable until
+        // route publication so a retry cannot conflict with installed owners.
+        if matches!(table.placement, TablePlacement::Routed { .. })
+            && context.sql(&statement(
+                "SELECT 1 FROM ddb_routes WHERE table_id = ?1",
+                vec![SqlValue::Text(table.id.clone())],
+            ))?[0]
+                .rows
+                .is_empty()
+        {
+            return Ok(CommandResult::Rejected(Json(
+                UpdateTableOutcome::TableNotActive,
+            )));
+        }
         if let Some(mode) = input.billing_mode {
             if mode != table.billing_mode {
                 table.pay_per_request_since_ms =
@@ -320,6 +296,7 @@ impl Command for UpdateTable {
             table.deletion_protection_enabled = enabled;
         }
         let spec = TableSpec {
+            placement: table.placement,
             table_name: table.table_name.clone(),
             key_schema: table.key_schema.clone(),
             attribute_definitions: table.attribute_definitions.clone(),
@@ -381,7 +358,7 @@ impl Query for DescribeTableById {
     fn execute(context: &mut QueryContext<'_>, Json(id): Self::Input) -> Result<Self::Output> {
         Ok(Json(decode_table(
             &context.sql(&statement(
-                "SELECT record FROM ddb_tables WHERE table_id = ?1",
+                "SELECT record FROM ddb_live_tables WHERE table_id = ?1",
                 vec![SqlValue::Text(id)],
             ))?[0],
         )?))
@@ -462,7 +439,7 @@ pub(super) fn command_table(
 ) -> Result<Option<TableRecord>> {
     decode_table(
         &context.sql(&statement(
-            "SELECT record FROM ddb_tables WHERE table_name = ?1",
+            "SELECT record FROM ddb_live_tables WHERE table_name = ?1",
             vec![SqlValue::Text(name.to_owned())],
         ))?[0],
     )
@@ -471,7 +448,7 @@ pub(super) fn command_table(
 pub(super) fn query_table(context: &QueryContext<'_>, name: &str) -> Result<Option<TableRecord>> {
     decode_table(
         &context.sql(&statement(
-            "SELECT record FROM ddb_tables WHERE table_name = ?1",
+            "SELECT record FROM ddb_live_tables WHERE table_name = ?1",
             vec![SqlValue::Text(name.to_owned())],
         ))?[0],
     )
@@ -484,7 +461,7 @@ pub(super) fn command_unrouted_table(
     // Route publication transfers item authority; account writes must fail closed.
     decode_table(
         &context.sql(&statement(
-            "SELECT t.record FROM ddb_tables t LEFT JOIN ddb_routes r ON t.table_id = r.table_id \
+            "SELECT t.record FROM ddb_live_tables t LEFT JOIN ddb_routes r ON t.table_id = r.table_id \
              WHERE t.table_name = ?1 AND r.table_id IS NULL",
             vec![SqlValue::Text(name.to_owned())],
         ))?[0],
@@ -498,7 +475,7 @@ pub(super) fn query_unrouted_table(
     // The account item image is no longer authoritative after activation.
     decode_table(
         &context.sql(&statement(
-            "SELECT t.record FROM ddb_tables t LEFT JOIN ddb_routes r ON t.table_id = r.table_id \
+            "SELECT t.record FROM ddb_live_tables t LEFT JOIN ddb_routes r ON t.table_id = r.table_id \
              WHERE t.table_name = ?1 AND r.table_id IS NULL",
             vec![SqlValue::Text(name.to_owned())],
         ))?[0],
@@ -537,6 +514,13 @@ fn table_id(context: &CommandContext<'_, '_>, name: &str) -> String {
 }
 
 fn valid_table_spec(spec: &TableSpec) -> bool {
+    if let TablePlacement::Routed { initial_partitions } = spec.placement
+        && (initial_partitions == 0
+            || initial_partitions > 256
+            || !initial_partitions.is_power_of_two())
+    {
+        return false;
+    }
     let input = CreateTableInput {
         table_name: spec.table_name.clone(),
         key_schema: spec.key_schema.clone(),

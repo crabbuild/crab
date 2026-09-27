@@ -29,6 +29,28 @@ use crate::{
     CellStorage, DATA_NAMESPACE, NAMESPACE, credentials, transaction_coordinator,
 };
 
+/// Drain a serving node and retire its advertised boot session.
+///
+/// The session and directory must belong to this node. Drain or withdrawal
+/// failures propagate; callers must retain scratch state on failure.
+pub async fn shutdown_serving_node(
+    node: &CellNode,
+    directory: &NodeDirectory,
+    session: SessionId,
+) -> crab_cell_runtime::Result<()> {
+    // Retirement fences publication authority. Drain closes owners/logs and
+    // joins heartbeat maintenance before we read the last authoritative version.
+    node.shutdown().await?;
+    if let Some(observed) = directory.load(session, node_lease::unix_time_ms()?).await? {
+        // A late heartbeat CAS cannot replace the tombstone. If it wins first,
+        // withdrawal fails rather than reporting a clean session retirement.
+        directory
+            .withdraw(&observed, node_lease::unix_time_ms()?)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Restricts peer forwarding to BeyondDB's compiled Cell namespaces.
 ///
 /// Account tenants are derived per account, while credential Cells use a
@@ -41,6 +63,7 @@ impl PeerTargetScope for BeyonddbPeerScope {
             || ![
                 NAMESPACE,
                 DATA_NAMESPACE,
+                crate::directory::NAMESPACE,
                 crate::global_index::NAMESPACE,
                 credentials::NAMESPACE,
                 transaction_coordinator::NAMESPACE,
@@ -94,9 +117,11 @@ impl BeyonddbPeers {
         ));
         Ok(Self {
             runtime: node.runtime(),
-            layout,
+            layout: layout.clone(),
             registry: node.application().registry(),
             placement: Arc::new(placement::RangePlacement {
+                runtime: node.runtime(),
+                authority: CellAuthority::new(layout),
                 directory,
                 session,
                 signer,
@@ -105,7 +130,7 @@ impl BeyonddbPeers {
         })
     }
 
-    /// Build an owner-resolving client with placement for idle data/index Cells.
+    /// Build an owner-resolving client with placement for idle range/directory Cells.
     pub fn client(&self, provisioner: Arc<CellInitialPartitionProvisioner>) -> CellClient {
         let principal =
             peer_receiver::peer_principal(self.placement.directory.fleet(), self.placement.session);
@@ -128,6 +153,16 @@ impl BeyonddbPeers {
 
     pub(crate) fn directory(&self) -> &NodeDirectory {
         &self.placement.directory
+    }
+
+    pub(crate) async fn activate_remote_range(
+        &self,
+        target: &CellTarget,
+        node: crab_cell_runtime::node::NodeAdvertisement,
+    ) -> crab_cell_runtime::Result<()> {
+        self.placement
+            .admit_remote(target, node, peer_receiver::ACTIVATE_ACTION)
+            .await
     }
 
     pub(crate) async fn provision_local(

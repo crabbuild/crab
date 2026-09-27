@@ -1,4 +1,4 @@
-//! Reclaim local slots while retaining published transaction and table history.
+//! Reclaim obsolete range residency while retaining durable history.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -12,7 +12,6 @@ use crab_cell_runtime::control::{
     authority::{CellAuthority, VersionedControl},
 };
 use crab_cell_runtime::identity::{CellId, CellTarget};
-use crab_cell_runtime::ltx::Limits;
 use crab_cell_runtime::recovery::manifest::RecoveryManifestStore;
 use crab_ltx::CellReplica;
 use extenddb_storage::error::StorageError;
@@ -20,10 +19,113 @@ use extenddb_storage::error::StorageError;
 use super::{CellInitialPartitionProvisioner, provision_error};
 use crate::backend::cell_error;
 use crate::{
-    DescribeTableById, Json, ReadGlobalIndexPartition, ReadPartitionState, account_target,
+    DescribeTableById, GlobalIndexPartitionInput, GlobalIndexState, Json, PartitionState,
+    PublishedPartitionInput, PublishedPartitionOutcome, ReadGlobalIndexPartition,
+    ReadGlobalIndexSplitPlan, ReadGlobalIndexState, ReadPartitionSplitPlan, ReadPartitionState,
+    ReadPublishedGlobalIndexPartition, ReadPublishedPartition,
 };
 
 impl CellInitialPartitionProvisioner {
+    // Admission is held. Routing/authentication must be able to restore even
+    // when live ranges occupy every slot and need that metadata to move safely.
+    pub(super) async fn release_range_for_metadata(
+        &self,
+        target: &CellTarget,
+    ) -> Result<(), StorageError> {
+        if ![
+            crate::NAMESPACE,
+            crate::credentials::NAMESPACE,
+            crate::directory::NAMESPACE,
+        ]
+        .contains(&target.namespace())
+        {
+            return Ok(());
+        }
+        let ranges: HashSet<_> = self
+            .runtime
+            .active_cell_targets()
+            .await
+            .map_err(provision_error)?
+            .into_iter()
+            .filter(|target| {
+                [crate::DATA_NAMESPACE, crate::global_index::NAMESPACE]
+                    .contains(&target.namespace())
+            })
+            .map(|target| target.cell_id())
+            .collect();
+        let candidate = self
+            .runtime
+            .idle_transfer_candidates()
+            .await
+            .map_err(provision_error)?
+            .into_iter()
+            .filter(|(cell, _, _, _)| ranges.contains(cell))
+            .min_by_key(|(_, _, last_used, _)| *last_used);
+        if let Some((cell, generation, _, _)) = candidate {
+            // Release changes residency only. Durable items, intents, and range
+            // fences restore through ordinary owner resolution; busy work stays.
+            self.release_capacity(cell, generation).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn reclaim_directory_capacity(&self) -> Result<(), StorageError> {
+        if self.runtime.stats().active_cells() < self.runtime.stats().active_cell_capacity() {
+            return Ok(());
+        }
+        let _admission = self.admission.lock().await;
+        self.release_retired_directory().await.map(|_| ())
+    }
+
+    // Admission is held. Terminal directory state is irreversible, so release
+    // needs no account lookup that could recursively request another slot.
+    pub(super) async fn release_retired_directory(&self) -> Result<bool, StorageError> {
+        let stats = self.runtime.stats();
+        if stats.active_cells() < stats.active_cell_capacity() {
+            return Ok(false);
+        }
+        let targets: HashMap<_, _> = self
+            .runtime
+            .active_cell_targets()
+            .await
+            .map_err(provision_error)?
+            .into_iter()
+            .filter(|target| target.namespace() == crate::directory::NAMESPACE)
+            .map(|target| (target.cell_id(), target))
+            .collect();
+        let mut candidates = self
+            .runtime
+            .idle_transfer_candidates()
+            .await
+            .map_err(provision_error)?;
+        candidates.sort_by_key(|(_, _, last_used, _)| *last_used);
+        let client = CellClient::local_runtime(
+            self.application.registry(),
+            self.runtime.clone(),
+            self.layout.clone(),
+        );
+        for (cell, generation, _, _) in candidates {
+            let Some(target) = targets.get(&cell) else {
+                continue;
+            };
+            let state = client
+                .query::<crate::ReadDirectory>(target, None, Json(()))
+                .await
+                .map_err(cell_error)?;
+            if state
+                .output
+                .0
+                .is_some_and(|state| state.mode == crate::DirectoryMode::Retired)
+            {
+                // Runtime rechecks residency generation and settled work. The
+                // retained root still fences delayed split/open commands.
+                self.release_capacity(cell, generation).await?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) async fn restore_idle(
         &self,
         target: &CellTarget,
@@ -56,14 +158,28 @@ impl CellInitialPartitionProvisioner {
         if !restorable(observed.value()) {
             return Ok(None);
         }
-        self.reclaim_coordinator_capacity()
+        self.reclaim_settled_capacity(target)
             .await
             .map_err(admission_error)?;
+        self.activate_published(target, proof, observed)
+            .await
+            .map(Some)
+    }
+
+    // Callers hold admission and have checked Idle or our Recovering claim.
+    // Sharing activation keeps request and background recovery on the same root.
+    pub(super) async fn activate_published(
+        &self,
+        target: &CellTarget,
+        proof: CatalogProof,
+        observed: VersionedControl,
+    ) -> crab_cell_runtime::Result<CellHandle> {
+        let authority = CellAuthority::new(self.layout.clone());
         let replica = CellReplica::new(
             self.layout.clone(),
             *target.cell_id().as_bytes(),
             *observed.value().incarnation.as_bytes(),
-            Limits::default(),
+            self.replica_limits(target)?,
         )?;
         let destination = self
             .activation_destination(target)
@@ -79,7 +195,7 @@ impl CellInitialPartitionProvisioner {
                     replica,
                     authority,
                     observed,
-                    RecoveryManifestStore::new(self.layout.clone(), Limits::default())
+                    RecoveryManifestStore::new(self.layout.clone(), self.replica_limits(target)?)
                         .with_recovery_scratch(self.directory.clone()),
                     destination,
                 )
@@ -100,19 +216,19 @@ impl CellInitialPartitionProvisioner {
                 .await?
         };
         self.track_coordinator(target).map_err(admission_error)?;
-        Ok(Some(handle))
+        Ok(handle)
     }
 
-    pub(super) async fn reclaim_deleted_ranges(
+    pub(crate) async fn reclaim_retired_ranges(
         &self,
         client: &CellClient,
-        account_id: &str,
+        account: &CellTarget,
+        retained_source: Option<CellId>,
     ) -> Result<(), StorageError> {
         let stats = self.runtime.stats();
         if stats.active_cells() < stats.active_cell_capacity() {
             return Ok(());
         }
-        let account = account_target(account_id).map_err(provision_error)?;
         let mut retired = HashSet::new();
         let mut tables = HashMap::new();
         let local = CellClient::local_runtime(
@@ -140,48 +256,128 @@ impl CellInitialPartitionProvisioner {
                 entry.partition(),
             )
             .map_err(provision_error)?;
-            if target.cell_id() != entry.cell() {
+            // An unfinished controller may resume after publication. Keep its
+            // sealed export source resident throughout copy/open recovery.
+            if target.cell_id() != entry.cell() || retained_source == Some(entry.cell()) {
                 continue;
             }
-            let table_id = if entry.namespace() == crate::DATA_NAMESPACE {
-                local
-                    .query::<ReadPartitionState>(&target, None, Json(()))
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0
-                    .map(|state| state.spec.table.id)
-            } else {
-                local
-                    .query::<ReadGlobalIndexPartition>(&target, None, Json(()))
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0
-                    .map(|spec| spec.table.id)
-            };
-            let Some(table_id) = table_id else {
-                continue;
-            };
+            let (table_id, partition_id, index_id, sealed) =
+                if entry.namespace() == crate::DATA_NAMESPACE {
+                    let Some(status) = local
+                        .query::<ReadPartitionState>(&target, None, Json(()))
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0
+                    else {
+                        continue;
+                    };
+                    (
+                        status.spec.table.id,
+                        status.spec.partition_id,
+                        None,
+                        matches!(status.state, PartitionState::Sealed(_)),
+                    )
+                } else {
+                    let Some(spec) = local
+                        .query::<ReadGlobalIndexPartition>(&target, None, Json(()))
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0
+                    else {
+                        continue;
+                    };
+                    let sealed = matches!(
+                        local
+                            .query::<ReadGlobalIndexState>(&target, None, Json(()))
+                            .await
+                            .map_err(cell_error)?
+                            .output
+                            .0,
+                        Some(GlobalIndexState::Sealed(_))
+                    );
+                    (
+                        spec.table.id,
+                        spec.partition_id,
+                        Some((spec.index.id, spec.lower.unwrap_or([0; 16]))),
+                        sealed,
+                    )
+                };
             let present = match tables.get(&table_id) {
                 Some(present) => *present,
                 None => {
                     let present = client
-                        .query::<DescribeTableById>(&account, None, Json(table_id.clone()))
+                        .query::<DescribeTableById>(account, None, Json(table_id.clone()))
                         .await
                         .map_err(cell_error)?
                         .output
                         .0
                         .is_some();
-                    tables.insert(table_id, present);
+                    tables.insert(table_id.clone(), present);
                     present
                 }
             };
             if present {
-                continue;
+                if !sealed {
+                    continue;
+                }
+                let unpublished = if let Some((index_id, lower)) = index_id {
+                    let directory =
+                        crate::global_index_directory_target(&client, account, &index_id, lower)
+                            .await?;
+                    let input = GlobalIndexPartitionInput {
+                        index_id,
+                        partition_id,
+                    };
+                    // Keep the sealed source resident while copying/opening is
+                    // pending. Completion removes its durable participant reservation.
+                    client
+                        .query::<ReadGlobalIndexSplitPlan>(&directory, None, Json(input.clone()))
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0
+                        .is_none()
+                        && client
+                            .query::<ReadPublishedGlobalIndexPartition>(
+                                &directory,
+                                None,
+                                Json(input),
+                            )
+                            .await
+                            .map_err(cell_error)?
+                            .output
+                            .0
+                            .is_none()
+                } else {
+                    let input = PublishedPartitionInput {
+                        table_id,
+                        partition_id,
+                    };
+                    client
+                        .query::<ReadPartitionSplitPlan>(account, None, Json(input.clone()))
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0
+                        .is_none()
+                        && matches!(
+                            client
+                                .query::<ReadPublishedPartition>(account, None, Json(input))
+                                .await
+                                .map_err(cell_error)?
+                                .output
+                                .0,
+                            PublishedPartitionOutcome::Missing
+                        )
+                };
+                if !unpublished {
+                    continue;
+                }
             }
-            // Table names may be recreated; IDs never are. Release only residency:
-            // original transaction participants retain their roots for recovery.
+            // Generation IDs are never reused and sealed sources cannot reopen.
+            // Release residency only: replay and recovery retain the durable root.
             retired.insert(entry.cell());
         }
         if retired.is_empty() {
@@ -192,6 +388,20 @@ impl CellInitialPartitionProvisioner {
         // Wait for eligibility; unknown or busy state never authorizes release.
         let candidate = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
+                // Another admission or maintenance sweep can release these
+                // owners while this caller waits for inventory settlement.
+                let stats = self.runtime.stats();
+                if stats.active_cells() < stats.active_cell_capacity()
+                    || !self
+                        .runtime
+                        .active_cell_targets()
+                        .await
+                        .map_err(provision_error)?
+                        .iter()
+                        .any(|target| retired.contains(&target.cell_id()))
+                {
+                    return Ok(None);
+                }
                 let candidates = self
                     .runtime
                     .idle_transfer_candidates()
@@ -202,13 +412,16 @@ impl CellInitialPartitionProvisioner {
                     .filter(|(cell, _, _, _)| retired.contains(cell))
                     .min_by_key(|(_, _, last_used, _)| *last_used)
                 {
-                    return Ok::<_, StorageError>((cell, generation));
+                    return Ok::<_, StorageError>(Some((cell, generation)));
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
         .await
-        .map_err(|_| StorageError::Transient("deleted table ranges have not settled".into()))??;
+        .map_err(|_| StorageError::Transient("retired ranges have not settled".into()))??;
+        let Some(candidate) = candidate else {
+            return Ok(());
+        };
         // Metadata lookup may itself restore an idle account. Hold the local
         // admission gate only for release, avoiding recursive admission waits.
         let _admission = self.admission.lock().await;

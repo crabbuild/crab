@@ -60,9 +60,15 @@ impl CellInitialPartitionProvisioner {
         Ok(())
     }
 
-    pub(super) async fn reclaim_coordinator_capacity(&self) -> Result<(), StorageError> {
+    pub(super) async fn reclaim_settled_capacity(
+        &self,
+        target: &CellTarget,
+    ) -> Result<(), StorageError> {
         let stats = self.runtime.stats();
         if stats.active_cells() < stats.active_cell_capacity() {
+            return Ok(());
+        }
+        if self.release_retired_directory().await? {
             return Ok(());
         }
         let mut candidates = self
@@ -127,9 +133,10 @@ impl CellInitialPartitionProvisioner {
             }
             return Ok(());
         }
-        Err(StorageError::Transient(
-            "no settled coordinator can release capacity".into(),
-        ))
+        self.release_range_for_metadata(target).await?;
+        // The admission boundary reports exhausted capacity in its native error
+        // type, so peer placement retains ResourceExhausted rather than Internal.
+        Ok(())
     }
 
     /// Discover and recover abandoned transactions for configured accounts.
@@ -429,7 +436,7 @@ impl CellInitialPartitionProvisioner {
         nodes: &NodeDirectory,
     ) -> Result<(), StorageError> {
         let admission = self
-            .recover_registered_partitions(account_id, account, nodes)
+            .recover_registered_partitions(account_id, account, client, nodes)
             .await;
         let resolution = self
             .recover_registered_coordinators(account_id, client, storage, nodes)
@@ -684,7 +691,7 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
                     self.track_coordinator(&target)?;
                 }
             } else {
-                self.reclaim_deleted_ranges(client, account_id).await?;
+                self.reclaim_retired_ranges(client, &account, None).await?;
                 self.admit_module(
                     &target,
                     crate::transaction_coordinator::MODULE,

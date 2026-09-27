@@ -49,15 +49,33 @@ impl CellStorage {
             .await
             .map_err(cell_error)?;
         match response.output.0 {
-            PartitionLookupOutcome::Unrouted if self.initial_partitions.is_none() => Ok(None),
             PartitionLookupOutcome::Unrouted => {
-                Err(StorageError::TableNotActive(key_info.table_id.clone()))
+                self.require_account_placement(key_info).await?;
+                Ok(None)
             }
             PartitionLookupOutcome::Routed {
                 partition_id,
                 epoch,
             } => Ok(Some((partition_id, epoch))),
         }
+    }
+
+    async fn require_account_placement(&self, key_info: &TableKeyInfo) -> Result<(), StorageError> {
+        // Missing routes do not imply account-local storage. Resolve the durable
+        // generation policy even when this client has no provisioning capability.
+        let account = target(&key_info.account_id)?;
+        let record = self
+            .client
+            .query::<crate::DescribeTableById>(&account, None, Json(key_info.table_id.clone()))
+            .await
+            .map_err(cell_error)?
+            .output
+            .0
+            .ok_or_else(|| StorageError::TableNotFound(key_info.table_name.clone()))?;
+        if record.placement != crate::TablePlacement::Account {
+            return Err(StorageError::TableNotActive(key_info.table_name.clone()));
+        }
+        Ok(())
     }
 
     pub(super) async fn scan_routed(
@@ -118,27 +136,25 @@ impl CellStorage {
         let mut bytes = 0_usize;
         let mut expected_lower = None;
         loop {
-            let response = if global.is_some() {
-                self.client
-                    .query::<crate::ReadGlobalIndexRoutePage>(
-                        &account,
-                        None,
-                        Json(route_page.clone()),
-                    )
-                    .await
+            let page = if global.is_some() {
+                crate::read_global_index_route_page(
+                    &self.client,
+                    &key_info.account_id,
+                    route_page.clone(),
+                )
+                .await?
             } else {
                 self.client
                     .query::<ReadRoutePage>(&account, None, Json(route_page.clone()))
                     .await
-            }
-            .map_err(cell_error)?;
-            let (epoch, partitions, has_more) = match response.output.0 {
+                    .map_err(cell_error)?
+                    .output
+                    .0
+            };
+            let (epoch, partitions, has_more) = match page {
                 RoutePageOutcome::Unrouted if route_page.expected_epoch.is_none() => {
-                    return if self.initial_partitions.is_some() {
-                        Err(StorageError::TableNotActive(key_info.table_id.clone()))
-                    } else {
-                        Ok(None)
-                    };
+                    self.require_account_placement(key_info).await?;
+                    return Ok(None);
                 }
                 RoutePageOutcome::Unrouted | RoutePageOutcome::Changed => {
                     return Err(stale_partition());

@@ -77,10 +77,13 @@ weaken table deletion or the existing immediate credential/policy revocation
 contract. Listing and scan continuation must remain correct through directory
 splits; no request may fetch all table routes as its normal path.
 
-Current owners are `src/routing.rs`, `src/routing/split_state.rs`, and the account
-schema. Their callers include keyed routing, Query/Scan, TTL, GSI projection,
-split publication, table deletion, and transaction admission. Each must use the
-new directory contract. Existing transactions continue resolving their original
+Base-route owners remain `src/routing.rs`, `src/routing/split_state.rs`, and the
+account schema. Their callers include keyed routing, Query/Scan, TTL, split
+publication, table deletion, and transaction admission. GSI routes and split
+plans now use independently owned directory leaves; the serving cutover is
+under verification. See [metadata ownership](METADATA_SHARDING.md) for current
+contracts, lifecycle proof and remaining qualification. Base routes and the
+table-name catalog still require extraction. Existing transactions continue resolving their original
 participants rather than rerouting through a changed directory.
 
 ### Large collections and index ranges
@@ -109,6 +112,13 @@ projection progress so old journal work cannot undo newer results. Journal
 acknowledgement must follow durable destination application across cutover.
 Base-table transaction atomicity does not turn asynchronous GSIs into an atomic
 multi-key read view.
+
+Index Cells now implement fenced, version-preserving transfers with fingerprints
+that include tombstones. Account plans survive publication until both children
+open, and automatic sweeps visit base and index ranges. SDK proof covers a full
+node, adding capacity, remote child placement, independent plans, and restored
+read availability. Single-HASH-group growth and fleet-scale qualification remain
+open; see [global indexes](GLOBAL_INDEXES.md).
 
 ### Coordinator expansion and retirement
 
@@ -370,8 +380,9 @@ children accept idempotent imports while hidden from normal reads and writes;
 they activate only when the imported count and digest match the sealed export.
 Activated children remain hidden until route publication and a durable open
 command. Late imports are rejected after activation, including after owner restart.
-The account directory can consume the exact durable plan and switch the route
-with a predecessor compare-and-swap; owner restart retains the published route.
+The account directory switches the route with a predecessor compare-and-swap
+and retains the exact durable plan until both children open; owner restart
+retains both the route and unfinished plan.
 The host-backed controller verifies the sealed source and both children before
 publication and resumes idempotently after interruption. A host test runs the
 account capacity loop to trigger a split, performs a second split, sends a
@@ -495,7 +506,8 @@ table and one repeatedly recreated indexed table failed in 0.17 seconds without
 any coordinator transactions.
 
 Foreground table/index provisioning and coordinator admission now inspect bounded
-local catalog entries under the admission mutex when slots are exhausted. A
+local catalog entries when slots are exhausted; the admission mutex covers
+release after metadata lookup. A
 candidate must belong to the requested account, have an installed data or GSI
 specification, and refer to an exact table ID absent at the current account
 owner. The account lookup uses the routed client, so the account can live on a
@@ -510,18 +522,19 @@ one-window retry for movement capacity is shared with coordinator release.
 Published roots, item data, prepared transactions, and index journals remain;
 this releases residency and does not implement storage garbage collection.
 
-Live table generations, other tenants, account/credential Cells, and unfinished
-installations are ineligible for this proof. This does not make a fleet of live
+Serving ranges of live table generations, other tenants, account/credential
+Cells, and unfinished installations are ineligible for deletion proof. Sealed
+sources have the separate route-removal proof described below. This does not make a fleet of live
 ranges fit in one node's 64 slots; general activation/placement and durable
 history reclamation remain required. The independent tests ran unchanged from
 ExtendDB revision `bdb7b3df4ace3b80a6e928f144036d056aec0327`, with signed boto3
 requests against the compiled BeyondDB process and a fresh local RustFS store.
 Its 16 transaction tests passed in 59.93 seconds before this residency fix.
 
-This pressure proof currently runs in foreground table/index provisioning and
-coordinator admission. Split-child and background recovery admissions retain
-their existing coordinator reclamation policy; integrating deleted-range
-reclamation there remains follow-up work. Startup does not reactivate deleted
+This pressure proof runs in foreground table/index provisioning, split-child
+admission, and coordinator admission. Background recovery admission still
+uses coordinator reclamation; integrating range reclamation there remains
+follow-up work. Startup does not reactivate deleted
 tables because their directories are absent from the table listing.
 
 The signed SDK recreation regression also exposed a stale table-key cache in
@@ -541,10 +554,10 @@ cached table identities. No dependency patch or new setting is required.
 | Admission caller | Initial data/GSI provisioning and foreground coordinator `ensure` supply their routed client. |
 | Deletion proof | `DescribeTableById` on the current account owner; target derivation excludes other tenants and applications. |
 | Release callee | Runtime `release_idle_cell` rechecks exact generation and settled work, closes SQLite, and publishes Idle. |
-| Shared boundary | Settled coordinator release uses the same movement retry; split/background recovery integration remains open as noted above. |
+| Shared boundary | Settled coordinator release uses the same movement retry; split admission also reclaims obsolete ranges. Background recovery integration remains open. |
 | Regression | Five slots, live indexed data, repeated table generations, preserved roots, and restoration of an old participant. |
 | Peer proof | Signed SDK recreation with the account on another owner, followed by existing transaction recovery and restart assertions. |
-| Baseline | `origin/main` has no BeyondDB subtree; the previous draft retained deleted data/index owners and cached old table IDs. |
+| Baseline | The earlier draft retained deleted data/index owners and cached old table IDs. Current main includes deleted-table reclamation but retains sealed split sources. |
 
 **Is this the best fix?** Reclaim residency through the runtime's existing
 fenced release contract, using immutable table-generation absence as product
@@ -1302,7 +1315,7 @@ collected in `src/provision/capacity.rs`, replacing the local-handle composition
 inside `provision.rs`. Metadata route CAS, sealed-source fingerprints, and
 participant transaction barriers remain in their existing Cell commands.
 
-This fixes automatic data-range growth after cold placement. Proactive ownership movement, GSI splitting, and distributed capacity
+This fixes automatic data-range growth after cold placement. Proactive ownership movement and distributed capacity
 controller ownership remain unfinished.
 
 The pre-fix remote-source regression fails in 1.95 seconds. After routing the
@@ -1379,3 +1392,937 @@ results; current-head Linux and fleet-scale qualification remain separate gates.
 Production Rust grows by 213 net lines for the shared peer composition,
 scoped provisioning capability, and common range admission/recovery boundary.
 No wire shape, storage schema, dependency, or configuration setting changed.
+
+## Independent source-range splits
+
+Pending data splits are keyed by `(table_id, source_partition_id)`. Each source
+has one immutable pending plan; unrelated sources can copy and publish
+concurrently. `ReadPartitionSplitPlan` is the point lookup used by explicit split,
+threshold, and replay paths. `ReadSplitPlan` returns only the first pending
+source in ID order for explicit table recovery. Account sweeps visit published
+ranges in lower-bound order and use the participant lookup, which also finds
+an unfinished plan through either published child.
+
+Publication compares the exact source and child identities, bounds, table
+snapshot, and partition epochs in the command's SQL transaction. A newer
+directory epoch from an unrelated split no longer invalidates that comparison.
+Each successful publication increments the current directory epoch, preserving
+Scan page invalidation, while planned child epochs remain immutable. Publication
+retains the source plan and all three reservations until verified child opening;
+`FinishSplit` then removes only that plan and its members. Completed replay validates the exact children even
+when subsequent unrelated publications have advanced the directory epoch.
+
+The regression initially rejected the second disjoint source's plan. The signed
+SDK test now persists both plans, releases and restores the metadata owner,
+rejects a competing plan for the same source, publishes one plan, then replays
+it concurrently with publication of the other. It verifies that the second
+plan survives the first commit, the directory advances twice, stale page epochs
+are rejected, and copied SDK items survive release/restoration of the metadata
+and child owners. SDK retries are disabled for those recovered reads.
+
+Ownership remains in `routing.rs` and `routing/split_state.rs`; callers are
+`provision/capacity.rs` and `split.rs`. The runtime's existing application SQL
+transaction/savepoint commits or rolls back the route rows, epoch, and plan
+together. `DeleteTable` continues deleting all plans for the table and cascades
+participant reservations. GSI routing has an equivalent lifecycle, described
+in the automatic index growth section. Per-source prepare locks and
+export/import fingerprints retain their existing guards.
+
+Account metadata still uses one writer and a 512-MiB Cell budget.
+Each account sweep selects one existing range or one incomplete table, advancing
+past transient failures. A creation attempt can install all remaining initial
+ranges. Distributed scheduling and recursively sharded directories remain
+required; [the metadata ownership design](METADATA_SHARDING.md) records the atomic
+boundaries and integration gates for that work.
+The split-plan schema is unreleased and changed in place; development roots
+must be reprovisioned. There is no legacy schema reader or upgrade claim.
+
+These changes were verified on top of the tree merged by PR #469
+(`311105eb864c`), which is byte-identical to the tested parent branch.
+Seven signed SDK residency cases pass in 91.06s; the 1,025-range route-page
+regression passes in 3.12s; LSI mutation/transaction/split passes in 0.72s;
+admission-backpressure recovery passes in 0.36s; the data-range transaction,
+split, and owner-restart regression passes in 1.52s. The latter retains both
+wrong-source rejection (`PlanNotFound`) and same-source payload rejection
+(`PlanMismatch`) under the new source-keyed lookup.
+
+These are small fixtures. Fleet throughput and recovery remain unmeasured.
+Production code grows by 65 net lines, including SQL, to add the source lookup
+and replace table-wide exclusion. No dependency or configuration setting changed.
+Strict all-target BeyondDB Clippy passes in 28.60s; the standalone server builds
+in 51.83s. Format, Cell/LTX layout, policy entry points, and diff checks pass.
+The prior build directory lost compiler files during verification; a fresh
+checkout-specific target directory completed the clean build and tests.
+
+
+## Capacity progress around unresolved source work
+
+The account capacity sweep visits each published range in lower-bound order.
+Its caller retains a mutable cursor that advances after range selection,
+including when that range's inspection or split returns a transient error.
+Metadata discovery failures retain the prior cursor. At the end of a table the
+sweep proceeds to the next table, then starts another account pass. A pending
+split's source remains published until atomic cutover, so its durable plan is
+rediscovered on the next pass without a separate first-pending-plan priority.
+
+`SealPartition` still refuses prepared transaction locks and pending GSI
+projection journals. The split controller now maps those two typed rejections
+to transient deferral. Invalid contracts and unexpected results retain their
+existing error handling. Expected source work must neither stop the supervised
+serving task nor prevent another range's independent split from progressing.
+
+`reconcile_account_capacity` takes `&mut Option<CapacityCursor>` and now returns
+a boolean indicating that a base or index split completed. The cursor carries
+an optional index position as well as the range boundary. The redundant `CapacitySweep` result type
+was removed; all workspace callers use the canonical cursor ownership. These
+APIs are unreleased. The explicit one-shot table reconciliation method retains
+its first-pending-plan behavior and reports a blocked attempt to its caller.
+
+The signed SDK regression first timed out with both plans pending: a prepared
+read intent on the first source stopped the capacity task. With only cursor
+changes it still failed, exposing the fatal classification of the seal refusal.
+After both fixes, the other range publishes while the original intent remains
+Prepared and its source plan remains durable. Explicitly resolving that intent
+allows a later pass to finish its split. SDK reads with retries disabled return
+both original items, and node readiness remains healthy throughout.
+
+Verification: eight signed SDK residency cases pass in 66.71s; numeric
+Query/Scan, supervised splitting, and SDK restart coverage pass in 14.21s;
+admission-backpressure recovery passes in 0.48s; data-range transaction/split
+restart coverage passes in 3.01s. Strict all-target BeyondDB Clippy passes in
+9.55s and the standalone server builds in 24.36s. This refactor removes 32 net
+production Rust lines. It adds no storage, wire, dependency, or configuration
+change. Distributed controller ownership, metadata sharding, and fleet-scale
+throughput qualification remain open.
+
+
+## Automatic index-range growth
+
+The account sweep visits base ranges and then each GSI directory, applying the
+same occupied-page threshold. GSI planning reserves the source and both children
+in account-local indexed rows. A source or child can discover its pending plan
+without scanning another range's history. Publication replaces exactly one
+source, advances the current directory epoch, and retains the plan until both
+children are open. Retention closes the crash window between route publication
+and child availability. Participant reservations prevent overlapping transfers
+and premature child splits; table deletion cascades through the plan rows.
+
+The controller copies versions and tombstones through the fenced index lifecycle,
+verifies fingerprints, publishes, opens, and finishes. Recovery can resume through
+a published child. The existing base and new index planners share midpoint
+calculation. Initial placement and foreground requests continue through the
+existing peer admission boundary; no new configuration or dependency is added.
+
+The new SDK test exposed a supervisor failure: an exhausted fleet returned
+`LimitExceeded`, stopping its task and making the node unready. Capacity limits
+now defer a selected range just like transient owner pressure. Explicit one-shot
+calls still report the limit. The cursor advances and the durable plan remains;
+adding a node lets the next pass place children remotely and finish the split.
+
+Evidence: the regression failed before this classification change in 3.26s and
+passed after it in 13.06s. It covers an eight-slot node, a second node joining,
+independent plans across epoch changes, overlapping participant rejection,
+administrative metadata updates, stale route pages, SDK Query/Scan after owner
+restoration, tombstone replay protection, later projection key moves, and table
+deletion with a pending split. The transfer test also restores during import and
+after route publication before either child opens. These are bounded fixtures;
+10,000 active Cells, multi-TB storage throughput, unclean fleet recovery, and
+cutover latency qualification remain outstanding. An indivisible HASH group can
+still exhaust one Cell; sort-key subranges remain necessary.
+
+
+## Sealed-source residency after splits
+
+A completed split previously left its source in the active SQL pool. With eight
+slots and seven resident Cells, admission could not open two new split
+children even though one resident source was no longer routed. Local pressure reclamation now covers base and GSI split sources
+through the existing runtime release path.
+
+A candidate must have a durable `Sealed` state and a successful current-account
+lookup showing its exact partition ID absent from the published directory.
+For base ranges, `Unrouted` is insufficient: the directory must exist and report
+`Missing`. For both base and index sources, the pending participant reservation must also
+be absent; it remains present until both children open. Table deletion still supplies its
+independent immutable-generation proof. Serving and importing Cells are never
+eligible solely because their route row is absent.
+
+Initial table/index creation, transaction coordinator admission, and both split
+controllers share this pressure path. Each unfinished split excludes its own source from reclamation.
+Completed-plan replays perform no admission. The runtime rechecks the selected
+local generation and settled work before publishing Idle. Object-store roots,
+seals, tombstones, and transaction history remain recoverable. This does not
+collect storage, proactively rebalance remote nodes, or guarantee admission against stale remote fleet advertisements. The local
+Cell count now comes directly from the runtime admission ledger; other resource
+observations retain their signed-advertisement gates. Recovery of historical sources still needs
+available runtime capacity.
+
+The signed SDK regression `sdk_split_sources_release_capacity_and_retain_recoverable_roots`
+uses eight slots: SDK CreateTable/PutItem, base split, GSI projection and split,
+then another SDK CreateTable. It checks that both obsolete sources lose owners
+without losing roots, restores their durable seals, closes current children,
+and reads base/index images through the SDK after restoration. SDK retries are
+disabled. Before the fix, the second index child failed admission; the initial
+regression passed after adding reclamation. Deleted-table and existing split
+regressions cover the shared admission callers.
+
+**Is this the best fix?** Extend the existing product proof and runtime release
+boundary. No new eviction mechanism, schema, dependency, or capacity setting is
+needed. Discovery is bounded by local residency; metadata sharding and distributed
+rebalancing remain separate scaling gates. This increment adds about 80 net
+production lines to identify obsolete sources and share reclamation with splits.
+
+
+Verification on 2026-09-27:
+
+- New signed SDK regression: PASS, 2.45s with retries disabled.
+- All 11 `peer_network` SDK cases: PASS, 284.41s, including two-owner transaction
+  recovery, remote placement, independent split replay, and GSI tombstones.
+- Existing deleted-table residency and historical restoration: PASS, 5.33s.
+- Strict all-target Clippy: PASS, 11.59s; server build: PASS, 21.18s.
+- Format, diff, Cell/LTX layout, and policy entry-point checks: PASS.
+
+These scoped results do not resolve the previously recorded intermittent
+idle-owner test or establish fleet-scale qualification.
+
+
+## Base split recovery through child opening
+
+The base split previously deleted its intent at route publication. A crash before
+`OpenPartition` left published children in `Activated`, while automatic sweeps
+could see neither the old source nor its plan. The signed SDK fault regression
+reproduced this: after all participant/account owners were released and restored,
+four capacity steps left the published child unreadable.
+
+`ddb_split_members` now reserves the source and both child IDs in the same
+account command as the plan. `ReadPartitionSplitPlan` replaces the unreleased
+source-only query and performs an indexed member lookup. Publication retains the
+plan; repeated publication returns the same success without advancing the epoch
+again. The controller accepts a matching pending plan on either side of cutover,
+uses current-owner reads, verifies each durable open state, and calls
+`FinishSplit` only afterward. Completion atomically deletes the plan and cascades
+its memberships. A published child remains reserved against a nested split
+until its parent finishes. Deleted tables cascade all unfinished memberships.
+
+Account capacity sweeps therefore rediscover unfinished base work through a
+published child even when its occupied pages are below the split threshold.
+Source residency reclamation also requires absence of the pending reservation,
+matching index behavior. Prepared transactions and undelivered index journals
+still block source sealing; the source root and immutable import fingerprints
+remain the recovery authority. A newer write to an already-open child is not
+replaced when the controller replays the original sealed source.
+
+Evidence map:
+
+| Boundary | Proof |
+| --- | --- |
+| Caller | Account capacity sweep → partition lookup → host provisioner → `CellSplitController`. |
+| Metadata owner | `routing/split_state.rs`: Begin/Commit/Finish and indexed participant reads; route/schema types remain in `routing.rs`. |
+| Atomic callee | Runtime application savepoint commits plan/member/route mutations with the command result; rejected commands roll back. |
+| Data owner | Install/import/activate/open keep exact source seals and frozen import summaries; ordinary writes stay fenced until opening. |
+| Sibling paths | GSI already retains its plan through both opens; initial routes, source transaction guards, table deletion, and residency continue through their canonical paths. |
+| Baseline | Main and the previous PR head consume base intent at CommitSplit and cannot rediscover a published unopened child. |
+| SDK regression | Inject loss before the first or second child opens, release all participants/account, resume from a fresh sweep, preserve an intervening write, reject a nested plan until completion, then delete a table with a later pending plan. |
+
+**Is this the best fix?** Retain discoverable intent through the last required
+cross-Cell side effect. This follows the existing GSI protocol and avoids
+heuristic scans of historical sources or opening children without verifying
+imports. Split metadata handlers now live beside their state queries, bringing
+both routing modules below 700 lines. The new table and query name are unreleased;
+development roots require reprovisioning. No dependency, configuration, or
+released-data compatibility path is added.
+
+
+A completed replay now returns after matching the exact child directory and
+observing that Finish removed the intent. This applies to both base and GSI
+controllers: it does not reacquire historical sources, mutate children, or
+consume another active slot. The eight-slot SDK regression checks that completed
+base/index replays leave a released source idle before creating another table.
+Unfinished plans still require their sealed exports and verified fingerprints.
+
+The same capacity regression also exposed a stale local placement count: after
+release published Idle, the last heartbeat could still advertise eight occupied
+slots. Local placement now uses `CellRuntimeStats::placement_active_cells()` for
+its own authenticated session. Signed lease identity and all other resource
+eligibility gates remain mandatory; remote observations stay signed snapshots.
+Runtime admission and owner CAS still authorize actual acquisition. This is a
+local count refresh, not proactive fleet rebalancing.
+
+The existing numeric Query/Scan regression now waits for Finish before checking
+that a below-threshold child performs no split work. Its original assertions and
+timeout remain; a published epoch alone no longer implies completed opening.
+Net production growth for this increment is about 130 lines, including SQL and
+local placement wiring; moving existing handlers adds no second code path.
+
+
+Verification on 2026-09-27:
+
+- Before intent retention: the injected publication/open crash stranded an
+  `Activated` child after owner restoration and four capacity steps (2.54s).
+- Final 11 SDK residency cases: PASS, 23.20s, including both interruption points,
+  pending-member lookup, nested-split exclusion, table deletion, preserved newer
+  writes, completed replay at full capacity, GSI tombstones, and remote recovery.
+- Data/transaction/split owner recovery: PASS, 3.17s.
+- Numeric Query/Scan and successive capacity splits: PASS, 3.10s.
+- 1,025-range directory publication: PASS, 7.42s.
+- LSI mutations/transactions/splits: PASS, 1.32s.
+- Strict all-target Clippy: PASS, 9.38s; server build: PASS, 12.79s.
+- Format, diff, Cell/LTX layout, and policy entry-point checks: PASS.
+
+Earlier concurrent selections reported a five-second blocked-source timeout,
+placement denials, a remote-placement assertion, and a transient GSI read. The
+blocked-source case passed alone in 2.19s. The final selection above ran after
+completed-replay and fresh local-count fixes; no test timeout or assertion was
+relaxed. CI and fleet-scale qualification remain required. The older recorded
+idle-owner regression was not included in this selection and remains unresolved.
+
+### Resume ownership claims during configured and background recovery
+
+Request routing already resumed a published root left in `Recovering` after
+this boot session claimed ownership. Configured admission and background
+discovery did not: `admit_initialized` rejected that root, and
+`recover_discovered_owner` treated its own ownership as completed activation.
+Both behaviors also exist in the inspected `origin/main` at `311105eb864`.
+The initial regression run failed both cases: configured recovery returned
+“Cell has another owner or is still activating”; discovered recovery returned
+success with authority still `Recovering` and no serving actor.
+
+Configured admission now restores both Idle published roots and published roots
+claimed by this session through `activate_published`, shared with request
+routing. Discovery checks the local handle before declaring recovery complete;
+missing actors use canonical admission. Existing local actors avoid the admission
+mutex. Live remote owners and expired-owner takeover keep their existing paths.
+No coordinator decision, split state, account schema, or dependency changes.
+
+| Evidence boundary | Source and behavior |
+| --- | --- |
+| Entry points | `src/bin/beyonddb.rs` configured startup, registered route/coordinator recovery, and the transaction/GSI background workers. |
+| Product owner | `src/provision.rs::recover_discovered_owner` verifies an actor; `admit_initialized` distinguishes initial bootstrap from published restoration. |
+| Shared mechanism | `src/provision/residency.rs::activate_published` restores while the caller holds admission; it tracks coordinator residency only after activation succeeds. |
+| Runtime contract | `crab-cell-runtime/src/cell/actor/acquire.rs`: `local_handle` checks actual dispatcher residency; `acquire_idle_restored` reserves capacity before claiming; `activate_restored` validates local ownership and restores the authoritative LTX root. Lease, capacity, and authority checks remain in the runtime. |
+| Siblings | Account, credential, base range, GSI range, and coordinator use this admission path. Peer request restoration shares the same helper. The ordinary peer dispatcher still refuses an inactive owner. |
+| Regression | `tests/peer_network/residency/recovery.rs` commits SDK data, drains owners, publishes only their takeover claims, and invokes configured/discovered recovery. It verifies Serving authority and a local actor before SDK reads, including a restored GSI image. Coordinator discovery uses a local-only client so request routing cannot conceal a skipped activation. |
+
+This increment closes an interrupted-activation recovery gap. It does not prove
+fleet recovery throughput, rebalancing, a larger metadata budget, hot-key
+partitioning, or the 10,000-active-Cell/multi-TB target. At this stage, ordinary restoration under a full local pool still depended on
+coordinator reclamation or spare capacity. The later
+[request admission change](#retired-range-reclamation-before-request-placement)
+extends retired-range reclamation beyond explicit provisioning/splitting.
+
+Focused verification for this increment: 13 peer-network residency cases passed
+in 23.20 seconds, including signed SDK reads, cross-Cell transactional writes
+and reads, base/GSI split recovery, reclamation, and remote placement. The two
+transaction admission-failure cases passed in 10.55 seconds; settled-coordinator
+restart/checkpoint recovery passed in 1.28 seconds. Strict all-target BeyondDB
+Clippy passed. The new regression module adds coverage for the interrupted claim
+without production fault injection or weaker assertions/timeouts. Production
+code grows by 38 net lines to share restoration and verify discovery readiness.
+These are focused local results; the broader process qualification remains in CI.
+
+### Bounded base-range usage measurement
+
+`PartitionUsage` previously counted every item row and summed its stored BLOB
+lengths on every capacity check. The same aggregate exists on inspected
+`origin/main` at `311105eb864`. SQLite can obtain BLOB lengths without loading
+the full payload, but the aggregate still traverses all rows. This made the
+per-range capacity sweep grow with range item count.
+
+A singleton `ddb_partition_usage` row now maintains the existing report's item
+count and stored JSON/key bytes. AFTER INSERT, UPDATE, and DELETE triggers on
+`ddb_partition_items` update that row within the item command. The UPDATE trigger
+covers only counted columns, so TTL generation/backfill edits leave totals alone.
+The usage query reads that singleton and the existing occupied-page PRAGMAs.
+GSI capacity measurement already uses occupied-page metadata without an item scan;
+account-local tables are outside the data-range capacity controller.
+
+| Evidence boundary | Source and behavior |
+| --- | --- |
+| Entry point | Account capacity loop → `provision/capacity.rs::split_if_over_database_bytes` → `PartitionUsage`; report shape and physical split threshold remain unchanged. |
+| Mutation owner | `partition.rs::write_item`/`delete_item` cover CRUD, partition transaction resolution, TTL deletes, and imported split images. No second adapter-specific accounting path. |
+| Storage boundary | `partition_schema.sql` installs and seeds the singleton plus triggers. `item_storage.rs::StoredValue::write` allocates the final BLOB size before bounded content writes. |
+| Runtime contract | `registry/handlers.rs::write_sql_blob` and `primitives/sql.rs::write_blob` require fixed-size BLOB allocation; `cell/executor.rs` rolls rejected application work back to its savepoint. Counter changes publish and roll back with those item changes. |
+| Capacity reservation | The singleton occupies one preallocated page and has one bounded row. Its page is part of occupied storage before PREPARE; updates cannot grow its B-tree. Existing transaction headroom tests exercise both small/large COMMIT after other writers fill the Cell, refused PREPARE, and SQLite FULL upload rollback. |
+| Regression | `tests/elastic_cells/usage.rs` compares maintained totals to an independent full aggregate through inserts, UPSERT, large BLOB allocation and chunk writes, savepoint rollback, TTL metadata changes, and repeated deletion. `tests/peer_network/residency/usage.rs` verifies SDK mutation, failed condition, transaction replay, split imports, and owner-restored totals. |
+
+SQLite's [trigger semantics](https://www.sqlite.org/lang_createtrigger.html),
+[fixed-size BLOB writes](https://www.sqlite.org/c3ref/blob_write.html), and
+[BLOB length behavior](https://www.sqlite.org/lang_corefunc.html#length) match
+this boundary. The singleton preserves the useful distinction between item
+bytes and occupied database pages without reading all item rows. It adds one
+metadata page and bounded accounting work to each changed row; write-throughput
+impact at fleet scale remains unmeasured.
+
+A local SQL microprobe using Python SQLite 3.53.4, the actual schema, and the
+SELECT extracted from `PartitionUsage` counted VM instructions. At 100 rows,
+the prior aggregate used 1,413 steps and the singleton used 10. At 10,000 rows,
+they used 140,013 and 10 steps respectively, with identical totals. These are
+SQL-shape measurements, not 10,000 Cells or a production throughput benchmark.
+The Rust/runtime tests use the workspace's pinned rusqlite dependency.
+
+Focused verification: raw SQL invariant test PASS (0.01s); signed SDK usage,
+replay, split, and restart test PASS (1.29s); four transaction-capacity tests PASS
+(46.11s); TTL/transaction-lock test PASS (1.11s); LSI mutation/transaction/split
+test PASS (1.54s); numeric Query and automatic split test PASS (3.40s).
+Strict all-target Clippy and the standalone server build passed. This adds 32
+net production lines, retaining the existing report and removing its scan.
+
+This changes the unreleased data-Cell schema. Existing development roots require
+reprovisioning; no compatibility reader or dependency patch is introduced.
+These capacity counters retain the internal stored-JSON/key-byte definition;
+public table statistics use the separate logical measurement below. Metadata
+sharding, hot-key subdivision, fleet rebalancing, and 10,000-Cell/multi-TB
+qualification remain required.
+
+
+### Table and index statistics
+
+`DescribeTable` and `UpdateTable` now read the last published count/size sample;
+`DeleteTable` returns the previous sample when it belongs to the deleted table
+generation. A fresh table returns zero until the first successful sample.
+Inspected `origin/main` at `311105eb864` returned zero for these fields.
+
+Each item writer computes logical bytes with pinned ExtendDB core
+`types::item_size_bytes` (`bdb7b3df4ace3b80a6e928f144036d056aec0327`). SQL triggers
+maintain counts/bytes with CRUD, transaction resolution, TTL deletion and split
+imports. LSI ALL totals include only items present in the sparse index. GSI totals
+use the actual projected image; version tombstones contribute zero. The account
+and LSI statistics retain zero rows until table deletion, keeping accounting to
+one tree edit per item/index change. Transaction reservations include the base
+account edit and both LSI accounting edits during replacement.
+
+The server installs a cancellable statistics worker for its configured accounts.
+It rotates accounts every 250 ms, reads one bounded table-directory page, and
+samples at most one base or GSI range per tick. Counters make each range sample
+independent of its item count. Worker state holds one table, one range cursor and
+bounded per-index totals per account. Completed snapshots are stored separately
+from immutable table/route specifications. Partial sweeps are discarded on restart.
+
+Publication validates the table ID, base route epoch and every GSI route epoch
+inside one account command. A split during any part of a sweep rejects that
+sample; the next pass starts again. Sealed sources are excluded once the directory
+publishes children. The last completed sample remains visible while a sweep is
+retried. Table deletion cascades the persisted snapshot and removes local totals;
+reusing a table name cannot inherit another generation's totals. A sample whose
+start timestamp is older than the persisted sample cannot overwrite it.
+
+Samples are approximate: concurrent writes across Cells are observed at different
+moments, GSI projection can lag, and these statistics provide no transaction
+snapshot or freshness SLO. With one worker, 10,000 ranges alone need at least about
+42 minutes of tick slots, plus directory, RPC and retry time. Fleet throughput
+qualification remains open. [AWS documents asynchronous table/index statistics](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TableDescription.html);
+BeyondDB does not copy AWS's approximately six-hour refresh schedule.
+
+Size values are logical item-size estimates using attribute names and values,
+including raw binary and nested-value overhead. They exclude storage-system
+metadata and per-item storage overhead, and must not be used as AWS billing
+estimates. [AWS item-size rules](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/CapacityUnitCalculations.html)
+distinguish item data from storage overhead. Pinned ExtendDB's SQLite backend
+`MetadataEngine::refresh_table_size` instead sums serialized JSON lengths; this
+implementation deliberately uses its core item-size function for the Cell backend.
+
+| Evidence boundary | Source / focused test |
+| --- | --- |
+| Public entry | ExtendDB `TableEngine` → `backend.rs` → persisted account snapshot; `bin/beyonddb.rs` installs the worker. |
+| Mutation owners | `items.rs`, `partition.rs`, `secondary_index.rs`, `global_index.rs`; shared writers cover ordinary and transactional paths. |
+| Cell publication | `statistics.rs::PublishStatistics` checks directory generations; schema/source digests include the new handlers and accounting. |
+| Sweep orchestration | `backend/statistics.rs` owns bounded sampling and cancellation; `MetadataEngine::refresh_table_size` runs the same sweep explicitly. |
+| SQL atomicity | `elastic_cells::usage` compares maintained physical/logical totals with independent aggregates through UPSERT, incremental BLOB writes, rollback and deletion. |
+| SDK / durability | `residency::statistics` covers background publication, sparse LSI ALL, GSI KEYS_ONLY, nested/binary sizing, split sources, account restart, deletes, index tombstones and table recreation. |
+| Topology race | The SDK fixture forces base and GSI splits after directory lookup; both stale samples must return transient failure before a fresh sweep succeeds. |
+| Other mutation paths | `account_cell` compares the account-local sample with scanned items after transaction rollback/replay; `residency::usage` checks published totals after transaction replay, split, restore and deletion. |
+
+The account, data and GSI schemas are unreleased; existing development roots need
+reprovisioning. No dependency override, patch or lockfile change is involved.
+Metadata sharding, hot-key subdivision, fleet placement and multi-TB qualification
+remain required for the full goal.
+
+Focused verification: the two statistics SDK/race cases passed in 2.38 s;
+mutation/replay statistics passed in 1.59 s; account-local integration passed in
+4.42 s; four transaction capacity cases passed in 58.73 s; SQL counter, LSI and
+TTL cases passed in 0.01 s, 1.61 s and 1.06 s. Strict all-target Clippy, server
+build, formatting, layout, policy and diff checks passed. The production-process
+smoke test now polls the executable's sampled totals after signed writes; its
+execution remains a CI gate. Production code grows to implement Cell accounting,
+generation-checked publication and one shared bounded sweep for the worker and
+explicit refresh. It adds no public configuration or dependency changes.
+
+### Coordinator write-image retention
+
+Participant resolution now compacts its coordinator write-operation chunks in
+the same durable command as its receipt. Committed read mappings and all decision,
+token and participant replay protection remain. Drivers tolerate compaction
+between chunk reads by finishing from the durable decision. See the
+[protocol evidence and race tests](CROSS_CELL_TRANSACTIONS.md#terminal-operation-compaction).
+This reduces retained logical write bytes; bounded total history and physical
+object-store reclamation still need the full retirement protocol.
+
+
+### Retired-range reclamation before request placement
+
+The signed SDK regression on `47921e03923` returned ServiceUnavailable when a
+Scan needed to restore published children while all eight fixture slots were
+occupied, including two retired sources (51.55 s). Main `311105eb864` also sends
+ordinary restoration to placement without checking retired ranges. Explicit
+provisioning on the branch already performs that check.
+
+`server/peer_receiver.rs::LocalResolver` now checks for a current local actor
+first. A missing data/GSI owner invokes the existing retirement check before
+fresh placement or authenticated bootstrap/activation. The requested source is
+excluded from reclamation, so reading a historical root cannot evict that same
+root while trying to restore it. The planner observes the updated local Cell
+count; destination admission and authority CAS still decide whether activation
+is possible.
+
+Retirement receives the account Cell target derived from the request's tenant.
+`account_target` and request admission share the same private target constructor;
+account IDs are not reverse-decoded from hashes. Its dedicated metadata client
+uses `CellClient::runtime_with_peer`, whose runtime contract reaches current local
+or authenticated remote owners without acquiring an idle Cell. Queries force
+CurrentOwner policy. Missing metadata authority is an error, never evidence of
+deletion. Metadata queries precede the admission mutex, preventing recursive
+restoration and admission waits. Current local actors and ordinary forwarded
+invocations do not run reclamation.
+
+| Evidence boundary | Source / behavior |
+| --- | --- |
+| Entry | Signed SDK Scan/Get reach `BeyonddbPeers::client` and `LocalResolver`; authenticated activate/provision dispatchers use the same resolver. |
+| Owner | `provision/residency.rs::reclaim_retired_ranges` remains the sole retirement policy. It verifies table generation, seals, published routes and unfinished split plans. |
+| Runtime dependency | `client.rs::runtime_with_peer` and `client/runtime.rs::RuntimeLocalResolver` never activate metadata. `cell/actor/runtime.rs::release_idle_cell` and `cell/actor/task.rs` recheck the exact generation, lease and settled-work gates before closing and publishing release. |
+| Caller siblings | Initial base/GSI provisioning, base/GSI split children and coordinator admission now pass their existing account target to the same retirement function. Their policy is unchanged. |
+| Security sibling | Ordinary peer invocation has no provisioner or metadata client. Activate/provision authorization still requires the scoped capability and a data/index description. |
+| Regression | `tests/peer_network/residency/reclamation.rs` restores both historical seals, fills the pool, then uses signed SDK Scan to restore serving children without manually draining the historical sources. Both released roots remain present and SDK items match. |
+| Adjacent proof | Remote activation and capability rejection, base/GSI initial placement, unpublished-owner recovery and interrupted base split publication keep their existing assertions. |
+
+The new full-pool regression passes (3.54 s), remote cold placement passes
+(22.79 s), both remote provisioning/recovery cases pass (39.00 s), and interrupted
+split publication recovery passes (3.12 s). No test assertion or timeout was
+relaxed. The retirement check grows production code by 29 net lines, mostly the
+non-activating metadata client and shared admission sequencing; it adds no
+configuration, dependency, serialized format or storage-schema change.
+
+This is local same-account residency reclamation, not distributed rebalancing or
+object-store garbage collection. A full remote node can remain excluded by its
+signed capacity advertisement before activation is attempted. Account metadata
+must already have an available owner; background recovery, coordinator/credential
+admission and cross-account capacity selection retain their separate policies.
+10,000-active-Cell/multi-TB throughput and failure qualification remain open.
+
+GSI split/tombstone restoration also passes (11.63 s). Strict all-target
+Clippy, the standalone server build, formatting, diff, Cell/LTX layout and
+policy entry-point checks pass. Full SDK/process qualification remains a CI
+gate for the pushed head.
+
+
+## Resume incomplete table creation
+
+A failed CreateTable request can leave a durable catalog generation and published
+GSI directories without a base route. Previously the account capacity sweep
+skipped that generation; only a matching client retry could finish it. The sweep
+now invokes the same initial-route completion function as the request path,
+preserves published GSI directories and publishes the base route after its
+owners are installed. It advances the table cursor before trying recovery, so
+capacity pressure on one creation does not starve other tables.
+
+Deletion or a competing creator can supersede a discovered generation. If
+completion fails, the worker rereads the catalog and base publication before
+propagating the error. An absent/replaced record or completed base publication
+ends that attempt safely. Errors for an unchanged, incomplete generation still
+propagate through the existing retry/error policy.
+
+| Evidence | Boundary |
+| --- | --- |
+| Entry and owner | `backend.rs::create_table` and `provision/capacity.rs::reconcile_account_capacity` call `backend/table_creation.rs::publish_initial_routes`. The account owns the catalog and initial directory publication. |
+| Callees | `provision.rs::InitialPartitionProvisioner` installs deterministic base/GSI ranges through existing placement and admission; account `ActivateTableRoute` requires index publication before base publication. |
+| Siblings | Active base/GSI split sweeps keep their cursor and reservation handling. Account-local storage still bypasses routed provisioning; the global transition hook has no account inventory. |
+| Runtime contract | `CellClient::with_local_resolver` resolves before invocation; typed account commands reject stale generations. Durable Cell roots survive owner drain and are restored by the existing resolver. |
+| ExtendDB contract | Pinned `crates/engine/src/create_table.rs` delegates to `TableEngine::create_table`; readiness and cache invalidation follow a successful response. Worker completion uses the durable stored generation and does not replay the HTTP request. |
+| Baseline | Main and pre-change HEAD skip unrouted tables. The signed SDK recovery test failed its 15-second ACTIVE wait before this change. Removing error revalidation makes the concurrent-deletion test fail with `TableNotFound`. |
+| Regression | `tests/peer_network/residency/creation.rs` fills the node, fails creation after GSI publication, deletes a filler table, drains the account owner and lets the production worker finish without a CreateTable retry. Generation and GSI routes are preserved; writes, owner-restored reads and GSI Scan succeed. A second test deletes during base installation, then recreates and writes the name. |
+
+One worker selection repairs one table, potentially installing all remaining
+initial base/GSI ranges. Work is not bounded to one Cell per tick. Initial
+partition-count policy and administrative-update fencing are now durable, as
+described under [Persisted creation placement](#persisted-creation-placement). Metadata sharding and 10,000-Cell/multi-TB
+qualification remain open. No dependency, configuration or schema change is
+required for this recovery path.
+
+Local proof: both new signed SDK cases pass (3.80 s); remote base/GSI placement
+and unpublished-owner recovery pass (22.00 s); three capacity/split regressions
+pass (9.53 s). Strict all-target Clippy passes (10.11 s), as do formatting,
+diff, Cell/LTX layout and policy checks. The standalone server builds (17.55 s).
+Full SDK/process proof remains the CI gate. Production growth is 100 net lines: one shared completion path, published
+route checks, and worker revalidation replace the request-only path.
+
+## Persisted creation placement
+
+The table generation now records either account-local placement or routed
+placement with an initial range count. CreateTable validates and commits that
+policy with its catalog row before provisioning starts. Both base and GSI
+provisioning read the stored count; a changed node configuration cannot resize
+an interrupted generation or conflict with an already installed first range.
+Matching SDK retries retain that generation's policy.
+
+UpdateTable rejects an unpublished routed generation inside the account command.
+The readiness check and metadata mutation share one Cell transaction, preserving
+the table specification already installed in initial owners. Once the base route
+is published, billing and deletion-protection updates remain available. This
+matches the pinned ExtendDB SQLite backend's non-ACTIVE check in
+`crates/storage-sqlite/src/update_table.rs`; the existing engine maps
+`StorageError::TableNotActive` to ResourceInUseException. See also the
+[AWS UpdateTable contract](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_UpdateTable.html).
+
+DescribeTable, key discovery, point routing and Scan use the durable policy
+instead of inferring readiness from a client's provisioning capability. A
+maintenance client cannot treat an incomplete routed table as account-local.
+The extra metadata read is limited to an unpublished route; published data
+routing keeps its existing lookup path. Capacity sweeps skip explicitly
+account-local tables rather than attempting to convert them.
+
+| Evidence | Boundary |
+| --- | --- |
+| Entry | Signed CreateTable selects the provisioner's policy before `table.rs::CreateTable` commits it. Matching request retries and the account capacity worker reuse that record. |
+| Owner | `TablePlacement` in the catalog generation; `UpdateTable` checks `ddb_routes` in the same account command as its update. No second placement directory or policy fallback is introduced. |
+| Callees/siblings | `InitialPartitionProvisioner` exposes its new-table count; both base and GSI installers consume the persisted count. Point and Scan routing share the account-placement guard. Account-local fixtures explicitly select Account. |
+| Dependency | ExtendDB's SQLite update runs a non-ACTIVE guard under its write transaction; the shared engine's error mapping produces ResourceInUseException. Cell command SQL gives the corresponding atomic guard here. |
+| Baseline | On eae16432b3b, recovery configured for one range conflicts with the original first half-range. The SDK update succeeds and reports ACTIVE while the base route is absent. Both failures were reproduced before the fix. |
+| Regression | Signed SDK fixtures interrupt after one base or one GSI installation, drain the account owner, recover under a different configured count and retain two base/GSI ranges. SDK data remains readable after base-owner restoration. Updates fail during creation and succeed after publication; provisioner-free describe/point/Scan observe the same readiness. |
+
+This adds a required field to the unreleased serialized TableSpec/TableRecord
+contracts, including records embedded in base/index specifications. Development
+roots must be reprovisioned; there is no old-shape reader or rolling-upgrade
+claim. No dependency pin, lockfile or configuration option changes. Production
+growth is 85 net lines for durable placement, atomic readiness checks and shared
+unpublished-route classification. The fleet, metadata-sharding and full API
+qualification gates remain open.
+
+Local proof: four creation tests pass (6.51 s), including both interrupted
+base/GSI count-change cases; remote initial placement/recovery passes (19.30 s);
+account replay/rollback/new-host restoration passes (5.34 s); interrupted
+CreateTable retry and two-range persistence passes (25.16 s). Strict all-target
+Clippy passes (13.01 s), and the server builds (21.12 s). Formatting, diff,
+Cell/LTX layout and policy checks pass.
+
+The qualification workflow now retains its running invocation and keeps only
+the latest pending revision in the same concurrency group. Seven successive
+runs had been canceled by subsequent pushes before producing a result. This
+uses GitHub's [documented concurrency behavior](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency),
+without changing assertions, deadlines or the SDK/process workload. A result for
+an older commit does not qualify a newer one; the latest head still needs its
+own completed run.
+
+## Bounded generation-scoped table deletion
+
+`DeleteTable` now accepts the immutable generation selected by the backend and
+records a durable deletion marker before cleanup. DescribeTable reports DELETING
+while that marker exists. The physical catalog entry reserves the name until
+cleanup finishes; normal account reads, writes and new prepares use the live
+catalog view. Prepared account transactions prevent the marker from being
+created, so a durable COMMIT can still apply its original table image.
+
+Each command removes at most 64 directly selected metadata rows, then removes
+the catalog and marker once every child collection is empty. Child rows precede
+parents, preventing foreign-key cascades from hiding an unbounded collection.
+Item/LSI counters remain until item deletion triggers have finished. The GSI
+base-table index keeps generation selection from scanning every index directory.
+This bounds selected row work; it does not qualify total WAL bytes, storage
+latency or fleet throughput. Immutable data/index histories are not garbage
+collected by this change.
+
+The account capacity worker discovers DELETING through the same catalog listing
+used for creation recovery and advances one cleanup batch per visit. Remaining
+rows are durable progress, so no process-local cursor is needed. Delayed cleanup
+uses the original table ID; a delayed initial delete also carries that ID and
+cannot remove a replacement with the same name. Base/GSI publication, split
+admission/publication, TTL selection and statistics publication reject the fenced
+generation. Existing participant addresses and transaction replay history remain
+available to resolve earlier decisions.
+
+| Evidence boundary | Source and proof |
+| --- | --- |
+| Public entry and owner | ExtendDB `TableEngine` reaches `backend.rs`, then `table/deletion.rs` commands in the account Cell. |
+| Previous behavior | Main and pre-change HEAD synchronously remove the catalog and all account rows; the new SDK recovery test failed at post-delete DescribeTable with ResourceNotFound. |
+| Dependency contract | Pinned ExtendDB SQLite deletion supports immediate removal or a DELETING lifecycle and returns a DELETING description. BeyondDB uses its existing description/error types; no dependency or lockfile change. |
+| Sibling fences | Shared table helpers, base/GSI routing, split publication, account transaction resolution, LSI reads, TTL and sampled statistics consult the live view. Physical catalog reads remain only for uniqueness, lifecycle and listing. |
+| Recovery regression | Signed SDK writes populate an account-local table; deletion rejects new mutations and reserves the name, survives account-owner drain, finishes through the production worker, and permits safe recreation. Old-generation cleanup and delete cannot affect the replacement. |
+| Transaction gate | `mixed_participants_preserve_locks_and_finish_after_owner_restart` passed after the input contract change; prepared account locks still refuse deletion. |
+
+This is a prerequisite for metadata extraction, not sharded metadata. The account
+catalog, directories and cleanup writer still share one Cell. Distributed cleanup
+completion, metadata-tree recovery and 10,000-Cell/multi-TB proof remain required.
+The unreleased account schema and internal DeleteTable input changed; development
+stores must be reprovisioned for this application release.
+
+Focused verification: the SDK deletion/recreation case with 160 base items and
+160 LSI entries passed in 8.97s; mixed account/data prepared transactions and
+owner restart passed in 34.69s. Both base-capacity recovery cases passed. The GSI
+capacity case returned one HTTP 503 during Scan when run with the base cases;
+an unchanged isolated rerun passed in 15.79s. That intermittent failure is not
+resolved by this deletion change. Large routed/GSI deletion and process-level
+recovery still require their broader qualification gates.
+
+## Graceful node-session retirement
+
+CI run `36313605590` passed all 20 peer-network cases but failed the standalone
+bootstrap/restart test when CreateTable after a graceful restart received HTTP
+503. Placement reported `multiple live sessions advertise one node`. The old
+server had successfully drained and stopped its heartbeat while leaving its
+signed 15-second advertisement alive. A new boot reused the configured node ID
+with a fresh session; authoritative discovery correctly rejected both live
+sessions.
+
+A focused regression using the real host task group and signed directory
+reproduced that exact error in 0.03s. `shutdown_serving_node` now owns the product
+ordering: successful host drain, heartbeat join, read the final session version,
+then conditional withdrawal. The binary calls this boundary before removing its
+scratch directory. Host drain or withdrawal errors propagate and preserve that
+directory. If a cancelled in-flight heartbeat wins its CAS first, withdrawal can
+fail; this is an unsuccessful shutdown, not proof that the advertisement retired.
+No error is converted into successful retirement.
+
+| Boundary | Evidence |
+| --- | --- |
+| Caller | `src/bin/beyonddb.rs` uses the shared shutdown boundary after the serving loop returns. |
+| Lifecycle owner | `crab-cell-host/src/node/lifecycle.rs` closes runtime publication/logs before cancelling and joining lease maintenance. Failed drain must not authorize retirement. |
+| Authority contract | `NodeDirectory::withdraw` replaces the exact observed version with a tombstone, refuses unsealed node logs, and propagates version conflicts; a later heartbeat with an older CAS cannot revive the session. |
+| Sibling | `crab-http-server/src/peer.rs` already withdraws its advertisement after shutdown. Its log/observed-version ownership remains unchanged. |
+| Prior behavior | Both current main and pre-fix BeyondDB stop the publisher without withdrawal. Directory `live` reads authoritative records; reader-cache expiry cannot repair the omitted write. |
+| Regression | Immediate same-node republication sees only the replacement session and a retired original. Failed host drain preserves the advertisement. The existing stalled-heartbeat cancellation regression remains unchanged. |
+
+The focused successful-shutdown case passed in 0.03s and stalled refresh
+cancellation/fencing passed in 6.04s. The original standalone process scenario
+must still pass on the new PR head in CI before this failure is considered fully
+qualified. Hard-kill recovery and automatic fleet rebalancing retain their
+separate requirements.
+
+## Peer codec admission during storage waits
+
+Investigation of an intermittent GSI Scan 503 exposed a separate, deterministic
+admission defect. BeyondDB's peer handler held its signature-verification CPU
+reservation through catalog/control I/O, activation, actor dispatch and reply
+encoding. On a one-worker node, a delayed catalog GET occupied the only primitive
+CPU slot, preventing unrelated work from acquiring it. The slow-catalog mTLS
+regression failed on unchanged `e2daa9c3bdb` in 4.68s.
+
+The handler now releases that slot after signature verification, independently
+reserves request memory while asynchronous work waits, and reacquires CPU only
+for response encoding. The request-memory charge covers raw/decoded/signed
+copies and enrollment bookkeeping using the existing node ledger. Enrollment,
+dispatch and the encoding-slot wait share the signed request deadline. Initial
+admission refusals still advertise Retry-After; once dispatch begins, timeout or
+encoding failures remain uncertain outcomes and never use that retryable refusal.
+
+| Boundary | Evidence |
+| --- | --- |
+| Entry and callers | `server/peer_receiver.rs::forward`; ordinary typed peer clients and authenticated ACTIVATE/PROVISION requests all use it. |
+| CPU/memory owner | Runtime `try_reserve_worker_job`, `reserve_worker_job` and `try_reserve_node_bytes` own separate admission ledgers. They remain authoritative. |
+| Dispatch contract | `PeerDispatcher::dispatch` rechecks capability before resolving; `encode_peer_reply` preserves the same wire result. No private protocol changes. |
+| Cancellation contract | `CellHandle::execute` moves its work reservation into the actor's queued command before awaiting the reply. Dropping the HTTP waiter does not cancel accepted durable publication. |
+| Transport contract | `crab-cell-peer-http` treats 5xx failures after dispatch as unknown; only explicit admission refusal or a typed NotStarted result permits its bounded retry. |
+| Sibling and main | Current main retains the codec slot across dispatch. `crab-http-server/src/peer.rs` already separates memory, verification, dispatch and encoding with one deadline. |
+| Regression | A real authenticated peer query stalls at an observed catalog GET while unrelated CPU work must remain admissible. A second test allows a five-second sender timeout but proves the receiver terminates stalled enrollment at its shorter signed deadline. |
+
+The two codec regressions pass in 4.93s; all three base/GSI capacity cases pass in
+9.84s after the change. The original Scan failure did not recur in 20 instrumented
+runs of those three capacity cases before the fix. Temporary diagnostics were
+removed. Its cause therefore remains unproven; these passes do not establish that
+the original intermittent failure is fixed. Full signed SDK/process qualification
+and fleet admission/load qualification remain separate gates.
+
+Production growth is 21 net lines: explicit retained-memory admission and deadline
+handling replace the old reservation spanning every async phase. No dependency,
+configuration, serialized format or persistence changes are required.
+
+Remote cold activation, resumption of a claimed owner and capability rejection
+pass in 15.77s. Both initial remote base/GSI placement and unpublished-owner
+recovery cases pass in 19.17s. Strict all-target Clippy passes in 13.48s. The
+existing full signed SDK/standalone process CI suite must qualify the pushed head.
+
+### Cold-restoration failure diagnostics
+
+[Qualification run 36314291645](https://github.com/crabbuild/crab/actions/runs/36314291645)
+on `1a141965ce58` completed with 21 peer-network cases passing and the GSI
+capacity case failing at its first Scan after draining the index children and
+account owner. That head predates the bounded deletion, node retirement and
+codec fixes. Its standalone process suite passed two cases and failed the
+same duplicate-node-session recreation described above. Neither result qualifies
+the subsequent fixes.
+
+The residency fixture now enables the existing server WARN/ERROR events in test
+output. ExtendDB's shared `storage_err_to_dynamo` mapper records the transient
+storage cause before returning the intentionally generic SDK 503; without a
+subscriber that diagnostic was lost. The standalone binary already initializes
+tracing. No request retries, assertions, deadlines or production logging change.
+
+A temporary probe delayed every object-store GET by 50 ms during the post-drain
+Scan. The scenario passed in 30.14s with background recovery/capacity warnings;
+this did not reproduce or explain the original failure. The delay was removed.
+CI retains server warnings so a recurrence can distinguish admission, ownership
+and routing failures. The intermittent Scan failure remains open.
+
+## Placement freshness after fleet discovery
+
+The SDK discovery regression on `21a8c0cf763` fails in 4.41s with
+`LimitExceededException: no eligible BeyondDB placement destination`. The fixture
+delays object-store listing by four seconds while both real serving nodes renew
+their signed advertisements every three seconds. BeyondDB previously captured
+the evaluation time before discovery; the planner correctly rejected every
+newer heartbeat as a future observation, despite spare capacity.
+
+`RangePlacement::select_local` now reads the clock after discovery for both
+advertisement conversion and placement ranking. Heartbeats that renewed during
+the read can qualify, while advertisements that expired during the read are
+rejected. Runtime admission, signature validation, future-clock rejection and
+ownership CAS remain authoritative. No retry or freshness window is extended.
+
+| Boundary | Evidence |
+| --- | --- |
+| Entry and callers | `server/placement.rs::select_local`; initial base/GSI and split-child provisioning through `provision_local`, cold restoration through `LocalResolver`. |
+| Discovery contract | `NodeDirectory::live` verifies canonical signed records and rejects directory overflow and duplicate live sessions. It uses the caller's reference time during asynchronous reads. |
+| Placement contract | `PlacementObservation::from_signed_advertisement` rejects expired leases; planner `fresh` rejects samples newer than its evaluation time. |
+| Siblings | `crab-http-server/src/cells/router.rs::placement_snapshot` already reads the clock after discovery. Runtime `choose_advertised_placement` retains its explicit reference-time API; its current callers are tests, not BeyondDB serving paths. Exact-owner recovery still uses its existing authority/session checks. |
+| Main behavior | Current main and the prior PR head evaluate discovery results against the earlier timestamp. |
+| SDK regression | Real heartbeats, delayed discovery, retries disabled, CreateTable, durable PutItem, owner drain, and GetItem restoration. |
+
+The change fixes a demonstrated placement refusal. It does not implement
+automatic rebalancing or establish the cause of the separate intermittent GSI
+Scan 503. Those remain independent work and qualification gates.
+
+The complete SDK regression passes in 13.06s, including delayed discovery during
+both initial provisioning and cold activation. The three base/GSI capacity cases
+pass in 14.04s; existing cold placement, interrupted-claim recovery and capability
+rejection pass in 15.71s. Strict all-target Clippy passes in 11.63s; formatting,
+Cell/LTX layout and policy-entry checks pass. The production change adds one
+clock read and two explanatory comment lines, with no new dependencies,
+configuration, wire formats or persistent state. Full process qualification of
+the latest head is still required.
+
+## Automatic movement of settled ranges
+
+The serving binary installs one range-rebalance task per node, including nodes
+without configured account ownership. Every 15 seconds it reads the bounded
+signed fleet directory, evaluates freshness after discovery, and passes settled
+local data/GSI candidates to the runtime's placement planner. Account, credential
+and coordinator ownership are excluded from this movement policy.
+
+The planner retains its measured-resource, stable-sample, 60-second residence,
+weighted ownership balance and projected destination-capacity gates. A pass can
+release at most two Cells, subject to the planner's 8-GiB restore budget. The
+product conservatively budgets each destination for the database/capture limits,
+native/page-cache memory and two job credits; actual receiver admission still
+uses runtime ledgers. Balancing by Cell count requires a complete signed fleet
+view. Subsequent count-based moves wait for samples newer than the last release.
+
+The actor rechecks settlement and the exact local generation before closing the
+source and publishing Idle authority. The selected receiver then handles the
+existing authenticated ACTIVATE request and restores the same root. Table and
+index directory entries do not change, nor do partition epochs or transaction
+participant addresses. A rejected activation leaves a discoverable Idle root;
+an uncertain response may leave the receiver's claim or serving owner instead.
+The existing request/recovery paths handle those authority states. The worker
+never manufactures a replacement root or bootstraps missing authority.
+
+Receiver activation has no reservation or reachability handshake before release.
+An unreachable receiver that continues advertising capacity can therefore delay
+access to a released range. The failure test retires that receiver's session and
+advertisement before the SDK restores the range; it proves retained data and
+recovery after retirement, not uninterrupted availability during a partition.
+
+Maintenance obtains tenant-scoped targets from the runtime's active-owner
+inventory. Catalog proofs now retain tenant/application scope in memory; their
+serialized pages are unchanged. This avoids a product registry that could miss
+an owner between completed activation and cancelled caller bookkeeping. The
+loop keeps only generation/sample evidence for currently active ranges and
+resets settled-sample evidence when a candidate becomes busy. Restart discards
+this advisory evidence and requires a fresh residence window.
+
+| Boundary | Evidence |
+| --- | --- |
+| Entry | `src/bin/beyonddb.rs` installs `install_range_rebalance_loop` after recovery; the host work-task phase cancels it before runtime drain. |
+| Identity owner | Runtime catalog provision, lookup, pinned scan and resident proofs retain tenant/application scope; `active_cell_targets` reads actor-owned proofs and refuses fenced nodes. |
+| Placement | Runtime `PlacementPlanner::{fleet_balance, plan_transfers}`; the same resource and movement policy used by repository serving. |
+| Release | `CellRuntime::release_idle_cell` rechecks generation, persisted work, actor admission and worker close before authoritative release. Local admission serialization covers restoration and reclamation. |
+| Receiver | `RangePlacement::admit_remote` is shared by initial provisioning, cold activation and rebalancing. Capabilities and actual capacity remain receiver-enforced. |
+| Failure | A lost receiver cannot erase the published root. Ordinary resolution reloads authority and either restores Idle state or resumes its claimed owner. |
+| Prior behavior | Current main and `48416adec32` place new/cold ranges but have no automatic range movement worker. |
+| Focused proof | All three signed SDK cases pass in 76.27s: automatic data movement, automatic GSI movement, reads after owner restoration, and recovery after a receiver becomes unreachable. Runtime inventory across two tenants and cancellation after activation passes in 0.36s. |
+
+This is bounded serving-node range movement. The 1,024-node directory limit,
+account metadata sharding, hot-key subdivision, distributed failover scheduling,
+coordinator/history bounds and 10,000-Cell/multi-TB qualification remain open.
+Full binary qualification must also exercise this newly installed worker.
+
+Existing catalog tests pass (11 cases, 3.51s), as do all five exact-release
+regressions (0.76s), including persisted-work refusal and admission races.
+Strict all-target Clippy for BeyondDB and the runtime passes (1.94s).
+The standalone server builds successfully (21.91s).
+Formatting, diff, Cell/LTX layout and policy checks pass; runtime documentation
+validation passes 28 schema/protocol assertions and 240 local links.
+
+This increment adds 286 net production lines. The new worker reuses the runtime
+planner, exact-generation release and authenticated activation rather than
+adding a transfer protocol. Actor-owned scoped identity replaces the need for a
+second product owner registry. No dependencies, persistent formats or
+configuration options change.
+
+[Qualification run 36316016159](https://github.com/crabbuild/crab/actions/runs/36316016159)
+completed successfully on `e2daa9c3bdb`: six capacity unit cases, 23 peer-network
+cases (678.16s), and all three standalone process cases (288.38s). This qualifies
+the graceful node-session retirement fix on that head. It predates the codec,
+discovery-timing and range-rebalance increments and does not qualify those changes
+or establish the cause of the intermittent Scan failure.
+
+## Bounded activation replay
+
+Metadata review found two full-directory comparisons in the native activation
+commands. GSI replay selected every partition in a single SQL result, failing
+above the runtime's 1,000-row limit. Base replay paged SQL reads but reconstructed
+every `PartitionSpec`, copying the table schema for each range before comparison.
+
+Both now compare compact 64-row pages within the command's existing atomic
+snapshot. The base command checks its directory epoch and table schema once.
+Comparison stops at the first mismatch or when either sequence ends. Existing
+input validation, live-generation checks, index-before-base publication and
+transaction fencing remain in place. The diagnostic `ReadTableRoute` query still
+materializes a complete route; serving point and maintenance reads use indexed
+lookups or `ReadRoutePage` instead.
+
+The regression failed on `4f37a16fb8c` with `SQL result exceeds 1000 rows` after
+successful native GSI activation. With the change, base and GSI replay across
+1,024 entries passes after account-owner restoration, including rejection of
+changed first/middle/final entries and changed coverage (1.37s). This test installs
+metadata through native commands; it does not provision 1,024 data owners or
+change the public 256-range initial-placement limit. The focused regression is
+included in the qualification workflow.
+
+The signed SDK partial-creation recovery case also passes (1.22s): the serving
+worker restores the account, finishes base publication after index publication,
+then SDK writes, restored base reads and index reads succeed. Strict all-target
+Clippy passes (17.19s), and formatting/diff checks and the standalone build pass.
+
+| Boundary | Evidence |
+| --- | --- |
+| Entry | `ActivateTableRoute` and `ActivateGlobalIndexRoute`, called by `backend/table_creation.rs::publish_initial_routes` during creation and recovery. |
+| Owner | Account command snapshot owns both the route header and indexed rows, preserving atomic comparison. |
+| Dependency | Runtime `primitives/sql.rs::execute_batch` rejects more than 1,000 rows or 1 MiB per SQL result batch; a 64-row compact range page fits both. |
+| Siblings | Base and GSI activation share `route_partitions_match`; split publication already compares only source/child rows. Public point, Scan, TTL, projection and recovery use indexed or bounded directory queries. |
+| Main | Main and the preceding PR head retain full-directory activation comparisons. |
+
+The increment adds 37 net production lines to share bounded comparison; no
+schema, dependency or configuration changes. It does not shard account metadata.
+
+[Run 36317672700](https://github.com/crabbuild/crab/actions/runs/36317672700),
+head `48416adec32`, completed with six capacity cases and all three standalone
+process cases passing (273.86s). Peer tests finished 25 passed and one failed:
+`sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restore` received
+`Capacity("peer HTTP admission")` when reading the sealed source at line 417.
+This differs from the earlier post-drain Scan 503. The admission failure remains
+open; the run does not qualify a green peer suite or the newer rebalancing head.
+
+The unchanged GSI scenario passed 11 subsequent local runs, so no local
+reproduction or causal fix is established. Peer admission now records its
+rejection stage (`request_memory`, `decode`, or `verify`) and the runtime's
+resource counters at DEBUG level. The residency fixture retains that target's
+DEBUG events alongside other server warnings. It logs neither request bodies
+nor credentials, and changes no admission, deadline or retry behavior. The two
+existing codec/enrollment tests pass (4.52s). These diagnostics are intended to
+make the next CI recurrence actionable; passing repeats do not close the failure.

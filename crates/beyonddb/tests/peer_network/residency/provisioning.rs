@@ -9,28 +9,28 @@ use crab_cell_runtime::{
     identity::{CellTarget, IncarnationId},
 };
 
-struct Remote {
-    node: CellNode,
+pub(super) struct Remote {
+    pub(super) node: CellNode,
     _tasks: Arc<CellNodeTaskGroup>,
-    session: SessionId,
+    pub(super) session: SessionId,
     endpoint: String,
     lease: CancellationToken,
     server: tokio::task::JoinHandle<()>,
 }
 
 impl Remote {
-    async fn new(fixture: &Fixture) -> Self {
+    pub(super) async fn new(fixture: &Fixture) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("https://{}", listener.local_addr().unwrap());
         let session = SessionId::from_bytes([96; 16]);
         let lease = CancellationToken::new();
         let (remote, _tasks) = start_node(
             fixture.application.clone(),
+            8,
             fixture.directory.clone(),
             session,
             endpoint.clone(),
-            fixture.remote_tls.certificate(),
-            fixture.remote_tls.signing_key().clone(),
+            &fixture.remote_tls,
             98,
             lease.clone(),
         )
@@ -84,9 +84,18 @@ impl Remote {
             server,
         }
     }
+    pub(super) async fn shutdown(self) {
+        self.node.shutdown().await.unwrap();
+        self.server.abort();
+        let _ = self.server.await;
+    }
+
+    pub(super) fn stop_listener(&self) {
+        self.server.abort();
+    }
 }
 
-fn sdk_without_retries(fixture: &Fixture) -> aws_sdk_dynamodb::Client {
+pub(super) fn sdk_without_retries(fixture: &Fixture) -> aws_sdk_dynamodb::Client {
     aws_sdk_dynamodb::Client::from_conf(
         fixture
             .sdk
@@ -160,22 +169,18 @@ async fn sdk_initial_base_and_index_ranges_use_remote_owners() {
         })
         .collect::<Vec<_>>();
     let index = &record.global_secondary_indexes[0];
-    let page = fixture
-        .client
-        .query::<beyonddb::ReadGlobalIndexRoutePage>(
-            &account,
-            None,
-            Json(beyonddb::RoutePageInput {
-                table_id: index.id.clone(),
-                start_hash: None,
-                after_lower: None,
-                expected_epoch: None,
-            }),
-        )
-        .await
-        .unwrap()
-        .output
-        .0;
+    let page = beyonddb::read_global_index_route_page(
+        &fixture.client,
+        "123456789012",
+        beyonddb::RoutePageInput {
+            table_id: index.id.clone(),
+            start_hash: None,
+            after_lower: None,
+            expected_epoch: None,
+        },
+    )
+    .await
+    .unwrap();
     let beyonddb::RoutePageOutcome::Page { partitions, .. } = page else {
         panic!("missing GSI route")
     };
@@ -215,7 +220,12 @@ async fn sdk_initial_base_and_index_ranges_use_remote_owners() {
         .unwrap();
     fixture
         .provisioner
-        .recover_registered_partitions("123456789012", account_handle, &fixture.directory)
+        .recover_registered_partitions(
+            "123456789012",
+            account_handle,
+            &fixture.client,
+            &fixture.directory,
+        )
         .await
         .unwrap();
     assert_index(&sdk).await;
@@ -417,7 +427,7 @@ async fn sdk_initial_claim_recovery_preserves_unrouted_roots() {
     fixture.shutdown().await;
 }
 
-async fn wait_for_expiry(fixture: &Fixture, session: SessionId) {
+pub(super) async fn wait_for_expiry(fixture: &Fixture, session: SessionId) {
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         while fixture.directory.is_live(session, now_ms()).await.unwrap() {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -427,7 +437,7 @@ async fn wait_for_expiry(fixture: &Fixture, session: SessionId) {
     .unwrap();
 }
 
-fn create(
+pub(super) fn create(
     sdk: &aws_sdk_dynamodb::Client,
     name: &str,
     index: bool,
@@ -481,7 +491,7 @@ fn create(
     request
 }
 
-async fn table_id(fixture: &Fixture, name: &str) -> String {
+pub(super) async fn table_id(fixture: &Fixture, name: &str) -> String {
     fixture
         .client
         .query::<DescribeTable>(
@@ -512,6 +522,9 @@ async fn unpublished(
             &account_target("123456789012").unwrap(),
             mutation(),
             Json(TableSpec {
+                placement: beyonddb::TablePlacement::Routed {
+                    initial_partitions: 2,
+                },
                 table_name: name.into(),
                 key_schema: vec![KeySchemaElement {
                     attribute_name: "id".into(),
@@ -599,4 +612,42 @@ fn mutation() -> crab_cell_runtime::MutationIdentity {
         issued_at_ms: now,
         expires_at_ms: now + 60_000,
     }
+}
+
+pub(super) async fn complete_deletion(
+    fixture: &Fixture,
+    sdk: &aws_sdk_dynamodb::Client,
+    name: &str,
+) {
+    fixture
+        .provisioner
+        .install_account_capacity_loop(
+            &fixture.tasks,
+            "123456789012".into(),
+            fixture.client.clone(),
+            u64::MAX,
+            std::time::Duration::from_millis(100),
+        )
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            match sdk.describe_table().table_name(name).send().await {
+                Ok(table) => assert_eq!(
+                    table.table.unwrap().table_status(),
+                    Some(&aws_sdk_dynamodb::types::TableStatus::Deleting)
+                ),
+                Err(error)
+                    if error
+                        .as_service_error()
+                        .is_some_and(|error| error.is_resource_not_found_exception()) =>
+                {
+                    break;
+                }
+                Err(error) => panic!("deletion recovery failed: {error}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("directory retirement did not complete");
 }

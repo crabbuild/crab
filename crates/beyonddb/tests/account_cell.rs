@@ -27,7 +27,8 @@ use extenddb_core::types::{
     TableStatus, UpdateTableInput,
 };
 use extenddb_storage::{
-    DataEngine, IdempotencyKey, TableEngine, TransactGetOp, TransactWriteOp, error::StorageError,
+    DataEngine, IdempotencyKey, MetadataEngine, TableEngine, TransactGetOp, TransactWriteOp,
+    error::StorageError,
 };
 use object_store::memory::InMemory;
 
@@ -136,6 +137,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .application_handle::<Beyonddb>(cell_client, target.tenant(), target.application())
         .unwrap();
     let schema = TableSpec {
+        placement: beyonddb::TablePlacement::Account,
         local_secondary_indexes: Vec::new(),
         global_secondary_indexes: Vec::new(),
         table_name: "Books".into(),
@@ -600,6 +602,28 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .unwrap();
     assert_eq!(second_items.len(), 1);
     assert_eq!(end, None);
+    storage
+        .refresh_table_size("123456789012", "Books")
+        .await
+        .unwrap();
+    let described = storage
+        .describe_table(
+            "123456789012",
+            extenddb_core::types::DescribeTableInput {
+                table_name: "Books".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let bytes: usize = first_items
+        .iter()
+        .chain(&second_items)
+        .map(extenddb_core::types::item_size_bytes)
+        .sum();
+    assert_eq!(
+        (described.item_count, described.table_size_bytes),
+        (3, bytes as i64)
+    );
     let scanned_ids: Vec<_> = first_items
         .into_iter()
         .chain(second_items)

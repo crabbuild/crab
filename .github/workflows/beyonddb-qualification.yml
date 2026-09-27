@@ -29,7 +29,9 @@ permissions:
 
 concurrency:
   group: beyonddb-sdk-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Let expensive process qualification finish; newer pushes replace the pending
+  # run, so continued development cannot repeatedly discard all test evidence.
+  cancel-in-progress: false
 
 jobs:
   sdk:
@@ -78,6 +80,12 @@ jobs:
           set -euo pipefail
           cargo test -p beyonddb --locked --lib server::capacity \
             2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/capacity.log"
+          cargo test -p beyonddb --locked --test elastic_cells directory_activation \
+            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/directory-activation.log"
+          cargo test -p beyonddb --locked --test elastic_cells read_release \
+            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/read-release.log"
+          cargo test -p beyonddb --locked --test elastic_cells directory_tree \
+            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/directory-tree.log"
           # Keep the two process workloads serial so their storage load does not
           # distort one another's unchanged readiness deadlines.
           cargo test -p beyonddb --locked --no-fail-fast \

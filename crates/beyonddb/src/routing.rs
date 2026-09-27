@@ -10,10 +10,10 @@ use crate::{Json, MODULE, PartitionSpec, Result, SqlBatch, SqlResultSet, SqlValu
 
 mod split_state;
 
-use split_state::split_route_state;
 pub use split_state::{
-    PublishedPartitionInput, PublishedPartitionOutcome, ReadPublishedPartition, ReadSplitRoute,
-    SplitRouteState,
+    BeginSplit, BeginSplitOutcome, CommitSplit, CommitSplitOutcome, FinishSplit,
+    PublishedPartitionInput, PublishedPartitionOutcome, ReadPartitionSplitPlan,
+    ReadPublishedPartition, ReadSplitPlan, ReadSplitRoute, SplitRouteState,
 };
 
 /// One published set of contiguous data Cell ranges for a table.
@@ -65,7 +65,7 @@ pub struct SplitPlan {
     pub source: PartitionSpec,
     /// New adjacent ranges that replace the source.
     pub children: [PartitionSpec; 2],
-    /// Published directory epoch that this plan is allowed to replace.
+    /// Directory epoch observed when planning; unrelated ranges may advance it.
     pub expected_epoch: u64,
 }
 
@@ -108,213 +108,6 @@ impl SplitPlan {
     }
 }
 
-/// Outcome of recording one split plan.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum BeginSplitOutcome {
-    /// This exact plan is durable.
-    Planned,
-    /// The table does not exist.
-    TableNotFound,
-    /// The table has no active route.
-    RouteNotFound,
-    /// The proposed route is not a valid one-range split.
-    InvalidPlan,
-    /// Another split plan is already durable for this table.
-    Conflict,
-}
-
-/// Record a single-range split before provisioning or copying its children.
-pub struct BeginSplit;
-
-impl Command for BeginSplit {
-    const MODULE: &'static str = MODULE;
-    const ID: u32 = 11;
-    const CODEC_VERSION: u32 = 1;
-    type Input = Json<SplitPlan>;
-    type Output = Json<BeginSplitOutcome>;
-
-    fn execute(
-        context: &mut CommandContext<'_, '_>,
-        Json(plan): Self::Input,
-    ) -> Result<CommandResult<Self::Output>> {
-        let table_id = &plan.source.table.id;
-        let table_rows = context.sql(&statement(
-            "SELECT record FROM ddb_tables WHERE table_id = ?1",
-            vec![SqlValue::Text(table_id.clone())],
-        ))?;
-        let Some(table) = decode_table(&table_rows[0])? else {
-            return Ok(CommandResult::Rejected(Json(
-                BeginSplitOutcome::TableNotFound,
-            )));
-        };
-        let state = split_route_state(&plan, |batch| context.sql(batch))?;
-        if state == SplitRouteState::Unrouted {
-            return Ok(CommandResult::Rejected(Json(
-                BeginSplitOutcome::RouteNotFound,
-            )));
-        }
-        if !plan.valid_for(&table) || state != SplitRouteState::Before {
-            return Ok(CommandResult::Rejected(Json(
-                BeginSplitOutcome::InvalidPlan,
-            )));
-        }
-        let existing_rows = context.sql(&statement(
-            "SELECT plan FROM ddb_split_plans WHERE table_id = ?1",
-            vec![SqlValue::Text(table_id.clone())],
-        ))?;
-        if let Some(existing) = decode_plan(&existing_rows[0])? {
-            return Ok(if existing == plan {
-                CommandResult::Success(Json(BeginSplitOutcome::Planned))
-            } else {
-                CommandResult::Rejected(Json(BeginSplitOutcome::Conflict))
-            });
-        }
-        context.sql(&statement(
-            "INSERT INTO ddb_split_plans (table_id, plan) VALUES (?1, ?2)",
-            vec![
-                SqlValue::Text(table_id.clone()),
-                SqlValue::Blob(serde_json::to_vec(&plan)?),
-            ],
-        ))?;
-        Ok(CommandResult::Success(Json(BeginSplitOutcome::Planned)))
-    }
-}
-
-/// Outcome of atomically replacing a published route with its planned split.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum CommitSplitOutcome {
-    /// The planned route is published and the plan has been consumed.
-    Committed,
-    /// The table or its published route no longer exists.
-    RouteNotFound,
-    /// No matching split plan is durable for this table.
-    PlanNotFound,
-    /// The durable plan differs from the submitted plan.
-    PlanMismatch,
-    /// The published route changed since the split was planned.
-    RouteChanged,
-}
-
-/// Publish a split after a trusted coordinator verifies both activated children.
-///
-/// This account-local compare-and-swap does not inspect other Cells. The caller
-/// must verify the sealed source and both child activations before invoking it.
-pub struct CommitSplit;
-
-impl Command for CommitSplit {
-    const MODULE: &'static str = MODULE;
-    const ID: u32 = 12;
-    const CODEC_VERSION: u32 = 1;
-    type Input = Json<SplitPlan>;
-    type Output = Json<CommitSplitOutcome>;
-
-    fn execute(
-        context: &mut CommandContext<'_, '_>,
-        Json(plan): Self::Input,
-    ) -> Result<CommandResult<Self::Output>> {
-        let table_id = &plan.source.table.id;
-        let table_rows = context.sql(&statement(
-            "SELECT record FROM ddb_tables WHERE table_id = ?1",
-            vec![SqlValue::Text(table_id.clone())],
-        ))?;
-        if decode_table(&table_rows[0])?.is_none() {
-            return Ok(CommandResult::Rejected(Json(
-                CommitSplitOutcome::RouteNotFound,
-            )));
-        }
-        let state = split_route_state(&plan, |batch| context.sql(batch))?;
-        if state == SplitRouteState::Unrouted {
-            return Ok(CommandResult::Rejected(Json(
-                CommitSplitOutcome::RouteNotFound,
-            )));
-        }
-        let plan_rows = context.sql(&statement(
-            "SELECT plan FROM ddb_split_plans WHERE table_id = ?1",
-            vec![SqlValue::Text(table_id.clone())],
-        ))?;
-        let Some(durable) = decode_plan(&plan_rows[0])? else {
-            return Ok(if state == SplitRouteState::After {
-                CommandResult::Success(Json(CommitSplitOutcome::Committed))
-            } else {
-                CommandResult::Rejected(Json(CommitSplitOutcome::PlanNotFound))
-            });
-        };
-        if durable != plan {
-            return Ok(CommandResult::Rejected(Json(
-                CommitSplitOutcome::PlanMismatch,
-            )));
-        }
-        if state != SplitRouteState::Before {
-            return Ok(CommandResult::Rejected(Json(
-                CommitSplitOutcome::RouteChanged,
-            )));
-        }
-        // The epoch and indexed rows must switch in one Cell transaction.
-        context.sql(&statement(
-            "UPDATE ddb_routes SET route_epoch = ?2 WHERE table_id = ?1",
-            vec![
-                SqlValue::Text(table_id.clone()),
-                SqlValue::Text(
-                    plan.next_epoch()
-                        .ok_or(crate::Error::Command("split epoch exhausted"))?
-                        .to_string(),
-                ),
-            ],
-        ))?;
-        let removed = context.sql(&statement(
-            "DELETE FROM ddb_route_partitions WHERE table_id = ?1 AND partition_id = ?2",
-            vec![
-                SqlValue::Text(table_id.clone()),
-                SqlValue::Blob(plan.source.partition_id.to_vec()),
-            ],
-        ))?;
-        if removed[0].rows_affected != 1 {
-            return Err(crate::Error::Command("split source route row is missing"));
-        }
-        for partition in &plan.children {
-            insert_route_partition(context, partition)?;
-        }
-        context.sql(&statement(
-            "DELETE FROM ddb_split_plans WHERE table_id = ?1",
-            vec![SqlValue::Text(table_id.clone())],
-        ))?;
-        Ok(CommandResult::Success(Json(CommitSplitOutcome::Committed)))
-    }
-}
-
-/// Read a durable split plan for recovery after owner loss.
-pub struct ReadSplitPlan;
-
-impl Query for ReadSplitPlan {
-    const MODULE: &'static str = MODULE;
-    const ID: u32 = 12;
-    const CODEC_VERSION: u32 = 1;
-    type Input = Json<String>;
-    type Output = Json<Option<SplitPlan>>;
-
-    fn execute(
-        context: &mut QueryContext<'_>,
-        Json(table_id): Self::Input,
-    ) -> Result<Self::Output> {
-        Ok(Json(decode_plan(
-            &context.sql(&statement(
-                "SELECT plan FROM ddb_split_plans WHERE table_id = ?1",
-                vec![SqlValue::Text(table_id)],
-            ))?[0],
-        )?))
-    }
-}
-
-fn decode_plan(rows: &SqlResultSet) -> Result<Option<SplitPlan>> {
-    let Some(row) = rows.rows.first() else {
-        return Ok(None);
-    };
-    let [SqlValue::Blob(bytes)] = row.as_slice() else {
-        return Err(crate::Error::Command("invalid split plan row"));
-    };
-    Ok(Some(serde_json::from_slice(bytes)?))
-}
-
 /// Outcome of publishing initial table placement.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ActivateTableRouteOutcome {
@@ -349,7 +142,7 @@ impl Command for ActivateTableRoute {
         Json(route): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
         let table_rows = context.sql(&statement(
-            "SELECT record FROM ddb_tables WHERE table_id = ?1",
+            "SELECT record FROM ddb_live_tables WHERE table_id = ?1",
             vec![SqlValue::Text(route.table_id.clone())],
         ))?;
         let Some(table) = decode_table(&table_rows[0])? else {
@@ -364,7 +157,7 @@ impl Command for ActivateTableRoute {
         }
         for index in &table.global_secondary_indexes {
             if context.sql(&statement(
-                "SELECT 1 FROM ddb_global_index_routes WHERE table_id = ?1 AND base_table_id = ?2",
+                "SELECT 1 FROM ddb_global_index_routes WHERE table_id = ?1 AND base_table_id = ?2 AND initial_fingerprint IS NOT NULL",
                 vec![
                     SqlValue::Text(index.id.clone()),
                     SqlValue::Text(table.id.clone()),
@@ -393,8 +186,28 @@ impl Command for ActivateTableRoute {
                 ActivateTableRouteOutcome::TableNotEmpty,
             )));
         }
-        if let Some(current) = load_route(&route.table_id, |batch| context.sql(batch))? {
-            let outcome = if current == route {
+        let existing = context.sql(&statement(
+            "SELECT route_epoch, route_table FROM ddb_routes WHERE table_id = ?1",
+            vec![SqlValue::Text(route.table_id.clone())],
+        ))?;
+        if let Some(row) = existing[0].rows.first() {
+            let [SqlValue::Text(epoch), SqlValue::Blob(table)] = row.as_slice() else {
+                return Err(crate::Error::Command("invalid table route row"));
+            };
+            let matches = parse_epoch(epoch)? == route.epoch
+                && serde_json::from_slice::<TableRecord>(table)? == route.partitions[0].table
+                && route_partitions_match(
+                    context,
+                    "ddb_route_partitions",
+                    &route.table_id,
+                    route.partitions.iter().map(|partition| RoutePagePartition {
+                        partition_id: partition.partition_id,
+                        lower: partition.lower.unwrap_or([0; 16]),
+                        upper: partition.upper,
+                        epoch: partition.epoch,
+                    }),
+                )?;
+            let outcome = if matches {
                 ActivateTableRouteOutcome::Activated
             } else {
                 ActivateTableRouteOutcome::AlreadyActive
@@ -446,7 +259,7 @@ fn load_route(
     sql: impl Fn(&SqlBatch) -> Result<Vec<SqlResultSet>>,
 ) -> Result<Option<TableRoute>> {
     let route_rows = sql(&statement(
-        "SELECT route_epoch, route_table FROM ddb_routes WHERE table_id = ?1",
+        "SELECT route_epoch, route_table FROM ddb_routes WHERE table_id = ?1 AND EXISTS (SELECT 1 FROM ddb_live_tables WHERE table_id = ?1)",
         vec![SqlValue::Text(table_id.to_owned())],
     ))?;
     let route_rows = &route_rows[0];
@@ -564,7 +377,7 @@ impl Query for ReadPartitionRoute {
             "SELECT p.partition_id, p.epoch FROM ddb_routes r \
              LEFT JOIN ddb_route_partitions p ON p.table_id = r.table_id \
              AND p.lower_bound <= ?2 AND ?2 < p.upper_bound \
-             WHERE r.table_id = ?1 ORDER BY p.lower_bound DESC LIMIT 2",
+             WHERE r.table_id = ?1 AND EXISTS (SELECT 1 FROM ddb_live_tables WHERE table_id = ?1) ORDER BY p.lower_bound DESC LIMIT 2",
             vec![
                 SqlValue::Text(input.table_id),
                 SqlValue::Blob(input.hash.to_vec()),
@@ -663,8 +476,13 @@ pub(crate) fn read_route_page(
     if input.start_hash.is_some() && input.after_lower.is_some() {
         return Err(crate::Error::Command("invalid route page cursor"));
     }
+    let generation = if routes_table == "ddb_routes" {
+        "table_id"
+    } else {
+        "base_table_id"
+    };
     let epoch_rows = context.sql(&statement(
-        &format!("SELECT route_epoch FROM {routes_table} WHERE table_id = ?1"),
+        &format!("SELECT r.route_epoch FROM {routes_table} r JOIN ddb_live_tables t ON t.table_id = r.{generation} WHERE r.table_id = ?1"),
         vec![SqlValue::Text(input.table_id.clone())],
     ))?;
     let Some(row) = epoch_rows[0].rows.first() else {
@@ -756,7 +574,35 @@ pub(crate) fn read_route_page(
     }))
 }
 
-fn decode_page_partition(row: &Vec<SqlValue>) -> Result<RoutePagePartition> {
+// Activation replay runs inside one snapshot. Compare compact indexed pages so
+// an existing large directory cannot exceed SQL result limits or duplicate its
+// table schema once per range in memory.
+pub(crate) fn route_partitions_match(
+    context: &CommandContext<'_, '_>,
+    partitions_table: &'static str,
+    table_id: &str,
+    mut expected: impl Iterator<Item = RoutePagePartition>,
+) -> Result<bool> {
+    let mut after = Vec::new();
+    loop {
+        let page = context.sql(&statement(
+            &format!("SELECT partition_id, lower_bound, upper_bound, epoch FROM {partitions_table} WHERE table_id = ?1 AND lower_bound > ?2 ORDER BY lower_bound LIMIT 64"),
+            vec![SqlValue::Text(table_id.to_owned()), SqlValue::Blob(after.clone())],
+        ))?;
+        for row in &page[0].rows {
+            let actual = decode_page_partition(row)?;
+            after = actual.lower.to_vec();
+            if expected.next().as_ref() != Some(&actual) {
+                return Ok(false);
+            }
+        }
+        if page[0].rows.len() < 64 {
+            return Ok(expected.next().is_none());
+        }
+    }
+}
+
+pub(crate) fn decode_page_partition(row: &Vec<SqlValue>) -> Result<RoutePagePartition> {
     let [
         SqlValue::Blob(id),
         SqlValue::Blob(lower),
@@ -792,7 +638,7 @@ fn decode_page_partition(row: &Vec<SqlValue>) -> Result<RoutePagePartition> {
     })
 }
 
-fn parse_epoch(epoch: &str) -> Result<u64> {
+pub(crate) fn parse_epoch(epoch: &str) -> Result<u64> {
     let parsed = epoch
         .parse::<u64>()
         .map_err(|_| crate::Error::Command("invalid route partition epoch"))?;

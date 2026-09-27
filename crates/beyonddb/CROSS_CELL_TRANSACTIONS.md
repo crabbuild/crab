@@ -291,7 +291,7 @@ Participant durable record:
 | --- | --- |
 | Transaction ID, coordinator target, request digest, route epoch | Match a prepare to its immutable decision authority. |
 | Locked table ID, canonical item keys, and lock mode | Shared reads exclude writes; exclusive writes exclude other transactions. |
-| Proposed write images or captured read images and local positions | Prepare evaluates conditions against one serialized local state; apply needs no expression re-evaluation. The coordinator retains the original operations and request indexes. |
+| Proposed write images or captured read images and local positions | Prepare evaluates conditions against one serialized local state; apply needs no expression re-evaluation. The coordinator retains operations during prepare and committed-read response assembly; write operation images are compacted at participant resolution. |
 | `PREPARED`, `COMMITTED`, or `ABORTED` and coordinator identity | Make resolution idempotent across retries and owner recovery. The trusted driver reads the decision; participants do not store or independently verify a decision certificate. An `ABORTED` tombstone also fences a delayed prepare. |
 
 Account locks have primary key `(table_id, item_key, transaction_id)`; data
@@ -326,8 +326,10 @@ described below. Locks, chunk counts, and phase payload rows commit or roll back
 together. Participant resolution reads its chunks into memory, deletes the
 staged rows to reclaim their pages, applies images, releases locks, and sets
 its terminal marker inside one command. A failed apply rolls back the deletion
-as well as any partial image writes. Coordinator history remains retained as before;
-SQL chunking does not implement history collection or add decision phases.
+as well as any partial image writes. Decisions and participant replay markers
+remain retained. [Terminal operation compaction](#terminal-operation-compaction)
+now releases coordinator write images at resolution; full history retirement
+still needs a protocol that prevents late messages from recreating intents.
 
 Large individual items also need bounded SQL, even below DynamoDB's item limit:
 JSON escapes can make their encoded images exceed 1 MiB. The shared
@@ -2121,7 +2123,7 @@ development fixtures need reprovisioning. This is not a rolling-upgrade proof.
 | --- | --- |
 | Entry points | `recover_registered_coordinators` and `discover_coordinator` in `src/provision/transactions.rs` share proof recording and checking. |
 | Metadata owner | `src/transaction_coordinator/registry.rs` updates an existing account registration; `ListCoordinatorShards` returns that observation with its shard. Registration still precedes the first BEGIN. |
-| Empty-work proof | `ReadPendingTransactionBoundary` reads the coordinator's indexed `unresolved_count > 0` records; resolution decrements that count only after a participant receipt. |
+| Empty-work proof | `ReadPendingTransactionBoundary` reads the coordinator's indexed unresolved or acknowledged-read-cleanup records; resolution decrements that count only after a participant receipt. |
 | Dependency contract | Runtime `Control::release` preserves root and epoch while publishing Idle; reacquisition raises epoch. Query receipts identify the committed SQL sequence. Root matching cannot authorize skipping a Serving owner or recovery overlay. |
 | Callers and siblings | Account and data participant recovery still use the common resolver; foreground `CoordinatorProvisioner::ensure` always restores Idle history. The existing history/residency fixture exercises serving discovery with twelve shards and three active slots. |
 | Regression | `tests/elastic_cells/coordinator_checkpoints.rs` commits three tokenized writes, records settled observations, then prepares a new read after one observation. After owner restart, unchanged history must stay Idle without an epoch increase, while the changed shard must be acquired and its BEGIN aborted. Raw participant state proves cleanup before reads can help. A newer write and old-token replay prove lock release and no duplicate apply. |
@@ -2227,3 +2229,129 @@ hard restart, and client-token replay. This supplies the durable client-to-serve
 proof for the initial GSI path; online index lifecycle, automatic GSI splitting,
 retention, full DynamoDB compatibility, and 10,000-Cell/multi-TB qualification
 remain open.
+
+## Terminal operation compaction
+
+Inspected main (`311105eb864`) and the previous branch head retained every
+coordinator operation chunk after all resolutions. Replaying a completed write
+uses the request fingerprint/digest and durable decision; terminal recovery uses
+the participant target and receipt. Neither path needs the original write images.
+Those payloads could therefore consume the coordinator's finite database budget
+in proportion to all historical write bytes.
+
+`RecordParticipantResolution` now deletes that participant's nonnegative payload
+position and sets its chunk count to NULL in the same Cell command that records
+the resolved receipt. BEGIN and unresolved participants retain their payloads.
+The NULL is an explicit absence of operation images; the participant identity,
+prepare/resolution receipts and decision stay durable. The abort-decision payload
+uses position -1 and remains available for cancellation reasons and old images.
+Repeated resolution returns the existing receipt outcome without another apply.
+
+BEGIN records whether each participant contains a Read operation. Committed
+reads retain their operation-to-result mapping for `transaction_read.rs` to
+assemble immutable saved images, including duplicate read positions. Aborted
+reads can release operations because they never return a committed response.
+The account and data participant markers remain unchanged, so a delayed prepare
+still returns Committed/Aborted and cannot reacquire locks after compaction.
+
+A driver can read BEGIN and the first operation chunk just before another driver
+finishes. `ReadCoordinatorParticipant` returns None after compaction, including
+for a later chunk of an already-started fetch. The adapter discards the partial
+image, reads the authoritative decision and finishes remaining resolutions.
+A missing payload does not itself imply COMMIT or ABORT. Transactional-read
+response assembly continues to require its retained operations.
+
+| Evidence boundary | Source / qualification |
+| --- | --- |
+| Entry and ownership | `backend/transaction.rs` drives BEGIN; `backend/recovery.rs::finish_participant` records resolution only after the participant's durable outcome. |
+| Durable mutation | `transaction_coordinator/phase.rs::RecordParticipantResolution` compacts the payload and records progress under the runtime command savepoint. The runtime publishes or rolls back those changes together. |
+| Chunk consumer | `backend/transaction_transport.rs::coordinator_participant` discards partial bytes when compaction wins; the driver finishes from the coordinator decision. |
+| Sibling consumer | `backend/transaction_read.rs` still reads retained operation mappings. BEGIN derives retention from the actual operation variants; callers do not choose it. Shared-snapshot tests verify committed mappings remain and aborted mappings disappear for both account and data participants. |
+| Replay protection | `participant.rs::prepared` checks terminal records before stage/lock creation; coordinator BEGIN compares the retained request digest/fingerprint. No terminal marker or token lifetime is removed. |
+| Direct proof | The transaction-driver fixture checks zero retained write-operation rows and preserved participant metadata for COMMIT, ABORT, condition/route/capacity failures, concurrent drivers and lost replies. Fresh late prepares must return the original terminal participant state. |
+| Chunk race | A valid escaped item spans multiple chunks. The test transport delivers one chunk, runs a competing driver to completion, then delivers the next read. Both drivers return COMMIT and the published item matches the full original request. |
+| Signed SDK | Two-key TransactWriteItems commits, a later UpdateItem changes one value, then coordinator and data owners drain. Replaying the old token after restoration preserves the later value; TransactGetItems returns both expected values through restored owners. |
+| Owner replacement | The restored range fixture requires compacted operation absence and retains its existing decision, participant, pending-work and data assertions. |
+
+This changes the unreleased coordinator schema and requires reprovisioning
+existing development roots. No dependency pin or lockfile changes are involved.
+Deleting the logical payload frees SQLite pages for reuse; it does not promise
+immediate object-store byte reclamation. Full decision/tombstone/read-image
+retirement, coordinator expansion, retention under backup/split references, and
+10,000-Cell/multi-TB soak qualification remain open.
+
+
+### Compaction qualification
+
+The focused driver regression passes (6.79 s), including the second-chunk race,
+physical payload absence and fresh delayed prepares. Mixed account/data
+participants and shared-reader COMMIT/ABORT checks pass (24.57 s). The signed SDK
+replay after coordinator/data owner restoration passes (1.33 s). Token retention
+passes (0.54 s), both interrupted-upload cases pass (2.51 s), and all four
+reservation/full-database cases pass (55.93 s).
+
+The large data-range owner-restart fixture passes (3.51 s) with
+`RUST_MIN_STACK=16777216`. Its default local test-thread stack overflows on both
+this change and unchanged head `37ad11cf66d`; the baseline was run with these
+changes stashed. No assertion or test timeout was relaxed. This is a local debug
+test-harness limitation, not evidence of a production stack failure or a fleet
+qualification.
+
+The production change adds 48 net lines for retention selection, atomic payload
+removal and the chunk-race/read-response handling. Resolution is the appropriate
+ownership boundary: participant outcomes are durable before images disappear,
+and no background collector or second transaction state machine is introduced.
+
+Strict all-target Clippy and the standalone server build pass. Formatting,
+diff, Cell/LTX layout and policy entry-point checks pass. The SDK/process CI
+workflow will qualify the pushed head; these local checks do not replace that
+gate or the full API and fleet qualification.
+
+
+## Acknowledged transactional read cleanup
+
+The previous branch head (`66986825e26`) retained committed read images and
+operation mappings indefinitely. The public read adapter now assembles every
+position before publishing `BeginReadResultRelease`. Each request uses a fresh
+transaction ID; TransactGetItems has no token replay path that needs these images
+after assembly. Cancellation before acknowledgement still retains the images.
+
+The coordinator counts outstanding read-result releases in the same pending
+index used for decision recovery. `ReadUnresolvedCoordinatorParticipants` returns
+original targets for resolution or acknowledged cleanup. Recovery deletes the
+participant's saved images idempotently, then `RecordReadResultRelease` compacts
+its operation payload and decrements the counter in one command. If the deletion
+receipt is lost, the original target remains discoverable and deletion replays.
+The coordinator decision and participant identity/digest remain durable, so delayed
+prepare or resolve cannot recreate images or reacquire locks. Missing saved rows
+remain `Unavailable`, distinct from a saved absent item.
+
+A failed cleanup after durable acknowledgement does not discard the assembled
+response: recovery retains the work. An acknowledgement failure returns an error;
+no deletion starts without durable intent. No timer guesses when an active reader
+has finished. The pending-index predicate also prevents cleanup from being hidden
+by a settled-root checkpoint. Later acknowledgement changes that exact root.
+
+| Boundary | Evidence |
+| --- | --- |
+| Entry | `backend/transaction_read.rs` validates complete positions before acknowledgement; `backend/admission.rs` gives token-free reads fresh identities. |
+| Durable coordinator | `transaction_coordinator/read_release.rs` requires committed, fully resolved read participants; progress and payload compaction share a command. |
+| Participants | Account and data commands share `participant::release_read_result`; `item_storage::StoredValue::TransactionRead` stores the complete image in the deleted SQL row. |
+| Recovery | `backend/recovery.rs` and `provision/transactions.rs` use the existing pending index, immutable targets, bounded fanout and owner recovery. |
+| Siblings | Writes and aborted reads retain their existing resolution compaction. Committed reads without acknowledgement remain available; terminal markers remain in both participant types. |
+| Regression | `tests/elastic_cells/read_release.rs` checks returned public Storage results and zero saved rows; rejects premature acknowledgement and mismatched participant cleanup; restarts before deletion and after deletion without a coordinator receipt; verifies both participant types, compacted mappings, stale settled checkpoints, replayed acknowledgement and delayed prepare. |
+
+This adds one durable consumption boundary rather than a second recovery service.
+It reduces retained logical read bytes for completed requests. It does not bound
+abandoned readers, terminal records, command receipts, abort-result payloads or
+object-store history, and is not proof of unlimited scaling. Coordinator expansion
+and safe retirement remain required for the 10,000-Cell/multi-TB target. The
+unreleased coordinator schema gains a counter; peer query codec versions change
+with the status and pending-participant shapes. No dependency pins change.
+
+
+Focused validation: the read-release restart/public-Storage regression passed
+(2.14 s); the existing mixed account/data, shared-read, lost-reply and owner-restart
+fixture passed (27.81 s). Strict all-target Clippy passed. The signed SDK/process
+workflow now includes the new regression; the new revision still requires its
+CI run. These local checks do not establish fleet-scale or full API compatibility.

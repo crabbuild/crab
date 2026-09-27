@@ -1,9 +1,22 @@
+mod codec;
+mod creation;
+mod deletion;
+mod directories;
+mod discovery;
+mod index_splits;
 mod placement;
 mod provisioning;
+mod rebalance;
+mod reclamation;
+mod recovery;
+mod splits;
+mod statistics;
+mod usage;
 
 use crate::*;
 use crab_cell_runtime::cell::actor::CellHandle;
 use extenddb_core::types::{AttributeValue, Item};
+use tracing_subscriber::prelude::*;
 
 type SdkItem = HashMap<String, AwsAttributeValue>;
 
@@ -27,6 +40,39 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_partition_count(2).await
+    }
+
+    async fn with_partition_count(partitions: u16) -> Self {
+        Self::with_store(partitions, Arc::new(InMemory::new())).await
+    }
+
+    async fn with_capacity(partitions: u16, cell_capacity: usize) -> Self {
+        Self::with_store_capacity(partitions, Arc::new(InMemory::new()), cell_capacity).await
+    }
+
+    async fn with_store(partitions: u16, store: Arc<dyn object_store::ObjectStore>) -> Self {
+        Self::with_store_capacity(partitions, store, 8).await
+    }
+
+    async fn with_store_capacity(
+        partitions: u16,
+        store: Arc<dyn object_store::ObjectStore>,
+        cell_capacity: usize,
+    ) -> Self {
+        // SDK errors deliberately hide storage details. Retain server warnings
+        // in the test output so CI failures identify the underlying boundary.
+        let diagnostics = tracing_subscriber::filter::Targets::new()
+            .with_default(tracing::Level::WARN)
+            .with_target("beyonddb::server::peer_receiver", tracing::Level::DEBUG);
+        let _ = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_test_writer()
+                    .with_filter(diagnostics),
+            )
+            .try_init();
         let files = tempfile::tempdir().unwrap();
         let (certificate, key, remote_certificate, remote_key, ca) = tls_files(files.path());
         let remote_tls =
@@ -43,7 +89,7 @@ impl Fixture {
         );
         let account = account_target("123456789012").unwrap();
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            Store::new(store),
             object_store::path::Path::from("beyonddb-residency"),
             *account.application().as_bytes(),
         );
@@ -57,11 +103,11 @@ impl Fixture {
         let lease = CancellationToken::new();
         let (node, tasks) = start_node(
             Arc::clone(&application),
+            cell_capacity,
             directory.clone(),
             session,
             endpoint.clone(),
-            tls.certificate(),
-            tls.signing_key().clone(),
+            &tls,
             95,
             lease.clone(),
         )
@@ -79,7 +125,7 @@ impl Fixture {
                 files.path().join("data"),
             )
             .unwrap()
-            .with_initial_partition_count(2)
+            .with_initial_partition_count(partitions)
             .unwrap()
             .with_peers(peers.clone()),
         );
@@ -203,7 +249,7 @@ impl Fixture {
             .0
             .unwrap();
 
-        assert_eq!(route.partitions.len(), 2);
+        assert_eq!(route.partitions.len(), usize::from(partitions));
         let mut data = Vec::new();
         for partition in route.partitions {
             let id = (0..1_000)

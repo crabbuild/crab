@@ -88,7 +88,8 @@ impl PublishedNodeLease {
     /// Refresh the authoritative lease until cancellation or terminal failure.
     ///
     /// Serving hosts retain this task in their lease-maintenance phase until
-    /// runtime drain finishes. Cancellation leaves the current deadline intact.
+    /// runtime drain finishes. Cancellation leaves the current deadline intact;
+    /// serving composition retires the session through `shutdown_serving_node`.
     pub async fn run(mut self, cancellation: &CancellationToken) -> Result<()> {
         let guard = self.guard.clone();
         // A storage request can outlive the lease or shutdown. Dropping its

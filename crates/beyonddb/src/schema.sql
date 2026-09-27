@@ -4,10 +4,19 @@ CREATE TABLE ddb_tables (
     record BLOB NOT NULL
 );
 
+CREATE TABLE ddb_table_deletions (
+    table_id TEXT PRIMARY KEY REFERENCES ddb_tables(table_id) ON DELETE CASCADE
+);
+CREATE VIEW ddb_live_tables AS
+    SELECT t.* FROM ddb_tables t WHERE NOT EXISTS (
+        SELECT 1 FROM ddb_table_deletions d WHERE d.table_id = t.table_id
+    );
+
 CREATE TABLE ddb_items (
     table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
     item_key BLOB NOT NULL,
     item BLOB NOT NULL,
+    logical_bytes INTEGER NOT NULL CHECK (logical_bytes >= 0),
     PRIMARY KEY (table_id, item_key)
 );
 
@@ -30,9 +39,21 @@ CREATE UNIQUE INDEX ddb_route_partition_lookup
     ON ddb_route_partitions (table_id, lower_bound);
 
 CREATE TABLE ddb_split_plans (
-    table_id TEXT PRIMARY KEY REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
-    plan BLOB NOT NULL
+    table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
+    source_partition_id BLOB NOT NULL,
+    plan BLOB NOT NULL,
+    PRIMARY KEY (table_id, source_partition_id)
 );
+
+CREATE TABLE ddb_split_members (
+    table_id TEXT NOT NULL,
+    partition_id BLOB NOT NULL,
+    source_partition_id BLOB NOT NULL,
+    PRIMARY KEY (table_id, partition_id),
+    FOREIGN KEY (table_id, source_partition_id)
+        REFERENCES ddb_split_plans(table_id, source_partition_id) ON DELETE CASCADE
+);
+CREATE INDEX ddb_split_source ON ddb_split_members (table_id, source_partition_id);
 
 CREATE TABLE ddb_iam_user_policies (
     user_name TEXT NOT NULL,
@@ -80,16 +101,30 @@ CREATE INDEX ddb_account_write_locks ON ddb_account_transaction_locks (table_id,
 CREATE TABLE ddb_global_index_routes (
     table_id TEXT PRIMARY KEY,
     base_table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
-    route_epoch TEXT NOT NULL
+    initial_fingerprint BLOB,
+    retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0, 1))
+);
+CREATE INDEX ddb_global_index_routes_base ON ddb_global_index_routes (base_table_id);
+
+CREATE TABLE ddb_table_statistics (
+    table_id TEXT PRIMARY KEY REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
+    sampled_at INTEGER NOT NULL,
+    statistics BLOB NOT NULL
 );
 
-CREATE TABLE ddb_global_index_partitions (
-    table_id TEXT NOT NULL REFERENCES ddb_global_index_routes(table_id) ON DELETE CASCADE,
-    partition_id BLOB NOT NULL,
-    lower_bound BLOB NOT NULL,
-    upper_bound BLOB NOT NULL,
-    epoch TEXT NOT NULL,
-    PRIMARY KEY (table_id, partition_id)
-);
-CREATE UNIQUE INDEX ddb_global_index_partition_lookup
-    ON ddb_global_index_partitions (table_id, lower_bound);
+CREATE TRIGGER ddb_account_statistics_insert AFTER INSERT ON ddb_items
+BEGIN
+    INSERT INTO ddb_local_index_statistics VALUES (NEW.table_id, '', 1, NEW.logical_bytes)
+    ON CONFLICT(table_id, index_name) DO UPDATE SET
+        item_count = item_count + 1, item_bytes = item_bytes + NEW.logical_bytes;
+END;
+CREATE TRIGGER ddb_account_statistics_update AFTER UPDATE OF logical_bytes ON ddb_items
+BEGIN
+    UPDATE ddb_local_index_statistics SET item_bytes = item_bytes + NEW.logical_bytes - OLD.logical_bytes
+    WHERE table_id = OLD.table_id AND index_name = '';
+END;
+CREATE TRIGGER ddb_account_statistics_delete AFTER DELETE ON ddb_items
+BEGIN
+    UPDATE ddb_local_index_statistics SET item_count = item_count - 1, item_bytes = item_bytes - OLD.logical_bytes
+    WHERE table_id = OLD.table_id AND index_name = '';
+END;

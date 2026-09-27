@@ -63,9 +63,10 @@ async fn capacity_sweep_survives_admission_backpressure() {
         .await
         .unwrap();
     // The account and source occupy both slots: splitting cannot admit a child.
+    let mut cursor = None;
     assert!(matches!(
         provisioner
-            .reconcile_account_capacity(ACCOUNT, client.clone(), 1, None)
+            .reconcile_account_capacity(ACCOUNT, client.clone(), 1, &mut cursor)
             .await,
         Err(StorageError::Transient(_))
     ));
@@ -136,6 +137,7 @@ async fn coordinator_history_outgrows_residency_and_released_read_recovers() {
             &account,
             identity(245),
             Json(TableSpec {
+                placement: beyonddb::TablePlacement::Account,
                 local_secondary_indexes: Vec::new(),
                 global_secondary_indexes: Vec::new(),
                 table_name: "Residency".into(),

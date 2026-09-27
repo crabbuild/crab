@@ -55,7 +55,7 @@ impl CellStorage {
             if participant.prepared {
                 continue;
             }
-            let payload = self
+            let Some(payload) = self
                 .coordinator_participant(
                     &coordinator,
                     ReadCoordinatorParticipantInput {
@@ -66,7 +66,10 @@ impl CellStorage {
                         chunk: 0,
                     },
                 )
-                .await?;
+                .await?
+            else {
+                return self.finish_transaction(&coordinator, &read).await;
+            };
             let operations = payload
                 .operations
                 .iter()

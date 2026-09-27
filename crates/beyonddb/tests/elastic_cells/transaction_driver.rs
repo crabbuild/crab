@@ -35,6 +35,9 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
     let mut table_bytes = [180; 32];
     table_bytes[..16].copy_from_slice(account.tenant().as_bytes());
     let table = TableRecord {
+        placement: beyonddb::TablePlacement::Routed {
+            initial_partitions: 2,
+        },
         local_secondary_indexes: Vec::new(),
         global_secondary_indexes: Vec::new(),
         id: blake3::Hash::from_bytes(table_bytes).to_hex().to_string(),
@@ -110,10 +113,10 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
     for (position, (_, participant)) in participants.iter_mut().enumerate() {
         participant.operations[0].index = u8::try_from(1 - position).unwrap();
     }
-    for scenario in [180_u8, 181, 182, 183, 184, 185, 186, 187] {
+    for scenario in [180_u8, 181, 182, 183, 184, 185, 186, 187, 188] {
         let transaction_id = [scenario; 16];
         let coordinator = coordinator_target(account_id, &transaction_id).unwrap();
-        bootstrap
+        let coordinator_handle = bootstrap
             .cell(
                 &coordinator,
                 "beyonddb-coordinator",
@@ -128,7 +131,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             .iter()
             .map(|(_, participant)| participant.clone())
             .collect();
-        if !matches!(scenario, 180 | 181 | 185 | 186) {
+        if !matches!(scenario, 180 | 181 | 185 | 186 | 188) {
             for participant in &mut request {
                 let TransactionOperation::Put(input) = &mut participant.operations[0].operation
                 else {
@@ -137,6 +140,18 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                 input
                     .item
                     .insert("value".into(), AttributeValue::N("2".into()));
+            }
+        }
+        if scenario == 188 {
+            for participant in &mut request {
+                let TransactionOperation::Put(input) = &mut participant.operations[0].operation
+                else {
+                    unreachable!()
+                };
+                // JSON escaping makes one valid item span coordinator chunks.
+                input
+                    .item
+                    .insert("padding".into(), AttributeValue::S("\0".repeat(140_000)));
             }
         }
         if scenario == 182 {
@@ -261,6 +276,13 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             };
             let transport: Arc<dyn PeerRoundTrip> = if scenario == 185 {
                 Arc::new(transport)
+            } else if scenario == 188 {
+                Arc::new(FinishDuringPayload {
+                    inner: transport,
+                    client: client.clone(),
+                    transaction_id,
+                    seen: lost.clone(),
+                })
             } else {
                 Arc::new(RefusePhase {
                     inner: transport,
@@ -290,7 +312,13 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                 .unwrap();
             assert_eq!(
                 lost.load(Ordering::SeqCst),
-                if scenario == 185 { 3 } else { 1 }
+                if scenario == 185 {
+                    3
+                } else if scenario == 188 {
+                    2
+                } else {
+                    1
+                }
             );
             peer_runtime.shutdown().await.unwrap();
             decision
@@ -301,7 +329,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                 .unwrap()
         };
         match scenario {
-            180 | 181 | 185 | 186 => assert_eq!(decision, CoordinatorDecision::Commit),
+            180 | 181 | 185 | 186 | 188 => assert_eq!(decision, CoordinatorDecision::Commit),
             187 => assert_eq!(
                 decision,
                 CoordinatorDecision::Abort {
@@ -346,6 +374,63 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
         }
         let status = status.output.0.unwrap();
         assert_eq!(status.resolved_count, 2);
+        let database = rusqlite::Connection::open_with_flags(
+            directory
+                .path()
+                .join(format!("coordinator-{scenario}.sqlite")),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let retained: (i64, i64) = database
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM ddb_transaction_payloads WHERE position >= 0), \
+             (SELECT COUNT(*) FROM ddb_coordinator_participants WHERE operation_chunks IS NULL)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            retained,
+            (0, 2),
+            "completed operation images must be released"
+        );
+        for (position, (target, _)) in participants.iter().enumerate() {
+            let outcome = transaction_command!(
+                client,
+                PreparePartitionTransaction,
+                target,
+                MutationIdentity {
+                    request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
+                    ..identity(188)
+                },
+                Json(PreparePartitionTransactionInput {
+                    table_id: table.id.clone(),
+                    epoch: 1,
+                    transaction_id,
+                    coordinator_cell: *coordinator.cell_id().as_bytes(),
+                    coordinator_key: transaction_id.to_vec(),
+                    operations: request[position]
+                        .operations
+                        .iter()
+                        .map(|op| op.operation.clone())
+                        .collect(),
+                }),
+            )
+            .await;
+            let result = match outcome {
+                Ok(value) => value.output.0,
+                Err(InvocationError::Rejected(value)) => value.output.0,
+                Err(error) => panic!("{error:?}"),
+            };
+            assert_eq!(
+                result,
+                if decision == CoordinatorDecision::Commit {
+                    PrepareTransactionOutcome::Committed
+                } else {
+                    PrepareTransactionOutcome::Aborted
+                }
+            );
+        }
         if scenario == 183 {
             client
                 .command::<ResolvePartitionTransaction>(
@@ -360,8 +445,13 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                 .await
                 .unwrap();
         }
-        for (target, participant) in &participants {
-            let TransactionOperation::Put(input) = &participant.operations[0].operation else {
+        for (position, (target, participant)) in participants.iter().enumerate() {
+            let expected = if scenario == 188 {
+                &request[position]
+            } else {
+                participant
+            };
+            let TransactionOperation::Put(input) = &expected.operations[0].operation else {
                 unreachable!()
             };
             let key = extenddb_core::types::extract_key(&input.item, &table.key_schema);
@@ -382,6 +472,32 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                     .0,
                 PartitionGetOutcome::Found(Some(input.item.clone()))
             );
+            if scenario == 188 {
+                let TransactionOperation::Put(original) = &participant.operations[0].operation
+                else {
+                    unreachable!()
+                };
+                client
+                    .command::<PartitionPut>(
+                        target,
+                        MutationIdentity {
+                            request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
+                            ..identity(188)
+                        },
+                        Json(PartitionPutInput {
+                            table_id: table.id.clone(),
+                            epoch: 1,
+                            item: original.item.clone(),
+                            condition: None,
+                        }),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        if scenario == 188 {
+            drop(database);
+            coordinator_handle.drain().await.unwrap();
         }
     }
     super::transaction_write_skew::assert_condition_checks_prevent_write_skew(
@@ -538,6 +654,59 @@ impl PeerRoundTrip for RefusePhase {
                 return Err(crab_cell_runtime::Error::Capacity(
                     "injected before submission",
                 ));
+            }
+            dispatcher.dispatch_bytes(&verified, now_ms).await
+        })
+    }
+}
+
+struct FinishDuringPayload {
+    inner: DropPhaseReplies,
+    client: CellClient,
+    transaction_id: [u8; 16],
+    seen: Arc<std::sync::atomic::AtomicU8>,
+}
+
+impl PeerRoundTrip for FinishDuringPayload {
+    fn send(
+        &self,
+        target: CellTarget,
+        request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+    > {
+        let verifier = self.inner.verifier.clone();
+        let dispatcher = self.inner.dispatcher.clone();
+        let client = self.client.clone();
+        let transaction_id = self.transaction_id;
+        let seen = self.seen.clone();
+        Box::pin(async move {
+            use crab_cell_runtime::{
+                peer::wire::{peer_request, read_request},
+                registry::Query,
+            };
+            let now_ms = identity(188).issued_at_ms;
+            let verified = verifier.verify(&request, now_ms)?;
+            let coordinator = coordinator_target("123456789012", &transaction_id).unwrap();
+            let chunk = target == coordinator
+                && matches!(verified.operation(),
+                Some(peer_request::Operation::Read(read)) if matches!(&read.operation,
+                    Some(read_request::Operation::CellQuery(query)) if query.query_id == ReadCoordinatorParticipant::ID));
+            // Deliver the first piece, then let another driver finish and compact
+            // before the paused driver's second piece reaches the owner.
+            if chunk && seen.fetch_add(1, Ordering::SeqCst) == 1 {
+                assert_eq!(
+                    CellStorage::new(client, "us-east-1")
+                        .resume_cross_cell_transaction(
+                            "123456789012",
+                            &transaction_id,
+                            transaction_id
+                        )
+                        .await
+                        .unwrap(),
+                    CoordinatorDecision::Commit
+                );
             }
             dispatcher.dispatch_bytes(&verified, now_ms).await
         })

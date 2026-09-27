@@ -77,7 +77,7 @@ fn seed(
         let cell = data_target(ACCOUNT, table_id, partition_id)?;
         transaction.execute(
             "INSERT INTO ddb_coordinator_participants \
-             (transaction_id, position, cell_id, target, operation_chunks, prepared_sequence, resolved_sequence) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)",
+             (transaction_id, position, cell_id, target, operation_chunks, prepared_sequence, resolved_sequence, retain_operations) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, 0)",
             rusqlite::params![input.transaction_id.as_slice(), position as i64, cell.cell_id().as_bytes().as_slice(), serde_json::to_vec(&participant.target).unwrap(), (state != 0).then_some(1_i64), ((position as i64) < 2 - unresolved).then_some(2_i64)],
         )?;
         transaction.execute(

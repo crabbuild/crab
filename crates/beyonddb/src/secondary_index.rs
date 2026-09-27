@@ -69,8 +69,8 @@ pub(crate) fn write(
     delete(context, table, key)?;
     for entry in entries(table, item)? {
         context.sql(&statement(
-            "INSERT INTO ddb_local_index_items (table_id, index_name, item_key, partition_key, sort_key, base_sort_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            vec![SqlValue::Text(table.id.clone()), SqlValue::Text(entry.name), SqlValue::Blob(key.to_vec()), SqlValue::Blob(entry.partition), SqlValue::Blob(entry.sort), SqlValue::Blob(entry.base_sort)],
+            "INSERT INTO ddb_local_index_items (table_id, index_name, item_key, partition_key, sort_key, base_sort_key, logical_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            vec![SqlValue::Text(table.id.clone()), SqlValue::Text(entry.name), SqlValue::Blob(key.to_vec()), SqlValue::Blob(entry.partition), SqlValue::Blob(entry.sort), SqlValue::Blob(entry.base_sort), SqlValue::Integer(crate::statistics::item_bytes(item)?)],
         ))?;
     }
     Ok(())
@@ -83,10 +83,10 @@ pub(crate) struct Capacity {
 }
 
 pub(crate) fn capacity(table: &TableRecord, item: Option<&Item>) -> Result<Capacity> {
-    // A replacement deletes and inserts in two B-trees. Reserve overflow bytes
-    // separately: the same base/HASH keys can appear in all five local indexes.
+    // A replacement deletes/inserts in two index trees and their statistics tree.
+    // Reserve overflow bytes separately: the same base/HASH keys can appear in all five local indexes.
     let mut capacity = Capacity {
-        edits: table.local_secondary_indexes.len() as u64 * 4,
+        edits: table.local_secondary_indexes.len() as u64 * 6,
         overflow_bytes: 0,
     };
     if let Some(item) = item {

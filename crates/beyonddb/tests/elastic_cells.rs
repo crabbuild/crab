@@ -5,9 +5,14 @@ mod elastic_cells {
     mod coordinator_checkpoints;
     mod coordinator_residency;
     mod coordinator_tokens;
+    mod directory_activation;
+    mod directory_tree;
+    mod global_index_splits;
     mod global_indexes;
     mod local_indexes;
+    mod node_sessions;
     mod public_transactions;
+    mod read_release;
     mod read_resolution;
     mod recovery_admission;
     mod table_residency;
@@ -20,6 +25,7 @@ mod elastic_cells {
     pub(crate) mod transaction_visibility;
     mod transaction_write_skew;
     mod ttl_transactions;
+    mod usage;
 }
 
 use std::{
@@ -165,6 +171,21 @@ struct FailOnceProvisioner {
 }
 
 impl InitialPartitionProvisioner for FailOnceProvisioner {
+    fn provision_global_index_directory<'a>(
+        &'a self,
+        client: &'a CellClient,
+        account_id: &'a str,
+        index_id: &'a str,
+        ranges: Vec<beyonddb::RoutePagePartition>,
+    ) -> BoxedFuture<'a, Result<beyonddb::DirectoryCopyReceipt, StorageError>> {
+        self.inner
+            .provision_global_index_directory(client, account_id, index_id, ranges)
+    }
+
+    fn initial_partition_count(&self) -> u16 {
+        self.inner.initial_partition_count()
+    }
+
     fn provision_global_index<'a>(
         &'a self,
         client: &'a CellClient,
@@ -492,6 +513,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
             &account,
             identity(77),
             Json(TableSpec {
+                placement: beyonddb::TablePlacement::Account,
                 local_secondary_indexes: Vec::new(),
                 global_secondary_indexes: Vec::new(),
                 table_name: "ManyRanges".into(),
@@ -802,6 +824,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                 &account,
                 identity(200 + index),
                 Json(TableSpec {
+                    placement: beyonddb::TablePlacement::Account,
                     local_secondary_indexes: Vec::new(),
                     global_secondary_indexes: Vec::new(),
                     table_name: name.clone(),
@@ -845,6 +868,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
             &account,
             identity(79),
             Json(TableSpec {
+                placement: beyonddb::TablePlacement::Account,
                 local_secondary_indexes: Vec::new(),
                 global_secondary_indexes: Vec::new(),
                 table_name: "MoreRanges".into(),
@@ -1625,6 +1649,19 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
                 .0
                 && route.epoch == 2
             {
+                // Publication precedes child opening. The capacity task's
+                // terminal boundary is the durable Finish, not the new epoch.
+                if account_client
+                    .query::<ReadSplitPlan>(&account, None, Json(created.table_id.clone()))
+                    .await
+                    .unwrap()
+                    .output
+                    .0
+                    .is_some()
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
                 break route;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1648,39 +1685,39 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         replay_after_split,
         Err(StorageError::IdempotentReplay)
     ));
+    let mut capacity_cursor = None;
     let first_range = provisioner
-        .reconcile_account_capacity("123456789012", capacity_client.clone(), u64::MAX, None)
+        .reconcile_account_capacity(
+            "123456789012",
+            capacity_client.clone(),
+            u64::MAX,
+            &mut capacity_cursor,
+        )
         .await
         .unwrap();
-    assert!(first_range.split.is_none());
-    assert_eq!(
-        first_range.cursor.as_ref().unwrap().after_lower,
-        Some([0; 16])
-    );
+    assert!(!first_range);
+    assert_eq!(capacity_cursor.as_ref().unwrap().after_lower, Some([0; 16]));
     let second_range = provisioner
         .reconcile_account_capacity(
             "123456789012",
             capacity_client.clone(),
             u64::MAX,
-            first_range.cursor.as_ref(),
+            &mut capacity_cursor,
         )
         .await
         .unwrap();
-    assert!(second_range.split.is_none());
-    assert_eq!(second_range.cursor.as_ref().unwrap().after_lower, None);
-    assert!(
-        provisioner
-            .reconcile_account_capacity(
-                "123456789012",
-                capacity_client.clone(),
-                u64::MAX,
-                second_range.cursor.as_ref(),
-            )
-            .await
-            .unwrap()
-            .cursor
-            .is_none()
-    );
+    assert!(!second_range);
+    assert_eq!(capacity_cursor.as_ref().unwrap().after_lower, None);
+    provisioner
+        .reconcile_account_capacity(
+            "123456789012",
+            capacity_client.clone(),
+            u64::MAX,
+            &mut capacity_cursor,
+        )
+        .await
+        .unwrap();
+    assert!(capacity_cursor.is_none());
     assert_eq!(
         account_client
             .query::<ReadTableRoute>(&account, None, Json(created.table_id.clone()))
@@ -2004,28 +2041,28 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         .output
         .0
         .unwrap();
-    let new_table_sweep = provisioner
-        .reconcile_account_capacity("123456789012", capacity_client.clone(), u64::MAX, None)
-        .await
-        .unwrap();
-    assert_eq!(
-        new_table_sweep.cursor.as_ref().unwrap().table_name,
-        "NewTable"
-    );
-    let numbers_sweep = provisioner
+    let mut capacity_cursor = None;
+    provisioner
         .reconcile_account_capacity(
             "123456789012",
             capacity_client.clone(),
             u64::MAX,
-            new_table_sweep.cursor.as_ref(),
+            &mut capacity_cursor,
         )
         .await
         .unwrap();
-    assert_eq!(numbers_sweep.cursor.as_ref().unwrap().table_name, "Numbers");
-    assert_eq!(
-        numbers_sweep.cursor.as_ref().unwrap().after_lower,
-        Some([0; 16])
-    );
+    assert_eq!(capacity_cursor.as_ref().unwrap().table_name, "NewTable");
+    provisioner
+        .reconcile_account_capacity(
+            "123456789012",
+            capacity_client.clone(),
+            u64::MAX,
+            &mut capacity_cursor,
+        )
+        .await
+        .unwrap();
+    assert_eq!(capacity_cursor.as_ref().unwrap().table_name, "Numbers");
+    assert_eq!(capacity_cursor.as_ref().unwrap().after_lower, Some([0; 16]));
     let new_target = data_target(
         "123456789012",
         &new_table_id,
@@ -2556,6 +2593,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &account,
             identity(13),
             Json(TableSpec {
+                placement: beyonddb::TablePlacement::Account,
                 local_secondary_indexes: Vec::new(),
                 global_secondary_indexes: Vec::new(),
                 table_name: "Books".into(),
@@ -4320,16 +4358,22 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         Err(InvocationError::Rejected(result))
             if result.output.0 == PartitionPutOutcome::NotReady
     ));
-    let mut wrong_plan = plan.clone();
-    wrong_plan.source.partition_id = [9; 16];
-    let wrong_commit = client
-        .command::<CommitSplit>(&account, identity(64), Json(wrong_plan))
-        .await;
-    assert!(matches!(
-        wrong_commit,
-        Err(InvocationError::Rejected(result))
-            if result.output.0 == CommitSplitOutcome::PlanMismatch
-    ));
+    let mut wrong_source = plan.clone();
+    wrong_source.source.partition_id = [9; 16];
+    let mut wrong_children = plan.clone();
+    wrong_children.children[0].partition_id = [9; 16];
+    for (request, submitted, expected) in [
+        (64, wrong_source, CommitSplitOutcome::PlanNotFound),
+        (138, wrong_children, CommitSplitOutcome::PlanMismatch),
+    ] {
+        let wrong_commit = client
+            .command::<CommitSplit>(&account, identity(request), Json(submitted))
+            .await;
+        assert!(matches!(
+            wrong_commit,
+            Err(InvocationError::Rejected(result)) if result.output.0 == expected
+        ));
+    }
     let controller_client = CellClient::local_many(
         Arc::clone(&registry),
         [
@@ -5002,13 +5046,9 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
-    let restored_participant = restored_participant.output.unwrap();
-    assert_eq!(restored_participant.target, participants[0].target);
-    assert_eq!(
-        serde_json::from_slice::<Vec<IndexedTransactionOperation>>(&restored_participant.payload)
-            .unwrap(),
-        participants[0].operations
-    );
+    // Terminal write payloads are compacted, while the durable decision and
+    // participant tombstones above still fence replay after owner restart.
+    assert!(restored_participant.output.is_none());
     let recovered_intent = restored_client
         .query::<ReadPartitionTransaction>(
             restored_child_target,
@@ -5199,7 +5239,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             restored_child_target,
             identity(64),
             Json(PartitionImportInput {
-                table_id: table.id,
+                table_id: table.id.clone(),
                 epoch: 3,
                 item: first_item,
             }),
@@ -5212,7 +5252,14 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     ));
     assert!(matches!(
         restored_client
-            .command::<DeleteTable>(&account, identity(67), Json(table.table_name.clone()))
+            .command::<DeleteTable>(
+                &account,
+                identity(67),
+                Json(beyonddb::TableGeneration {
+                    table_name: table.table_name.clone(),
+                    table_id: table.id.clone()
+                })
+            )
             .await
             .unwrap()
             .output

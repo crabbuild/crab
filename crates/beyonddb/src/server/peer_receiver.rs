@@ -1,4 +1,9 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Router,
@@ -13,7 +18,7 @@ use crab_cell_runtime::cell::{
     actor::{CellHandle, CellRuntime},
     catalog::{CatalogRole, CellCatalog},
 };
-use crab_cell_runtime::client::LocalCellResolver;
+use crab_cell_runtime::client::{CellClient, LocalCellResolver};
 use crab_cell_runtime::control::{ControlState, authority::CellAuthority};
 use crab_cell_runtime::identity::{CellTarget, Digest, SessionId};
 use crab_cell_runtime::ltx::CellStorageLayout;
@@ -39,6 +44,7 @@ pub(super) struct LocalResolver {
     layout: CellStorageLayout,
     registry: Arc<Registry>,
     provisioner: Option<Arc<crate::CellInitialPartitionProvisioner>>,
+    metadata: Option<CellClient>,
     placement: Option<Arc<super::placement::RangePlacement>>,
     bootstrap: Option<NodeDirectory>,
 }
@@ -53,6 +59,16 @@ impl LocalResolver {
             layout: peers.layout.clone(),
             registry: peers.registry.clone(),
             provisioner: Some(provisioner),
+            // Retirement checks may reach a remote account, but cannot restore
+            // metadata recursively while admission is trying to free capacity.
+            metadata: Some(CellClient::runtime_with_peer(
+                peers.registry.clone(),
+                peers.runtime.clone(),
+                peers.layout.clone(),
+                peers.placement.signer.clone(),
+                peer_principal(peers.placement.directory.fleet(), peers.placement.session),
+                peers.placement.round_trip.clone(),
+            )),
             placement: None,
             bootstrap: None,
         }
@@ -82,6 +98,7 @@ impl LocalCellResolver for LocalResolver {
             let module = match target.namespace() {
                 NAMESPACE => MODULE,
                 DATA_NAMESPACE => DATA_MODULE,
+                namespace if namespace == crate::directory::NAMESPACE => crate::directory::MODULE,
                 namespace if namespace == crate::global_index::NAMESPACE => {
                     crate::global_index::MODULE
                 }
@@ -103,33 +120,68 @@ impl LocalCellResolver for LocalResolver {
             {
                 return Err(Error::CatalogCollision);
             }
-            if let Some(nodes) = resolver.bootstrap {
-                let provisioner = resolver.provisioner.ok_or(Error::CellNotActive)?;
-                return provisioner.admit_range(&target, &nodes).await.map(Some);
-            }
             let control = CellAuthority::new(resolver.layout)
                 .load(target.cell_id())
-                .await?
-                .ok_or(Error::CellNotActive)?;
-            let local = resolver
-                .runtime
-                .local_handle(proof.clone(), &control)
                 .await?;
-            if local.is_some() {
-                return Ok(local);
+            if let Some(control) = &control
+                && let Some(local) = resolver
+                    .runtime
+                    .local_handle(proof.clone(), control)
+                    .await?
+            {
+                return Ok(Some(local));
             }
             let Some(provisioner) = resolver.provisioner else {
                 return Ok(None);
             };
-            let owner = control.value().owner.as_ref().map(|owner| owner.session);
-            let needs_placement = match control.value().state {
-                ControlState::Idle => owner.is_none(),
-                ControlState::Recovering => owner.is_some(),
-                _ => false,
-            };
-            if needs_placement
-                && control.value().root.is_some()
+            let owner = control
+                .as_ref()
+                .and_then(|control| control.value().owner.as_ref())
+                .map(|owner| owner.session);
+            let needs_placement = control.as_ref().is_some_and(|control| {
+                control.value().root.is_some()
+                    && match control.value().state {
+                        ControlState::Idle => owner.is_none(),
+                        ControlState::Recovering => owner.is_some(),
+                        _ => false,
+                    }
+            });
+            if needs_placement || resolver.bootstrap.is_some() {
+                provisioner
+                    .reclaim_directory_capacity()
+                    .await
+                    .map_err(|source| Error::PeerTransport {
+                        context: "BeyondDB directory residency",
+                        source: Box::new(source),
+                    })?;
+            }
+            if (needs_placement || resolver.bootstrap.is_some())
                 && super::placement::is_data_target(&target)
+            {
+                let account = crate::account_for_tenant(target.tenant())?;
+                let metadata = resolver.metadata.as_ref().ok_or(Error::CellNotActive)?;
+                // Release only proven retired ranges before placement observes
+                // the local pool. Keep the requested historical source resident.
+                provisioner
+                    .reclaim_retired_ranges(metadata, &account, Some(target.cell_id()))
+                    .await
+                    .map_err(|source| Error::PeerTransport {
+                        context: "BeyondDB range residency",
+                        source: Box::new(source),
+                    })?;
+            }
+            if let Some(nodes) = resolver.bootstrap {
+                return provisioner
+                    .admit_range(&target, &nodes)
+                    .await
+                    .inspect_err(|error| {
+                        tracing::warn!(cell = ?target.cell_id(), ?error, "peer bootstrap failed");
+                    })
+                    .map(Some);
+            }
+            let control = control.ok_or(Error::CellNotActive)?;
+            if needs_placement
+                && super::placement::is_placeable_target(&target)
                 && let Some(placement) = resolver.placement
                 && !placement
                     .select_local(&target, owner, ACTIVATE_ACTION)
@@ -168,13 +220,13 @@ impl PeerAuthorizer for BeyondPeerAuthorizer {
             ));
         }
         if [ACTIVATE_ACTION, PROVISION_ACTION].contains(&self.action)
-            && (!super::placement::is_data_target(request.target())
+            && (!super::placement::is_placeable_target(request.target())
                 || !matches!(request.operation(), Some(wire::peer_request::Operation::Read(read))
                     if read.minimum.is_none()
                         && matches!(read.operation, Some(wire::read_request::Operation::Describe(true)))))
         {
             return Err(Error::PeerAuthorization(
-                "activation requires a data Cell description",
+                "activation requires a data, index or directory Cell description",
             ));
         }
         Ok(())
@@ -217,6 +269,7 @@ pub(super) fn peer_router(
             // The sender selects ownership before forwarding. A receiver may
             // only dispatch to that active owner; a raced release must reject.
             provisioner: None,
+            metadata: None,
             placement: None,
             bootstrap: None,
         }),
@@ -267,6 +320,7 @@ async fn forward(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let started = Instant::now();
     if headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -274,45 +328,54 @@ async fn forward(
     {
         return error(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
+    // I/O waiters retain request copies and enrollment state, not CPU slots.
+    // Bound that memory independently before allowing another request to wait.
+    let Ok(_request_bytes) = receiver
+        .runtime
+        .try_reserve_node_bytes(body.len() * 3 + 64 * 1024)
+    else {
+        return busy(&receiver, "request_memory");
+    };
     let decoded = {
         let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
-            return busy();
+            return busy(&receiver, "decode");
         };
         match crab_cell_runtime::peer::UnverifiedPeerRequest::decode(&body) {
             Ok(request) => request,
             Err(_) => return error(StatusCode::UNAUTHORIZED),
         }
     };
+    let deadline = started + Duration::from_millis(u64::from(decoded.remaining_ms()));
     let now_ms = match unix_time_ms() {
         Ok(now_ms) => now_ms,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
     };
     // Session enrollment reads object storage. Release the codec reservation
     // during that I/O so unrelated requests can make progress.
-    let verifier = match receiver
-        .directory
-        .peer_verifier(
-            decoded.session(),
-            identity.certificate(),
-            identity.public_key(),
-            now_ms,
-        )
-        .await
-    {
-        Ok(verifier) => verifier,
-        Err(_) => return error(StatusCode::UNAUTHORIZED),
+    let enrollment = receiver.directory.peer_verifier(
+        decoded.session(),
+        identity.certificate(),
+        identity.public_key(),
+        now_ms,
+    );
+    let verifier = match tokio::time::timeout_at(deadline.into(), enrollment).await {
+        Ok(Ok(verifier)) => verifier,
+        Ok(Err(_)) => return error(StatusCode::UNAUTHORIZED),
+        Err(_) => return error(StatusCode::GATEWAY_TIMEOUT),
     };
-    let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
-        return busy();
-    };
-    // Enrollment I/O consumes the signed request lifetime too.
-    let now_ms = match unix_time_ms() {
-        Ok(now_ms) => now_ms,
-        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
-    };
-    let request = match verifier.verify(decoded, now_ms) {
-        Ok(request) => request,
-        Err(_) => return error(StatusCode::UNAUTHORIZED),
+    let request = {
+        let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
+            return busy(&receiver, "verify");
+        };
+        // Enrollment I/O consumes the signed request lifetime too.
+        let now_ms = match unix_time_ms() {
+            Ok(now_ms) => now_ms,
+            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+        match verifier.verify(decoded, now_ms) {
+            Ok(request) => request,
+            Err(_) => return error(StatusCode::UNAUTHORIZED),
+        }
     };
     // Each dispatcher authorizes before resolving. Only scoped admission
     // capabilities may acquire a Cell; forwarded application work cannot.
@@ -323,20 +386,26 @@ async fn forward(
     } else {
         None
     };
-    let dispatched = if let Some(dispatcher) = admission {
-        match tokio::time::timeout(
-            std::time::Duration::from_millis(u64::from(request.remaining_ms())),
-            dispatcher.dispatch_bytes(&request, now_ms),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => return error(StatusCode::GATEWAY_TIMEOUT),
-        }
-    } else {
-        receiver.dispatcher.dispatch_bytes(&request, now_ms).await
+    let dispatcher = admission.unwrap_or(&receiver.dispatcher);
+    let now_ms = match unix_time_ms() {
+        Ok(now_ms) => now_ms,
+        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    let reply = match dispatched {
+    let reply =
+        match tokio::time::timeout_at(deadline.into(), dispatcher.dispatch(&request, now_ms)).await
+        {
+            Ok(reply) => reply,
+            Err(_) => return error(StatusCode::GATEWAY_TIMEOUT),
+        };
+    // Resolution, restoration and actor publication own their resources. Only
+    // encoding needs another CPU reservation; post-dispatch failures are unknown
+    // outcomes and must never be labeled as safe-to-retry admission refusals.
+    let _reservation = match receiver.runtime.reserve_worker_job(deadline).await {
+        Ok(reservation) => reservation,
+        Err(Error::Deadline) => return error(StatusCode::GATEWAY_TIMEOUT),
+        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    let reply = match crab_cell_runtime::peer::encode_peer_reply(&reply) {
         Ok(reply) => reply,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
     };
@@ -355,7 +424,12 @@ fn error(status: StatusCode) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")]).into_response()
 }
 
-fn busy() -> Response {
+fn busy(receiver: &Receiver, phase: &'static str) -> Response {
+    tracing::debug!(
+        phase,
+        resources = ?receiver.runtime.stats(),
+        "peer request admission deferred"
+    );
     // No dispatch has occurred; the sender may retry after codec capacity frees.
     (
         StatusCode::SERVICE_UNAVAILABLE,

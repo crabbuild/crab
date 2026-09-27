@@ -145,7 +145,7 @@ fn apply(context: &mut CommandContext<'_, '_>, staged: Vec<StagedImage>) -> Resu
         }
         let table = crate::table::decode_table(
             &context.sql(&statement(
-                "SELECT record FROM ddb_tables WHERE table_id = ?1",
+                "SELECT record FROM ddb_live_tables WHERE table_id = ?1",
                 vec![SqlValue::Text(image.table_id.clone())],
             ))?[0],
         )?
@@ -340,5 +340,21 @@ impl Query for ReadAccountTransactionResult {
     type Output = Json<crate::TransactionReadResult>;
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
         crate::participant::read_result(context, input)
+    }
+}
+
+/// Release assembled read images while retaining the account's terminal decision.
+pub struct ReleaseAccountTransactionReads;
+impl Command for ReleaseAccountTransactionReads {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 33;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<ReadTransactionInput>;
+    type Output = Json<bool>;
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        crate::participant::release_read_result(context, input)
     }
 }

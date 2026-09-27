@@ -117,6 +117,9 @@ pub(super) enum Message {
     ActiveCatalogEntries {
         reply: oneshot::Sender<crate::Result<Vec<crate::cell::catalog::CatalogEntry>>>,
     },
+    ActiveCellTargets {
+        reply: oneshot::Sender<crate::Result<Vec<crate::identity::CellTarget>>>,
+    },
     UnreleasedCellCount {
         reply: oneshot::Sender<crate::Result<usize>>,
     },

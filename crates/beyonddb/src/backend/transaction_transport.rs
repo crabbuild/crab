@@ -81,19 +81,21 @@ impl CellStorage {
         &self,
         target: &CellTarget,
         mut input: ReadCoordinatorParticipantInput,
-    ) -> Result<CoordinatorParticipant, StorageError> {
+    ) -> Result<Option<CoordinatorParticipant>, StorageError> {
         let mut bytes = Vec::new();
         let mut manifest = None;
         loop {
-            let result = self
+            let Some(result) = self
                 .client
                 .query::<ReadCoordinatorParticipant>(target, None, Json(input.clone()))
                 .await
                 .map_err(cell_error)?
                 .output
-                .ok_or_else(|| {
-                    StorageError::Internal("transaction participant payload is missing".into())
-                })?;
+            else {
+                // Resolution can compact between chunks. Discard the partial
+                // image so a driver can finish from the authoritative decision.
+                return Ok(None);
+            };
             let description = (result.target.clone(), result.chunks);
             if result.chunks == 0
                 || result.chunks as usize
@@ -111,11 +113,11 @@ impl CellStorage {
             bytes.extend_from_slice(&result.payload);
             input.chunk += 1;
             if input.chunk == result.chunks {
-                return Ok(CoordinatorParticipant {
+                return Ok(Some(CoordinatorParticipant {
                     target: result.target,
                     operations: serde_json::from_slice(&bytes)
                         .map_err(|error| StorageError::Internal(error.to_string()))?,
-                });
+                }));
             }
         }
     }

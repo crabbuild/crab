@@ -766,10 +766,12 @@ impl MetadataEngine for CellStorage {
 
     fn refresh_table_size(
         &self,
-        _account_id: &str,
-        _table_name: &str,
+        account_id: &str,
+        table_name: &str,
     ) -> BoxedFuture<'_, Result<(), StorageError>> {
-        Box::pin(async { Err(unsupported("table size refresh")) })
+        let account_id = account_id.to_owned();
+        let table_name = table_name.to_owned();
+        Box::pin(async move { self.refresh_statistics(&account_id, &table_name).await })
     }
 
     fn list_active_table_names(
@@ -867,7 +869,8 @@ impl WorkerStore for CellStorage {
     fn process_control_plane_transitions(
         &self,
     ) -> BoxedFuture<'_, Result<Vec<(String, &'static str)>, StorageError>> {
-        // Table creation and deletion reach their durable end state in one Cell command.
+        // Account-scoped capacity workers resume creation and bounded deletion.
+        // This global hook has no account inventory to discover that work.
         Box::pin(async { Ok(Vec::new()) })
     }
 }

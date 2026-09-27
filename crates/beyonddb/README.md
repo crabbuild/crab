@@ -18,9 +18,14 @@ AWS SDK / DynamoDB JSON client
 ## Running the current server
 
 The server writes warnings and errors to stderr.
-Serving nodes publish a 15-second lease and renew every three seconds. Owner
-replacement waits for authoritative expiry; storage stalls that exhaust the
-lease still fence serving. See [measured lease qualification](SCALING.md#large-transaction-transfer-qualification).
+Peer requests reserve memory while awaiting storage or Cell dispatch. CPU slots
+cover envelope decoding, signature verification and reply encoding; asynchronous
+work does not retain a codec slot. The signed request deadline bounds enrollment,
+dispatch and reply encoding.
+Serving nodes publish a 15-second lease and renew every three seconds. Graceful
+shutdown drains the runtime and joins heartbeat maintenance before withdrawing
+the boot-session advertisement. After an unclean exit, owner replacement waits
+for authoritative expiry; storage stalls that exhaust the lease still fence serving. See [measured lease qualification](SCALING.md#large-transaction-transfer-qualification).
 
 Each renewal measures RAM and scratch-filesystem availability on a blocking
 worker, caps them by runtime reservations, and signs Cell/job counts and backlog
@@ -34,8 +39,21 @@ Configured owned Cells can still serve when placement measurement is unavailable
 Requests for idle, previously published data/GSI Cells now select a destination
 from signed capacity and activate it over pinned mTLS. Missing eligible capacity
 rejects placement. Account, credential, and coordinator residency keep their
-existing policies. Initial range provisioning and automatic rebalancing remain
-unfinished; adding a node does not move already serving Cells.
+existing policies. Placement evaluates heartbeat freshness after fleet discovery,
+so storage latency does not make a renewed sample appear to come from the future.
+Initial data, GSI, and split-child provisioning use the same
+signed placement measurements with a separate authenticated provisioning
+capability. A serving-node loop now uses the runtime's transfer planner to move
+settled data/GSI owners to available capacity. It samples every 15 seconds,
+retains the planner's residence and settlement gates, and releases at most two
+ranges per pass. Account, credential and coordinator Cells retain their existing
+ownership policies. Fleet load and failure qualification remain open; see
+[range movement](SCALING.md#automatic-movement-of-settled-ranges).
+When the local Cell pool is full, request restoration and authenticated range
+admission can release retired base/GSI sources before placement. Current-owner
+account metadata must prove the table generation is deleted, or that the sealed
+source is absent from both routes and unfinished split plans. The durable root
+remains recoverable; active ranges and pending exports are retained.
 
 `cargo run -p beyonddb --bin beyonddb -- config.json --bootstrap` starts one
 leased Cell node, a private mTLS peer listener, and ExtendDB's public DynamoDB
@@ -118,13 +136,16 @@ This server uses an explicit list of locally owned account and credential
 Cells. On startup it recovers configured account and credential Cells, then
 pages the account's routes and coordinator registry. Idle or expired owners can
 be recovered at a new peer endpoint; live remote owners remain in place. Every
-takeover still requires node-session fencing and a Cell authority CAS. This
-requires the account to be configured on the replacement and enough local
+takeover still requires node-session fencing and a Cell authority CAS. Recovery
+also resumes a published root already claimed by this boot session if activation
+was interrupted. Discovery verifies a local actor exists before reporting the
+Cell recovered; configured admission and request routing share root restoration.
+This requires the account to be configured on the replacement and enough local
 capacity for its recovered ranges. While serving, it also discovers expired
 coordinator owners through configured accounts and restores their original
 participants. Data-only-node discovery and general fleet placement still need
 a recovery scheduler.
-Initial fleet placement, proactive rebalancing, unattended takeover, multi-node capacity loops,
+Unattended takeover, distributed recovery scheduling, fleet qualification,
 management APIs, and the remaining DynamoDB operations are still required
 before this is a complete service. A public node with no locally owned account
 or credential Cells can forward signed requests to live owners through mTLS.
@@ -144,8 +165,18 @@ data Cell index.
 TTL candidate selection skips shared and exclusive transaction locks. If a
 prepare races selection, the conditional delete defers that item while the
 sweep continues; later passes revisit it after transaction resolution.
-The synchronous table-transition worker is also implemented. Table resource tags now have Cell-backed CreateTable, TagResource, UntagResource,
-and ListTagsOfResource paths; DeleteTable removes their rows. The RustFS
+The account capacity worker resumes incomplete table creation from its durable
+catalog row, preserving any published GSI directories before publishing the base
+route. It uses the same provisioning path as CreateTable and can continue after
+account-owner restoration without a client retry. One creation attempt can install
+all remaining initial ranges; this is not a one-Cell-per-tick operation. The global
+table-transition hook has no account inventory and remains a no-op.
+Table resource tags now have Cell-backed CreateTable, TagResource, UntagResource,
+and ListTagsOfResource paths; DeleteTable fences the generation and removes their
+rows in bounded cleanup batches. Large deletions remain DELETING until the
+account capacity worker finishes; progress survives account-owner replacement.
+The name remains reserved until catalog cleanup completes. This does not reclaim
+the retired data/index Cells' object-store history. The RustFS
 process test verifies these requests through the AWS SDK across a server
 restart and verifies that a recreated table starts without the old tags.
 TransactWriteItems accepts Put, Delete, Update, and ConditionCheck across
@@ -169,14 +200,20 @@ remain retryable. Cancellation leaves durable progress for the next resolver.
 Each Cell query helps at most one transaction; BEGIN and unavailable decisions
 remain retryable conflicts. Transactional reads retain conflict cancellation.
 Once a table's initial route is published, keyed CRUD and Scan use its data
-Cells; unactivated tables
-still use the account Cell unless a provisioner is configured. The host-backed
+Cells. Placement is committed with the table generation: account-local tables
+use the account Cell, while routed tables remain CREATING until publication,
+including for clients without provisioning capability. The host-backed
 provisioner installs 1–256 initial data Cells per table during CreateTable and
-resumes after an interrupted setup. The initial count must stay fixed across
-retries. A host-backed controller can resume a recorded split. A cancellable
+resumes using the persisted count after an interrupted setup. Configuration
+changes affect new generations only. UpdateTable rejects incomplete routed
+creation atomically, preserving the specification already installed in owners. A host-backed controller can resume a recorded split. A cancellable
 account capacity loop can trigger a split, and the serving binary starts that
-loop for locally owned accounts. Inspection and split replay use the routed
-client, so published sources and children can stay on remote owners. New table ranges, GSI ranges, and split
+loop for locally owned accounts. It visits base ranges and then GSI ranges in
+order, advancing past transient failures and capacity refusals. GSI plans remain
+discoverable through their source and children until both replacements open;
+adding a node can resume a pending split onto remote owners. Prepared
+transactions and pending index projections defer sealing without stopping the
+serving task. Inspection and split replay use the routed client, so published sources and children can stay on remote owners. New table ranges, GSI ranges, and split
 children use signed fleet placement in the serving binary. There is no merge controller or complete
 `StorageEngine`/`CatalogStore` behavior, or account-management service yet.
 `build_http_state` now assembles ExtendDB's signed request path from a ready,
@@ -192,7 +229,9 @@ authentication and stays inactive after owner recovery.
 The provisioner can inspect a table's active data Cells, resume a pending split,
 and split one range whose occupied SQLite pages cross a caller-supplied
 threshold. That measurement includes indexes and runtime tables, but excludes
-WAL and LTX files. The account loop checks one table range per tick and can
+WAL and LTX files. Base-range item counts and stored JSON/key byte totals are
+maintained atomically with item changes, so usage queries read one metadata row
+instead of traversing all items. The account loop checks one table range per tick and can
 trigger one split per tick. The provisioner can install it in the node's task
 group, where failure closes readiness and shutdown cancels it before Cell drain.
 The serving binary installs it for every locally admitted account. The loop
@@ -230,7 +269,8 @@ its published root; existing remote owners retain authority. SDK regressions
 release data, account, and credential Cells and read the persisted item again,
 including the claimed-but-not-yet-restored state. Data/GSI restoration selects
 a destination from signed capacity; account, credential, and coordinator
-restoration retains its existing policy. Proactive rebalancing remains open.
+restoration retains its existing policy. The range rebalancer uses the same
+authenticated activation path after generation-fenced source release.
 `tests/peer_network.rs` uses separate mTLS identities on two leased nodes,
 denies a wrong peer principal, and sends signed AWS SDK CreateTable, PutItem,
 and GetItem requests through ExtendDB's public listener and the private peer
@@ -242,8 +282,8 @@ apply and before its receipt. Both Cells restore from object storage.
 Both public endpoints then read the committed item, including a read that
 forwards to the data owner. The replacement refuses data takeover while that
 owner is live, then fences its expired node session after lease renewal stops,
-restores the data Cell from object storage, and reads the item again. Initial
-fleet placement and unattended takeover remain unfinished.
+restores the data Cell from object storage, and reads the item again. General
+unattended takeover and fleet qualification remain unfinished.
 
 ## Cell ownership
 
@@ -261,10 +301,13 @@ keyed reads and writes reject a wrong range or stale epoch. The account Cell
 can publish a durable initial route after the provisioner installs its data
 Cells. The directory version can advance while unaffected data Cells retain
 their own epochs. A durable split plan must replace one range with two fresh,
-contiguous child ranges while leaving every other range unchanged. Route
-validation requires complete, nonoverlapping hash coverage and the table's
-immutable key schema. Route publication currently trusts the
-provisioner to have installed and published the data Cells; it does not verify
+contiguous child ranges while leaving every other range unchanged. Plans are
+owned by source range: independent splits can remain pending and publish
+concurrently. Each publication advances the directory epoch without changing
+unrelated source or planned child epochs. Route validation requires complete,
+nonoverlapping hash coverage and the table's immutable key schema. Route
+publication currently trusts the provisioner to have installed and published
+the data Cells; it does not verify
 their receipts. The source data Cell can persist an idempotent split seal that
 fences ordinary reads and writes, then serves bounded export pages after owner
 restart. Import-only child Cells accept idempotent item copies and verify an
@@ -272,12 +315,23 @@ expected count and digest before activation. Activation closes imports while
 keeping ordinary requests fenced. The host-backed split controller admits
 children, seals the source, copies bounded export pages, checks both child
 fingerprints against the sealed source, and atomically publishes the exact
-durable plan against its predecessor route. It then opens the children for
-ordinary requests. The host provisioner can choose a range midpoint, record
-the plan, and repeat the split on an already opened child. Repeated calls
+durable plan against its exact predecessor source range. It then opens the
+children for ordinary requests, verifies their durable open states, then
+finishes the plan. Source and child reservations remain discoverable through
+publication, so a restarted capacity sweep can resume from either published
+child. An opened child cannot start a new split until its parent plan finishes.
+The host provisioner can choose a range
+midpoint, record the plan, and repeat the split on an already opened child. Repeated calls
 resume this sequence after interruption.
 The account command itself cannot inspect other Cells; serving code must use
 the controller rather than calling route publication directly.
+`DescribeTable` reports periodically sampled item counts and logical item bytes
+for the table and its indexes. Each mutation maintains local counters; the server
+samples one range per tick and publishes a completed snapshot only if its table
+and route generations still match. Published totals survive account-owner restart.
+The values can lag writes and index projection, and do not measure billed storage
+or SQLite/object-store usage. See [statistics semantics and proof](SCALING.md#table-and-index-statistics).
+
 Routed keyed CRUD and Scan use the published directory. The account Cell
 stores the route epoch and table snapshot alongside indexed range rows, so
 keyed requests read one owner row instead of transferring the complete route.
@@ -330,6 +384,15 @@ only after participant resolution. A proven capacity refusal during participant
 upload or prepare proposes ABORT and returns ordered `ThrottlingError` reasons
 only after cleanup. This includes direct SQLite FULL errors with verified rollback;
 unknown outcomes remain retryable and a competing COMMIT wins.
+Recording a terminal participant resolution releases its coordinator operation
+images for writes and aborted reads. Durable decisions, request digests, targets,
+receipts and replay markers remain. Committed read operations stay available for
+response assembly. Once all results are assembled, the reader durably acknowledges
+consumption. The existing recovery loop deletes saved images in each original
+participant Cell, then compacts its coordinator mapping after a durable receipt.
+A driver whose chunk fetch races compaction re-reads and finishes the durable
+decision. Unacknowledged read images, decisions, tombstones, and object-store
+history still require safe retention and collection.
 Coordinator token lookup preserves original
 participants across route changes and starts the ten-minute replay window only
 after all participants resolve. The old account claims and Cell-local token
@@ -356,8 +419,8 @@ Recovery reactivates released coordinators; startup resolves shards one at a
 time. A participant admission failure no longer prevents a published decision
 from resolving healthy Cells. Startup continues through the shard's pending
 records but retains errors and fails readiness until recovery completes. Serving
-recovery keeps undecided transactions behind successful admission. Initial fleet
-placement, proactive rebalancing, bounded transaction/read-image retention, and
+recovery keeps undecided transactions behind successful admission. Distributed
+recovery scheduling, bounded transaction/read-image retention, and
 fleet qualification remain incomplete. Production admits 64
 active Cells per node; busy coordinators apply retryable backpressure. See
 SCALING.md for the unqualified 10,000-Cell, multi-TB target.
@@ -571,3 +634,7 @@ fixture credentials and stops both services on exit. It disables bytecode and
 pytest cache writes in the upstream checkout. Omit test selectors to collect the
 whole Python suite; it stops at the first failure. Passing selected files does
 not establish full DynamoDB compatibility.
+
+The persisted creation-placement field changes the unreleased table-record
+format, including embedded base/index specifications. Existing development
+roots require reprovisioning before running this revision.

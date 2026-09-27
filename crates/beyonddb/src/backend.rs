@@ -5,6 +5,8 @@ mod data;
 mod global_index;
 mod recovery;
 mod remaining;
+mod statistics;
+pub(crate) mod table_creation;
 mod transaction;
 mod transaction_read;
 mod transaction_transport;
@@ -28,15 +30,17 @@ use extenddb_storage::error::StorageError;
 use extenddb_storage::{BoxedFuture, TableEngine};
 
 use super::{
-    APPLICATION, ActivateTableRoute, ActivateTableRouteOutcome, CreateTable, CreateTableOutcome,
-    DeleteTable, DeleteTableOutcome, DescribeTable, DescribeTableById, Json, ListTables,
-    ListTablesInput, ListTablesOutcome, NAMESPACE, PartitionSpec, ReadRoutePage, RoutePageInput,
-    RoutePageOutcome, TableRecord, TableRoute, TableSpec, TableUpdate, UpdateTable,
-    UpdateTableOutcome, account_target,
+    APPLICATION, CreateTable, CreateTableOutcome, DeleteTable, DeleteTableOutcome, DescribeTable,
+    DescribeTableById, Json, ListTables, ListTablesInput, ListTablesOutcome, NAMESPACE,
+    PartitionSpec, ReadRoutePage, RoutePageInput, RoutePageOutcome, TablePlacement, TableRecord,
+    TableSpec, TableUpdate, UpdateTable, UpdateTableOutcome, account_target,
 };
 
 /// Installs an initial table's data Cells before its route becomes visible.
 pub trait InitialPartitionProvisioner: Send + Sync {
+    /// Select the initial count to persist before installing any new table ranges.
+    fn initial_partition_count(&self) -> u16;
+
     /// Return installed ranges, using the routed client for account-owned admission proof.
     fn provision<'a>(
         &'a self,
@@ -53,6 +57,15 @@ pub trait InitialPartitionProvisioner: Send + Sync {
         table: &'a TableRecord,
         index: &'a crate::GlobalIndexRecord,
     ) -> BoxedFuture<'a, Result<Vec<crate::GlobalIndexPartitionSpec>, StorageError>>;
+
+    /// Install the initial index directory before publishing its account anchor.
+    fn provision_global_index_directory<'a>(
+        &'a self,
+        client: &'a CellClient,
+        account_id: &'a str,
+        index_id: &'a str,
+        ranges: Vec<crate::RoutePagePartition>,
+    ) -> BoxedFuture<'a, Result<crate::DirectoryCopyReceipt, StorageError>>;
 }
 
 /// Admits a discoverable coordinator before any transaction record is written.
@@ -155,6 +168,12 @@ impl TableEngine for CellStorage {
             let target = target(&account_id)?;
             let name = input.table_name.clone();
             let spec = TableSpec {
+                placement: self.initial_partitions.as_ref().map_or(
+                    TablePlacement::Account,
+                    |provisioner| TablePlacement::Routed {
+                        initial_partitions: provisioner.initial_partition_count(),
+                    },
+                ),
                 table_name: input.table_name,
                 key_schema: input.key_schema,
                 attribute_definitions: input.attribute_definitions,
@@ -189,8 +208,13 @@ impl TableEngine for CellStorage {
                         if self.initial_partitions.is_none() {
                             return Err(StorageError::TableAlreadyExists(name));
                         }
-                        let existing = self.record(&account_id, &name).await?;
-                        if !submitted.matches_record(&existing)
+                        let crate::TableLifecycle::Live(existing) =
+                            self.lifecycle(&account_id, &name).await?
+                        else {
+                            return Err(StorageError::TableAlreadyExists(name));
+                        };
+                        if existing.placement == TablePlacement::Account
+                            || !submitted.matches_record(&existing)
                             || self.route_active_for(&account_id, &existing.id).await?
                         {
                             return Err(StorageError::TableAlreadyExists(name));
@@ -209,78 +233,13 @@ impl TableEngine for CellStorage {
                 Err(error) => return Err(cell_error(error)),
             };
             if let Some(provisioner) = &self.initial_partitions {
-                for index in &record.global_secondary_indexes {
-                    let partitions = provisioner
-                        .provision_global_index(&self.client, &account_id, &record, index)
-                        .await?
-                        .into_iter()
-                        .map(|range| crate::RoutePagePartition {
-                            partition_id: range.partition_id,
-                            lower: range.lower.unwrap_or([0; 16]),
-                            upper: range.upper,
-                            epoch: range.epoch,
-                        })
-                        .collect();
-                    self.client
-                        .command::<crate::ActivateGlobalIndexRoute>(
-                            &target,
-                            mutation_identity()?,
-                            Json(crate::GlobalIndexRoute {
-                                table: record.clone(),
-                                index: index.clone(),
-                                partitions,
-                            }),
-                        )
-                        .await
-                        .map_err(cell_error)?;
-                }
-                let partitions = provisioner
-                    .provision(&self.client, &account_id, &record)
-                    .await?;
-                let route = TableRoute {
-                    table_id: record.id.clone(),
-                    epoch: 1,
-                    partitions,
-                };
-                match self
-                    .client
-                    .command::<ActivateTableRoute>(&target, mutation_identity()?, Json(route))
-                    .await
-                {
-                    Ok(committed) if committed.output.0 == ActivateTableRouteOutcome::Activated => {
-                    }
-                    Ok(_) => {
-                        return Err(StorageError::Internal(
-                            "unexpected successful route activation".into(),
-                        ));
-                    }
-                    Err(InvocationError::Rejected(committed)) => {
-                        return Err(match committed.output.0 {
-                            ActivateTableRouteOutcome::TableNotFound => {
-                                StorageError::TableNotFound(record.table_name.clone())
-                            }
-                            ActivateTableRouteOutcome::AlreadyActive => StorageError::Transient(
-                                "table route changed during creation".into(),
-                            ),
-                            ActivateTableRouteOutcome::TransactionConflict => {
-                                StorageError::Transient("table has prepared transactions".into())
-                            }
-                            ActivateTableRouteOutcome::IndexesNotReady => {
-                                StorageError::Transient("global index routes are not ready".into())
-                            }
-                            ActivateTableRouteOutcome::TableNotEmpty => {
-                                StorageError::TableNotActive(record.table_name.clone())
-                            }
-                            ActivateTableRouteOutcome::InvalidRoute => StorageError::Internal(
-                                "provisioner returned an invalid table route".into(),
-                            ),
-                            ActivateTableRouteOutcome::Activated => StorageError::Internal(
-                                "unexpected rejected route activation".into(),
-                            ),
-                        });
-                    }
-                    Err(error) => return Err(cell_error(error)),
-                }
+                table_creation::publish_initial_routes(
+                    provisioner.as_ref(),
+                    &self.client,
+                    &account_id,
+                    &record,
+                )
+                .await?;
             }
             Ok(description(
                 record,
@@ -300,9 +259,23 @@ impl TableEngine for CellStorage {
         Box::pin(async move {
             let target = target(&account_id)?;
             let name = input.table_name;
+            let previous = match self.lifecycle(&account_id, &name).await? {
+                crate::TableLifecycle::Live(record) | crate::TableLifecycle::Deleting(record) => {
+                    record
+                }
+                crate::TableLifecycle::Missing => return Err(StorageError::TableNotFound(name)),
+            };
+            let statistics = self.statistics(&account_id, &previous.id).await?;
             let record = match self
                 .client
-                .command::<DeleteTable>(&target, mutation_identity()?, Json(name.clone()))
+                .command::<DeleteTable>(
+                    &target,
+                    mutation_identity()?,
+                    Json(crate::TableGeneration {
+                        table_name: name.clone(),
+                        table_id: previous.id.clone(),
+                    }),
+                )
                 .await
             {
                 Ok(committed) => match committed.output.0 {
@@ -333,12 +306,14 @@ impl TableEngine for CellStorage {
                 },
                 Err(error) => return Err(cell_error(error)),
             };
-            Ok(description(
-                record,
-                &account_id,
-                &self.region,
-                TableStatus::Deleting,
-            ))
+            // A concurrent delete/recreate can change the name's generation.
+            // Never attach the previous table's sample to the newly deleted one.
+            let same_generation = record.id == previous.id;
+            let mut result = description(record, &account_id, &self.region, TableStatus::Deleting);
+            if same_generation {
+                statistics::apply(&mut result, statistics);
+            }
+            Ok(result)
         })
     }
 
@@ -349,15 +324,23 @@ impl TableEngine for CellStorage {
     ) -> BoxedFuture<'_, Result<TableDescription, StorageError>> {
         let account_id = account_id.to_owned();
         Box::pin(async move {
-            let record = self.record(&account_id, &input.table_name).await?;
-            let status = if self.initial_partitions.is_some()
-                && !self.route_active_for(&account_id, &record.id).await?
-            {
-                TableStatus::Creating
-            } else {
-                TableStatus::Active
+            let (record, status) = match self.lifecycle(&account_id, &input.table_name).await? {
+                crate::TableLifecycle::Missing => {
+                    return Err(StorageError::TableNotFound(input.table_name));
+                }
+                crate::TableLifecycle::Deleting(record) => (record, TableStatus::Deleting),
+                crate::TableLifecycle::Live(record) => {
+                    let status = if matches!(record.placement, TablePlacement::Routed { .. })
+                        && !self.route_active_for(&account_id, &record.id).await?
+                    {
+                        TableStatus::Creating
+                    } else {
+                        TableStatus::Active
+                    };
+                    (record, status)
+                }
             };
-            Ok(description(record, &account_id, &self.region, status))
+            self.table_description(record, &account_id, status).await
         })
     }
 
@@ -443,6 +426,9 @@ impl TableEngine for CellStorage {
                     UpdateTableOutcome::TableNotFound => {
                         return Err(StorageError::TableNotFound(name));
                     }
+                    UpdateTableOutcome::TableNotActive => {
+                        return Err(StorageError::TableNotActive(name));
+                    }
                     UpdateTableOutcome::InvalidUpdate => {
                         return Err(StorageError::Validation(
                             "invalid table billing update".into(),
@@ -456,12 +442,8 @@ impl TableEngine for CellStorage {
                 },
                 Err(error) => return Err(cell_error(error)),
             };
-            Ok(description(
-                record,
-                &account_id,
-                &self.region,
-                TableStatus::Active,
-            ))
+            self.table_description(record, &account_id, TableStatus::Active)
+                .await
         })
     }
 
@@ -474,7 +456,7 @@ impl TableEngine for CellStorage {
         let table_name = table_name.to_owned();
         Box::pin(async move {
             let record = self.record(&account_id, &table_name).await?;
-            if self.initial_partitions.is_some()
+            if matches!(record.placement, TablePlacement::Routed { .. })
                 && !self.route_active_for(&account_id, &record.id).await?
             {
                 return Err(StorageError::TableNotActive(table_name));
@@ -594,6 +576,21 @@ impl CellStorage {
                 Err(StorageError::Transient("table route changed; retry".into()))
             }
         }
+    }
+
+    async fn lifecycle(
+        &self,
+        account_id: &str,
+        name: &str,
+    ) -> Result<crate::TableLifecycle, StorageError> {
+        let account = target(account_id)?;
+        Ok(self
+            .client
+            .query::<crate::ReadTableLifecycle>(&account, None, Json(name.into()))
+            .await
+            .map_err(cell_error)?
+            .output
+            .0)
     }
 
     async fn record(&self, account_id: &str, name: &str) -> Result<TableRecord, StorageError> {
