@@ -34,8 +34,10 @@ Configured owned Cells can still serve when placement measurement is unavailable
 Requests for idle, previously published data/GSI Cells now select a destination
 from signed capacity and activate it over pinned mTLS. Missing eligible capacity
 rejects placement. Account, credential, and coordinator residency keep their
-existing policies. Initial range provisioning and automatic rebalancing remain
-unfinished; adding a node does not move already serving Cells.
+existing policies. Initial data, GSI, and split-child provisioning use the same
+signed placement measurements with a separate authenticated provisioning
+capability. Automatic rebalancing remains unfinished; adding a node does not
+move already serving Cells.
 
 `cargo run -p beyonddb --bin beyonddb -- config.json --bootstrap` starts one
 leased Cell node, a private mTLS peer listener, and ExtendDB's public DynamoDB
@@ -261,10 +263,13 @@ keyed reads and writes reject a wrong range or stale epoch. The account Cell
 can publish a durable initial route after the provisioner installs its data
 Cells. The directory version can advance while unaffected data Cells retain
 their own epochs. A durable split plan must replace one range with two fresh,
-contiguous child ranges while leaving every other range unchanged. Route
-validation requires complete, nonoverlapping hash coverage and the table's
-immutable key schema. Route publication currently trusts the
-provisioner to have installed and published the data Cells; it does not verify
+contiguous child ranges while leaving every other range unchanged. Plans are
+owned by source range: independent splits can remain pending and publish
+concurrently. Each publication advances the directory epoch without changing
+unrelated source or planned child epochs. Route validation requires complete,
+nonoverlapping hash coverage and the table's immutable key schema. Route
+publication currently trusts the provisioner to have installed and published
+the data Cells; it does not verify
 their receipts. The source data Cell can persist an idempotent split seal that
 fences ordinary reads and writes, then serves bounded export pages after owner
 restart. Import-only child Cells accept idempotent item copies and verify an
@@ -272,9 +277,9 @@ expected count and digest before activation. Activation closes imports while
 keeping ordinary requests fenced. The host-backed split controller admits
 children, seals the source, copies bounded export pages, checks both child
 fingerprints against the sealed source, and atomically publishes the exact
-durable plan against its predecessor route. It then opens the children for
-ordinary requests. The host provisioner can choose a range midpoint, record
-the plan, and repeat the split on an already opened child. Repeated calls
+durable plan against its exact predecessor source range. It then opens the
+children for ordinary requests. The host provisioner can choose a range
+midpoint, record the plan, and repeat the split on an already opened child. Repeated calls
 resume this sequence after interruption.
 The account command itself cannot inspect other Cells; serving code must use
 the controller rather than calling route publication directly.

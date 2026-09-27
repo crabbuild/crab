@@ -4320,16 +4320,22 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         Err(InvocationError::Rejected(result))
             if result.output.0 == PartitionPutOutcome::NotReady
     ));
-    let mut wrong_plan = plan.clone();
-    wrong_plan.source.partition_id = [9; 16];
-    let wrong_commit = client
-        .command::<CommitSplit>(&account, identity(64), Json(wrong_plan))
-        .await;
-    assert!(matches!(
-        wrong_commit,
-        Err(InvocationError::Rejected(result))
-            if result.output.0 == CommitSplitOutcome::PlanMismatch
-    ));
+    let mut wrong_source = plan.clone();
+    wrong_source.source.partition_id = [9; 16];
+    let mut wrong_children = plan.clone();
+    wrong_children.children[0].partition_id = [9; 16];
+    for (request, submitted, expected) in [
+        (64, wrong_source, CommitSplitOutcome::PlanNotFound),
+        (138, wrong_children, CommitSplitOutcome::PlanMismatch),
+    ] {
+        let wrong_commit = client
+            .command::<CommitSplit>(&account, identity(request), Json(submitted))
+            .await;
+        assert!(matches!(
+            wrong_commit,
+            Err(InvocationError::Rejected(result)) if result.output.0 == expected
+        ));
+    }
     let controller_client = CellClient::local_many(
         Arc::clone(&registry),
         [

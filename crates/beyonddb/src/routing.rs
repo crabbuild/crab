@@ -10,11 +10,11 @@ use crate::{Json, MODULE, PartitionSpec, Result, SqlBatch, SqlResultSet, SqlValu
 
 mod split_state;
 
-use split_state::split_route_state;
 pub use split_state::{
     PublishedPartitionInput, PublishedPartitionOutcome, ReadPublishedPartition, ReadSplitRoute,
     SplitRouteState,
 };
+use split_state::{route_head, split_route_state};
 
 /// One published set of contiguous data Cell ranges for a table.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -65,7 +65,7 @@ pub struct SplitPlan {
     pub source: PartitionSpec,
     /// New adjacent ranges that replace the source.
     pub children: [PartitionSpec; 2],
-    /// Published directory epoch that this plan is allowed to replace.
+    /// Directory epoch observed when planning; unrelated ranges may advance it.
     pub expected_epoch: u64,
 }
 
@@ -119,7 +119,7 @@ pub enum BeginSplitOutcome {
     RouteNotFound,
     /// The proposed route is not a valid one-range split.
     InvalidPlan,
-    /// Another split plan is already durable for this table.
+    /// Another split plan is already durable for this source range.
     Conflict,
 }
 
@@ -159,8 +159,11 @@ impl Command for BeginSplit {
             )));
         }
         let existing_rows = context.sql(&statement(
-            "SELECT plan FROM ddb_split_plans WHERE table_id = ?1",
-            vec![SqlValue::Text(table_id.clone())],
+            "SELECT plan FROM ddb_split_plans WHERE table_id = ?1 AND source_partition_id = ?2",
+            vec![
+                SqlValue::Text(table_id.clone()),
+                SqlValue::Blob(plan.source.partition_id.to_vec()),
+            ],
         ))?;
         if let Some(existing) = decode_plan(&existing_rows[0])? {
             return Ok(if existing == plan {
@@ -170,9 +173,10 @@ impl Command for BeginSplit {
             });
         }
         context.sql(&statement(
-            "INSERT INTO ddb_split_plans (table_id, plan) VALUES (?1, ?2)",
+            "INSERT INTO ddb_split_plans (table_id, source_partition_id, plan) VALUES (?1, ?2, ?3)",
             vec![
                 SqlValue::Text(table_id.clone()),
+                SqlValue::Blob(plan.source.partition_id.to_vec()),
                 SqlValue::Blob(serde_json::to_vec(&plan)?),
             ],
         ))?;
@@ -187,7 +191,7 @@ pub enum CommitSplitOutcome {
     Committed,
     /// The table or its published route no longer exists.
     RouteNotFound,
-    /// No matching split plan is durable for this table.
+    /// No matching split plan is durable for this source range.
     PlanNotFound,
     /// The durable plan differs from the submitted plan.
     PlanMismatch,
@@ -229,8 +233,11 @@ impl Command for CommitSplit {
             )));
         }
         let plan_rows = context.sql(&statement(
-            "SELECT plan FROM ddb_split_plans WHERE table_id = ?1",
-            vec![SqlValue::Text(table_id.clone())],
+            "SELECT plan FROM ddb_split_plans WHERE table_id = ?1 AND source_partition_id = ?2",
+            vec![
+                SqlValue::Text(table_id.clone()),
+                SqlValue::Blob(plan.source.partition_id.to_vec()),
+            ],
         ))?;
         let Some(durable) = decode_plan(&plan_rows[0])? else {
             return Ok(if state == SplitRouteState::After {
@@ -249,16 +256,19 @@ impl Command for CommitSplit {
                 CommitSplitOutcome::RouteChanged,
             )));
         }
-        // The epoch and indexed rows must switch in one Cell transaction.
+        // Unrelated sources can publish between planning and this commit. Advance
+        // the current directory epoch while retaining the planned child epochs;
+        // paged readers must detect every publication, including concurrent splits.
+        let (epoch, _) = route_head(table_id, |batch| context.sql(batch))?
+            .ok_or(crate::Error::Command("split route disappeared"))?;
+        let next_epoch = epoch
+            .checked_add(1)
+            .ok_or(crate::Error::Command("split epoch exhausted"))?;
         context.sql(&statement(
             "UPDATE ddb_routes SET route_epoch = ?2 WHERE table_id = ?1",
             vec![
                 SqlValue::Text(table_id.clone()),
-                SqlValue::Text(
-                    plan.next_epoch()
-                        .ok_or(crate::Error::Command("split epoch exhausted"))?
-                        .to_string(),
-                ),
+                SqlValue::Text(next_epoch.to_string()),
             ],
         ))?;
         let removed = context.sql(&statement(
@@ -275,14 +285,17 @@ impl Command for CommitSplit {
             insert_route_partition(context, partition)?;
         }
         context.sql(&statement(
-            "DELETE FROM ddb_split_plans WHERE table_id = ?1",
-            vec![SqlValue::Text(table_id.clone())],
+            "DELETE FROM ddb_split_plans WHERE table_id = ?1 AND source_partition_id = ?2",
+            vec![
+                SqlValue::Text(table_id.clone()),
+                SqlValue::Blob(plan.source.partition_id.to_vec()),
+            ],
         ))?;
         Ok(CommandResult::Success(Json(CommitSplitOutcome::Committed)))
     }
 }
 
-/// Read a durable split plan for recovery after owner loss.
+/// Read the first pending source plan in ID order for bounded table recovery.
 pub struct ReadSplitPlan;
 
 impl Query for ReadSplitPlan {
@@ -298,8 +311,31 @@ impl Query for ReadSplitPlan {
     ) -> Result<Self::Output> {
         Ok(Json(decode_plan(
             &context.sql(&statement(
-                "SELECT plan FROM ddb_split_plans WHERE table_id = ?1",
+                "SELECT plan FROM ddb_split_plans WHERE table_id = ?1 ORDER BY source_partition_id LIMIT 1",
                 vec![SqlValue::Text(table_id)],
+            ))?[0],
+        )?))
+    }
+}
+
+/// Read one source range's durable split plan without blocking unrelated ranges.
+pub struct ReadSourceSplitPlan;
+
+impl Query for ReadSourceSplitPlan {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 32;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<PublishedPartitionInput>;
+    type Output = Json<Option<SplitPlan>>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        Ok(Json(decode_plan(
+            &context.sql(&statement(
+                "SELECT plan FROM ddb_split_plans WHERE table_id = ?1 AND source_partition_id = ?2",
+                vec![
+                    SqlValue::Text(input.table_id),
+                    SqlValue::Blob(input.partition_id.to_vec()),
+                ],
             ))?[0],
         )?))
     }

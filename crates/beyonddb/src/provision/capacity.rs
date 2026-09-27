@@ -20,8 +20,8 @@ use crate::{
     BeginSplit, BeginSplitOutcome, CellSplitController, DescribeTable, Json, ListTables,
     ListTablesInput, ListTablesOutcome, PartitionState, PartitionUsage, PublishedPartitionInput,
     PublishedPartitionOutcome, ReadPartitionState, ReadPublishedPartition, ReadRoutePage,
-    ReadSplitPlan, ReadSplitRoute, RoutePageInput, RoutePageOutcome, SplitPlan, SplitRouteState,
-    account_target, data_target,
+    ReadSourceSplitPlan, ReadSplitPlan, ReadSplitRoute, RoutePageInput, RoutePageOutcome,
+    SplitPlan, SplitRouteState, account_target, data_target,
 };
 
 impl CellInitialPartitionProvisioner {
@@ -253,7 +253,7 @@ impl CellInitialPartitionProvisioner {
             .map_err(provision_error)
     }
 
-    /// Split one oversized range or resume the table's durable split plan.
+    /// Split one oversized range or resume the table's first pending source plan.
     ///
     /// A serving control loop should repeat this call while the table is active.
     pub async fn reconcile_table_capacity(
@@ -364,7 +364,14 @@ impl CellInitialPartitionProvisioner {
         let account = account_target(account_id).map_err(provision_error)?;
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
         if client
-            .query::<ReadSplitPlan>(&account, None, Json(table_id.to_owned()))
+            .query::<ReadSourceSplitPlan>(
+                &account,
+                None,
+                Json(PublishedPartitionInput {
+                    table_id: table_id.to_owned(),
+                    partition_id: source_partition_id,
+                }),
+            )
             .await
             .map_err(cell_error)?
             .output
@@ -428,17 +435,19 @@ impl CellInitialPartitionProvisioner {
             let account = account_target(account_id).map_err(provision_error)?;
             let client = client.with_read_policy(ReadPolicy::CurrentOwner);
             if let Some(plan) = client
-                .query::<ReadSplitPlan>(&account, None, Json(table_id.to_owned()))
+                .query::<ReadSourceSplitPlan>(
+                    &account,
+                    None,
+                    Json(PublishedPartitionInput {
+                        table_id: table_id.to_owned(),
+                        partition_id: source_partition_id,
+                    }),
+                )
                 .await
                 .map_err(cell_error)?
                 .output
                 .0
             {
-                if plan.source.partition_id != source_partition_id {
-                    return Err(StorageError::Transient(
-                        "another partition split is pending for this table".into(),
-                    ));
-                }
                 self.resume_split(account_id, client.clone(), &plan).await?;
                 return Ok(plan);
             }
@@ -591,7 +600,14 @@ impl CellInitialPartitionProvisioner {
         let account = account_target(account_id).map_err(provision_error)?;
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
         let pending = client
-            .query::<ReadSplitPlan>(&account, None, Json(source.table.id.clone()))
+            .query::<ReadSourceSplitPlan>(
+                &account,
+                None,
+                Json(PublishedPartitionInput {
+                    table_id: source.table.id.clone(),
+                    partition_id: source.partition_id,
+                }),
+            )
             .await
             .map_err(cell_error)?
             .output

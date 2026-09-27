@@ -30,8 +30,10 @@ CREATE UNIQUE INDEX ddb_route_partition_lookup
     ON ddb_route_partitions (table_id, lower_bound);
 
 CREATE TABLE ddb_split_plans (
-    table_id TEXT PRIMARY KEY REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
-    plan BLOB NOT NULL
+    table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
+    source_partition_id BLOB NOT NULL,
+    plan BLOB NOT NULL,
+    PRIMARY KEY (table_id, source_partition_id)
 );
 
 CREATE TABLE ddb_iam_user_policies (

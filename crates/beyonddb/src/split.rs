@@ -9,9 +9,9 @@ use crate::{
     CommitSplit, CommitSplitOutcome, ImportPartitionItem, ImportSummary, InstallPartition,
     InstallPartitionOutcome, Json, OpenPartition, OpenPartitionOutcome, PartitionExport,
     PartitionImportInput, PartitionImportOutcome, PartitionInstall, PartitionScanInput,
-    PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState, ReadPartitionState,
-    ReadSplitPlan, ReadSplitRoute, SealPartition, SealPartitionOutcome, SplitPlan, SplitRouteState,
-    account_target, data_key_hash, data_target,
+    PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState, PublishedPartitionInput,
+    ReadPartitionState, ReadSourceSplitPlan, ReadSplitRoute, SealPartition, SealPartitionOutcome,
+    SplitPlan, SplitRouteState, account_target, data_key_hash, data_target,
 };
 
 /// Runs a durable split using already admitted account and data Cells.
@@ -43,7 +43,14 @@ impl CellSplitController {
         ];
         let current_plan = self
             .client
-            .query::<ReadSplitPlan>(&account, None, Json(source.table.id.clone()))
+            .query::<ReadSourceSplitPlan>(
+                &account,
+                None,
+                Json(PublishedPartitionInput {
+                    table_id: source.table.id.clone(),
+                    partition_id: source.partition_id,
+                }),
+            )
             .await
             .map_err(cell_error)?
             .output

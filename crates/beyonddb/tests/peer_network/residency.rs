@@ -1,5 +1,6 @@
 mod placement;
 mod provisioning;
+mod splits;
 
 use crate::*;
 use crab_cell_runtime::cell::actor::CellHandle;

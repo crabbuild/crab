@@ -1379,3 +1379,58 @@ results; current-head Linux and fleet-scale qualification remain separate gates.
 Production Rust grows by 213 net lines for the shared peer composition,
 scoped provisioning capability, and common range admission/recovery boundary.
 No wire shape, storage schema, dependency, or configuration setting changed.
+
+## Independent source-range splits
+
+Pending data splits are keyed by `(table_id, source_partition_id)`. Each source
+has one immutable pending plan; unrelated sources can copy and publish
+concurrently. `ReadSourceSplitPlan` is the point lookup used by explicit split,
+threshold, and replay paths. `ReadSplitPlan` returns only the first pending
+source in ID order for bounded table/account recovery sweeps.
+
+Publication compares the exact source and child identities, bounds, table
+snapshot, and partition epochs in the command's SQL transaction. A newer
+directory epoch from an unrelated split no longer invalidates that comparison.
+Each successful publication increments the current directory epoch, preserving
+Scan page invalidation, while planned child epochs remain immutable. It removes
+only that source's plan. Completed replay validates the exact children even
+when subsequent unrelated publications have advanced the directory epoch.
+
+The regression initially rejected the second disjoint source's plan. The signed
+SDK test now persists both plans, releases and restores the metadata owner,
+rejects a competing plan for the same source, publishes one plan, then replays
+it concurrently with publication of the other. It verifies that the second
+plan survives the first commit, the directory advances twice, stale page epochs
+are rejected, and copied SDK items survive release/restoration of the metadata
+and child owners. SDK retries are disabled for those recovered reads.
+
+Ownership remains in `routing.rs` and `routing/split_state.rs`; callers are
+`provision/capacity.rs` and `split.rs`. The runtime's existing application SQL
+transaction/savepoint commits or rolls back the route rows, epoch, and plan
+together. `DeleteTable` continues deleting all plans for the table. GSI routing
+shares page validation but has no split planner yet; this change does not add
+one. Existing per-source prepare locks, export/import fingerprints, and opening
+after publication remain unchanged.
+
+Account metadata still uses one writer and a 512-MiB Cell budget.
+Table recovery still chooses one pending plan per sweep; fair
+distributed scheduling and recursively sharded directories remain required.
+The split-plan schema is unreleased and changed in place; development roots
+must be reprovisioned. There is no legacy schema reader or upgrade claim.
+
+These changes were verified on top of the tree merged by PR #469
+(`311105eb864c`), which is byte-identical to the tested parent branch.
+Seven signed SDK residency cases pass in 91.06s; the 1,025-range route-page
+regression passes in 3.12s; LSI mutation/transaction/split passes in 0.72s;
+admission-backpressure recovery passes in 0.36s; the data-range transaction,
+split, and owner-restart regression passes in 1.52s. The latter retains both
+wrong-source rejection (`PlanNotFound`) and same-source payload rejection
+(`PlanMismatch`) under the new source-keyed lookup.
+
+These are small fixtures. Fleet throughput and recovery remain unmeasured.
+Production code grows by 65 net lines, including SQL, to add the source lookup
+and replace table-wide exclusion. No dependency or configuration setting changed.
+Strict all-target BeyondDB Clippy passes in 28.60s; the standalone server builds
+in 51.83s. Format, Cell/LTX layout, policy entry points, and diff checks pass.
+The prior build directory lost compiler files during verification; a fresh
+checkout-specific target directory completed the clean build and tests.

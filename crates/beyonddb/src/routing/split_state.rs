@@ -124,9 +124,11 @@ pub(super) fn split_route_state(
             children[1] = spec == plan.children[1];
         }
     }
-    let state = if epoch == plan.expected_epoch && source && rows[0].rows.len() == 1 {
+    // The exact source/child identities fence this split. A newer directory
+    // epoch can belong to an unrelated range and must not strand a sealed source.
+    let state = if epoch >= plan.expected_epoch && source && rows[0].rows.len() == 1 {
         SplitRouteState::Before
-    } else if plan.next_epoch() == Some(epoch)
+    } else if plan.next_epoch().is_some_and(|next| epoch >= next)
         && !source
         && children == [true, true]
         && rows[0].rows.len() == 2
@@ -138,7 +140,7 @@ pub(super) fn split_route_state(
     Ok(state)
 }
 
-fn route_head(
+pub(super) fn route_head(
     table_id: &str,
     sql: impl Fn(&SqlBatch) -> Result<Vec<SqlResultSet>>,
 ) -> Result<Option<(u64, TableRecord)>> {

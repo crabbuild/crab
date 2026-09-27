@@ -465,7 +465,7 @@ pub struct PartitionSeal {
     pub source_partition_id: [u8; 16],
     /// Source data Cell epoch.
     pub epoch: u64,
-    /// Directory epoch assigned to both child data Cells.
+    /// Planned epoch assigned to both child data Cells, independent of publication order.
     pub next_epoch: u64,
     /// Source range's inclusive lower bound.
     pub source_lower: Option<[u8; 16]>,
