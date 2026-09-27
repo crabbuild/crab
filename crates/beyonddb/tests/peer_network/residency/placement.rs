@@ -120,11 +120,19 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
             .collect(),
         actions: Vec::new(),
     };
+    let handle = &fixture.data[0].0;
+    let expected = wire::CellDescription {
+        cell_id: handle.cell_id().as_bytes().to_vec(),
+        incarnation: handle.incarnation().as_bytes().to_vec(),
+        code: handle.code().as_bytes().to_vec(),
+        schema: handle.schema(),
+    };
     let send = |target: CellTarget, action: &str, describe: bool| {
         let transport = transport.clone();
         let signer = signer.clone();
         let directory = fixture.directory.clone();
         let destination = fixture.session;
+        let expected = (!describe).then(|| expected.clone());
         let mut principal = principal.clone();
         principal.actions.push(action.to_owned());
         async move {
@@ -150,7 +158,7 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
                         }),
                         timeout_ms: 30_000,
                         minimum: None,
-                        expected: None,
+                        expected,
                         operation: Some(if describe {
                             wire::read_request::Operation::Describe(true)
                         } else {
