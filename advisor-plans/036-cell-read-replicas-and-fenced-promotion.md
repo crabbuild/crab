@@ -296,6 +296,21 @@ authority outage, and a separately isolated reader during takeover; broader capa
 and production fault qualification remain open. Private peer replica requests are accepted only in
 the object-durability server profile.
 
+The reference application's direct and balanced three-process RustFS tests now
+exercise generated snapshot queries on two non-owner `CellNode` processes.
+Both local GA RustFS runs passed: thirteen successful queries were attributed
+7/6 to the two selected readers and zero to the writer. Missing readers return
+unavailability, a new owner command leaves the old snapshot readable, its
+minimum receipt is rejected until refresh, and duplicate command delivery
+preserves one receipt and effect. Refresh is test-controlled; this proof does
+not establish automatic placement, replacement, or production throughput.
+The run exposed that a 32-writer pool's default native admission budget is only
+2 MiB, below one 12 MiB read snapshot. Hosts can now explicitly set the pool's
+native-memory ceiling without increasing writer or descriptor capacity. The
+reference host uses 32 MiB so old and replacement snapshots remain charged
+during refresh. The constrained Compose proof and protected gates remain
+separate evidence. See the reference application's `PERFORMANCE.md` commands.
+
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed
 against a local RustFS bucket with an isolated prefix. It exercised real S3
 root reads, atomic snapshot refresh, fencing after release, and a policy

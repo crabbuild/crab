@@ -138,6 +138,29 @@ fn fixture(cell_byte: u8) -> Fixture {
 }
 
 #[tokio::test]
+async fn native_memory_budget_preserves_writer_limit_and_active_reservations() {
+    let first = fixture(98);
+    let second = fixture(99);
+    let pool = SqlWorkerPool::new(1, 1)
+        .unwrap()
+        .with_native_memory_limit(32 << 20)
+        .unwrap();
+    pool.activate(first.cell, first.executor).await.unwrap();
+    assert!(matches!(
+        pool.activate(second.cell, second.executor).await,
+        Err(Error::Capacity(_))
+    ));
+    for limit in [0, 1] {
+        assert!(matches!(
+            pool.clone().with_native_memory_limit(limit),
+            Err(Error::Capacity(_))
+        ));
+    }
+    pool.deactivate(first.cell).await.unwrap();
+    pool.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn fixed_workers_own_execute_prepare_confirm_and_dedup() {
     let Fixture {
         _directory,

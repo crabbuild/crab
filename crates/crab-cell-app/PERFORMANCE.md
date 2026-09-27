@@ -105,6 +105,19 @@ application handles; generated stable-ID commands additionally prove that
 repeating a committed mutation preserves its receipt and creates one visible
 effect. Every primitive lane checks its visible result.
 
+After the measured action lanes, the generated-client proof admits two SQL
+snapshot readers on the other node processes. It verifies unavailable readers
+do not fall back to the owner, reads report the older snapshot after a new
+owner mutation, and a minimum receipt rejects that older position. A controlled
+refresh then exposes the exact newer receipt and one effect after duplicate
+command delivery. Successful direct peer replies are counted by selected
+physical node; both readers must serve queries and the writer must serve none
+of these replica queries. Each receiver dispatches the explicit query against
+its local admitted snapshot, including when that receiver is also a gateway.
+These steps are outside the action timer and do not establish replica
+throughput. Refresh is driven by test markers; automatic reader reconciliation
+and replacement remain separate product qualification.
+
 Provide an isolated bucket, a prefix, and explicit credentials:
 
 ```bash
@@ -145,6 +158,11 @@ The disposable evidence directory is shared and writable by the host and all
 fixture containers; its sticky bit protects entries owned by another UID.
 This also permits capability-free container root to create logs on a Linux
 runner-owned bind mount. Source and binary mounts remain read-only.
+
+The worker pool retains its 32-writer ceiling and explicitly reserves 32 MiB
+for native admission, covering a reader's overlapping refresh snapshots.
+The default 32-writer budget alone is 2 MiB and correctly refuses a 12 MiB
+snapshot; raising the writer count is not required to provision reader memory.
 
 Use a fresh Compose project and state directory per run. The source archive
 must contain the committed change being measured. The selected Docker/Colima
