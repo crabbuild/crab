@@ -8,11 +8,20 @@ use super::process_performance::wait_for_marker;
 use super::process_recruitment::{ObservedReads, ready_readers};
 use crate::*;
 use crab_cell_runtime::{
-    client::{ReadPolicy, ReplicaReadRouter},
+    client::{Observed, ReadPolicy, ReplicaReadRouter},
     peer::{PeerPrincipal, PeerSigner, ReplicaPeerClient},
     read_policy::ReadPolicyStore,
 };
-use std::{collections::HashMap, env, net::SocketAddr, path::Path, sync::Mutex, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    env,
+    fs::File,
+    io::{BufWriter, Write},
+    net::SocketAddr,
+    path::Path,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 struct Controller<'a> {
     sync: &'a Path,
@@ -216,6 +225,29 @@ async fn reference_compose_reader_scaling() {
         println!(
             "PERF reader_scale: nodes={count} readers={desired} by_node={by_node:?} ingress={entries:?} owner_unchanged=1"
         );
+        observed.lock().unwrap().clear();
+        expected = mixed_load(&owner, &reader, sync, count, expected).await;
+        let reads = observed.lock().unwrap().clone();
+        assert_eq!(
+            reads
+                .keys()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            selected
+        );
+        assert!(!reads.contains_key(&node_session(0)));
+        let entries = ingress
+            .counts()
+            .iter()
+            .zip(entries)
+            .map(|(after, before)| after - before)
+            .collect::<Vec<_>>();
+        assert!(entries.iter().all(|count| *count > 0));
+        assert!(entries.iter().max().unwrap() - entries.iter().min().unwrap() <= 1);
+        println!(
+            "PERF mixed_reader_distribution: nodes={count} by_session={reads:?} writer_ingress={entries:?}"
+        );
+        ready_readers(&router, &peer, target, expected.receipt, desired, None).await;
         if count == 5 {
             let lost = *survivors
                 .iter()
@@ -290,4 +322,200 @@ async fn reference_compose_reader_scaling() {
     for node in survivors {
         wait_for_marker(&sync.join(format!("node-{node}.done"))).await;
     }
+}
+
+async fn mixed_load(
+    owner: &ReferenceOrderCell,
+    reader: &ReferenceOrderCell,
+    sync: &Path,
+    nodes: usize,
+    baseline: Observed<u64>,
+) -> Observed<u64> {
+    let started = Instant::now();
+    let window = Duration::from_secs(60);
+    let latest = Mutex::new(baseline.clone());
+    let writes = async {
+        let mut raw =
+            BufWriter::new(File::create(sync.join(format!("mixed-{nodes}-writes.tsv"))).unwrap());
+        writeln!(
+            raw,
+            "arrival\tscheduled_us\tstarted_us\telapsed_us\toutcome\tsequence\tcount"
+        )
+        .unwrap();
+        writeln!(
+            raw,
+            "baseline\t0\t0\t0\tbaseline\t{}\t{}",
+            baseline.receipt.commit_sequence, baseline.output
+        )
+        .unwrap();
+        let mut acknowledged =
+            BTreeMap::from([(baseline.receipt.commit_sequence, baseline.output)]);
+        let mut samples = Vec::new();
+        let mut missed = 0;
+        for arrival in 0..300 {
+            let offset = Duration::from_millis(arrival * 200);
+            tokio::time::sleep_until((started + offset).into()).await;
+            let dispatched = started.elapsed();
+            // A slow writer must not lower the advertised rate or catch up in
+            // a burst. Missing arrivals remain part of the capacity result.
+            if dispatched.saturating_sub(offset) >= Duration::from_millis(200) {
+                missed += 1;
+                writeln!(
+                    raw,
+                    "{arrival}\t{}\t{}\t0\tscheduler_late\t0\t0",
+                    offset.as_micros(),
+                    dispatched.as_micros()
+                )
+                .unwrap();
+                continue;
+            }
+            let input = CronInvocation {
+                schedule_id: [107; 16],
+                generation: 1,
+                occurrence: (nodes as u64 * 300) + arrival,
+                scheduled_at_ms: now_ms(),
+                payload: b"sustained-replica-refresh".to_vec(),
+            };
+            let call = Instant::now();
+            let committed = owner
+                .receive_cron(identity(107, nodes * 300 + arrival as usize, 0), input)
+                .await
+                .unwrap();
+            let elapsed = call.elapsed();
+            let count = baseline.output + samples.len() as u64 + 1;
+            assert_eq!(committed.receipt.cell, baseline.receipt.cell);
+            assert_eq!(committed.receipt.incarnation, baseline.receipt.incarnation);
+            assert!(committed.receipt.commit_sequence > *acknowledged.last_key_value().unwrap().0);
+            acknowledged.insert(committed.receipt.commit_sequence, count);
+            *latest.lock().unwrap() = Observed {
+                output: count,
+                receipt: committed.receipt,
+            };
+            writeln!(
+                raw,
+                "{arrival}\t{}\t{}\t{}\tcommitted\t{}\t{count}",
+                offset.as_micros(),
+                dispatched.as_micros(),
+                elapsed.as_micros(),
+                committed.receipt.commit_sequence
+            )
+            .unwrap();
+            raw.flush().unwrap();
+            samples.push(elapsed);
+        }
+        raw.flush().unwrap();
+        assert!(!samples.is_empty());
+        println!(
+            "PERF mixed_writes: nodes={nodes} planned=300 committed={} missed={missed} arrival_seconds=60",
+            samples.len()
+        );
+        report_samples(
+            &format!("mixed_writes_{nodes}_nodes"),
+            &mut samples,
+            started.elapsed().max(window),
+        );
+        acknowledged
+    };
+    let reads = futures_util::future::join_all((0..8).map(|lane| {
+        let latest = &latest;
+        async move {
+            let mut raw = BufWriter::new(
+                File::create(sync.join(format!("mixed-{nodes}-reader-{lane}.tsv"))).unwrap(),
+            );
+            writeln!(
+                raw,
+                "started_us\telapsed_us\tminimum_sequence\tlatest_count\toutcome\tsequence\tcount"
+            )
+            .unwrap();
+            let mut samples = Vec::new();
+            let mut behind = 0;
+            while started.elapsed() < window {
+                // Four lanes request the last acknowledged receipt; four
+                // permit older snapshots and report their observed lag.
+                let known = latest.lock().unwrap().clone();
+                let minimum = (lane % 2 == 0).then_some(known.receipt);
+                let floor = minimum.map_or(0, |receipt| receipt.commit_sequence);
+                let dispatched = started.elapsed();
+                let call = Instant::now();
+                match reader.receipt_count(minimum, ()).await {
+                    Ok(observed) => {
+                        let elapsed = call.elapsed();
+                        assert_eq!(observed.receipt.cell, baseline.receipt.cell);
+                        assert_eq!(observed.receipt.incarnation, baseline.receipt.incarnation);
+                        assert!(observed.receipt.commit_sequence >= floor);
+                        writeln!(
+                            raw,
+                            "{}\t{}\t{floor}\t{}\tok\t{}\t{}",
+                            dispatched.as_micros(),
+                            elapsed.as_micros(),
+                            known.output,
+                            observed.receipt.commit_sequence,
+                            observed.output
+                        )
+                        .unwrap();
+                        samples.push((observed, elapsed, known.output));
+                        assert!(
+                            samples.len() <= 100_000,
+                            "reader evidence exceeded its memory bound"
+                        );
+                    }
+                    Err(InvocationError::NotStarted(Error::ReplicaBehind { .. }))
+                        if minimum.is_some() =>
+                    {
+                        behind += 1;
+                        writeln!(
+                            raw,
+                            "{}\t{}\t{floor}\t{}\tbehind\t0\t0",
+                            dispatched.as_micros(),
+                            call.elapsed().as_micros(),
+                            known.output
+                        )
+                        .unwrap();
+                    }
+                    Err(error) => panic!("mixed replica read failed: {error}"),
+                }
+            }
+            raw.flush().unwrap();
+            assert!(!samples.is_empty(), "reader lane made no progress");
+            (samples, behind)
+        }
+    }));
+    let (acknowledged, readers) = tokio::join!(writes, reads);
+    let mut latencies = Vec::new();
+    let mut lag = 0;
+    let mut behind = 0;
+    for (samples, rejected) in readers {
+        behind += rejected;
+        for (observed, elapsed, known_count) in samples {
+            // A read can finish before its overlapping write is acknowledged.
+            // Join after both lanes finish, using exact commit positions.
+            let (_, count) = acknowledged
+                .range(..=observed.receipt.commit_sequence)
+                .next_back()
+                .unwrap();
+            assert_eq!(
+                observed.output, *count,
+                "snapshot value disagrees with its receipt"
+            );
+            lag = lag.max(known_count.saturating_sub(observed.output));
+            latencies.push(elapsed);
+        }
+    }
+    println!(
+        "PERF mixed_reads: nodes={nodes} clients=8 behind={behind} max_acknowledged_count_lag={lag} window_seconds=60"
+    );
+    report_samples(
+        &format!("mixed_replica_reads_{nodes}_nodes"),
+        &mut latencies,
+        started.elapsed(),
+    );
+    let expected = latest.into_inner().unwrap();
+    assert_eq!(
+        owner
+            .receipt_count(Some(expected.receipt), ())
+            .await
+            .unwrap(),
+        expected
+    );
+    expected
 }

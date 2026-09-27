@@ -4,13 +4,80 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import copy
+import csv
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import time
+
+
+def verify_mixed_load(control: Path, nodes: int) -> dict:
+    def rows(name):
+        path = control / name
+        with path.open(newline="") as source:
+            result = list(csv.DictReader(source, delimiter="\t"))
+        hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return result
+
+    hashes = {}
+    writes = rows(f"mixed-{nodes}-writes.tsv")
+    baseline, *arrivals = writes
+    assert baseline["outcome"] == baseline["arrival"] == "baseline"
+    assert [int(row["arrival"]) for row in arrivals] == list(range(300))
+    positions = [int(baseline["sequence"])]
+    counts = [int(baseline["count"])]
+    missed = 0
+    for index, row in enumerate(arrivals):
+        assert int(row["scheduled_us"]) == index * 200_000
+        delay = int(row["started_us"]) - int(row["scheduled_us"])
+        assert delay >= 0
+        if row["outcome"] == "scheduler_late":
+            assert delay >= 200_000 and row["sequence"] == row["count"] == "0"
+            missed += 1
+            continue
+        assert row["outcome"] == "committed" and delay < 200_000
+        assert int(row["sequence"]) > positions[-1]
+        assert int(row["count"]) == counts[-1] + 1
+        positions.append(int(row["sequence"]))
+        counts.append(int(row["count"]))
+    assert len(positions) > 1
+    reads, behind, lag = 0, 0, 0
+    lanes = []
+    for lane in range(8):
+        samples = rows(f"mixed-{nodes}-reader-{lane}.tsv")
+        assert samples and max(int(row["started_us"]) + int(row["elapsed_us"]) for row in samples) >= 59_000_000
+        successes = 0
+        for row in samples:
+            assert 0 <= int(row["started_us"]) < 60_000_000 and int(row["elapsed_us"]) >= 0
+            minimum = int(row["minimum_sequence"])
+            assert (minimum > 0) == (lane % 2 == 0)
+            assert counts[0] <= int(row["latest_count"]) <= counts[-1]
+            if minimum:
+                assert minimum == positions[int(row["latest_count"]) - counts[0]]
+            if row["outcome"] == "behind":
+                assert minimum > 0 and row["sequence"] == row["count"] == "0"
+                behind += 1
+                continue
+            assert row["outcome"] == "ok"
+            sequence = int(row["sequence"])
+            assert max(minimum, positions[0]) <= sequence <= positions[-1]
+            index = bisect.bisect_right(positions, sequence) - 1
+            assert int(row["count"]) == counts[index], "snapshot value disagrees with its receipt"
+            lag = max(lag, int(row["latest_count"]) - int(row["count"]))
+            successes += 1
+        assert successes > 0
+        reads += successes
+        lanes.append(successes)
+    return dict(nodes=nodes, window_seconds=60, planned_writes=300,
+                acknowledged_writes=len(positions) - 1, missed_writes=missed,
+                fully_served_writes=missed == 0, successful_reads=reads,
+                behind_responses=behind, max_acknowledged_count_lag=lag,
+                successful_reads_by_lane=lanes, raw_sha256=hashes)
 
 
 class Fleet:
@@ -187,10 +254,11 @@ class Fleet:
         driver_log = (self.evidence / "driver.log").read_text()
         for nodes, readers in [(3, 2), (5, 3), (10, 9), (20, 19)]:
             assert f"PERF reader_scale: nodes={nodes} readers={readers} " in driver_log
+        mixed = [verify_mixed_load(self.control, nodes) for nodes in (3, 5, 10, 20)]
         assert f"killed_node={killed} ready_readers=3 exact_queries=12 " in driver_log
         source = (self.state / "evidence/source-revision.txt").read_text().strip()
         result = dict(verified=True, source=source, binary_sha256=binaries.pop(),
-                      roles=reports, killed_node=killed, events=self.events)
+                      roles=reports, killed_node=killed, events=self.events, mixed_load=mixed)
         (self.evidence / "verification.json").write_text(json.dumps(result, indent=2) + "\n")
         print(f"Verified 3/5/10/20 nodes and reader replacement; evidence: {self.evidence}", flush=True)
 

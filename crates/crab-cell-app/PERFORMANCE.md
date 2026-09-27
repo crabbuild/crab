@@ -269,6 +269,25 @@ balancer whose entry counts must differ by at most one. Replica requests go
 directly to the selected readers through the signed peer transport; this
 profile does not place a second balancer in that path.
 
+Each stage also measures sixty seconds of concurrent refresh and queries.
+One generated writer schedules five unique mutations per second through the
+balancer. It records missed arrivals instead of issuing a catch-up burst.
+Eight closed-loop readers run concurrently: four require the latest
+acknowledged receipt and four permit older snapshots. Typed `ReplicaBehind`
+responses are counted separately; other query errors fail the run. Every
+successful snapshot count must match the acknowledged command history at its
+actual receipt. All selected readers must serve queries, and the writer must
+remain excluded. The final owner read and all selected readers must cover the
+last acknowledgement before the next stage.
+
+Raw per-command and per-reader TSV files live in `evidence/scaling/control/`.
+The controller independently checks their scheduled arrivals, exact counts,
+minimum receipts, lag, and completeness, and binds them by SHA-256 in
+`verification.json`. `fully_served_writes` is false when any scheduled write
+was missed, even if all admitted work remains correct. Query latency excludes
+typed behind responses; their count remains visible. This is a fixed mixed
+workload, not a saturation curve or a freshness guarantee.
+
 At five nodes, three readers and one spare are eligible. The controller kills
 one selected reader-only container, proves exit 137 without an OOM event, and
 the driver requires a newly selected reader plus twelve exact query results.
@@ -285,9 +304,9 @@ stops only its project. Failed runs retain their containers and evidence.
 An optional repeated `--compose-file` supplies explicit image/cache overrides
 to the same source configuration; the resolved result is retained.
 
-This is a scaling and failure smoke. Serial reads, two writes per stage and
-one killed reader do not establish sustained capacity, concurrent-write
-freshness, continuous fault availability or an owner-loss SLO. A one-CPU cap
+This combines a scaling/failure smoke and bounded mixed-workload measurements.
+One replicated SQL Cell and one killed reader do not establish many-Cell
+capacity, continuous fault availability or an owner-loss SLO. A one-CPU cap
 does not reserve a physical core; record Docker VM resources and contention
 before comparing latency across sizes. The Compose CI runs this profile after
 the three-node lifecycle smoke using the same compiled binary.

@@ -57,6 +57,8 @@ jobs:
       - name: Build release test binary
         run: |
           set -euo pipefail
+          python3 -B -m unittest discover \
+            -s crates/crab-cell-app/qualification -p 'test_*.py'
           docker compose -p "$CRAB_REFERENCE_PROJECT" \
             -f "$CRAB_REFERENCE_STATE/source/crates/crab-cell-app/qualification/compose.yaml" \
             run --name cell-reference-build build \
