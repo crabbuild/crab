@@ -33,6 +33,8 @@ jobs:
           CRAB_REFERENCE_STATE="$RUNNER_TEMP/cell-reference"
           printf 'CRAB_REFERENCE_STATE=%s\n' "$CRAB_REFERENCE_STATE" >> "$GITHUB_ENV"
           mkdir -p "$CRAB_REFERENCE_STATE/source" "$CRAB_REFERENCE_STATE/target-linux" "$CRAB_REFERENCE_STATE/evidence"
+          # Capability-free container root needs write permission on this runner-owned mount.
+          chmod 1777 "$CRAB_REFERENCE_STATE/evidence"
           git archive HEAD | tar -x -C "$CRAB_REFERENCE_STATE/source"
           git rev-parse HEAD > "$CRAB_REFERENCE_STATE/evidence/source-revision.txt"
           uname -a > "$CRAB_REFERENCE_STATE/evidence/host.txt"

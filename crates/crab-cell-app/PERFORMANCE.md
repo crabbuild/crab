@@ -141,6 +141,10 @@ zero swap, and 256 processes. Each has a private disk-backed Docker volume for
 SQLite/WAL/cache; the shared evidence directory holds control markers and
 reports. The `crab`/`crab` credentials are local fixture credentials. No service
 publishes a host port.
+The disposable evidence directory is shared and writable by the host and all
+fixture containers; its sticky bit protects entries owned by another UID.
+This also permits capability-free container root to create logs on a Linux
+runner-owned bind mount. Source and binary mounts remain read-only.
 
 Use a fresh Compose project and state directory per run. The source archive
 must contain the committed change being measured. The selected Docker/Colima
@@ -150,6 +154,7 @@ VM must mount the external state directory and have space for the build:
 export CRAB_REFERENCE_STATE="$HOME/Workspace/crabbuild-target/crab-my-worktree/reference-$(git rev-parse --short HEAD)-$(date +%s)"
 export CRAB_REFERENCE_PROJECT="crab-reference-$(date +%s)"
 mkdir -p "$CRAB_REFERENCE_STATE/source" "$CRAB_REFERENCE_STATE/target-linux" "$CRAB_REFERENCE_STATE/evidence"
+chmod 1777 "$CRAB_REFERENCE_STATE/evidence"
 git archive HEAD | tar -x -C "$CRAB_REFERENCE_STATE/source"
 git rev-parse HEAD > "$CRAB_REFERENCE_STATE/evidence/source-revision.txt"
 compose() {
