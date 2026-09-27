@@ -264,12 +264,11 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .unwrap(),
     );
     let owner_node = owner_publisher.node();
-    ingress_publisher.publish_initial().await.unwrap();
     owner_publisher.publish_initial().await.unwrap();
     let ingress_session_dir = ingress_publisher.session_dir();
     let owner_session_dir = owner_publisher.session_dir();
 
-    let owner_runtime = runtime(owner_session);
+    let owner_runtime = runtime(owner_session, owner_publisher.lease_guard().unwrap(), 16);
     let receiver_reads = Arc::new(ReceiverReads::default());
     let owner_hints = crate::peer::PeerOwnerHints::default();
     let activation_store = Arc::new(ThrottledStore::new(
@@ -319,10 +318,6 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         subject: "operator".into(),
         name: "Local operator".into(),
     };
-    owner_router
-        .route(repository_id, &local_operator, "repository.read")
-        .await
-        .unwrap();
 
     let authority = CellAuthority::new(cell_layout.clone());
     let target = crab_cell_runtime::CellTarget::new(
@@ -332,14 +327,6 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         repository_id.as_bytes(),
     )
     .unwrap();
-    let root_before = authority
-        .load(target.cell_id())
-        .await
-        .unwrap()
-        .unwrap()
-        .value()
-        .root
-        .clone();
 
     let owner_read_replicas = crate::cells::ReadReplicaManager::new(
         owner_runtime.clone(),
@@ -394,6 +381,18 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         Arc::clone(&owner_publisher)
             .run_shared(Arc::clone(&owner_server), owner_heartbeat_stop.clone()),
     );
+    owner_router
+        .route(repository_id, &local_operator, "repository.read")
+        .await
+        .unwrap();
+    let root_before = authority
+        .load(target.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .root
+        .clone();
     let management = management_router(Arc::clone(&owner_server));
     let (management_stop, management_done) = tokio::sync::oneshot::channel();
     let management_tls = Arc::clone(&peer_tls);
@@ -409,12 +408,12 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .unwrap();
     });
 
-    let ingress_runtime = CellRuntime::new(
-        SqlWorkerPool::new(1, 512).unwrap(),
-        16 * 1024 * 1024,
+    ingress_publisher.publish_initial().await.unwrap();
+    let ingress_runtime = runtime(
         ingress_session,
-    )
-    .unwrap();
+        ingress_publisher.lease_guard().unwrap(),
+        512,
+    );
     let reader = crate::cells::ReadReplicaManager::new(
         ingress_runtime.clone(),
         Arc::clone(&registry),
@@ -1319,7 +1318,23 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     management_task.await.unwrap();
     owner_heartbeat_stop.cancel();
     owner_heartbeat_task.await.unwrap().unwrap();
+    // Fencing must stop local workers before simulating disk loss. Its expired
+    // lease must also prevent graceful release, so recovery still takes over
+    // a Serving owner rather than acquiring an idle Cell.
+    match owner_server.shutdown_runtimes().await {
+        Ok(()) | Err(crate::Error::Cell(crab_cell_runtime::Error::Fenced)) => {}
+        Err(error) => panic!("unexpected stale-owner shutdown result: {error}"),
+    }
+    assert_eq!(owner_runtime.stats().file_descriptors(), 0);
     let stale_owner = authority.load(target.cell_id()).await.unwrap().unwrap();
+    assert_eq!(
+        stale_owner.value().state,
+        crab_cell_runtime::control::ControlState::Serving
+    );
+    assert_eq!(
+        stale_owner.value().owner.as_ref().unwrap().session,
+        owner_session
+    );
     let stale_reader = reader.resolve(target.clone()).await.unwrap();
     let (warm, ready) = reader.status(target.clone()).await.unwrap();
     assert!(!ready);
@@ -1558,15 +1573,11 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     public_task.await.unwrap();
     ingress_management_stop.send(()).unwrap();
     ingress_management_task.await.unwrap();
-    ingress_heartbeat_stop.cancel();
-    ingress_heartbeat_task.await.unwrap().unwrap();
     ingress_server.receives.close();
     ingress_server.receives.wait().await;
     ingress_server.shutdown_runtimes().await.unwrap();
-    match owner_server.shutdown_runtimes().await {
-        Ok(()) | Err(crate::Error::Cell(crab_cell_runtime::Error::Fenced)) => {}
-        Err(error) => panic!("unexpected stale-owner shutdown result: {error}"),
-    }
+    ingress_heartbeat_stop.cancel();
+    ingress_heartbeat_task.await.unwrap().unwrap();
     let released = authority.load(target.cell_id()).await.unwrap().unwrap();
     assert_eq!(
         released.value().state,
@@ -1605,13 +1616,20 @@ async fn repository(store: Store, bucket: &str, prefix: String) -> Arc<Repositor
     })
 }
 
-fn runtime(session: SessionId) -> CellRuntime {
-    CellRuntime::new(
-        SqlWorkerPool::new(1, 16).unwrap(),
+fn runtime(
+    session: SessionId,
+    lease: crab_cell_runtime::NodeLeaseGuard,
+    queue_capacity: usize,
+) -> CellRuntime {
+    let runtime = CellRuntime::new_with_replica_host_requiring_node_lease(
+        SqlWorkerPool::new(1, queue_capacity).unwrap(),
         16 * 1024 * 1024,
         session,
+        crab_ltx::Host::default(),
     )
-    .unwrap()
+    .unwrap();
+    runtime.install_node_lease(lease).unwrap();
+    runtime
 }
 
 fn server(
