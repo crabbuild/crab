@@ -1,4 +1,4 @@
-//! Initial range placement and fenced recovery after an interrupted admission.
+//! Range and directory placement with fenced recovery after interrupted admission.
 
 use crab_cell_runtime::{
     Error, Result,
@@ -24,8 +24,9 @@ fn range_module(target: &CellTarget) -> Result<(&'static str, Initializer)> {
         crate::global_index::NAMESPACE => {
             Ok((crate::global_index::MODULE, crate::initialize_global_index))
         }
+        crate::directory::NAMESPACE => Ok((crate::directory::MODULE, crate::initialize_directory)),
         _ => Err(Error::PeerAuthorization(
-            "bootstrap requires a data/index Cell",
+            "bootstrap requires a data, index or directory Cell",
         )),
     }
 }

@@ -1,6 +1,7 @@
 mod codec;
 mod creation;
 mod deletion;
+mod directories;
 mod discovery;
 mod index_splits;
 mod placement;

@@ -9,6 +9,19 @@ use crate::{
 };
 
 impl CellInitialPartitionProvisioner {
+    async fn existing_directory_client(
+        &self,
+        client: &CellClient,
+        account_id: &str,
+        spec: &DirectorySpec,
+    ) -> Result<CellClient, StorageError> {
+        // Published paths authorize restoration, never a replacement empty root.
+        // Once verified, shared admission routes to live peers or fences expired
+        // owners before moving authority; it does not force local ownership.
+        let (target, _) = self.published_directory(account_id, spec).await?;
+        self.provision_range(&target, client).await
+    }
+
     /// Split an existing metadata leaf, or finish its previously published split.
     ///
     /// The caller must authorize this directory through its table generation.
@@ -20,7 +33,10 @@ impl CellInitialPartitionProvisioner {
         spec: &DirectorySpec,
     ) -> Result<DirectorySplit, StorageError> {
         let parent = directory_target(account_id, spec).map_err(provision_error)?;
-        let state = client
+        let parent_client = self
+            .existing_directory_client(client, account_id, spec)
+            .await?;
+        let state = parent_client
             .query::<ReadDirectory>(&parent, None, Json(()))
             .await
             .map_err(cell_error)?
@@ -36,7 +52,7 @@ impl CellInitialPartitionProvisioner {
             DirectoryMode::Branch(split) => (split, true),
             DirectoryMode::Frozen(split) => (split, false),
             DirectoryMode::Leaf => {
-                let split = client
+                let split = parent_client
                     .command::<FreezeDirectory>(&parent, mutation_identity()?, Json(state.version))
                     .await
                     .map_err(cell_error)?
@@ -53,7 +69,7 @@ impl CellInitialPartitionProvisioner {
             let mut copies: [Vec<RoutePagePartition>; 2] = [Vec::new(), Vec::new()];
             let mut hash = spec.lower;
             loop {
-                let page = client
+                let page = parent_client
                     .query::<ReadDirectoryPage>(
                         &parent,
                         None,
@@ -91,9 +107,9 @@ impl CellInitialPartitionProvisioner {
             }
             let mut receipts = Vec::with_capacity(2);
             for (index, (child, ranges)) in split.children.iter().zip(copies).enumerate() {
-                self.admit_directory(account_id, child).await?;
                 let target = directory_target(account_id, child).map_err(provision_error)?;
-                let installed = client
+                let child_client = self.provision_range(&target, client).await?;
+                let installed = child_client
                     .command::<InstallDirectory>(
                         &target,
                         mutation_identity()?,
@@ -119,7 +135,7 @@ impl CellInitialPartitionProvisioner {
             let receipts = receipts.try_into().map_err(|_| {
                 StorageError::Internal("directory copy receipts are incomplete".into())
             })?;
-            let published = client
+            let published = parent_client
                 .command::<PublishDirectorySplit>(
                     &parent,
                     mutation_identity()?,
@@ -139,9 +155,11 @@ impl CellInitialPartitionProvisioner {
         for child in &split.children {
             // A published parent never authorizes bootstrapping a missing child.
             // Restore its verified root before acknowledging that it is open.
-            self.admit_existing_directory(account_id, child).await?;
+            let child_client = self
+                .existing_directory_client(client, account_id, child)
+                .await?;
             let target = directory_target(account_id, child).map_err(provision_error)?;
-            let opened = client
+            let opened = child_client
                 .command::<OpenDirectory>(&target, mutation_identity()?, Json(split.clone()))
                 .await
                 .map_err(cell_error)?;
@@ -169,9 +187,11 @@ impl CellInitialPartitionProvisioner {
         let mut current = root.clone();
         let mut parent = None;
         for _ in 0..128 {
-            self.admit_existing_directory(account_id, &current).await?;
+            let current_client = self
+                .existing_directory_client(client, account_id, &current)
+                .await?;
             let target = directory_target(account_id, &current).map_err(provision_error)?;
-            let observed = client
+            let observed = current_client
                 .query::<ReadDirectory>(&target, None, Json(()))
                 .await
                 .map_err(cell_error)?;
@@ -189,7 +209,7 @@ impl CellInitialPartitionProvisioner {
             ) {
                 (state.mode, observed.receipt.commit_sequence)
             } else {
-                let retired = client
+                let retired = current_client
                     .command::<crate::RetireDirectory>(
                         &target,
                         mutation_identity()?,
@@ -209,9 +229,11 @@ impl CellInitialPartitionProvisioner {
                     let Some(parent) = parent else {
                         return Ok(true);
                     };
-                    self.admit_existing_directory(account_id, &parent).await?;
+                    let parent_client = self
+                        .existing_directory_client(client, account_id, &parent)
+                        .await?;
                     let target = directory_target(account_id, &parent).map_err(provision_error)?;
-                    let recorded = client
+                    let recorded = parent_client
                         .command::<crate::RecordDirectoryRetirement>(
                             &target,
                             mutation_identity()?,

@@ -129,7 +129,7 @@ impl BeyonddbPeers {
         })
     }
 
-    /// Build an owner-resolving client with placement for idle data/index Cells.
+    /// Build an owner-resolving client with placement for idle range/directory Cells.
     pub fn client(&self, provisioner: Arc<CellInitialPartitionProvisioner>) -> CellClient {
         let principal =
             peer_receiver::peer_principal(self.placement.directory.fleet(), self.placement.session);

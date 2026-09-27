@@ -183,8 +183,13 @@ Provisioning now constructs replica limits from the compiled Cell type instead
 of assuming every type uses 512/64 MiB. Initial bootstrap, idle restoration and
 expired-owner restoration use the same declared limits. Existing account, data,
 index, coordinator and credential declarations retain their existing ceilings.
-The directory namespace is accepted by the signed peer scope and local resolver;
-fleet placement and discovery integration still remain.
+The directory namespace uses signed peer admission and placement for child copies
+and idle restoration. Split and retirement controllers follow live remote owners
+and use the existing expired-session takeover path when required. Published paths
+require cataloged identity and a durable root before restoration; a missing child
+cannot be replaced with an empty node. Account, credential and coordinator targets
+remain outside this admission capability. Directory rebalancing, capacity
+reclamation and background discovery still need integration.
 
 ### Directory retirement
 
@@ -199,9 +204,8 @@ the terminal fence. Retained SQL rows and command receipts are not garbage-colle
 existing authority only, and records a child's durable retirement before its parent
 can finish. A lost receipt is recovered from the child's terminal state. Missing
 or unavailable published children leave retirement pending. The caller must fence
-the table generation first; this primitive is not yet wired into public DeleteTable
-or distributed owner selection. Name reuse must wait for this work when public
-routing moves to the directory tree.
+the table generation first; this primitive is not yet wired into public DeleteTable.
+Name reuse must wait for this work when public routing moves to the directory tree.
 
 ### Evidence and remaining integration
 
@@ -219,6 +223,13 @@ published child owned by an unavailable host, and verifies eventual completion
 after that owner releases it. Wrong-generation retirement and delayed install,
 open, split and range-publication attempts are rejected. This is native protocol
 proof, not DynamoDB SDK cutover.
+
+`tests/peer_network/residency/directories.rs` runs split/copy/open over signed mTLS
+between two leased hosts, verifies remote ownership, restores a released child
+through peer activation, retires a live remote child, then recovers a lost child
+retirement acknowledgement after its owner stops and its advertisement expires.
+That focused test passed in 18.71 seconds. It exercises native metadata commands
+over the real peer transport; it does not claim public DynamoDB directory routing.
 
 Public creation/routing, data and GSI split controllers, deletion, statistics,
 TTL/projection traversal, distributed residency, and background discovery still

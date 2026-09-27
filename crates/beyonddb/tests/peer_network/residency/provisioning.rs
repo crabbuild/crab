@@ -426,7 +426,7 @@ async fn sdk_initial_claim_recovery_preserves_unrouted_roots() {
     fixture.shutdown().await;
 }
 
-async fn wait_for_expiry(fixture: &Fixture, session: SessionId) {
+pub(super) async fn wait_for_expiry(fixture: &Fixture, session: SessionId) {
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         while fixture.directory.is_live(session, now_ms()).await.unwrap() {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;

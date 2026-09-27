@@ -1,4 +1,4 @@
-//! Advisory placement and authenticated admission of data and index Cells.
+//! Advisory placement and authenticated admission of range and directory Cells.
 
 use std::sync::Arc;
 
@@ -15,6 +15,12 @@ use super::{node_lease::unix_time_ms, peer_receiver::peer_principal};
 
 pub(super) fn is_data_target(target: &CellTarget) -> bool {
     [crate::DATA_NAMESPACE, crate::global_index::NAMESPACE].contains(&target.namespace())
+}
+
+pub(super) fn is_placeable_target(target: &CellTarget) -> bool {
+    // Directory admission shares placement, but data-range reclamation cannot
+    // prove a directory's retirement. Keep that caller's narrower namespace gate.
+    is_data_target(target) || target.namespace() == crate::directory::NAMESPACE
 }
 
 pub(super) struct RangePlacement {

@@ -507,6 +507,16 @@ impl CellInitialPartitionProvisioner {
         account_id: &str,
         spec: &crate::DirectorySpec,
     ) -> Result<CellHandle, StorageError> {
+        let (target, proof) = self.published_directory(account_id, spec).await?;
+        self.admit_initialized(&target, proof, crate::initialize_directory)
+            .await
+    }
+
+    async fn published_directory(
+        &self,
+        account_id: &str,
+        spec: &crate::DirectorySpec,
+    ) -> Result<(CellTarget, CatalogProof), StorageError> {
         let target = crate::directory_target(account_id, spec).map_err(provision_error)?;
         let proof = self.cataloged(&target, crate::directory::MODULE).await?;
         let observed = CellAuthority::new(self.layout.clone())
@@ -521,8 +531,7 @@ impl CellInitialPartitionProvisioner {
                 "published directory root is missing".into(),
             ));
         }
-        self.admit_initialized(&target, proof, crate::initialize_directory)
-            .await
+        Ok((target, proof))
     }
 
     /// Reacquire one cataloged data range after its prior owner released it.

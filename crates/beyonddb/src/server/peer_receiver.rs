@@ -166,7 +166,7 @@ impl LocalCellResolver for LocalResolver {
             }
             let control = control.ok_or(Error::CellNotActive)?;
             if needs_placement
-                && super::placement::is_data_target(&target)
+                && super::placement::is_placeable_target(&target)
                 && let Some(placement) = resolver.placement
                 && !placement
                     .select_local(&target, owner, ACTIVATE_ACTION)
@@ -205,13 +205,13 @@ impl PeerAuthorizer for BeyondPeerAuthorizer {
             ));
         }
         if [ACTIVATE_ACTION, PROVISION_ACTION].contains(&self.action)
-            && (!super::placement::is_data_target(request.target())
+            && (!super::placement::is_placeable_target(request.target())
                 || !matches!(request.operation(), Some(wire::peer_request::Operation::Read(read))
                     if read.minimum.is_none()
                         && matches!(read.operation, Some(wire::read_request::Operation::Describe(true)))))
         {
             return Err(Error::PeerAuthorization(
-                "activation requires a data Cell description",
+                "activation requires a data, index or directory Cell description",
             ));
         }
         Ok(())
