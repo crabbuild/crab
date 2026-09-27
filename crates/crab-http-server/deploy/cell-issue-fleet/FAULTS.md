@@ -57,6 +57,11 @@ owners, forwarded writes and response proofs before, during and after recovery.
 Fault report schema 2 uses the full-body checks and distinct scheduled payloads
 of load report schema 7. Earlier receipts establish only ID/title readback;
 they do not supply full-body recovery evidence.
+`fault.control_selected` records the placement snapshot used to choose the
+fault target. Acknowledgement, action, control and node observations are saved
+as they arrive, before their guards run. A rejected owner or cohort therefore
+retains the differing snapshots even when no kill occurs; missing `killed_ns`
+means the driver never confirmed a successful kill command.
 Phases use client dispatch time relative to the kill and verified-recovery
 observations. Pair and observation timestamps use the load process's monotonic
 clock; they are not comparable with server clocks.

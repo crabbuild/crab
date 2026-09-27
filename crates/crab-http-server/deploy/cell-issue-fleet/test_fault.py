@@ -79,6 +79,27 @@ class TailFaultTests(unittest.TestCase):
         self.assertEqual(self.driver.acknowledgements.get_nowait()["operations"], [])
         self.assertTrue(self.driver.acknowledgements.empty())
 
+    def test_rejected_owner_observation_is_retained_without_injecting_loss(self):
+        for field, value in (("owner", {"session": "new"}), ("epoch", 4), ("state", "draining")):
+            observed = {**self.control, field: value}
+            self.driver.on_acknowledged(self.sample)
+            with self.subTest(field=field), \
+                    patch.object(self.driver, "trace_events", return_value=[]), \
+                    patch.object(fault.action_traces, "join", return_value=[self.action]), \
+                    patch.object(self.driver, "status", return_value=observed), \
+                    patch.object(self.driver, "cli") as cli, \
+                    patch.object(fault, "command") as command, \
+                    self.assertRaisesRegex(RuntimeError, "target owner changed before the fault"):
+                self.driver.run()
+            cli.assert_not_called()
+            command.assert_not_called()
+            self.assertFalse(self.driver.losing_owner.is_set())
+            receipt = json.loads(json.dumps(self.driver.receipt))
+            self.assertEqual(receipt["control_selected"], self.control)
+            self.assertEqual(receipt["control_before"], observed)
+            self.assertEqual(receipt["acknowledgement"], self.sample)
+            self.assertEqual(receipt["action"], self.action)
+
     def test_post_recovery_trace_join_retains_the_removed_owners_events(self):
         self.driver.receipt["owner_disk_removed"] = True
         (self.output / "failed-owner.log").write_text('event="cell_command_response" commit_sequence=9\n')
@@ -168,6 +189,9 @@ class TailFaultTests(unittest.TestCase):
                     ("docker", "kill", "--signal", "KILL", "c" * 12),
                     ("docker", "rm", "c" * 12), ("docker", "volume", "rm", "fixture-data"),
                 ] if case in ("success", "corrupt_recovery") else [])
+                if case == "cohort_changed":
+                    self.assertEqual(self.driver.receipt["control_pre_kill"], self.control)
+                    self.assertEqual(self.driver.receipt["node_pre_kill"], last_node)
                 if case == "success":
                     self.assertTrue(self.driver.receipt["owner_disk_removed"])
                     self.assertEqual(self.driver.receipt["control_after"]["owner"]["session"], "new")

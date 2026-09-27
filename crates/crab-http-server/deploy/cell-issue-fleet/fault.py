@@ -88,7 +88,7 @@ class TailFault:
         self.target, self.owner, self.before, self.output = target, owner, before, output
         self.observer = "node-01" if owner != "node-01" else "node-02"
         self.acknowledgements = queue.Queue(maxsize=1)
-        self.receipt = {}
+        self.receipt = {"control_selected": copy.deepcopy(before)}
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.policy_installed = False
         self.losing_owner = threading.Event()
@@ -189,17 +189,24 @@ class TailFault:
             sample = self.acknowledgements.get(timeout=45)
         except queue.Empty as error:
             raise RuntimeError("no target acknowledgement arrived while immutable writes were denied") from error
+        # Retain observations before rejecting them, so a failed guard explains
+        # why the acknowledged owner could not safely be killed.
+        self.receipt["acknowledgement"] = sample
         action = action_traces.join([sample], self.trace_events("before-kill"))[0]
+        self.receipt["action"] = action
         control = self.status()
+        self.receipt["control_before"] = control
         if (control.get("state") != "serving" or control["owner"] != self.before["owner"]
                 or control["epoch"] != self.before["epoch"]):
             raise RuntimeError("target owner changed before the fault")
         node = json.loads(self.cli("node", "--session", control["owner"]["session"], "--json"))
+        self.receipt["node_before"] = node
         unpublished_acknowledgement(action, control, self.owner, node)
         metrics = compose(self.path, self.profiles, "exec", "-T", self.owner,
                           "crab-http-server", "--config", CONFIG, "cells", "metrics")
         uncovered = next((int(line.split()[1]) for line in metrics.splitlines()
                           if line.startswith("crab_cell_node_log_uncovered_bytes ")), 0)
+        self.receipt["uncovered_bytes"] = uncovered
         if uncovered <= 0:
             raise RuntimeError("the acknowledging owner has no retained unpublished tail")
         project = json.loads(self.path.read_text())["name"]
@@ -227,7 +234,9 @@ class TailFault:
         # A fully covered cohort can rotate during evidence collection. Bind
         # the last observation to the acknowledged log before losing its owner.
         last_control = self.status()
+        self.receipt["control_pre_kill"] = last_control
         last_node = json.loads(self.cli("node", "--session", control["owner"]["session"], "--json"))
+        self.receipt["node_pre_kill"] = last_node
         unpublished_acknowledgement(action, last_control, self.owner, last_node)
         last_log = last_node["advertisement"]["log"]
         if (last_control["owner"] != control["owner"] or last_control["epoch"] != control["epoch"]
@@ -235,10 +244,7 @@ class TailFault:
                 or last_log["epoch"] != node["advertisement"]["log"]["epoch"]
                 or set(last_log["member_nodes"]) != set(members)):
             raise RuntimeError("acknowledging owner or follower cohort changed before kill")
-        self.receipt.update(acknowledgement=sample, action=action, control_before=control,
-                            node_before=node, uncovered_bytes=uncovered,
-                            control_pre_kill=last_control, node_pre_kill=last_node,
-                            followers={member: identities[member] for member in members})
+        self.receipt["followers"] = {member: identities[member] for member in members}
         self.losing_owner.set()
         command("docker", "kill", "--signal", "KILL", container)
         self.receipt["killed_ns"] = time.monotonic_ns()
