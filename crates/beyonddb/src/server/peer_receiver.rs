@@ -127,14 +127,30 @@ impl LocalCellResolver for LocalResolver {
                     .as_ref()
                     .and_then(|control| control.value().owner.as_ref())
                     .map(|owner| owner.session);
-                let needs_placement = control.as_ref().is_some_and(|control| {
-                    control.value().root.is_some()
-                        && match control.value().state {
-                            ControlState::Idle => owner.is_none(),
-                            ControlState::Recovering => owner.is_some(),
-                            _ => false,
-                        }
-                });
+                let expired = if let Some(placement) = &resolver.placement
+                    && super::placement::is_placeable_target(&target)
+                    && let Some(control) = &control
+                    && control.value().root.is_some()
+                    && matches!(
+                        control.value().state,
+                        ControlState::Serving | ControlState::Recovering
+                    )
+                    && let Some(owner) = owner
+                    && owner != placement.session
+                {
+                    !placement.directory.is_live(owner, unix_time_ms()?).await?
+                } else {
+                    false
+                };
+                let needs_placement = expired
+                    || control.as_ref().is_some_and(|control| {
+                        control.value().root.is_some()
+                            && match control.value().state {
+                                ControlState::Idle => owner.is_none(),
+                                ControlState::Recovering => owner.is_some(),
+                                _ => false,
+                            }
+                    });
                 if needs_placement || resolver.bootstrap.is_some() {
                     provisioner
                         .reclaim_placement_capacity(&target)
@@ -158,11 +174,25 @@ impl LocalCellResolver for LocalResolver {
                     if needs_placement
                         && super::placement::is_placeable_target(&target)
                         && let Some(placement) = &resolver.placement
-                        && !placement
-                            .select_local(&target, owner, ACTIVATE_ACTION)
-                            .await?
                     {
-                        return Ok(None);
+                        // Expired owners need a new placement and fenced takeover,
+                        // even when no background transaction or index work exists.
+                        // Admission rechecks the session and exact published root.
+                        let recovering = if expired { None } else { owner };
+                        let action = if expired {
+                            PROVISION_ACTION
+                        } else {
+                            ACTIVATE_ACTION
+                        };
+                        if !placement.select_local(&target, recovering, action).await? {
+                            return Ok(None);
+                        }
+                        if expired {
+                            return provisioner
+                                .admit_range(&target, &placement.directory)
+                                .await
+                                .map(Some);
+                        }
                     }
                     provisioner
                         .restore_idle(&target, proof.clone(), control.clone())

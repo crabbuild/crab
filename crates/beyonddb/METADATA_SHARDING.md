@@ -762,3 +762,35 @@ After retirement it reclaims exactly one retired directory, preserves the live
 directory, restores the retired root and verifies its stale-install fence
 (0.61 s). Its former account-admission refusal contradicted the live-directory
 recovery policy; metadata recovery remains covered by signed SDK residency tests.
+
+### Request recovery after range-owner expiry
+
+Ordinary routing previously restored Idle owners but delegated Serving owners
+to peer transport even after their lease expired. Transaction recovery restores
+its recorded participants; index projection skips tables without indexes. Neither
+guarantees recovery of a plain table's directory before its next SDK read.
+
+A focused signed GetItem regression moves the directory and data owner to a peer,
+verifies both are Serving there, stops the peer and waits for lease expiry. It
+failed with HTTP 503 in 15.28 s without SDK retries. Request admission now checks
+expired Serving/Recovering owners for cataloged data, index and directory targets
+with published roots. It selects capacity through existing placement and uses
+the existing authenticated range admission and runtime fenced takeover path.
+Live remote owners stay in place; account and credential takeover remains owned
+by configured recovery. No accepted application command is replayed.
+
+The runtime contract remains `claim_expired_for_takeover` plus `takeover_restored`:
+fence the exact expired session, require published recovery coverage for active
+logs, reserve activation capacity, and compare-and-swap Cell authority before
+restoring the verified root. Missing/invalid membership and competing authority
+still fail closed. Receiver application invocation has no provisioner and cannot
+acquire ownership.
+
+The first fixed regression passes (16.29 s). With an additional live-lease
+refusal check, it passes in 15.45 s: an unreachable live peer retains both owners,
+then the same signed read succeeds after expiry. Two owner-race tests (0.96 s), four
+recovery tests (4.38 s), and five reclamation tests (4.71 s) also pass. This does
+not establish the full restart scenario: its latest run failed earlier, before
+node loss, on `BeginCrossCellTransaction` with peer HTTP admission exhaustion
+(134.80 s). A separate diagnostic run hit the same exhaustion during route
+inspection (202.44 s). Those codec-admission failures remain open.

@@ -156,9 +156,12 @@ Cell recovered; configured admission and request routing share root restoration.
 This requires the account to be configured on the replacement and enough local
 capacity for its recovered ranges. While serving, it also discovers expired
 coordinator owners through configured accounts and restores their original
-participants. Data-only-node discovery and general fleet placement still need
-a recovery scheduler.
-Unattended takeover, distributed recovery scheduling, fleet qualification,
+participants. Requests also select capacity and recover expired data, index and
+directory owners from their published roots, without waiting for transaction or
+index maintenance to discover them. Unreachable owners with live leases remain
+fenced against takeover. Background recovery of unaccessed data-only nodes still
+needs a recovery scheduler.
+Distributed recovery scheduling, fleet qualification,
 management APIs, and the remaining DynamoDB operations are still required
 before this is a complete service. A public node with no locally owned account
 or credential Cells can forward signed requests to live owners through mTLS.
