@@ -71,6 +71,30 @@ atomically. This follows the [AWS propagation contract](https://docs.aws.amazon.
 
 ## Splits and recovery
 
+The index Cell now has a durable transfer lifecycle: serving → sealed for the
+source, and importing → activated → opened for each replacement. Sealed sources
+and unopened children reject Query, Scan, and projection application with a
+stale-route result. Projection workers retain their source journal on that result.
+
+`PrepareGlobalIndexSplit` binds the source and both children to one exact plan.
+`ExportGlobalIndexEntries` reads only that sealed source, returning at most 64
+entries per page with an image-byte bound. Export includes the full index/base
+key, original source version, and image or tombstone. SQL image reads and writes
+use the existing 256-KiB BLOB chunks. Imports share ordinary projection validation
+and storage, but reject any conflicting version rather than replacing it.
+
+The imported row and its fingerprint commit in the same runtime command.
+The fingerprint covers canonical key bytes, source version, and the optional
+image; duplicate imports do not increment its count. Activation requires the
+complete expected fingerprint and still blocks serving traffic. Opening requires
+a trusted controller to observe the replacement directory route first.
+
+These are registered Cell primitives, not automatic GSI splitting yet. Durable
+account split plans, atomic directory publication, controller replay, and capacity
+sweeps remain to be wired. Their SDK cutover and crash qualification is pending.
+The unreleased index schema now stores lifecycle state; existing development
+roots require reprovisioning. No released-data migration is claimed.
+
 Base split sealing rejects pending projection entries as well as transaction
 locks. Split imports therefore copy already-projected images and do not emit
 new projection work. A later child mutation has a newer source epoch. The
@@ -172,3 +196,27 @@ two test threads), and strict all-target BeyondDB Clippy passed in 8.84 seconds.
 The compiled-server signed SDK/RustFS smoke passed in 317.32 seconds, including
 unclean restart, recovered index state, and transaction-token replay.
 These results cover selected recovery schedules, not a fleet-scale bound.
+
+## Transfer evidence
+
+| Boundary | Evidence |
+| --- | --- |
+| Cell entry points | `global_index/transfer.rs` commands and queries registered by `GlobalIndexModule`; `global_index_schema.sql` persists lifecycle state. |
+| Shared projection path | `ApplyGlobalIndexMutation` and `ImportGlobalIndexEntry` call the same key/image validator and versioned row writer; imports require exact replay. |
+| Reader siblings | Both `GlobalIndexQuery` and `GlobalIndexScan` require serving/opened state. `ReadGlobalIndexPartition` remains available for owner recovery and retired-table residency checks. |
+| Dependency contract | Runtime `cell/executor.rs` uses an application savepoint and rolls it back on command rejection. `StoredValue` chunks images. ExtendDB's `AttributeValue` deserializer normalizes numeric strings before canonical Cell encoding. |
+| Prior behavior | Before this change the index schema had no lifecycle state, and normal Query/Scan omitted tombstones. No export/verified-import commands existed. |
+| Transfer regression | `index_transfer_retains_versions_tombstones_and_fences_replay_after_restart`: 70 entries across both children, duplicate index keys, wide escaped keys, large binary images, tombstones, bounded export, exact replay, conflicting versions, wrong fingerprint, premature opening, restart during import and after activation, and delayed mutations after opening. |
+
+The transfer regression uses real Cell actors, host ownership, object-store roots,
+and restoration. It does not publish replacement account routes or exercise SDK
+cutover; those remain required before automatic splitting can be called working.
+
+The transfer regression and existing journal replay regression passed. The existing
+idle-owner discovery test failed twice with `target Cell is not locally owned`
+and passed alone in 1.95 seconds. This repeats the intermittent result already
+recorded in `SCALING.md`: its final ownership observation can precede local
+activation (`acquire_idle_restored` claims authority before restoring the actor).
+The test assertions were not changed. This remains unresolved evidence, not an
+all-green GSI suite claim. Strict all-target Clippy, standalone server build,
+format, and Cell layout/policy checks pass.

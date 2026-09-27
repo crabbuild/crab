@@ -4,8 +4,10 @@ pub(crate) mod outbox;
 pub use outbox::*;
 mod read;
 mod routing;
+mod transfer;
 pub use read::*;
 pub use routing::*;
+pub use transfer::*;
 
 use std::sync::OnceLock;
 
@@ -28,22 +30,30 @@ use crate::{APPLICATION, Error, Json, Result, SqlBatch, SqlResultSet, SqlValue, 
 pub(crate) const MODULE: &str = "beyonddb-global-index";
 pub(crate) const NAMESPACE: NamespaceId = NamespaceId::from_bytes([0x46; 16]);
 const SCHEMA: &str = include_str!("global_index_schema.sql");
-// Install/apply return small status values. Reserving an item-sized response
-// would consume projection concurrency without carrying any image back.
-static COMMANDS: [crab_cell_runtime::registry::OperationDescriptor; 2] = [
-    crab_cell_runtime::registry::OperationDescriptor {
-        output_limit: 4096,
-        ..crate::operation(1)
-    },
-    crab_cell_runtime::registry::OperationDescriptor {
-        output_limit: 4096,
-        ..crate::operation(2)
-    },
+// Lifecycle and projection mutations only return status values. Reserving an
+// item-sized response would reduce concurrency without carrying images back.
+static COMMANDS: [crab_cell_runtime::registry::OperationDescriptor; 6] = [
+    status_operation(1),
+    status_operation(2),
+    status_operation(3),
+    status_operation(4),
+    status_operation(5),
+    status_operation(6),
 ];
-static QUERIES: [crab_cell_runtime::registry::OperationDescriptor; 3] = [
+
+const fn status_operation(id: u32) -> crab_cell_runtime::registry::OperationDescriptor {
+    crab_cell_runtime::registry::OperationDescriptor {
+        output_limit: 4096,
+        ..crate::operation(id)
+    }
+}
+
+static QUERIES: [crab_cell_runtime::registry::OperationDescriptor; 5] = [
     crate::operation(1),
     crate::operation(2),
     crate::operation(3),
+    crate::operation(4),
+    crate::operation(5),
 ];
 
 /// One immutable index generation within a base table.
@@ -189,6 +199,7 @@ impl crab_cell_runtime::registry::CellModule for GlobalIndexModule {
             let mut hash = blake3::Hasher::new();
             hash.update(include_bytes!("global_index.rs"));
             hash.update(include_bytes!("global_index/read.rs"));
+            hash.update(include_bytes!("global_index/transfer.rs"));
             hash.update(include_bytes!("table.rs"));
             hash.update(include_bytes!("item_storage.rs"));
             hash.update(include_bytes!("items.rs"));
@@ -224,6 +235,12 @@ impl crab_cell_runtime::registry::CellModule for GlobalIndexModule {
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
         registry.bind_command::<InstallGlobalIndexPartition>()?;
         registry.bind_command::<ApplyGlobalIndexMutation>()?;
+        registry.bind_command::<PrepareGlobalIndexSplit>()?;
+        registry.bind_command::<ImportGlobalIndexEntry>()?;
+        registry.bind_command::<ActivateGlobalIndexImport>()?;
+        registry.bind_command::<OpenGlobalIndexImport>()?;
+        registry.bind_query::<ReadGlobalIndexState>()?;
+        registry.bind_query::<ExportGlobalIndexEntries>()?;
         registry.bind_query::<ReadGlobalIndexPartition>()?;
         registry.bind_query::<GlobalIndexQuery>()?;
         registry.bind_query::<GlobalIndexScan>()
@@ -301,15 +318,20 @@ impl Command for InstallGlobalIndexPartition {
             return Ok(CommandResult::Rejected(Json(false)));
         }
         if let Some(existing) = read_spec(|batch| context.sql(batch))? {
-            return Ok(if existing == spec {
-                CommandResult::Success(Json(true))
-            } else {
-                CommandResult::Rejected(Json(false))
-            });
+            return Ok(
+                if existing == spec && transfer::serving(|batch| context.sql(batch))? {
+                    CommandResult::Success(Json(true))
+                } else {
+                    CommandResult::Rejected(Json(false))
+                },
+            );
         }
         context.sql(&statement(
-            "INSERT INTO ddb_global_index (singleton, spec) VALUES (1, ?1)",
-            vec![SqlValue::Blob(serde_json::to_vec(&spec)?)],
+            "INSERT INTO ddb_global_index (singleton, spec, state) VALUES (1, ?1, ?2)",
+            vec![
+                SqlValue::Blob(serde_json::to_vec(&spec)?),
+                SqlValue::Blob(serde_json::to_vec(&GlobalIndexState::Serving)?),
+            ],
         ))?;
         Ok(CommandResult::Success(Json(true)))
     }
@@ -362,55 +384,78 @@ impl Command for ApplyGlobalIndexMutation {
         let Some(spec) = read_spec(|batch| context.sql(batch))? else {
             return rejected(Outcome::StaleRoute);
         };
-        if input.index_id != spec.index.id || input.epoch != spec.epoch {
+        if input.index_id != spec.index.id
+            || input.epoch != spec.epoch
+            || !transfer::serving(|batch| context.sql(batch))?
+        {
             return rejected(Outcome::StaleRoute);
         }
-        if input.version.sequence == 0 || !spec.valid_key(&input.key) {
-            return rejected(Outcome::InvalidItem);
-        }
-        if !spec.contains(&input.key)? {
-            return rejected(Outcome::StaleRoute);
-        }
-        let schema = spec.index.key_schema(&spec.table);
-        if input.item.as_ref().is_some_and(|item| {
-            extract_key(item, &schema) != input.key
-                || spec.index.project(&spec.table, item).as_ref() != Some(item)
-                || extenddb_core::types::item_size_bytes(item) > 400 * 1024
-        }) {
-            return rejected(Outcome::InvalidItem);
-        }
-        let key = item_key(&input.key, &schema)?;
-        let version = input.version.bytes();
-        let digest = blake3::hash(&serde_json::to_vec(&input.item)?);
-        let rows = context.sql(&statement(
-            "SELECT version, digest FROM ddb_global_index_items WHERE item_key = ?1",
-            vec![SqlValue::Blob(key.clone())],
-        ))?;
-        if let Some(row) = rows[0].rows.first() {
-            let [SqlValue::Blob(prior), SqlValue::Blob(prior_digest)] = row.as_slice() else {
-                return Err(Error::Command("invalid global-index version"));
+        Ok(match apply(context, &spec, input, false)? {
+            outcome @ (Outcome::Applied | Outcome::Replay | Outcome::Superseded) => {
+                CommandResult::Success(Json(outcome))
+            }
+            outcome => CommandResult::Rejected(Json(outcome)),
+        })
+    }
+}
+
+fn apply(
+    context: &mut CommandContext<'_, '_>,
+    spec: &GlobalIndexPartitionSpec,
+    input: GlobalIndexMutation,
+    importing: bool,
+) -> Result<GlobalIndexApplyOutcome> {
+    use GlobalIndexApplyOutcome as Outcome;
+    if input.version.sequence == 0 || !spec.valid_key(&input.key) {
+        return Ok(Outcome::InvalidItem);
+    }
+    if !spec.contains(&input.key)? {
+        return Ok(Outcome::StaleRoute);
+    }
+    let schema = spec.index.key_schema(&spec.table);
+    if input.item.as_ref().is_some_and(|item| {
+        extract_key(item, &schema) != input.key
+            || spec.index.project(&spec.table, item).as_ref() != Some(item)
+            || extenddb_core::types::item_size_bytes(item) > 400 * 1024
+    }) {
+        return Ok(Outcome::InvalidItem);
+    }
+    let key = item_key(&input.key, &schema)?;
+    let version = input.version.bytes();
+    let digest = blake3::hash(&serde_json::to_vec(&input.item)?);
+    let rows = context.sql(&statement(
+        "SELECT version, digest FROM ddb_global_index_items WHERE item_key = ?1",
+        vec![SqlValue::Blob(key.clone())],
+    ))?;
+    if let Some(row) = rows[0].rows.first() {
+        let [SqlValue::Blob(prior), SqlValue::Blob(prior_digest)] = row.as_slice() else {
+            return Err(Error::Command("invalid global-index version"));
+        };
+        if prior == &version {
+            return if prior_digest == digest.as_bytes() {
+                Ok(Outcome::Replay)
+            } else {
+                Ok(Outcome::VersionConflict)
             };
-            if prior > &version {
-                return Ok(CommandResult::Success(Json(Outcome::Superseded)));
-            }
-            if prior == &version {
-                return if prior_digest == digest.as_bytes() {
-                    Ok(CommandResult::Success(Json(Outcome::Replay)))
-                } else {
-                    rejected(Outcome::VersionConflict)
-                };
-            }
         }
-        let (partition, sort) = index_key(&input.key, &spec.index.specification.key_schema)?;
-        // Retain tombstones: an older delivery may arrive after deletion or a
-        // key move. The full index/base key also separates both arms of a move.
-        context.sql(&statement("INSERT INTO ddb_global_index_items (item_key, partition_key, sort_key, version, digest, item) VALUES (?1, ?2, ?3, ?4, ?5, NULL) ON CONFLICT(item_key) DO UPDATE SET version = excluded.version, digest = excluded.digest, item = NULL", vec![
+        // A sealed source is immutable. A second import for the same key
+        // must match exactly, or the destination fingerprint is invalid.
+        if importing {
+            return Ok(Outcome::VersionConflict);
+        }
+        if prior > &version {
+            return Ok(Outcome::Superseded);
+        }
+    }
+    let (partition, sort) = index_key(&input.key, &spec.index.specification.key_schema)?;
+    // Retain tombstones: an older delivery may arrive after deletion or a
+    // key move. The full index/base key also separates both arms of a move.
+    context.sql(&statement("INSERT INTO ddb_global_index_items (item_key, partition_key, sort_key, version, digest, item) VALUES (?1, ?2, ?3, ?4, ?5, NULL) ON CONFLICT(item_key) DO UPDATE SET version = excluded.version, digest = excluded.digest, item = NULL", vec![
             SqlValue::Blob(key.clone()), SqlValue::Blob(partition), SqlValue::Blob(sort),
             SqlValue::Blob(version), SqlValue::Blob(digest.as_bytes().to_vec()),
         ]))?;
-        if let Some(item) = input.item {
-            StoredValue::GlobalIndex(&key).write(context, &item)?;
-        }
-        Ok(CommandResult::Success(Json(Outcome::Applied)))
+    if let Some(item) = input.item {
+        StoredValue::GlobalIndex(&key).write(context, &item)?;
     }
+    Ok(Outcome::Applied)
 }

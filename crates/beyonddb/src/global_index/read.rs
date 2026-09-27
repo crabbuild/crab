@@ -27,7 +27,10 @@ impl Query for GlobalIndexQuery {
         let Some(spec) = read_spec(|batch| context.sql(batch))? else {
             return Ok(Json(Outcome::NotInstalled));
         };
-        if input.table_id != spec.index.id || input.epoch != spec.epoch {
+        if input.table_id != spec.index.id
+            || input.epoch != spec.epoch
+            || !super::transfer::serving(|batch| context.sql(batch))?
+        {
             return Ok(Json(Outcome::StaleRoute));
         }
         if input.limit == 0 {
@@ -139,7 +142,10 @@ impl Query for GlobalIndexScan {
         let Some(spec) = read_spec(|batch| context.sql(batch))? else {
             return Ok(Json(Outcome::NotInstalled));
         };
-        if input.table_id != spec.index.id || input.epoch != spec.epoch {
+        if input.table_id != spec.index.id
+            || input.epoch != spec.epoch
+            || !super::transfer::serving(|batch| context.sql(batch))?
+        {
             return Ok(Json(Outcome::StaleRoute));
         }
         if input.limit == Some(0) {

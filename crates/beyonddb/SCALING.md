@@ -110,6 +110,11 @@ acknowledgement must follow durable destination application across cutover.
 Base-table transaction atomicity does not turn asynchronous GSIs into an atomic
 multi-key read view.
 
+Index Cells now implement fenced, version-preserving transfer primitives with
+fingerprints that include tombstones. Recovery tests cover partial import and
+activated children. Account plan publication, automatic GSI capacity sweeps, and
+SDK cutover/recovery proof remain unfinished; see [global indexes](GLOBAL_INDEXES.md).
+
 ### Coordinator expansion and retirement
 
 Changing the current 4,096-shard modulus would strand token and decision lookup.

@@ -6,16 +6,16 @@ use beyonddb::{
 };
 use extenddb_core::types::TableKeyInfo;
 
-const ACCOUNT: &str = "123456789012";
+pub(super) const ACCOUNT: &str = "123456789012";
 
-fn mutation() -> MutationIdentity {
+pub(super) fn mutation() -> MutationIdentity {
     MutationIdentity {
         request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
         ..identity(89)
     }
 }
 
-fn owner(
+pub(super) fn owner(
     application: &Arc<crab_cell_app::CompiledApplication>,
     layout: &CellStorageLayout,
     session: SessionId,

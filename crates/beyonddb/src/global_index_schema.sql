@@ -1,6 +1,7 @@
 CREATE TABLE ddb_global_index (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    spec BLOB NOT NULL
+    spec BLOB NOT NULL,
+    state BLOB NOT NULL
 );
 
 CREATE TABLE ddb_global_index_items (

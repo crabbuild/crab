@@ -5,6 +5,7 @@ mod elastic_cells {
     mod coordinator_checkpoints;
     mod coordinator_residency;
     mod coordinator_tokens;
+    mod global_index_splits;
     mod global_indexes;
     mod local_indexes;
     mod public_transactions;
