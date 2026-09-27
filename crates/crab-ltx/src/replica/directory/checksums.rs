@@ -115,10 +115,10 @@ pub(in crate::replica) async fn load_checksums(
         let database_pages = verification.database_pages;
         writer
             .run(move |output| {
-                let mut file = output.file.take().ok_or(CrabError::LTXCorrupted)?;
-                file.sync_all()?;
+                let file = output.file.take().ok_or(CrabError::LTXCorrupted)?;
                 drop(file);
-                output.host.filesystem.sync_parent(&output.path)?;
+                // This checksum base is derived scratch. Durable warm handoff
+                // writes a separate synced sidecar; crashes restore the pinned root.
                 PageChecksums::from_file(
                     crate::LtxHost {
                         // Only activation work retains admission. The immutable
@@ -142,7 +142,7 @@ pub(in crate::replica) async fn load_checksums(
     }
     .await;
     if result.is_ok() {
-        // Disarm after delivery: cancellation of a dispatched final sync must
+        // Disarm after delivery: cancellation of a dispatched final metadata check must
         // still remove its undelivered activation file.
         if let Some(output) = &mut writer.output {
             output.keep = true;
@@ -247,9 +247,7 @@ struct ChecksumFile {
 impl ChecksumFile {
     fn remove(&mut self) {
         drop(self.file.take());
-        if self.host.filesystem.remove_file(&self.path).is_ok() {
-            let _ = self.host.filesystem.sync_parent(&self.path);
-        }
+        let _ = self.host.filesystem.remove_file(&self.path);
         self.keep = true;
     }
 }

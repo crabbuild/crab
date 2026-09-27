@@ -514,9 +514,12 @@ async fn objects_to_pin(
 
 A verified root can become writable without first downloading every page.
 `prepare_writable` fetches the authenticated checksum directory asynchronously
-and dispatches local checksum creation, buffered writes, synchronization, and
+and dispatches local checksum creation, buffered writes, metadata checks, and
 failure cleanup through the bounded host executor. Dispatched jobs retain their
 admission until completion even if the caller cancels.
+Checksum bases and sparse/immutable placeholders are derived session files, so
+activation does not sync them or their names. SQLite retains its normal WAL
+durability policy; warm reuse separately writes and syncs a verified continuation.
 `open_writable` must then run on the Cell's dedicated SQLite worker. Page faults
 fetch and verify missing pages. Direct synchronous embedders can use
 `hydrate_step` on their database worker. The Cell runtime instead uses

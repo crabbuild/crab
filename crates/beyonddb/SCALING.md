@@ -105,8 +105,9 @@ bounded steady-state footprint before claiming sustained scalability.
 
 ### Delivery order
 
-1. Establish recovery/admission correctness and measured node observations. The
-   current hard-restart readiness failure remains an open gate.
+1. Establish recovery/admission correctness and measured node observations.
+   Linux SDK hard-restart qualification passes at `18c01469870`; local failures
+   and fleet recovery under sustained pressure still require qualification.
 2. Partition metadata and integrate fleet placement through the existing runtime
    authority and movement contracts.
 3. Extend fenced range migration to large non-LSI collections and GSI growth.
@@ -1141,3 +1142,45 @@ async-worker blocking; it does not establish the standalone readiness deadline
 or eliminate serial coordinator recovery. Strict all-target Clippy passes for
 LTX with `replica` in 14.39 seconds and for BeyondDB/runtime in 31.03 seconds;
 format, layout, and policy-entry checks pass. Process qualification must be rerun.
+
+The checksum-dispatch binary completed all 70 small-item transactions in
+1,743.40 seconds. Its replacement exited with
+`cell-coordination-tasks: Fenced` before readiness; the test failed in 1,759.85
+seconds. The retained replacement session contained no SQLite databases. A
+native stack sampler was attached during this attempt, so timing interference
+must be isolated before attributing the fence to application recovery. The
+failed storage fixture is retained. A startup-only replay on a clone of that
+fixture, with the same binary and no sampler, became healthy in 34.47 seconds;
+a signed AWS CLI Scan returned both items at version 69. The prior leases had
+already expired by replay, so this does not prove the original hard-restart
+deadline or classify the fencing failure. Linux qualification is running at
+PR head `18c01469870`.
+
+Linux qualification subsequently passed at that head in
+[run 36293008636](https://github.com/crabbuild/crab/actions/runs/36293008636).
+All four signed peer SDK cases passed in 408.95 seconds, including replacement
+ownership and released/interrupted acquisition. Both standalone process tests
+passed in 361.47 seconds total, including large payload/index recovery and the
+70-shard history case beyond node residency. The latter committed its history
+in 87.78 seconds. Both replacements satisfied the unchanged 45-second readiness
+gate. This establishes those Linux scenarios, not an explanation of the local
+fence or 10,000-Cell recovery. It predates the derived-file change below.
+
+Activation also synced a freshly derived checksum base and a sparse or immutable
+placeholder. Those files cannot acknowledge a Cell command: the published root
+selects crash recovery, and clean local reuse separately writes a fresh synced
+dense checksum sidecar and continuation, then verifies every reused page. The
+activation path now omits these redundant barriers for both writable and
+immutable views. SQLite WAL durability and warm-handoff synchronization remain.
+Both new activation regressions failed on `sync_all` before the change. All 11
+preparation tests pass afterward in 1.08 seconds; seven modeled crash tests pass
+in 0.14 seconds, six sparse cases in 0.32 seconds, clean continuation across
+process exit in 0.04 seconds, and checksum-write failure fencing in 0.08 seconds.
+These tests do not establish physical power-loss behavior or a fleet latency gain.
+Strict all-target Clippy passes for LTX with `replica` in 6.67 seconds and for
+BeyondDB/runtime in 22.44 seconds. The rebuilt server recovered a fresh clone of
+the retained 70-shard fixture in 25.91 seconds without a profiler; a signed Scan
+returned both items at version 69. Its binary digest remained unchanged during
+the replay. Prior leases had already expired, so this remains startup-only
+evidence, not fresh hard-crash qualification or a controlled latency comparison.
+Format, diff, Cell/LTX layout, and policy-entry checks pass.

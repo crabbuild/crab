@@ -220,7 +220,7 @@ async fn writable_activation_dispatches_filesystem_work_with_one_job_slot() {
 
 #[tokio::test]
 async fn canceled_activation_retains_admission_until_file_cleanup_finishes() {
-    for operation in ["create", "write_all", "sync_all", "sync_parent", "file_len"] {
+    for operation in ["create", "write_all", "file_len"] {
         let (directory, faults, host, mut writer) = fixture();
         let jobs = Arc::new(tokio::sync::Semaphore::new(1));
         let dirty = Arc::new(tokio::sync::Semaphore::new(1));
@@ -291,7 +291,7 @@ async fn activation_file_failures_cleanup_before_retry_and_preserve_existing_des
     let (directory, faults, host, mut writer) = fixture();
     let paged = prepared_root(host, &mut writer, Store::new(Arc::new(InMemory::new()))).await;
     let destination = directory.path().join("active.sqlite");
-    for operation in ["create", "write_all", "sync_all", "sync_parent", "file_len"] {
+    for operation in ["create", "write_all", "file_len"] {
         faults.plan([operation]);
         injected(paged.clone().prepare_writable(&destination).await);
         assert!(!checksum_path(&destination).exists(), "{operation}");
@@ -450,7 +450,7 @@ async fn rustfs_sparse_activation_io_does_not_block_other_cells() {
 }
 
 async fn verify_registry_isolation(store: Store) {
-    for operation in ["sync_all", "sync_parent", "start_worker"] {
+    for operation in ["create", "set_len", "start_worker"] {
         let (_slow_directory, faults, slow, slow_path) =
             prepared_activation(store.clone(), 1).await;
         let (_opening_directory, _, opening, opening_path) =
@@ -551,8 +551,6 @@ async fn failed_sparse_open_releases_its_claim_without_deleting_files() {
     for operation in [
         "create",
         "set_len",
-        "sync_all",
-        "sync_parent",
         "start_worker",
         "create_dir",
         "existing",

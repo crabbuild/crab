@@ -2,9 +2,9 @@
 
 use super::*;
 
-async fn writable_fixture(
+async fn verified_fixture(
     extra_bytes: i64,
-) -> (tempfile::TempDir, Arc<Faults>, crab_ltx::CellPagedDatabase) {
+) -> (tempfile::TempDir, Arc<Faults>, crab_ltx::VerifiedRoot) {
     let (directory, faults, host, mut source) = fixture();
     source
         .transaction(|tx| {
@@ -30,18 +30,54 @@ async fn writable_fixture(
         .unwrap()
         .root();
     source.close().unwrap();
-    let paged = replica.open_root(&root).await.unwrap().paged();
-    (directory, faults, paged)
+    let verified = replica.open_root(&root).await.unwrap();
+    (directory, faults, verified)
+}
+
+#[tokio::test]
+async fn writable_activation_avoids_syncing_derived_files() {
+    let (directory, faults, verified) = verified_fixture(0).await;
+    for barrier in ["sync_all", "sync_parent"] {
+        let destination = directory.path().join(format!("{barrier}.sqlite"));
+        faults.arm(Some(barrier));
+        let prepared = verified.paged().prepare_writable(&destination).await;
+        let opened = prepared.and_then(|prepared| prepared.open_writable(&destination));
+        faults.arm(None);
+        let mut writer = opened.unwrap();
+        let bytes: i64 = writer
+            .query_with(|db| db.query_row("SELECT sum(length(v)) FROM t", [], |row| row.get(0)))
+            .unwrap();
+        assert_eq!(bytes, 20_000);
+        writer.close().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn immutable_activation_avoids_syncing_derived_files() {
+    let (directory, faults, verified) = verified_fixture(0).await;
+    for barrier in ["sync_all", "sync_parent"] {
+        let destination = directory.path().join(format!("{barrier}.sqlite"));
+        faults.arm(Some(barrier));
+        let opened = verified.open_read_only(&destination);
+        faults.arm(None);
+        let view = opened.unwrap();
+        let bytes: i64 = view
+            .connection()
+            .unwrap()
+            .query_row("SELECT sum(length(v)) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(bytes, 20_000);
+    }
 }
 
 #[tokio::test]
 async fn writable_preparation_dispatches_filesystem_work_off_the_async_thread() {
     // More than 8,192 pages exercises streamed checksum writes as well as the
-    // final durability barrier, with only one available host executor slot.
-    let (directory, faults, paged) = writable_fixture(35_000_000).await;
+    // final metadata check, with only one available host executor slot.
+    let (directory, faults, verified) = verified_fixture(35_000_000).await;
     let destination = directory.path().join("active.sqlite");
     *faults.forbidden_thread.lock().unwrap() = Some(std::thread::current().id());
-    let prepared = paged.prepare_writable(&destination).await;
+    let prepared = verified.paged().prepare_writable(&destination).await;
     *faults.forbidden_thread.lock().unwrap() = None;
     let mut writer = prepared.unwrap().open_writable(&destination).unwrap();
     let size: i64 = writer
@@ -55,12 +91,12 @@ async fn writable_preparation_dispatches_filesystem_work_off_the_async_thread() 
 
 #[tokio::test]
 async fn failed_checksum_preparation_cleans_up_without_blocking_the_async_thread() {
-    let (directory, faults, paged) = writable_fixture(0).await;
-    for operation in ["write_all", "sync_all", "sync_parent"] {
+    let (directory, faults, verified) = verified_fixture(0).await;
+    for operation in ["write_all", "file_len"] {
         let destination = directory.path().join(format!("{operation}.sqlite"));
         faults.arm(Some(operation));
         *faults.forbidden_thread.lock().unwrap() = Some(std::thread::current().id());
-        let result = paged.clone().prepare_writable(&destination).await;
+        let result = verified.paged().prepare_writable(&destination).await;
         *faults.forbidden_thread.lock().unwrap() = None;
         faults.arm(None);
         assert!(
