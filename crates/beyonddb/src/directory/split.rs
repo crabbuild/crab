@@ -194,7 +194,11 @@ impl Command for OpenDirectory {
         if !input.valid() {
             return Ok(CommandResult::Rejected(Json(false)));
         }
-        if state.initial_fingerprint != input.fingerprints[position] {
+        if matches!(
+            state.mode,
+            DirectoryMode::Retiring { .. } | DirectoryMode::Retired
+        ) || state.initial_fingerprint != input.fingerprints[position]
+        {
             return Ok(CommandResult::Rejected(Json(false)));
         }
         if !matches!(state.mode, DirectoryMode::Importing) {

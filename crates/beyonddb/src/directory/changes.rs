@@ -175,6 +175,11 @@ impl Command for FinishDirectoryChange {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
+        if !state(|batch| context.sql(batch))?
+            .is_some_and(|state| matches!(state.mode, DirectoryMode::Leaf))
+        {
+            return Ok(CommandResult::Rejected(Json(false)));
+        }
         if !current(context, &input.children[0])? || !current(context, &input.children[1])? {
             return Ok(CommandResult::Rejected(Json(false)));
         }
@@ -200,6 +205,11 @@ impl Query for ReadDirectoryChanges {
     type Input = Json<Option<[u8; 16]>>;
     type Output = Json<Vec<DirectoryChange>>;
     fn execute(context: &mut QueryContext<'_>, Json(after): Self::Input) -> Result<Self::Output> {
+        if !state(|batch| context.sql(batch))?
+            .is_some_and(|state| matches!(state.mode, DirectoryMode::Leaf))
+        {
+            return Ok(Json(Vec::new()));
+        }
         let rows=context.sql(&statement("SELECT plan FROM ddb_directory_changes WHERE (?1 IS NULL OR lower_bound > ?1) ORDER BY lower_bound LIMIT 64",
             vec![after.map_or(SqlValue::Null,|key|SqlValue::Blob(key.to_vec()))]))?;
         Ok(Json(

@@ -186,6 +186,23 @@ index, coordinator and credential declarations retain their existing ceilings.
 The directory namespace is accepted by the signed peer scope and local resolver;
 fleet placement and discovery integration still remain.
 
+### Directory retirement
+
+`directory/retirement.rs` fences an exact node generation before acknowledging
+retirement. A branch retains both published child addresses and an acknowledgement
+bitmap until both descendants finish. Leaves, importing copies and frozen nodes
+become terminal immediately; a frozen parent can no longer publish unfinished
+copies. Installation, opening, membership changes and split discovery all respect
+the terminal fence. Retained SQL rows and command receipts are not garbage-collected.
+
+`provision/directory.rs::retire_directory_step` advances one bounded path, restores
+existing authority only, and records a child's durable retirement before its parent
+can finish. A lost receipt is recovered from the child's terminal state. Missing
+or unavailable published children leave retirement pending. The caller must fence
+the table generation first; this primitive is not yet wired into public DeleteTable
+or distributed owner selection. Name reuse must wait for this work when public
+routing moves to the directory tree.
+
 ### Evidence and remaining integration
 
 `tests/elastic_cells/directory_tree.rs` runs the native client through the real
@@ -196,7 +213,12 @@ The controller restores every case. Tests also check stale-parent writes,
 leaf-version conflicts, reservations blocking metadata movement, independent
 child writers, install replay after mutation, recursive splitting and an unchanged
 ancestor. These are metadata entries, not 1,024 active data owners. Focused test:
-passed in 2.60 seconds. This is native protocol proof, not DynamoDB SDK cutover.
+passed in 5.33 seconds with retirement coverage. It also interrupts retirement
+after a grandchild commit but before its parent acknowledgement, leaves another
+published child owned by an unavailable host, and verifies eventual completion
+after that owner releases it. Wrong-generation retirement and delayed install,
+open, split and range-publication attempts are rejected. This is native protocol
+proof, not DynamoDB SDK cutover.
 
 Public creation/routing, data and GSI split controllers, deletion, statistics,
 TTL/projection traversal, distributed residency, and background discovery still

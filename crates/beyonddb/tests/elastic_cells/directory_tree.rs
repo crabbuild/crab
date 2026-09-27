@@ -350,6 +350,205 @@ async fn interrupted_split(installed_children: usize) {
             .unwrap(),
         state
     );
+    // Retirement can interrupt a pending data split and a frozen metadata copy.
+    // Its terminal fence must prevent either stale publisher from proceeding.
+    let pending = change(&plans[1].children[0], 9500);
+    client
+        .command::<BeginDirectoryChange>(&copies[1].0, mutation(), Json(pending.clone()))
+        .await
+        .unwrap();
+    let grandchild = directory_target(ACCOUNT, &grandchildren.children[0]).unwrap();
+    let frozen = client
+        .command::<FreezeDirectory>(&grandchild, mutation(), Json(1))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    let mut other_generation = root.clone();
+    other_generation.table_id.replace_range(63..64, "1");
+    assert!(matches!(
+        client
+            .command::<beyonddb::RetireDirectory>(&target, mutation(), Json(other_generation))
+            .await,
+        Err(InvocationError::Rejected(_))
+    ));
+    client
+        .command::<beyonddb::RetireDirectory>(&target, mutation(), Json(root.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .query::<ReadDirectoryPage>(
+                &target,
+                None,
+                Json(DirectoryPageInput {
+                    hash: [0; 16],
+                    expected_version: None,
+                })
+            )
+            .await
+            .unwrap()
+            .output
+            .0,
+        DirectoryPage::Unavailable
+    );
+    assert!(matches!(
+        client
+            .command::<beyonddb::RecordDirectoryRetirement>(
+                &target,
+                mutation(),
+                Json(beyonddb::DirectoryRetirementReceipt {
+                    parent: root.clone(),
+                    child_id: [0xff; 16],
+                    sequence: 1,
+                })
+            )
+            .await,
+        Err(InvocationError::Rejected(_))
+    ));
+    client
+        .command::<beyonddb::RetireDirectory>(
+            &copies[0].0,
+            mutation(),
+            Json(split.children[0].clone()),
+        )
+        .await
+        .unwrap();
+    client
+        .command::<beyonddb::RetireDirectory>(
+            &grandchild,
+            mutation(),
+            Json(grandchildren.children[0].clone()),
+        )
+        .await
+        .unwrap();
+    // Lose the grandchild's retirement receipt before its parent acknowledges it.
+    host.shutdown().await.unwrap();
+    let (unavailable, remote_provisioner, _, _) = owner(
+        &application,
+        &layout,
+        SessionId::from_bytes([88; 16]),
+        &directory.path().join("unavailable"),
+    );
+    remote_provisioner
+        .admit_existing_directory(ACCOUNT, &split.children[1])
+        .await
+        .unwrap();
+    let (host, provisioner, client, _) = owner(
+        &application,
+        &layout,
+        SessionId::from_bytes([89; 16]),
+        &directory.path().join("retiring"),
+    );
+    // The other child is still owned elsewhere. A failed restoration must leave
+    // the root pending, even after all reachable descendants are retired.
+    let mut saw_unavailable = false;
+    for _ in 0..8 {
+        match provisioner
+            .retire_directory_step(&client, ACCOUNT, &root)
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) => panic!("retirement skipped an unavailable published child"),
+            Err(_) => {
+                saw_unavailable = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_unavailable);
+    let retiring = client
+        .query::<ReadDirectory>(&target, None, Json(()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert!(matches!(
+        retiring.mode,
+        DirectoryMode::Retiring {
+            acknowledged: 1,
+            ..
+        }
+    ));
+    unavailable.shutdown().await.unwrap();
+    assert!(
+        provisioner
+            .retire_directory_step(&client, ACCOUNT, &root)
+            .await
+            .unwrap()
+    );
+    assert!(
+        provisioner
+            .retire_directory_step(&client, ACCOUNT, &root)
+            .await
+            .unwrap()
+    );
+    for spec in std::iter::once(&root)
+        .chain(split.children.iter())
+        .chain(grandchildren.children.iter())
+    {
+        let target = directory_target(ACCOUNT, spec).unwrap();
+        assert_eq!(
+            client
+                .query::<ReadDirectory>(&target, None, Json(()))
+                .await
+                .unwrap()
+                .output
+                .0
+                .unwrap()
+                .mode,
+            DirectoryMode::Retired
+        );
+    }
+    assert!(matches!(
+        client
+            .command::<InstallDirectory>(
+                &target,
+                mutation(),
+                Json(DirectoryInstall {
+                    spec: root.clone(),
+                    ranges: ranges.clone(),
+                    source: None,
+                })
+            )
+            .await,
+        Err(InvocationError::Rejected(_))
+    ));
+    assert!(matches!(
+        client
+            .command::<beyonddb::OpenDirectory>(&copies[1].0, mutation(), Json(split.clone()))
+            .await,
+        Err(InvocationError::Rejected(_))
+    ));
+    assert!(matches!(
+        client
+            .command::<PublishDirectoryChange>(&copies[1].0, mutation(), Json(pending))
+            .await,
+        Err(InvocationError::Rejected(_))
+    ));
+    assert!(
+        client
+            .query::<beyonddb::ReadDirectoryChanges>(&copies[1].0, None, Json(None))
+            .await
+            .unwrap()
+            .output
+            .0
+            .is_empty()
+    );
+    assert!(matches!(
+        client
+            .command::<FreezeDirectory>(&grandchild, mutation(), Json(frozen.version))
+            .await,
+        Err(InvocationError::Rejected(_))
+    ));
+    assert!(
+        provisioner
+            .split_directory(&client, ACCOUNT, &root)
+            .await
+            .is_err()
+    );
     host.shutdown().await.unwrap();
 }
 

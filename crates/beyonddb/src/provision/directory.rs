@@ -45,7 +45,7 @@ impl CellInitialPartitionProvisioner {
                     .ok_or_else(|| StorageError::Transient("directory cannot split yet".into()))?;
                 (split, false)
             }
-            DirectoryMode::Importing => {
+            DirectoryMode::Importing | DirectoryMode::Retiring { .. } | DirectoryMode::Retired => {
                 return Err(StorageError::Transient("directory copy is not open".into()));
             }
         };
@@ -152,5 +152,105 @@ impl CellInitialPartitionProvisioner {
             }
         }
         Ok(split)
+    }
+}
+
+impl CellInitialPartitionProvisioner {
+    /// Advance one generation-fenced directory retirement by a bounded path.
+    ///
+    /// Call only after the table lifecycle authority has fenced the generation.
+    /// Returns true only when every published descendant is durably retired.
+    pub async fn retire_directory_step(
+        &self,
+        client: &CellClient,
+        account_id: &str,
+        root: &DirectorySpec,
+    ) -> Result<bool, StorageError> {
+        let mut current = root.clone();
+        let mut parent = None;
+        for _ in 0..128 {
+            self.admit_existing_directory(account_id, &current).await?;
+            let target = directory_target(account_id, &current).map_err(provision_error)?;
+            let observed = client
+                .query::<ReadDirectory>(&target, None, Json(()))
+                .await
+                .map_err(cell_error)?;
+            let state = observed.output.0.ok_or_else(|| {
+                StorageError::Transient("published directory state is missing".into())
+            })?;
+            if state.spec != current {
+                return Err(StorageError::Internal(
+                    "directory retirement scope changed".into(),
+                ));
+            }
+            let (mode, sequence) = if matches!(
+                state.mode,
+                DirectoryMode::Retiring { .. } | DirectoryMode::Retired
+            ) {
+                (state.mode, observed.receipt.commit_sequence)
+            } else {
+                let retired = client
+                    .command::<crate::RetireDirectory>(
+                        &target,
+                        mutation_identity()?,
+                        Json(current.clone()),
+                    )
+                    .await
+                    .map_err(cell_error)?;
+                (
+                    retired.output.0.ok_or_else(|| {
+                        StorageError::Transient("directory retirement was rejected".into())
+                    })?,
+                    retired.receipt.commit_sequence,
+                )
+            };
+            match mode {
+                DirectoryMode::Retired => {
+                    let Some(parent) = parent else {
+                        return Ok(true);
+                    };
+                    self.admit_existing_directory(account_id, &parent).await?;
+                    let target = directory_target(account_id, &parent).map_err(provision_error)?;
+                    let recorded = client
+                        .command::<crate::RecordDirectoryRetirement>(
+                            &target,
+                            mutation_identity()?,
+                            Json(crate::DirectoryRetirementReceipt {
+                                parent: parent.clone(),
+                                child_id: current.node_id,
+                                sequence,
+                            }),
+                        )
+                        .await
+                        .map_err(cell_error)?;
+                    return Ok(parent == *root && recorded.output.0);
+                }
+                DirectoryMode::Retiring {
+                    children,
+                    acknowledged,
+                } => {
+                    let next = children
+                        .into_iter()
+                        .enumerate()
+                        .find(|(position, _)| acknowledged & (1 << position) == 0)
+                        .map(|(_, child)| child)
+                        .ok_or_else(|| {
+                            StorageError::Internal(
+                                "directory retirement has no pending child".into(),
+                            )
+                        })?;
+                    parent = Some(current);
+                    current = next;
+                }
+                _ => {
+                    return Err(StorageError::Internal(
+                        "directory retirement did not fence writes".into(),
+                    ));
+                }
+            }
+        }
+        Err(StorageError::Internal(
+            "directory retirement exceeded depth bound".into(),
+        ))
     }
 }

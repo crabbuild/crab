@@ -15,8 +15,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
 mod changes;
+mod retirement;
 mod split;
 pub use changes::*;
+pub use retirement::*;
 pub use split::*;
 
 pub(crate) const MODULE: &str = "beyonddb-directory";
@@ -25,7 +27,7 @@ const SCHEMA: &str = include_str!("directory/schema.sql");
 const MAX_RANGES: usize = 1024;
 const PAGE_SIZE: usize = 64;
 
-static COMMANDS: [crab_cell_runtime::registry::OperationDescriptor; 7] = [
+static COMMANDS: [crab_cell_runtime::registry::OperationDescriptor; 9] = [
     crab_cell_runtime::registry::OperationDescriptor {
         input_limit: 1024 * 1024,
         ..crate::participant::phase_operation(1)
@@ -36,9 +38,14 @@ static COMMANDS: [crab_cell_runtime::registry::OperationDescriptor; 7] = [
     crate::participant::phase_operation(5),
     crate::participant::phase_operation(6),
     crate::participant::phase_operation(7),
+    crate::participant::phase_operation(8),
+    crate::participant::phase_operation(9),
 ];
 static QUERIES: [crab_cell_runtime::registry::OperationDescriptor; 3] = [
-    crate::participant::phase_operation(1),
+    crab_cell_runtime::registry::OperationDescriptor {
+        codec_version: 2,
+        ..crate::participant::phase_operation(1)
+    },
     crab_cell_runtime::registry::OperationDescriptor {
         output_limit: 64 * 1024,
         ..crate::participant::phase_operation(2)
@@ -85,6 +92,11 @@ pub enum DirectoryMode {
     Importing,
     Frozen(DirectorySplit),
     Branch(DirectorySplit),
+    Retiring {
+        children: [DirectorySpec; 2],
+        acknowledged: u8,
+    },
+    Retired,
 }
 
 /// Current node version and its immutable scope.
@@ -105,6 +117,7 @@ impl crab_cell_runtime::registry::CellModule for DirectoryModule {
             let mut source = blake3::Hasher::new();
             source.update(include_bytes!("directory.rs"));
             source.update(include_bytes!("directory/changes.rs"));
+            source.update(include_bytes!("directory/retirement.rs"));
             source.update(include_bytes!("directory/split.rs"));
             ModuleDescriptor {
                 name: MODULE,
@@ -140,6 +153,8 @@ impl crab_cell_runtime::registry::CellModule for DirectoryModule {
         registry.bind_command::<FreezeDirectory>()?;
         registry.bind_command::<PublishDirectorySplit>()?;
         registry.bind_command::<OpenDirectory>()?;
+        registry.bind_command::<RetireDirectory>()?;
+        registry.bind_command::<RecordDirectoryRetirement>()?;
         registry.bind_query::<ReadDirectory>()?;
         registry.bind_query::<ReadDirectoryPage>()?;
         registry.bind_query::<ReadDirectoryChanges>()
@@ -345,7 +360,10 @@ impl Command for InstallDirectory {
         if let Some(existing) = state(|batch| context.sql(batch))? {
             // The birth digest survives mutations and splitting. A delayed install
             // can acknowledge the original copy without replacing newer membership.
-            let same = existing.spec == installed.spec
+            let same = !matches!(
+                existing.mode,
+                DirectoryMode::Retiring { .. } | DirectoryMode::Retired
+            ) && existing.spec == installed.spec
                 && existing.initial_fingerprint == installed.initial_fingerprint;
             return Ok(if same {
                 CommandResult::Success(Json(true))
@@ -366,7 +384,7 @@ pub struct ReadDirectory;
 impl Query for ReadDirectory {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 1;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<()>;
     type Output = Json<Option<DirectoryState>>;
     fn execute(context: &mut QueryContext<'_>, _: Self::Input) -> Result<Self::Output> {
@@ -412,7 +430,9 @@ impl Query for ReadDirectoryPage {
             DirectoryMode::Branch(split) => {
                 return Ok(Json(DirectoryPage::Redirect(split.children)));
             }
-            DirectoryMode::Importing => return Ok(Json(DirectoryPage::Unavailable)),
+            DirectoryMode::Importing | DirectoryMode::Retiring { .. } | DirectoryMode::Retired => {
+                return Ok(Json(DirectoryPage::Unavailable));
+            }
             DirectoryMode::Leaf | DirectoryMode::Frozen(_) => {}
         }
         if input
