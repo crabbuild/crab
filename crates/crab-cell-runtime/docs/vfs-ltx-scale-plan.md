@@ -502,7 +502,7 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
   three_node_host_recovers_published_state_after_owner_loss --locked
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
   cargo test -p crab-cell-app --test reference_application \
-  three_node_host_serves_two_release_ids_with_unchanged_module_contracts --locked
+  three_node_host_additive_code_rollout_preserves_acknowledged_state --locked
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
   cargo test -p crab-http-server --test public_cell_takeover --locked
 ```

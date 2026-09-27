@@ -54,8 +54,12 @@ commits, fleet behavior, primitives, and process performance, with shared
 fixtures in `tests/reference_application/harness.rs`) and `contracts` (the
 descriptor, digest, and identity contracts).
 The reference suite also runs three `CellNode` hosts to test ambiguous results,
-duplicate delivery, owner loss, and overlap between two release IDs with
-unchanged module contracts through the public APIs.
+duplicate delivery, owner loss, and an additive application release through
+the public APIs. The release adds a generated query, retains predecessor code
+during client overlap, publishes the new code, fences old capabilities, and
+recovers exact receipts on a fresh host. Its RustFS variant also runs in the
+Compose workflow; this rollout gate hosts its runtimes in one process and
+does not qualify continuous traffic across rolling container replacements.
 The public-host reader checks also verify publication-triggered recruitment
 and cancellation of a storage-stalled activation during drain.
 

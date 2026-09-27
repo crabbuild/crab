@@ -163,6 +163,7 @@ fn signed_client(
 }
 
 mod replicas;
+mod rollout;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_node_host_resolves_ambiguous_result_and_deduplicates_delivery() {
@@ -300,62 +301,6 @@ async fn recover_sql_on_second_node(fixture: &PerfFixture) -> (ReferenceClient, 
         .unwrap();
     let recovered = ReferenceClient::new(handle).unwrap();
     (recovered, recovered_directory)
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn three_node_host_serves_two_release_ids_with_unchanged_module_contracts() {
-    let predecessor = compiled();
-    // The build identity changes while executable module contracts stay fixed.
-    // Both release digests must bind their own clients during an online overlap.
-    let successor = Arc::new(
-        ReferenceApplication::compile(BuildDescriptor {
-            source_revision: "reference-compatible-successor".into(),
-            cargo_lock_digest: Digest::from_bytes([42; 32]),
-        })
-        .unwrap(),
-    );
-    assert_ne!(
-        predecessor.registry().release_digest(),
-        successor.registry().release_digest()
-    );
-    successor
-        .registry()
-        .verify_rolling_from(predecessor.registry().release_bytes())
-        .unwrap();
-    let fixture = PerfFixture::start_with_successor(3, Some(Arc::clone(&successor))).await;
-    let sql_handle = fixture.owned_handles[0]
-        .iter()
-        .find(|handle| handle.cell_id() == fixture.sql_target.cell_id())
-        .unwrap()
-        .clone();
-    let successor_client = CellClient::local(successor.registry(), sql_handle);
-    let successor_handle = fixture.nodes[0]
-        .application_handle::<ReferenceApplication>(
-            successor_client,
-            fixture.sql_target.tenant(),
-            fixture.sql_target.application(),
-        )
-        .unwrap();
-    let successor_client = ReferenceClient::new(successor_handle).unwrap();
-    let order = successor_client
-        .orders(&OrderId(b"rollout-order".to_vec()))
-        .unwrap();
-    order
-        .receive_cron(reference_identity(76, now_ms()), invocation(1))
-        .await
-        .unwrap();
-
-    let predecessor_client = ReferenceClient::new(fixture.typed.clone()).unwrap();
-    let old_order = predecessor_client
-        .orders(&OrderId(b"rollout-order".to_vec()))
-        .unwrap();
-    assert_eq!(old_order.receipt_count(None, ()).await.unwrap().output, 1);
-    old_order
-        .receive_cron(reference_identity(77, now_ms()), invocation(2))
-        .await
-        .unwrap();
-    assert_eq!(order.receipt_count(None, ()).await.unwrap().output, 2);
-    fixture.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

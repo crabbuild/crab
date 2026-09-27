@@ -557,7 +557,16 @@ impl CellApplication for ReferenceApplication {
     const NAME: &'static str = "reference-application";
 
     fn register(builder: &mut ApplicationBuilder) -> Result<()> {
-        builder.register(ReferenceSql)?;
+        Self::register_with_sql(builder, ReferenceSql)
+    }
+}
+
+impl ReferenceApplication {
+    pub(super) fn register_with_sql<M: CellModule>(
+        builder: &mut ApplicationBuilder,
+        sql: M,
+    ) -> Result<()> {
+        builder.register(sql)?;
         builder.register(ReferenceKv)?;
         builder.register(ReferenceBlob)?;
         builder.register(ReferenceQueue)?;

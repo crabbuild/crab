@@ -4,7 +4,8 @@ case "${1:-}" in
   node) role="node-${CRAB_CELL_PERF_PROCESS_NODE:?}"; selected=process_performance::fleet_process_role ;;
   driver) role=driver; selected=process_performance::reference_compose_fleet_end_to_end_performance ;;
   scale) role=driver; selected=process_scaling::reference_compose_reader_scaling ;;
-  *) printf 'usage: run.sh node|driver|scale\n' >&2; exit 2 ;;
+  rollout) role=rollout; selected=public_host::rollout::three_node_host_rustfs_additive_code_rollout ;;
+  *) printf 'usage: run.sh node|driver|scale|rollout\n' >&2; exit 2 ;;
 esac
 binary=
 for candidate in /target/release/deps/reference_application-*; do

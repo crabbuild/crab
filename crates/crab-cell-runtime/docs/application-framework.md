@@ -356,9 +356,13 @@ traits; each accessor accepts a declared `CellKey` whose canonical bytes feed
 the compiled `CellType` shard contract. The
 reference application's independent descriptor-byte test, compile-fail
 examples, and three-node `CellNode` suite cover this initial binding. The
-rollout test overlaps two release identities with unchanged module contracts;
-additive code rollout remains unqualified. A general schema-driven generator
-and generated transport adapters remain open.
+rollout test adds a generated query and retains predecessor code while old and
+new clients overlap. It then publishes a code-only migration, rejects stale
+capabilities and predecessor clients, and recovers exact receipts on a fresh
+host. The RustFS variant uses the same path with real object storage. This is
+a correctness gate with one process hosting the nodes; additive schema changes
+and continuous traffic during rolling container replacement remain unqualified.
+A general schema-driven generator and generated transport adapters remain open.
 
 ```rust,ignore
 let commerce = CommerceClient::new(node.application::<Commerce>()?);

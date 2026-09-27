@@ -1,5 +1,39 @@
 # Cell primitive end-to-end performance
 
+## Additive application release correctness
+
+The public-host rollout test compiles a successor SQL module with a new typed
+receipt-payload query and retains the predecessor code. An old generated client
+uses TCP to invoke the successor host while the successor client writes the
+same retained Cell locally. After both writes acknowledge, an operator publishes
+the code-only migration. A prepared old capability and a predecessor client
+must fail before execution. The upgraded generated client then reads the added
+query over signed TCP, replays an old request with its original receipt, and
+writes another receipt. A fresh host restores the published root in a separate
+SQLite directory, replays the request again without duplication, and writes
+successfully. Four visible receipts must remain.
+
+Run the real-provider version against an existing isolated RustFS bucket and a
+fresh prefix:
+
+```sh
+AWS_ACCESS_KEY_ID=crab AWS_SECRET_ACCESS_KEY=crab \
+CRAB_CELL_TEST_ENDPOINT=http://127.0.0.1:9000 \
+CRAB_CELL_TEST_BUCKET=crab-reference-app \
+CRAB_CELL_PERF_PROCESS_ROOT=additive-rollout-unique-run \
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/<checkout>" \
+  cargo test -p crab-cell-app --locked --test reference_application \
+  three_node_host_rustfs_additive_code_rollout -- --ignored --nocapture
+```
+
+The Compose smoke runs this same gate in a separate constrained driver container
+before stopping RustFS, retaining `rollout.log`, its binary hash, and kernel
+resource counters. The three initial hosts share that process; one host is
+retired before its replacement starts. The schema stays at version one, and
+traffic pauses for code publication and recovery. This gate does not establish
+rolling-container availability, sustained throughput, or a migration latency
+bound. Independent-process scale and fault qualification remain separate.
+
 ## Generated client action and recovery slices
 
 The ignored `reference_public_host_action_performance` test runs the generated

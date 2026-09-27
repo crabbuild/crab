@@ -216,16 +216,15 @@ fn peer_io(source: std::io::Error) -> Error {
 }
 
 pub(super) async fn start_peer_servers(
-    registry: &Arc<Registry>,
     verifier: Arc<PeerVerifier>,
-    owned: Vec<Vec<CellHandle>>,
+    owned: Vec<(Arc<Registry>, Vec<CellHandle>)>,
 ) -> (Arc<dyn PeerRoundTrip>, Vec<tokio::task::JoinHandle<()>>) {
     let mut endpoints = HashMap::new();
     let mut servers = Vec::new();
-    for handles in owned {
+    for (registry, handles) in owned {
         let ids = handles.iter().map(CellHandle::cell_id).collect::<Vec<_>>();
         let (address, server) =
-            start_peer_server(registry, Arc::clone(&verifier), handles, None).await;
+            start_peer_server(&registry, Arc::clone(&verifier), handles, None).await;
         // Pin routing for this run; the receiving resolver rejects a target
         // it does not own, so a wrong route cannot pass the action checks.
         for id in ids {
