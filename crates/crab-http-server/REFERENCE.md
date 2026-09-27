@@ -440,7 +440,8 @@ can supply the cached description; the receiving node still verifies target,
 control, authorization, and actor admission. Observations expire within five
 seconds and before the signed node lease, with at most 4,096 entries. Refusals
 and ambiguous results clear the observed session; only the existing retryable
-cases take one authoritative retry.
+cases take one authoritative retry. A sender lookup removes an expired entry
+before refresh, including when authoritative lookup fails or is canceled.
 
 Forwarded requests reserve retained bytes while waiting. Codec admission uses
 one absolute received transport deadline, and releases its job slot during

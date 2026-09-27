@@ -407,3 +407,60 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
     first_server.await.unwrap().unwrap();
     second_server.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn failed_refresh_retires_an_expired_owner_observation() {
+    let files = IdentityFiles::generate();
+    let endpoint = url::Url::parse("https://localhost:1").unwrap();
+    let loaded = LoadedPeerTls::load(&files.config(endpoint.clone())).unwrap();
+    let identity = ApplicationIdentity::new(
+        TenantId::from_bytes([1; 16]),
+        ApplicationId::from_bytes([2; 16]),
+    );
+    let target = CellTarget::new(
+        identity.tenant(),
+        identity.application(),
+        NamespaceId::from_bytes([3; 16]),
+        b"repository",
+    )
+    .unwrap();
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        ObjectPath::from("expired-hint"),
+        *identity.application().as_bytes(),
+    );
+    let round_trip = PeerHttpRoundTrip::new(
+        crate::peer::PeerOwnerHints::default(),
+        identity,
+        CellAuthority::new(layout.clone()),
+        NodeDirectory::new(
+            layout,
+            loaded.fleet(),
+            Digest::from_bytes([6; 32]),
+            Digest::from_bytes([7; 32]),
+        ),
+        loaded.client_identity(),
+        SessionId::from_bytes([4; 16]),
+    );
+    // Model a cached observation after its Cell disappeared. The canonical
+    // refresh must fail before any peer request; elapsed wall time is irrelevant.
+    round_trip.owner_hints.entries.lock().unwrap().insert(
+        target.cell_id(),
+        super::CachedOwnerHint {
+            owner: super::RemotePeer {
+                session: SessionId::from_bytes([5; 16]),
+                endpoint,
+                certificate: loaded.certificate(),
+                public_key: loaded.signing_key().verifying_key().to_bytes(),
+            },
+            description: None,
+            valid_until_ms: 0,
+            revision: 1,
+        },
+    );
+    assert!(matches!(
+        round_trip.send(target.clone(), vec![1, 2, 3], 5_000).await,
+        Err(crab_cell_runtime::Error::CellNotActive)
+    ));
+    assert!(!round_trip.has_owner_hint(target.cell_id()));
+}

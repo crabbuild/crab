@@ -187,7 +187,7 @@ impl PeerHttpRoundTrip {
         }
         let now_ms = now_ms().map_err(peer_transport)?;
         // Cache failure cannot block the authoritative owner lookup.
-        if allow_hint && let Ok(hints) = self.owner_hints.entries.lock() {
+        if allow_hint && let Ok(mut hints) = self.owner_hints.entries.lock() {
             if let Some(hint) = hints.get(&target.cell_id())
                 && now_ms < hint.valid_until_ms
             {
@@ -196,8 +196,11 @@ impl PeerHttpRoundTrip {
                 }
                 return Ok(hint.owner.clone());
             }
+            // Retire expiry before I/O: failed or cancelled refresh must not
+            // retain it, or remove a newer observation installed during the wait.
+            let stale = hints.remove(&target.cell_id()).is_some();
             if let Some(metrics) = &self.metrics {
-                metrics.record_owner_hint(if hints.contains_key(&target.cell_id()) {
+                metrics.record_owner_hint(if stale {
                     OwnerHintOutcome::Stale
                 } else {
                     OwnerHintOutcome::Miss
