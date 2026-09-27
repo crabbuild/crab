@@ -2123,7 +2123,7 @@ development fixtures need reprovisioning. This is not a rolling-upgrade proof.
 | --- | --- |
 | Entry points | `recover_registered_coordinators` and `discover_coordinator` in `src/provision/transactions.rs` share proof recording and checking. |
 | Metadata owner | `src/transaction_coordinator/registry.rs` updates an existing account registration; `ListCoordinatorShards` returns that observation with its shard. Registration still precedes the first BEGIN. |
-| Empty-work proof | `ReadPendingTransactionBoundary` reads the coordinator's indexed `unresolved_count > 0` records; resolution decrements that count only after a participant receipt. |
+| Empty-work proof | `ReadPendingTransactionBoundary` reads the coordinator's indexed unresolved or acknowledged-read-cleanup records; resolution decrements that count only after a participant receipt. |
 | Dependency contract | Runtime `Control::release` preserves root and epoch while publishing Idle; reacquisition raises epoch. Query receipts identify the committed SQL sequence. Root matching cannot authorize skipping a Serving owner or recovery overlay. |
 | Callers and siblings | Account and data participant recovery still use the common resolver; foreground `CoordinatorProvisioner::ensure` always restores Idle history. The existing history/residency fixture exercises serving discovery with twelve shards and three active slots. |
 | Regression | `tests/elastic_cells/coordinator_checkpoints.rs` commits three tokenized writes, records settled observations, then prepares a new read after one observation. After owner restart, unchanged history must stay Idle without an epoch increase, while the changed shard must be acquired and its BEGIN aborted. Raw participant state proves cleanup before reads can help. A newer write and old-token replay prove lock release and no duplicate apply. |
@@ -2306,3 +2306,52 @@ Strict all-target Clippy and the standalone server build pass. Formatting,
 diff, Cell/LTX layout and policy entry-point checks pass. The SDK/process CI
 workflow will qualify the pushed head; these local checks do not replace that
 gate or the full API and fleet qualification.
+
+
+## Acknowledged transactional read cleanup
+
+The previous branch head (`66986825e26`) retained committed read images and
+operation mappings indefinitely. The public read adapter now assembles every
+position before publishing `BeginReadResultRelease`. Each request uses a fresh
+transaction ID; TransactGetItems has no token replay path that needs these images
+after assembly. Cancellation before acknowledgement still retains the images.
+
+The coordinator counts outstanding read-result releases in the same pending
+index used for decision recovery. `ReadUnresolvedCoordinatorParticipants` returns
+original targets for resolution or acknowledged cleanup. Recovery deletes the
+participant's saved images idempotently, then `RecordReadResultRelease` compacts
+its operation payload and decrements the counter in one command. If the deletion
+receipt is lost, the original target remains discoverable and deletion replays.
+The coordinator decision and participant identity/digest remain durable, so delayed
+prepare or resolve cannot recreate images or reacquire locks. Missing saved rows
+remain `Unavailable`, distinct from a saved absent item.
+
+A failed cleanup after durable acknowledgement does not discard the assembled
+response: recovery retains the work. An acknowledgement failure returns an error;
+no deletion starts without durable intent. No timer guesses when an active reader
+has finished. The pending-index predicate also prevents cleanup from being hidden
+by a settled-root checkpoint. Later acknowledgement changes that exact root.
+
+| Boundary | Evidence |
+| --- | --- |
+| Entry | `backend/transaction_read.rs` validates complete positions before acknowledgement; `backend/admission.rs` gives token-free reads fresh identities. |
+| Durable coordinator | `transaction_coordinator/read_release.rs` requires committed, fully resolved read participants; progress and payload compaction share a command. |
+| Participants | Account and data commands share `participant::release_read_result`; `item_storage::StoredValue::TransactionRead` stores the complete image in the deleted SQL row. |
+| Recovery | `backend/recovery.rs` and `provision/transactions.rs` use the existing pending index, immutable targets, bounded fanout and owner recovery. |
+| Siblings | Writes and aborted reads retain their existing resolution compaction. Committed reads without acknowledgement remain available; terminal markers remain in both participant types. |
+| Regression | `tests/elastic_cells/read_release.rs` checks returned public Storage results and zero saved rows; rejects premature acknowledgement and mismatched participant cleanup; restarts before deletion and after deletion without a coordinator receipt; verifies both participant types, compacted mappings, stale settled checkpoints, replayed acknowledgement and delayed prepare. |
+
+This adds one durable consumption boundary rather than a second recovery service.
+It reduces retained logical read bytes for completed requests. It does not bound
+abandoned readers, terminal records, command receipts, abort-result payloads or
+object-store history, and is not proof of unlimited scaling. Coordinator expansion
+and safe retirement remain required for the 10,000-Cell/multi-TB target. The
+unreleased coordinator schema gains a counter; peer query codec versions change
+with the status and pending-participant shapes. No dependency pins change.
+
+
+Focused validation: the read-release restart/public-Storage regression passed
+(2.14 s); the existing mixed account/data, shared-read, lost-reply and owner-restart
+fixture passed (27.81 s). Strict all-target Clippy passed. The signed SDK/process
+workflow now includes the new regression; the new revision still requires its
+CI run. These local checks do not establish fleet-scale or full API compatibility.

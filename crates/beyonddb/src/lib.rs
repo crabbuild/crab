@@ -113,7 +113,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 29] = [
+static COMMANDS: [OperationDescriptor; 30] = [
     operation(1),
     operation(2),
     operation(3),
@@ -147,6 +147,7 @@ static COMMANDS: [OperationDescriptor; 29] = [
     operation(30),
     operation(31),
     operation(32),
+    participant::phase_operation(33),
 ];
 static QUERIES: [OperationDescriptor; 32] = [
     operation(4),
@@ -349,6 +350,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<crate::UploadTransactionPayload<PrepareAccountTransaction>>()?;
         registry.bind_command::<PrepareAccountTransaction>()?;
         registry.bind_command::<ResolveAccountTransaction>()?;
+        registry.bind_command::<ReleaseAccountTransactionReads>()?;
         registry.bind_command::<DeleteTable>()?;
         registry.bind_command::<ContinueTableDeletion>()?;
         registry.bind_query::<ReadTableLifecycle>()?;

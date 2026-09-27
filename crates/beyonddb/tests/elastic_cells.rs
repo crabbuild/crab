@@ -11,6 +11,7 @@ mod elastic_cells {
     mod local_indexes;
     mod node_sessions;
     mod public_transactions;
+    mod read_release;
     mod read_resolution;
     mod recovery_admission;
     mod table_residency;

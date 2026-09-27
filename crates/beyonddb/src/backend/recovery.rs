@@ -14,7 +14,8 @@ use crate::{
     ReadAccountTransaction, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
     ReadPartitionTransaction, ReadPendingCrossCellTransactions,
     ReadPendingCrossCellTransactionsInput, ReadPendingTransactionBoundary, ReadTransactionInput,
-    ReadUnresolvedCoordinatorParticipants, RecordParticipantResolution, ResolveAccountTransaction,
+    ReadUnresolvedCoordinatorParticipants, RecordParticipantResolution, RecordReadResultRelease,
+    ReleaseAccountTransactionReads, ReleasePartitionTransactionReads, ResolveAccountTransaction,
     ResolvePartitionTransaction, ResolveTransactionInput, ResolveTransactionOutcome,
     UnresolvedCoordinatorParticipant, account_target, coordinator_target, data_target,
 };
@@ -180,7 +181,8 @@ impl CellStorage {
             CoordinatorDecision::Commit => true,
             CoordinatorDecision::Abort { .. } => false,
         };
-        if status.resolved_count == status.participant_count {
+        if status.resolved_count == status.participant_count && status.unreleased_read_results == 0
+        {
             return Ok(());
         }
         let participants = self
@@ -213,7 +215,9 @@ impl CellStorage {
             .output
             .0
             .ok_or_else(|| StorageError::Internal("coordinator transaction disappeared".into()))?;
-        if final_status.resolved_count != final_status.participant_count {
+        if final_status.resolved_count != final_status.participant_count
+            || final_status.unreleased_read_results != 0
+        {
             return Err(StorageError::Transient(
                 "cross-Cell participant resolution is incomplete".into(),
             ));
@@ -239,24 +243,50 @@ impl CellStorage {
             } => data_target(&read.account_id, &table_id, &partition_id)
                 .map_err(|error| StorageError::Internal(error.to_string()))?,
         };
-        let receipt = self
-            .resolve_participant(&target, coordinator, read.transaction_id, commit)
-            .await?;
-        let recorded = self
-            .client
-            .command::<RecordParticipantResolution>(
-                coordinator,
-                mutation_identity()?,
-                Json(CoordinatorPhaseInput {
-                    account_id: read.account_id.clone(),
-                    transaction_id: read.transaction_id,
-                    routing_key: read.routing_key.clone(),
-                    position,
-                    participant_cell: *target.cell_id().as_bytes(),
-                    sequence: receipt.commit_sequence,
-                }),
-            )
-            .await;
+        let receipt = if participant.release_read_result {
+            let input = Json(ReadTransactionInput {
+                transaction_id: read.transaction_id,
+                coordinator_cell: *coordinator.cell_id().as_bytes(),
+            });
+            let identity = mutation_identity()?;
+            let released = if target.namespace() == NAMESPACE {
+                self.client
+                    .command::<ReleaseAccountTransactionReads>(&target, identity, input)
+                    .await
+            } else {
+                self.client
+                    .command::<ReleasePartitionTransactionReads>(&target, identity, input)
+                    .await
+            }
+            .map_err(cell_error)?;
+            if !released.output.0 {
+                return Err(StorageError::Internal(
+                    "participant rejected read result release".into(),
+                ));
+            }
+            released.receipt
+        } else {
+            self.resolve_participant(&target, coordinator, read.transaction_id, commit)
+                .await?
+        };
+        let input = Json(CoordinatorPhaseInput {
+            account_id: read.account_id.clone(),
+            transaction_id: read.transaction_id,
+            routing_key: read.routing_key.clone(),
+            position,
+            participant_cell: *target.cell_id().as_bytes(),
+            sequence: receipt.commit_sequence,
+        });
+        let identity = mutation_identity()?;
+        let recorded = if participant.release_read_result {
+            self.client
+                .command::<RecordReadResultRelease>(coordinator, identity, input)
+                .await
+        } else {
+            self.client
+                .command::<RecordParticipantResolution>(coordinator, identity, input)
+                .await
+        };
         match recorded {
             Ok(committed)
                 if matches!(

@@ -387,9 +387,12 @@ unknown outcomes remain retryable and a competing COMMIT wins.
 Recording a terminal participant resolution releases its coordinator operation
 images for writes and aborted reads. Durable decisions, request digests, targets,
 receipts and replay markers remain. Committed read operations stay available for
-response assembly. A driver whose chunk fetch races compaction re-reads and
-finishes the durable decision. This reduces retained write payloads; decision,
-tombstone, read-image and object-store history collection remain unfinished.
+response assembly. Once all results are assembled, the reader durably acknowledges
+consumption. The existing recovery loop deletes saved images in each original
+participant Cell, then compacts its coordinator mapping after a durable receipt.
+A driver whose chunk fetch races compaction re-reads and finishes the durable
+decision. Unacknowledged read images, decisions, tombstones, and object-store
+history still require safe retention and collection.
 Coordinator token lookup preserves original
 participants across route changes and starts the ten-minute replay window only
 after all participants resolve. The old account claims and Cell-local token

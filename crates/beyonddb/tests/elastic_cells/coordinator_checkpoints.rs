@@ -196,7 +196,7 @@ async fn settled_recovery_survives_restart_but_later_begin_is_not_skipped() {
     host.shutdown().await.unwrap();
 }
 
-fn owner(
+pub(super) fn owner(
     application: &Arc<crab_cell_app::CompiledApplication>,
     layout: &CellStorageLayout,
     session: SessionId,

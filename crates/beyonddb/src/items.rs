@@ -405,7 +405,7 @@ impl Command for TransactWrite {
 pub(crate) mod transaction;
 pub use transaction::{
     PrepareAccountTransaction, PrepareAccountTransactionInput, ReadAccountTransaction,
-    ReadAccountTransactionResult, ResolveAccountTransaction,
+    ReadAccountTransactionResult, ReleaseAccountTransactionReads, ResolveAccountTransaction,
 };
 
 mod scan;

@@ -3,9 +3,9 @@
 use extenddb_core::types::{Item, TableKeyInfo};
 use extenddb_storage::error::StorageError;
 
-use super::{CellStorage, cell_error};
+use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
-    CoordinatorDecision, CoordinatorParticipantTarget, GetItemInput, Json,
+    BeginReadResultRelease, CoordinatorDecision, CoordinatorParticipantTarget, GetItemInput, Json,
     ReadAccountTransactionResult, ReadCoordinatorParticipantInput, ReadCrossCellTransaction,
     ReadPartitionTransactionResult, ReadTransactionInput, ReadTransactionResultInput,
     TransactionFailure, TransactionOperation, TransactionReadResult, account_target,
@@ -127,6 +127,33 @@ impl CellStorage {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // Only the initiating reader can acknowledge fully assembled images.
+        // Persist cleanup intent before deleting anything so cancellation or an
+        // unavailable participant leaves discoverable work for recovery.
+        let acknowledged = self
+            .client
+            .command::<BeginReadResultRelease>(
+                &coordinator,
+                mutation_identity()?,
+                Json(identity.clone()),
+            )
+            .await
+            .map_err(cell_error)?;
+        if !acknowledged.output.0 {
+            return Err(StorageError::Internal(
+                "coordinator rejected read result acknowledgement".into(),
+            ));
+        }
+        if let Err(error) = self
+            .finish_decided_cross_cell_transaction(
+                account_id,
+                &identity.routing_key,
+                identity.transaction_id,
+            )
+            .await
+        {
+            tracing::warn!(%error, "transaction read result cleanup remains pending");
+        }
         validate_read_size(items)
     }
 }

@@ -50,7 +50,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 15] = [
+static COMMANDS: [OperationDescriptor; 16] = [
     operation(1),
     operation(2),
     operation(3),
@@ -66,6 +66,7 @@ static COMMANDS: [OperationDescriptor; 15] = [
     crate::participant::phase_operation(13),
     crate::transaction_transport::upload_operation(14),
     crate::participant::phase_operation(15),
+    crate::participant::phase_operation(16),
 ];
 static QUERIES: [OperationDescriptor; 13] = [
     operation(1),
@@ -158,6 +159,7 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
         registry.bind_command::<crate::UploadTransactionPayload<PreparePartitionTransaction>>()?;
         registry.bind_command::<PreparePartitionTransaction>()?;
         registry.bind_command::<ResolvePartitionTransaction>()?;
+        registry.bind_command::<ReleasePartitionTransactionReads>()?;
         registry.bind_command::<crate::AckPartitionIndexChange>()?;
         registry.bind_query::<crate::statistics::ReadPartitionStatistics>()?;
         registry.bind_query::<PartitionGet>()?;
