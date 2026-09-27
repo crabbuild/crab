@@ -1,8 +1,10 @@
 //! ExtendDB HTTP composition over a ready BeyondDB Cell node.
 
+mod capacity;
 mod node_lease;
 mod peer_receiver;
 
+pub use capacity::measured_node_capacity;
 pub use node_lease::{NodeLeasePublisher, PublishedNodeLease};
 pub use peer_receiver::peer_router;
 

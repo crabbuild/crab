@@ -36,7 +36,7 @@ pub use provision::*;
 pub use routing::*;
 pub use server::{
     BeyonddbPeerScope, NodeLeasePublisher, PublishedNodeLease, build_http_state, build_peer_client,
-    peer_router,
+    measured_node_capacity, peer_router,
 };
 pub use split::*;
 pub use table::*;

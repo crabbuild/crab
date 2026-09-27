@@ -5,7 +5,7 @@ use std::{error::Error, io, io::Read, net::SocketAddr, path::PathBuf, sync::Arc,
 use beyonddb::{
     APPLICATION_ID, Beyonddb, CellAuthorizationStore, CellCredentialStore,
     CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, build_http_state,
-    build_peer_client, peer_router,
+    build_peer_client, measured_node_capacity, peer_router,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::{CellNode, CellNodeBuilder, CellNodeTaskGroup};
@@ -181,6 +181,7 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     let session_uuid = Uuid::now_v7();
     let session = SessionId::from_bytes(*session_uuid.as_bytes());
     let session_dir = config.data_dir.join(session_uuid.to_string());
+    tokio::fs::create_dir_all(&config.data_dir).await?;
     let node = CellNodeBuilder::new(Arc::clone(&application))
         .with_runtime(SqlWorkerPool::new(4, 64)?, 256 * 1024 * 1024)
         .with_replica_host(
@@ -195,10 +196,24 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     let signer = tls.signing_key().clone();
     let certificate = tls.certificate();
     let fleet = tls.fleet();
-    let disk_budget = config.disk_budget_bytes;
+    let capacity_runtime = node.runtime();
+    let capacity_dir = config.data_dir.clone();
     let modules = application.registry().module_digests();
     let published = NodeLeasePublisher::new(directory.clone(), move |now, expires| {
-        NodeAdvertisement::sign(
+        let (capacity, placement) = if capacity_runtime.is_shutting_down() {
+            (NodeCapacity::default(), None)
+        } else {
+            match measured_node_capacity(&capacity_dir, capacity_runtime.stats()) {
+                Ok((capacity, placement)) => (capacity, Some(placement)),
+                Err(error) => {
+                    // Observation failure disables placement, not the serving lease.
+                    // Never renew a stale sample with the next advertisement's time.
+                    tracing::warn!(error = ?error, "node placement measurement unavailable");
+                    (NodeCapacity::default(), None)
+                }
+            }
+        };
+        let advertisement = NodeAdvertisement::sign(
             node_id,
             session,
             endpoint.clone(),
@@ -213,13 +228,12 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
             modules.clone(),
             vec![1],
             NodeFailureDomain::default(),
-            NodeCapacity {
-                free_memory_bytes: 256 * 1024 * 1024,
-                free_disk_bytes: disk_budget,
-                job_credits: 64,
-                ..NodeCapacity::default()
-            },
-        )
+            capacity,
+        )?;
+        match placement {
+            Some(placement) => advertisement.with_placement_capacity(placement, &signer),
+            None => Ok(advertisement),
+        }
     })
     .publish()
     .await?;

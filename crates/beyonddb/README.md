@@ -22,6 +22,17 @@ Serving nodes publish a 15-second lease and renew every three seconds. Owner
 replacement waits for authoritative expiry; storage stalls that exhaust the
 lease still fence serving. See [measured lease qualification](SCALING.md#large-transaction-transfer-qualification).
 
+Each renewal measures RAM and scratch-filesystem availability on a blocking
+worker, caps them by runtime reservations, and signs Cell/job counts and backlog
+pressure for the placement planner. Failed measurements and shutdown advertise
+no placement capacity. A probe cannot extend the lease or publish after fencing.
+Linux placement measurement requires a readable, complete cgroup-v2 memory
+hierarchy; it checks ancestor limits and usage, including usage above a limit.
+Cgroup-v1, hidden ancestors in a container namespace, and unsupported platforms
+are ineligible instead of advertising host-wide RAM. Native macOS uses host RAM.
+Configured owned Cells can still serve when placement measurement is unavailable;
+automatic fleet placement and rebalancing are not yet composed into this server.
+
 `cargo run -p beyonddb --bin beyonddb -- config.json --bootstrap` starts one
 leased Cell node, a private mTLS peer listener, and ExtendDB's public DynamoDB
 listener. `--bootstrap` reads one access-key secret from stdin, stores it

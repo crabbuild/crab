@@ -29,6 +29,7 @@ impl NodeLeasePublisher {
     ///
     /// The signer must preserve its node, session, fleet, image, release, and
     /// key across renewals. The directory rejects a changed boot identity.
+    /// It runs on a blocking worker so resource probes cannot block lease timers.
     pub fn new(
         directory: NodeDirectory,
         sign: impl Fn(i64, i64) -> Result<NodeAdvertisement> + Send + Sync + 'static,
@@ -42,7 +43,7 @@ impl NodeLeasePublisher {
     /// Publish the initial lease before installing it in a Cell node.
     pub async fn publish(self) -> Result<PublishedNodeLease> {
         let now_ms = unix_time_ms()?;
-        let advertisement = (self.sign)(now_ms, lease_expiry(now_ms)?)?;
+        let advertisement = self.advertisement(now_ms).await?;
         let observed = self.directory.create(advertisement, now_ms).await?;
         // Object-store publication can take time; lease the remaining
         // authoritative window, not a fresh window after the response.
@@ -53,6 +54,19 @@ impl NodeLeasePublisher {
             guard,
             fence_on_drop: true,
         })
+    }
+
+    async fn advertisement(&self, now_ms: i64) -> Result<NodeAdvertisement> {
+        let expires = lease_expiry(now_ms)?;
+        let sign = Arc::clone(&self.sign);
+        // Only one sample is in flight per publisher. Its timestamp precedes
+        // dispatch, so queue/probe latency cannot extend the signed lease.
+        tokio::task::spawn_blocking(move || sign(now_ms, expires))
+            .await
+            .map_err(|source| Error::Facility {
+                name: "node-capacity-signing",
+                source: Box::new(source),
+            })?
     }
 }
 
@@ -118,7 +132,8 @@ impl PublishedNodeLease {
     async fn refresh(&mut self) -> Result<()> {
         self.guard.check()?;
         let now_ms = unix_time_ms()?;
-        let next = (self.publisher.sign)(now_ms, lease_expiry(now_ms)?)?;
+        let next = self.publisher.advertisement(now_ms).await?;
+        self.guard.check()?;
         let observed = self
             .publisher
             .directory

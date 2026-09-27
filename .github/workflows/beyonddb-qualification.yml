@@ -76,6 +76,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo test -p beyonddb --locked --lib server::capacity \
+            2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/capacity.log"
           # Keep the two process workloads serial so their storage load does not
           # distort one another's unchanged readiness deadlines.
           cargo test -p beyonddb --locked --no-fail-fast \

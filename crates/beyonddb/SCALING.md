@@ -27,10 +27,33 @@ capabilities. Per-Cell and per-node resource admission remains bounded.
 validation, ranking, fleet balance, and transfer planning. BeyondDB must compose
 these primitives with enrollment, scheduling, durable movement, and recovery;
 duplicating a placement algorithm inside its table adapter is unnecessary.
-The current binary advertises fixed free-memory and job-credit values and the
-configured disk budget. Those are not measured fleet placement headroom. The
-planner requires a signed placement snapshot and treats missing data as
-ineligible, so simply invoking it against today's advertisements is insufficient.
+The binary now signs fresh memory, disk, Cell/job, and backlog observations on
+each lease renewal. OS availability is capped by runtime admission and current
+reservations. Probe failures and shutdown advertise no placement capacity; old
+samples are never re-signed with a fresh timestamp. These observations supply
+planner input; a distributed movement controller remains unimplemented.
+Reservations also reduce OS-available bytes because they can include future
+allocation. This conservatively counts already materialized reservations twice
+and protects unallocated bytes already held by accepted work.
+
+Linux sampling uses process membership and mount metadata to walk the complete
+cgroup-v2 memory hierarchy. Ancestor usage can exhaust headroom even when the
+leaf is unlimited. Usage above a limit saturates available capacity to zero.
+The probe requires the real root's memory controller and absence of its own
+`memory.max`; subtree mounts and namespace roots with hidden ancestors are
+ineligible. Cgroup-v1 and platforms other than Linux/native macOS currently
+advertise no placement capacity. This restricts automatic placement eligibility,
+not existing explicitly owned serving Cells. Container deployment needs an
+observable hierarchy or an additional qualified host measurement contract.
+See the kernel's [memory and namespace contracts](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+and [mount-root semantics](https://man7.org/linux/man-pages/man5/proc_pid_mountinfo.5.html).
+
+The lease signer runs on a blocking worker with at most one probe in flight per
+publisher. Its timestamp precedes dispatch; waiting on a probe cannot refresh
+the lease deadline. The async lease guard can fence the publisher while its
+probe is stalled, and the late worker result cannot publish another renewal.
+The HTTP server's separate resource probe is unchanged; this implementation
+belongs to BeyondDB's product composition and does not add a runtime scheduler.
 
 Controllers need bounded ownership of discovery/scheduling ranges, controller
 lease fencing, and durable progress. One fleet leader must not scan every Cell
@@ -106,7 +129,7 @@ bounded steady-state footprint before claiming sustained scalability.
 ### Delivery order
 
 1. Establish recovery/admission correctness and measured node observations.
-   Linux SDK hard-restart qualification passes at `18c01469870`; local failures
+   Linux SDK hard-restart qualification passes at `3e6b9072ede`; local failures
    and fleet recovery under sustained pressure still require qualification.
 2. Partition metadata and integrate fleet placement through the existing runtime
    authority and movement contracts.
@@ -1184,3 +1207,39 @@ returned both items at version 69. Its binary digest remained unchanged during
 the replay. Prior leases had already expired, so this remains startup-only
 evidence, not fresh hard-crash qualification or a controlled latency comparison.
 Format, diff, Cell/LTX layout, and policy-entry checks pass.
+
+Linux SDK qualification also passes with the derived-file change at
+`3e6b9072ede` in [run 36294537538](https://github.com/crabbuild/crab/actions/runs/36294537538).
+Four peer tests pass in 394.92 seconds and both standalone process cases in
+278.51 seconds. The 70-shard case commits its history in 54.57 seconds and the
+replacement becomes healthy in 18.31 seconds. This is a fresh hard-kill scenario
+with the unchanged 45-second gate. These single-run timings are not a controlled
+performance comparison or fleet recovery qualification.
+
+### Measured node placement inputs
+
+The binary now uses the signed capacity path described above instead of fixed
+RAM/job hints and the full configured disk budget. A current-thread lease test
+failed before dispatching its signer to a blocking worker. The renewal and slow
+storage cases pass afterward in 11.02 seconds. Six capacity tests pass in 0.02
+seconds with nested/disabled controllers, hidden ancestors, malformed or missing
+measurements, over-limit usage, and live runtime disk/memory/job reservations.
+The stalled-probe regression passes in 3.02 seconds: fencing finishes before the
+probe is released, and its late result leaves advertisement generation one.
+The existing stalled-storage shutdown/fencing case passes in 6.03 seconds.
+
+A new real-server test bootstraps against RustFS, sends a signed SDK request,
+loads the published node through `NodeDirectory` to verify its signatures, and
+converts it into planner input. It observes admitted Cells and scratch bytes
+subtracted from the configured budget. The initial macOS run passes in 5.15
+seconds. After charging future reservations against OS-available bytes as well,
+the six tests and strict all-target Clippy pass (10.09 seconds for Clippy).
+The final process rerun also passes in 13.76 seconds. Its build took 7 minutes
+4 seconds; a native sample found the compiler waiting in an archive-file write
+on the mounted workspace volume. The existing build completed without restart.
+Linux qualification now includes the capacity tests and this process case;
+Linux measurement is not established by the macOS result. The added production
+code owns host probing, cgroup parsing, and admission intersection; it supplies
+measured inputs without introducing another scheduler or admission ledger.
+The lockfile adds only BeyondDB edges to already locked `fs4` 0.13.1 and
+`sysinfo` 0.38.4, with no package-version or source changes.

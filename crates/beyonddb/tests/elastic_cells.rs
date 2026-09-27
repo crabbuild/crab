@@ -120,33 +120,43 @@ async fn published_test_node_lease(
     let image = Digest::from_bytes([81; 32]);
     let release = Digest::from_bytes([82; 32]);
     let directory = NodeDirectory::new(layout.clone(), fleet, image, release);
+    let async_thread = std::thread::current().id();
     NodeLeasePublisher::new(directory, move |now_ms, expires_at_ms| {
-        NodeAdvertisement::sign(
-            NodeId::from_bytes([83; 16]),
-            session,
-            "https://beyonddb-sort-query.internal:8081".into(),
-            fleet,
-            Digest::from_bytes([84; 32]),
-            image,
-            release,
-            &SigningKey::from_bytes(&[85; 32]),
-            1,
-            now_ms,
-            expires_at_ms,
-            vec![Digest::from_bytes([86; 32])],
-            vec![1],
-            NodeFailureDomain::default(),
-            NodeCapacity {
-                free_memory_bytes: 16 * 1024 * 1024,
-                free_disk_bytes: 1 << 30,
-                job_credits: 8,
-                ..NodeCapacity::default()
-            },
-        )
+        assert_ne!(std::thread::current().id(), async_thread);
+        test_node_advertisement(session, now_ms, expires_at_ms)
     })
     .publish()
     .await
     .unwrap()
+}
+
+fn test_node_advertisement(
+    session: SessionId,
+    now_ms: i64,
+    expires_at_ms: i64,
+) -> crab_cell_runtime::Result<NodeAdvertisement> {
+    NodeAdvertisement::sign(
+        NodeId::from_bytes([83; 16]),
+        session,
+        "https://beyonddb-sort-query.internal:8081".into(),
+        Digest::from_bytes([80; 32]),
+        Digest::from_bytes([84; 32]),
+        Digest::from_bytes([81; 32]),
+        Digest::from_bytes([82; 32]),
+        &SigningKey::from_bytes(&[85; 32]),
+        1,
+        now_ms,
+        expires_at_ms,
+        vec![Digest::from_bytes([86; 32])],
+        vec![1],
+        NodeFailureDomain::default(),
+        NodeCapacity {
+            free_memory_bytes: 16 * 1024 * 1024,
+            free_disk_bytes: 1 << 30,
+            job_credits: 8,
+            ..NodeCapacity::default()
+        },
+    )
 }
 
 struct FailOnceProvisioner {
@@ -987,7 +997,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
     host.shutdown().await.unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn published_node_lease_renews_before_drain() {
     let layout = CellStorageLayout::new(
         Store::new(Arc::new(InMemory::new())),
@@ -1093,6 +1103,67 @@ async fn published_node_lease_survives_slow_authoritative_refresh() {
     task.await.unwrap().unwrap();
     guard.check().unwrap();
     guard.fence();
+}
+
+#[tokio::test]
+async fn stalled_capacity_probe_cannot_publish_after_lease_fencing() {
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        object_store::path::Path::from("stalled-capacity-probe"),
+        [42; 16],
+    );
+    let directory = NodeDirectory::new(
+        layout,
+        Digest::from_bytes([80; 32]),
+        Digest::from_bytes([81; 32]),
+        Digest::from_bytes([82; 32]),
+    );
+    let session = SessionId::from_bytes([90; 16]);
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let finished = Arc::new(tokio::sync::Notify::new());
+    let (release, wait) = std::sync::mpsc::channel();
+    let wait = std::sync::Mutex::new(wait);
+    let started = entered.clone();
+    let done = finished.clone();
+    let published = NodeLeasePublisher::new(directory.clone(), move |now, expires| {
+        if calls.fetch_add(1, Ordering::SeqCst) != 0 {
+            started.notify_one();
+            wait.lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            done.notify_one();
+        }
+        test_node_advertisement(session, now, expires)
+    })
+    .publish()
+    .await
+    .unwrap();
+    let guard = published.guard();
+    let task = tokio::spawn(async move { published.run(&CancellationToken::new()).await });
+    let started = tokio::time::timeout(Duration::from_secs(5), entered.notified()).await;
+    guard.fence();
+    let ended = tokio::time::timeout(Duration::from_secs(1), task).await;
+    // Release the blocking job even if the async deadline assertion fails.
+    release.send(()).unwrap();
+    started.unwrap();
+    assert!(matches!(
+        ended.unwrap().unwrap(),
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+    tokio::time::timeout(Duration::from_secs(1), finished.notified())
+        .await
+        .unwrap();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let record = directory.load(session, now).await.unwrap().unwrap();
+    assert_eq!(record.advertisement().generation(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

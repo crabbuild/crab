@@ -3,6 +3,7 @@
 mod support;
 
 mod server_binary {
+    mod capacity;
     mod coordinator_recovery;
     pub(super) mod global_indexes;
     pub(super) mod local_indexes;

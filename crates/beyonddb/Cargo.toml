@@ -25,10 +25,12 @@ extenddb-core = { git = "https://github.com/ExtendDB/extenddb.git", rev = "bdb7b
 extenddb-server = { git = "https://github.com/ExtendDB/extenddb.git", rev = "bdb7b3df4ace3b80a6e928f144036d056aec0327" }
 extenddb-storage = { git = "https://github.com/ExtendDB/extenddb.git", rev = "bdb7b3df4ace3b80a6e928f144036d056aec0327" }
 futures-util.workspace = true
+fs4 = "0.13.1"
 getrandom = "0.3"
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "time", "fs"] }
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber = "0.3"
