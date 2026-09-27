@@ -1,6 +1,7 @@
 mod index_splits;
 mod placement;
 mod provisioning;
+mod reclamation;
 mod splits;
 
 use crate::*;
@@ -29,6 +30,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_partition_count(2).await
+    }
+
+    async fn with_partition_count(partitions: u16) -> Self {
         let files = tempfile::tempdir().unwrap();
         let (certificate, key, remote_certificate, remote_key, ca) = tls_files(files.path());
         let remote_tls =
@@ -81,7 +86,7 @@ impl Fixture {
                 files.path().join("data"),
             )
             .unwrap()
-            .with_initial_partition_count(2)
+            .with_initial_partition_count(partitions)
             .unwrap()
             .with_peers(peers.clone()),
         );
@@ -205,7 +210,7 @@ impl Fixture {
             .0
             .unwrap();
 
-        assert_eq!(route.partitions.len(), 2);
+        assert_eq!(route.partitions.len(), usize::from(partitions));
         let mut data = Vec::new();
         for partition in route.partitions {
             let id = (0..1_000)

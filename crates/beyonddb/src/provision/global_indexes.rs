@@ -236,6 +236,8 @@ impl CellInitialPartitionProvisioner {
                 ));
             }
             for target in children.iter().chain([&source]) {
+                self.reclaim_retired_ranges(&client, account_id, Some(source.cell_id()))
+                    .await?;
                 self.provision_range(target, &client).await?;
                 committed(
                     client

@@ -17,7 +17,7 @@ reads and ALL_ATTRIBUTES on partial projections.
 
 Indexes created with the table now support automatic HASH-range splits. Online
 Create/Delete/Update index operations, index statistics, tombstone collection,
-sealed-source cleanup, and fleet-scale recovery qualification remain unfinished. Each index range has
+sealed-source storage collection, and fleet-scale recovery qualification remain unfinished. Each index range has
 a 512-MiB database budget and a 64-MiB capture budget. Adding initial ranges is
 not an unlimited scaling claim.
 
@@ -107,6 +107,11 @@ byte threshold. Its cursor advances before attempts; capacity refusals and
 transient errors defer work without terminating healthy serving. When fleet
 capacity becomes available, pending plans resume through signed placement and
 peer admission. Source/child identities remain fixed across retries.
+
+At local admission pressure, completed sealed sources can release their SQL
+slots after the account owner confirms route removal and no pending split
+reservation. Their durable roots and tombstones remain for recovery; remote
+rebalancing and storage collection remain unfinished.
 
 Index reads and projection application can return transient failures between
 source sealing and child opening. Base mutations continue to retain projection

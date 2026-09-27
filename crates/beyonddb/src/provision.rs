@@ -821,7 +821,8 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
         Box::pin(async move {
             let mut partitions = Vec::with_capacity(usize::from(self.initial_partition_count));
             for ordinal in 0..self.initial_partition_count {
-                self.reclaim_deleted_ranges(client, account_id).await?;
+                self.reclaim_retired_ranges(client, account_id, None)
+                    .await?;
                 let range = initial_partition(table, self.initial_partition_count, ordinal)?;
                 let spec = crate::GlobalIndexPartitionSpec {
                     table: table.clone(),
@@ -864,7 +865,8 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
         Box::pin(async move {
             let mut partitions = Vec::with_capacity(usize::from(self.initial_partition_count));
             for index in 0..self.initial_partition_count {
-                self.reclaim_deleted_ranges(client, account_id).await?;
+                self.reclaim_retired_ranges(client, account_id, None)
+                    .await?;
                 let spec = initial_partition(table, self.initial_partition_count, index)?;
                 let target = data_target(account_id, &table.id, &spec.partition_id)
                     .map_err(provision_error)?;

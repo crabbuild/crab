@@ -1,4 +1,4 @@
-//! Reclaim local slots while retaining published transaction and table history.
+//! Reclaim obsolete range residency while retaining durable history.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -20,7 +20,10 @@ use extenddb_storage::error::StorageError;
 use super::{CellInitialPartitionProvisioner, provision_error};
 use crate::backend::cell_error;
 use crate::{
-    DescribeTableById, Json, ReadGlobalIndexPartition, ReadPartitionState, account_target,
+    DescribeTableById, GlobalIndexPartitionInput, GlobalIndexState, Json, PartitionState,
+    PublishedPartitionInput, PublishedPartitionOutcome, ReadGlobalIndexPartition,
+    ReadGlobalIndexSplitPlan, ReadGlobalIndexState, ReadPartitionState,
+    ReadPublishedGlobalIndexPartition, ReadPublishedPartition, account_target,
 };
 
 impl CellInitialPartitionProvisioner {
@@ -103,10 +106,11 @@ impl CellInitialPartitionProvisioner {
         Ok(Some(handle))
     }
 
-    pub(super) async fn reclaim_deleted_ranges(
+    pub(super) async fn reclaim_retired_ranges(
         &self,
         client: &CellClient,
         account_id: &str,
+        retained_source: Option<CellId>,
     ) -> Result<(), StorageError> {
         let stats = self.runtime.stats();
         if stats.active_cells() < stats.active_cell_capacity() {
@@ -140,29 +144,54 @@ impl CellInitialPartitionProvisioner {
                 entry.partition(),
             )
             .map_err(provision_error)?;
-            if target.cell_id() != entry.cell() {
+            // A completed split can be replayed. Its caller still needs the
+            // sealed source, even after publication makes it otherwise eligible.
+            if target.cell_id() != entry.cell() || retained_source == Some(entry.cell()) {
                 continue;
             }
-            let table_id = if entry.namespace() == crate::DATA_NAMESPACE {
-                local
-                    .query::<ReadPartitionState>(&target, None, Json(()))
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0
-                    .map(|state| state.spec.table.id)
-            } else {
-                local
-                    .query::<ReadGlobalIndexPartition>(&target, None, Json(()))
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0
-                    .map(|spec| spec.table.id)
-            };
-            let Some(table_id) = table_id else {
-                continue;
-            };
+            let (table_id, partition_id, index_id, sealed) =
+                if entry.namespace() == crate::DATA_NAMESPACE {
+                    let Some(status) = local
+                        .query::<ReadPartitionState>(&target, None, Json(()))
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0
+                    else {
+                        continue;
+                    };
+                    (
+                        status.spec.table.id,
+                        status.spec.partition_id,
+                        None,
+                        matches!(status.state, PartitionState::Sealed(_)),
+                    )
+                } else {
+                    let Some(spec) = local
+                        .query::<ReadGlobalIndexPartition>(&target, None, Json(()))
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0
+                    else {
+                        continue;
+                    };
+                    let sealed = matches!(
+                        local
+                            .query::<ReadGlobalIndexState>(&target, None, Json(()))
+                            .await
+                            .map_err(cell_error)?
+                            .output
+                            .0,
+                        Some(GlobalIndexState::Sealed(_))
+                    );
+                    (
+                        spec.table.id,
+                        spec.partition_id,
+                        Some(spec.index.id),
+                        sealed,
+                    )
+                };
             let present = match tables.get(&table_id) {
                 Some(present) => *present,
                 None => {
@@ -173,15 +202,59 @@ impl CellInitialPartitionProvisioner {
                         .output
                         .0
                         .is_some();
-                    tables.insert(table_id, present);
+                    tables.insert(table_id.clone(), present);
                     present
                 }
             };
             if present {
-                continue;
+                if !sealed {
+                    continue;
+                }
+                let unpublished = if let Some(index_id) = index_id {
+                    let input = GlobalIndexPartitionInput {
+                        index_id,
+                        partition_id,
+                    };
+                    // Keep the sealed source resident while copying/opening is
+                    // pending. Completion removes its durable participant reservation.
+                    client
+                        .query::<ReadGlobalIndexSplitPlan>(&account, None, Json(input.clone()))
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0
+                        .is_none()
+                        && client
+                            .query::<ReadPublishedGlobalIndexPartition>(&account, None, Json(input))
+                            .await
+                            .map_err(cell_error)?
+                            .output
+                            .0
+                            .is_none()
+                } else {
+                    matches!(
+                        client
+                            .query::<ReadPublishedPartition>(
+                                &account,
+                                None,
+                                Json(PublishedPartitionInput {
+                                    table_id,
+                                    partition_id
+                                }),
+                            )
+                            .await
+                            .map_err(cell_error)?
+                            .output
+                            .0,
+                        PublishedPartitionOutcome::Missing
+                    )
+                };
+                if !unpublished {
+                    continue;
+                }
             }
-            // Table names may be recreated; IDs never are. Release only residency:
-            // original transaction participants retain their roots for recovery.
+            // Generation IDs are never reused and sealed sources cannot reopen.
+            // Release residency only: replay and recovery retain the durable root.
             retired.insert(entry.cell());
         }
         if retired.is_empty() {
@@ -208,7 +281,7 @@ impl CellInitialPartitionProvisioner {
             }
         })
         .await
-        .map_err(|_| StorageError::Transient("deleted table ranges have not settled".into()))??;
+        .map_err(|_| StorageError::Transient("retired ranges have not settled".into()))??;
         // Metadata lookup may itself restore an idle account. Hold the local
         // admission gate only for release, avoiding recursive admission waits.
         let _admission = self.admission.lock().await;

@@ -502,7 +502,8 @@ table and one repeatedly recreated indexed table failed in 0.17 seconds without
 any coordinator transactions.
 
 Foreground table/index provisioning and coordinator admission now inspect bounded
-local catalog entries under the admission mutex when slots are exhausted. A
+local catalog entries when slots are exhausted; the admission mutex covers
+release after metadata lookup. A
 candidate must belong to the requested account, have an installed data or GSI
 specification, and refer to an exact table ID absent at the current account
 owner. The account lookup uses the routed client, so the account can live on a
@@ -517,18 +518,19 @@ one-window retry for movement capacity is shared with coordinator release.
 Published roots, item data, prepared transactions, and index journals remain;
 this releases residency and does not implement storage garbage collection.
 
-Live table generations, other tenants, account/credential Cells, and unfinished
-installations are ineligible for this proof. This does not make a fleet of live
+Serving ranges of live table generations, other tenants, account/credential
+Cells, and unfinished installations are ineligible for deletion proof. Sealed
+sources have the separate route-removal proof described below. This does not make a fleet of live
 ranges fit in one node's 64 slots; general activation/placement and durable
 history reclamation remain required. The independent tests ran unchanged from
 ExtendDB revision `bdb7b3df4ace3b80a6e928f144036d056aec0327`, with signed boto3
 requests against the compiled BeyondDB process and a fresh local RustFS store.
 Its 16 transaction tests passed in 59.93 seconds before this residency fix.
 
-This pressure proof currently runs in foreground table/index provisioning and
-coordinator admission. Split-child and background recovery admissions retain
-their existing coordinator reclamation policy; integrating deleted-range
-reclamation there remains follow-up work. Startup does not reactivate deleted
+This pressure proof runs in foreground table/index provisioning, split-child
+admission, and coordinator admission. Background recovery admission still
+uses coordinator reclamation; integrating range reclamation there remains
+follow-up work. Startup does not reactivate deleted
 tables because their directories are absent from the table listing.
 
 The signed SDK recreation regression also exposed a stale table-key cache in
@@ -548,10 +550,10 @@ cached table identities. No dependency patch or new setting is required.
 | Admission caller | Initial data/GSI provisioning and foreground coordinator `ensure` supply their routed client. |
 | Deletion proof | `DescribeTableById` on the current account owner; target derivation excludes other tenants and applications. |
 | Release callee | Runtime `release_idle_cell` rechecks exact generation and settled work, closes SQLite, and publishes Idle. |
-| Shared boundary | Settled coordinator release uses the same movement retry; split/background recovery integration remains open as noted above. |
+| Shared boundary | Settled coordinator release uses the same movement retry; split admission also reclaims obsolete ranges. Background recovery integration remains open. |
 | Regression | Five slots, live indexed data, repeated table generations, preserved roots, and restoration of an old participant. |
 | Peer proof | Signed SDK recreation with the account on another owner, followed by existing transaction recovery and restart assertions. |
-| Baseline | `origin/main` has no BeyondDB subtree; the previous draft retained deleted data/index owners and cached old table IDs. |
+| Baseline | The earlier draft retained deleted data/index owners and cached old table IDs. Current main includes deleted-table reclamation but retains sealed split sources. |
 
 **Is this the best fix?** Reclaim residency through the runtime's existing
 fenced release contract, using immutable table-generation absence as product
@@ -1518,3 +1520,56 @@ after route publication before either child opens. These are bounded fixtures;
 10,000 active Cells, multi-TB storage throughput, unclean fleet recovery, and
 cutover latency qualification remain outstanding. An indivisible HASH group can
 still exhaust one Cell; sort-key subranges remain necessary.
+
+
+## Sealed-source residency after splits
+
+A completed split previously left its source in the active SQL pool. With eight
+slots and seven resident Cells, admission could not open two new split
+children even though one resident source was no longer routed. Local pressure reclamation now covers base and GSI split sources
+through the existing runtime release path.
+
+A candidate must have a durable `Sealed` state and a successful current-account
+lookup showing its exact partition ID absent from the published directory.
+For base ranges, `Unrouted` is insufficient: the directory must exist and report
+`Missing`. For indexes, the pending participant reservation must also be absent;
+it remains present until both children open. Table deletion still supplies its
+independent immutable-generation proof. Serving and importing Cells are never
+eligible solely because their route row is absent.
+
+Initial table/index creation, transaction coordinator admission, and both split
+controllers share this pressure path. Each split excludes its own source from
+reclamation, including completed-plan replays. The runtime rechecks the selected
+local generation and settled work before publishing Idle. Object-store roots,
+seals, tombstones, and transaction history remain recoverable. This does not
+collect storage, proactively rebalance remote nodes, or guarantee admission
+against stale fleet advertisements. Recovery of historical sources still needs
+available runtime capacity.
+
+The signed SDK regression `sdk_split_sources_release_capacity_and_retain_recoverable_roots`
+uses eight slots: SDK CreateTable/PutItem, base split, GSI projection and split,
+then another SDK CreateTable. It checks that both obsolete sources lose owners
+without losing roots, restores their durable seals, closes current children,
+and reads base/index images through the SDK after restoration. SDK retries are
+disabled. Before the fix, the second index child failed admission; the initial
+regression passed after adding reclamation. Deleted-table and existing split
+regressions cover the shared admission callers.
+
+**Is this the best fix?** Extend the existing product proof and runtime release
+boundary. No new eviction mechanism, schema, dependency, or capacity setting is
+needed. Discovery is bounded by local residency; metadata sharding and distributed
+rebalancing remain separate scaling gates. This increment adds about 80 net
+production lines to identify obsolete sources and share reclamation with splits.
+
+
+Verification on 2026-09-27:
+
+- New signed SDK regression: PASS, 2.45s with retries disabled.
+- All 11 `peer_network` SDK cases: PASS, 284.41s, including two-owner transaction
+  recovery, remote placement, independent split replay, and GSI tombstones.
+- Existing deleted-table residency and historical restoration: PASS, 5.33s.
+- Strict all-target Clippy: PASS, 11.59s; server build: PASS, 21.18s.
+- Format, diff, Cell/LTX layout, and policy entry-point checks: PASS.
+
+These scoped results do not resolve the previously recorded intermittent
+idle-owner test or establish fleet-scale qualification.
