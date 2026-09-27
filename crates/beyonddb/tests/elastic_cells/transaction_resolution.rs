@@ -79,12 +79,7 @@ async fn resolution_progress(participant_count: usize, hold_first: bool) {
             .await
             .unwrap();
         let info = storage.table_key_info(account_id, &name).await.unwrap();
-        let route = client
-            .query::<ReadTableRoute>(&account, None, Json(table.table_id))
-            .await
-            .unwrap()
-            .output
-            .0;
+        let route = crate::single_leaf_route(&client, &account, &table.table_id).await;
         let (target, participant) = match route {
             Some(route) => {
                 let spec = &route.partitions[0];

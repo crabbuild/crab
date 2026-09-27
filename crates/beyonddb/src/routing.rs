@@ -6,15 +6,7 @@ use crab_cell_runtime::registry::{Command, CommandContext, CommandResult, Query,
 use serde::{Deserialize, Serialize};
 
 use crate::table::{TableRecord, decode_table, statement};
-use crate::{Json, MODULE, PartitionSpec, Result, SqlBatch, SqlResultSet, SqlValue};
-
-mod split_state;
-
-pub use split_state::{
-    BeginSplit, BeginSplitOutcome, CommitSplit, CommitSplitOutcome, FinishSplit,
-    PublishedPartitionInput, PublishedPartitionOutcome, ReadPartitionSplitPlan,
-    ReadPublishedPartition, ReadSplitPlan, ReadSplitRoute, SplitRouteState,
-};
+use crate::{Json, MODULE, PartitionSpec, Result, SqlValue};
 
 /// One published set of contiguous data Cell ranges for a table.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -65,13 +57,11 @@ pub struct SplitPlan {
     pub source: PartitionSpec,
     /// New adjacent ranges that replace the source.
     pub children: [PartitionSpec; 2],
-    /// Directory epoch observed when planning; unrelated ranges may advance it.
-    pub expected_epoch: u64,
 }
 
 impl SplitPlan {
     pub(crate) fn next_epoch(&self) -> Option<u64> {
-        self.expected_epoch.checked_add(1)
+        self.source.epoch.checked_add(1)
     }
 
     pub(crate) fn valid_for(&self, table: &TableRecord) -> bool {
@@ -82,12 +72,10 @@ impl SplitPlan {
         let Some(boundary) = left.upper else {
             return false;
         };
-        self.expected_epoch > 0
-            && self.source.table.id == table.id
+        self.source.table.id == table.id
             && self.source.table.key_schema == table.key_schema
             && self.source.table.attribute_definitions == table.attribute_definitions
             && self.source.epoch > 0
-            && self.source.epoch <= self.expected_epoch
             && self
                 .source
                 .lower
@@ -130,17 +118,25 @@ pub enum ActivateTableRouteOutcome {
 /// Publish an initial route after its data Cells have been provisioned.
 pub struct ActivateTableRoute;
 
+/// Installed initial base directory and its durable publication receipt.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TableRoutePublication {
+    pub route: TableRoute,
+    pub receipt: crate::DirectoryCopyReceipt,
+}
+
 impl Command for ActivateTableRoute {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 10;
-    const CODEC_VERSION: u32 = 1;
-    type Input = Json<TableRoute>;
+    const CODEC_VERSION: u32 = 2;
+    type Input = Json<TableRoutePublication>;
     type Output = Json<ActivateTableRouteOutcome>;
 
     fn execute(
         context: &mut CommandContext<'_, '_>,
-        Json(route): Self::Input,
+        Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
+        let route = input.route;
         let table_rows = context.sql(&statement(
             "SELECT record FROM ddb_live_tables WHERE table_id = ?1",
             vec![SqlValue::Text(route.table_id.clone())],
@@ -150,14 +146,17 @@ impl Command for ActivateTableRoute {
                 ActivateTableRouteOutcome::TableNotFound,
             )));
         };
-        if !route.valid_for(&table) {
+        if route.epoch != 1
+            || route.partitions.iter().any(|part| part.epoch != 1)
+            || !route.valid_for(&table)
+        {
             return Ok(CommandResult::Rejected(Json(
                 ActivateTableRouteOutcome::InvalidRoute,
             )));
         }
         for index in &table.global_secondary_indexes {
             if context.sql(&statement(
-                "SELECT 1 FROM ddb_global_index_routes WHERE table_id = ?1 AND base_table_id = ?2 AND initial_fingerprint IS NOT NULL",
+                "SELECT 1 FROM ddb_directory_roots WHERE table_id = ?1 AND base_table_id = ?2 AND initial_fingerprint IS NOT NULL",
                 vec![
                     SqlValue::Text(index.id.clone()),
                     SqlValue::Text(table.id.clone()),
@@ -186,225 +185,57 @@ impl Command for ActivateTableRoute {
                 ActivateTableRouteOutcome::TableNotEmpty,
             )));
         }
-        let existing = context.sql(&statement(
-            "SELECT route_epoch, route_table FROM ddb_routes WHERE table_id = ?1",
-            vec![SqlValue::Text(route.table_id.clone())],
-        ))?;
-        if let Some(row) = existing[0].rows.first() {
-            let [SqlValue::Text(epoch), SqlValue::Blob(table)] = row.as_slice() else {
-                return Err(crate::Error::Command("invalid table route row"));
-            };
-            let matches = parse_epoch(epoch)? == route.epoch
-                && serde_json::from_slice::<TableRecord>(table)? == route.partitions[0].table
-                && route_partitions_match(
-                    context,
-                    "ddb_route_partitions",
-                    &route.table_id,
-                    route.partitions.iter().map(|partition| RoutePagePartition {
-                        partition_id: partition.partition_id,
-                        lower: partition.lower.unwrap_or([0; 16]),
-                        upper: partition.upper,
-                        epoch: partition.epoch,
-                    }),
-                )?;
-            let outcome = if matches {
-                ActivateTableRouteOutcome::Activated
-            } else {
-                ActivateTableRouteOutcome::AlreadyActive
-            };
-            return Ok(if outcome == ActivateTableRouteOutcome::Activated {
-                CommandResult::Success(Json(outcome))
-            } else {
-                CommandResult::Rejected(Json(outcome))
-            });
+        let spec = crate::DirectorySpec::root(table.id.clone());
+        let ranges = route
+            .partitions
+            .iter()
+            .map(|part| RoutePagePartition {
+                partition_id: part.partition_id,
+                lower: part.lower.unwrap_or([0; 16]),
+                upper: part.upper,
+                epoch: part.epoch,
+            })
+            .collect::<Vec<_>>();
+        let target = crate::directory::target_for_tenant(context.target().tenant(), &spec)?;
+        let fingerprint = crate::directory::fingerprint(&spec, &ranges)?;
+        if input.receipt.cell_id != *target.cell_id().as_bytes()
+            || input.receipt.sequence == 0
+            || input.receipt.sequence > i64::MAX as u64
+            || input.receipt.fingerprint != fingerprint
+        {
+            return Ok(CommandResult::Rejected(Json(
+                ActivateTableRouteOutcome::InvalidRoute,
+            )));
         }
-        // The table snapshot and indexed ranges must become visible in one Cell commit.
+        let existing = context.sql(&statement(
+            "SELECT initial_fingerprint FROM ddb_directory_roots WHERE table_id = ?1 AND base_table_id = ?1",
+            vec![SqlValue::Text(table.id.clone())],
+        ))?;
+        match existing[0].rows.first().map(Vec::as_slice) {
+            Some([SqlValue::Null]) => {}
+            Some([SqlValue::Blob(previous)]) if previous.as_slice() == fingerprint => {
+                return Ok(CommandResult::Success(Json(
+                    ActivateTableRouteOutcome::Activated,
+                )));
+            }
+            _ => {
+                return Ok(CommandResult::Rejected(Json(
+                    ActivateTableRouteOutcome::AlreadyActive,
+                )));
+            }
+        }
+        // A fixed-size anchor admits base writes only after the independently
+        // installed directory is durable. Replay cannot rewrite its later splits.
         context.sql(&statement(
-            "INSERT INTO ddb_routes (table_id, route_epoch, route_table) VALUES (?1, ?2, ?3)",
+            "UPDATE ddb_directory_roots SET initial_fingerprint = ?2 WHERE table_id = ?1",
             vec![
-                SqlValue::Text(route.table_id.clone()),
-                SqlValue::Text(route.epoch.to_string()),
-                SqlValue::Blob(serde_json::to_vec(&route.partitions[0].table)?),
+                SqlValue::Text(table.id),
+                SqlValue::Blob(fingerprint.to_vec()),
             ],
         ))?;
-        for partition in &route.partitions {
-            insert_route_partition(context, partition)?;
-        }
         Ok(CommandResult::Success(Json(
             ActivateTableRouteOutcome::Activated,
         )))
-    }
-}
-
-/// Read the published route for a table, if activated.
-pub struct ReadTableRoute;
-
-impl Query for ReadTableRoute {
-    const MODULE: &'static str = MODULE;
-    const ID: u32 = 11;
-    const CODEC_VERSION: u32 = 1;
-    type Input = Json<String>;
-    type Output = Json<Option<TableRoute>>;
-
-    fn execute(
-        context: &mut QueryContext<'_>,
-        Json(table_id): Self::Input,
-    ) -> Result<Self::Output> {
-        Ok(Json(load_route(&table_id, |batch| context.sql(batch))?))
-    }
-}
-
-fn load_route(
-    table_id: &str,
-    sql: impl Fn(&SqlBatch) -> Result<Vec<SqlResultSet>>,
-) -> Result<Option<TableRoute>> {
-    let route_rows = sql(&statement(
-        "SELECT route_epoch, route_table FROM ddb_routes WHERE table_id = ?1 AND EXISTS (SELECT 1 FROM ddb_live_tables WHERE table_id = ?1)",
-        vec![SqlValue::Text(table_id.to_owned())],
-    ))?;
-    let route_rows = &route_rows[0];
-    let Some(row) = route_rows.rows.first() else {
-        return Ok(None);
-    };
-    let [SqlValue::Text(epoch), SqlValue::Blob(table)] = row.as_slice() else {
-        return Err(crate::Error::Command("invalid table route row"));
-    };
-    let table: TableRecord = serde_json::from_slice(table)?;
-    if table.id != table_id {
-        return Err(crate::Error::Command("invalid table route state"));
-    }
-    let mut partitions = Vec::new();
-    let mut after_lower: Option<[u8; 16]> = None;
-    loop {
-        let page = match after_lower {
-            Some(lower) => statement(
-                "SELECT partition_id, lower_bound, upper_bound, epoch \
-                 FROM ddb_route_partitions WHERE table_id = ?1 AND lower_bound > ?2 \
-                 ORDER BY lower_bound LIMIT 256",
-                vec![
-                    SqlValue::Text(table_id.to_owned()),
-                    SqlValue::Blob(lower.to_vec()),
-                ],
-            ),
-            None => statement(
-                "SELECT partition_id, lower_bound, upper_bound, epoch \
-                 FROM ddb_route_partitions WHERE table_id = ?1 \
-                 ORDER BY lower_bound LIMIT 256",
-                vec![SqlValue::Text(table_id.to_owned())],
-            ),
-        };
-        let rows = sql(&page)?;
-        for row in &rows[0].rows {
-            let range = decode_page_partition(row)?;
-            partitions.push(PartitionSpec {
-                table: table.clone(),
-                partition_id: range.partition_id,
-                lower: (range.lower != [0; 16]).then_some(range.lower),
-                upper: range.upper,
-                epoch: range.epoch,
-            });
-            after_lower = Some(range.lower);
-        }
-        if rows[0].rows.len() < 256 {
-            break;
-        }
-    }
-    let route = TableRoute {
-        table_id: table_id.to_owned(),
-        epoch: parse_epoch(epoch)?,
-        partitions,
-    };
-    if !route.valid_for(&table) {
-        return Err(crate::Error::Command("invalid table route state"));
-    }
-    Ok(Some(route))
-}
-
-fn insert_route_partition(
-    context: &mut CommandContext<'_, '_>,
-    partition: &PartitionSpec,
-) -> Result<()> {
-    context.sql(&statement(
-        "INSERT INTO ddb_route_partitions \
-         (table_id, partition_id, lower_bound, upper_bound, epoch) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        vec![
-            SqlValue::Text(partition.table.id.clone()),
-            SqlValue::Blob(partition.partition_id.to_vec()),
-            SqlValue::Blob(partition.lower.unwrap_or([0; 16]).to_vec()),
-            // The 17-byte sentinel sorts after every 16-byte key hash.
-            SqlValue::Blob(
-                partition
-                    .upper
-                    .map_or_else(|| vec![0xff; 17], |bound| bound.to_vec()),
-            ),
-            SqlValue::Text(partition.epoch.to_string()),
-        ],
-    ))?;
-    Ok(())
-}
-
-/// One hash key's published owner without materializing the full table route.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PartitionLookupInput {
-    /// Immutable table identity.
-    pub table_id: String,
-    /// Hash of the canonical partition key.
-    pub hash: [u8; 16],
-}
-
-/// Result of a point lookup in the durable route directory.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum PartitionLookupOutcome {
-    /// No initial route has been published.
-    Unrouted,
-    /// The published route maps this hash to one partition.
-    Routed { partition_id: [u8; 16], epoch: u64 },
-}
-
-/// Resolve one partition key through the indexed account directory.
-pub struct ReadPartitionRoute;
-
-impl Query for ReadPartitionRoute {
-    const MODULE: &'static str = MODULE;
-    const ID: u32 = 14;
-    const CODEC_VERSION: u32 = 1;
-    type Input = Json<PartitionLookupInput>;
-    type Output = Json<PartitionLookupOutcome>;
-
-    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
-        let rows = context.sql(&statement(
-            "SELECT p.partition_id, p.epoch FROM ddb_routes r \
-             LEFT JOIN ddb_route_partitions p ON p.table_id = r.table_id \
-             AND p.lower_bound <= ?2 AND ?2 < p.upper_bound \
-             WHERE r.table_id = ?1 AND EXISTS (SELECT 1 FROM ddb_live_tables WHERE table_id = ?1) ORDER BY p.lower_bound DESC LIMIT 2",
-            vec![
-                SqlValue::Text(input.table_id),
-                SqlValue::Blob(input.hash.to_vec()),
-            ],
-        ))?;
-        let rows = &rows[0].rows;
-        match rows.as_slice() {
-            [] => Ok(Json(PartitionLookupOutcome::Unrouted)),
-            [row] => match row.as_slice() {
-                [SqlValue::Blob(id), SqlValue::Text(epoch)] => {
-                    let partition_id: [u8; 16] = id
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| crate::Error::Command("invalid route partition ID"))?;
-                    Ok(Json(PartitionLookupOutcome::Routed {
-                        partition_id,
-                        epoch: parse_epoch(epoch)?,
-                    }))
-                }
-                _ => Err(crate::Error::Command(
-                    "published route has no owner for hash",
-                )),
-            },
-            _ => Err(crate::Error::Command(
-                "published route has overlapping owners",
-            )),
-        }
     }
 }
 
@@ -417,7 +248,7 @@ pub struct RoutePageInput {
     pub start_hash: Option<[u8; 16]>,
     /// Later pages start after this range lower bound.
     pub after_lower: Option<[u8; 16]>,
-    /// Route epoch pinned by the first page of this request.
+    /// Membership version of the leaf containing the previous logical bound.
     pub expected_epoch: Option<u64>,
 }
 
@@ -443,7 +274,7 @@ pub enum RoutePageOutcome {
     Changed,
     /// One ordered route page and whether another directory page remains.
     Page {
-        /// Route epoch pinned within this request.
+        /// Membership version of the leaf that returned this page.
         epoch: u64,
         /// At most 64 owner ranges.
         partitions: Vec<RoutePagePartition>,
@@ -452,198 +283,162 @@ pub enum RoutePageOutcome {
     },
 }
 
-/// Return up to 64 indexed owner ranges without transferring the full route.
-pub struct ReadRoutePage;
+/// Position of one transfer relative to the published directory.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SplitRouteState {
+    Unrouted,
+    Before,
+    After,
+    Changed,
+}
 
-impl Query for ReadRoutePage {
-    const MODULE: &'static str = MODULE;
-    const ID: u32 = 15;
-    const CODEC_VERSION: u32 = 1;
-    type Input = Json<RoutePageInput>;
-    type Output = Json<RoutePageOutcome>;
-
-    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
-        read_route_page(context, input, "ddb_routes", "ddb_route_partitions")
+/// Read the published root of a live base or index generation.
+pub struct ReadRouteDirectory;
+impl Query for ReadRouteDirectory {
+    const MODULE: &'static str = crate::MODULE;
+    const ID: u32 = 29;
+    const CODEC_VERSION: u32 = 3;
+    type Input = Json<String>;
+    type Output = Json<Option<crate::DirectorySpec>>;
+    fn execute(
+        context: &mut QueryContext<'_>,
+        Json(directory_id): Self::Input,
+    ) -> Result<Self::Output> {
+        let rows = context.sql(&statement("SELECT 1 FROM ddb_directory_roots r JOIN ddb_live_tables t ON t.table_id = r.base_table_id WHERE r.table_id = ?1 AND r.initial_fingerprint IS NOT NULL", vec![SqlValue::Text(directory_id.clone())]))?;
+        Ok(Json(
+            (!rows[0].rows.is_empty()).then(|| crate::DirectorySpec::root(directory_id)),
+        ))
     }
 }
 
-pub(crate) fn read_route_page(
-    context: &QueryContext<'_>,
+/// Page a published base or index directory through bounded, independently versioned metadata leaves.
+pub async fn read_route_page(
+    client: &crab_cell_runtime::client::CellClient,
+    account: &crab_cell_runtime::identity::CellTarget,
     input: RoutePageInput,
-    routes_table: &'static str,
-    partitions_table: &'static str,
-) -> Result<Json<RoutePageOutcome>> {
+) -> std::result::Result<RoutePageOutcome, extenddb_storage::error::StorageError> {
+    use crate::backend::cell_error;
+    use extenddb_storage::error::StorageError;
+    let client = client
+        .clone()
+        .with_read_policy(crab_cell_runtime::client::ReadPolicy::CurrentOwner);
     if input.start_hash.is_some() && input.after_lower.is_some() {
-        return Err(crate::Error::Command("invalid route page cursor"));
+        return Err(StorageError::Validation("invalid directory cursor".into()));
     }
-    let generation = if routes_table == "ddb_routes" {
-        "table_id"
-    } else {
-        "base_table_id"
-    };
-    let epoch_rows = context.sql(&statement(
-        &format!("SELECT r.route_epoch FROM {routes_table} r JOIN ddb_live_tables t ON t.table_id = r.{generation} WHERE r.table_id = ?1"),
-        vec![SqlValue::Text(input.table_id.clone())],
-    ))?;
-    let Some(row) = epoch_rows[0].rows.first() else {
-        return Ok(Json(RoutePageOutcome::Unrouted));
-    };
-    let [SqlValue::Text(epoch)] = row.as_slice() else {
-        return Err(crate::Error::Command("invalid route epoch row"));
-    };
-    let epoch = parse_epoch(epoch)?;
+    if client
+        .query::<ReadRouteDirectory>(account, None, Json(input.table_id.clone()))
+        .await
+        .map_err(cell_error)?
+        .output
+        .0
+        .is_none()
+    {
+        return Ok(RoutePageOutcome::Unrouted);
+    }
+    let hash = input.after_lower.or(input.start_hash).unwrap_or([0; 16]);
+    let mut page =
+        crate::read_directory_leaf(&client, account.tenant(), &input.table_id, hash).await?;
     if input
         .expected_epoch
-        .is_some_and(|expected| expected != epoch)
+        .is_some_and(|expected| expected != page.version)
     {
-        return Ok(Json(RoutePageOutcome::Changed));
+        return Ok(RoutePageOutcome::Changed);
     }
-    let page = match (input.start_hash, input.after_lower) {
-        (Some(hash), None) => statement(
-            &format!(
-                "SELECT partition_id, lower_bound, upper_bound, epoch \
-             FROM {partitions_table} WHERE table_id = ?1 AND lower_bound >= \
-             (SELECT MAX(lower_bound) FROM {partitions_table} \
-              WHERE table_id = ?1 AND lower_bound <= ?2) \
-             ORDER BY lower_bound LIMIT 65"
-            ),
-            vec![
-                SqlValue::Text(input.table_id),
-                SqlValue::Blob(hash.to_vec()),
-            ],
-        ),
-        (None, Some(lower)) => statement(
-            &format!(
-                "SELECT partition_id, lower_bound, upper_bound, epoch \
-             FROM {partitions_table} WHERE table_id = ?1 AND lower_bound > ?2 \
-             ORDER BY lower_bound LIMIT 65"
-            ),
-            vec![
-                SqlValue::Text(input.table_id),
-                SqlValue::Blob(lower.to_vec()),
-            ],
-        ),
-        (None, None) => statement(
-            &format!(
-                "SELECT partition_id, lower_bound, upper_bound, epoch \
-             FROM {partitions_table} WHERE table_id = ?1 \
-             ORDER BY lower_bound LIMIT 65"
-            ),
-            vec![SqlValue::Text(input.table_id)],
-        ),
-        (Some(_), Some(_)) => return Err(crate::Error::Command("invalid route page cursor")),
-    };
-    let rows = context.sql(&page)?;
-    let has_more = rows[0].rows.len() > 64;
-    let partitions = rows[0]
-        .rows
-        .iter()
-        .take(64)
-        .map(decode_page_partition)
-        .collect::<Result<Vec<_>>>()?;
-    if input.after_lower.is_none() && partitions.is_empty() {
-        return Err(crate::Error::Command("published route has no partitions"));
-    }
-    if input.start_hash.is_none()
-        && input.after_lower.is_none()
-        && partitions
-            .first()
-            .is_some_and(|first| first.lower != [0; 16])
-    {
-        return Err(crate::Error::Command("route page misses hash-space start"));
-    }
-    if !has_more && partitions.last().is_some_and(|last| last.upper.is_some()) {
-        return Err(crate::Error::Command("route page misses hash-space end"));
-    }
-    for pair in partitions.windows(2) {
-        if pair[0].upper != Some(pair[1].lower) {
-            return Err(crate::Error::Command("route page has a gap or overlap"));
+    if let Some(after) = input.after_lower {
+        page.ranges.retain(|range| range.lower > after);
+        if page.ranges.is_empty()
+            && let Some(next) = page.spec.upper
+        {
+            // The previous leaf was checked at its logical continuation.
+            // Neighbour versions are independent; crossing its immutable
+            // upper bound starts a new membership observation.
+            page = crate::read_directory_leaf(&client, account.tenant(), &input.table_id, next)
+                .await?;
         }
     }
-    if input.start_hash.is_some_and(|hash| {
-        partitions.first().is_none_or(|first| {
-            hash < first.lower || first.upper.is_some_and(|upper| hash >= upper)
-        })
-    }) {
-        return Err(crate::Error::Command("route page misses start hash"));
-    }
-    Ok(Json(RoutePageOutcome::Page {
-        epoch,
-        partitions,
-        has_more,
-    }))
-}
-
-// Activation replay runs inside one snapshot. Compare compact indexed pages so
-// an existing large directory cannot exceed SQL result limits or duplicate its
-// table schema once per range in memory.
-pub(crate) fn route_partitions_match(
-    context: &CommandContext<'_, '_>,
-    partitions_table: &'static str,
-    table_id: &str,
-    mut expected: impl Iterator<Item = RoutePagePartition>,
-) -> Result<bool> {
-    let mut after = Vec::new();
-    loop {
-        let page = context.sql(&statement(
-            &format!("SELECT partition_id, lower_bound, upper_bound, epoch FROM {partitions_table} WHERE table_id = ?1 AND lower_bound > ?2 ORDER BY lower_bound LIMIT 64"),
-            vec![SqlValue::Text(table_id.to_owned()), SqlValue::Blob(after.clone())],
-        ))?;
-        for row in &page[0].rows {
-            let actual = decode_page_partition(row)?;
-            after = actual.lower.to_vec();
-            if expected.next().as_ref() != Some(&actual) {
-                return Ok(false);
-            }
-        }
-        if page[0].rows.len() < 64 {
-            return Ok(expected.next().is_none());
-        }
-    }
-}
-
-pub(crate) fn decode_page_partition(row: &Vec<SqlValue>) -> Result<RoutePagePartition> {
-    let [
-        SqlValue::Blob(id),
-        SqlValue::Blob(lower),
-        SqlValue::Blob(upper),
-        SqlValue::Text(epoch),
-    ] = row.as_slice()
-    else {
-        return Err(crate::Error::Command("invalid route page row"));
-    };
-    let partition_id = id
-        .as_slice()
-        .try_into()
-        .map_err(|_| crate::Error::Command("invalid route partition ID"))?;
-    let lower = lower
-        .as_slice()
-        .try_into()
-        .map_err(|_| crate::Error::Command("invalid route lower bound"))?;
-    let upper = if upper.as_slice() == [0xff; 17] {
-        None
-    } else {
-        Some(
-            upper
-                .as_slice()
-                .try_into()
-                .map_err(|_| crate::Error::Command("invalid route upper bound"))?,
-        )
-    };
-    Ok(RoutePagePartition {
-        partition_id,
-        lower,
-        upper,
-        epoch: parse_epoch(epoch)?,
+    Ok(RoutePageOutcome::Page {
+        epoch: page.version,
+        has_more: page.ranges.last().is_some_and(|last| last.upper.is_some()),
+        partitions: page.ranges,
     })
 }
 
-pub(crate) fn parse_epoch(epoch: &str) -> Result<u64> {
-    let parsed = epoch
-        .parse::<u64>()
-        .map_err(|_| crate::Error::Command("invalid route partition epoch"))?;
-    if parsed == 0 || parsed.to_string() != epoch {
-        return Err(crate::Error::Command("invalid route partition epoch"));
+/// Resolve the leaf owning a logical position after checking its live anchor.
+pub async fn route_directory_target(
+    client: &crab_cell_runtime::client::CellClient,
+    account: &crab_cell_runtime::identity::CellTarget,
+    directory_id: &str,
+    lower: [u8; 16],
+) -> std::result::Result<
+    crab_cell_runtime::identity::CellTarget,
+    extenddb_storage::error::StorageError,
+> {
+    use extenddb_storage::error::StorageError;
+    let client = client
+        .clone()
+        .with_read_policy(crab_cell_runtime::client::ReadPolicy::CurrentOwner);
+    if client
+        .query::<ReadRouteDirectory>(account, None, Json(directory_id.into()))
+        .await
+        .map_err(crate::backend::cell_error)?
+        .output
+        .0
+        .is_none()
+    {
+        return Err(StorageError::Transient(
+            "route directory is not published".into(),
+        ));
     }
-    Ok(parsed)
+    let page = crate::read_directory_leaf(&client, account.tenant(), directory_id, lower).await?;
+    crate::directory::target_for_tenant(account.tenant(), &page.spec)
+        .map_err(|error| StorageError::Internal(error.to_string()))
+}
+
+pub(crate) async fn split_route_state(
+    client: &crab_cell_runtime::client::CellClient,
+    account_id: &str,
+    plan: &crate::DirectoryTransfer,
+) -> std::result::Result<crate::SplitRouteState, extenddb_storage::error::StorageError> {
+    let account = crate::account_target(account_id)
+        .map_err(|error| extenddb_storage::error::StorageError::Internal(error.to_string()))?;
+    let change = plan.directory_change();
+    let left = read_route_page(
+        client,
+        &account,
+        RoutePageInput {
+            table_id: plan.table_id().to_owned(),
+            start_hash: Some(change.source.lower),
+            after_lower: None,
+            expected_epoch: None,
+        },
+    )
+    .await?;
+    let RoutePageOutcome::Page { partitions, .. } = left else {
+        return Ok(SplitRouteState::Unrouted);
+    };
+    if partitions.first() == Some(&change.source) {
+        return Ok(SplitRouteState::Before);
+    }
+    if partitions.first() != Some(&change.children[0]) {
+        return Ok(SplitRouteState::Changed);
+    }
+    let right = read_route_page(
+        client,
+        &account,
+        RoutePageInput {
+            table_id: plan.table_id().to_owned(),
+            start_hash: Some(change.children[1].lower),
+            after_lower: None,
+            expected_epoch: None,
+        },
+    )
+    .await?;
+    Ok(match right {
+        RoutePageOutcome::Page { partitions, .. }
+            if partitions.first() == Some(&change.children[1]) =>
+        {
+            SplitRouteState::After
+        }
+        _ => SplitRouteState::Changed,
+    })
 }

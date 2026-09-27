@@ -250,12 +250,8 @@ async fn local_indexes_follow_mutations_transactions_and_splits() {
     for commit in [false, true] {
         assert_prepared_index_barriers(&client, &storage, &provisioner, &infos, commit).await;
     }
-    let route = client
-        .query::<ReadTableRoute>(&account, None, Json(infos[1].table_id.clone()))
+    let route = crate::single_leaf_route(&client, &account, &infos[1].table_id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     provisioner
         .split_partition(
@@ -263,6 +259,7 @@ async fn local_indexes_follow_mutations_transactions_and_splits() {
             client.clone(),
             &infos[1].table_id,
             route.partitions[0].partition_id,
+            route.partitions[0].lower.unwrap_or([0; 16]),
         )
         .await
         .unwrap();
@@ -314,26 +311,16 @@ async fn assert_prepared_index_barriers(
                 return_old: false,
             }),
         ];
-        let route = client
-            .query::<ReadPartitionRoute>(
-                &account,
-                None,
-                Json(PartitionLookupInput {
-                    table_id: info.table_id.clone(),
-                    hash: data_key_hash(&info.table_id, &item("2", None), &info.base_key_schema)
-                        .unwrap(),
-                }),
-            )
-            .await
-            .unwrap()
-            .output
-            .0;
+        let route = crate::point_range(
+            client,
+            &account,
+            &info.table_id,
+            data_key_hash(&info.table_id, &item("2", None), &info.base_key_schema).unwrap(),
+        )
+        .await;
         let target = match route {
-            PartitionLookupOutcome::Unrouted => CoordinatorParticipantTarget::Account,
-            PartitionLookupOutcome::Routed {
-                partition_id,
-                epoch,
-            } => CoordinatorParticipantTarget::Data {
+            None => CoordinatorParticipantTarget::Account,
+            Some((partition_id, epoch)) => CoordinatorParticipantTarget::Data {
                 table_id: info.table_id.clone(),
                 partition_id,
                 epoch,

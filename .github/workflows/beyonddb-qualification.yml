@@ -70,20 +70,20 @@ jobs:
           set -euo pipefail
           cargo test -p beyonddb --locked --lib server::capacity \
             2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/capacity.log"
-          cargo test -p beyonddb --locked --test elastic_cells directory_activation \
-            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/directory-activation.log"
-          cargo test -p beyonddb --locked --test elastic_cells read_release \
-            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/read-release.log"
-          cargo test -p beyonddb --locked --test elastic_cells directory_tree \
-            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/directory-tree.log"
-          cargo test -p beyonddb --locked --test elastic_cells node_sessions \
-            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/node-sessions.log"
-          # Keep the two process workloads serial so their storage load does not
-          # distort one another's unchanged readiness deadlines.
+          # The directory cutover changes native fixtures as well as SDK paths.
+          # Run all capability suites serially to keep fixture storage workloads
+          # from distorting one another's unchanged readiness deadlines.
+          qualification_status=0
+          # Large debug native futures require the measured 16-MiB test stack.
+          # Keep this out of the peer/server command and its child processes.
+          RUST_MIN_STACK=16777216 cargo test -p beyonddb --locked --test elastic_cells \
+            -- --include-ignored --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/native.log" || qualification_status=$?
           cargo test -p beyonddb --locked --no-fail-fast \
             --test peer_network --test server_binary \
             -- --include-ignored --test-threads=1 --nocapture \
-            2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/sdk.log"
+            2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/sdk.log" || qualification_status=$?
+          exit "$qualification_status"
       - name: Retain qualification logs
         if: always()
         uses: actions/upload-artifact@v4

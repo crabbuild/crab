@@ -79,12 +79,7 @@ async fn cleanup_restart(delete_first: bool) {
             )
             .await
             .unwrap();
-        let route = client
-            .query::<ReadTableRoute>(&account, None, Json(table.table_id))
-            .await
-            .unwrap()
-            .output
-            .0;
+        let route = crate::single_leaf_route(&client, &account, &table.table_id).await;
         let (target, participant) = match route {
             None => (account.clone(), CoordinatorParticipantTarget::Account),
             Some(route) => {

@@ -20,6 +20,13 @@ pub(super) struct Remote {
 
 impl Remote {
     pub(super) async fn new(fixture: &Fixture) -> Self {
+        Self::with_router(fixture, std::convert::identity).await
+    }
+
+    pub(super) async fn with_router(
+        fixture: &Fixture,
+        wrap: impl FnOnce(axum::Router) -> axum::Router,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("https://{}", listener.local_addr().unwrap());
         let session = SessionId::from_bytes([96; 16]);
@@ -59,7 +66,7 @@ impl Remote {
             .unwrap()
             .with_peers(peers.clone()),
         );
-        let router = peers.router(provisioner.clone());
+        let router = wrap(peers.router(provisioner.clone()));
         let tls = LoadedPeerTls::load(
             &fixture._files.path().join("remote.crt"),
             &fixture._files.path().join("remote.key"),
@@ -153,13 +160,8 @@ async fn sdk_initial_base_and_index_ranges_use_remote_owners() {
         .output
         .0
         .unwrap();
-    let route = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(record.id.clone()))
+    let route = crate::single_leaf_route(&fixture.client, &account, &record.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let mut targets = route
         .partitions
@@ -169,9 +171,9 @@ async fn sdk_initial_base_and_index_ranges_use_remote_owners() {
         })
         .collect::<Vec<_>>();
     let index = &record.global_secondary_indexes[0];
-    let page = beyonddb::read_global_index_route_page(
+    let page = beyonddb::read_route_page(
         &fixture.client,
-        "123456789012",
+        &beyonddb::account_target("123456789012").unwrap(),
         beyonddb::RoutePageInput {
             table_id: index.id.clone(),
             start_hash: None,
@@ -241,6 +243,20 @@ async fn sdk_initial_base_and_index_ranges_use_remote_owners() {
         item.item.unwrap()["bucket"],
         AwsAttributeValue::S("same".into())
     );
+    // Nine durable owners must remain readable through eight resident slots.
+    // Revisit older ranges after recovery to exercise their idle-root admission.
+    for (_, item) in &fixture.data {
+        let restored = sdk
+            .get_item()
+            .table_name("Residency")
+            .key("id", item["id"].clone())
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(restored.item.as_ref(), Some(item));
+    }
+    assert_index(&sdk).await;
     fixture.shutdown().await;
 }
 
@@ -296,13 +312,8 @@ async fn sdk_initial_claim_recovery_preserves_unrouted_roots() {
         .await
         .unwrap();
     assert!(
-        fixture
-            .client
-            .query::<ReadTableRoute>(&account, None, Json(record.id.clone()))
+        crate::single_leaf_route(&fixture.client, &account, &record.id.clone())
             .await
-            .unwrap()
-            .output
-            .0
             .is_none()
     );
     let published_before = authority.load(published.cell_id()).await.unwrap().unwrap();

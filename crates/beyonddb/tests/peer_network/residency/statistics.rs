@@ -39,8 +39,9 @@ async fn description(sdk: &aws_sdk_dynamodb::Client) -> (i64, i64, i64, i64, i64
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_statistics_count_sparse_indexes_and_survive_restore_and_splits() {
-    // One directory owner is additional to the original eight-slot workload.
-    let fixture = Fixture::with_capacity(1, 9).await;
+    // The two base directories and one GSI directory are additional to the
+    // original eight-slot workload of table/index owners and split participants.
+    let fixture = Fixture::with_capacity(1, 11).await;
     let sdk = aws_sdk_dynamodb::Client::from_conf(
         fixture
             .sdk
@@ -162,7 +163,7 @@ async fn sdk_statistics_count_sparse_indexes_and_survive_restore_and_splits() {
     // contribute to the next sample; source counters remain nonzero.
     let plan = fixture
         .provisioner
-        .split_partition(ACCOUNT, fixture.client.clone(), &table.id, [0; 16])
+        .split_partition(ACCOUNT, fixture.client.clone(), &table.id, [0; 16], [0; 16])
         .await
         .unwrap();
     let index = &table.global_secondary_indexes[0];
@@ -298,7 +299,7 @@ impl crab_cell_runtime::client::LocalCellResolver for SplitDuringSample {
                         .unwrap();
                 } else {
                     provisioner
-                        .split_partition(ACCOUNT, client, &table_id, [0; 16])
+                        .split_partition(ACCOUNT, client, &table_id, [0; 16], [0; 16])
                         .await
                         .unwrap();
                 }

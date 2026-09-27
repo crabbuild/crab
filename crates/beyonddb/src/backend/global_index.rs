@@ -228,9 +228,9 @@ impl CellStorage {
     ) -> Result<(CellTarget, u64), StorageError> {
         let hash = crate::data_key_hash(index_id, key, schema)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
-        let page = crate::read_global_index_route_page(
+        let page = crate::read_route_page(
             &self.client,
-            account_id,
+            &target(account_id)?,
             RoutePageInput {
                 table_id: index_id.into(),
                 start_hash: Some(hash),
@@ -364,36 +364,29 @@ impl CellStorage {
             expected_epoch: cursor.epoch,
         });
         let account_target = target(account)?;
-        let page = if let Some(index_id) = index_id {
-            let page = async {
+        let page = async {
+            if matches!(table.placement, crate::TablePlacement::Routed { .. }) {
                 provisioner
-                    .recover_index_directory_path(
+                    .recover_route_directory_path(
                         &self.client,
                         account,
-                        index_id,
+                        index_id.unwrap_or(&table_id),
                         cursor.after_range,
                         nodes,
                     )
                     .await?;
-                crate::read_global_index_route_page(&self.client, account, input.0).await
             }
-            .await;
-            match page {
-                Ok(page) => page,
-                Err(error) => {
-                    // An unavailable metadata path cannot pin the account sweep.
-                    // Revisit it on the next pass while other indexes recover.
-                    cursor.next_index(index_count);
-                    return Err(error);
-                }
+            crate::read_route_page(&self.client, &account_target, input.0).await
+        }
+        .await;
+        let page = match page {
+            Ok(page) => page,
+            Err(error) => {
+                // Each directory owns an independent path. Revisit an outage next
+                // pass so base recovery cannot starve healthy index generations.
+                cursor.next_index(index_count);
+                return Err(error);
             }
-        } else {
-            self.client
-                .query::<crate::ReadRoutePage>(&account_target, None, input)
-                .await
-                .map_err(cell_error)?
-                .output
-                .0
         };
         let mut sources = Vec::new();
         match page {

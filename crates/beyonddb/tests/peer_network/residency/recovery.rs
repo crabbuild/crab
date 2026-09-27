@@ -104,7 +104,9 @@ async fn configured_recovery_resumes_claimed_roots_before_sdk_requests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discovered_recovery_resumes_claimed_ranges_before_sdk_requests() {
-    let fixture = Fixture::with_partition_count(1).await;
+    // Two base directories and one index directory must fit alongside the four
+    // owners under test, account and credential. This test interrupts all four.
+    let fixture = Fixture::with_capacity(1, 9).await;
     super::reclamation::create(&fixture.sdk, "ResidencyClaimedIndex", true).await;
     let account_target = account_target(ACCOUNT).unwrap();
     let table = fixture
@@ -314,6 +316,240 @@ async fn metadata_restoration_releases_a_settled_range_without_losing_items() {
             .await
             .unwrap();
         assert_eq!(restored.item.as_ref(), Some(item));
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoned_begin_finishes_with_one_participant_residency_slot() {
+    use beyonddb::{
+        BeginCrossCellTransaction, BeginCrossCellTransactionInput, CoordinatorDecision,
+        CoordinatorParticipant, CoordinatorParticipantTarget, IndexedTransactionOperation,
+        PreparePartitionTransaction, PreparePartitionTransactionInput, PutItemInput,
+        ReadCrossCellTransaction, ReadCrossCellTransactionInput, TransactionOperation,
+    };
+
+    let fixture = Fixture::with_capacity(2, 6).await;
+    let account = account_target(ACCOUNT).unwrap();
+    let table = fixture
+        .client
+        .query::<DescribeTable>(&account, None, Json("Residency".into()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    let route = crate::single_leaf_route(&fixture.client, &account, &table.id)
+        .await
+        .unwrap();
+    let transaction_id = [167; 16];
+    let identity = || crab_cell_runtime::MutationIdentity {
+        request_id: crab_cell_runtime::identity::RequestId::from_bytes(
+            *uuid::Uuid::now_v7().as_bytes(),
+        ),
+        issued_at_ms: now_ms(),
+        expires_at_ms: now_ms() + 60_000,
+    };
+    let coordinator = beyonddb::coordinator_target(ACCOUNT, &transaction_id).unwrap();
+    fixture
+        .provisioner
+        .admit_coordinator(ACCOUNT, &transaction_id)
+        .await
+        .unwrap();
+    let mut participants = route
+        .partitions
+        .iter()
+        .enumerate()
+        .map(|(index, partition)| {
+            let target =
+                beyonddb::data_target(ACCOUNT, &table.id, &partition.partition_id).unwrap();
+            let (_, item) = fixture
+                .data
+                .iter()
+                .find(|(handle, _)| handle.cell_id() == target.cell_id())
+                .unwrap();
+            CoordinatorParticipant {
+                target: CoordinatorParticipantTarget::Data {
+                    table_id: table.id.clone(),
+                    partition_id: partition.partition_id,
+                    epoch: partition.epoch,
+                },
+                operations: vec![IndexedTransactionOperation {
+                    index: u8::try_from(index).unwrap(),
+                    operation: TransactionOperation::Put(PutItemInput {
+                        table_name: table.table_name.clone(),
+                        table_id: table.id.clone(),
+                        item: Item::from([
+                            (
+                                "id".into(),
+                                AttributeValue::S(item["id"].as_s().unwrap().clone()),
+                            ),
+                            ("value".into(), AttributeValue::S("recovered-begin".into())),
+                        ]),
+                        condition: None,
+                    }),
+                }],
+            }
+        })
+        .collect::<Vec<_>>();
+    participants.sort_by_key(|participant| match &participant.target {
+        CoordinatorParticipantTarget::Data {
+            table_id,
+            partition_id,
+            ..
+        } => *beyonddb::data_target(ACCOUNT, table_id, partition_id)
+            .unwrap()
+            .cell_id()
+            .as_bytes(),
+        _ => unreachable!(),
+    });
+    transaction_command!(
+        fixture.client,
+        BeginCrossCellTransaction,
+        &coordinator,
+        identity(),
+        Json(BeginCrossCellTransactionInput {
+            account_id: ACCOUNT.into(),
+            transaction_id,
+            token: None,
+            participants: participants.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    let first = &participants[0];
+    let CoordinatorParticipantTarget::Data {
+        table_id,
+        partition_id,
+        epoch,
+    } = &first.target
+    else {
+        unreachable!()
+    };
+    let target = beyonddb::data_target(ACCOUNT, table_id, partition_id).unwrap();
+    // Stop after durable prepare, before the coordinator receives its receipt.
+    transaction_command!(
+        fixture.client,
+        PreparePartitionTransaction,
+        &target,
+        identity(),
+        Json(PreparePartitionTransactionInput {
+            table_id: table_id.clone(),
+            epoch: *epoch,
+            transaction_id,
+            coordinator_cell: *coordinator.cell_id().as_bytes(),
+            coordinator_key: transaction_id.to_vec(),
+            operations: first
+                .operations
+                .iter()
+                .map(|op| op.operation.clone())
+                .collect(),
+        }),
+    )
+    .await
+    .unwrap();
+    for partition in &route.partitions {
+        fixture
+            .provisioner
+            .admit_existing_partition(ACCOUNT, &table.id, &partition.partition_id)
+            .await
+            .unwrap()
+            .drain()
+            .await
+            .unwrap();
+    }
+    fixture
+        .provisioner
+        .admit_coordinator(ACCOUNT, &transaction_id)
+        .await
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
+    let mut credentials =
+        std::collections::HashSet::from([beyonddb::credential_target(ACCESS_KEY)
+            .unwrap()
+            .cell_id()]);
+    for key in ["AKIARECOVERYRESIDENCY", "AKIARECOVERYRESIDENCYTWO"] {
+        let blocker = fixture.provisioner.admit_credential(key).await.unwrap();
+        assert!(credentials.insert(blocker.cell_id()));
+    }
+    // Account and three credential owners occupy four slots. A pending coordinator
+    // must stay resident while both original participants share the final slot.
+    fixture
+        .provisioner
+        .install_transaction_recovery_loop(
+            &fixture.tasks,
+            beyonddb::CellStorage::new(fixture.client.clone(), "us-east-1"),
+            fixture.directory.clone(),
+            vec![ACCOUNT.into()],
+        )
+        .unwrap();
+    // Observe locally: a routed query could restore the coordinator itself and
+    // conceal a discovery failure in the background worker.
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let proof = CellCatalog::new(fixture.layout.clone(), coordinator.tenant())
+        .lookup(coordinator.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let control = authority
+                .load(coordinator.cell_id())
+                .await
+                .unwrap()
+                .unwrap();
+            if let Some(handle) = fixture
+                .node
+                .runtime()
+                .local_handle(proof.clone(), &control)
+                .await
+                .unwrap()
+            {
+                let state = CellClient::local(fixture.application.registry(), handle)
+                    .query::<ReadCrossCellTransaction>(
+                        &coordinator,
+                        None,
+                        Json(ReadCrossCellTransactionInput {
+                            account_id: ACCOUNT.into(),
+                            transaction_id,
+                            routing_key: transaction_id.to_vec(),
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .output
+                    .0
+                    .unwrap();
+                if state.resolved_count == 2 {
+                    assert_eq!(state.decision, CoordinatorDecision::Commit);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let sdk = super::provisioning::sdk_without_retries(&fixture);
+    for (_, item) in &fixture.data {
+        let mut expected = item.clone();
+        expected.insert(
+            "value".into(),
+            AwsAttributeValue::S("recovered-begin".into()),
+        );
+        assert_eq!(
+            sdk.get_item()
+                .table_name("Residency")
+                .key("id", item["id"].clone())
+                .consistent_read(true)
+                .send()
+                .await
+                .unwrap()
+                .item,
+            Some(expected)
+        );
     }
     fixture.shutdown().await;
 }

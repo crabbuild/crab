@@ -1,12 +1,12 @@
 use super::global_indexes::{ACCOUNT, mutation, owner};
 use crate::*;
 use beyonddb::{
-    ActivateGlobalIndexImport, ApplyGlobalIndexMutation, BeginGlobalIndexSplit,
-    CommitGlobalIndexSplit, ExportGlobalIndexEntries, GlobalIndexApplyOutcome, GlobalIndexEntry,
+    ActivateGlobalIndexImport, ApplyGlobalIndexMutation, BeginDirectoryTransfer,
+    DirectoryPartitionInput, ExportGlobalIndexEntries, GlobalIndexApplyOutcome, GlobalIndexEntry,
     GlobalIndexExport, GlobalIndexFingerprint, GlobalIndexImport, GlobalIndexImportComplete,
-    GlobalIndexMutation, GlobalIndexPartitionInput, GlobalIndexQuery, GlobalIndexScan,
-    GlobalIndexSplitPlan, GlobalIndexState, ImportGlobalIndexEntry, OpenGlobalIndexImport,
-    PrepareGlobalIndexSplit, ProjectionVersion, ReadGlobalIndexPartition, ReadGlobalIndexSplitPlan,
+    GlobalIndexMutation, GlobalIndexQuery, GlobalIndexScan, GlobalIndexSplitPlan, GlobalIndexState,
+    ImportGlobalIndexEntry, OpenGlobalIndexImport, PrepareGlobalIndexSplit, ProjectionVersion,
+    PublishDirectoryTransfer, ReadDirectoryTransfer, ReadGlobalIndexPartition,
     ReadGlobalIndexState, global_index_target, initialize_global_index,
 };
 
@@ -159,9 +159,9 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
             .unwrap();
     let RoutePageOutcome::Page {
         partitions, epoch, ..
-    } = beyonddb::read_global_index_route_page(
+    } = beyonddb::read_route_page(
         &client,
-        "123456789012",
+        &beyonddb::account_target("123456789012").unwrap(),
         RoutePageInput {
             table_id: index.id.clone(),
             start_hash: None,
@@ -197,7 +197,11 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
     };
     assert!(
         client
-            .command::<BeginGlobalIndexSplit>(&index_directory, mutation(), Json(plan.clone()))
+            .command::<BeginDirectoryTransfer>(
+                &index_directory,
+                mutation(),
+                Json(plan.clone().into())
+            )
             .await
             .unwrap()
             .output
@@ -472,7 +476,11 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
     }
     assert!(
         client
-            .command::<CommitGlobalIndexSplit>(&index_directory, mutation(), Json(plan.clone()))
+            .command::<PublishDirectoryTransfer>(
+                &index_directory,
+                mutation(),
+                Json(plan.clone().into())
+            )
             .await
             .unwrap()
             .output
@@ -481,11 +489,11 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
     for spec in [&plan.source, &plan.children[0], &plan.children[1]] {
         assert_eq!(
             client
-                .query::<ReadGlobalIndexSplitPlan>(
+                .query::<ReadDirectoryTransfer>(
                     &index_directory,
                     None,
-                    Json(GlobalIndexPartitionInput {
-                        index_id: index.id.clone(),
+                    Json(DirectoryPartitionInput {
+                        table_id: index.id.clone(),
                         partition_id: spec.partition_id
                     })
                 )
@@ -493,7 +501,7 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
                 .unwrap()
                 .output
                 .0,
-            Some(plan.clone())
+            Some(plan.clone().into())
         );
     }
     host.shutdown().await.unwrap();
@@ -535,11 +543,11 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
     for spec in [&plan.source, &plan.children[0], &plan.children[1]] {
         assert!(
             client
-                .query::<ReadGlobalIndexSplitPlan>(
+                .query::<ReadDirectoryTransfer>(
                     &index_directory,
                     None,
-                    Json(GlobalIndexPartitionInput {
-                        index_id: index.id.clone(),
+                    Json(DirectoryPartitionInput {
+                        table_id: index.id.clone(),
                         partition_id: spec.partition_id
                     })
                 )

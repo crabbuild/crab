@@ -18,10 +18,12 @@ mod changes;
 mod client;
 mod retirement;
 mod split;
+mod transfer;
 pub use changes::*;
 pub use client::*;
 pub use retirement::*;
 pub use split::*;
+pub use transfer::*;
 
 pub(crate) const MODULE: &str = "beyonddb-directory";
 pub(crate) const NAMESPACE: NamespaceId = NamespaceId::from_bytes([0x47; 16]);
@@ -47,14 +49,17 @@ static COMMANDS: [crab_cell_runtime::registry::OperationDescriptor; 12] = [
     crate::participant::phase_operation(9),
     crab_cell_runtime::registry::OperationDescriptor {
         input_limit: crate::OPERATION_BYTES,
+        codec_version: 2,
         ..crate::participant::phase_operation(10)
     },
     crab_cell_runtime::registry::OperationDescriptor {
         input_limit: crate::OPERATION_BYTES,
+        codec_version: 2,
         ..crate::participant::phase_operation(11)
     },
     crab_cell_runtime::registry::OperationDescriptor {
         input_limit: crate::OPERATION_BYTES,
+        codec_version: 2,
         ..crate::participant::phase_operation(12)
     },
 ];
@@ -72,8 +77,12 @@ static QUERIES: [crab_cell_runtime::registry::OperationDescriptor; 6] = [
         output_limit: 128 * 1024,
         ..crate::participant::phase_operation(3)
     },
-    crate::participant::phase_operation(4),
     crab_cell_runtime::registry::OperationDescriptor {
+        codec_version: 2,
+        ..crate::participant::phase_operation(4)
+    },
+    crab_cell_runtime::registry::OperationDescriptor {
+        codec_version: 2,
         output_limit: crate::OPERATION_BYTES,
         ..crate::participant::phase_operation(5)
     },
@@ -155,7 +164,7 @@ impl crab_cell_runtime::registry::CellModule for DirectoryModule {
             source.update(include_bytes!("directory/changes.rs"));
             source.update(include_bytes!("directory/retirement.rs"));
             source.update(include_bytes!("directory/split.rs"));
-            source.update(include_bytes!("global_index/split_routing.rs"));
+            source.update(include_bytes!("directory/transfer.rs"));
             ModuleDescriptor {
                 name: MODULE,
                 source_digest: Digest::from_bytes(*source.finalize().as_bytes()),
@@ -195,12 +204,12 @@ impl crab_cell_runtime::registry::CellModule for DirectoryModule {
         registry.bind_query::<ReadDirectory>()?;
         registry.bind_query::<ReadDirectoryPage>()?;
         registry.bind_query::<ReadDirectoryChanges>()?;
-        registry.bind_command::<crate::BeginGlobalIndexSplit>()?;
-        registry.bind_command::<crate::CommitGlobalIndexSplit>()?;
-        registry.bind_command::<crate::FinishGlobalIndexSplit>()?;
-        registry.bind_query::<crate::ReadPublishedGlobalIndexPartition>()?;
+        registry.bind_command::<crate::BeginDirectoryTransfer>()?;
+        registry.bind_command::<crate::PublishDirectoryTransfer>()?;
+        registry.bind_command::<crate::FinishDirectoryTransfer>()?;
+        registry.bind_query::<crate::ReadDirectoryRange>()?;
         registry.bind_query::<DirectoryNeedsSplit>()?;
-        registry.bind_query::<crate::ReadGlobalIndexSplitPlan>()
+        registry.bind_query::<crate::ReadDirectoryTransfer>()
     }
 }
 

@@ -4,10 +4,11 @@ use aws_sdk_dynamodb::types::{
     ProjectionType, ScalarAttributeType,
 };
 use beyonddb::{
-    ApplyGlobalIndexMutation, BeginGlobalIndexSplit, GlobalIndexApplyOutcome, GlobalIndexMutation,
-    GlobalIndexPartitionInput, GlobalIndexSplitPlan, GlobalIndexState, GlobalIndexUsage,
-    PartitionUsage, ProjectionVersion, ReadGlobalIndexPartition, ReadGlobalIndexSplitPlan,
-    ReadGlobalIndexState, RoutePageInput, RoutePageOutcome, data_target, global_index_target,
+    ApplyGlobalIndexMutation, BeginDirectoryTransfer, DirectoryPartitionInput,
+    GlobalIndexApplyOutcome, GlobalIndexMutation, GlobalIndexSplitPlan, GlobalIndexState,
+    GlobalIndexUsage, PartitionUsage, ProjectionVersion, ReadDirectoryTransfer,
+    ReadGlobalIndexPartition, ReadGlobalIndexState, RoutePageInput, RoutePageOutcome, data_target,
+    global_index_target,
 };
 use crab_cell_runtime::{MutationIdentity, cell::catalog::CellCatalog, identity::RequestId};
 
@@ -61,8 +62,9 @@ async fn settled(sdk: &aws_sdk_dynamodb::Client, expected: &[SdkItem]) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restore() {
-    // One directory owner is additional to the original eight-slot workload.
-    let fixture = Fixture::with_capacity(2, 9).await;
+    // Two base directories and the index directory add three owners to the
+    // original eight-slot workload; the fleet must still be full before splitting.
+    let fixture = Fixture::with_capacity(2, 11).await;
     let sdk = aws_sdk_dynamodb::Client::from_conf(
         fixture
             .sdk
@@ -120,13 +122,8 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
         .output
         .0
         .unwrap();
-    let base = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+    let base = crate::single_leaf_route(&fixture.client, &account, &table.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let index = &table.global_secondary_indexes[0];
     let index_directory =
@@ -140,9 +137,13 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
     };
     let RoutePageOutcome::Page {
         partitions, epoch, ..
-    } = beyonddb::read_global_index_route_page(&fixture.client, "123456789012", page.clone())
-        .await
-        .unwrap()
+    } = beyonddb::read_route_page(
+        &fixture.client,
+        &beyonddb::account_target("123456789012").unwrap(),
+        page.clone(),
+    )
+    .await
+    .unwrap()
     else {
         panic!("missing index route");
     };
@@ -246,7 +247,11 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
     assert!(
         fixture
             .client
-            .command::<BeginGlobalIndexSplit>(&index_directory, mutation(), Json(pending.clone()))
+            .command::<BeginDirectoryTransfer>(
+                &index_directory,
+                mutation(),
+                Json(pending.clone().into())
+            )
             .await
             .unwrap()
             .output
@@ -275,7 +280,7 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
     assert!(matches!(
         fixture
             .client
-            .command::<BeginGlobalIndexSplit>(&index_directory, mutation(), Json(collision))
+            .command::<BeginDirectoryTransfer>(&index_directory, mutation(), Json(collision.into()))
             .await,
         Err(crab_cell_runtime::client::InvocationError::Rejected(_))
     ));
@@ -328,7 +333,7 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
         }
     })
     .await
-    .expect("fixture should advertise all nine slots occupied");
+    .expect("fixture should advertise every slot occupied");
     let mut cursor = None;
     let mut deferred = false;
     for _ in 0..12 {
@@ -348,11 +353,11 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
     assert!(deferred);
     let plan = fixture
         .client
-        .query::<ReadGlobalIndexSplitPlan>(
+        .query::<ReadDirectoryTransfer>(
             &index_directory,
             None,
-            Json(GlobalIndexPartitionInput {
-                index_id: index.id.clone(),
+            Json(DirectoryPartitionInput {
+                table_id: index.id.clone(),
                 partition_id: partitions[0].partition_id,
             }),
         )
@@ -361,6 +366,7 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
         .output
         .0
         .expect("capacity refusal must retain the plan");
+    let plan = GlobalIndexSplitPlan::try_from(plan).unwrap();
     fixture
         .provisioner
         .install_account_capacity_loop(
@@ -386,11 +392,11 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
             for plan in [&plan, &pending] {
                 done &= fixture
                     .client
-                    .query::<ReadGlobalIndexSplitPlan>(
+                    .query::<ReadDirectoryTransfer>(
                         &index_directory,
                         None,
-                        Json(GlobalIndexPartitionInput {
-                            index_id: index.id.clone(),
+                        Json(DirectoryPartitionInput {
+                            table_id: index.id.clone(),
                             partition_id: plan.source.partition_id,
                         }),
                     )
@@ -428,17 +434,21 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
         partitions: ranges,
         epoch: current,
         ..
-    } = beyonddb::read_global_index_route_page(&fixture.client, "123456789012", page.clone())
-        .await
-        .unwrap()
+    } = beyonddb::read_route_page(
+        &fixture.client,
+        &beyonddb::account_target("123456789012").unwrap(),
+        page.clone(),
+    )
+    .await
+    .unwrap()
     else {
         panic!("split index directory missing");
     };
     assert_eq!((ranges.len(), current), (4, epoch + 2));
     assert_eq!(
-        beyonddb::read_global_index_route_page(
+        beyonddb::read_route_page(
             &fixture.client,
-            "123456789012",
+            &beyonddb::account_target("123456789012").unwrap(),
             RoutePageInput {
                 expected_epoch: Some(epoch),
                 ..page
@@ -581,7 +591,11 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
     assert!(
         fixture
             .client
-            .command::<BeginGlobalIndexSplit>(&index_directory, mutation(), Json(retiring.clone()))
+            .command::<BeginDirectoryTransfer>(
+                &index_directory,
+                mutation(),
+                Json(retiring.clone().into())
+            )
             .await
             .unwrap()
             .output
@@ -616,11 +630,11 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
         assert!(
             fixture
                 .client
-                .query::<ReadGlobalIndexSplitPlan>(
+                .query::<ReadDirectoryTransfer>(
                     &index_directory,
                     None,
-                    Json(GlobalIndexPartitionInput {
-                        index_id: index.id.clone(),
+                    Json(DirectoryPartitionInput {
+                        table_id: index.id.clone(),
                         partition_id: spec.partition_id
                     })
                 )

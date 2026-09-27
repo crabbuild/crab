@@ -34,8 +34,7 @@ use crate::{
     BackfillPartitionTtl, BackfillPartitionTtlOutcome, ConfigurePartitionTtl,
     ConfigurePartitionTtlInput, ConfigurePartitionTtlOutcome, ExpiredPartitionInput,
     ExpiredPartitionOutcome, PartitionTtlInput, ReadExpiredPartition, ReadPartitionTtl,
-    ReadPartitionTtlInput, ReadPartitionTtlOutcome, ReadRoutePage, RoutePageInput,
-    RoutePageOutcome, data_target,
+    ReadPartitionTtlInput, ReadPartitionTtlOutcome, RoutePageInput, RoutePageOutcome, data_target,
 };
 
 use super::{CellStorage, cell_error, mutation_identity, target, unsupported};
@@ -133,22 +132,17 @@ impl CellStorage {
         state: TtlSweepState,
         now: u64,
     ) -> Result<u64, StorageError> {
-        let page = self
-            .client
-            .query::<ReadRoutePage>(
-                account,
-                None,
-                Json(RoutePageInput {
-                    table_id: state.table_id.clone(),
-                    start_hash: None,
-                    after_lower: state.after_lower,
-                    expected_epoch: None,
-                }),
-            )
-            .await
-            .map_err(cell_error)?
-            .output
-            .0;
+        let page = crate::read_route_page(
+            &self.client,
+            account,
+            RoutePageInput {
+                table_id: state.table_id.clone(),
+                start_hash: None,
+                after_lower: state.after_lower,
+                expected_epoch: None,
+            },
+        )
+        .await?;
         let (partitions, has_more) = match page {
             RoutePageOutcome::Page {
                 partitions,
@@ -290,22 +284,17 @@ impl CellStorage {
         let mut expected_epoch = None;
         let mut owners = Vec::new();
         loop {
-            let page = self
-                .client
-                .query::<ReadRoutePage>(
-                    &account,
-                    None,
-                    Json(RoutePageInput {
-                        table_id: table.id.clone(),
-                        start_hash: None,
-                        after_lower,
-                        expected_epoch,
-                    }),
-                )
-                .await
-                .map_err(cell_error)?
-                .output
-                .0;
+            let page = crate::read_route_page(
+                &self.client,
+                &account,
+                RoutePageInput {
+                    table_id: table.id.clone(),
+                    start_hash: None,
+                    after_lower,
+                    expected_epoch,
+                },
+            )
+            .await?;
             let (epoch, partitions, has_more) = match page {
                 RoutePageOutcome::Page {
                     epoch,
@@ -651,22 +640,17 @@ impl MetadataEngine for CellStorage {
         Box::pin(async move {
             let table = self.record(&account_id, &table_name).await?;
             let account = target(&account_id)?;
-            let page = self
-                .client
-                .query::<ReadRoutePage>(
-                    &account,
-                    None,
-                    Json(RoutePageInput {
-                        table_id: table.id.clone(),
-                        start_hash: None,
-                        after_lower: None,
-                        expected_epoch: None,
-                    }),
-                )
-                .await
-                .map_err(cell_error)?
-                .output
-                .0;
+            let page = crate::read_route_page(
+                &self.client,
+                &account,
+                RoutePageInput {
+                    table_id: table.id.clone(),
+                    start_hash: None,
+                    after_lower: None,
+                    expected_epoch: None,
+                },
+            )
+            .await?;
             let (partitions, has_more) = match page {
                 RoutePageOutcome::Page {
                     partitions,

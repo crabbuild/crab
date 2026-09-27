@@ -9,13 +9,12 @@ use extenddb_storage::{BoxedFuture, error::StorageError};
 use super::{CellInitialPartitionProvisioner, provision_error, split_boundary};
 use crate::backend::{cell_error, mutation_identity};
 use crate::{
-    ActivateGlobalIndexImport, BeginGlobalIndexSplit, CommitGlobalIndexSplit,
-    ExportGlobalIndexEntries, FinishGlobalIndexSplit, GlobalIndexApplyOutcome, GlobalIndexExport,
-    GlobalIndexFingerprint, GlobalIndexImport, GlobalIndexImportComplete,
-    GlobalIndexPartitionInput, GlobalIndexSplitPlan, GlobalIndexState, ImportGlobalIndexEntry,
-    Json, OpenGlobalIndexImport, PrepareGlobalIndexSplit, ReadGlobalIndexPartition,
-    ReadGlobalIndexSplitPlan, ReadGlobalIndexState, ReadPublishedGlobalIndexPartition,
-    SplitRouteState, account_target, data_key_hash, global_index_target,
+    ActivateGlobalIndexImport, BeginDirectoryTransfer, DirectoryPartitionInput,
+    ExportGlobalIndexEntries, FinishDirectoryTransfer, GlobalIndexApplyOutcome, GlobalIndexExport,
+    GlobalIndexFingerprint, GlobalIndexImport, GlobalIndexImportComplete, GlobalIndexSplitPlan,
+    GlobalIndexState, ImportGlobalIndexEntry, Json, OpenGlobalIndexImport, PrepareGlobalIndexSplit,
+    PublishDirectoryTransfer, ReadDirectoryRange, ReadDirectoryTransfer, ReadGlobalIndexPartition,
+    ReadGlobalIndexState, SplitRouteState, account_target, data_key_hash, global_index_target,
 };
 
 fn changed() -> StorageError {
@@ -50,14 +49,13 @@ impl CellInitialPartitionProvisioner {
         }
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
         let account = account_target(account_id).map_err(provision_error)?;
-        let directory =
-            crate::global_index_directory_target(&client, &account, index_id, lower).await?;
+        let directory = crate::route_directory_target(&client, &account, index_id, lower).await?;
         let pending = client
-            .query::<ReadGlobalIndexSplitPlan>(
+            .query::<ReadDirectoryTransfer>(
                 &directory,
                 None,
-                Json(GlobalIndexPartitionInput {
-                    index_id: index_id.to_owned(),
+                Json(DirectoryPartitionInput {
+                    table_id: index_id.to_owned(),
                     partition_id,
                 }),
             )
@@ -66,6 +64,7 @@ impl CellInitialPartitionProvisioner {
             .output
             .0;
         if let Some(plan) = pending {
+            let plan = GlobalIndexSplitPlan::try_from(plan).map_err(provision_error)?;
             self.resume_global_index_split(account_id, client, &plan)
                 .await?;
             return Ok(Some(plan));
@@ -98,25 +97,26 @@ impl CellInitialPartitionProvisioner {
         Box::pin(async move {
             let client = client.with_read_policy(ReadPolicy::CurrentOwner);
             let account = account_target(account_id).map_err(provision_error)?;
-            let mut directory =
-                crate::global_index_directory_target(&client, &account, index_id, lower).await?;
-            let input = GlobalIndexPartitionInput {
-                index_id: index_id.to_owned(),
+            let directory =
+                crate::route_directory_target(&client, &account, index_id, lower).await?;
+            let input = DirectoryPartitionInput {
+                table_id: index_id.to_owned(),
                 partition_id,
             };
             if let Some(plan) = client
-                .query::<ReadGlobalIndexSplitPlan>(&directory, None, Json(input.clone()))
+                .query::<ReadDirectoryTransfer>(&directory, None, Json(input.clone()))
                 .await
                 .map_err(cell_error)?
                 .output
                 .0
             {
+                let plan = GlobalIndexSplitPlan::try_from(plan).map_err(provision_error)?;
                 self.resume_global_index_split(account_id, client, &plan)
                     .await?;
                 return Ok(plan);
             }
             let published = client
-                .query::<ReadPublishedGlobalIndexPartition>(&directory, None, Json(input))
+                .query::<ReadDirectoryRange>(&directory, None, Json(input))
                 .await
                 .map_err(cell_error)?
                 .output
@@ -152,34 +152,9 @@ impl CellInitialPartitionProvisioner {
             {
                 return Err(changed());
             }
-            let mut ready = false;
-            for _ in 0..128 {
-                let state = client
-                    .query::<crate::ReadDirectory>(&directory, None, Json(()))
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0
-                    .ok_or_else(changed)?;
-                let full = client
-                    .query::<crate::DirectoryNeedsSplit>(&directory, None, Json(()))
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0;
-                if matches!(state.mode, crate::DirectoryMode::Leaf) && !full {
-                    ready = true;
-                    break;
-                }
-                self.split_directory(&client, account_id, &state.spec)
-                    .await?;
-                directory =
-                    crate::global_index_directory_target(&client, &account, index_id, lower)
-                        .await?;
-            }
-            if !ready {
-                return Err(changed());
-            }
+            let directory = self
+                .split_ready_directory(&client, account_id, index_id, lower)
+                .await?;
             let boundary = split_boundary(source.lower, source.upper)?;
             let epoch = published.epoch.checked_add(1).ok_or_else(|| {
                 StorageError::LimitExceeded("index directory epoch exhausted".into())
@@ -198,10 +173,10 @@ impl CellInitialPartitionProvisioner {
             };
             committed(
                 client
-                    .command::<BeginGlobalIndexSplit>(
+                    .command::<BeginDirectoryTransfer>(
                         &directory,
                         mutation_identity()?,
-                        Json(plan.clone()),
+                        Json(plan.clone().into()),
                     )
                     .await,
             )?;
@@ -225,7 +200,7 @@ impl CellInitialPartitionProvisioner {
             let client = client.with_read_policy(ReadPolicy::CurrentOwner);
             let account = account_target(account_id).map_err(provision_error)?;
             let index = &plan.source.index;
-            let directory = crate::global_index_directory_target(
+            let directory = crate::route_directory_target(
                 &client,
                 &account,
                 &index.id,
@@ -233,19 +208,22 @@ impl CellInitialPartitionProvisioner {
             )
             .await?;
             let pending = client
-                .query::<ReadGlobalIndexSplitPlan>(
+                .query::<ReadDirectoryTransfer>(
                     &directory,
                     None,
-                    Json(GlobalIndexPartitionInput {
-                        index_id: index.id.clone(),
+                    Json(DirectoryPartitionInput {
+                        table_id: index.id.clone(),
                         partition_id: plan.source.partition_id,
                     }),
                 )
                 .await
                 .map_err(cell_error)?
                 .output
-                .0;
-            let state = crate::global_index_split_route(&client, account_id, plan).await?;
+                .0
+                .map(GlobalIndexSplitPlan::try_from)
+                .transpose()
+                .map_err(provision_error)?;
+            let state = crate::split_route_state(&client, account_id, &plan.clone().into()).await?;
             // Finish is durable proof that the exact replacement ranges opened.
             // Completed replay needs no historical source or admission capacity.
             if pending.is_none() && state == SplitRouteState::After {
@@ -361,14 +339,14 @@ impl CellInitialPartitionProvisioner {
             }
             committed(
                 client
-                    .command::<CommitGlobalIndexSplit>(
+                    .command::<PublishDirectoryTransfer>(
                         &directory,
                         mutation_identity()?,
-                        Json(plan.clone()),
+                        Json(plan.clone().into()),
                     )
                     .await,
             )?;
-            if crate::global_index_split_route(&client, account_id, plan).await?
+            if crate::split_route_state(&client, account_id, &plan.clone().into()).await?
                 != SplitRouteState::After
             {
                 return Err(changed());
@@ -405,10 +383,10 @@ impl CellInitialPartitionProvisioner {
             // A restarted sweep can discover the unfinished plan through a child.
             committed(
                 client
-                    .command::<FinishGlobalIndexSplit>(
+                    .command::<FinishDirectoryTransfer>(
                         &directory,
                         mutation_identity()?,
-                        Json(plan.clone()),
+                        Json(plan.clone().into()),
                     )
                     .await,
             )

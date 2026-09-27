@@ -1,7 +1,9 @@
+mod lineage;
+
 use super::*;
 use beyonddb::{
-    BeginSplit, BeginSplitOutcome, PublishedPartitionInput, ReadPartitionSplitPlan, ReadRoutePage,
-    ReadSplitPlan, RoutePageInput, RoutePageOutcome, SplitPlan,
+    BeginDirectoryTransfer, DirectoryPartitionInput, ReadDirectoryTransfer, RoutePageInput,
+    RoutePageOutcome, SplitPlan,
 };
 use crab_cell_runtime::client::InvocationError;
 use crab_cell_runtime::{MutationIdentity, identity::RequestId};
@@ -12,23 +14,24 @@ async fn sdk_independent_range_splits_preserve_progress_and_replay() {
     let (route, plans) = pending_splits(&fixture).await;
     let account = account_target("123456789012").unwrap();
     let table = route.partitions[0].table.clone();
+    let directory = beyonddb::route_directory_target(&fixture.client, &account, &table.id, [0; 16])
+        .await
+        .unwrap();
     let mut competing = plans[0].clone();
     competing.children[0].partition_id = [120; 16];
     let conflict = fixture
         .client
-        .command::<BeginSplit>(
-            &account,
+        .command::<BeginDirectoryTransfer>(
+            &directory,
             MutationIdentity {
                 request_id: RequestId::from_bytes([119; 16]),
                 issued_at_ms: now_ms(),
                 expires_at_ms: now_ms() + 60_000,
             },
-            Json(competing),
+            Json(competing.into()),
         )
         .await;
-    assert!(
-        matches!(conflict, Err(InvocationError::Rejected(result)) if result.output.0 == BeginSplitOutcome::Conflict)
-    );
+    assert!(matches!(conflict, Err(InvocationError::Rejected(result)) if !result.output.0));
     fixture
         .provisioner
         .admit_account("123456789012")
@@ -40,10 +43,10 @@ async fn sdk_independent_range_splits_preserve_progress_and_replay() {
     for plan in &plans {
         let recovered = fixture
             .client
-            .query::<ReadPartitionSplitPlan>(
-                &account,
+            .query::<ReadDirectoryTransfer>(
+                &directory,
                 None,
-                Json(PublishedPartitionInput {
+                Json(DirectoryPartitionInput {
                     table_id: table.id.clone(),
                     partition_id: plan.source.partition_id,
                 }),
@@ -52,7 +55,7 @@ async fn sdk_independent_range_splits_preserve_progress_and_replay() {
             .unwrap()
             .output
             .0;
-        assert_eq!(recovered.as_ref(), Some(plan));
+        assert_eq!(recovered, Some(plan.clone().into()));
     }
     // Publish one range while the other plan is still pending. Replaying the
     // first concurrently with the second protects both sides of the cutover.
@@ -63,18 +66,26 @@ async fn sdk_independent_range_splits_preserve_progress_and_replay() {
             fixture.client.clone(),
             &table.id,
             plans[0].source.partition_id,
+            plans[0].source.lower.unwrap_or([0; 16]),
             u64::MAX,
         )
         .await
         .unwrap();
     let pending = fixture
         .client
-        .query::<ReadSplitPlan>(&account, None, Json(table.id.clone()))
+        .query::<ReadDirectoryTransfer>(
+            &directory,
+            None,
+            Json(DirectoryPartitionInput {
+                table_id: table.id.clone(),
+                partition_id: plans[1].source.partition_id,
+            }),
+        )
         .await
         .unwrap()
         .output
         .0;
-    assert_eq!(pending, Some(plans[1].clone()));
+    assert_eq!(pending, Some(plans[1].clone().into()));
     let (replay, second) = tokio::join!(
         fixture
             .provisioner
@@ -83,7 +94,8 @@ async fn sdk_independent_range_splits_preserve_progress_and_replay() {
             "123456789012",
             fixture.client.clone(),
             &table.id,
-            plans[1].source.partition_id
+            plans[1].source.partition_id,
+            plans[1].source.lower.unwrap_or([0; 16]),
         ),
     );
     replay.unwrap();
@@ -95,13 +107,8 @@ async fn sdk_independent_range_splits_preserve_progress_and_replay() {
             .await
             .unwrap();
     }
-    let published = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+    let published = crate::single_leaf_route(&fixture.client, &account, &table.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     assert_eq!(published.epoch, route.epoch + 2);
     assert_eq!(
@@ -111,33 +118,45 @@ async fn sdk_independent_range_splits_preserve_progress_and_replay() {
             .flat_map(|plan| plan.children.clone())
             .collect::<Vec<_>>()
     );
-    let stale_page = fixture
-        .client
-        .query::<ReadRoutePage>(
-            &account,
-            None,
-            Json(RoutePageInput {
-                table_id: table.id.clone(),
-                start_hash: None,
-                after_lower: None,
-                expected_epoch: Some(route.epoch + 1),
-            }),
-        )
-        .await
-        .unwrap()
-        .output
-        .0;
+    let stale_page = beyonddb::read_route_page(
+        &fixture.client,
+        &account,
+        RoutePageInput {
+            table_id: table.id.clone(),
+            start_hash: None,
+            after_lower: None,
+            expected_epoch: Some(route.epoch + 1),
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(stale_page, RoutePageOutcome::Changed);
     assert!(
         fixture
             .client
-            .query::<ReadSplitPlan>(&account, None, Json(table.id.clone()))
+            .query::<ReadDirectoryTransfer>(
+                &directory,
+                None,
+                Json(DirectoryPartitionInput {
+                    table_id: table.id.clone(),
+                    partition_id: plans[1].source.partition_id
+                })
+            )
             .await
             .unwrap()
             .output
             .0
             .is_none()
     );
+    let root = beyonddb::DirectorySpec::root(table.id.clone());
+    fixture
+        .provisioner
+        .admit_existing_directory("123456789012", &root)
+        .await
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
     // Release every new range and the metadata owner; SDK reads must restore
     // the published directory and copied values from object storage.
     for range in &published.partitions {
@@ -190,13 +209,8 @@ async fn pending_splits(fixture: &Fixture) -> (TableRoute, Vec<SplitPlan>) {
         .output
         .0
         .unwrap();
-    let route = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+    let route = crate::single_leaf_route(&fixture.client, &account, &table.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let plans: Vec<_> = route
         .partitions
@@ -209,29 +223,31 @@ async fn pending_splits(fixture: &Fixture) -> (TableRoute, Vec<SplitPlan>) {
             let mut left = source.clone();
             left.partition_id = [101 + index as u8 * 2; 16];
             left.upper = Some(boundary);
-            left.epoch = route.epoch + 1;
+            left.epoch = source.epoch + 1;
             let mut right = source.clone();
             right.partition_id = [102 + index as u8 * 2; 16];
             right.lower = Some(boundary);
-            right.epoch = route.epoch + 1;
+            right.epoch = source.epoch + 1;
             SplitPlan {
                 source: source.clone(),
                 children: [left, right],
-                expected_epoch: route.epoch,
             }
         })
         .collect();
+    let directory = beyonddb::route_directory_target(&fixture.client, &account, &table.id, [0; 16])
+        .await
+        .unwrap();
     for (index, plan) in plans.iter().enumerate() {
         fixture
             .client
-            .command::<BeginSplit>(
-                &account,
+            .command::<BeginDirectoryTransfer>(
+                &directory,
                 MutationIdentity {
                     request_id: RequestId::from_bytes([111 + index as u8; 16]),
                     issued_at_ms: now_ms(),
                     expires_at_ms: now_ms() + 60_000,
                 },
-                Json(plan.clone()),
+                Json(plan.clone().into()),
             )
             .await
             .expect("disjoint ranges must retain independent split plans");
@@ -249,11 +265,15 @@ async fn sdk_capacity_sweep_advances_past_a_transaction_blocked_split() {
     };
     use std::time::Duration;
 
-    let fixture = Fixture::new().await;
+    // Retain both pending sources and four children plus account, credential and directory.
+    let fixture = Fixture::with_capacity(2, 9).await;
     let (route, plans) = pending_splits(&fixture).await;
     let table = &route.partitions[0].table;
     let account = account_target("123456789012").unwrap();
     let source = data_target("123456789012", &table.id, &plans[0].source.partition_id).unwrap();
+    let directory = beyonddb::route_directory_target(&fixture.client, &account, &table.id, [0; 16])
+        .await
+        .unwrap();
     let identity = |byte| MutationIdentity {
         request_id: RequestId::from_bytes([byte; 16]),
         issued_at_ms: now_ms(),
@@ -302,10 +322,10 @@ async fn sdk_capacity_sweep_advances_past_a_transaction_blocked_split() {
     assert_eq!(
         fixture
             .client
-            .query::<ReadPartitionSplitPlan>(
-                &account,
+            .query::<ReadDirectoryTransfer>(
+                &directory,
                 None,
-                Json(PublishedPartitionInput {
+                Json(DirectoryPartitionInput {
                     table_id: table.id.clone(),
                     partition_id: plans[0].source.partition_id,
                 })
@@ -314,7 +334,7 @@ async fn sdk_capacity_sweep_advances_past_a_transaction_blocked_split() {
             .unwrap()
             .output
             .0,
-        Some(plans[0].clone())
+        Some(plans[0].clone().into())
     );
     assert_eq!(
         fixture
@@ -377,13 +397,8 @@ async fn wait_for_ranges(fixture: &Fixture, table_id: &str, count: usize) -> Tab
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             assert!(fixture.node.is_ready(), "capacity sweep stopped serving");
-            let route = fixture
-                .client
-                .query::<ReadTableRoute>(&account, None, Json(table_id.to_owned()))
+            let route = crate::single_leaf_route(&fixture.client, &account, table_id)
                 .await
-                .unwrap()
-                .output
-                .0
                 .unwrap();
             if route.partitions.len() == count {
                 break route;
@@ -418,16 +433,24 @@ impl crab_cell_runtime::client::LocalCellResolver for FailPublishedChild {
         let plan = self.plan.clone();
         let child = self.child;
         Box::pin(async move {
-            if target.cell_id() == child
-                && client
-                    .query::<beyonddb::ReadSplitRoute>(&account, None, Json(plan))
-                    .await
-                    .unwrap()
-                    .output
-                    .0
-                    == beyonddb::SplitRouteState::After
-            {
-                return Err(crab_cell_runtime::Error::CellNotActive);
+            if target.cell_id() == child {
+                let page = beyonddb::read_route_page(
+                    &client,
+                    &account,
+                    RoutePageInput {
+                        table_id: plan.source.table.id.clone(),
+                        start_hash: Some(plan.source.lower.unwrap_or([0; 16])),
+                        after_lower: None,
+                        expected_epoch: None,
+                    },
+                )
+                .await
+                .unwrap();
+                let published = matches!(page, RoutePageOutcome::Page { partitions, .. }
+                    if partitions.first().is_some_and(|range| range.partition_id == plan.children[0].partition_id));
+                if published {
+                    return Err(crab_cell_runtime::Error::CellNotActive);
+                }
             }
             Ok(None)
         })
@@ -443,6 +466,10 @@ async fn sdk_capacity_recovers_publication_before_children_open() {
         let plan = &plans[0];
         let table = &plan.source.table;
         let account = account_target("123456789012").unwrap();
+        let directory =
+            beyonddb::route_directory_target(&fixture.client, &account, &table.id, [0; 16])
+                .await
+                .unwrap();
         let sdk = aws_sdk_dynamodb::Client::from_conf(
             fixture
                 .sdk
@@ -497,10 +524,10 @@ async fn sdk_capacity_recovers_publication_before_children_open() {
             assert_eq!(
                 fixture
                     .client
-                    .query::<ReadPartitionSplitPlan>(
-                        &account,
+                    .query::<ReadDirectoryTransfer>(
+                        &directory,
                         None,
-                        Json(PublishedPartitionInput {
+                        Json(DirectoryPartitionInput {
                             table_id: table.id.clone(),
                             partition_id: spec.partition_id
                         })
@@ -510,7 +537,7 @@ async fn sdk_capacity_recovers_publication_before_children_open() {
                     .output
                     .0
                     .as_ref(),
-                Some(plan)
+                Some(&plan.clone().into())
             );
         }
         let child_source = plan.children[0].clone();
@@ -526,7 +553,6 @@ async fn sdk_capacity_recovers_publication_before_children_open() {
         let nested = SplitPlan {
             source: child_source,
             children: grandchildren,
-            expected_epoch: plan.expected_epoch + 1,
         };
         let mutation = || MutationIdentity {
             request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
@@ -535,8 +561,8 @@ async fn sdk_capacity_recovers_publication_before_children_open() {
         };
         // A published child remains reserved until its parent's second open.
         assert!(
-            matches!(fixture.client.command::<BeginSplit>(&account, mutation(), Json(nested.clone())).await,
-            Err(InvocationError::Rejected(result)) if result.output.0 == BeginSplitOutcome::Conflict)
+            matches!(fixture.client.command::<BeginDirectoryTransfer>(&directory, mutation(), Json(nested.clone().into())).await,
+            Err(InvocationError::Rejected(result)) if !result.output.0)
         );
         for (i, target) in targets.iter().enumerate() {
             let state = fixture
@@ -578,6 +604,17 @@ async fn sdk_capacity_recovers_publication_before_children_open() {
         fixture
             .provisioner
             .admit_account("123456789012")
+            .await
+            .unwrap()
+            .drain()
+            .await
+            .unwrap();
+        fixture
+            .provisioner
+            .admit_existing_directory(
+                "123456789012",
+                &beyonddb::DirectorySpec::root(table.id.clone()),
+            )
             .await
             .unwrap()
             .drain()
@@ -627,7 +664,14 @@ async fn sdk_capacity_recovers_publication_before_children_open() {
         assert!(
             fixture
                 .client
-                .query::<ReadSplitPlan>(&account, None, Json(table.id.clone()))
+                .query::<ReadDirectoryTransfer>(
+                    &directory,
+                    None,
+                    Json(DirectoryPartitionInput {
+                        table_id: table.id.clone(),
+                        partition_id: plan.source.partition_id
+                    })
+                )
                 .await
                 .unwrap()
                 .output
@@ -638,10 +682,10 @@ async fn sdk_capacity_recovers_publication_before_children_open() {
             assert!(
                 fixture
                     .client
-                    .query::<ReadPartitionSplitPlan>(
-                        &account,
+                    .query::<ReadDirectoryTransfer>(
+                        &directory,
                         None,
-                        Json(PublishedPartitionInput {
+                        Json(DirectoryPartitionInput {
                             table_id: table.id.clone(),
                             partition_id: spec.partition_id
                         })
@@ -653,11 +697,11 @@ async fn sdk_capacity_recovers_publication_before_children_open() {
                     .is_none()
             );
         }
-        // Completion releases the reservation, and table deletion cascades a
-        // later unfinished plan together with all of its participant lookups.
+        // Completion releases the reservation. Deletion retires the leaf before
+        // acknowledging account cleanup, fencing later unfinished transfers.
         fixture
             .client
-            .command::<BeginSplit>(&account, mutation(), Json(nested.clone()))
+            .command::<BeginDirectoryTransfer>(&directory, mutation(), Json(nested.clone().into()))
             .await
             .unwrap();
         sdk.delete_table()
@@ -665,14 +709,23 @@ async fn sdk_capacity_recovers_publication_before_children_open() {
             .send()
             .await
             .unwrap();
+        fixture
+            .provisioner
+            .retire_directory_step(
+                &fixture.client,
+                "123456789012",
+                &beyonddb::DirectorySpec::root(table.id.clone()),
+            )
+            .await
+            .unwrap();
         for spec in [&nested.source, &nested.children[0], &nested.children[1]] {
             assert!(
                 fixture
                     .client
-                    .query::<ReadPartitionSplitPlan>(
-                        &account,
+                    .query::<ReadDirectoryTransfer>(
+                        &directory,
                         None,
-                        Json(PublishedPartitionInput {
+                        Json(DirectoryPartitionInput {
                             table_id: table.id.clone(),
                             partition_id: spec.partition_id
                         })

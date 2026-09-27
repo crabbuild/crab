@@ -15,11 +15,10 @@ use super::{CapacityCursor, CellInitialPartitionProvisioner, provision_error, sp
 use crate::backend::{cell_error, mutation_identity};
 use crate::split::split_contract;
 use crate::{
-    BeginSplit, BeginSplitOutcome, CellSplitController, DescribeTable, Json, ListTables,
-    ListTablesInput, ListTablesOutcome, PartitionState, PartitionUsage, PublishedPartitionInput,
-    PublishedPartitionOutcome, ReadPartitionSplitPlan, ReadPartitionState, ReadPublishedPartition,
-    ReadRoutePage, ReadSplitPlan, ReadSplitRoute, RoutePageInput, RoutePageOutcome, SplitPlan,
-    SplitRouteState, account_target, data_target,
+    BeginDirectoryTransfer, CellSplitController, DescribeTable, DirectoryPartitionInput, Json,
+    ListTables, ListTablesInput, ListTablesOutcome, PartitionState, PartitionUsage,
+    ReadDirectoryRange, ReadDirectoryTransfer, ReadPartitionState, RoutePageInput,
+    RoutePageOutcome, SplitPlan, SplitRouteState, account_target, data_target,
 };
 
 impl CellInitialPartitionProvisioner {
@@ -27,7 +26,7 @@ impl CellInitialPartitionProvisioner {
     ///
     /// `None` starts a new pass. Once a range is selected, the cursor advances
     /// even if its split fails; its durable plan remains for the next pass.
-    /// Account discovery failures preserve the cursor; unavailable index
+    /// Account discovery failures preserve the cursor; unavailable base/index
     /// directories are revisited next pass. Reads use current owners.
     pub async fn reconcile_account_capacity(
         &self,
@@ -111,28 +110,19 @@ impl CellInitialPartitionProvisioner {
             after_lower,
             expected_epoch: None,
         });
-        let page = if let Some(position) = index {
-            match crate::read_global_index_route_page(&client, account_id, input.0).await {
-                Ok(page) => page,
-                Err(error) => {
-                    // Each index has an independent metadata owner. Skip a failed
-                    // path so its outage cannot stop capacity work for peers.
-                    *cursor = Some(CapacityCursor {
-                        table_name: name,
-                        after_lower: None,
-                        index: (position + 1 < table.global_secondary_indexes.len())
-                            .then_some(position + 1),
-                    });
-                    return Err(error);
-                }
+        let page = match crate::read_route_page(&client, &account, input.0).await {
+            Ok(page) => page,
+            Err(error) => {
+                // Base and index directories have independent owners. Advance
+                // past an unavailable path so it cannot starve healthy peers.
+                let next = index.map_or(0, |position| position + 1);
+                *cursor = Some(CapacityCursor {
+                    table_name: name,
+                    after_lower: None,
+                    index: (next < table.global_secondary_indexes.len()).then_some(next),
+                });
+                return Err(error);
             }
-        } else {
-            client
-                .query::<ReadRoutePage>(&account, None, input)
-                .await
-                .map_err(cell_error)?
-                .output
-                .0
         };
         let (partitions, has_more) = match page {
             RoutePageOutcome::Page {
@@ -170,21 +160,17 @@ impl CellInitialPartitionProvisioner {
                     if current.as_ref() != Some(&table) {
                         return Ok(false);
                     }
-                    let route = client
-                        .query::<ReadRoutePage>(
-                            &account,
-                            None,
-                            Json(RoutePageInput {
-                                table_id: table.id,
-                                start_hash: None,
-                                after_lower: None,
-                                expected_epoch: None,
-                            }),
-                        )
-                        .await
-                        .map_err(cell_error)?
-                        .output
-                        .0;
+                    let route = crate::read_route_page(
+                        &client,
+                        &account,
+                        RoutePageInput {
+                            table_id: table.id,
+                            start_hash: None,
+                            after_lower: None,
+                            expected_epoch: None,
+                        },
+                    )
+                    .await?;
                     if !matches!(route, RoutePageOutcome::Page { .. }) {
                         return Err(error);
                     }
@@ -236,6 +222,7 @@ impl CellInitialPartitionProvisioner {
                 client,
                 &table.id,
                 partition.partition_id,
+                partition.lower,
                 max_database_bytes,
             )
             .await
@@ -319,7 +306,7 @@ impl CellInitialPartitionProvisioner {
             .map_err(provision_error)
     }
 
-    /// Split one oversized range or resume the table's first pending source plan.
+    /// Inspect ranges in order and resume their leaf-owned transfers before splitting.
     ///
     /// A serving control loop should repeat this call while the table is active.
     pub async fn reconcile_table_capacity(
@@ -336,41 +323,20 @@ impl CellInitialPartitionProvisioner {
         }
         let account = account_target(account_id).map_err(provision_error)?;
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
-        if let Some(plan) = client
-            .query::<ReadSplitPlan>(&account, None, Json(table_id.to_owned()))
-            .await
-            .map_err(cell_error)?
-            .output
-            .0
-        {
-            return self
-                .split_partition(
-                    account_id,
-                    client.clone(),
-                    table_id,
-                    plan.source.partition_id,
-                )
-                .await
-                .map(Some);
-        }
         let mut after_lower = None;
         let mut expected_epoch = None;
         loop {
-            let page = client
-                .query::<ReadRoutePage>(
-                    &account,
-                    None,
-                    Json(RoutePageInput {
-                        table_id: table_id.to_owned(),
-                        start_hash: None,
-                        after_lower,
-                        expected_epoch,
-                    }),
-                )
-                .await
-                .map_err(cell_error)?
-                .output
-                .0;
+            let page = crate::read_route_page(
+                &client,
+                &account,
+                RoutePageInput {
+                    table_id: table_id.to_owned(),
+                    start_hash: None,
+                    after_lower,
+                    expected_epoch,
+                },
+            )
+            .await?;
             let (epoch, partitions, has_more) = match page {
                 RoutePageOutcome::Page {
                     epoch,
@@ -394,6 +360,7 @@ impl CellInitialPartitionProvisioner {
                         client.clone(),
                         table_id,
                         partition.partition_id,
+                        partition.lower,
                         max_database_bytes,
                     )
                     .await?
@@ -420,6 +387,7 @@ impl CellInitialPartitionProvisioner {
         client: CellClient,
         table_id: &str,
         source_partition_id: [u8; 16],
+        lower: [u8; 16],
         max_database_bytes: u64,
     ) -> Result<Option<SplitPlan>, StorageError> {
         if max_database_bytes == 0 {
@@ -429,42 +397,26 @@ impl CellInitialPartitionProvisioner {
         }
         let account = account_target(account_id).map_err(provision_error)?;
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
-        if client
-            .query::<ReadPartitionSplitPlan>(
-                &account,
-                None,
-                Json(PublishedPartitionInput {
-                    table_id: table_id.to_owned(),
-                    partition_id: source_partition_id,
-                }),
-            )
-            .await
-            .map_err(cell_error)?
-            .output
-            .0
-            .is_some()
-        {
-            return self
-                .split_partition(account_id, client.clone(), table_id, source_partition_id)
-                .await
-                .map(Some);
-        }
-        let published = client
-            .query::<ReadPublishedPartition>(
-                &account,
-                None,
-                Json(PublishedPartitionInput {
-                    table_id: table_id.to_owned(),
-                    partition_id: source_partition_id,
-                }),
-            )
+        let directory = crate::route_directory_target(&client, &account, table_id, lower).await?;
+        let input = DirectoryPartitionInput {
+            table_id: table_id.into(),
+            partition_id: source_partition_id,
+        };
+        let pending = client
+            .query::<ReadDirectoryTransfer>(&directory, None, Json(input.clone()))
             .await
             .map_err(cell_error)?
             .output
             .0;
-        if !matches!(published, PublishedPartitionOutcome::Published { .. }) {
+        let published = client
+            .query::<ReadDirectoryRange>(&directory, None, Json(input))
+            .await
+            .map_err(cell_error)?
+            .output
+            .0;
+        if pending.is_some() || published.is_none() {
             return self
-                .split_partition(account_id, client.clone(), table_id, source_partition_id)
+                .split_partition(account_id, client, table_id, source_partition_id, lower)
                 .await
                 .map(Some);
         }
@@ -479,9 +431,15 @@ impl CellInitialPartitionProvisioner {
         if usage.database_bytes <= max_database_bytes {
             return Ok(None);
         }
-        self.split_partition(account_id, client.clone(), table_id, source_partition_id)
-            .await
-            .map(Some)
+        self.split_partition(
+            account_id,
+            client.clone(),
+            table_id,
+            source_partition_id,
+            lower,
+        )
+        .await
+        .map(Some)
     }
 
     /// Plan and finish one additional data Cell range split.
@@ -494,90 +452,81 @@ impl CellInitialPartitionProvisioner {
         client: CellClient,
         table_id: &'a str,
         source_partition_id: [u8; 16],
+        lower: [u8; 16],
     ) -> BoxedFuture<'a, Result<SplitPlan, StorageError>> {
         // Split recovery nests admission and replay futures. Keep that state off
         // the capacity caller's stack, including retries of completed splits.
         Box::pin(async move {
             let account = account_target(account_id).map_err(provision_error)?;
             let client = client.with_read_policy(ReadPolicy::CurrentOwner);
+            let directory =
+                crate::route_directory_target(&client, &account, table_id, lower).await?;
+            let input = DirectoryPartitionInput {
+                table_id: table_id.into(),
+                partition_id: source_partition_id,
+            };
             if let Some(plan) = client
-                .query::<ReadPartitionSplitPlan>(
-                    &account,
-                    None,
-                    Json(PublishedPartitionInput {
-                        table_id: table_id.to_owned(),
-                        partition_id: source_partition_id,
-                    }),
-                )
+                .query::<ReadDirectoryTransfer>(&directory, None, Json(input.clone()))
                 .await
                 .map_err(cell_error)?
                 .output
                 .0
             {
+                let plan = SplitPlan::try_from(plan).map_err(provision_error)?;
                 self.resume_split(account_id, client.clone(), &plan).await?;
                 return Ok(plan);
             }
             let published = client
-                .query::<ReadPublishedPartition>(
-                    &account,
-                    None,
-                    Json(PublishedPartitionInput {
-                        table_id: table_id.to_owned(),
-                        partition_id: source_partition_id,
-                    }),
-                )
+                .query::<ReadDirectoryRange>(&directory, None, Json(input))
                 .await
                 .map_err(cell_error)?
                 .output
                 .0;
-            let (route_epoch, source) = match published {
-                PublishedPartitionOutcome::Published { route_epoch, spec } => (route_epoch, spec),
-                PublishedPartitionOutcome::Unrouted => {
-                    return Err(StorageError::TableNotActive(table_id.to_owned()));
-                }
-                PublishedPartitionOutcome::Missing => {
-                    return self
-                        .completed_split(
-                            account_id,
-                            table_id,
-                            source_partition_id,
-                            &client,
-                            &account,
-                        )
-                        .await?
-                        .ok_or_else(|| {
-                            StorageError::Validation(
-                                "split source is absent from table route".into(),
-                            )
-                        });
-                }
+            let Some(published) = published else {
+                return self
+                    .completed_split(account_id, table_id, source_partition_id, &client)
+                    .await?
+                    .ok_or_else(|| {
+                        StorageError::Validation("split source is absent from table route".into())
+                    });
             };
-            let plan = split_plan(&source, route_epoch)?;
+            let target =
+                data_target(account_id, table_id, &source_partition_id).map_err(provision_error)?;
+            let source = client
+                .query::<ReadPartitionState>(&target, None, Json(()))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0
+                .ok_or_else(|| StorageError::Transient("split source is unavailable".into()))?
+                .spec;
+            if source.table.id != table_id
+                || source.partition_id != source_partition_id
+                || source.lower.unwrap_or([0; 16]) != published.lower
+                || source.upper != published.upper
+                || source.epoch != published.epoch
+            {
+                return Err(StorageError::Transient(
+                    "split source contract changed".into(),
+                ));
+            }
+            let directory = self
+                .split_ready_directory(&client, account_id, table_id, lower)
+                .await?;
+            let plan = split_plan(&source)?;
             match client
-                .command::<BeginSplit>(&account, mutation_identity()?, Json(plan.clone()))
+                .command::<BeginDirectoryTransfer>(
+                    &directory,
+                    mutation_identity()?,
+                    Json(plan.clone().into()),
+                )
                 .await
             {
-                Ok(committed) if committed.output.0 == BeginSplitOutcome::Planned => {}
-                Ok(_) => {
-                    return Err(StorageError::Internal(
-                        "unexpected successful split plan result".into(),
+                Ok(result) if result.output.0 => {}
+                Ok(_) | Err(InvocationError::Rejected(_)) => {
+                    return Err(StorageError::Transient(
+                        "split plan or route changed".into(),
                     ));
-                }
-                Err(InvocationError::Rejected(committed)) => {
-                    return Err(match committed.output.0 {
-                        BeginSplitOutcome::TableNotFound => {
-                            StorageError::TableNotFound(table_id.to_owned())
-                        }
-                        BeginSplitOutcome::RouteNotFound => {
-                            StorageError::TableNotActive(table_id.to_owned())
-                        }
-                        BeginSplitOutcome::InvalidPlan | BeginSplitOutcome::Conflict => {
-                            StorageError::Transient("split plan or route changed; retry".into())
-                        }
-                        BeginSplitOutcome::Planned => {
-                            StorageError::Internal("unexpected rejected split plan result".into())
-                        }
-                    });
                 }
                 Err(error) => return Err(cell_error(error)),
             }
@@ -592,7 +541,6 @@ impl CellInitialPartitionProvisioner {
         table_id: &str,
         source_partition_id: [u8; 16],
         client: &CellClient,
-        account: &crab_cell_runtime::identity::CellTarget,
     ) -> Result<Option<SplitPlan>, StorageError> {
         let target =
             data_target(account_id, table_id, &source_partition_id).map_err(provision_error)?;
@@ -626,9 +574,6 @@ impl CellInitialPartitionProvisioner {
         {
             return Ok(None);
         }
-        let Some(expected_epoch) = seal.next_epoch.checked_sub(1) else {
-            return Ok(None);
-        };
         let mut left = source.clone();
         left.partition_id = seal.left_partition_id;
         left.upper = Some(seal.boundary);
@@ -640,14 +585,8 @@ impl CellInitialPartitionProvisioner {
         let plan = SplitPlan {
             source,
             children: [left, right],
-            expected_epoch,
         };
-        let state = client
-            .query::<ReadSplitRoute>(account, None, Json(plan.clone()))
-            .await
-            .map_err(cell_error)?
-            .output
-            .0;
+        let state = crate::split_route_state(client, account_id, &plan.clone().into()).await?;
         Ok((state == SplitRouteState::After).then_some(plan))
     }
 
@@ -665,11 +604,18 @@ impl CellInitialPartitionProvisioner {
         let (source, children, _) = split_contract(plan)?;
         let account = account_target(account_id).map_err(provision_error)?;
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
+        let directory = crate::route_directory_target(
+            &client,
+            &account,
+            &source.table.id,
+            source.lower.unwrap_or([0; 16]),
+        )
+        .await?;
         let pending = client
-            .query::<ReadPartitionSplitPlan>(
-                &account,
+            .query::<ReadDirectoryTransfer>(
+                &directory,
                 None,
-                Json(PublishedPartitionInput {
+                Json(DirectoryPartitionInput {
                     table_id: source.table.id.clone(),
                     partition_id: source.partition_id,
                 }),
@@ -677,13 +623,12 @@ impl CellInitialPartitionProvisioner {
             .await
             .map_err(cell_error)?
             .output
-            .0;
-        let route_state = client
-            .query::<ReadSplitRoute>(&account, None, Json(plan.clone()))
-            .await
-            .map_err(cell_error)?
-            .output
-            .0;
+            .0
+            .map(SplitPlan::try_from)
+            .transpose()
+            .map_err(provision_error)?;
+        let route_state =
+            crate::split_route_state(&client, account_id, &plan.clone().into()).await?;
         // A missing intent plus the exact replacement route proves Finish.
         // Replaying completed work must not admit any historical participants.
         if pending.is_none() && route_state == SplitRouteState::After {

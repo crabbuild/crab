@@ -82,13 +82,8 @@ async fn sdk_reads_index_moved_automatically_to_added_capacity() {
         .output
         .0
         .unwrap();
-    let base = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+    let base = crate::single_leaf_route(&fixture.client, &account, &table.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let base =
         beyonddb::data_target("123456789012", &table.id, &base.partitions[0].partition_id).unwrap();
@@ -99,9 +94,9 @@ async fn sdk_reads_index_moved_automatically_to_added_capacity() {
         .unwrap()
     {}
     let index = &table.global_secondary_indexes[0];
-    let page = beyonddb::read_global_index_route_page(
+    let page = beyonddb::read_route_page(
         &fixture.client,
-        "123456789012",
+        &beyonddb::account_target("123456789012").unwrap(),
         beyonddb::RoutePageInput {
             table_id: index.id.clone(),
             start_hash: None,

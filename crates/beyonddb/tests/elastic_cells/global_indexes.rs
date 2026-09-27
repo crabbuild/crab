@@ -154,12 +154,8 @@ async fn journal_recovers_partial_projection_and_fences_delayed_images() {
         .table_key_info(ACCOUNT, "JournalItems")
         .await
         .unwrap();
-    let route = client
-        .query::<ReadTableRoute>(&account, None, Json(base.table_id.clone()))
+    let route = crate::single_leaf_route(&client, &account, &base.table_id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let original = Item::from([
         ("id".into(), AttributeValue::S("a".into())),
@@ -433,12 +429,8 @@ async fn serving_worker_recovers_released_ranges_and_keeps_healthy_indexes_progr
         .table_key_info(ACCOUNT, "ServingIndexes")
         .await
         .unwrap();
-    let route = client
-        .query::<ReadTableRoute>(&account, None, Json(base.table_id.clone()))
+    let route = crate::single_leaf_route(&client, &account, &base.table_id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let item = Item::from([
         ("id".into(), AttributeValue::S("a".into())),
@@ -456,9 +448,9 @@ async fn serving_worker_recovers_released_ranges_and_keeps_healthy_indexes_progr
     let source_target = data_target(ACCOUNT, &base.table_id, &source.partition_id).unwrap();
     let first = &source.table.global_secondary_indexes[0];
     let hash = data_key_hash(&first.id, &item, &first.specification.key_schema).unwrap();
-    let page = beyonddb::read_global_index_route_page(
+    let page = beyonddb::read_route_page(
         &client,
-        "123456789012",
+        &beyonddb::account_target("123456789012").unwrap(),
         RoutePageInput {
             table_id: first.id.clone(),
             start_hash: Some(hash),

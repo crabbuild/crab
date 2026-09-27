@@ -112,16 +112,35 @@ async fn capacity_case(
     let storage = CellStorage::new(client.clone(), "us-east-1");
     let mut tables = Vec::new();
     for name in ["CapacityAccount", "CapacityData"] {
-        storage
-            .create_table(
-                account_id,
-                serde_json::from_value(serde_json::json!({
-                    "TableName": name,
-                    "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
-                    "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
-                    "BillingMode": "PAY_PER_REQUEST"
-                }))
-                .unwrap(),
+        client
+            .command::<CreateTable>(
+                &account,
+                mutation(),
+                Json(TableSpec {
+                    placement: if name == "CapacityData" {
+                        beyonddb::TablePlacement::Routed {
+                            initial_partitions: 1,
+                        }
+                    } else {
+                        beyonddb::TablePlacement::Account
+                    },
+                    table_name: name.into(),
+                    local_secondary_indexes: vec![],
+                    global_secondary_indexes: vec![],
+                    key_schema: vec![KeySchemaElement {
+                        attribute_name: "id".into(),
+                        key_type: KeyType::Hash,
+                    }],
+                    attribute_definitions: vec![AttributeDefinition {
+                        attribute_name: "id".into(),
+                        attribute_type: ScalarAttributeType::S,
+                    }],
+                    billing_mode: BillingMode::PayPerRequest,
+                    provisioned_throughput: None,
+                    deletion_protection_enabled: false,
+                    initial_tags: vec![],
+                    resource_arn: None,
+                }),
             )
             .await
             .unwrap();
@@ -161,16 +180,19 @@ async fn capacity_case(
         )
         .await
         .unwrap();
-    client
-        .command::<ActivateTableRoute>(
-            &account,
-            mutation(),
-            Json(TableRoute {
+    let (_, publication) = bootstrap
+        .directory(
+            TableRoute {
                 table_id: tables[1].id.clone(),
                 epoch: 1,
                 partitions: vec![spec],
-            }),
+            },
+            249,
+            &directory.path().join("directory.sqlite"),
         )
+        .await;
+    client
+        .command::<ActivateTableRoute>(&account, mutation(), Json(publication))
         .await
         .unwrap();
     let transaction_id = [252; 16];

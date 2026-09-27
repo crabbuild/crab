@@ -31,10 +31,10 @@ use extenddb_storage::error::StorageError;
 use crate::backend::{InitialPartitionProvisioner, cell_error, mutation_identity};
 use crate::{
     DATA_MODULE, DescribeTable, InstallPartition, InstallPartitionOutcome, Json, ListTables,
-    ListTablesInput, ListTablesOutcome, PartitionInstall, PartitionSpec, ReadRoutePage,
-    RegisterCoordinatorShard, RegisterCoordinatorShardInput, RoutePageInput, RoutePageOutcome,
-    SplitPlan, TableRecord, account_target, coordinator_target, credential_target, data_target,
-    initialize_account, initialize_coordinator, initialize_credentials, initialize_partition,
+    ListTablesInput, ListTablesOutcome, PartitionInstall, PartitionSpec, RegisterCoordinatorShard,
+    RegisterCoordinatorShardInput, RoutePageInput, RoutePageOutcome, SplitPlan, TableRecord,
+    account_target, coordinator_target, credential_target, data_target, initialize_account,
+    initialize_coordinator, initialize_credentials, initialize_partition,
 };
 
 /// Position in an account capacity sweep.
@@ -404,14 +404,13 @@ impl CellInitialPartitionProvisioner {
         index: Option<&crate::GlobalIndexRecord>,
     ) -> Result<(), StorageError> {
         let table_id = index.map_or(table_id, |index| index.id.as_str());
-        if index.is_some()
-            && client
-                .query::<crate::ReadGlobalIndexDirectory>(account, None, Json(table_id.into()))
-                .await
-                .map_err(cell_error)?
-                .output
-                .0
-                .is_none()
+        if client
+            .query::<crate::ReadRouteDirectory>(account, None, Json(table_id.into()))
+            .await
+            .map_err(cell_error)?
+            .output
+            .0
+            .is_none()
         {
             return Ok(());
         }
@@ -419,26 +418,15 @@ impl CellInitialPartitionProvisioner {
         let mut after_lower = None;
         let mut expected_epoch = None;
         loop {
-            if index.is_some() {
-                self.recover_index_directory_path(client, account_id, table_id, after_lower, nodes)
-                    .await?;
-            }
+            self.recover_route_directory_path(client, account_id, table_id, after_lower, nodes)
+                .await?;
             let input = Json(RoutePageInput {
                 table_id: table_id.to_owned(),
                 start_hash: None,
                 after_lower,
                 expected_epoch,
             });
-            let page = if index.is_some() {
-                crate::read_global_index_route_page(client, account_id, input.0).await?
-            } else {
-                client
-                    .query::<ReadRoutePage>(account, None, input)
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0
-            };
+            let page = crate::read_route_page(client, account, input.0).await?;
             let (epoch, partitions, has_more) = match page {
                 RoutePageOutcome::Unrouted => return Ok(()),
                 RoutePageOutcome::Changed => {
@@ -894,11 +882,12 @@ fn split_boundary(
     Ok(midpoint.to_be_bytes())
 }
 
-fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, StorageError> {
+fn split_plan(source: &PartitionSpec) -> Result<SplitPlan, StorageError> {
     let boundary = split_boundary(source.lower, source.upper)?;
-    let next_epoch = route_epoch
+    let next_epoch = source
+        .epoch
         .checked_add(1)
-        .ok_or_else(|| StorageError::LimitExceeded("table route epoch exhausted".into()))?;
+        .ok_or_else(|| StorageError::LimitExceeded("partition epoch exhausted".into()))?;
     let fresh_id = |other: Option<[u8; 16]>| loop {
         let candidate = *uuid::Uuid::now_v7().as_bytes();
         if other != Some(candidate) && source.partition_id != candidate {
@@ -918,12 +907,11 @@ fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, Sto
     Ok(SplitPlan {
         source: source.clone(),
         children: [left, right],
-        expected_epoch: route_epoch,
     })
 }
 
 impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
-    fn provision_global_index_directory<'a>(
+    fn provision_route_directory<'a>(
         &'a self,
         client: &'a CellClient,
         account_id: &'a str,
@@ -950,7 +938,7 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
                 .map_err(cell_error)?;
             if !installed.output.0 {
                 return Err(StorageError::Transient(
-                    "index directory installation was rejected".into(),
+                    "directory installation was rejected".into(),
                 ));
             }
             Ok(crate::DirectoryCopyReceipt {

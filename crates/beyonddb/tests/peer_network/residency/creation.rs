@@ -38,8 +38,9 @@ impl crab_cell_runtime::client::LocalCellResolver for DeleteDuringInstall {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_creation_recovery_tolerates_concurrent_delete() {
-    // One directory owner is additional to the original eight-slot workload.
-    let fixture = Fixture::with_capacity(2, 9).await;
+    // Account/credential and two base tables consume eight slots;
+    // two pending index owners and their directory fill the remaining three.
+    let fixture = Fixture::with_capacity(2, 11).await;
     let sdk = sdk_without_retries(&fixture);
     create(&sdk, "ResidencyFill", false).send().await.unwrap();
     assert!(create(&sdk, "ResidencyPending", true).send().await.is_err());
@@ -61,16 +62,22 @@ async fn sdk_creation_recovery_tolerates_concurrent_delete() {
     let mut cursor = None;
     // Sweep the existing table first, then delete the incomplete generation
     // between its discovery and base-route publication.
-    for _ in 0..3 {
-        fixture
-            .provisioner
-            .reconcile_account_capacity("123456789012", interrupted.clone(), u64::MAX, &mut cursor)
-            .await
-            .unwrap();
-        if deleted.load(Ordering::SeqCst) {
-            break;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !deleted.load(Ordering::SeqCst) {
+            fixture
+                .provisioner
+                .reconcile_account_capacity(
+                    "123456789012",
+                    interrupted.clone(),
+                    u64::MAX,
+                    &mut cursor,
+                )
+                .await
+                .unwrap();
         }
-    }
+    })
+    .await
+    .unwrap();
     assert!(deleted.load(Ordering::SeqCst));
     super::provisioning::complete_deletion(&fixture, &sdk, "ResidencyPending").await;
     create(&sdk, "ResidencyPending", true).send().await.unwrap();
@@ -97,8 +104,9 @@ async fn sdk_creation_recovery_tolerates_concurrent_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_worker_finishes_partial_creation_after_account_restore() {
-    // One directory owner is additional to the original eight-slot workload.
-    let fixture = Fixture::with_capacity(2, 9).await;
+    // Account/credential and two base tables consume eight slots;
+    // two pending index owners and their directory fill the remaining three.
+    let fixture = Fixture::with_capacity(2, 11).await;
     let sdk = sdk_without_retries(&fixture);
     create(&sdk, "ResidencyFill", false).send().await.unwrap();
     // Two index owners fit; the base owners do not. The failed public request
@@ -125,9 +133,9 @@ async fn sdk_worker_finishes_partial_creation_after_account_restore() {
         status.table_status(),
         Some(&aws_sdk_dynamodb::types::TableStatus::Creating)
     );
-    let index_before = beyonddb::read_global_index_route_page(
+    let index_before = beyonddb::read_route_page(
         &fixture.client,
-        "123456789012",
+        &beyonddb::account_target("123456789012").unwrap(),
         beyonddb::RoutePageInput {
             table_id: pending.global_secondary_indexes[0].id.clone(),
             start_hash: None,
@@ -184,9 +192,9 @@ async fn sdk_worker_finishes_partial_creation_after_account_restore() {
     })
     .await
     .unwrap();
-    let index_after = beyonddb::read_global_index_route_page(
+    let index_after = beyonddb::read_route_page(
         &fixture.client,
-        "123456789012",
+        &beyonddb::account_target("123456789012").unwrap(),
         beyonddb::RoutePageInput {
             table_id: pending.global_secondary_indexes[0].id.clone(),
             start_hash: None,
@@ -205,13 +213,8 @@ async fn sdk_worker_finishes_partial_creation_after_account_restore() {
         .send()
         .await
         .unwrap();
-    let routes = fixture
-        .client
-        .query::<ReadTableRoute>(&account, None, Json(pending.id.clone()))
+    let routes = crate::single_leaf_route(&fixture.client, &account, &pending.id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let storage = beyonddb::CellStorage::new(fixture.client.clone(), "us-east-1");
     for range in &routes.partitions {
@@ -255,8 +258,9 @@ async fn sdk_worker_finishes_partial_creation_after_account_restore() {
 }
 
 async fn partially_installed_table(base_installed: bool) -> (Fixture, beyonddb::TableRecord) {
-    // One directory owner is additional to the original eight-slot workload.
-    let fixture = Fixture::with_capacity(2, 9).await;
+    // Account/credential and the original base table consume five slots.
+    // Blockers leave space for exactly one owner at the selected creation stage.
+    let fixture = Fixture::with_capacity(2, 10).await;
     let mut blockers = Vec::new();
     for ordinal in 0..if base_installed { 1 } else { 4 } {
         blockers.push(
@@ -340,22 +344,17 @@ async fn sdk_creation_resumes_original_partition_count_after_restore() {
                 .await
                 .unwrap();
         }
-        let route = fixture
-            .client
-            .query::<ReadTableRoute>(
-                &account_target("123456789012").unwrap(),
-                None,
-                Json(table.id.clone()),
-            )
-            .await
-            .unwrap()
-            .output
-            .0
-            .unwrap();
-        assert_eq!(route.partitions.len(), 2);
-        let index = beyonddb::read_global_index_route_page(
+        let route = crate::single_leaf_route(
             &fixture.client,
-            "123456789012",
+            &account_target("123456789012").unwrap(),
+            &table.id.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(route.partitions.len(), 2);
+        let index = beyonddb::read_route_page(
+            &fixture.client,
+            &beyonddb::account_target("123456789012").unwrap(),
             beyonddb::RoutePageInput {
                 table_id: table.global_secondary_indexes[0].id.clone(),
                 start_hash: None,
@@ -502,12 +501,7 @@ async fn sdk_delete_fences_unpublished_directory_installers() {
         if copied {
             fixture
                 .provisioner
-                .provision_global_index_directory(
-                    &fixture.client,
-                    ACCOUNT,
-                    &index.id,
-                    ranges.clone(),
-                )
+                .provision_route_directory(&fixture.client, ACCOUNT, &index.id, ranges.clone())
                 .await
                 .unwrap();
         }
@@ -516,7 +510,7 @@ async fn sdk_delete_fences_unpublished_directory_installers() {
         assert!(
             fixture
                 .client
-                .query::<beyonddb::ReadGlobalIndexDirectory>(
+                .query::<beyonddb::ReadRouteDirectory>(
                     &account_target(ACCOUNT).unwrap(),
                     None,
                     Json(index.id.clone()),

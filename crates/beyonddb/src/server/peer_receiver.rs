@@ -18,7 +18,7 @@ use crab_cell_runtime::cell::{
     actor::{CellHandle, CellRuntime},
     catalog::{CatalogRole, CellCatalog},
 };
-use crab_cell_runtime::client::{CellClient, LocalCellResolver};
+use crab_cell_runtime::client::LocalCellResolver;
 use crab_cell_runtime::control::{ControlState, authority::CellAuthority};
 use crab_cell_runtime::identity::{CellTarget, Digest, SessionId};
 use crab_cell_runtime::ltx::CellStorageLayout;
@@ -44,7 +44,6 @@ pub(super) struct LocalResolver {
     layout: CellStorageLayout,
     registry: Arc<Registry>,
     provisioner: Option<Arc<crate::CellInitialPartitionProvisioner>>,
-    metadata: Option<CellClient>,
     placement: Option<Arc<super::placement::RangePlacement>>,
     bootstrap: Option<NodeDirectory>,
 }
@@ -59,16 +58,6 @@ impl LocalResolver {
             layout: peers.layout.clone(),
             registry: peers.registry.clone(),
             provisioner: Some(provisioner),
-            // Retirement checks may reach a remote account, but cannot restore
-            // metadata recursively while admission is trying to free capacity.
-            metadata: Some(CellClient::runtime_with_peer(
-                peers.registry.clone(),
-                peers.runtime.clone(),
-                peers.layout.clone(),
-                peers.placement.signer.clone(),
-                peer_principal(peers.placement.directory.fleet(), peers.placement.session),
-                peers.placement.round_trip.clone(),
-            )),
             placement: None,
             bootstrap: None,
         }
@@ -120,76 +109,79 @@ impl LocalCellResolver for LocalResolver {
             {
                 return Err(Error::CatalogCollision);
             }
-            let control = CellAuthority::new(resolver.layout)
-                .load(target.cell_id())
-                .await?;
-            if let Some(control) = &control
-                && let Some(local) = resolver
-                    .runtime
-                    .local_handle(proof.clone(), control)
-                    .await?
-            {
-                return Ok(Some(local));
-            }
-            let Some(provisioner) = resolver.provisioner else {
-                return Ok(None);
-            };
-            let owner = control
-                .as_ref()
-                .and_then(|control| control.value().owner.as_ref())
-                .map(|owner| owner.session);
-            let needs_placement = control.as_ref().is_some_and(|control| {
-                control.value().root.is_some()
-                    && match control.value().state {
-                        ControlState::Idle => owner.is_none(),
-                        ControlState::Recovering => owner.is_some(),
-                        _ => false,
+            let authority = CellAuthority::new(resolver.layout.clone());
+            for attempt in 0..2 {
+                let control = authority.load(target.cell_id()).await?;
+                if let Some(control) = &control
+                    && let Some(local) = resolver
+                        .runtime
+                        .local_handle(proof.clone(), control)
+                        .await?
+                {
+                    return Ok(Some(local));
+                }
+                let Some(provisioner) = &resolver.provisioner else {
+                    return Ok(None);
+                };
+                let owner = control
+                    .as_ref()
+                    .and_then(|control| control.value().owner.as_ref())
+                    .map(|owner| owner.session);
+                let needs_placement = control.as_ref().is_some_and(|control| {
+                    control.value().root.is_some()
+                        && match control.value().state {
+                            ControlState::Idle => owner.is_none(),
+                            ControlState::Recovering => owner.is_some(),
+                            _ => false,
+                        }
+                });
+                if needs_placement || resolver.bootstrap.is_some() {
+                    provisioner
+                        .reclaim_placement_capacity(&target)
+                        .await
+                        .map_err(|source| Error::PeerTransport {
+                            context: "BeyondDB placement residency",
+                            source: Box::new(source),
+                        })?;
+                }
+                if let Some(nodes) = &resolver.bootstrap {
+                    return provisioner
+                        .admit_range(&target, nodes)
+                        .await
+                        .inspect_err(|error| {
+                            tracing::warn!(cell = ?target.cell_id(), ?error, "peer bootstrap failed");
+                        })
+                        .map(Some);
+                }
+                let control = control.ok_or(Error::CellNotActive)?;
+                if needs_placement
+                    && super::placement::is_placeable_target(&target)
+                    && let Some(placement) = &resolver.placement
+                {
+                    match placement
+                        .select_local(&target, owner, ACTIVATE_ACTION)
+                        .await
+                    {
+                        Ok(false) => return Ok(None),
+                        Ok(true) => {}
+                        Err(Error::CellNotActive) if attempt == 0 => {
+                            // Another admission can win while a selected peer is restoring.
+                            // Refresh only on a changed ownership epoch, before dispatch;
+                            // a stable refusal or uncertain activation still propagates.
+                            let current = authority.load(target.cell_id()).await?;
+                            if current.is_some_and(|current| {
+                                current.value().epoch != control.value().epoch
+                            }) {
+                                continue;
+                            }
+                            return Err(Error::CellNotActive);
+                        }
+                        Err(error) => return Err(error),
                     }
-            });
-            if needs_placement || resolver.bootstrap.is_some() {
-                provisioner
-                    .reclaim_directory_capacity()
-                    .await
-                    .map_err(|source| Error::PeerTransport {
-                        context: "BeyondDB directory residency",
-                        source: Box::new(source),
-                    })?;
+                }
+                return provisioner.restore_idle(&target, proof, control).await;
             }
-            if (needs_placement || resolver.bootstrap.is_some())
-                && super::placement::is_data_target(&target)
-            {
-                let account = crate::account_for_tenant(target.tenant())?;
-                let metadata = resolver.metadata.as_ref().ok_or(Error::CellNotActive)?;
-                // Release only proven retired ranges before placement observes
-                // the local pool. Keep the requested historical source resident.
-                provisioner
-                    .reclaim_retired_ranges(metadata, &account, Some(target.cell_id()))
-                    .await
-                    .map_err(|source| Error::PeerTransport {
-                        context: "BeyondDB range residency",
-                        source: Box::new(source),
-                    })?;
-            }
-            if let Some(nodes) = resolver.bootstrap {
-                return provisioner
-                    .admit_range(&target, &nodes)
-                    .await
-                    .inspect_err(|error| {
-                        tracing::warn!(cell = ?target.cell_id(), ?error, "peer bootstrap failed");
-                    })
-                    .map(Some);
-            }
-            let control = control.ok_or(Error::CellNotActive)?;
-            if needs_placement
-                && super::placement::is_placeable_target(&target)
-                && let Some(placement) = resolver.placement
-                && !placement
-                    .select_local(&target, owner, ACTIVATE_ACTION)
-                    .await?
-            {
-                return Ok(None);
-            }
-            provisioner.restore_idle(&target, proof, control).await
+            Err(Error::CellNotActive)
         })
     }
 }
@@ -269,7 +261,6 @@ pub(super) fn peer_router(
             // The sender selects ownership before forwarding. A receiver may
             // only dispatch to that active owner; a raced release must reject.
             provisioner: None,
-            metadata: None,
             placement: None,
             bootstrap: None,
         }),

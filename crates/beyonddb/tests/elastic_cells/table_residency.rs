@@ -2,8 +2,8 @@ use crate::*;
 use extenddb_core::types::DeleteTableInput;
 
 const ACCOUNT: &str = "123456789012";
-// One account and two indexed tables, each with data, index and directory owners.
-const CELL_CAPACITY: usize = 7;
+// One account and two indexed tables, each with data, index and both directory roots.
+const CELL_CAPACITY: usize = 9;
 
 fn table(name: &str) -> extenddb_core::types::CreateTableInput {
     serde_json::from_value(serde_json::json!({
@@ -105,12 +105,8 @@ async fn deleted_table_ranges_release_residency_without_releasing_live_ranges() 
             .output
             .0
             .unwrap();
-        let range = client
-            .query::<ReadTableRoute>(&account, None, Json(record.id.clone()))
+        let range = crate::single_leaf_route(&client, &account, &record.id.clone())
             .await
-            .unwrap()
-            .output
-            .0
             .unwrap()
             .partitions
             .remove(0);

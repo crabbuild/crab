@@ -9,11 +9,45 @@ use crate::{
 };
 
 impl CellInitialPartitionProvisioner {
-    pub(crate) async fn recover_index_directory_path(
+    pub(super) async fn split_ready_directory(
         &self,
         client: &CellClient,
         account_id: &str,
-        index_id: &str,
+        id: &str,
+        lower: [u8; 16],
+    ) -> Result<crab_cell_runtime::identity::CellTarget, StorageError> {
+        let account = crate::account_target(account_id).map_err(provision_error)?;
+        for _ in 0..128 {
+            let directory = crate::route_directory_target(client, &account, id, lower).await?;
+            let state = client
+                .query::<crate::ReadDirectory>(&directory, None, Json(()))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0
+                .ok_or_else(|| StorageError::Transient("directory state changed".into()))?;
+            let full = client
+                .query::<crate::DirectoryNeedsSplit>(&directory, None, Json(()))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            if matches!(state.mode, crate::DirectoryMode::Leaf) && !full {
+                return Ok(directory);
+            }
+            self.split_directory(client, account_id, &state.spec)
+                .await?;
+        }
+        Err(StorageError::Transient(
+            "directory did not become writable".into(),
+        ))
+    }
+
+    pub(crate) async fn recover_route_directory_path(
+        &self,
+        client: &CellClient,
+        account_id: &str,
+        directory_id: &str,
         after: Option<[u8; 16]>,
         nodes: &NodeDirectory,
     ) -> Result<(), StorageError> {
@@ -21,7 +55,7 @@ impl CellInitialPartitionProvisioner {
         // At a leaf boundary, pagination first checks the previous leaf and then
         // crosses into its neighbour. Restore only those two bounded paths.
         for crossing in 0..2 {
-            let mut spec = DirectorySpec::root(index_id.into());
+            let mut spec = DirectorySpec::root(directory_id.into());
             for _ in 0..128 {
                 let (target, _) = self.published_directory(account_id, &spec).await?;
                 self.recover_discovered_owner(
@@ -54,9 +88,7 @@ impl CellInitialPartitionProvisioner {
                         break;
                     }
                     DirectoryMode::Retiring { .. } | DirectoryMode::Retired => {
-                        return Err(StorageError::Transient(
-                            "index directory is retiring".into(),
-                        ));
+                        return Err(StorageError::Transient("directory is retiring".into()));
                     }
                 }
             }
@@ -65,7 +97,7 @@ impl CellInitialPartitionProvisioner {
                 account_target(account_id)
                     .map_err(provision_error)?
                     .tenant(),
-                index_id,
+                directory_id,
                 hash,
             )
             .await?;
@@ -304,7 +336,7 @@ impl CellInitialPartitionProvisioner {
                     mutation_identity()?,
                     Json(crate::TableDirectoryRetirement {
                         table_id: table_id.into(),
-                        index_id: spec.table_id,
+                        directory_id: spec.table_id,
                         sequence: observed.receipt.commit_sequence,
                     }),
                 )

@@ -124,12 +124,8 @@ async fn ttl_skips_transaction_locks_and_revisits_after_abort() {
             .unwrap();
     }
     let info = &infos[0];
-    let route = client
-        .query::<ReadTableRoute>(&account, None, Json(info.table_id.clone()))
+    let route = crate::single_leaf_route(&client, &account, &info.table_id.clone())
         .await
-        .unwrap()
-        .output
-        .0
         .unwrap();
     let spec = &route.partitions[0];
     let data = data_target(account_id, &info.table_id, &spec.partition_id).unwrap();

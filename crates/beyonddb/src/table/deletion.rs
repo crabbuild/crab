@@ -146,7 +146,7 @@ fn cleanup(context: &CommandContext<'_, '_>, id: &str) -> Result<bool> {
     // The account marker fences new work, but published directory owners must
     // acknowledge retirement before anchors disappear or the name can be reused.
     if !context.sql(&statement(
-        "SELECT 1 FROM ddb_global_index_routes WHERE base_table_id = ?1 AND retired = 0 LIMIT 1",
+        "SELECT 1 FROM ddb_directory_roots WHERE base_table_id = ?1 AND retired = 0 LIMIT 1",
         vec![SqlValue::Text(id.into())],
     ))?[0]
         .rows
@@ -158,10 +158,6 @@ fn cleanup(context: &CommandContext<'_, '_>, id: &str) -> Result<bool> {
     // Remove children before parents, so FK cascades cannot hide unbounded work.
     // Statistics follow item deletion because its triggers decrement the totals.
     for (table, key, predicate) in [
-        ("ddb_route_partitions", "rowid", "table_id = ?1"),
-        ("ddb_split_members", "rowid", "table_id = ?1"),
-        ("ddb_split_plans", "rowid", "table_id = ?1"),
-        ("ddb_routes", "rowid", "table_id = ?1"),
         (
             "ddb_local_index_items",
             "(table_id, index_name, item_key)",
@@ -177,7 +173,7 @@ fn cleanup(context: &CommandContext<'_, '_>, id: &str) -> Result<bool> {
         ("ddb_table_tags", "rowid", "table_id = ?1"),
         ("ddb_table_ttl", "rowid", "table_id = ?1"),
         ("ddb_table_statistics", "rowid", "table_id = ?1"),
-        ("ddb_global_index_routes", "rowid", "base_table_id = ?1"),
+        ("ddb_directory_roots", "rowid", "base_table_id = ?1"),
     ] {
         if remaining == 0 {
             return Ok(false);
@@ -208,7 +204,7 @@ pub struct PendingDirectoryRetirement {
     pub published: bool,
 }
 
-/// Read one index directory that still blocks generation removal.
+/// Read one base or index directory that still blocks generation removal.
 pub struct ReadPendingDirectoryRetirement;
 impl Query for ReadPendingDirectoryRetirement {
     const MODULE: &'static str = MODULE;
@@ -220,7 +216,7 @@ impl Query for ReadPendingDirectoryRetirement {
         context: &mut QueryContext<'_>,
         Json(table_id): Self::Input,
     ) -> Result<Self::Output> {
-        let rows = context.sql(&statement("SELECT r.table_id, r.initial_fingerprint IS NOT NULL FROM ddb_global_index_routes r JOIN ddb_table_deletions d ON d.table_id = r.base_table_id WHERE r.base_table_id = ?1 AND r.retired = 0 ORDER BY r.table_id LIMIT 1", vec![SqlValue::Text(table_id)]))?;
+        let rows = context.sql(&statement("SELECT r.table_id, r.initial_fingerprint IS NOT NULL FROM ddb_directory_roots r JOIN ddb_table_deletions d ON d.table_id = r.base_table_id WHERE r.base_table_id = ?1 AND r.retired = 0 ORDER BY r.table_id LIMIT 1", vec![SqlValue::Text(table_id)]))?;
         match rows[0].rows.first().map(Vec::as_slice) {
             None => Ok(Json(None)),
             Some([SqlValue::Text(id), SqlValue::Integer(published)]) => {
@@ -238,7 +234,7 @@ impl Query for ReadPendingDirectoryRetirement {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TableDirectoryRetirement {
     pub table_id: String,
-    pub index_id: String,
+    pub directory_id: String,
     pub sequence: u64,
 }
 
@@ -247,7 +243,7 @@ pub struct RecordTableDirectoryRetirement;
 impl Command for RecordTableDirectoryRetirement {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 34;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<TableDirectoryRetirement>;
     type Output = Json<bool>;
     fn execute(
@@ -259,7 +255,7 @@ impl Command for RecordTableDirectoryRetirement {
         }
         // The immutable base/index IDs fence delayed receipts after name reuse.
         // Missing rows need no work; only a deleting generation can be changed.
-        context.sql(&statement("UPDATE ddb_global_index_routes SET retired = 1 WHERE table_id = ?1 AND base_table_id = ?2 AND EXISTS (SELECT 1 FROM ddb_table_deletions WHERE table_id = ?2)", vec![SqlValue::Text(input.index_id), SqlValue::Text(input.table_id)]))?;
+        context.sql(&statement("UPDATE ddb_directory_roots SET retired = 1 WHERE table_id = ?1 AND base_table_id = ?2 AND EXISTS (SELECT 1 FROM ddb_table_deletions WHERE table_id = ?2)", vec![SqlValue::Text(input.directory_id), SqlValue::Text(input.table_id)]))?;
         Ok(CommandResult::Success(Json(true)))
     }
 }
