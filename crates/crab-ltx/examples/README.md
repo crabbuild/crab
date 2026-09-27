@@ -70,6 +70,75 @@ restore timers cover separate phases; digest comparison is outside restore
 timing. Retain stdout with the source revision, image/provider version,
 architecture, filesystem, and resource limits when comparing runs.
 
+### Concurrent activation and first-write recovery
+
+Pass `--activation-cells 4` (range 1–16) to prepare that many distinct Cell
+graphs from the same source capture stream. The default run keeps its existing
+single-Cell workload. Each additional Cell uploads its own scoped objects, so
+choose the target size with total provider storage in mind:
+
+```sh
+CRAB_CELL_LTX_TARGET_BYTES=33554432 \
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
+  cargo run --release -p crab-ltx --features replica \
+  --example rustfs_cell_replica_scale_load --locked -- --activation-cells 4
+```
+
+After the original eighteen activation samples, four rounds run with concurrent
+activation limits `1, 4, 4, 1`. Every round uses the same four authenticated
+roots and fresh sparse files. New per-Cell Store identities discard prior
+metadata caches; the provider connection pool, provider caches and default
+Host admission remain shared. Each Cell reads and hashes the first 1 MiB
+payload, replaces it with a known compressible Cell-specific value, captures the update
+through `capture_deferred`, and prepares the next immutable root. A distinct
+mutation ID in each replacement prevents later rounds from measuring a repeated
+immutable upload. The first write follows the payload read, which has already
+materialized that row; this is not a write-first cold-page experiment.
+
+`activation_burst` records each Cell/root identity, dispatch delay, time to
+first payload read and prepared root, plus separate root-open, checksum,
+writable-open, query, mutation, capture and root-prepare read counters/timers.
+These read counters observe Store GET/range/HEAD calls and bytes; they exclude
+provider-internal retries. `prepared_objects` and `prepared_bytes` report the
+replica publication ledger separately. The mutation timer is a
+local SQLite transaction; the prepared root has not passed a runtime authority
+CAS and is not an application acknowledgement.
+
+Verification starts only after every Cell in the round reaches its prepared
+cut, so a full verification restore cannot contaminate another Cell's measured
+activation. It removes the local database and captured cut, independently
+reopens the new root, restores it, and checks the digest of **every payload**
+against the source plus the intended replacement. `activation_burst_complete`
+reports time until all roots are prepared separately from total time including
+verification. A failed activation or verification is reported and returns a
+nonzero exit; the round drains its in-flight tasks before returning.
+
+The probe uses Tokio blocking jobs for synchronous SQLite work and the LTX
+Host's shared admission for internal I/O. It does not use runtime SQL-worker
+sharding, Cell authority, `CellNode` or HTTP. Record actual cgroup limits and
+memory/CPU counters when running under the one-vCPU/one-GiB profile; the default
+Host is not itself an RSS limit. Two serial and two burst rounds are diagnostic,
+not service latency percentiles or independent-host recovery qualification.
+
+To run with enforced container limits, follow the source-directory and RustFS
+setup in the [Compose worker profile](../../crab-cell-runtime/qualification/worker-profile.md).
+Build this example instead of the runtime test binary, then override the worker
+entrypoint. The worker keeps its one-vCPU/one-GiB/no-swap limits and local scratch
+volume. Use fresh container names for another size and retain the logs and
+container inspection separately:
+
+```sh
+worker_compose run --no-deps --name "$worker_project-build" build \
+  cargo build --release --locked -p crab-ltx --features replica \
+  --example rustfs_cell_replica_scale_load
+worker_compose run --no-deps --name "$worker_project-burst" \
+  --entrypoint /target/release/examples/rustfs_cell_replica_scale_load \
+  -e CRAB_LTX_WORKLOAD_ROOT=/scratch -e CRAB_CELL_LTX_TARGET_BYTES=33554432 \
+  worker --activation-cells 4 > "$CRAB_WORKER_STATE/evidence/burst.log" 2>&1
+docker --context "$CRAB_WORKER_CONTEXT" inspect "$worker_project-burst" \
+  > "$CRAB_WORKER_STATE/evidence/burst-container.json"
+```
+
 ## Public API exercised
 
 With `--features replica`, the canonical surface is:

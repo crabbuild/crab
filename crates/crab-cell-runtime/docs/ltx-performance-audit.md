@@ -46,6 +46,16 @@ their separate performance gates.
 | Release gate | Current-source saturation, recovery under arrivals and independent-host evidence are incomplete (12, 16, 23) | Run fixed-workload then offered-rate curves at 3/5/10/20 nodes, with actual owner distribution, cgroup/host resources and every acknowledged result checked after failure. |
 | Verifier corrected; current-source fleet open | Earlier fleet acknowledgement checks ignored issue bodies (29) | All sixteen later GA rate points verify complete acknowledged payloads before and after published-root owner loss. Earlier receipts remain ID/title evidence. The separate unpublished-tail fault never reached final payload verification. |
 
+The [one-vCPU GA activation-burst probe](../../crab-ltx/perf/README.md#concurrent-ga-activation-under-one-vcpu-2026-09-27)
+now checks four distinct Cell graphs at 32 and 256 MiB each. All 32 first-write
+object-root restores match every expected payload. Four-way activation helped
+the smaller case (82–107 ms versus 137–139 ms serial) but hurt the larger case
+(393–542 ms versus 244–290 ms). At 256 MiB, checksum preparation alone reads
+about 5.8 MB of metadata per Cell. These LTX measurements use shared Host
+admission and explicit container limits; they do not use `CellNode`, runtime
+SQL-worker sharding or application acknowledgement. Keep the public recovery
+gate open and qualify larger roots before changing concurrency defaults.
+
 ### Latest completed RustFS GA rate evidence
 
 The [complete GA rate report](../../crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-27-ga-rate-curves.md)

@@ -817,6 +817,76 @@ Raw JSON lines and phase summaries: `32mib.log` and `256mib.log` under
 The same directory retains source/environment metadata and stderr. Keep this
 microbenchmark separate from public-action and fleet qualification.
 
+### Concurrent GA activation under one vCPU (2026-09-27)
+
+The scale example's [activation burst](../examples/README.md#concurrent-activation-and-first-write-recovery)
+was run with four distinct Cells at 32 MiB and 256 MiB per Cell. Both release
+processes used the same Linux ARM64 binary, pinned RustFS 1.0 GA and kernel
+limits of one vCPU, 1 GiB memory and no swap. Within each process all four
+rounds reopened the same four authenticated roots with fresh metadata
+identities and local files. Serial/burst order was `1, 4, 4, 1`.
+
+The measured interval ends when every Cell has read its first 1 MiB payload,
+committed a local replacement, captured it and prepared its next immutable root.
+Full verification starts after that interval. Times below are whole-round
+observations, not percentiles:
+
+| Payload per Cell | Serial, round 0 | Four concurrent, round 1 | Four concurrent, round 2 | Serial, round 3 |
+| --- | ---: | ---: | ---: | ---: |
+| 32 MiB | 139.252 ms | 81.941 ms | 107.235 ms | 136.621 ms |
+| 256 MiB | 243.549 ms | 393.284 ms | 542.418 ms | 290.040 ms |
+
+At 256 MiB, per-Cell checksum-phase medians were 28.770 / 167.682 /
+355.429 / 31.504 ms in round order. That phase includes shared dirty-admission
+waiting and local checksum-file work as well as object reads; it is not a
+provider-only timer. It performed 259–260 observed reads and returned
+5,797,768–5,797,912 bytes per Cell. At 32 MiB, it performed 33 reads and
+returned 723,272 bytes. The larger case therefore exposes eager metadata cost
+and interference that the smaller case does not qualify away.
+
+Both sizes passed all sixteen first-write recovery checks: after removing the
+local database and captured cut, a fresh object-root restore matched every
+payload against the independent source-plus-replacement model. Across both
+processes this checks 4,608 payloads of 1 MiB each. All sixteen mutations per
+process have distinct IDs and prepared roots. The 256 MiB case also exercises
+eight successive bootstrap capture batches for each independent Cell graph.
+The original full-source and compacted-root byte comparisons also passed.
+
+The replacement is a compressible 1 MiB value with a unique mutation ID; the
+source payloads use SQLite `randomblob`. The measured write follows a complete
+read of that row, so it does not measure a write-first cold fault. Prepared
+object totals were 8 / 102,814 bytes at 32 MiB and 9 / 121,989 bytes at 256 MiB.
+These are immutable proposals; the probe performs no authority CAS or public
+application acknowledgement.
+
+Peak charged cgroup memory was 205.9 MiB at 32 MiB and 940.1 MiB at 256 MiB.
+The latter process recorded 68 throttled CPU periods and 591,933 microseconds
+of throttled time; the smaller process recorded none. Neither had OOM events.
+These process-wide counters include bootstrap, the preceding eighteen single
+activations, verification and final compaction. They cannot attribute the
+burst slowdown to CPU throttling or estimate four resident Cells' RSS.
+Default LTX Host admission had 32 I/O slots, one blocking slot, one dirty slot
+and two recovery slots. SQLite operations used Tokio blocking dispatch; this
+does not reproduce the runtime's fixed SQL-worker assignment or node ledger.
+
+Source: `411ab72b291` plus the opt-in activation-burst example patch, excluding
+the separately staged app-to-host relocation. Rust 1.97.1 and SQLite 3.49.1;
+RustFS image
+`ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858`.
+Four-CPU/eight-GiB Colima VM; scratch used a Docker local volume. Raw logs,
+source patch/hashes, binary hash, container inspections, cgroup counters and
+independently checked JSON summaries are retained under
+`worker-profile-20260927/activation-burst/evidence/` in the checkout's external
+target; the `256/` child holds the larger run. The example defaults remain
+unchanged when `--activation-cells` is omitted.
+
+Do not raise production recovery concurrency from the 32 MiB result. First
+measure the same mixed recovery/application workload through `CellNode` and
+its admission ledger, including write-first faults, larger or fragmented
+roots, unaffected resident Cells and phase-specific resource counters. These
+two processes do not establish sustained capacity, service tails or independent
+failure-domain recovery.
+
 The runners also use the implementations' pinned bundled SQLite versions:
 Crab currently links SQLite 3.49.1 while the pinned Celld revision links SQLite
 3.45.0. `workload_write_us` and therefore `total_us` include that difference;
