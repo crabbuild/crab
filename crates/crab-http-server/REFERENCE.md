@@ -1741,6 +1741,14 @@ availability without letting a permanently unready pod block a node drain.
 
 ### Keep qualification evidence honest
 
+The local [reader and rollout runners](deploy/cell-issue-fleet/README.md)
+accept `--rustfs-port` alongside `--gateway-port` and `--node-port-base` to
+isolate simultaneous Compose projects. Both require
+`--skip-build --runtime-source <commit>` for an existing image; the report
+records the image source separately from the committed runner source.
+The drained fleet-to-object transition updates node configuration while
+preserving the Compose image digest, release identity and provider endpoint.
+
 Use the following interpretation:
 
 | Evidence | What it proves | What it does not prove |

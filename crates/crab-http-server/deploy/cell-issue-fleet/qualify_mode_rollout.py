@@ -13,7 +13,7 @@ from qualify import (
     node_url, pin_image, prove_node, request_json, run_stage,
 )
 from qualify_read_replicas import prove_readers, set_reader_target
-from render import CONFIG, ROOT, node_name, render
+from render import CONFIG, ROOT, node_config, node_name, render
 
 
 def metrics(path: Path, index: int) -> str:
@@ -96,6 +96,7 @@ def main() -> None:
     parser.add_argument("--project", required=True)
     parser.add_argument("--gateway-port", type=int, default=18080)
     parser.add_argument("--node-port-base", type=int, default=18100)
+    parser.add_argument("--rustfs-port", type=int, default=19010)
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--runtime-source", help="source commit of the existing image when skipping its build")
     parser.add_argument("--exercise-drain-faults", action="store_true")
@@ -107,7 +108,7 @@ def main() -> None:
     label = f"label=com.docker.compose.project={args.project}"
     if any(command("docker", kind, "ls", "-q", "--filter", label) for kind in ("volume", "network")) or command("docker", "ps", "-aq", "--filter", label):
         raise RuntimeError(f"Compose project {args.project} already has resources")
-    path = render(args.state, args.project, args.gateway_port, args.node_port_base)
+    path = render(args.state, args.project, args.gateway_port, args.node_port_base, args.rustfs_port)
     compose(path, (), "config", "--quiet")
     source = command("git", "-C", str(ROOT), "rev-parse", "HEAD")
     if not args.skip_build:
@@ -185,7 +186,10 @@ def main() -> None:
     report["drain"] = drain_fleet(path, nodes)
     (path.parent / "mode-rollout-report.json").write_text(json.dumps(report, indent=2) + "\n")
     require_drained(report["drain"])
-    path = render(args.state, args.project, args.gateway_port, args.node_port_base, object_durability=True)
+    # Preserve the pinned image, release identity and provider port across the
+    # transition; re-rendering Compose would restore the mutable build tag.
+    for index in range(1, 21):
+        (path.parent / "config" / f"{node_name(index)}.toml").write_text(node_config(index, object_durability=True))
     compose(path, (), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300")
     verify_values(args.node_port_base, acknowledged)
     object_body = "acknowledged after the object-proof rollout"

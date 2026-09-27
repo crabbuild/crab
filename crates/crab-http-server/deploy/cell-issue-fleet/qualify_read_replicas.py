@@ -469,8 +469,12 @@ def main() -> None:
     parser.add_argument("--project", required=True)
     parser.add_argument("--gateway-port", type=int, default=18080)
     parser.add_argument("--node-port-base", type=int, default=18100)
+    parser.add_argument("--rustfs-port", type=int, default=19010)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--runtime-source", help="source commit of the existing image when skipping its build")
     args = parser.parse_args()
+    if args.skip_build and not args.runtime_source:
+        parser.error("--skip-build requires --runtime-source")
 
     source = command("git", "-C", str(ROOT), "rev-parse", "HEAD")
     if command("git", "-C", str(ROOT), "status", "--porcelain"):
@@ -479,13 +483,18 @@ def main() -> None:
     label = f"label=com.docker.compose.project={args.project}"
     if any(command("docker", kind, "ls", "-q", "--filter", label) for kind in ("volume", "network")) or command("docker", "ps", "-aq", "--filter", label):
         raise RuntimeError(f"Compose project {args.project} already has resources")
-    path = render(args.state, args.project, args.gateway_port, args.node_port_base, object_durability=True)
+    path = render(args.state, args.project, args.gateway_port, args.node_port_base,
+                  args.rustfs_port, object_durability=True)
     compose(path, (), "config", "--quiet")
     if not args.skip_build:
         build_image(args.project, source)
-    image = pin_image(path, source)
+    runtime_source = source
+    if args.skip_build:
+        runtime_source = command("git", "-C", str(ROOT), "rev-parse", args.runtime_source + "^{commit}")
+    image = pin_image(path, runtime_source)
     report = {
         "project": args.project,
+        "runtime_source": runtime_source,
         "source_commit": source,
         **image,
         "started_at": datetime.now(timezone.utc).isoformat(),

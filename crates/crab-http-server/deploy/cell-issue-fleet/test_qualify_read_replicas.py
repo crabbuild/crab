@@ -63,8 +63,7 @@ class FixtureReadbackTests(unittest.TestCase):
         for module in (qualify_read_replicas, qualify_mode_rollout):
             with self.subTest(module=module.__name__), tempfile.TemporaryDirectory() as state:
                 args = [module.__name__, "--state", state, "--project", "crab-cell-issue-reader-test", "--skip-build"]
-                if module is qualify_mode_rollout:
-                    args.extend(["--runtime-source", source])
+                args.extend(["--runtime-source", source])
                 with patch("sys.argv", args), \
                         patch.object(module, "command", side_effect=lambda *args:
                                      source if "rev-parse" in args else ""), \
@@ -75,6 +74,49 @@ class FixtureReadbackTests(unittest.TestCase):
                         module.main()
                     start.assert_not_called()
                 self.assertFalse((Path(state) / "read-replica-report.json").exists())
+
+    def test_rollout_preserves_the_pinned_deployment_when_changing_durability(self):
+        class ObjectRestart(Exception):
+            pass
+
+        source = "a" * 40
+        image = {"Id": "sha256:" + "1" * 64, "Os": "linux", "Architecture": "arm64",
+                 "Config": {"Labels": {"org.opencontainers.image.revision": source}}}
+        with tempfile.TemporaryDirectory() as state:
+            path = Path(state) / "compose.yaml"
+            before = []
+
+            def drain(_path, nodes):
+                before.append(path.read_bytes())
+                return {node: {"Running": False, "ExitCode": 0, "OOMKilled": False}
+                        for node in nodes}
+
+            def compose(_path, _profiles, *args):
+                if args[0] == "up":
+                    raise ObjectRestart()
+                if args[0] == "exec":
+                    return json.dumps({"advertisement": {"log": {"active": True}}})
+                return ""
+
+            args = ["qualify_mode_rollout", "--state", state, "--project", "crab-cell-issue-rollout-test",
+                    "--skip-build", "--runtime-source", source, "--rustfs-port", "42010"]
+            with patch("sys.argv", args), \
+                    patch.object(qualify_mode_rollout, "command", side_effect=lambda *args:
+                                 source if "rev-parse" in args else ""), \
+                    patch.object(qualify, "command", return_value=json.dumps([image])), \
+                    patch.object(qualify_mode_rollout, "compose", side_effect=compose), \
+                    patch.object(qualify_mode_rollout, "run_stage", return_value={}), \
+                    patch.object(qualify_mode_rollout, "prove_node", return_value=("session", {}, "container")), \
+                    patch.object(qualify_mode_rollout, "request_json", side_effect=lambda _m, _u, body: body), \
+                    patch.object(qualify_mode_rollout, "metrics", return_value='crab_cell_durability_proofs_total{source="fleet"} 1'), \
+                    patch.object(qualify_mode_rollout, "drain_fleet", side_effect=drain):
+                with self.assertRaises(ObjectRestart):
+                    qualify_mode_rollout.main()
+            self.assertEqual(path.read_bytes(), before[0])
+            self.assertEqual(json.loads(before[0])["services"]["rustfs"]["ports"], ["127.0.0.1:42010:9000"])
+            configs = list((Path(state) / "config").glob("*.toml"))
+            self.assertEqual(len(configs), 20)
+            self.assertTrue(all('durability = "object"' in file.read_text() for file in configs))
 
     def test_reader_accepts_the_current_fixture_after_body_refresh(self):
         response = io.BytesIO(json.dumps({**initial_issue(1), "body": "acknowledged update"}).encode())
