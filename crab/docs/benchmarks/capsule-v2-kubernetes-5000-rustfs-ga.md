@@ -31,14 +31,29 @@ fsck, and 32 sampled blob digests in each independent final clone all passed.
 An independent audit counts 825 incremental-fetch requests, no seed-capsule or
 stable pack-layer reads, and no server-error responses in those fetches.
 
-Warm reuse still fails. Both final clones downloaded approximately 1.313 GB;
-the warm clone fetched all three pack bodies again and its shared cache root
-remained empty. The native installer's earlier cache tests do not qualify this
-entry point: normal Git uses `upload_pack_wire`, whose pack materialization
-calls `RemoteGitReader::download_pack_source_to_path`. Its storage facade
-forwards v2 capsule/layer reads to origin and never invokes the native
-installer's verified pack-file cache. Fixing this requires actual wire-path
-coverage, not broadening cache-service admission or weakening integrity checks.
+The run did not exercise a usable warm cache. Both final clones downloaded
+approximately 1.313 GB and the shared cache remained empty. The initial
+attribution to a wire-path cache bypass was incorrect: Trace2 shows the classic
+native installer, with no `index-pack` child. The harness pre-created its cache
+root with mode `0755`; Crab requires a private root and correctly rejected it.
+The harness now leaves creation to Crab, with a regression test proving both
+product-owned creation and reuse of the same root. No cache security checks
+were relaxed. The original measurements remain unchanged; a corrected clone
+diagnostic is separate from full performance qualification.
+
+That diagnostic (`native-cache-fixed-20260927-r1`) passed with the same frozen
+binary and retained remote, using the harness's real `clone` method and matched
+environment. Crab created the cache as `0700` and retained three packs totaling
+1,257,557,204 bytes. Cold/warm origin transfer was 1,313,413,256 / 55,855,815
+bytes; the savings equal all retained pack bytes plus 237 bytes of varying
+control traffic. The remaining ranges are checkpoint metadata and pack sidecars.
+Both independent clones matched the final tip and passed strict full Git fsck.
+Cold/warm command latency was 40.474 / 50.258 seconds, with 17 / 15 requests:
+this proves native cache reuse, **not** a latency improvement. Warm Trace2 shows
+24.942 seconds in native Git clone, 5.104 seconds in the LFS-detection `grep`,
+and 10.136 seconds in checkout. These are component timings, not a complete
+accounting or an isolated performance comparison. No compilation overlapped the
+diagnostic; other host workloads were active. All original gates stay unchanged.
 
 The slowest fetch's Git Trace2 records a 7.692-second helper child and a
 subsequent 7.704-second connectivity `rev-list`; overlapping `index-pack` took

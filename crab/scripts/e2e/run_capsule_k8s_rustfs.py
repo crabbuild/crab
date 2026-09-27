@@ -725,7 +725,8 @@ class Qualification:
         cache_name: str | None = None,
     ) -> None:
         cache = self.root / "cache" / (cache_name or name)
-        cache.mkdir(parents=True, exist_ok=True)
+        # Crab owns private cache creation. A default-mode mkdir here creates
+        # a shared-readable root which its security checks correctly reject.
         elapsed, requests, resources, _ = self.run(
             [str(self.crab), "clone", "--lazy", self.remote_url, str(target)],
             self.root,

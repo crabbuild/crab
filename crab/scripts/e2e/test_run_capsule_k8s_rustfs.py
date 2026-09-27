@@ -28,6 +28,32 @@ SPEC.loader.exec_module(QUALIFICATION)
 
 
 class CapsuleKubernetesQualificationTests(unittest.TestCase):
+    def test_clone_leaves_private_cache_creation_to_crab_and_reuses_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache" / "final-clones"
+            qualification = object.__new__(QUALIFICATION.Qualification)
+            qualification.root = root
+            qualification.crab = Path("crab")
+            qualification.remote_url = "crab://fixture/repo"
+            qualification.trace_path = Mock(return_value=root / "trace.jsonl")
+            qualification.save = Mock()
+            qualification.report = {"maintenance": []}
+
+            def run(_command: list[str], _cwd: Path, **options: object) -> tuple:
+                self.assertEqual(options["extra_env"]["CRAB_CACHE_DIR"], str(cache))
+                if options["operation"] == "cold":
+                    self.assertFalse(cache.exists(), "Crab must create its private cache root")
+                    cache.mkdir(parents=True, mode=0o700)
+                    (cache / "retained").write_bytes(b"verified pack")
+                else:
+                    self.assertEqual((cache / "retained").read_bytes(), b"verified pack")
+                return 1, {}, {}, ""
+
+            qualification.run = run
+            for name in ("cold", "warm"):
+                qualification.clone(root / name, name, 5000, cache_name="final-clones")
+
     def test_changed_binary_cannot_pass_qualification(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             binary = Path(temporary) / "candidate"
