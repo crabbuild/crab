@@ -435,7 +435,7 @@ their original baseline and subsequent implementation evidence.
 | Order | Remaining gap | Decision and acceptance gate |
 | --- | --- | --- |
 | 1 | Corrected-source recovery and capacity evidence (12, 16, 23, 29–30) | Repeat full-body readback after process loss with multiple successor nodes; finish all 3/5/10/20-node stages and the follower-only tail fault. Count missed arrivals and actual owners; preserve shared-host limits in the verdict. |
-| 2 | Application preflight adds a serialized Cell query (31) | Seven issue/comment/label commands now check archive state in their transaction; public RustFS proof confirms the removed query. Compare matched load and cover concurrent archive ordering plus the remaining mutation families. |
+| 2 | Application preflight adds a serialized Cell query (31) | Seven issue/comment/label commands now check archive state in their transaction; RustFS proof covers the removed query, concurrent archive ordering, duplicate delivery and recovery. Compare matched load and cover the remaining mutation families. |
 | 3 | Publication delay grows under saturation (4–5, 17) | Split provider GET/HEAD/PUT, root preparation, worker binding and confirmation. Measure logical commit advance and uncovered age/bytes across repeated debt thresholds before selecting metadata reuse or consecutive-root coalescing. |
 | 4 | Replica routing repeats provider work; root refresh loses demand-page reuse (27) | Measure provider operations per response and hot-set bytes fetched after small updates. Compare bounded observation coalescing and verified immutable-frame reuse while retaining fresh response authority. |
 | 5 | Synchronous demand faults, installation and cleanup block a shared SQL worker (9–10, 19) | Run cold and resident Cells on the same worker. Separate origin wait, installation and confirmation; evaluate scheduling changes only after that attribution. |
@@ -3006,16 +3006,33 @@ admission; this does not establish mixed-version compatibility.
 
 The public fixture requires zero routed queries for an unlabeled create/edit
 and one for label enrichment, while retaining its existing owner-loss and
-durability checks. The complete memory-backed fixture passed in 46.33 seconds;
+durability checks. The initial memory-backed fixture passed in 46.33 seconds;
 the same flow against pinned RustFS 1.0 GA on Colima passed in 36.61 seconds.
 Eight focused HTTP tests also passed, covering all seven archived endpoints,
 invalid-input precedence, authorization, duplicate creation, issue/comment
 edits, labels and recovery. These are single correctness runs on a shared host;
 their elapsed times are not an A/B performance comparison.
 
-Matched offered-load curves for this change, concurrent
-archive/submission stress and policy conversion of other mutation families
-remain open. Do not infer a p99 or throughput improvement from query counts.
+**Concurrent ordering proof:** the same public application fixture now runs
+[four archive/unarchive rounds](../../crab-http-server/src/archive_race_tests.rs)
+through its application router and signed mTLS command clients. Each round
+has a known preceding write, four concurrent label commands delivered twice,
+and a known following write. Every accepted result precedes archive's durable
+commit sequence; every rejection follows it. Duplicate receipts must match.
+After owner fencing, shutdown, local-data loss and takeover, all 24 outcomes
+replay with their original receipts. Accepted rows match exactly, rejected rows
+are absent, and replay preserves the authority root at owner loss.
+
+The memory run passed in 39.72 seconds (five creates, nineteen rejections);
+RustFS 1.0 GA on Colima passed in 40.71 seconds (six creates, eighteen
+rejections). Both observed accepted and rejected concurrent commands beyond
+the ordered controls. These remain in-process application hosts against a real
+provider, separate from the resource-limited Compose fleet. No production code,
+durability policy or request lifetime changed for this proof.
+
+Matched offered-load curves, prolonged multi-Cell archive/load/fault stress and
+policy conversion of other mutation families remain open. Do not infer a p99
+or throughput improvement from query counts or these functional run durations.
 
 ### 32. Catalog propagation can reject a newly created Cell before load starts
 

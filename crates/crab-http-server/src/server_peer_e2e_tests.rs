@@ -24,6 +24,7 @@ use crate::{
 };
 
 mod action_trace_tests;
+mod archive_race_tests;
 
 struct UnavailablePeer;
 
@@ -463,7 +464,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         repository,
         store,
         ingress_runtime.clone(),
-        Some(ingress_router),
+        Some(ingress_router.clone()),
         Some(PeerReceiver::new(
             ingress_publisher.node(),
             ingress_session,
@@ -1110,6 +1111,8 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     let listed: Value = serde_json::from_slice(&listed.bytes().await.unwrap()).unwrap();
     assert_eq!(listed["items"][0]["title"], "Remote Cell");
     assert_eq!(listed["items"][0]["labels"][0]["id"], 1);
+    let archive_results =
+        archive_race_tests::run(&ingress_router, repository_id, &local_operator).await;
     let root_after = authority
         .load(target.cell_id())
         .await
@@ -1494,6 +1497,13 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         "e2e/runtime"
     );
     eprintln!("qualified restored collaboration matrix");
+    archive_race_tests::verify_recovered(
+        &ingress_router,
+        repository_id,
+        &local_operator,
+        &archive_results,
+    )
+    .await;
     let taken_over = authority.load(target.cell_id()).await.unwrap().unwrap();
     // Idle compaction may replace the manifest after the last mutation.
     // Takeover must preserve the exact authority root observed at owner death,

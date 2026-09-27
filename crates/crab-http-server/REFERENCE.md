@@ -536,6 +536,13 @@ external storage effects require separate ordering proof. Removing one routed
 query is verified by the public HTTP/mTLS fixture, but does not establish an
 improved throughput or latency limit.
 
+The fixture also races duplicate typed label commands against archive across
+four rounds, checks each decision against archive's durable commit sequence,
+then replays all 24 outcomes after owner loss. Exact receipts, accepted rows,
+absent rejected rows and the recovered authority root are checked with both
+memory storage and RustFS 1.0 GA. This bounded concurrency proof is separate
+from sustained load qualification on the Compose fleet.
+
 `action_traces.latency` summarizes each observed phase separately for `all`,
 `local`, `forwarded`, `fleet`, `object` and `recorded` writes. Fault reports add
 the same summaries within each before/during/after population. Every distribution
