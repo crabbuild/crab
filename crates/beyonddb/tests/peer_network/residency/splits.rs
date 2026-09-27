@@ -1,3 +1,5 @@
+mod lineage;
+
 use super::*;
 use beyonddb::{
     BeginSplit, BeginSplitOutcome, PublishedPartitionInput, ReadPartitionSplitPlan, ReadRoutePage,
@@ -209,15 +211,14 @@ async fn pending_splits(fixture: &Fixture) -> (TableRoute, Vec<SplitPlan>) {
             let mut left = source.clone();
             left.partition_id = [101 + index as u8 * 2; 16];
             left.upper = Some(boundary);
-            left.epoch = route.epoch + 1;
+            left.epoch = source.epoch + 1;
             let mut right = source.clone();
             right.partition_id = [102 + index as u8 * 2; 16];
             right.lower = Some(boundary);
-            right.epoch = route.epoch + 1;
+            right.epoch = source.epoch + 1;
             SplitPlan {
                 source: source.clone(),
                 children: [left, right],
-                expected_epoch: route.epoch,
             }
         })
         .collect();
@@ -526,7 +527,6 @@ async fn sdk_capacity_recovers_publication_before_children_open() {
         let nested = SplitPlan {
             source: child_source,
             children: grandchildren,
-            expected_epoch: plan.expected_epoch + 1,
         };
         let mutation = || MutationIdentity {
             request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),

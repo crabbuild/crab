@@ -26,9 +26,10 @@ use crate::{
 };
 
 impl CellInitialPartitionProvisioner {
-    // Admission is held. Routing/authentication must be able to restore even
-    // when live ranges occupy every slot and need that metadata to move safely.
-    pub(super) async fn release_range_for_metadata(
+    // Admission is held. Metadata and existing published owners must remain
+    // reachable when durable Cells outnumber resident slots. New range creation
+    // still requires free capacity so placement can choose another node.
+    pub(super) async fn release_range_for_admission(
         &self,
         target: &CellTarget,
     ) -> Result<(), StorageError> {
@@ -38,6 +39,11 @@ impl CellInitialPartitionProvisioner {
             crate::directory::NAMESPACE,
         ]
         .contains(&target.namespace())
+            && CellAuthority::new(self.layout.clone())
+                .load(target.cell_id())
+                .await
+                .map_err(provision_error)?
+                .is_none_or(|observed| observed.value().root.is_none())
         {
             return Ok(());
         }
@@ -59,7 +65,7 @@ impl CellInitialPartitionProvisioner {
             .await
             .map_err(provision_error)?
             .into_iter()
-            .filter(|(cell, _, _, _)| ranges.contains(cell))
+            .filter(|(cell, _, _, _)| *cell != target.cell_id() && ranges.contains(cell))
             .min_by_key(|(_, _, last_used, _)| *last_used);
         if let Some((cell, generation, _, _)) = candidate {
             // Release changes residency only. Durable items, intents, and range
@@ -69,12 +75,17 @@ impl CellInitialPartitionProvisioner {
         Ok(())
     }
 
-    pub(crate) async fn reclaim_directory_capacity(&self) -> Result<(), StorageError> {
+    pub(crate) async fn reclaim_placement_capacity(
+        &self,
+        target: &CellTarget,
+    ) -> Result<(), StorageError> {
         if self.runtime.stats().active_cells() < self.runtime.stats().active_cell_capacity() {
             return Ok(());
         }
         let _admission = self.admission.lock().await;
-        self.release_retired_directory().await.map(|_| ())
+        // Placement samples the local pool before activation. Apply the same
+        // reclamation policy here so a full pool cannot hide a restorable root.
+        self.reclaim_settled_capacity(target).await
     }
 
     // Admission is held. Terminal directory state is irreversible, so release
@@ -168,55 +179,63 @@ impl CellInitialPartitionProvisioner {
 
     // Callers hold admission and have checked Idle or our Recovering claim.
     // Sharing activation keeps request and background recovery on the same root.
-    pub(super) async fn activate_published(
-        &self,
-        target: &CellTarget,
+    pub(super) fn activate_published<'a>(
+        &'a self,
+        target: &'a CellTarget,
         proof: CatalogProof,
         observed: VersionedControl,
-    ) -> crab_cell_runtime::Result<CellHandle> {
-        let authority = CellAuthority::new(self.layout.clone());
-        let replica = CellReplica::new(
-            self.layout.clone(),
-            *target.cell_id().as_bytes(),
-            *observed.value().incarnation.as_bytes(),
-            self.replica_limits(target)?,
-        )?;
-        let destination = self
-            .activation_destination(target)
-            .map_err(admission_error)?;
-        // Reads restore only an existing published root. Initial catalog and
-        // authority creation belong exclusively to explicit provisioning.
-        let handle = if observed.value().owner.is_some() {
-            // A canceled request can leave our ownership CAS published before
-            // restoration reaches the actor. Resume that exact root and epoch.
-            self.runtime
-                .activate_restored(
-                    proof,
-                    replica,
-                    authority,
-                    observed,
-                    RecoveryManifestStore::new(self.layout.clone(), self.replica_limits(target)?)
+    ) -> impl Future<Output = crab_cell_runtime::Result<CellHandle>> + Send + 'a {
+        // Recovery composes nested activation and root-verification futures.
+        // Keep this cold path on the heap so admission callers do not carry
+        // its state through every parent poll frame.
+        Box::pin(async move {
+            let authority = CellAuthority::new(self.layout.clone());
+            let replica = CellReplica::new(
+                self.layout.clone(),
+                *target.cell_id().as_bytes(),
+                *observed.value().incarnation.as_bytes(),
+                self.replica_limits(target)?,
+            )?;
+            let destination = self
+                .activation_destination(target)
+                .map_err(admission_error)?;
+            // Reads restore only an existing published root. Initial catalog and
+            // authority creation belong exclusively to explicit provisioning.
+            let handle = if observed.value().owner.is_some() {
+                // A canceled request can leave our ownership CAS published before
+                // restoration reaches the actor. Resume that exact root and epoch.
+                self.runtime
+                    .activate_restored(
+                        proof,
+                        replica,
+                        authority,
+                        observed,
+                        RecoveryManifestStore::new(
+                            self.layout.clone(),
+                            self.replica_limits(target)?,
+                        )
                         .with_recovery_scratch(self.directory.clone()),
-                    destination,
-                )
-                .await?
-        } else {
-            self.runtime
-                .acquire_idle_restored(
-                    proof,
-                    replica,
-                    authority,
-                    observed,
-                    destination,
-                    Owner {
-                        session: self.session,
-                        endpoint: self.endpoint.clone(),
-                    },
-                )
-                .await?
-        };
-        self.track_coordinator(target).map_err(admission_error)?;
-        Ok(handle)
+                        destination,
+                    )
+                    .await?
+            } else {
+                self.runtime
+                    .acquire_idle_restored(
+                        proof,
+                        replica,
+                        authority,
+                        observed,
+                        destination,
+                        Owner {
+                            session: self.session,
+                            endpoint: self.endpoint.clone(),
+                        },
+                    )
+                    .await?
+            };
+            self.track_coordinator(target).map_err(admission_error)?;
+            Ok(handle)
+        })
     }
 
     pub(crate) async fn reclaim_retired_ranges(

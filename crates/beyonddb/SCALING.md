@@ -1408,7 +1408,8 @@ Publication compares the exact source and child identities, bounds, table
 snapshot, and partition epochs in the command's SQL transaction. A newer
 directory epoch from an unrelated split no longer invalidates that comparison.
 Each successful publication increments the current directory epoch, preserving
-Scan page invalidation, while planned child epochs remain immutable. Publication
+Scan page invalidation. Each child epoch is its source epoch plus one, independent
+of the directory counter; plans store no observed global epoch. Publication
 retains the source plan and all three reservations until verified child opening;
 `FinishSplit` then removes only that plan and its members. Completed replay validates the exact children even
 when subsequent unrelated publications have advanced the directory epoch.

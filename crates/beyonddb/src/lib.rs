@@ -124,8 +124,14 @@ static COMMANDS: [OperationDescriptor; 28] = [
     operation(8),
     operation(9),
     operation(10),
-    operation(11),
-    operation(12),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(11)
+    },
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(12)
+    },
     operation(13),
     operation(14),
     operation(15),
@@ -149,7 +155,10 @@ static COMMANDS: [OperationDescriptor; 28] = [
         codec_version: 2,
         ..participant::phase_operation(26)
     },
-    operation(30),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(30)
+    },
     OperationDescriptor {
         codec_version: 2,
         ..operation(31)
@@ -165,12 +174,21 @@ static QUERIES: [OperationDescriptor; 30] = [
     operation(9),
     operation(10),
     operation(11),
-    operation(12),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(12)
+    },
     operation(13),
     operation(14),
     operation(15),
-    operation(16),
-    operation(17),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(16)
+    },
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(17)
+    },
     operation(18),
     operation(20),
     operation(21),
@@ -187,7 +205,10 @@ static QUERIES: [OperationDescriptor; 30] = [
     },
     participant::phase_operation(30),
     global_index::outbox::chunk_operation(31),
-    operation(32),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(32)
+    },
     operation(36),
     operation(37),
     operation(38),

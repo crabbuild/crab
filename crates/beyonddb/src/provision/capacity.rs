@@ -530,8 +530,8 @@ impl CellInitialPartitionProvisioner {
                 .map_err(cell_error)?
                 .output
                 .0;
-            let (route_epoch, source) = match published {
-                PublishedPartitionOutcome::Published { route_epoch, spec } => (route_epoch, spec),
+            let source = match published {
+                PublishedPartitionOutcome::Published { spec } => spec,
                 PublishedPartitionOutcome::Unrouted => {
                     return Err(StorageError::TableNotActive(table_id.to_owned()));
                 }
@@ -552,7 +552,7 @@ impl CellInitialPartitionProvisioner {
                         });
                 }
             };
-            let plan = split_plan(&source, route_epoch)?;
+            let plan = split_plan(&source)?;
             match client
                 .command::<BeginSplit>(&account, mutation_identity()?, Json(plan.clone()))
                 .await
@@ -626,9 +626,6 @@ impl CellInitialPartitionProvisioner {
         {
             return Ok(None);
         }
-        let Some(expected_epoch) = seal.next_epoch.checked_sub(1) else {
-            return Ok(None);
-        };
         let mut left = source.clone();
         left.partition_id = seal.left_partition_id;
         left.upper = Some(seal.boundary);
@@ -640,7 +637,6 @@ impl CellInitialPartitionProvisioner {
         let plan = SplitPlan {
             source,
             children: [left, right],
-            expected_epoch,
         };
         let state = client
             .query::<ReadSplitRoute>(account, None, Json(plan.clone()))

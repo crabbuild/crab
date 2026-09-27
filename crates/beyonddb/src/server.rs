@@ -203,6 +203,8 @@ impl BeyonddbPeers {
 /// The caller must provision account and credential Cells, provide a client
 /// that reaches their current owners, retain the node's lease and task group,
 /// and start ExtendDB's listener with the returned state.
+/// Table lifecycle completion also requires the provisioner's account capacity
+/// worker, as installed by the server binary; HTTP deletion records intent first.
 /// ExtendDB requires a catalog to authorize DynamoDB requests. The catalog's
 /// management methods explicitly fail until their Cell implementation lands.
 pub fn build_http_state(

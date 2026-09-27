@@ -23,25 +23,22 @@ pub enum PublishedPartitionOutcome {
     Unrouted,
     /// The route exists but this partition no longer owns a range.
     Missing,
-    /// The partition's immutable range and the current directory epoch.
-    Published {
-        route_epoch: u64,
-        spec: Box<PartitionSpec>,
-    },
+    /// The partition's immutable range contract.
+    Published { spec: Box<PartitionSpec> },
 }
 
-/// Read one indexed owner row and the route epoch.
+/// Read one indexed owner row.
 pub struct ReadPublishedPartition;
 
 impl Query for ReadPublishedPartition {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 16;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<PublishedPartitionInput>;
     type Output = Json<PublishedPartitionOutcome>;
 
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
-        let Some((epoch, table)) = route_head(&input.table_id, |batch| context.sql(batch))? else {
+        let Some((_, table)) = route_head(&input.table_id, |batch| context.sql(batch))? else {
             return Ok(Json(PublishedPartitionOutcome::Unrouted));
         };
         let rows = context.sql(&statement(
@@ -56,7 +53,6 @@ impl Query for ReadPublishedPartition {
             return Ok(Json(PublishedPartitionOutcome::Missing));
         };
         Ok(Json(PublishedPartitionOutcome::Published {
-            route_epoch: epoch,
             spec: Box::new(partition_spec(row, &table)?),
         }))
     }
@@ -81,7 +77,7 @@ pub struct ReadSplitRoute;
 impl Query for ReadSplitRoute {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 17;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<SplitPlan>;
     type Output = Json<SplitRouteState>;
 
@@ -95,7 +91,7 @@ fn split_route_state(
     sql: impl Fn(&SqlBatch) -> Result<Vec<SqlResultSet>>,
 ) -> Result<SplitRouteState> {
     let table_id = &plan.source.table.id;
-    let Some((epoch, table)) = route_head(table_id, &sql)? else {
+    let Some((_, table)) = route_head(table_id, &sql)? else {
         return Ok(SplitRouteState::Unrouted);
     };
     if table != plan.source.table || !plan.valid_for(&table) {
@@ -126,13 +122,9 @@ fn split_route_state(
     }
     // The exact source/child identities fence this split. A newer directory
     // epoch can belong to an unrelated range and must not strand a sealed source.
-    let state = if epoch >= plan.expected_epoch && source && rows[0].rows.len() == 1 {
+    let state = if source && rows[0].rows.len() == 1 {
         SplitRouteState::Before
-    } else if plan.next_epoch().is_some_and(|next| epoch >= next)
-        && !source
-        && children == [true, true]
-        && rows[0].rows.len() == 2
-    {
+    } else if !source && children == [true, true] && rows[0].rows.len() == 2 {
         SplitRouteState::After
     } else {
         SplitRouteState::Changed
@@ -193,7 +185,7 @@ pub struct BeginSplit;
 impl Command for BeginSplit {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 11;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<SplitPlan>;
     type Output = Json<BeginSplitOutcome>;
 
@@ -282,7 +274,7 @@ pub struct CommitSplit;
 impl Command for CommitSplit {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 12;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<SplitPlan>;
     type Output = Json<CommitSplitOutcome>;
 
@@ -371,7 +363,7 @@ pub struct ReadSplitPlan;
 impl Query for ReadSplitPlan {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 12;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<String>;
     type Output = Json<Option<SplitPlan>>;
 
@@ -394,7 +386,7 @@ pub struct ReadPartitionSplitPlan;
 impl Query for ReadPartitionSplitPlan {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 32;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<PublishedPartitionInput>;
     type Output = Json<Option<SplitPlan>>;
 
@@ -429,7 +421,7 @@ pub struct FinishSplit;
 impl Command for FinishSplit {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 30;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<SplitPlan>;
     type Output = Json<bool>;
 

@@ -65,13 +65,11 @@ pub struct SplitPlan {
     pub source: PartitionSpec,
     /// New adjacent ranges that replace the source.
     pub children: [PartitionSpec; 2],
-    /// Directory epoch observed when planning; unrelated ranges may advance it.
-    pub expected_epoch: u64,
 }
 
 impl SplitPlan {
     pub(crate) fn next_epoch(&self) -> Option<u64> {
-        self.expected_epoch.checked_add(1)
+        self.source.epoch.checked_add(1)
     }
 
     pub(crate) fn valid_for(&self, table: &TableRecord) -> bool {
@@ -82,12 +80,10 @@ impl SplitPlan {
         let Some(boundary) = left.upper else {
             return false;
         };
-        self.expected_epoch > 0
-            && self.source.table.id == table.id
+        self.source.table.id == table.id
             && self.source.table.key_schema == table.key_schema
             && self.source.table.attribute_definitions == table.attribute_definitions
             && self.source.epoch > 0
-            && self.source.epoch <= self.expected_epoch
             && self
                 .source
                 .lower

@@ -148,10 +148,10 @@ impl LocalCellResolver for LocalResolver {
             });
             if needs_placement || resolver.bootstrap.is_some() {
                 provisioner
-                    .reclaim_directory_capacity()
+                    .reclaim_placement_capacity(&target)
                     .await
                     .map_err(|source| Error::PeerTransport {
-                        context: "BeyondDB directory residency",
+                        context: "BeyondDB placement residency",
                         source: Box::new(source),
                     })?;
             }

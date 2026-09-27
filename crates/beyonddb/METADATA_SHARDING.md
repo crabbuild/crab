@@ -286,8 +286,9 @@ The index split/owner-restore regression exposed metadata starvation when live
 ranges occupied a released account owner's slot. Under admission pressure,
 account, credential and directory restoration can now release one settled data
 or GSI owner. The runtime rechecks generation, queued work and publication state;
-release preserves its durable root, items and transaction intents. Ordinary data
-admission does not use this priority. The SDK regression passed after this change
+release preserves its durable root, items and transaction intents. New data-owner
+bootstrap does not use this priority; restoration of existing published roots
+now shares the residency allowance described below. The SDK regression passed after this change
 (16.49 s); fleet throughput and admission fairness remain unqualified.
 
 The native directory-tree regression now also retires a frozen descendant with
@@ -347,3 +348,69 @@ Final pre-push gates passed: strict all-target Clippy (23.69 s), the BeyondDB
 server build (45.21 s), formatting and diff checks. The branch already includes
 latest fetched `origin/main` (`311105eb864`); broader SDK/process CI must verify
 the pushed cutover before it is considered ready to land.
+
+## Base-range epoch independence
+
+Base split plans now carry only their exact source and children. Each child uses
+`source.epoch + 1`; the controller no longer reads a table-wide route epoch to
+construct a data-owner version. Publication still compares exact source/child
+identities and increments the current directory epoch for Scan invalidation.
+Completed replay reconstructs the immutable plan from the sealed source without
+inventing a historical directory version. Changed native operation codecs reject
+old plan/result shapes. No released-data compatibility is claimed.
+
+This removes a dependency that would couple independently writable base-directory
+leaves through one global counter. Base route storage is still account-owned;
+this step alone does not remove that size/writer limit. GSI split plans already
+use source-relative child epochs. Transaction participants retain their admitted
+partition identity and epoch, so unrelated branch splits do not change them.
+
+The new regression first failed against the prior implementation: after two
+splits on another branch, an untouched sibling received child epoch 4 instead
+of its source-relative epoch 2. The revised case passed (1.81 s). It now also
+selects the descendant containing a stored item, executes and replays an SDK
+transaction across the deeper branch and untouched sibling, then checks both
+committed values. All four focused signed split regressions passed together
+(7.20 s), including transaction-blocked capacity progress, independent split
+replay and recovery after publication before child opening.
+
+## Recovery through bounded residency
+
+CI run 36328796541 passed 32 peer SDK tests and all three server-process tests,
+but exposed two incomplete integration paths. Recovery of nine durable owners
+into eight resident slots failed with native admission exhaustion. The remote
+account recreation fixture also omitted the lifecycle worker and attempted
+CreateTable immediately after the asynchronous DeleteTable response.
+
+Admission now permits restoration of an existing published root to release one
+settled base/GSI owner, using the same runtime generation, queue, publication and
+lease checks as metadata admission. The released owner retains its exact root,
+items, locks and journals. Fresh range bootstrap still requires free capacity;
+this policy does not turn stale placement measurements into new ownership claims.
+The SDK recovery test revisits the original data ranges and the GSI after peer
+loss, exercising reuse of the eight slots across all nine durable owners.
+That extension caught a second gate: ownerless-root placement rejected the full
+pool before activation could reclaim it. Peer resolution and explicit range
+provisioning now apply the same admission policy before sampling local capacity.
+This changes real residency before selection rather than overstating advertised
+headroom; ordinary planner resource and ownership checks remain in force.
+
+The recreation fixture now runs the production lifecycle loop and waits for
+DescribeTable to return ResourceNotFound before reusing a name. This follows the
+[asynchronous DeleteTable contract](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_DeleteTable.html).
+The HTTP state constructor documents that lifecycle-worker requirement.
+
+Native participant recovery also exposed default-stack exhaustion in the nested
+admission/restore path. BeyondDB's shared published-root restoration future now
+lives on the heap; it retains ordinary cancellation and admission-lock ownership.
+The original scenario passes without a larger stack or fixture wrapper, and CI
+now includes that scenario. No runtime, LTX or dependency contract changed.
+
+Focused verification on this revision: the nine-owner/eight-slot SDK test passed
+in 24.78 s; three claimed-owner recovery/metadata-admission scenarios passed in
+3.13 s; four signed split/replay/transaction scenarios passed in 6.10 s. Native
+participant recovery passed on the default stack in 6.49 s. Numeric Query paging
+passed in 4.14 s, and the bounded route-page case passed in 9.30 s. Strict
+all-target Clippy passed (11.76 s), and the server binary built (17.69 s).
+The remote-account recreation fixture and full peer/process suite still require
+CI on the follow-up head. Earlier process success does not qualify these changes.

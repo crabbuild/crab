@@ -894,11 +894,12 @@ fn split_boundary(
     Ok(midpoint.to_be_bytes())
 }
 
-fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, StorageError> {
+fn split_plan(source: &PartitionSpec) -> Result<SplitPlan, StorageError> {
     let boundary = split_boundary(source.lower, source.upper)?;
-    let next_epoch = route_epoch
+    let next_epoch = source
+        .epoch
         .checked_add(1)
-        .ok_or_else(|| StorageError::LimitExceeded("table route epoch exhausted".into()))?;
+        .ok_or_else(|| StorageError::LimitExceeded("partition epoch exhausted".into()))?;
     let fresh_id = |other: Option<[u8; 16]>| loop {
         let candidate = *uuid::Uuid::now_v7().as_bytes();
         if other != Some(candidate) && source.partition_id != candidate {
@@ -918,7 +919,6 @@ fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, Sto
     Ok(SplitPlan {
         source: source.clone(),
         children: [left, right],
-        expected_epoch: route_epoch,
     })
 }
 

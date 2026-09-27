@@ -241,6 +241,20 @@ async fn sdk_initial_base_and_index_ranges_use_remote_owners() {
         item.item.unwrap()["bucket"],
         AwsAttributeValue::S("same".into())
     );
+    // Nine durable owners must remain readable through eight resident slots.
+    // Revisit older ranges after recovery to exercise their idle-root admission.
+    for (_, item) in &fixture.data {
+        let restored = sdk
+            .get_item()
+            .table_name("Residency")
+            .key("id", item["id"].clone())
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(restored.item.as_ref(), Some(item));
+    }
+    assert_index(&sdk).await;
     fixture.shutdown().await;
 }
 

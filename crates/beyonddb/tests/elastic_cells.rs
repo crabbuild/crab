@@ -931,7 +931,6 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
     let plan = SplitPlan {
         source,
         children: [left.clone(), right.clone()],
-        expected_epoch: 1,
     };
     client
         .command::<BeginSplit>(&account, identity(81), Json(plan.clone()))
@@ -1764,7 +1763,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         .await
         .unwrap();
     assert_eq!(split.source.partition_id, owner.partition_id);
-    assert_eq!(split.expected_epoch, 2);
+    assert_eq!(split.children[0].epoch, owner.epoch + 1);
     let grown = account_client
         .query::<ReadTableRoute>(&account, None, Json(created.table_id.clone()))
         .await
@@ -3226,20 +3225,19 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             partition_id: [3; 16],
             lower: None,
             upper: Some(boundary),
-            epoch: 3,
+            epoch: partitions[0].epoch + 1,
         },
         PartitionSpec {
             table: table.clone(),
             partition_id: [4; 16],
             lower: Some(boundary),
             upper: Some(split),
-            epoch: 3,
+            epoch: partitions[0].epoch + 1,
         },
     ];
     let plan = SplitPlan {
         source: partitions[0].clone(),
         children: children.clone(),
-        expected_epoch: route.epoch,
     };
     let next_route = TableRoute {
         table_id: table.id.clone(),
@@ -3803,11 +3801,12 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .await
         .unwrap();
     assert_eq!(premature_export.output.0, PartitionScanOutcome::NotSealed);
+    let child_epoch = next_route.partitions[0].epoch;
     let seal = PartitionSeal {
         table_id: table.id.clone(),
         source_partition_id: left_id,
         epoch: 1,
-        next_epoch: next_route.epoch,
+        next_epoch: child_epoch,
         source_lower: None,
         source_upper: Some(split),
         boundary,
@@ -4221,7 +4220,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             None,
             Json(PartitionGetInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 key: first_item.clone(),
             }),
         )
@@ -4234,7 +4233,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             identity(65),
             Json(PartitionPutInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 item: first_item.clone(),
                 condition: None,
             }),
@@ -4252,7 +4251,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             Json(PartitionScanInput {
                 index_name: None,
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 limit: Some(1),
                 exclusive_start_key: None,
             }),
@@ -4266,7 +4265,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             identity(54),
             Json(PartitionImportInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 item: first_item.clone(),
             }),
         )
@@ -4303,7 +4302,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             identity(56),
             Json(PartitionImportInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 item: first_item.clone(),
             }),
         )
@@ -4316,7 +4315,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             identity(58),
             Json(PartitionImportInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 item: first_item.clone(),
             }),
         )
@@ -4331,7 +4330,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             identity(59),
             Json(PartitionImportInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 item: changed_item.clone(),
             }),
         )
@@ -4347,7 +4346,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             identity(67),
             Json(PartitionPutInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 item: changed_item.clone(),
                 condition: None,
             }),
@@ -4500,7 +4499,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             identity(62),
             Json(PartitionPutInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 item: changed_item.clone(),
                 condition: None,
             }),
@@ -4517,7 +4516,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             identity(63),
             Json(PartitionImportInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 item: first_item.clone(),
             }),
         )
@@ -4533,7 +4532,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             None,
             Json(PartitionGetInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 key: first_item.clone(),
             }),
         )
@@ -4550,7 +4549,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         identity(101),
         Json(PreparePartitionTransactionInput {
             table_id: table.id.clone(),
-            epoch: 3,
+            epoch: child_epoch,
             transaction_id: [101; 16],
             coordinator_cell: *account.cell_id().as_bytes(),
             coordinator_key: [101; 16].to_vec(),
@@ -5070,7 +5069,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             None,
             Json(PartitionGetInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 key: extenddb_core::types::extract_key(&changed_item, &table.key_schema),
             }),
         )
@@ -5086,7 +5085,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             Json(PartitionScanInput {
                 index_name: None,
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 limit: None,
                 exclusive_start_key: None,
             }),
@@ -5102,7 +5101,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             identity(102),
             Json(PartitionPutInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 item: changed_item.clone(),
                 condition: None,
             }),
@@ -5224,7 +5223,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             None,
             Json(PartitionGetInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 key: first_item.clone(),
             }),
         )
@@ -5240,7 +5239,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             identity(64),
             Json(PartitionImportInput {
                 table_id: table.id.clone(),
-                epoch: 3,
+                epoch: child_epoch,
                 item: first_item,
             }),
         )

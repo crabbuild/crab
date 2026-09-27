@@ -38,7 +38,6 @@ impl CellInitialPartitionProvisioner {
         client: &CellClient,
     ) -> std::result::Result<CellClient, StorageError> {
         let (module, initialize) = range_module(target).map_err(provision_error)?;
-        self.reclaim_directory_capacity().await?;
         let code = self
             .application
             .registry()
@@ -89,11 +88,14 @@ impl CellInitialPartitionProvisioner {
         };
         // Route publication can follow root publication. An expired initial
         // owner must be recoverable even before account routes discover it.
-        if (unpublished || expired)
-            && peers
-                .provision_local(target, owner)
-                .await
-                .map_err(provision_error)?
+        if !unpublished && !expired {
+            return Ok(client.clone());
+        }
+        self.reclaim_placement_capacity(target).await?;
+        if peers
+            .provision_local(target, owner)
+            .await
+            .map_err(provision_error)?
         {
             self.admit_range(target, peers.directory())
                 .await
