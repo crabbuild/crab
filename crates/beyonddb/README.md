@@ -201,7 +201,9 @@ authentication and stays inactive after owner recovery.
 The provisioner can inspect a table's active data Cells, resume a pending split,
 and split one range whose occupied SQLite pages cross a caller-supplied
 threshold. That measurement includes indexes and runtime tables, but excludes
-WAL and LTX files. The account loop checks one table range per tick and can
+WAL and LTX files. Base-range item counts and stored JSON/key byte totals are
+maintained atomically with item changes, so usage queries read one metadata row
+instead of traversing all items. The account loop checks one table range per tick and can
 trigger one split per tick. The provisioner can install it in the node's task
 group, where failure closes readiness and shutdown cancels it before Cell drain.
 The serving binary installs it for every locally admitted account. The loop

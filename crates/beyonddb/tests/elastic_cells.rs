@@ -21,6 +21,7 @@ mod elastic_cells {
     pub(crate) mod transaction_visibility;
     mod transaction_write_skew;
     mod ttl_transactions;
+    mod usage;
 }
 
 use std::{

@@ -1711,3 +1711,57 @@ Clippy passed. The new regression module adds coverage for the interrupted claim
 without production fault injection or weaker assertions/timeouts. Production
 code grows by 38 net lines to share restoration and verify discovery readiness.
 These are focused local results; the broader process qualification remains in CI.
+
+### Bounded base-range usage measurement
+
+`PartitionUsage` previously counted every item row and summed its stored BLOB
+lengths on every capacity check. The same aggregate exists on inspected
+`origin/main` at `311105eb864`. SQLite can obtain BLOB lengths without loading
+the full payload, but the aggregate still traverses all rows. This made the
+per-range capacity sweep grow with range item count.
+
+A singleton `ddb_partition_usage` row now maintains the existing report's item
+count and stored JSON/key bytes. AFTER INSERT, UPDATE, and DELETE triggers on
+`ddb_partition_items` update that row within the item command. The UPDATE trigger
+covers only counted columns, so TTL generation/backfill edits leave totals alone.
+The usage query reads that singleton and the existing occupied-page PRAGMAs.
+GSI capacity measurement already uses occupied-page metadata without an item scan;
+account-local tables are outside the data-range capacity controller.
+
+| Evidence boundary | Source and behavior |
+| --- | --- |
+| Entry point | Account capacity loop → `provision/capacity.rs::split_if_over_database_bytes` → `PartitionUsage`; report shape and physical split threshold remain unchanged. |
+| Mutation owner | `partition.rs::write_item`/`delete_item` cover CRUD, partition transaction resolution, TTL deletes, and imported split images. No second adapter-specific accounting path. |
+| Storage boundary | `partition_schema.sql` installs and seeds the singleton plus triggers. `item_storage.rs::StoredValue::write` allocates the final BLOB size before bounded content writes. |
+| Runtime contract | `registry/handlers.rs::write_sql_blob` and `primitives/sql.rs::write_blob` require fixed-size BLOB allocation; `cell/executor.rs` rolls rejected application work back to its savepoint. Counter changes publish and roll back with those item changes. |
+| Capacity reservation | The singleton occupies one preallocated page and has one bounded row. Its page is part of occupied storage before PREPARE; updates cannot grow its B-tree. Existing transaction headroom tests exercise both small/large COMMIT after other writers fill the Cell, refused PREPARE, and SQLite FULL upload rollback. |
+| Regression | `tests/elastic_cells/usage.rs` compares maintained totals to an independent full aggregate through inserts, UPSERT, large BLOB allocation and chunk writes, savepoint rollback, TTL metadata changes, and repeated deletion. `tests/peer_network/residency/usage.rs` verifies SDK mutation, failed condition, transaction replay, split imports, and owner-restored totals. |
+
+SQLite's [trigger semantics](https://www.sqlite.org/lang_createtrigger.html),
+[fixed-size BLOB writes](https://www.sqlite.org/c3ref/blob_write.html), and
+[BLOB length behavior](https://www.sqlite.org/lang_corefunc.html#length) match
+this boundary. The singleton preserves the useful distinction between item
+bytes and occupied database pages without reading all item rows. It adds one
+metadata page and bounded accounting work to each changed row; write-throughput
+impact at fleet scale remains unmeasured.
+
+A local SQL microprobe using Python SQLite 3.53.4, the actual schema, and the
+SELECT extracted from `PartitionUsage` counted VM instructions. At 100 rows,
+the prior aggregate used 1,413 steps and the singleton used 10. At 10,000 rows,
+they used 140,013 and 10 steps respectively, with identical totals. These are
+SQL-shape measurements, not 10,000 Cells or a production throughput benchmark.
+The Rust/runtime tests use the workspace's pinned rusqlite dependency.
+
+Focused verification: raw SQL invariant test PASS (0.01s); signed SDK usage,
+replay, split, and restart test PASS (1.29s); four transaction-capacity tests PASS
+(46.11s); TTL/transaction-lock test PASS (1.11s); LSI mutation/transaction/split
+test PASS (1.54s); numeric Query and automatic split test PASS (3.40s).
+Strict all-target Clippy and the standalone server build passed. This adds 32
+net production lines, retaining the existing report and removing its scan.
+
+This changes the unreleased data-Cell schema. Existing development roots require
+reprovisioning; no compatibility reader or dependency patch is introduced.
+DescribeTable's DynamoDB size statistics remain a separate unfinished path;
+these counters retain the internal stored-JSON/key-byte definition. Metadata
+sharding, hot-key subdivision, fleet rebalancing, and 10,000-Cell/multi-TB
+qualification remain required.

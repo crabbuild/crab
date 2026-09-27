@@ -4,6 +4,7 @@ mod provisioning;
 mod reclamation;
 mod recovery;
 mod splits;
+mod usage;
 
 use crate::*;
 use crab_cell_runtime::cell::actor::CellHandle;

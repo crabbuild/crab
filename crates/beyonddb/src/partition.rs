@@ -327,8 +327,7 @@ impl Query for PartitionUsage {
 
     fn execute(context: &mut QueryContext<'_>, _: Self::Input) -> Result<Self::Output> {
         let rows = context.sql(&statement(
-            "SELECT COUNT(*), COALESCE(SUM(LENGTH(item) + LENGTH(item_key) + \
-             LENGTH(partition_key) + LENGTH(sort_key)), 0) FROM ddb_partition_items",
+            "SELECT item_count, item_bytes FROM ddb_partition_usage WHERE singleton = 1",
             vec![],
         ))?;
         let Some(row) = rows[0].rows.first() else {

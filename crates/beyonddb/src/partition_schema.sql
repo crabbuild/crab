@@ -17,6 +17,39 @@ CREATE INDEX ddb_partition_query ON ddb_partition_items (partition_key, sort_key
 CREATE INDEX ddb_partition_expiry ON ddb_partition_items (ttl_generation, ttl_epoch)
     WHERE ttl_epoch IS NOT NULL;
 
+CREATE TABLE ddb_partition_usage (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    item_count INTEGER NOT NULL CHECK (item_count >= 0),
+    item_bytes INTEGER NOT NULL CHECK (item_bytes >= 0)
+);
+INSERT INTO ddb_partition_usage VALUES (1, 0, 0);
+
+-- Keep usage atomic with ordinary writes, transaction resolution, and imports.
+-- Incremental BLOB writes preserve the length established by zeroblob allocation;
+-- TTL metadata changes do not change the counted columns.
+CREATE TRIGGER ddb_partition_usage_insert AFTER INSERT ON ddb_partition_items
+BEGIN
+    UPDATE ddb_partition_usage SET item_count = item_count + 1,
+        item_bytes = item_bytes + length(NEW.item) + length(NEW.item_key)
+            + length(NEW.partition_key) + length(NEW.sort_key)
+        WHERE singleton = 1;
+END;
+CREATE TRIGGER ddb_partition_usage_update
+AFTER UPDATE OF item, item_key, partition_key, sort_key ON ddb_partition_items
+BEGIN
+    UPDATE ddb_partition_usage SET item_bytes = item_bytes
+        + length(NEW.item) + length(NEW.item_key) + length(NEW.partition_key) + length(NEW.sort_key)
+        - length(OLD.item) - length(OLD.item_key) - length(OLD.partition_key) - length(OLD.sort_key)
+        WHERE singleton = 1;
+END;
+CREATE TRIGGER ddb_partition_usage_delete AFTER DELETE ON ddb_partition_items
+BEGIN
+    UPDATE ddb_partition_usage SET item_count = item_count - 1,
+        item_bytes = item_bytes - length(OLD.item) - length(OLD.item_key)
+            - length(OLD.partition_key) - length(OLD.sort_key)
+        WHERE singleton = 1;
+END;
+
 CREATE TABLE ddb_partition_ttl (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     attribute_name TEXT,
