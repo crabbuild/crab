@@ -85,7 +85,8 @@ impl ReplicaReadRouter {
 
     /// Executes a typed read on a selected replica and returns its serving node.
     ///
-    /// Selection and all attempts share one five-second deadline. A local
+    /// Selection and all attempts share one five-second deadline. Each attempt
+    /// receives an equal share of the remaining time and candidate count. A local
     /// resolver may serve this node's admitted views without a self-dial. The
     /// caller must perform its product authorization before invoking this route.
     /// There is no owner fallback when replicas are absent, behind or fenced.
@@ -126,16 +127,29 @@ impl ReplicaReadRouter {
                     input_limit: operation.input_limit,
                     output_limit: operation.output_limit,
                 };
-                let queried = if let Some((_, resolver)) =
-                    local.filter(|(session, _)| *session == node.session())
-                {
-                    match resolver.resolve(target.clone()).await {
-                        Ok(reader) => reader.query_encoded(query).await,
-                        Err(error) => Err(error),
+                // A blackholed peer or stalled local resolver must leave time
+                // for the other selected replicas. The outer deadline still
+                // bounds discovery and every attempt together.
+                let now = tokio::time::Instant::now();
+                let remaining = deadline.saturating_duration_since(now);
+                let candidates =
+                    u32::try_from(selected.len() + 1).map_err(|_| Error::ReplicaUnavailable)?;
+                let attempt_deadline = now + remaining / candidates;
+                let querying = async {
+                    if let Some((_, resolver)) =
+                        local.filter(|(session, _)| *session == node.session())
+                    {
+                        match resolver.resolve(target.clone()).await {
+                            Ok(reader) => reader.query_encoded(query).await,
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        peer.query_encoded(node, query, attempt_deadline).await
                     }
-                } else {
-                    peer.query_encoded(node, query, deadline).await
                 };
+                let queried = tokio::time::timeout_at(attempt_deadline, querying)
+                    .await
+                    .unwrap_or(Err(Error::ReplicaUnavailable));
                 drop(attempt);
                 match queried {
                     Ok(result) => {
