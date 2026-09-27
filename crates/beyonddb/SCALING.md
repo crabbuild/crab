@@ -2334,7 +2334,7 @@ main `311105eb864` and qualified a heartbeat-owned retirement implementation.
 Its native tests and GA RustFS process/peer runs (211.84s and 256.76s) remain
 historical evidence for that source, not proof of the current integration.
 
-Current main `de215cd0c49` independently fixes the ordinary restart path through
+Main `de215cd0c49` independently fixed the ordinary restart path through
 `shutdown_serving_node`: runtime drain must succeed before the product retires
 its session. PR479 now preserves that boundary. Lease maintenance still stops
 on cancellation without withdrawing; failed drain cannot remove the session.
@@ -2368,3 +2368,60 @@ container and volume; failed fixtures retain a stopped container for replay.
 The peer fixture separates simulated process loss from graceful shutdown:
 crash drops renewal without writing a tombstone, retaining expiry-based
 recovery. Linux CI and fleet-scale qualification remain separate gates.
+
+Current integration evidence uses base `a362f3b17f5` and source
+`1cf2db64ad7e7fa7fc1e63628e8e0f1983109f91`. The full signed SDK process
+scenario passed against digest-pinned RustFS GA in Colima in **321.67s**:
+large escaped/binary transactions, coordinator churn, hard restart at a new
+peer address, exact replay, index recovery, graceful restart and table
+recreation. This run builds and executes the real server binary; the server
+processes themselves run on the macOS host.
+
+Preserve the preceding failure as separate evidence: source `49906251a6f`
+on base `de215cd0c49` failed in 187.36s at `escaped-transfer-put`, before any
+restart or shutdown. The log reports mailbox-byte refusals and a started SQL
+command exceeding its wall deadline, followed by fenced-executor errors.
+The failed RustFS container was stopped and retained. The later passing run
+uses a newer integrated base and does not establish a causal fix for that
+failure. The shared macOS host also had other workloads and swap in use;
+this does not prove that contention caused the failure. Sustained-load and
+Linux process qualification remain required.
+
+The four public shutdown cases also pass on this integrated source (30.04s),
+and strict all-target BeyondDB/runtime Clippy with runtime test-support passes
+(1m36s). The earlier-base shared node suite passed 36 cases in 0.50s and the
+host drain-ordering regression in 0.01s. The controlled current-main function
+substitution reproduced the late-heartbeat failure; the corrected function
+passed in 2.04s. Format, layout, policy-entry, documentation and workflow
+syntax checks pass.
+
+
+The integrated signed peer SDK scenario also passed in **283.06s** after
+correcting its deletion lifecycle wiring. The test uses an in-memory provider
+with real signed SDK, HTTP/mTLS and public hosts; it is not RustFS evidence.
+DeleteTable returns DELETING until the account maintenance controller retires
+independent index directories. The old fixture reused the name immediately,
+failed at generation 1, and stalled when a completion waiter was added without
+maintenance. The retained maintenance task now uses the API host's provisioner
+and peer-aware client, preserving this fixture's explicit owner placement.
+DescribeTable must report ResourceNotFound before each of six recreations.
+Empty scans, writes, live-table preservation, transaction capacity cancellation,
+large transactions, owner expiry, changed-address recovery and replay retain
+their original assertions. The autonomous creation-recovery fixtures separately
+exercise production placement; installing a competing local-only provisioner
+into this explicit-placement scenario is not equivalent wiring.
+
+
+The sibling unleased residency test exposed the same stale fixture assumptions:
+it failed in 0.47s before recreation because its five slots predated independent
+GSI directory owners. Its exact full-pool accounting is now seven Cells: one
+account and two indexed tables with data, index and directory owners each.
+It drives the bounded deletion controller until the generation is absent,
+then checks that both historical range roots remain durable and the live table
+remains readable. The corrected case passes in **5.80s**, retaining all four
+recreations and historical-root restoration. No runtime capacity or admission
+policy was changed.
+
+Final BeyondDB/runtime all-target Clippy with runtime test-support passes in
+6.42s after these fixture changes. Format, layout, policy-entry and documentation
+checks also pass; production Rust remains the same bounded retirement change.

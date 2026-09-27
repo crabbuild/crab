@@ -2,6 +2,8 @@ use crate::*;
 use extenddb_core::types::DeleteTableInput;
 
 const ACCOUNT: &str = "123456789012";
+// One account and two indexed tables, each with data, index and directory owners.
+const CELL_CAPACITY: usize = 7;
 
 fn table(name: &str) -> extenddb_core::types::CreateTableInput {
     serde_json::from_value(serde_json::json!({
@@ -36,7 +38,10 @@ async fn deleted_table_ranges_release_residency_without_releasing_live_ranges() 
     );
     let session = SessionId::from_bytes([198; 16]);
     let host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 5).unwrap(), 16 * 1024 * 1024)
+        .with_runtime(
+            SqlWorkerPool::new(1, CELL_CAPACITY).unwrap(),
+            16 * 1024 * 1024,
+        )
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(session)
         .build_unleased_for_maintenance()
@@ -135,7 +140,7 @@ async fn deleted_table_ranges_release_residency_without_releasing_live_ranges() 
             .unwrap()
             .cell_id(),
         ];
-        assert_eq!(host.runtime().stats().active_cells(), 5);
+        assert_eq!(host.runtime().stats().active_cells(), CELL_CAPACITY);
         storage
             .delete_table(
                 ACCOUNT,
@@ -145,6 +150,35 @@ async fn deleted_table_ranges_release_residency_without_releasing_live_ranges() 
             )
             .await
             .unwrap();
+        // This unleased fixture drives the same bounded controller as serving
+        // maintenance. Directory retirement must finish before the name is free.
+        let mut cursor = None;
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let lifecycle = client
+                    .query::<beyonddb::ReadTableLifecycle>(&account, None, Json("Recreated".into()))
+                    .await
+                    .unwrap()
+                    .output
+                    .0;
+                match lifecycle {
+                    beyonddb::TableLifecycle::Missing => break,
+                    beyonddb::TableLifecycle::Deleting(_) => {}
+                    beyonddb::TableLifecycle::Live(_) => panic!("deleted generation is still live"),
+                }
+                Box::pin(provisioner.reconcile_account_capacity(
+                    ACCOUNT,
+                    client.clone(),
+                    u64::MAX,
+                    &mut cursor,
+                ))
+                .await
+                .unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("directory retirement did not complete");
     }
     // Recovery can still restore an original participant after its public
     // table name has been deleted and reused for other generations.

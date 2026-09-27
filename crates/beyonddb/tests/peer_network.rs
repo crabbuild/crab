@@ -208,6 +208,11 @@ async fn start_node(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .with_test_writer()
+        .try_init();
     let files = tempfile::tempdir().unwrap();
     let (owner_certificate, owner_key, remote_certificate, remote_key, ca) =
         tls_files(files.path());
@@ -284,7 +289,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     let remote_endpoint = format!("https://{}", remote_listener.local_addr().unwrap());
     let remote_session = SessionId::from_bytes([96; 16]);
     let remote_lease = CancellationToken::new();
-    let (remote, _remote_tasks) = start_node(
+    let (remote, remote_tasks) = start_node(
         Arc::clone(&application),
         8,
         peer_directory.clone(),
@@ -585,6 +590,18 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .unwrap();
     assert_eq!(read.item(), Some(&item));
     peer_network::concurrency::increment_without_client_retries(&sdk).await;
+    // This fixture explicitly places new ranges on the API host. Its retained
+    // controller must share that provisioner, while reaching account metadata
+    // through the peer client, to preserve the same admission policy.
+    remote_provisioner
+        .install_account_capacity_loop(
+            &remote_tasks,
+            "123456789012".into(),
+            client.clone(),
+            u64::MAX,
+            std::time::Duration::from_millis(100),
+        )
+        .unwrap();
     peer_network::table_residency::recreate_with_remote_account(&sdk).await;
     peer_network::capacity::assert_capacity_abort(&remote_provisioner, &client, &sdk).await;
     recovery::assert_read_triggered_commit(&remote_provisioner, &client, &sdk).await;
