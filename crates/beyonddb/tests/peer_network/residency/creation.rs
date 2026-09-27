@@ -268,3 +268,228 @@ async fn sdk_worker_finishes_partial_creation_after_account_restore() {
     assert_eq!(indexed, vec![item]);
     fixture.shutdown().await;
 }
+
+async fn partially_installed_table(base_installed: bool) -> (Fixture, beyonddb::TableRecord) {
+    let fixture = Fixture::new().await;
+    let mut blockers = Vec::new();
+    for ordinal in 0..if base_installed { 1 } else { 3 } {
+        blockers.push(
+            fixture
+                .provisioner
+                .admit_credential(&format!("AKIACREATIONCAPACITY{ordinal}"))
+                .await
+                .unwrap(),
+        );
+    }
+    let sdk = sdk_without_retries(&fixture);
+    // Leave room for one base owner or one GSI owner, interrupting installation.
+    assert!(create(&sdk, "ResidencyPending", true).send().await.is_err());
+    let account = account_target("123456789012").unwrap();
+    let table = fixture
+        .client
+        .query::<DescribeTable>(&account, None, Json("ResidencyPending".into()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    let first = if base_installed {
+        beyonddb::data_target("123456789012", &table.id, &[0; 16])
+    } else {
+        beyonddb::global_index_target(
+            "123456789012",
+            &table.global_secondary_indexes[0].id,
+            &[0; 16],
+        )
+    }
+    .unwrap();
+    assert!(
+        CellAuthority::new(fixture.layout.clone())
+            .load(first.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .root
+            .is_some()
+    );
+    for blocker in blockers {
+        blocker.drain().await.unwrap();
+    }
+    fixture
+        .provisioner
+        .admit_account("123456789012")
+        .await
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
+    (fixture, table)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_creation_resumes_original_partition_count_after_restore() {
+    for base_installed in [false, true] {
+        let (fixture, table) = partially_installed_table(base_installed).await;
+        let recovery = CellInitialPartitionProvisioner::new(
+            fixture.node.runtime(),
+            fixture.application.clone(),
+            fixture.layout.clone(),
+            fixture.session,
+            fixture.endpoint.clone(),
+            fixture._files.path().join("recovery"),
+        )
+        .unwrap()
+        .with_initial_partition_count(1)
+        .unwrap();
+        let mut cursor = None;
+        for _ in 0..3 {
+            recovery
+                .reconcile_account_capacity(
+                    "123456789012",
+                    fixture.client.clone(),
+                    u64::MAX,
+                    &mut cursor,
+                )
+                .await
+                .unwrap();
+        }
+        let route = fixture
+            .client
+            .query::<ReadTableRoute>(
+                &account_target("123456789012").unwrap(),
+                None,
+                Json(table.id.clone()),
+            )
+            .await
+            .unwrap()
+            .output
+            .0
+            .unwrap();
+        assert_eq!(route.partitions.len(), 2);
+        let index = fixture
+            .client
+            .query::<beyonddb::ReadGlobalIndexRoutePage>(
+                &account_target("123456789012").unwrap(),
+                None,
+                Json(beyonddb::RoutePageInput {
+                    table_id: table.global_secondary_indexes[0].id.clone(),
+                    start_hash: None,
+                    after_lower: None,
+                    expected_epoch: None,
+                }),
+            )
+            .await
+            .unwrap()
+            .output
+            .0;
+        assert!(
+            matches!(index, beyonddb::RoutePageOutcome::Page { partitions, .. } if partitions.len() == 2)
+        );
+        let sdk = sdk_without_retries(&fixture);
+        sdk.put_item()
+            .table_name("ResidencyPending")
+            .item("id", AwsAttributeValue::S("original-layout".into()))
+            .send()
+            .await
+            .unwrap();
+        for range in &route.partitions {
+            recovery
+                .admit_existing_partition("123456789012", &table.id, &range.partition_id)
+                .await
+                .unwrap()
+                .drain()
+                .await
+                .unwrap();
+        }
+        let item = sdk
+            .get_item()
+            .table_name("ResidencyPending")
+            .key("id", AwsAttributeValue::S("original-layout".into()))
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap()
+            .item
+            .unwrap();
+        assert_eq!(item["id"], AwsAttributeValue::S("original-layout".into()));
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_update_rejects_incomplete_creation() {
+    use extenddb_core::types::{DescribeTableInput, TableKeyInfo, TableStatus};
+    use extenddb_storage::{DataEngine, TableEngine, error::StorageError};
+
+    let (fixture, pending) = partially_installed_table(true).await;
+    // A maintenance/read client without a provisioner must observe the same
+    // creation state and must never route unpublished items into the account.
+    let storage = beyonddb::CellStorage::new(fixture.client.clone(), "us-east-1");
+    let description = storage
+        .describe_table(
+            "123456789012",
+            DescribeTableInput {
+                table_name: pending.table_name.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(description.table_status, TableStatus::Creating);
+    let info = TableKeyInfo {
+        account_id: "123456789012".into(),
+        table_name: pending.table_name,
+        table_id: pending.id,
+        base_key_schema: pending.key_schema.clone(),
+        key_schema: pending.key_schema,
+        attribute_definitions: pending.attribute_definitions,
+        ..TableKeyInfo::default()
+    };
+    let key = Item::from([("id".into(), AttributeValue::S("unpublished".into()))]);
+    assert!(matches!(
+        storage.get_item(&info, &key).await,
+        Err(StorageError::TableNotActive(_))
+    ));
+    assert!(matches!(
+        storage.scan(&info, None, None, None, None, None).await,
+        Err(StorageError::TableNotActive(_))
+    ));
+    let sdk = sdk_without_retries(&fixture);
+    let error = sdk
+        .update_table()
+        .table_name("ResidencyPending")
+        .deletion_protection_enabled(true)
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .as_service_error()
+            .unwrap()
+            .is_resource_in_use_exception()
+    );
+    let mut cursor = None;
+    for _ in 0..3 {
+        fixture
+            .provisioner
+            .reconcile_account_capacity(
+                "123456789012",
+                fixture.client.clone(),
+                u64::MAX,
+                &mut cursor,
+            )
+            .await
+            .unwrap();
+    }
+    let table = sdk
+        .update_table()
+        .table_name("ResidencyPending")
+        .deletion_protection_enabled(true)
+        .send()
+        .await
+        .unwrap()
+        .table_description
+        .unwrap();
+    assert_eq!(table.deletion_protection_enabled, Some(true));
+    fixture.shutdown().await;
+}

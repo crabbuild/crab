@@ -54,8 +54,11 @@ owners are installed. `CREATING` must remain visible until all initial index
 routes and the base route are published. The existing account-scoped worker can
 repair an incomplete creation from the stored table record; later directory
 extraction must retain that behavior without relying on the original request.
-The creation placement/count policy must be durable before supporting changes
-to that policy across a partially completed creation.
+The creation placement/count policy is persisted in the table generation before
+any initial owner is installed. Recovery uses that policy after configuration
+changes. UpdateTable rejects a routed generation until base-route publication
+inside the account command, keeping the installed specification immutable during
+creation. Metadata extraction must retain that atomic lifecycle guard.
 
 Deletion needs an explicit generation-scoped lifecycle transition before its
 metadata can live on separate owners. Mark the generation deleting, fence new

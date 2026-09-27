@@ -167,6 +167,10 @@ struct FailOnceProvisioner {
 }
 
 impl InitialPartitionProvisioner for FailOnceProvisioner {
+    fn initial_partition_count(&self) -> u16 {
+        self.inner.initial_partition_count()
+    }
+
     fn provision_global_index<'a>(
         &'a self,
         client: &'a CellClient,
@@ -494,6 +498,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
             &account,
             identity(77),
             Json(TableSpec {
+                placement: beyonddb::TablePlacement::Account,
                 local_secondary_indexes: Vec::new(),
                 global_secondary_indexes: Vec::new(),
                 table_name: "ManyRanges".into(),
@@ -804,6 +809,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                 &account,
                 identity(200 + index),
                 Json(TableSpec {
+                    placement: beyonddb::TablePlacement::Account,
                     local_secondary_indexes: Vec::new(),
                     global_secondary_indexes: Vec::new(),
                     table_name: name.clone(),
@@ -847,6 +853,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
             &account,
             identity(79),
             Json(TableSpec {
+                placement: beyonddb::TablePlacement::Account,
                 local_secondary_indexes: Vec::new(),
                 global_secondary_indexes: Vec::new(),
                 table_name: "MoreRanges".into(),
@@ -2571,6 +2578,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &account,
             identity(13),
             Json(TableSpec {
+                placement: beyonddb::TablePlacement::Account,
                 local_secondary_indexes: Vec::new(),
                 global_secondary_indexes: Vec::new(),
                 table_name: "Books".into(),

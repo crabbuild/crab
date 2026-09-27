@@ -35,6 +35,9 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
     let mut table_bytes = [180; 32];
     table_bytes[..16].copy_from_slice(account.tenant().as_bytes());
     let table = TableRecord {
+        placement: beyonddb::TablePlacement::Routed {
+            initial_partitions: 2,
+        },
         local_secondary_indexes: Vec::new(),
         global_secondary_indexes: Vec::new(),
         id: blake3::Hash::from_bytes(table_bytes).to_hex().to_string(),

@@ -185,11 +185,13 @@ remain retryable. Cancellation leaves durable progress for the next resolver.
 Each Cell query helps at most one transaction; BEGIN and unavailable decisions
 remain retryable conflicts. Transactional reads retain conflict cancellation.
 Once a table's initial route is published, keyed CRUD and Scan use its data
-Cells; unactivated tables
-still use the account Cell unless a provisioner is configured. The host-backed
+Cells. Placement is committed with the table generation: account-local tables
+use the account Cell, while routed tables remain CREATING until publication,
+including for clients without provisioning capability. The host-backed
 provisioner installs 1–256 initial data Cells per table during CreateTable and
-resumes after an interrupted setup. The initial count must stay fixed across
-retries. A host-backed controller can resume a recorded split. A cancellable
+resumes using the persisted count after an interrupted setup. Configuration
+changes affect new generations only. UpdateTable rejects incomplete routed
+creation atomically, preserving the specification already installed in owners. A host-backed controller can resume a recorded split. A cancellable
 account capacity loop can trigger a split, and the serving binary starts that
 loop for locally owned accounts. It visits base ranges and then GSI ranges in
 order, advancing past transient failures and capacity refusals. GSI plans remain
@@ -613,3 +615,7 @@ fixture credentials and stops both services on exit. It disables bytecode and
 pytest cache writes in the upstream checkout. Omit test selectors to collect the
 whole Python suite; it stops at the first failure. Passing selected files does
 not establish full DynamoDB compatibility.
+
+The persisted creation-placement field changes the unreleased table-record
+format, including embedded base/index specifications. Existing development
+roots require reprovisioning before running this revision.

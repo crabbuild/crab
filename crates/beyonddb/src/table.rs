@@ -1,9 +1,20 @@
 use super::*;
 use extenddb_core::types::{LsiInput, Tag};
 
+/// Immutable placement selected before a table's first range is installed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TablePlacement {
+    /// Items are stored directly in the account Cell.
+    Account,
+    /// Base and index directories start with this many ranges each.
+    Routed { initial_partitions: u16 },
+}
+
 /// An ExtendDB table's key contract stored in the account Cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TableSpec {
+    /// Placement policy persisted with the new generation.
+    pub placement: TablePlacement,
     /// Table name unique within the account.
     pub table_name: String,
     /// Primary key schema already validated by ExtendDB's operation engine.
@@ -28,6 +39,8 @@ pub struct TableSpec {
 
 impl TableSpec {
     pub(crate) fn matches_record(&self, record: &TableRecord) -> bool {
+        // Placement is service policy. A matching user retry keeps the original
+        // generation's policy even if the serving node's configuration changed.
         self.table_name == record.table_name
             && self.key_schema == record.key_schema
             && self.attribute_definitions == record.attribute_definitions
@@ -56,6 +69,8 @@ pub enum CreateTableOutcome {
 /// Durable identity and key contract for one account table.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TableRecord {
+    /// Original placement policy, unaffected by later server configuration.
+    pub placement: TablePlacement,
     /// Fresh ID assigned by the account Cell.
     pub id: String,
     /// Logical creation time assigned by the Cell runtime.
@@ -129,6 +144,7 @@ impl Command for CreateTable {
             }
         }
         let record = TableRecord {
+            placement: input.placement,
             id: table_id.clone(),
             created_at_ms: context.now_ms(),
             table_name: input.table_name.clone(),
@@ -284,6 +300,8 @@ pub enum UpdateTableOutcome {
     Updated(TableRecord),
     /// No table has this name.
     TableNotFound,
+    /// Initial routed placement has not been published yet.
+    TableNotActive,
     /// Billing and capacity settings are inconsistent.
     InvalidUpdate,
 }
@@ -307,6 +325,20 @@ impl Command for UpdateTable {
                 UpdateTableOutcome::TableNotFound,
             )));
         };
+        // Initial owners persist this record verbatim. Keep it immutable until
+        // route publication so a retry cannot conflict with installed owners.
+        if matches!(table.placement, TablePlacement::Routed { .. })
+            && context.sql(&statement(
+                "SELECT 1 FROM ddb_routes WHERE table_id = ?1",
+                vec![SqlValue::Text(table.id.clone())],
+            ))?[0]
+                .rows
+                .is_empty()
+        {
+            return Ok(CommandResult::Rejected(Json(
+                UpdateTableOutcome::TableNotActive,
+            )));
+        }
         if let Some(mode) = input.billing_mode {
             if mode != table.billing_mode {
                 table.pay_per_request_since_ms =
@@ -324,6 +356,7 @@ impl Command for UpdateTable {
             table.deletion_protection_enabled = enabled;
         }
         let spec = TableSpec {
+            placement: table.placement,
             table_name: table.table_name.clone(),
             key_schema: table.key_schema.clone(),
             attribute_definitions: table.attribute_definitions.clone(),
@@ -541,6 +574,13 @@ fn table_id(context: &CommandContext<'_, '_>, name: &str) -> String {
 }
 
 fn valid_table_spec(spec: &TableSpec) -> bool {
+    if let TablePlacement::Routed { initial_partitions } = spec.placement
+        && (initial_partitions == 0
+            || initial_partitions > 256
+            || !initial_partitions.is_power_of_two())
+    {
+        return false;
+    }
     let input = CreateTableInput {
         table_name: spec.table_name.clone(),
         key_schema: spec.key_schema.clone(),

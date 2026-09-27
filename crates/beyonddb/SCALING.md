@@ -1938,11 +1938,8 @@ propagate through the existing retry/error policy.
 
 One worker selection repairs one table, potentially installing all remaining
 initial base/GSI ranges. Work is not bounded to one Cell per tick. Initial
-partition-count policy still must remain stable while creation is incomplete;
-its durable representation belongs to the metadata lifecycle work described in
-[METADATA_SHARDING.md](METADATA_SHARDING.md). Administrative updates between
-partial installation attempts also require a stable creation specification;
-this change does not qualify that case. Metadata sharding and 10,000-Cell/multi-TB
+partition-count policy and administrative-update fencing are now durable, as
+described under [Persisted creation placement](#persisted-creation-placement). Metadata sharding and 10,000-Cell/multi-TB
 qualification remain open. No dependency, configuration or schema change is
 required for this recovery path.
 
@@ -1952,3 +1949,60 @@ pass (9.53 s). Strict all-target Clippy passes (10.11 s), as do formatting,
 diff, Cell/LTX layout and policy checks. The standalone server builds (17.55 s).
 Full SDK/process proof remains the CI gate. Production growth is 100 net lines: one shared completion path, published
 route checks, and worker revalidation replace the request-only path.
+
+## Persisted creation placement
+
+The table generation now records either account-local placement or routed
+placement with an initial range count. CreateTable validates and commits that
+policy with its catalog row before provisioning starts. Both base and GSI
+provisioning read the stored count; a changed node configuration cannot resize
+an interrupted generation or conflict with an already installed first range.
+Matching SDK retries retain that generation's policy.
+
+UpdateTable rejects an unpublished routed generation inside the account command.
+The readiness check and metadata mutation share one Cell transaction, preserving
+the table specification already installed in initial owners. Once the base route
+is published, billing and deletion-protection updates remain available. This
+matches the pinned ExtendDB SQLite backend's non-ACTIVE check in
+`crates/storage-sqlite/src/update_table.rs`; the existing engine maps
+`StorageError::TableNotActive` to ResourceInUseException. See also the
+[AWS UpdateTable contract](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_UpdateTable.html).
+
+DescribeTable, key discovery, point routing and Scan use the durable policy
+instead of inferring readiness from a client's provisioning capability. A
+maintenance client cannot treat an incomplete routed table as account-local.
+The extra metadata read is limited to an unpublished route; published data
+routing keeps its existing lookup path. Capacity sweeps skip explicitly
+account-local tables rather than attempting to convert them.
+
+| Evidence | Boundary |
+| --- | --- |
+| Entry | Signed CreateTable selects the provisioner's policy before `table.rs::CreateTable` commits it. Matching request retries and the account capacity worker reuse that record. |
+| Owner | `TablePlacement` in the catalog generation; `UpdateTable` checks `ddb_routes` in the same account command as its update. No second placement directory or policy fallback is introduced. |
+| Callees/siblings | `InitialPartitionProvisioner` exposes its new-table count; both base and GSI installers consume the persisted count. Point and Scan routing share the account-placement guard. Account-local fixtures explicitly select Account. |
+| Dependency | ExtendDB's SQLite update runs a non-ACTIVE guard under its write transaction; the shared engine's error mapping produces ResourceInUseException. Cell command SQL gives the corresponding atomic guard here. |
+| Baseline | On eae16432b3b, recovery configured for one range conflicts with the original first half-range. The SDK update succeeds and reports ACTIVE while the base route is absent. Both failures were reproduced before the fix. |
+| Regression | Signed SDK fixtures interrupt after one base or one GSI installation, drain the account owner, recover under a different configured count and retain two base/GSI ranges. SDK data remains readable after base-owner restoration. Updates fail during creation and succeed after publication; provisioner-free describe/point/Scan observe the same readiness. |
+
+This adds a required field to the unreleased serialized TableSpec/TableRecord
+contracts, including records embedded in base/index specifications. Development
+roots must be reprovisioned; there is no old-shape reader or rolling-upgrade
+claim. No dependency pin, lockfile or configuration option changes. Production
+growth is 85 net lines for durable placement, atomic readiness checks and shared
+unpublished-route classification. The fleet, metadata-sharding and full API
+qualification gates remain open.
+
+Local proof: four creation tests pass (6.51 s), including both interrupted
+base/GSI count-change cases; remote initial placement/recovery passes (19.30 s);
+account replay/rollback/new-host restoration passes (5.34 s); interrupted
+CreateTable retry and two-range persistence passes (25.16 s). Strict all-target
+Clippy passes (13.01 s), and the server builds (21.12 s). Formatting, diff,
+Cell/LTX layout and policy checks pass.
+
+The qualification workflow now retains its running invocation and keeps only
+the latest pending revision in the same concurrency group. Seven successive
+runs had been canceled by subsequent pushes before producing a result. This
+uses GitHub's [documented concurrency behavior](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency),
+without changing assertions, deadlines or the SDK/process workload. A result for
+an older commit does not qualify a newer one; the latest head still needs its
+own completed run.

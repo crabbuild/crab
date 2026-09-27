@@ -32,12 +32,15 @@ use extenddb_storage::{BoxedFuture, TableEngine};
 use super::{
     APPLICATION, CreateTable, CreateTableOutcome, DeleteTable, DeleteTableOutcome, DescribeTable,
     DescribeTableById, Json, ListTables, ListTablesInput, ListTablesOutcome, NAMESPACE,
-    PartitionSpec, ReadRoutePage, RoutePageInput, RoutePageOutcome, TableRecord, TableSpec,
-    TableUpdate, UpdateTable, UpdateTableOutcome, account_target,
+    PartitionSpec, ReadRoutePage, RoutePageInput, RoutePageOutcome, TablePlacement, TableRecord,
+    TableSpec, TableUpdate, UpdateTable, UpdateTableOutcome, account_target,
 };
 
 /// Installs an initial table's data Cells before its route becomes visible.
 pub trait InitialPartitionProvisioner: Send + Sync {
+    /// Select the initial count to persist before installing any new table ranges.
+    fn initial_partition_count(&self) -> u16;
+
     /// Return installed ranges, using the routed client for account-owned admission proof.
     fn provision<'a>(
         &'a self,
@@ -156,6 +159,12 @@ impl TableEngine for CellStorage {
             let target = target(&account_id)?;
             let name = input.table_name.clone();
             let spec = TableSpec {
+                placement: self.initial_partitions.as_ref().map_or(
+                    TablePlacement::Account,
+                    |provisioner| TablePlacement::Routed {
+                        initial_partitions: provisioner.initial_partition_count(),
+                    },
+                ),
                 table_name: input.table_name,
                 key_schema: input.key_schema,
                 attribute_definitions: input.attribute_definitions,
@@ -191,7 +200,8 @@ impl TableEngine for CellStorage {
                             return Err(StorageError::TableAlreadyExists(name));
                         }
                         let existing = self.record(&account_id, &name).await?;
-                        if !submitted.matches_record(&existing)
+                        if existing.placement == TablePlacement::Account
+                            || !submitted.matches_record(&existing)
                             || self.route_active_for(&account_id, &existing.id).await?
                         {
                             return Err(StorageError::TableAlreadyExists(name));
@@ -290,7 +300,7 @@ impl TableEngine for CellStorage {
         let account_id = account_id.to_owned();
         Box::pin(async move {
             let record = self.record(&account_id, &input.table_name).await?;
-            let status = if self.initial_partitions.is_some()
+            let status = if matches!(record.placement, TablePlacement::Routed { .. })
                 && !self.route_active_for(&account_id, &record.id).await?
             {
                 TableStatus::Creating
@@ -383,6 +393,9 @@ impl TableEngine for CellStorage {
                     UpdateTableOutcome::TableNotFound => {
                         return Err(StorageError::TableNotFound(name));
                     }
+                    UpdateTableOutcome::TableNotActive => {
+                        return Err(StorageError::TableNotActive(name));
+                    }
                     UpdateTableOutcome::InvalidUpdate => {
                         return Err(StorageError::Validation(
                             "invalid table billing update".into(),
@@ -410,7 +423,7 @@ impl TableEngine for CellStorage {
         let table_name = table_name.to_owned();
         Box::pin(async move {
             let record = self.record(&account_id, &table_name).await?;
-            if self.initial_partitions.is_some()
+            if matches!(record.placement, TablePlacement::Routed { .. })
                 && !self.route_active_for(&account_id, &record.id).await?
             {
                 return Err(StorageError::TableNotActive(table_name));

@@ -99,8 +99,8 @@ impl CellInitialPartitionProvisioner {
 
     /// Start each new table with a power-of-two number of independently owned ranges.
     ///
-    /// Accepted counts are 1 through 256. The count must remain stable while
-    /// retrying an interrupted CreateTable, because range IDs are deterministic.
+    /// Accepted counts are 1 through 256. Each table persists its selected count;
+    /// configuration changes affect only new table generations.
     pub fn with_initial_partition_count(mut self, count: u16) -> Result<Self, StorageError> {
         if count == 0 || count > 256 || !count.is_power_of_two() {
             return Err(StorageError::Validation(
@@ -835,6 +835,10 @@ fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, Sto
 }
 
 impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
+    fn initial_partition_count(&self) -> u16 {
+        self.initial_partition_count
+    }
+
     fn provision_global_index<'a>(
         &'a self,
         client: &'a CellClient,
@@ -844,10 +848,15 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
     ) -> BoxedFuture<'a, Result<Vec<crate::GlobalIndexPartitionSpec>, StorageError>> {
         Box::pin(async move {
             let account = account_target(account_id).map_err(provision_error)?;
-            let mut partitions = Vec::with_capacity(usize::from(self.initial_partition_count));
-            for ordinal in 0..self.initial_partition_count {
+            let crate::TablePlacement::Routed { initial_partitions } = table.placement else {
+                return Err(StorageError::Validation(
+                    "account-local table has no initial ranges".into(),
+                ));
+            };
+            let mut partitions = Vec::with_capacity(usize::from(initial_partitions));
+            for ordinal in 0..initial_partitions {
                 self.reclaim_retired_ranges(client, &account, None).await?;
-                let range = initial_partition(table, self.initial_partition_count, ordinal)?;
+                let range = initial_partition(table, initial_partitions, ordinal)?;
                 let spec = crate::GlobalIndexPartitionSpec {
                     table: table.clone(),
                     index: index.clone(),
@@ -888,10 +897,15 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
     ) -> BoxedFuture<'a, Result<Vec<PartitionSpec>, StorageError>> {
         Box::pin(async move {
             let account = account_target(account_id).map_err(provision_error)?;
-            let mut partitions = Vec::with_capacity(usize::from(self.initial_partition_count));
-            for index in 0..self.initial_partition_count {
+            let crate::TablePlacement::Routed { initial_partitions } = table.placement else {
+                return Err(StorageError::Validation(
+                    "account-local table has no initial ranges".into(),
+                ));
+            };
+            let mut partitions = Vec::with_capacity(usize::from(initial_partitions));
+            for index in 0..initial_partitions {
                 self.reclaim_retired_ranges(client, &account, None).await?;
-                let spec = initial_partition(table, self.initial_partition_count, index)?;
+                let spec = initial_partition(table, initial_partitions, index)?;
                 let target = data_target(account_id, &table.id, &spec.partition_id)
                     .map_err(provision_error)?;
                 let client = self.provision_range(&target, client).await?;

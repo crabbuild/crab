@@ -29,7 +29,9 @@ permissions:
 
 concurrency:
   group: beyonddb-sdk-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Let expensive process qualification finish; newer pushes replace the pending
+  # run, so continued development cannot repeatedly discard all test evidence.
+  cancel-in-progress: false
 
 jobs:
   sdk:

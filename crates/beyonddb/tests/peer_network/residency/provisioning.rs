@@ -517,6 +517,9 @@ async fn unpublished(
             &account_target("123456789012").unwrap(),
             mutation(),
             Json(TableSpec {
+                placement: beyonddb::TablePlacement::Routed {
+                    initial_partitions: 2,
+                },
                 table_name: name.into(),
                 key_schema: vec![KeySchemaElement {
                     attribute_name: "id".into(),

@@ -129,6 +129,9 @@ impl CellInitialPartitionProvisioner {
                     after_lower: None,
                     index: None,
                 });
+                if table.placement == crate::TablePlacement::Account {
+                    return Ok(false);
+                }
                 if let Err(error) = crate::backend::table_creation::publish_initial_routes(
                     self, &client, account_id, &table,
                 )
