@@ -1,15 +1,15 @@
 use crab_ltx::rusqlite::{Connection, DatabaseName, params};
 
 fn assert_usage(connection: &Connection) {
-    let measured: (i64, i64) = connection.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(length(item) + length(item_key) + length(partition_key) + length(sort_key)), 0) FROM ddb_partition_items",
-        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    let measured: (i64, i64, i64) = connection.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(length(item) + length(item_key) + length(partition_key) + length(sort_key)), 0), COALESCE(SUM(logical_bytes), 0) FROM ddb_partition_items",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).unwrap();
     let maintained = connection
         .query_row(
-            "SELECT item_count, item_bytes FROM ddb_partition_usage WHERE singleton = 1",
+            "SELECT item_count, item_bytes, logical_bytes FROM ddb_partition_usage WHERE singleton = 1",
             [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
         )
         .unwrap();
     assert_eq!(maintained, measured);
@@ -24,7 +24,7 @@ fn partition_usage_tracks_row_changes_and_rollback() {
     assert_usage(&connection);
     for n in 0_u32..128 {
         connection.execute(
-            "INSERT INTO ddb_partition_items (item_key, partition_key, sort_key, item) VALUES (?1, ?2, ?3, zeroblob(?4))",
+            "INSERT INTO ddb_partition_items (item_key, partition_key, sort_key, item, logical_bytes) VALUES (?1, ?2, ?3, zeroblob(?4), ?4)",
             params![n.to_be_bytes(), [0_u8; 32], n.to_le_bytes(), n * 17],
         ).unwrap();
         assert_usage(&connection);
@@ -32,7 +32,7 @@ fn partition_usage_tracks_row_changes_and_rollback() {
     // Exercise the reset/allocation/incremental-write shape used by StoredValue.
     let key = 0_u32.to_be_bytes();
     connection.execute(
-        "INSERT INTO ddb_partition_items (item_key, partition_key, sort_key, item) VALUES (?1, ?2, ?3, X'') ON CONFLICT(item_key) DO UPDATE SET partition_key = excluded.partition_key, sort_key = excluded.sort_key, item = excluded.item",
+        "INSERT INTO ddb_partition_items (item_key, partition_key, sort_key, item, logical_bytes) VALUES (?1, ?2, ?3, X'', 300000) ON CONFLICT(item_key) DO UPDATE SET partition_key = excluded.partition_key, sort_key = excluded.sort_key, item = excluded.item, logical_bytes = excluded.logical_bytes",
         params![key, [1_u8; 48], [2_u8; 8]],
     ).unwrap();
     connection

@@ -766,10 +766,12 @@ impl MetadataEngine for CellStorage {
 
     fn refresh_table_size(
         &self,
-        _account_id: &str,
-        _table_name: &str,
+        account_id: &str,
+        table_name: &str,
     ) -> BoxedFuture<'_, Result<(), StorageError>> {
-        Box::pin(async { Err(unsupported("table size refresh")) })
+        let account_id = account_id.to_owned();
+        let table_name = table_name.to_owned();
+        Box::pin(async move { self.refresh_statistics(&account_id, &table_name).await })
     }
 
     fn list_active_table_names(

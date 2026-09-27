@@ -67,7 +67,7 @@ static COMMANDS: [OperationDescriptor; 15] = [
     crate::transaction_transport::upload_operation(14),
     crate::participant::phase_operation(15),
 ];
-static QUERIES: [OperationDescriptor; 12] = [
+static QUERIES: [OperationDescriptor; 13] = [
     operation(1),
     operation(2),
     operation(3),
@@ -80,6 +80,7 @@ static QUERIES: [OperationDescriptor; 12] = [
     operation(11),
     crate::participant::phase_operation(12),
     crate::global_index::outbox::chunk_operation(13),
+    operation(14),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -106,6 +107,7 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("lib.rs"));
                 source.update(include_bytes!("partition.rs"));
+                source.update(include_bytes!("statistics.rs"));
                 source.update(include_bytes!("secondary_index.rs"));
                 source.update(include_bytes!("secondary_index/read.rs"));
                 source.update(include_bytes!("partition/key.rs"));
@@ -157,6 +159,7 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
         registry.bind_command::<PreparePartitionTransaction>()?;
         registry.bind_command::<ResolvePartitionTransaction>()?;
         registry.bind_command::<crate::AckPartitionIndexChange>()?;
+        registry.bind_query::<crate::statistics::ReadPartitionStatistics>()?;
         registry.bind_query::<PartitionGet>()?;
         registry.bind_query::<PartitionScan>()?;
         registry.bind_query::<PartitionExport>()?;
@@ -1426,17 +1429,18 @@ fn write_item(
     let (ttl_generation, ttl_epoch) = ttl::write_values(context, item)?;
     context.sql(&statement(
         "INSERT INTO ddb_partition_items \
-         (item_key, partition_key, sort_key, item, ttl_generation, ttl_epoch) \
-         VALUES (?1, ?2, ?3, X'', ?4, ?5) ON CONFLICT(item_key) DO UPDATE SET \
+         (item_key, partition_key, sort_key, item, ttl_generation, ttl_epoch, logical_bytes) \
+         VALUES (?1, ?2, ?3, X'', ?4, ?5, ?6) ON CONFLICT(item_key) DO UPDATE SET \
          partition_key = excluded.partition_key, sort_key = excluded.sort_key, \
          item = excluded.item, ttl_generation = excluded.ttl_generation, \
-         ttl_epoch = excluded.ttl_epoch",
+         ttl_epoch = excluded.ttl_epoch, logical_bytes = excluded.logical_bytes",
         vec![
             SqlValue::Blob(key.clone()),
             SqlValue::Blob(partition_key),
             SqlValue::Blob(sort_key),
             ttl_generation,
             ttl_epoch,
+            SqlValue::Integer(crate::statistics::item_bytes(item)?),
         ],
     ))?;
     crate::item_storage::StoredValue::Partition(&key).write(context, item)?;

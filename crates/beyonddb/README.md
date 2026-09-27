@@ -296,6 +296,13 @@ midpoint, record the plan, and repeat the split on an already opened child. Repe
 resume this sequence after interruption.
 The account command itself cannot inspect other Cells; serving code must use
 the controller rather than calling route publication directly.
+`DescribeTable` reports periodically sampled item counts and logical item bytes
+for the table and its indexes. Each mutation maintains local counters; the server
+samples one range per tick and publishes a completed snapshot only if its table
+and route generations still match. Published totals survive account-owner restart.
+The values can lag writes and index projection, and do not measure billed storage
+or SQLite/object-store usage. See [statistics semantics and proof](SCALING.md#table-and-index-statistics).
+
 Routed keyed CRUD and Scan use the published directory. The account Cell
 stores the route epoch and table snapshot alongside indexed range rows, so
 keyed requests read one owner row instead of transferring the complete route.

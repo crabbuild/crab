@@ -1,6 +1,7 @@
 use super::*;
 use aws_sdk_dynamodb::types::{Put, TransactWriteItem};
 use crab_cell_runtime::identity::CellTarget;
+use extenddb_storage::MetadataEngine;
 
 const ACCOUNT: &str = "123456789012";
 
@@ -131,6 +132,40 @@ async fn sdk_range_usage_survives_mutation_replay_split_and_owner_restore() {
         restored.1 += value.1;
     }
     assert_eq!(restored, committed);
+    let storage = beyonddb::CellStorage::new(fixture.client.clone(), "us-east-1");
+    storage
+        .refresh_table_size(ACCOUNT, "Residency")
+        .await
+        .unwrap();
+    let described = sdk
+        .describe_table()
+        .table_name("Residency")
+        .send()
+        .await
+        .unwrap()
+        .table
+        .unwrap();
+    assert_eq!(described.item_count, Some(1));
+    let expected = 2 + id.as_s().unwrap().len() + 5 + "transaction".len();
+    assert_eq!(described.table_size_bytes, Some(expected as i64));
+    fixture
+        .provisioner
+        .admit_account(ACCOUNT)
+        .await
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
+    let restored = sdk
+        .describe_table()
+        .table_name("Residency")
+        .send()
+        .await
+        .unwrap()
+        .table
+        .unwrap();
+    assert_eq!(restored.item_count, described.item_count);
+    assert_eq!(restored.table_size_bytes, described.table_size_bytes);
     for _ in 0..2 {
         sdk.delete_item()
             .table_name("Residency")
@@ -152,6 +187,22 @@ async fn sdk_range_usage_survives_mutation_replay_split_and_owner_restore() {
             .unwrap()
             .item
             .is_none()
+    );
+    storage
+        .refresh_table_size(ACCOUNT, "Residency")
+        .await
+        .unwrap();
+    let empty = sdk
+        .describe_table()
+        .table_name("Residency")
+        .send()
+        .await
+        .unwrap()
+        .table
+        .unwrap();
+    assert_eq!(
+        (empty.item_count, empty.table_size_bytes),
+        (Some(0), Some(0))
     );
     fixture.shutdown().await;
 }

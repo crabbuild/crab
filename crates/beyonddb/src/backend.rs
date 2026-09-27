@@ -5,6 +5,7 @@ mod data;
 mod global_index;
 mod recovery;
 mod remaining;
+mod statistics;
 mod transaction;
 mod transaction_read;
 mod transaction_transport;
@@ -300,6 +301,8 @@ impl TableEngine for CellStorage {
         Box::pin(async move {
             let target = target(&account_id)?;
             let name = input.table_name;
+            let previous = self.record(&account_id, &name).await?;
+            let statistics = self.statistics(&account_id, &previous.id).await?;
             let record = match self
                 .client
                 .command::<DeleteTable>(&target, mutation_identity()?, Json(name.clone()))
@@ -333,12 +336,14 @@ impl TableEngine for CellStorage {
                 },
                 Err(error) => return Err(cell_error(error)),
             };
-            Ok(description(
-                record,
-                &account_id,
-                &self.region,
-                TableStatus::Deleting,
-            ))
+            // A concurrent delete/recreate can change the name's generation.
+            // Never attach the previous table's sample to the newly deleted one.
+            let same_generation = record.id == previous.id;
+            let mut result = description(record, &account_id, &self.region, TableStatus::Deleting);
+            if same_generation {
+                statistics::apply(&mut result, statistics);
+            }
+            Ok(result)
         })
     }
 
@@ -357,7 +362,7 @@ impl TableEngine for CellStorage {
             } else {
                 TableStatus::Active
             };
-            Ok(description(record, &account_id, &self.region, status))
+            self.table_description(record, &account_id, status).await
         })
     }
 
@@ -456,12 +461,8 @@ impl TableEngine for CellStorage {
                 },
                 Err(error) => return Err(cell_error(error)),
             };
-            Ok(description(
-                record,
-                &account_id,
-                &self.region,
-                TableStatus::Active,
-            ))
+            self.table_description(record, &account_id, TableStatus::Active)
+                .await
         })
     }
 

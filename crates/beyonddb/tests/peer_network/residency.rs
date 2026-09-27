@@ -4,6 +4,7 @@ mod provisioning;
 mod reclamation;
 mod recovery;
 mod splits;
+mod statistics;
 mod usage;
 
 use crate::*;

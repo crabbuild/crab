@@ -8,6 +8,7 @@ CREATE TABLE ddb_items (
     table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
     item_key BLOB NOT NULL,
     item BLOB NOT NULL,
+    logical_bytes INTEGER NOT NULL CHECK (logical_bytes >= 0),
     PRIMARY KEY (table_id, item_key)
 );
 
@@ -124,3 +125,26 @@ CREATE TABLE ddb_global_index_split_members (
 );
 CREATE INDEX ddb_global_index_split_source
     ON ddb_global_index_split_members (table_id, source_partition_id);
+
+CREATE TABLE ddb_table_statistics (
+    table_id TEXT PRIMARY KEY REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
+    sampled_at INTEGER NOT NULL,
+    statistics BLOB NOT NULL
+);
+
+CREATE TRIGGER ddb_account_statistics_insert AFTER INSERT ON ddb_items
+BEGIN
+    INSERT INTO ddb_local_index_statistics VALUES (NEW.table_id, '', 1, NEW.logical_bytes)
+    ON CONFLICT(table_id, index_name) DO UPDATE SET
+        item_count = item_count + 1, item_bytes = item_bytes + NEW.logical_bytes;
+END;
+CREATE TRIGGER ddb_account_statistics_update AFTER UPDATE OF logical_bytes ON ddb_items
+BEGIN
+    UPDATE ddb_local_index_statistics SET item_bytes = item_bytes + NEW.logical_bytes - OLD.logical_bytes
+    WHERE table_id = OLD.table_id AND index_name = '';
+END;
+CREATE TRIGGER ddb_account_statistics_delete AFTER DELETE ON ddb_items
+BEGIN
+    UPDATE ddb_local_index_statistics SET item_count = item_count - 1, item_bytes = item_bytes - OLD.logical_bytes
+    WHERE table_id = OLD.table_id AND index_name = '';
+END;

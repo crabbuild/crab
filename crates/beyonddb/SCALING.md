@@ -1761,7 +1761,80 @@ net production lines, retaining the existing report and removing its scan.
 
 This changes the unreleased data-Cell schema. Existing development roots require
 reprovisioning; no compatibility reader or dependency patch is introduced.
-DescribeTable's DynamoDB size statistics remain a separate unfinished path;
-these counters retain the internal stored-JSON/key-byte definition. Metadata
+These capacity counters retain the internal stored-JSON/key-byte definition;
+public table statistics use the separate logical measurement below. Metadata
 sharding, hot-key subdivision, fleet rebalancing, and 10,000-Cell/multi-TB
 qualification remain required.
+
+
+### Table and index statistics
+
+`DescribeTable` and `UpdateTable` now read the last published count/size sample;
+`DeleteTable` returns the previous sample when it belongs to the deleted table
+generation. A fresh table returns zero until the first successful sample.
+Inspected `origin/main` at `311105eb864` returned zero for these fields.
+
+Each item writer computes logical bytes with pinned ExtendDB core
+`types::item_size_bytes` (`bdb7b3df4ace3b80a6e928f144036d056aec0327`). SQL triggers
+maintain counts/bytes with CRUD, transaction resolution, TTL deletion and split
+imports. LSI ALL totals include only items present in the sparse index. GSI totals
+use the actual projected image; version tombstones contribute zero. The account
+and LSI statistics retain zero rows until table deletion, keeping accounting to
+one tree edit per item/index change. Transaction reservations include the base
+account edit and both LSI accounting edits during replacement.
+
+The server installs a cancellable statistics worker for its configured accounts.
+It rotates accounts every 250 ms, reads one bounded table-directory page, and
+samples at most one base or GSI range per tick. Counters make each range sample
+independent of its item count. Worker state holds one table, one range cursor and
+bounded per-index totals per account. Completed snapshots are stored separately
+from immutable table/route specifications. Partial sweeps are discarded on restart.
+
+Publication validates the table ID, base route epoch and every GSI route epoch
+inside one account command. A split during any part of a sweep rejects that
+sample; the next pass starts again. Sealed sources are excluded once the directory
+publishes children. The last completed sample remains visible while a sweep is
+retried. Table deletion cascades the persisted snapshot and removes local totals;
+reusing a table name cannot inherit another generation's totals. A sample whose
+start timestamp is older than the persisted sample cannot overwrite it.
+
+Samples are approximate: concurrent writes across Cells are observed at different
+moments, GSI projection can lag, and these statistics provide no transaction
+snapshot or freshness SLO. With one worker, 10,000 ranges alone need at least about
+42 minutes of tick slots, plus directory, RPC and retry time. Fleet throughput
+qualification remains open. [AWS documents asynchronous table/index statistics](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TableDescription.html);
+BeyondDB does not copy AWS's approximately six-hour refresh schedule.
+
+Size values are logical item-size estimates using attribute names and values,
+including raw binary and nested-value overhead. They exclude storage-system
+metadata and per-item storage overhead, and must not be used as AWS billing
+estimates. [AWS item-size rules](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/CapacityUnitCalculations.html)
+distinguish item data from storage overhead. Pinned ExtendDB's SQLite backend
+`MetadataEngine::refresh_table_size` instead sums serialized JSON lengths; this
+implementation deliberately uses its core item-size function for the Cell backend.
+
+| Evidence boundary | Source / focused test |
+| --- | --- |
+| Public entry | ExtendDB `TableEngine` → `backend.rs` → persisted account snapshot; `bin/beyonddb.rs` installs the worker. |
+| Mutation owners | `items.rs`, `partition.rs`, `secondary_index.rs`, `global_index.rs`; shared writers cover ordinary and transactional paths. |
+| Cell publication | `statistics.rs::PublishStatistics` checks directory generations; schema/source digests include the new handlers and accounting. |
+| Sweep orchestration | `backend/statistics.rs` owns bounded sampling and cancellation; `MetadataEngine::refresh_table_size` runs the same sweep explicitly. |
+| SQL atomicity | `elastic_cells::usage` compares maintained physical/logical totals with independent aggregates through UPSERT, incremental BLOB writes, rollback and deletion. |
+| SDK / durability | `residency::statistics` covers background publication, sparse LSI ALL, GSI KEYS_ONLY, nested/binary sizing, split sources, account restart, deletes, index tombstones and table recreation. |
+| Topology race | The SDK fixture forces base and GSI splits after directory lookup; both stale samples must return transient failure before a fresh sweep succeeds. |
+| Other mutation paths | `account_cell` compares the account-local sample with scanned items after transaction rollback/replay; `residency::usage` checks published totals after transaction replay, split, restore and deletion. |
+
+The account, data and GSI schemas are unreleased; existing development roots need
+reprovisioning. No dependency override, patch or lockfile change is involved.
+Metadata sharding, hot-key subdivision, fleet placement and multi-TB qualification
+remain required for the full goal.
+
+Focused verification: the two statistics SDK/race cases passed in 2.38 s;
+mutation/replay statistics passed in 1.59 s; account-local integration passed in
+4.42 s; four transaction capacity cases passed in 58.73 s; SQL counter, LSI and
+TTL cases passed in 0.01 s, 1.61 s and 1.06 s. Strict all-target Clippy, server
+build, formatting, layout, policy and diff checks passed. The production-process
+smoke test now polls the executable's sampled totals after signed writes; its
+execution remains a CI gate. Production code grows to implement Cell accounting,
+generation-checked publication and one shared bounded sweep for the worker and
+explicit refresh. It adds no public configuration or dependency changes.

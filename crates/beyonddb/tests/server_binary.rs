@@ -618,6 +618,34 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
                 .collect()
         );
     }
+    // Prove the executable installs its statistics worker without test-side refresh.
+    let expected_bytes: usize = batch_items
+        .iter()
+        .chain(std::iter::once(&item))
+        .flat_map(|item| item.iter())
+        .map(|(name, value)| name.len() + value.as_s().unwrap().len())
+        .sum();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let table = sdk
+            .describe_table()
+            .table_name("ProcessData")
+            .send()
+            .await
+            .unwrap()
+            .table
+            .unwrap();
+        if table.item_count == Some(batch_items.len() as i64 + 1)
+            && table.table_size_bytes == Some(expected_bytes as i64)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "server statistics did not converge: {table:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
     let expires = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

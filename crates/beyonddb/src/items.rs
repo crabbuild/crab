@@ -447,8 +447,8 @@ fn write_item(
         crate::global_index::outbox::enqueue(context, table, key, 0, old, Some(item.clone()))?;
     }
     context.sql(&statement(
-        "INSERT INTO ddb_items (table_id, item_key, item) VALUES (?1, ?2, X'') ON CONFLICT(table_id, item_key) DO UPDATE SET item = excluded.item",
-        vec![SqlValue::Text(table_id.into()), SqlValue::Blob(key.to_vec())],
+        "INSERT INTO ddb_items (table_id, item_key, item, logical_bytes) VALUES (?1, ?2, X'', ?3) ON CONFLICT(table_id, item_key) DO UPDATE SET item = excluded.item, logical_bytes = excluded.logical_bytes",
+        vec![SqlValue::Text(table_id.into()), SqlValue::Blob(key.to_vec()), SqlValue::Integer(crate::statistics::item_bytes(item)?)],
     ))?;
     crate::item_storage::StoredValue::Account { table_id, key }.write(context, item)?;
     crate::secondary_index::write(context, table, key, item)

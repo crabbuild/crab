@@ -401,6 +401,8 @@ async fn serve_ready(
             provisioner.clone(),
             directory.clone(),
         )?;
+        CellStorage::new(client.clone(), config.region.clone())
+            .install_statistics_loop(&tasks, config.owned_accounts.clone())?;
         provisioner.install_transaction_recovery_loop(
             &tasks,
             storage,

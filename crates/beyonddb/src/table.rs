@@ -241,6 +241,10 @@ impl Command for DeleteTable {
                     parameters: vec![SqlValue::Text(table.id.clone())],
                 },
                 SqlStatement {
+                    sql: "DELETE FROM ddb_local_index_statistics WHERE table_id = ?1".into(),
+                    parameters: vec![SqlValue::Text(table.id.clone())],
+                },
+                SqlStatement {
                     sql: "DELETE FROM ddb_table_tags WHERE table_id = ?1".into(),
                     parameters: vec![SqlValue::Text(table.id.clone())],
                 },

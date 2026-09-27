@@ -50,13 +50,14 @@ const fn status_operation(id: u32) -> crab_cell_runtime::registry::OperationDesc
     }
 }
 
-static QUERIES: [crab_cell_runtime::registry::OperationDescriptor; 6] = [
+static QUERIES: [crab_cell_runtime::registry::OperationDescriptor; 7] = [
     crate::operation(1),
     crate::operation(2),
     crate::operation(3),
     crate::operation(4),
     crate::operation(5),
     status_operation(6),
+    status_operation(7),
 ];
 
 /// One immutable index generation within a base table.
@@ -201,6 +202,7 @@ impl crab_cell_runtime::registry::CellModule for GlobalIndexModule {
         DESCRIPTOR.get_or_init(|| {
             let mut hash = blake3::Hasher::new();
             hash.update(include_bytes!("global_index.rs"));
+            hash.update(include_bytes!("statistics.rs"));
             hash.update(include_bytes!("global_index/read.rs"));
             hash.update(include_bytes!("global_index/transfer.rs"));
             hash.update(include_bytes!("table.rs"));
@@ -242,6 +244,7 @@ impl crab_cell_runtime::registry::CellModule for GlobalIndexModule {
         registry.bind_command::<ImportGlobalIndexEntry>()?;
         registry.bind_command::<ActivateGlobalIndexImport>()?;
         registry.bind_command::<OpenGlobalIndexImport>()?;
+        registry.bind_query::<crate::statistics::ReadGlobalIndexStatistics>()?;
         registry.bind_query::<ReadGlobalIndexState>()?;
         registry.bind_query::<ExportGlobalIndexEntries>()?;
         registry.bind_query::<ReadGlobalIndexPartition>()?;
@@ -454,9 +457,10 @@ fn apply(
     let (partition, sort) = index_key(&input.key, &spec.index.specification.key_schema)?;
     // Retain tombstones: an older delivery may arrive after deletion or a
     // key move. The full index/base key also separates both arms of a move.
-    context.sql(&statement("INSERT INTO ddb_global_index_items (item_key, partition_key, sort_key, version, digest, item) VALUES (?1, ?2, ?3, ?4, ?5, NULL) ON CONFLICT(item_key) DO UPDATE SET version = excluded.version, digest = excluded.digest, item = NULL", vec![
+    context.sql(&statement("INSERT INTO ddb_global_index_items (item_key, partition_key, sort_key, version, digest, item, logical_bytes) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6) ON CONFLICT(item_key) DO UPDATE SET version = excluded.version, digest = excluded.digest, item = NULL, logical_bytes = excluded.logical_bytes", vec![
             SqlValue::Blob(key.clone()), SqlValue::Blob(partition), SqlValue::Blob(sort),
             SqlValue::Blob(version), SqlValue::Blob(digest.as_bytes().to_vec()),
+            SqlValue::Integer(input.item.as_ref().map(crate::statistics::item_bytes).transpose()?.unwrap_or(0)),
         ]))?;
     if let Some(item) = input.item {
         StoredValue::GlobalIndex(&key).write(context, &item)?;

@@ -220,7 +220,8 @@ fn reserve_apply(
     let payload = u64::try_from(staged.bytes.len()).map_err(|_| overflow())?;
     // Pinned SQLite permits 20 B-tree levels, adds at most two siblings per
     // level, and reuses old pages; 44 covers root expansion too. Per key, 16
-    // edits cover eight item edits, five lock edits, and two saved-read edits.
+    // edits cover eight item edits, five lock edits, two saved-read edits,
+    // and one account-statistics edit. Zero totals stay until table deletion.
     let edits = (staged.operations as u64 * 16)
         .checked_add(staged.index_edits)
         .and_then(|value| value.checked_add(chunks))

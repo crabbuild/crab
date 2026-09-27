@@ -15,6 +15,7 @@ mod routing;
 mod secondary_index;
 mod server;
 mod split;
+mod statistics;
 mod table;
 mod tags;
 mod transaction_coordinator;
@@ -112,7 +113,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 27] = [
+static COMMANDS: [OperationDescriptor; 28] = [
     operation(1),
     operation(2),
     operation(3),
@@ -144,8 +145,9 @@ static COMMANDS: [OperationDescriptor; 27] = [
     operation(28),
     operation(29),
     operation(30),
+    operation(31),
 ];
-static QUERIES: [OperationDescriptor; 29] = [
+static QUERIES: [OperationDescriptor; 31] = [
     operation(4),
     operation(7),
     operation(8),
@@ -175,6 +177,8 @@ static QUERIES: [OperationDescriptor; 29] = [
     operation(33),
     operation(34),
     operation(35),
+    operation(36),
+    operation(37),
 ];
 
 /// Statically linked account application.
@@ -287,6 +291,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
             source_digest: {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("lib.rs"));
+                source.update(include_bytes!("statistics.rs"));
                 source.update(include_bytes!("table.rs"));
                 source.update(include_bytes!("global_index.rs"));
                 source.update(include_bytes!("global_index/outbox.rs"));
@@ -332,6 +337,9 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
+        registry.bind_command::<statistics::PublishStatistics>()?;
+        registry.bind_query::<statistics::ReadAccountStatistics>()?;
+        registry.bind_query::<statistics::ReadTableStatistics>()?;
         registry.bind_command::<CreateTable>()?;
         registry.bind_command::<PutItem>()?;
         registry.bind_command::<DeleteItem>()?;
