@@ -318,6 +318,10 @@ The [mixed-read/write run](performance/2026-09-27-mixed-readers.md) records
 691,427 correct replica reads across four sixty-second windows, with explicit
 behind responses and 144 missed scheduled writes. It establishes concurrent
 snapshot correctness for that workload, not a supported mixed-load capacity.
+The same report records a fresh current-main integration run with 703,981
+exact reads, 1,172 acknowledged writes and 28 missed arrivals. Only its
+twenty-node window fully served the offered writes; the capacity limit remains
+unqualified.
 
 ## Native RustFS sanity check
 

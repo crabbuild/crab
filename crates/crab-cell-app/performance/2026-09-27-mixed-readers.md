@@ -1,10 +1,15 @@
 # Generated replica reads during sustained writes
 
-The reference application completed sixty-second mixed windows at 3, 5, 10
+The initial run completed sixty-second mixed windows at 3, 5, 10
 and 20 nodes against GA RustFS. All **691,427 successful replica queries**
 matched their snapshot receipts. The run acknowledged **1,056 mutations**,
 but missed **144 of 1,200 scheduled write arrivals**. Correctness and lifecycle
 checks passed; none of the four windows fully served the offered write load.
+
+The [current-main integration rerun](#current-main-integration-rerun) below
+verified another 703,981 reads. Its twenty-node window served all scheduled
+writes, while the smaller stages missed 28 arrivals in total. Neither run
+establishes a supported mixed-workload capacity.
 
 ## Exact source and deployment
 
@@ -123,3 +128,70 @@ API, dependency, lockfile, runtime option or existing qualification threshold
 changed. Remaining: controlling write tail latency under reader load,
 saturation curves, many-Cell resource/storage costs, faults and rollout during
 traffic, and independent-host/provider production qualification.
+
+## Current-main integration rerun
+
+The reader stack was replayed onto main
+`de215cd0c49a1bcd52b06a62127be1bcc7a80533`, retaining its newer catalog and
+BeyondDB changes. Earlier stacked reader PRs had been merged into their former
+parent branches after those parents landed, leaving this stack absent from
+main. This rerun verifies the resulting integration, rather than assuming
+the earlier binary's evidence covers it.
+
+- Source: `66a893523c13e071f4da1e6f280afd30cd980f31`.
+- Release binary SHA-256:
+  `cb803624c8c1a0decd4a0932d26b9c80268f8a2e732b34d190090857b750e302`.
+- Fresh source archive, target, storage volume and Compose project; same pinned
+  images, workload and Colima resource profile. Native verification also ran
+  on the macOS host during part of this run; this is not isolated capacity.
+- Linux release build: 4m45s. Driver: 301.57s. Controller exited zero.
+
+| Nodes / readers | Successful reads | Reads/s | Read p50 / p99 ms | Writes / offered | Write p50 / p99 ms | Behind responses |
+| --- | --- | --- | --- | --- | --- | --- |
+| 3 / 2 | 210,886 | 3,503.80 | 2.077 / 4.794 | 291 / 300 | 18.651 / 358.888 | 3,885 |
+| 5 / 3 | 186,006 | 3,099.45 | 2.304 / 6.424 | 289 / 300 | 20.718 / 390.874 | 2,850 |
+| 10 / 9 | 171,543 | 2,858.65 | 2.397 / 9.835 | 292 / 300 | 20.857 / 420.350 | 1,057 |
+| 20 / 19 | 135,546 | 2,258.83 | 2.647 / 21.439 | 300 / 300 | 19.645 / 222.091 | 460 |
+
+All **703,981 successful reads** matched their exact receipts. The independent
+verifier retained **1,172 acknowledgements**, **28 missed arrivals** and
+**8,252 behind responses**. Only the twenty-node stage set
+`fully_served_writes=true`. Variation between these two short runs prevents a
+supported-rate or performance-improvement claim. Percentiles use raw
+microsecond records and exclude behind responses.
+
+Maximum known acknowledgement lag was 1 / 1 / 1 / 2 mutations. First observed
+covering-read p99 after acknowledgement was 42.946 / 42.043 / 40.030 / 61.926 ms.
+One three-node write was not observed during the query window; the separate
+final convergence check covered it. These remain sampled observations of any
+reader, not a freshness guarantee.
+
+Reader 3 was killed after the five-node window. Replacement completed in
+14.643s, including a 0.651s fault-command round trip; twelve exact queries
+then passed. Owner,
+epoch and incarnation stayed unchanged. All selected readers served traffic;
+the owner served no replica query. Target-zero eviction, terminal close and
+all twenty surviving node tests passed. Surviving node memory peaks ranged
+from 24,768,512 to 49,852,416 bytes; driver peak was 54,063,104 bytes. No recorded
+node/driver cgroup CPU throttling or OOM occurred. All new containers stopped;
+volumes and raw evidence remain retained.
+
+Evidence is under the same mounted parent as the initial run, in
+`mixed-readers-66a8935-20260927/evidence/scaling`. Every raw TSV hash is checked
+again by the independent analysis.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `verification.json` | `8d442d7d01c69b6e4b8feb59448aad92543a043c93e2fd75268da00f7ac8afef` |
+| `driver.log` | `478ecfe6e765d135914d6a87025204842f8f216646be0e6db0302966320fa859` |
+| `events.json` | `330a92cbe22e5a9abf3a95b8c9d8bbe6ccbbeeb864ddc9861d1dca58c0159db6` |
+| `containers.json` | `026553c8679a052b66ddfc75009ff5a7734779b02b51aee0476c40b237acb6e5` |
+| `mixed-load-analysis.json` | `024a5a2cfe60b5403644d4081cc464a5c87360953743c9d0ffdcd66e77d55f13` |
+
+Native integration proof: six snapshot lifecycle tests, six public-host tests
+and seven product recruitment tests passed. Strict runtime/app/host all-target
+Clippy, HTTP library/binary Clippy, the native server build, six verifier tests,
+format, layout and workflow parsing passed. Manual cases stayed ignored in
+native suites; the separate container run above supplies the real-store proof.
+Existing BeyondDB dependency-inventory and frozen product-descriptor baseline
+failures remain unchanged from current main. Their baselines were not edited.
