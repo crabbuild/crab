@@ -20,7 +20,12 @@ pub(super) async fn start(
     node: usize,
     application: Arc<crab_cell_app::CompiledApplication>,
     layout: &CellStorageLayout,
-) -> (CellNode, Arc<DurabilityRecorder>) {
+    root: &std::path::Path,
+) -> (
+    CellNode,
+    Arc<DurabilityRecorder>,
+    crab_cell_host::read_replicas::ReadReplicaManager,
+) {
     let registry = application.registry();
     // Keep writer admission at 32 Cells while charging both the old and new
     // immutable snapshots during a refresh under the same node ledger.
@@ -118,6 +123,14 @@ pub(super) async fn start(
     // Even a short smoke must exercise provider-backed renewal before it can
     // report readiness; successful drain then proves withdrawal of that version.
     first_renewal.await.unwrap();
+    let readers = host
+        .install_read_replicas(
+            layout.clone(),
+            self::directory(layout, &host.application().registry()),
+            root.join("readers"),
+            Limits::default(),
+        )
+        .unwrap();
     host.start().unwrap();
-    (host, durability)
+    (host, durability, readers)
 }

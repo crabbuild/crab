@@ -329,13 +329,14 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     )
     .unwrap();
 
-    let owner_read_replicas = crate::cells::ReadReplicaManager::new(
+    let owner_read_replicas = crab_cell_host::read_replicas::ReadReplicaManager::new(
         owner_runtime.clone(),
         Arc::clone(&registry),
         cell_layout.clone(),
         directory.clone(),
         owner_session,
         owner_dir.path().join("read-replicas"),
+        crate::cells::repository_replica_limits(),
     );
 
     owner_runtime
@@ -415,13 +416,14 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         ingress_publisher.lease_guard().unwrap(),
         512,
     );
-    let reader = crate::cells::ReadReplicaManager::new(
+    let reader = crab_cell_host::read_replicas::ReadReplicaManager::new(
         ingress_runtime.clone(),
         Arc::clone(&registry),
         cell_layout.clone(),
         directory.clone(),
         ingress_session,
         ingress_dir.path().join("read-replicas"),
+        crate::cells::repository_replica_limits(),
     );
     let owner_hints = crate::peer::PeerOwnerHints::default();
     let ingress_reads = Arc::new(ReceiverReads::default());

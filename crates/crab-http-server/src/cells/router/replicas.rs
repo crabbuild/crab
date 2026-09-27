@@ -25,7 +25,7 @@ impl RepositoryCellRouter {
         &self,
         repository: Uuid,
         principal: &Identity,
-        local: &crate::cells::ReadReplicaManager,
+        local: &crab_cell_host::read_replicas::ReadReplicaManager,
         minimum: Option<Receipt>,
         input: Q::Input,
     ) -> crab_cell_runtime::Result<(Observed<Q::Output>, NodeId)> {
@@ -49,7 +49,7 @@ impl RepositoryCellRouter {
     pub(crate) async fn read_replica_status(
         &self,
         target: &CellTarget,
-        local: &crate::cells::ReadReplicaManager,
+        local: &crab_cell_host::read_replicas::ReadReplicaManager,
     ) -> crab_cell_runtime::Result<ReadReplicaStatus> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let initial = tokio::time::timeout_at(deadline, self.authority.load(target.cell_id()))
@@ -125,7 +125,7 @@ impl RepositoryCellRouter {
         target: &CellTarget,
         node: NodeAdvertisement,
         expected: CellDescription,
-        local: &crate::cells::ReadReplicaManager,
+        local: &crab_cell_host::read_replicas::ReadReplicaManager,
     ) -> crab_cell_runtime::Result<(Receipt, bool)> {
         if node.session() == self.peer.owner.session {
             return local.status(target.clone()).await;
@@ -330,7 +330,7 @@ impl RepositoryCellRouter {
 
     pub(crate) fn with_read_replicas(
         mut self,
-        readers: Option<crate::cells::ReadReplicaManager>,
+        readers: Option<crab_cell_host::read_replicas::ReadReplicaManager>,
     ) -> Self {
         self.read_replicas = readers;
         self

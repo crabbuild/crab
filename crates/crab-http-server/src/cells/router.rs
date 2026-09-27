@@ -93,7 +93,7 @@ pub(crate) struct RepositoryCellRouter {
     // fleet view is discarded until every member samples again.
     rebalance_settled_at_ms: Arc<AtomicI64>,
     replica_routing: ReplicaReadRouter,
-    read_replicas: Option<super::ReadReplicaManager>,
+    read_replicas: Option<crab_cell_host::read_replicas::ReadReplicaManager>,
 }
 
 #[derive(Clone)]

@@ -88,6 +88,72 @@ fn signed_client(
     ReferenceClient::new(handle).unwrap()
 }
 
+#[tokio::test]
+async fn public_host_drain_cancels_reader_activation_waiting_on_storage() {
+    use object_store::throttle::{ThrottleConfig, ThrottledStore};
+    use std::{task::Poll, time::Duration};
+
+    let application = Arc::new(compiled());
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(ThrottledStore::new(
+            InMemory::new(),
+            ThrottleConfig {
+                wait_get_per_call: Duration::from_secs(3600),
+                ..Default::default()
+            },
+        ))),
+        Path::from("blocked-reader"),
+        [82; 16],
+    );
+    let root = tempfile::TempDir::new().unwrap();
+    let node = crab_cell_host::CellNodeBuilder::new(Arc::clone(&application))
+        .with_runtime(SqlWorkerPool::new(1, 32).unwrap(), 64 << 20)
+        .with_replica_host(reference_host())
+        .with_session(node_session(1))
+        .build()
+        .unwrap();
+    node.install_task_group(
+        tokio_util::sync::CancellationToken::new(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap();
+    let manager = node
+        .install_read_replicas(
+            layout.clone(),
+            super::process_node::directory(&layout, &application.registry()),
+            root.path().to_owned(),
+            Limits::default(),
+        )
+        .unwrap();
+    let target = CellTarget::new(
+        TenantId::from_bytes([81; 16]),
+        ApplicationId::from_bytes([82; 16]),
+        SQL_NAMESPACE,
+        &partition_for_shard(0),
+    )
+    .unwrap();
+    let activation = manager.activate(target.clone(), node_session(0));
+    tokio::pin!(activation);
+    // Poll into the provider delay while activation owns its lane; no sleep
+    // or scheduler timing assumption is needed to put shutdown behind it.
+    std::future::poll_fn(|cx| {
+        assert!(activation.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    let (activated, drained) = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(&mut activation, node.shutdown())
+    })
+    .await
+    .expect("reader drain waited for stalled storage");
+    assert!(matches!(activated, Err(Error::RuntimeClosed)));
+    drained.unwrap();
+    assert!(matches!(
+        manager.activate(target, node_session(0)).await,
+        Err(Error::RuntimeClosed)
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_node_host_resolves_ambiguous_result_and_deduplicates_delivery() {
     let fixture = PerfFixture::start(3).await;
