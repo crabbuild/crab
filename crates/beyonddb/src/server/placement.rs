@@ -87,6 +87,7 @@ impl RangePlacement {
                 }),
                 timeout_ms: 30_000,
                 minimum: None,
+                expected: None,
                 operation: Some(wire::read_request::Operation::Describe(true)),
             }),
         )?;

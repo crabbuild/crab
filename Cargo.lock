@@ -2528,7 +2528,6 @@ dependencies = [
  "clap",
  "crab-cell-app",
  "crab-cell-host",
- "crab-cell-peer-http",
  "crab-cell-runtime",
  "crab-coordination",
  "crab-git",
@@ -2558,6 +2557,8 @@ dependencies = [
  "rand 0.9.4",
  "reqwest 0.12.28",
  "rusqlite",
+ "rustls 0.23.40",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2566,6 +2567,7 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tokio-util",
  "toml",
  "tower 0.5.3",
@@ -2573,6 +2575,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "x509-cert",
  "zip",
 ]
 

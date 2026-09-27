@@ -19,7 +19,8 @@ must authenticate its local client identity and pin the remote certificate and
 public key passed to it. The receiver must verify the peer envelope, enrollment,
 and product authorization before dispatching through `PeerDispatcher`.
 
-`crab-http-server` provides the existing mTLS factory and private receiver.
-BeyondDB composes the same outgoing transport for its account, credential,
-data, and coordinator Cells, with a pinned-mTLS incoming receiver. It reports a
-one-second retry delay when its peer admission slot is occupied.
+BeyondDB composes this transport and its pinned-mTLS implementation for account,
+credential, data, and coordinator Cells. Its incoming receiver reports a
+one-second retry delay when peer admission is occupied. `crab-http-server`
+retains its repository-scoped transport, owner-description hints, and telemetry;
+those product routing semantics are not enabled by this transport.

@@ -150,6 +150,7 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
                         }),
                         timeout_ms: 30_000,
                         minimum: None,
+                        expected: None,
                         operation: Some(if describe {
                             wire::read_request::Operation::Describe(true)
                         } else {

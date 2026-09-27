@@ -274,12 +274,12 @@ async fn forward(
     {
         return error(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
-    let session = {
+    let decoded = {
         let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
             return busy();
         };
-        match crab_cell_runtime::peer::claimed_peer_session(&body) {
-            Ok(session) => session,
+        match crab_cell_runtime::peer::UnverifiedPeerRequest::decode(&body) {
+            Ok(request) => request,
             Err(_) => return error(StatusCode::UNAUTHORIZED),
         }
     };
@@ -292,7 +292,7 @@ async fn forward(
     let verifier = match receiver
         .directory
         .peer_verifier(
-            session,
+            decoded.session(),
             identity.certificate(),
             identity.public_key(),
             now_ms,
@@ -310,7 +310,7 @@ async fn forward(
         Ok(now_ms) => now_ms,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    let request = match verifier.verify(&body, now_ms) {
+    let request = match verifier.verify(decoded, now_ms) {
         Ok(request) => request,
         Err(_) => return error(StatusCode::UNAUTHORIZED),
     };

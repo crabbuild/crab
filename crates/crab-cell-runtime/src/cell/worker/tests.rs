@@ -382,7 +382,7 @@ async fn rustfs_worker_interference(worker_count: usize) {
                 .query(
                     cell,
                     8,
-                    started + Duration::from_secs(10),
+                    SqlDeadline::new(started + Duration::from_secs(10)),
                     Box::new(move |connection| {
                         let entered = Instant::now();
                         let length: i64 = connection.query_row(
@@ -488,7 +488,7 @@ async fn rustfs_worker_interference(worker_count: usize) {
                     .query(
                         cold.cell,
                         32,
-                        demand_started + Duration::from_secs(30),
+                        SqlDeadline::new(demand_started + Duration::from_secs(30)),
                         Box::new(payload_digest),
                     )
                     .await
@@ -514,7 +514,7 @@ async fn rustfs_worker_interference(worker_count: usize) {
             .query(
                 cold.cell,
                 32,
-                warm_started + Duration::from_secs(10),
+                SqlDeadline::new(warm_started + Duration::from_secs(10)),
                 Box::new(payload_digest),
             )
             .await
@@ -708,13 +708,12 @@ async fn expired_worker_deadline_preserves_sparse_cell_for_retry() {
     ));
     assert!(!entered.load(Ordering::SeqCst));
     let HydrationStep::Progress(Some(progress)) = pool
-        .hydrate(
-            fixture.cell,
-            64,
-            Instant::now() + Duration::from_secs(5),
-        )
+        .hydrate(fixture.cell, 64, Instant::now() + Duration::from_secs(5))
         .await
-        .unwrap() else { panic!("hydration unexpectedly deferred") };
+        .unwrap()
+    else {
+        panic!("hydration unexpectedly deferred")
+    };
     assert!(progress.resolved > before.resolved);
     pool.deactivate(fixture.cell).await.unwrap();
     pool.shutdown().await.unwrap();
