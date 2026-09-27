@@ -43,8 +43,18 @@ coverage, not broadening cache-service admission or weakening integrity checks.
 The slowest fetch's Git Trace2 records a 7.692-second helper child and a
 subsequent 7.704-second connectivity `rev-list`; overlapping `index-pack` took
 2.633 seconds. Its 83 request durations sum to 1.796 seconds, which is not a
-critical-path measure. Native commit-graph acceleration is an untested
-hypothesis; connectivity checks remain enabled.
+critical-path measure. A diagnostic used a copy-on-write client copy with its
+remote ref restored to commit 4,000 and commit 4,500 as the input want. On that
+copy, the first connectivity pass took 59.566 seconds and the immediate repeat
+291 ms. After writing and verifying a reachable split commit-graph, alternating
+disabled/enabled trials took 268–270 / 157–169 ms. Both modes produced the same
+24,951 objects and identical 1,911,816-byte output (SHA256
+`1b22d3758c85a49461abf17141a47a2b49f7f322766b8bb7a6290f7570cea0ee`).
+Graph creation/verification took 1.704/0.858 seconds. This supports a small
+warmed-files improvement, not an explanation of the original 7.704-second
+walk or a qualified fetch fix. The copy already contains packs through commit
+5,000, and filesystem warming/shared-host load confound absolute timings.
+The original client was not changed; connectivity checks remained enabled.
 
 No task-owned compilation or second bulk workload overlapped this run. Read-only
 diagnostics did, and the host remained shared; OS/backend caches were not
