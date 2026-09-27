@@ -246,11 +246,16 @@ impl RepositoryCellRouter {
         else {
             return Ok(RebalanceProgress::default());
         };
-        let candidates = self.runtime.idle_transfer_candidates().await?;
-        let active = candidates
-            .iter()
-            .map(|(cell, _, _, _)| *cell)
+        // Keep residence across work and renewal on the same activation. Final
+        // candidate and generation checks still gate release after the idle window.
+        let active = self
+            .runtime
+            .active_catalog_entries()
+            .await?
+            .into_iter()
+            .map(|entry| entry.cell())
             .collect::<HashSet<_>>();
+        let candidates = self.runtime.idle_transfer_candidates().await?;
         let mut evidence = self.rebalance_evidence.lock().await;
         evidence.retain(|cell, _| active.contains(cell));
         let demands = candidates
@@ -2368,8 +2373,8 @@ mod tests {
         source_runtime.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn fleet_rebalance_releases_settled_cell_and_restores_its_result() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fleet_rebalance_preserves_residence_across_busy_work_and_restores_result() {
         let identity = ApplicationIdentity::new(
             TenantId::from_bytes([41; 16]),
             ApplicationId::from_bytes([42; 16]),
@@ -2562,6 +2567,40 @@ mod tests {
                 samples: 2,
             },
         );
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let querying = handle.clone();
+        let query = tokio::spawn(async move {
+            querying
+                .query(1, 1, move |_| {
+                    let _ = started.send(());
+                    released
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| crab_cell_runtime::Error::Control("test query timed out"))?;
+                    Ok(Vec::new())
+                })
+                .await
+        });
+        entered.await.unwrap();
+        let busy = source_router.rebalance_once(|| Ok(now_ms)).await;
+        release.send(()).unwrap();
+        query.await.unwrap().unwrap();
+        let busy = busy.unwrap();
+        assert_eq!((busy.released, busy.activated), (0, 0));
+        // The actor's work timestamp has now aged past the idle window on the
+        // planner clock. The same activation must retain its residence history.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while source_runtime
+                .idle_transfer_candidates()
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         let progress = source_router.rebalance_once(|| Ok(now_ms)).await.unwrap();
         assert_eq!((progress.released, progress.activated), (1, 1));
         assert_eq!(source_runtime.stats().active_cells(), 0);
