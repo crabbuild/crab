@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -29,7 +30,8 @@ class TailFaultTests(unittest.TestCase):
                        "owner_session": "SessionId(old)", "owner": "node-03",
                        "proof": "fleet", "commit_sequence": 9}
         self.driver = fault.TailFault(self.path, (), 3, "http://fixture", 1, "node-03", self.control, self.output)
-        self.sample = {"cell": 1, "acknowledged": {"number": 1, "title": "received", "body": "received body"}, "operations": []}
+        self.driver.containers = {f"node-{index:02d}": f"{index:064x}" for index in range(1, 4)}
+        self.sample = {"cell": 1, "acknowledged_ns": time.monotonic_ns(), "acknowledged": {"number": 1, "title": "received", "body": "received body"}, "operations": [{"operation": "write", "entry": "node-01"}]}
 
     def test_failed_placement_is_reported_before_any_fault_mutation(self):
         image = "sha256:" + "1" * 64
@@ -76,7 +78,7 @@ class TailFaultTests(unittest.TestCase):
         self.driver.on_acknowledged(self.sample)
         self.sample["operations"].append({"operation": "read"})
         self.driver.on_acknowledged(self.sample)
-        self.assertEqual(self.driver.acknowledgements.get_nowait()["operations"], [])
+        self.assertEqual(self.driver.acknowledgements.get_nowait()["operations"], [{"operation": "write", "entry": "node-01"}])
         self.assertTrue(self.driver.acknowledgements.empty())
 
     def test_rejected_owner_observation_is_retained_without_injecting_loss(self):
@@ -103,16 +105,17 @@ class TailFaultTests(unittest.TestCase):
     def test_post_recovery_trace_join_retains_the_removed_owners_events(self):
         self.driver.receipt["owner_disk_removed"] = True
         (self.output / "failed-owner.log").write_text('event="cell_command_response" commit_sequence=9\n')
-        with patch.object(fault, "compose", return_value='event="application_submission" submission_id="received"\n') as compose:
+        with patch.object(fault.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, 'event="application_submission" submission_id="received"\n')) as logs:
             events = self.driver.trace_events("after-recovery")
         self.assertEqual({event["node"] for event in events}, {"node-01", "node-02", "node-03"})
-        self.assertEqual(compose.call_count, 2)
-        self.assertTrue(all(call.args[-1] != "node-03" for call in compose.call_args_list))
+        self.assertEqual(logs.call_count, 2)
+        self.assertTrue(all(call.args[0][-1] != self.driver.containers["node-03"] for call in logs.call_args_list))
         self.assertEqual(events[-1]["commit_sequence"], 9)
 
     def test_policy_cleanup_retains_both_primary_and_cleanup_failures(self):
         for primary in (False, True):
             with self.subTest(primary=primary), \
+                    patch.object(self.driver, "preflight"), \
                     patch.object(self.driver, "install_policy"), \
                     patch.object(self.driver, "clear_policy", side_effect=RuntimeError("policy cleanup failed")), \
                     self.assertRaisesRegex(RuntimeError, "lost acknowledgement" if primary else "policy cleanup failed"):
@@ -122,7 +125,8 @@ class TailFaultTests(unittest.TestCase):
             self.assertEqual(self.driver.receipt["policy_cleanup"], {"passed": False, "error": "RuntimeError: policy cleanup failed"})
 
     def test_uncertain_policy_install_still_attempts_cleanup(self):
-        with patch.object(self.driver, "install_policy", side_effect=RuntimeError("install response lost")), \
+        with patch.object(self.driver, "preflight"), \
+                patch.object(self.driver, "install_policy", side_effect=RuntimeError("install response lost")), \
                 patch.object(self.driver, "clear_policy") as clear, \
                 self.assertRaisesRegex(RuntimeError, "install response lost"):
             with self.driver.publication_denied():
@@ -140,10 +144,17 @@ class TailFaultTests(unittest.TestCase):
             self.assertIsNone(self.driver.aws("put-object", missing="AccessDenied"))
 
     def test_kill_requires_the_same_cohort_and_a_project_owned_disposable_volume(self):
-        for case in ("cohort_changed", "other_project", "bind_mount", "corrupt_recovery", "success"):
+        cases = ("cohort_changed", "other_project", "bind_mount", "stopped_follower",
+                 "duplicate_identity", "corrupt_recovery", "success", "twenty_nodes")
+        for case in cases:
             with self.subTest(case=case):
-                self.driver.receipt.clear()
+                size = 20 if case == "twenty_nodes" else 3
+                self.driver = fault.TailFault(self.path, (), size, "http://fixture", 1, "node-03", self.control, self.output)
                 (self.output / "failed-owner.log").unlink(missing_ok=True)
+                if (self.output / "before-kill").exists():
+                    for log in (self.output / "before-kill").iterdir():
+                        log.unlink()
+                    (self.output / "before-kill").rmdir()
                 self.driver.on_acknowledged(self.sample)
                 last_node = copy.deepcopy(self.node)
                 if case == "cohort_changed":
@@ -152,49 +163,74 @@ class TailFaultTests(unittest.TestCase):
                 observed_issue = dict(self.sample["acknowledged"])
                 if case == "corrupt_recovery":
                     observed_issue["body"] = "corrupted body"
-                commands = []
+                commands, collected = [], []
+                denied = False
+                containers = {f"{index:064x}": {
+                    "Id": f"{index:064x}", "State": {"Running": True},
+                    "Config": {"Labels": {"com.docker.compose.project": self.project,
+                                          "com.docker.compose.service": f"node-{index:02d}"}},
+                    "Mounts": [{"Destination": "/var/lib/crab/cells", "Name": "fixture-data",
+                                "Type": "bind" if case == "bind_mount" else "volume"}],
+                } for index in range(1, size + 1)}
 
                 def command(*args):
                     commands.append(args)
-                    if args[:2] == ("docker", "ps"):
-                        return "c" * 12
                     if args[:2] == ("docker", "inspect"):
-                        return json.dumps([{"Mounts": [{"Destination": "/var/lib/crab/cells", "Name": "fixture-data",
-                                                        "Type": "bind" if case == "bind_mount" else "volume"}]}])
+                        values = copy.deepcopy([containers[item] for item in args[2:]])
+                        if denied and case == "stopped_follower":
+                            values[-1]["State"]["Running"] = False
+                        return json.dumps(values)
                     if args[:3] == ("docker", "volume", "inspect"):
+                        self.assertFalse(denied, "volume inspection must finish before publication is denied")
                         return json.dumps([{"Labels": {"com.docker.compose.project": "unrelated" if case == "other_project" else self.project}}])
-                    return ""
-
-                def compose(*args):
+                    if args[-1] == "/var/lib/crab/cells/node-id":
+                        self.assertFalse(denied, "fleet identity scan must finish before publication is denied")
+                        index = int(args[2], 16)
+                        return "owner" if index == 3 or case == "duplicate_identity" else f"follower{index}"
                     if args[-1] == "metrics":
                         return "crab_cell_node_log_uncovered_bytes 512\n"
-                    return {"node-01": "follower1", "node-02": "follower2", "node-03": "owner"}[args[4]]
+                    return ""
 
-                with patch.object(self.driver, "trace_events", return_value=[]), \
-                        patch.object(fault.action_traces, "join", return_value=[self.action]), \
+                def logs(args, **_kwargs):
+                    if args[:3] == ["docker", "logs", "--since"]:
+                        collected.append(args[-1])
+                        self.assertIn(args[-1], (f"{1:064x}", f"{3:064x}"),
+                                      "unrelated fleet logs cannot delay the acknowledged-owner kill")
+                    return subprocess.CompletedProcess(args, 0, "")
+
+                def install():
+                    nonlocal denied
+                    self.assertEqual(len(self.driver.receipt["preflight"]["containers"]), size)
+                    denied = True
+
+                with patch.object(fault.action_traces, "join", return_value=[self.action]), \
                         patch.object(self.driver, "status", side_effect=[self.control, self.control, after]), \
                         patch.object(self.driver, "cli", side_effect=[json.dumps(self.node), json.dumps(last_node)]), \
-                        patch.object(fault, "compose", side_effect=compose), \
+                        patch.object(fault, "compose", return_value="\n".join(containers)), \
                         patch.object(fault, "command", side_effect=command), \
-                        patch.object(fault.subprocess, "run"), \
+                        patch.object(fault.subprocess, "run", side_effect=logs), \
+                        patch.object(self.driver, "install_policy", side_effect=install), \
                         patch.object(self.driver, "clear_policy"), \
                         patch.object(fault.load, "request", return_value={"body": observed_issue}):
-                    if case == "success":
-                        self.driver.run()
+                    if case in ("success", "twenty_nodes"):
+                        with self.driver.publication_denied():
+                            self.driver.run()
                     else:
-                        with self.assertRaises(RuntimeError):
+                        with self.assertRaises(RuntimeError), self.driver.publication_denied():
                             self.driver.run()
                 effects = [args for args in commands if args[1] in ("kill", "rm") or args[1:3] == ("volume", "rm")]
                 self.assertEqual(effects, [
-                    ("docker", "kill", "--signal", "KILL", "c" * 12),
-                    ("docker", "rm", "c" * 12), ("docker", "volume", "rm", "fixture-data"),
-                ] if case in ("success", "corrupt_recovery") else [])
+                    ("docker", "kill", "--signal", "KILL", f"{3:064x}"),
+                    ("docker", "rm", f"{3:064x}"), ("docker", "volume", "rm", "fixture-data"),
+                ] if case in ("success", "twenty_nodes", "corrupt_recovery") else [])
                 if case == "cohort_changed":
                     self.assertEqual(self.driver.receipt["control_pre_kill"], self.control)
                     self.assertEqual(self.driver.receipt["node_pre_kill"], last_node)
-                if case == "success":
+                if case in ("success", "twenty_nodes"):
                     self.assertTrue(self.driver.receipt["owner_disk_removed"])
                     self.assertEqual(self.driver.receipt["control_after"]["owner"]["session"], "new")
+                    self.assertEqual(collected, [f"{1:064x}", f"{3:064x}"])
+                    self.assertGreaterEqual(self.driver.receipt["acknowledgement_to_kill_ms"], 0)
 
 
 class DuplicateResultTests(unittest.TestCase):

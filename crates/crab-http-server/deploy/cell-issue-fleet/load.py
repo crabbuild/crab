@@ -261,11 +261,13 @@ def load_pair(gateway: str, nodes: int, cell: int, arrival: int, run_id: str, sc
     return result
 
 
-def scheduled_load(gateway: str, nodes: int, workload: Workload, run_id: str, raw, on_acknowledged=None) -> tuple[dict, list[dict]]:
+def scheduled_load(gateway: str, nodes: int, workload: Workload, run_id: str, raw,
+                   on_acknowledged=None, *, stop=None) -> tuple[dict, list[dict]]:
     count = math.ceil(workload.rate * workload.duration)
     samples = []
     started = time.monotonic()
     stopped = False
+    stop = stop if stop is not None else threading.Event()
     peak = 0
 
     def record(sample):
@@ -279,7 +281,8 @@ def scheduled_load(gateway: str, nodes: int, workload: Workload, run_id: str, ra
         pending = set()
         for arrival in range(count):
             scheduled = started + arrival / workload.rate
-            time.sleep(max(0, scheduled - time.monotonic()))
+            if stop.wait(max(0, scheduled - time.monotonic())):
+                break
             completed = {future for future in pending if future.done()}
             pending -= completed
             for future in completed:
@@ -300,7 +303,7 @@ def scheduled_load(gateway: str, nodes: int, workload: Workload, run_id: str, ra
         for future in concurrent.futures.as_completed(pending):
             record(future.result())
     if not stopped:
-        time.sleep(max(0, started + workload.duration - time.monotonic()))
+        stop.wait(max(0, started + workload.duration - time.monotonic()))
     elapsed = time.monotonic() - started
     return {
         "planned_pairs": count,
@@ -312,6 +315,7 @@ def scheduled_load(gateway: str, nodes: int, workload: Workload, run_id: str, ra
         "elapsed_seconds": elapsed,
         "drain_seconds": max(0, elapsed - workload.duration),
         "stopped_on_invariant": stopped,
+        "stopped_externally": stop.is_set(),
     }, samples
 
 

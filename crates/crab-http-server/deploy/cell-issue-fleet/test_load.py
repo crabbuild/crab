@@ -399,6 +399,19 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(len(self.raw.getvalue().splitlines()), 20)
         self.assertGreaterEqual(summary["elapsed_seconds"], 1)
 
+    def test_fault_abort_stops_arrivals_but_drains_received_acknowledgements(self):
+        abort = threading.Event()
+        summary, samples = load.scheduled_load(
+            self.gateway, 3, load.Workload(1, 2, 5, 1, 0), "abort", self.raw,
+            on_acknowledged=lambda _sample: abort.set(), stop=abort,
+        )
+        self.assertTrue(summary["stopped_externally"])
+        self.assertFalse(summary["stopped_on_invariant"])
+        self.assertEqual(summary["outcomes"], {"success": 1})
+        self.assertLess(summary["elapsed_seconds"], 2)
+        self.assertIn("acknowledged", samples[0])
+        self.assertEqual(json.loads(self.raw.getvalue()), samples[0])
+
     def test_uncertain_write_retries_the_same_receipt_and_checks_readback(self):
         self.lose_response = True
         summary, samples = load.scheduled_load(
@@ -687,14 +700,16 @@ class LoadTests(unittest.TestCase):
 
     def test_late_scheduler_records_missed_arrivals_without_a_catchup_burst(self):
         clock = [0.0]
+        stop = threading.Event()
 
-        def delayed_sleep(seconds):
+        def delayed_wait(seconds):
             clock[0] += seconds + 0.05
+            return False
 
         with patch.object(load.time, "monotonic", side_effect=lambda: clock[0]), \
-                patch.object(load.time, "sleep", side_effect=delayed_sleep):
+                patch.object(stop, "wait", side_effect=delayed_wait):
             summary, _ = load.scheduled_load(
-                self.gateway, 3, load.Workload(3, 100, 0.03, 4, 0), "late", self.raw,
+                self.gateway, 3, load.Workload(3, 100, 0.03, 4, 0), "late", self.raw, stop=stop,
             )
         self.assertEqual(summary["outcomes"], {"scheduler_late": 3})
         self.assertEqual(summary["admitted_pairs"], 0)

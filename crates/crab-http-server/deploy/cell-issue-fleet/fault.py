@@ -92,9 +92,45 @@ class TailFault:
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.policy_installed = False
         self.losing_owner = threading.Event()
+        self.containers = {}
+        self.identities = {}
+        self.volume = None
+
+    def preflight(self):
+        started = time.monotonic_ns()
+        project = json.loads(self.path.read_text())["name"]
+        names = {load.node_name(index) for index in range(1, self.nodes + 1)}
+        containers = compose(self.path, self.profiles, "ps", "--quiet", *sorted(names)).split()
+        if len(containers) != self.nodes or any(not re.fullmatch(r"[0-9a-f]{12,64}", item) for item in containers):
+            raise RuntimeError("fault requires exactly one running container per node")
+        inspected = json.loads(command("docker", "inspect", *containers))
+        for item in inspected:
+            labels = item["Config"].get("Labels") or {}
+            name = labels.get("com.docker.compose.service")
+            if (labels.get("com.docker.compose.project") != project or name not in names
+                    or name in self.containers or not item["State"]["Running"]):
+                raise RuntimeError("fault container does not belong to the selected running fleet")
+            self.containers[name] = item["Id"]
+            identity = command("docker", "exec", item["Id"], "cat", "/var/lib/crab/cells/node-id")
+            if not identity or identity in self.identities:
+                raise RuntimeError("fault requires distinct persisted node identities")
+            self.identities[identity] = name
+            if name == self.owner:
+                mounts = [mount for mount in item["Mounts"] if mount["Destination"] == "/var/lib/crab/cells"]
+                if len(mounts) != 1 or mounts[0]["Type"] != "volume":
+                    raise RuntimeError("owner loss requires the fixture's disposable named Cell volume")
+                self.volume = mounts[0]["Name"]
+        if set(self.containers) != names:
+            raise RuntimeError("fault container inspection lost a selected node")
+        labels = json.loads(command("docker", "volume", "inspect", self.volume))[0].get("Labels") or {}
+        if labels.get("com.docker.compose.project") != project:
+            raise RuntimeError("owner volume is not owned by the selected fixture")
+        self.receipt["preflight"] = {"containers": self.containers, "identities": self.identities,
+                                     "owner_volume": self.volume,
+                                     "elapsed_ms": (time.monotonic_ns() - started) / 1_000_000}
 
     def cli(self, *args):
-        return compose(self.path, self.profiles, "exec", "-T", self.observer,
+        return command("docker", "exec", self.containers[self.observer],
                        "crab-http-server", "--config", CONFIG, "cells", *args)
 
     def status(self):
@@ -143,6 +179,9 @@ class TailFault:
 
     @contextmanager
     def publication_denied(self):
+        # Identity and disposable-volume inspection scales with fleet size.
+        # Complete it before denying PUTs starts the owner's publication grace.
+        self.preflight()
         failed = False
         try:
             self.install_policy()
@@ -169,17 +208,17 @@ class TailFault:
             except queue.Full:
                 pass
 
-    def trace_events(self, stage):
+    def trace_events(self, stage, nodes=None):
         destination = self.output / stage
         destination.mkdir()
         events = []
-        for index in range(1, self.nodes + 1):
-            node = load.node_name(index)
+        for node in sorted(nodes if nodes is not None else self.containers):
             if node == self.owner and self.receipt.get("owner_disk_removed"):
                 events.extend(action_traces.parse_log((self.output / "failed-owner.log").read_text(), node))
                 continue
-            text = compose(self.path, self.profiles, "logs", "--no-color", "--no-log-prefix",
-                           "--since", self.started_at, node)
+            text = subprocess.run(["docker", "logs", "--since", self.started_at, self.containers[node]],
+                                  check=True, text=True, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, timeout=15).stdout
             (destination / f"{node}.log").write_text(text)
             events.extend(action_traces.parse_log(text, node))
         return events
@@ -192,7 +231,12 @@ class TailFault:
         # Retain observations before rejecting them, so a failed guard explains
         # why the acknowledged owner could not safely be killed.
         self.receipt["acknowledgement"] = sample
-        action = action_traces.join([sample], self.trace_events("before-kill"))[0]
+        entry = next(operation["entry"] for operation in sample["operations"] if operation["operation"] == "write")
+        if entry not in self.containers:
+            raise RuntimeError("acknowledgement entered outside the selected fleet")
+        # One received write needs only its ingress and acknowledging owner.
+        # Full-fleet log collection can outlast the bounded publication grace.
+        action = action_traces.join([sample], self.trace_events("before-kill", {entry, self.owner}))[0]
         self.receipt["action"] = action
         control = self.status()
         self.receipt["control_before"] = control
@@ -202,35 +246,22 @@ class TailFault:
         node = json.loads(self.cli("node", "--session", control["owner"]["session"], "--json"))
         self.receipt["node_before"] = node
         unpublished_acknowledgement(action, control, self.owner, node)
-        metrics = compose(self.path, self.profiles, "exec", "-T", self.owner,
+        container = self.containers[self.owner]
+        metrics = command("docker", "exec", container,
                           "crab-http-server", "--config", CONFIG, "cells", "metrics")
         uncovered = next((int(line.split()[1]) for line in metrics.splitlines()
                           if line.startswith("crab_cell_node_log_uncovered_bytes ")), 0)
         self.receipt["uncovered_bytes"] = uncovered
         if uncovered <= 0:
             raise RuntimeError("the acknowledging owner has no retained unpublished tail")
-        project = json.loads(self.path.read_text())["name"]
-        identities = {}
-        for index in range(1, self.nodes + 1):
-            name = load.node_name(index)
-            identity = compose(self.path, self.profiles, "exec", "-T", name,
-                               "cat", "/var/lib/crab/cells/node-id").strip()
-            identities[identity] = name
         members = node["advertisement"]["log"]["member_nodes"]
-        if any(member not in identities or identities[member] == self.owner for member in members):
+        if any(member not in self.identities or self.identities[member] == self.owner for member in members):
             raise RuntimeError("an original follower is unavailable before the fault")
-        container = command("docker", "ps", "--quiet", "--filter", f"label=com.docker.compose.project={project}",
-                            "--filter", f"label=com.docker.compose.service={self.owner}")
-        if not re.fullmatch(r"[0-9a-f]{12,64}", container):
-            raise RuntimeError("fault owner is not exactly one running container")
-        inspected = json.loads(command("docker", "inspect", container))[0]
-        mounts = [mount for mount in inspected["Mounts"] if mount["Destination"] == "/var/lib/crab/cells"]
-        if len(mounts) != 1 or mounts[0]["Type"] != "volume":
-            raise RuntimeError("owner loss requires the fixture's disposable named Cell volume")
-        volume = mounts[0]["Name"]
-        labels = json.loads(command("docker", "volume", "inspect", volume))[0].get("Labels") or {}
-        if labels.get("com.docker.compose.project") != project:
-            raise RuntimeError("owner volume is not owned by the selected fixture")
+        survivors = [self.containers[self.identities[member]] for member in members]
+        inspected = json.loads(command("docker", "inspect", container, *survivors))
+        if ({item["Id"] for item in inspected} != {container, *survivors}
+                or not all(item["State"]["Running"] for item in inspected)):
+            raise RuntimeError("owner or an original follower stopped before the fault")
         # A fully covered cohort can rotate during evidence collection. Bind
         # the last observation to the acknowledged log before losing its owner.
         last_control = self.status()
@@ -244,16 +275,17 @@ class TailFault:
                 or last_log["epoch"] != node["advertisement"]["log"]["epoch"]
                 or set(last_log["member_nodes"]) != set(members)):
             raise RuntimeError("acknowledging owner or follower cohort changed before kill")
-        self.receipt["followers"] = {member: identities[member] for member in members}
+        self.receipt["followers"] = {member: self.identities[member] for member in members}
         self.losing_owner.set()
         command("docker", "kill", "--signal", "KILL", container)
         self.receipt["killed_ns"] = time.monotonic_ns()
+        self.receipt["acknowledgement_to_kill_ms"] = (self.receipt["killed_ns"] - sample["acknowledged_ns"]) / 1_000_000
         # Capture the final owner trace before removing both the process and its
         # volume. Recovery cannot accidentally consult the failed writer's disk.
         with (self.output / "failed-owner.log").open("x") as log:
             subprocess.run(["docker", "logs", container], stdout=log, stderr=subprocess.STDOUT, check=True)
         command("docker", "rm", container)
-        command("docker", "volume", "rm", volume)
+        command("docker", "volume", "rm", self.volume)
         self.receipt["owner_disk_removed"] = True
         self.clear_policy()
         deadline = time.monotonic() + 120
@@ -336,8 +368,12 @@ def main():
                     expected_absent = lambda: {fault.owner} if fault.losing_owner.is_set() else set()
                     observation = executor.submit(load.observe_nodes, path, profiles, args.nodes, stop, node_samples, expected_absent)
                     try:
+                        abort_arrivals = threading.Event()
                         failure = executor.submit(fault.run)
-                        summary, samples = load.scheduled_load(gateway, args.nodes, workload, run_id, raw, fault.on_acknowledged)
+                        failure.add_done_callback(lambda completed: abort_arrivals.set() if completed.exception() else None)
+                        summary, samples = load.scheduled_load(
+                            gateway, args.nodes, workload, run_id, raw, fault.on_acknowledged, stop=abort_arrivals,
+                        )
                         report["load"] = summary
                         failure.result()
                     finally:
