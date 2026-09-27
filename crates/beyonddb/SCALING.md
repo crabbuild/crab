@@ -2133,3 +2133,25 @@ Remote cold activation, resumption of a claimed owner and capability rejection
 pass in 15.77s. Both initial remote base/GSI placement and unpublished-owner
 recovery cases pass in 19.17s. Strict all-target Clippy passes in 13.48s. The
 existing full signed SDK/standalone process CI suite must qualify the pushed head.
+
+### Cold-restoration failure diagnostics
+
+[Qualification run 36314291645](https://github.com/crabbuild/crab/actions/runs/36314291645)
+on `1a141965ce58` completed with 21 peer-network cases passing and the GSI
+capacity case failing at its first Scan after draining the index children and
+account owner. That head predates the bounded deletion, node retirement and
+codec fixes. Its standalone process suite passed two cases and failed the
+same duplicate-node-session recreation described above. Neither result qualifies
+the subsequent fixes.
+
+The residency fixture now enables the existing server WARN/ERROR events in test
+output. ExtendDB's shared `storage_err_to_dynamo` mapper records the transient
+storage cause before returning the intentionally generic SDK 503; without a
+subscriber that diagnostic was lost. The standalone binary already initializes
+tracing. No request retries, assertions, deadlines or production logging change.
+
+A temporary probe delayed every object-store GET by 50 ms during the post-drain
+Scan. The scenario passed in 30.14s with background recovery/capacity warnings;
+this did not reproduce or explain the original failure. The delay was removed.
+CI retains server warnings so a recurrence can distinguish admission, ownership
+and routing failures. The intermittent Scan failure remains open.

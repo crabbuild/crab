@@ -44,6 +44,13 @@ impl Fixture {
     }
 
     async fn with_store(partitions: u16, store: Arc<dyn object_store::ObjectStore>) -> Self {
+        // SDK errors deliberately hide storage details. Retain server warnings
+        // in the test output so CI failures identify the underlying boundary.
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_test_writer()
+            .try_init();
         let files = tempfile::tempdir().unwrap();
         let (certificate, key, remote_certificate, remote_key, ca) = tls_files(files.path());
         let remote_tls =
