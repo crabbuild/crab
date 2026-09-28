@@ -19,6 +19,14 @@ qualification record](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md)
 distinguishes this capacity stop from protocol correctness and leaves the
 full replay, performance, Xet, and parity gates open.
 
+At 05:28 UTC on September 28, a separate cleanup removed the earlier mounted
+qualification directories and most of a fresh live replay's working files.
+That replay had reached 879 pushes, but its next push could not start because
+its binary link was gone; only a failed report and a truncated request log
+survived. The benchmark record distinguishes historical hashes from currently
+inspectable artifacts. No current-binary 5,000-push or Xet qualification can
+be claimed until evidence storage is stable and the gates rerun.
+
 ## 1. Decision
 
 Protocol v2 will publish an authenticated **pack set** whose members are

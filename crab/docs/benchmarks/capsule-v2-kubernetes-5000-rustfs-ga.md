@@ -9,6 +9,14 @@ A newer bounded-frontier reader candidate has not completed this workload:
 its September 28 replay was stopped for host capacity after 1,112 incremental
 pushes. Its passing 500/1,000-commit fetches are diagnostic, not qualification.
 
+**Current artifact status (September 28, 05:30 UTC):** the mounted qualification
+directory lost all earlier run directories during a separate cleanup. Their
+report and request-log hashes below remain historical records, but the raw
+files are no longer available at their recorded paths for reinspection. A
+fresh run also lost its replay checkout and binary link while active; see the
+interrupted r2 note below. Do not use these notes as current raw-artifact proof
+of release qualification.
+
 ## Reconciled-main candidate: full replay, still not qualified
 
 `capsule-main-integration-ga-20260927-r1` ran from 18:58:36 to 19:52:21 UTC
@@ -431,6 +439,21 @@ request-log SHA-256 is
 `ba7b7a48d5bc292f1fdaabe0e367b17c9c92570025c89b411865967a53986ce2`.
 The retained `capacity-stop.md` note records why the raw report is incomplete.
 No v1 parity or release claim follows from this partial run.
+
+### September 28 live-run artifact loss
+
+`k8s-5000-inline-20260928-r2` used the same frozen binary and harness on a
+fresh RustFS namespace. Its seed push, seed repack, independent clone, strict
+full Git fsck and remote Crab fsck passed. It reached 879 individual pushes;
+the 500-push fetch reported the exact tip, one new pack, 5.581 seconds and 34
+requests, followed by a 13.382-second / 63-request repack. At 05:28 UTC the
+run's replay checkout, binary link and most artifacts disappeared while the
+process was active. The next push failed before execution because `bin/crab`
+was missing. The report was copied off that directory (SHA-256
+`d0c2880694283ea91a6841db0af7d8636a43a519be173b67f4a6297bdb2cb495`),
+but only 12 request-log lines survived, so its metering cannot be fully
+re-audited. This is an invalidated qualification run, not a protocol failure
+or a completed replay. The source of the cleanup remains unconfirmed.
 
 ## Completed v1 baseline: diagnostic, not isolated timing
 
