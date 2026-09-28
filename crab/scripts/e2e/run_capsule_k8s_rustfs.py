@@ -610,7 +610,8 @@ class Qualification:
             raise RuntimeError(f"run root already exists: {self.root}")
         (self.root / "tmp").mkdir(parents=True)
         self.bin_dir.mkdir()
-        self.crab.symlink_to(Path(self.args.crab_bin).resolve())
+        # A run must keep its measured executable if the source build is removed.
+        shutil.copy2(Path(self.args.crab_bin).resolve(strict=True), self.crab)
         (self.bin_dir / "git-remote-crab").symlink_to(self.crab)
 
         source = Path(self.args.source).resolve()

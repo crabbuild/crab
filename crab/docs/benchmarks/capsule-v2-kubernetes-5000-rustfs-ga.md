@@ -1,21 +1,65 @@
 # Capsule v2: Kubernetes 5,000-commit RustFS GA qualification
 
-The full correctness workload completed. **Qualification failed** the unchanged
-incremental-fetch latency and request-count gates. Push performance passed its
-sub-second mean and under-ten-request average gates; this is not a matched v1
-comparison or permission to retire v1.
+The current bounded-frontier candidate completed the full correctness workload
+on RustFS 1.0.0 GA. **Qualification still failed** the unchanged incremental-fetch
+request-count gate: fetch p95 was 34 requests against a limit of 10. Pushes
+passed the sub-second mean and under-ten-request average gates, and fetch p95
+latency passed the ten-second gate. This is not an isolated matched-v1 comparison
+or permission to retire v1.
 
-A newer bounded-frontier reader candidate has not completed this workload:
-its September 28 replay was stopped for host capacity after 1,112 incremental
-pushes. Its passing 500/1,000-commit fetches are diagnostic, not qualification.
+A previous bounded-frontier run stopped for host capacity after 1,112 pushes;
+its passing 500/1,000-commit fetches remain diagnostic. The complete replay
+below supersedes it for this candidate's Kubernetes correctness and performance.
 
-**Current artifact status (September 28, 05:30 UTC):** the mounted qualification
+**Artifact status (September 28, 06:43 UTC):** the mounted qualification
 directory lost all earlier run directories during a separate cleanup. Their
-report and request-log hashes below remain historical records, but the raw
-files are no longer available at their recorded paths for reinspection. A
-fresh run also lost its replay checkout and binary link while active; see the
-interrupted r2 note below. Do not use these notes as current raw-artifact proof
-of release qualification.
+report and request-log hashes below are historical, not inspectable raw-artifact
+proof. A subsequent r2 run lost its binary link while active. The new r3 report
+and complete request log are retained in a sibling run directory, with a second
+copy made after completion; their hashes and independent counts appear below.
+
+## September 28 bounded-frontier full replay: correctness passed, request gate failed
+
+`crab-capsule-ga-r3-20260928` ran from 05:54:29 to 06:43:01 UTC using the
+frozen release binary SHA-256
+`9e12ab8cde084c9ca2831b3b2ab8727ccd425e9a010409e0fcca05445a40b027`
+and frozen harness SHA-256
+`77501e88310cc44a606a8847a66643487a495663c42ded49349e8ac4f8f1d5f1`.
+The harness copied the binary into its own run directory so loss of the build
+output could not break the replay. The report SHA-256 is
+`a351bdc6aab8b8147838448ba4f85c59326691517fe0b35653290b5f693e452c`;
+the complete request log SHA-256 is
+`97a0980ea68c5b75974e70e2e5691b6c73f309bef62ddfe1aff57b08b36aa11b`.
+The copied binary and source revision remained unchanged. The host was shared;
+no task-owned build or second task-owned bulk workload ran during the timed
+replay.
+
+| Operation | Latency | Origin requests |
+|---|---:|---:|
+| Seed push | 460.544 s | 9 |
+| Incremental push mean / p50 / p95 / p99 | 255.56 / 211 / 516 / 867 ms | 7.012 mean; 6 p50/p95; 40 p99 |
+| 500-commit fetch mean / p50 / p95 | 4.810 / 4.274 / 8.655 s | 32.8 mean; 34 p95 |
+| Final cold / warm clone | 48.372 / 28.589 s | 17 / 15 |
+
+All 5,000 individual pushes completed. Each of ten fetches ran before its
+interval repack, reached the exact source tip, passed connectivity, and added
+one local pack without a Git fetch repack. Each fetch took 2.456–8.655 seconds
+and 32–34 origin requests. Seed/final remote Crab fsck and strict full native
+Git fsck passed. Both independent final clones reached the source tip and
+matched all 32 sampled Git blob digests. The raw log independently matches
+all 5,001 push request counts and all ten fetch counts; it contains no 5xx
+response. Mean push latency stayed between 226.11 and 304.94 ms in every
+500-push window, rather than rising with commit count. The harness exited
+nonzero solely because fetch request p95 exceeded the unchanged ten-request
+limit; it did not relax the gate.
+
+The first 500-commit fetch's 32 requests break down into one root GET, one
+ref-head GET, one checkpoint-control range GET, 24 distinct capsule GETs, two
+ref LISTs, two read-admission PUTs, and one replica-discovery GET. Even reducing
+the non-capsule overhead to zero would not meet the request gate: the remaining
+physical capsule fan-out must be addressed without weakening authentication,
+tip binding, or cancellation safety. The 100 GiB Xet, fault/product/provider
+matrix, green CI, and controlled matched-v1 comparison remain open.
 
 ## Reconciled-main candidate: full replay, still not qualified
 

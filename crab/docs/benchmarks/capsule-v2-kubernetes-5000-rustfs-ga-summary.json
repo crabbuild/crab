@@ -1,4 +1,67 @@
 {
+  "bounded_frontier_full_replay": {
+    "run_id": "crab-capsule-ga-r3-20260928",
+    "started_at": "2026-09-28T05:54:29+00:00",
+    "finished_at": "2026-09-28T06:43:01+00:00",
+    "status": "failed",
+    "failure_scope": "Unchanged incremental-fetch request-count gate; all correctness and latency gates passed",
+    "backend": "RustFS 1.0.0 GA on Colima",
+    "source_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+    "provenance": {
+      "binary_sha256": "9e12ab8cde084c9ca2831b3b2ab8727ccd425e9a010409e0fcca05445a40b027",
+      "binary_unchanged": true,
+      "harness_sha256": "77501e88310cc44a606a8847a66643487a495663c42ded49349e8ac4f8f1d5f1",
+      "request_proxy_sha256": "bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879",
+      "report_sha256": "a351bdc6aab8b8147838448ba4f85c59326691517fe0b35653290b5f693e452c",
+      "requests_sha256": "97a0980ea68c5b75974e70e2e5691b6c73f309bef62ddfe1aff57b08b36aa11b",
+      "artifact_state": "Complete raw report and request log retained in the sibling r3 run directory and copied after completion"
+    },
+    "correctness": {
+      "incremental_pushes": 5000,
+      "incremental_fetches_before_repack": 10,
+      "one_new_local_pack_per_fetch": true,
+      "git_fetch_repack_events": 0,
+      "exact_tips_and_connectivity": "passed",
+      "seed_and_final_remote_crab_fsck": "passed",
+      "cold_and_warm_strict_full_git_fsck": "passed",
+      "sampled_blob_bytes_per_final_clone": 32,
+      "raw_log_matches_all_5001_pushes_and_ten_fetches": true,
+      "raw_log_5xx_responses": 0
+    },
+    "metrics": {
+      "seed_push_ms": 460544,
+      "push_latency_ms": {"mean": 255.56, "p50": 211, "p95": 516, "p99": 867, "max": 3464},
+      "push_requests": {"mean": 7.012, "p50": 6, "p95": 6, "p99": 40, "max": 42, "total": 35060},
+      "push_500_window_mean_ms_min": 226.11,
+      "push_500_window_mean_ms_max": 304.94,
+      "fetch_latency_ms": {"mean": 4810.3, "p50": 4274, "p95": 8655, "max": 8655},
+      "fetch_requests": {"mean": 32.8, "p50": 32, "p95": 34, "max": 34},
+      "cold_clone_ms": 48372,
+      "cold_clone_requests": 17,
+      "warm_clone_ms": 28589,
+      "warm_clone_requests": 15
+    },
+    "first_fetch_request_breakdown": {
+      "root_get": 1,
+      "ref_head_get": 1,
+      "checkpoint_control_range_get": 1,
+      "distinct_capsule_get": 24,
+      "ref_list": 2,
+      "read_admission_put": 2,
+      "replica_discovery_get": 1
+    },
+    "performance_gates": {
+      "push_mean_under_one_second": true,
+      "push_mean_under_ten_requests": true,
+      "fetch_p95_at_most_ten_seconds": true,
+      "fetch_p95_at_most_ten_requests": false
+    },
+    "scope_limits": [
+      "Shared-host timings are not an isolated matched-v1 comparison",
+      "Full 100 GiB Xet, fault/concurrency, product/provider parity and green CI remain open",
+      "v1 retirement is not qualified"
+    ]
+  },
   "authenticated_cutpoint_full_replay": {
     "run_id": "k8s-5000-ready-20260927-r3",
     "status": "failed",

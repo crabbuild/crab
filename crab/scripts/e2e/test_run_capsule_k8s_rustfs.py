@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import hashlib
 import json
@@ -28,6 +29,30 @@ SPEC.loader.exec_module(QUALIFICATION)
 
 
 class CapsuleKubernetesQualificationTests(unittest.TestCase):
+    def test_staged_binary_survives_loss_of_candidate_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate"
+            candidate.write_bytes(b"#!/bin/sh\nprintf staged\n")
+            candidate.chmod(0o755)
+            qualification = QUALIFICATION.Qualification(argparse.Namespace(
+                root=root, run_id="run", endpoint_url="http://127.0.0.1:9000",
+                bucket="fixture", crab_bin=str(candidate), source=str(candidate),
+            ))
+            qualification.git = Mock(side_effect=RuntimeError("stop after binary staging"))
+
+            with self.assertRaisesRegex(RuntimeError, "stop after binary staging"):
+                qualification.initialize()
+
+            candidate.unlink()
+            self.assertEqual(
+                subprocess.run([qualification.crab], check=True, capture_output=True).stdout,
+                b"staged",
+            )
+            self.assertEqual(
+                (qualification.bin_dir / "git-remote-crab").resolve(), qualification.crab,
+            )
+
     def test_saved_diagnostics_redact_credentials_without_changing_command_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
