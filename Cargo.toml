@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/beyonddb",
     "crates/crab-auth",
     "crates/crab-auth-store",
     "crates/crab-auth-server",
@@ -40,7 +39,6 @@ repository = "https://github.com/crabbuild/crab"
 rust-version = "1.97"
 
 [workspace.dependencies]
-beyonddb = { version = "=0.1.0", path = "crates/beyonddb", default-features = false }
 crab-auth = { version = "=0.1.0", path = "crates/crab-auth", default-features = false }
 crab-auth-server = { version = "=1.2.4", path = "crates/crab-auth-server", default-features = false }
 crab-auth-store = { version = "=0.1.0", path = "crates/crab-auth-store", default-features = false }
