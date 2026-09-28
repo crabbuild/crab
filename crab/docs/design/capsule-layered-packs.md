@@ -4914,11 +4914,22 @@ hydrated and the same-cache rehydration intentionally retained its first
 500 MiB cache. The report is **failed**, not Xet qualification or evidence
 of data corruption (report SHA-256
 `b7b224d635a67a3d7d57600828a7900cfecd5abbf2facb49be3d2365eb3ac653`).
-The newly added source dehydration should reclaim that redundant copy, but
-an end-to-end repeat is still required; the mounted volume currently has less
-than this rehearsal's 24,620,564,480-byte preflight requirement. Its isolated
-bucket and disposable checkout/cache were cleaned after the failure; the
-report and logs remain.
+The subsequent fresh-bucket rehearsal
+`xet-500m-source-dehydrate-20260928-r3` passed 158 checks across 174 commands
+on the pinned `f16f5d71` binary: five versioned pushes and layered repacks,
+source dehydration, cold cross-repository byte identity, cold and same-cache
+rehydration, five exact historical hydrations and retained-history proofs,
+oldest-root restore, current-tip republish, strict Git integrity and remote
+Crab fsck. No request-meter error occurred. Its 2,621,440,000 logical-history
+bytes retained 529,358,175 xorb bytes (20.19%); incremental large-file pushes
+took 389–408 ms and 34 origin requests each. The second hydrate began with
+33,171,410,944 free bytes against a 22,523,412,480-byte requirement. The
+report and transport SHA-256 values are
+`99bc1582ab80184490eaa97496e713fb8608e9cd5de96c3517d986cd0b443385`
+and `3385e7bee0ae6172b0280513db1571f271fe03c9a6bc3bdec4c4d24455f4bdc9`.
+The isolated bucket and disposable checkout/cache were cleaned after success;
+reports and logs remain. This passes the lifecycle regression at 500 MiB,
+not the 100 GiB, paired v1/v2, provider, or release gates.
 
 - Run the release binary against isolated local RustFS and every supported
   hosted provider.
