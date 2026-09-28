@@ -811,9 +811,7 @@ jobs:
         with:
           toolchain: stable
       - name: Build the cluster receipt validator
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-http-server-receipt-target
-        run: cargo build --locked -p crab-cell-runtime --bin qualification_receipt
+        run: python3 crab/scripts/cellule-qualification.py build
       - name: Exercise Compose startup, restore, crash recovery, and restart
         env:
           CRAB_HTTP_SERVER_IMAGE: crab-http-server:test
@@ -943,7 +941,6 @@ jobs:
           CRAB_HTTP_SERVER_IMAGE=crab-http-server:test \
             CRAB_HTTP_CLUSTER_BUILD=false \
             CRAB_HTTP_CLUSTER_VALIDATE=true \
-            CRAB_HTTP_CLUSTER_CARGO_TARGET_DIR="${RUNNER_TEMP}/crab-http-server-receipt-target" \
             crates/crab-http-server/tests/qualify_compose_cluster.sh \
             > "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"
           source_revision="$(git rev-parse HEAD)"
@@ -951,8 +948,7 @@ jobs:
           if [ -n '${{ inputs.image_ref }}' ]; then
             receipt_mode=release
           fi
-          CARGO_TARGET_DIR="${RUNNER_TEMP}/crab-http-server-receipt-target" \
-            cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+          python3 crab/scripts/cellule-qualification.py run \
               validate-cluster "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json" \
               "$source_revision" "${{ steps.image.outputs.digest }}" "$receipt_mode"
       - name: Prepare exact-source qualification evidence

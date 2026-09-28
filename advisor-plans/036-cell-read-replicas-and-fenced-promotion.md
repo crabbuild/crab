@@ -311,7 +311,7 @@ reference host uses 32 MiB so old and replacement snapshots remain charged
 during refresh. The same generated proof also passed on three constrained
 Compose nodes with GA RustFS: each node had 1 CPU, 1 GiB, and zero swap; all
 exited zero and withdrew renewed sessions. The
-[source-bound receipt](../crates/crab-cell-app/performance/2026-09-27-replica-compose.md)
+[source-bound receipt](https://github.com/crabbuild/cellule/blob/70c3c218fafc815b951a40d4df1b50bba15b7d4c/crates/cellule-app/performance/2026-09-27-replica-compose.md)
 records the 7/6 successful reader split and cgroup evidence. Protected capacity
 and fault gates remain open. See the reference application's `PERFORMANCE.md`
 commands.
@@ -325,7 +325,7 @@ fixture owner hint; general application-host recruitment was separate work.
 Shutdown cancels provider waits before joining the activation lane, and a
 retained manager cannot reopen after drain. A stalled-store regression covers
 this ordering. Product authentication stays in the server.
-The [three-container GA RustFS receipt](../crates/crab-cell-app/performance/2026-09-27-host-readers-compose.md)
+The [three-container GA RustFS receipt](https://github.com/crabbuild/cellule/blob/70c3c218fafc815b951a40d4df1b50bba15b7d4c/crates/cellule-app/performance/2026-09-27-host-readers-compose.md)
 binds these automatic lifecycle checks to source and binary hashes, one CPU /
 1 GiB / zero swap per node, and successful renewed-session withdrawal. It does
 not qualify performance improvement or a supported capacity.
@@ -335,7 +335,7 @@ reference hosts install one bounded, cancellable loop across their compiled
 application namespaces. Activation and status share the signed runtime peer
 client/dispatcher; receiver admission still checks current owner, policy,
 membership and resources. The
-[recruitment receipt](../crates/crab-cell-app/performance/2026-09-27-reader-recruitment.md)
+[recruitment receipt](https://github.com/crabbuild/cellule/blob/70c3c218fafc815b951a40d4df1b50bba15b7d4c/crates/cellule-app/performance/2026-09-27-reader-recruitment.md)
 proves automatic placement, refresh, eviction and drain on three constrained
 Compose nodes. A separate native three-to-five-process run killed a selected
 reader, automatically replaced it, and verified twelve generated reads at the
@@ -345,7 +345,7 @@ limits; constrained application capacity at 5/10/20 nodes, sustained freshness
 and throughput, owner loss during arrivals, and protected gates remain open.
 
 The reference application now also has a constrained
-[3/5/10/20-node reader run](../crates/crab-cell-app/performance/2026-09-27-reader-scaling.md).
+[3/5/10/20-node reader run](https://github.com/crabbuild/cellule/blob/70c3c218fafc815b951a40d4df1b50bba15b7d4c/crates/cellule-app/performance/2026-09-27-reader-scaling.md).
 It verifies thirty generated queries per selected reader, two acknowledged
 writes per stage, automatic refresh, an actual reader-container kill at five
 nodes, replacement without changing writer ownership, target-zero eviction,
@@ -358,7 +358,7 @@ took 34.830 s in one sample and needs latency investigation. Sustained
 capacity/freshness, many-Cell admission, arrivals during faults and protected
 qualification remain open.
 
-The [activation-expiry follow-up](../crates/crab-cell-app/performance/2026-09-27-reader-expiry.md)
+The [activation-expiry follow-up](https://github.com/crabbuild/cellule/blob/70c3c218fafc815b951a40d4df1b50bba15b7d4c/crates/cellule-app/performance/2026-09-27-reader-expiry.md)
 reproduced a pending hint holding recruitment after its selected boot expired.
 The shared peer client now rechecks that session at its observed expiry while
 preserving the same request across valid renewal. The unchanged constrained
@@ -367,7 +367,7 @@ earlier 34.830 s. Exact generated reads, owner identity and survivor drain
 remained intact. Refresh still took roughly five seconds, and neither sample
 establishes a supported recovery or freshness limit.
 
-The [publication-notification follow-up](../crates/crab-cell-app/performance/2026-09-27-reader-publication.md)
+The [publication-notification follow-up](https://github.com/crabbuild/cellule/blob/70c3c218fafc815b951a40d4df1b50bba15b7d4c/crates/cellule-app/performance/2026-09-27-reader-publication.md)
 passed the same constrained 3/5/10/20-node profile. Second-write readiness was
 110–152 ms, using bounded advisory notifications and the existing signed
 recruitment path. The run also exposed and fixed raw handler time moving behind

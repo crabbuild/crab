@@ -211,7 +211,7 @@ Read these sources in order:
 | [app.rs](src/app.rs) | Admission timeout, repository access, input validation, and HTTP error mapping |
 | [cells/router.rs](src/cells/router.rs) | Published-root validation plus local-owner restore or authenticated peer dispatch |
 | [cells/repository.rs](src/cells/repository.rs) | SQLite transaction, submission reservation, number allocation, and typed outcome |
-| [crab-ltx](../crab-ltx/README.md) | Verified immutable publication and exact source-loss restore |
+| [Cellule LTX](https://github.com/crabbuild/cellule/tree/70c3c218fafc815b951a40d4df1b50bba15b7d4c/crates/cellule-ltx) | Verified immutable publication and exact source-loss restore |
 
 Example JSON body, subject to the server's authentication and mutation checks:
 

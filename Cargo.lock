@@ -2291,88 +2291,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crab-cell-app"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "crab-cell-host",
- "crab-cell-runtime",
- "crab-ltx",
- "crab-storage",
- "ed25519-dalek",
- "futures-util",
- "object_store",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "crab-cell-host"
-version = "0.1.0"
-dependencies = [
- "crab-cell-app",
- "crab-cell-runtime",
- "futures-util",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "crab-cell-peer-http"
-version = "0.1.0"
-dependencies = [
- "axum 0.8.9",
- "crab-cell-runtime",
- "ed25519-dalek",
- "futures-util",
- "http 1.5.0",
- "reqwest 0.12.28",
- "rustls 0.23.40",
- "rustls-pemfile",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls 0.26.4",
- "tracing",
- "url",
- "x509-cert",
-]
-
-[[package]]
-name = "crab-cell-runtime"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "bytes",
- "crab-ltx",
- "crab-storage",
- "ed25519-dalek",
- "fs4",
- "futures-util",
- "object_store",
- "proptest",
- "prost",
- "prost-build",
- "protoc-bin-vendored",
- "rand 0.9.4",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "crab-coordination"
 version = "0.1.0"
 dependencies = [
@@ -2527,28 +2445,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
-]
-
-[[package]]
-name = "crab-ltx"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "bytes",
- "crab-storage",
- "crc-fast",
- "futures-util",
- "lz4_flex 0.11.6",
- "object_store",
- "proptest",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]

@@ -52,25 +52,6 @@ class CacheScopeTests(unittest.TestCase):
 
 
 class StorageScopeTests(unittest.TestCase):
-    def test_object_store_feature_ownership_distinguishes_test_fixtures(self):
-        metadata = {"packages": [{
-            "name": "crab-ltx",
-            "dependencies": [
-                {
-                    "name": "object_store", "kind": None,
-                    "uses_default_features": False, "features": [],
-                },
-                {
-                    "name": "object_store", "kind": "dev",
-                    "uses_default_features": False, "features": ["fs"],
-                },
-            ],
-        }]}
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertTrue(GATES.check_object_store_features(metadata))
-            metadata["packages"][0]["dependencies"][0]["features"] = ["fs"]
-            self.assertFalse(GATES.check_object_store_features(metadata))
-
     def test_dependency_prefixes_ignore_words_embedded_in_test_names(self):
         metadata = {"packages": [{
             "name": "crab-storage",
@@ -103,255 +84,29 @@ class StorageScopeTests(unittest.TestCase):
                     self.assertEqual(result, expected)
 
 
-class CellRuntimeBoundaryTests(unittest.TestCase):
-    def metadata(self, dependency_kind="dev"):
-        return {
-            "packages": [{
+class CelluleBoundaryTests(unittest.TestCase):
+    def check_source(self, source: str, dependencies: tuple[str, ...] = ()) -> bool:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "crates/crab-http-server/src/lib.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text(source, encoding="utf-8")
+            metadata = {"packages": [{
                 "name": "crab-http-server",
-                "dependencies": [{
-                    "name": "crab-ltx",
-                    "kind": dependency_kind,
-                    "optional": False,
-                    "features": ["replica"],
-                }],
-            }],
-        }
-
-    def check_source(
-        self,
-        text,
-        relative="crates/crab-http-server/src/lib.rs",
-        dependency_kind="dev",
-    ):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / relative
-            source.parent.mkdir(parents=True)
-            source.write_text(text, encoding="utf-8")
+                "dependencies": [{"name": name} for name in dependencies],
+            }]}
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                return GATES.check_cell_runtime_server_boundary(
-                    root,
-                    self.metadata(dependency_kind),
-                )
+                return GATES.check_cell_runtime_server_boundary(root, metadata)
 
-    def test_production_import_is_rejected(self):
-        self.assertFalse(self.check_source("use crab_ltx::CellReplica;\nfn route() {}\n"))
+    def test_cellule_import_is_admitted(self):
+        self.assertTrue(self.check_source("use cellule_runtime::CellRuntime;\n"))
 
-    def test_normal_and_build_dependencies_are_rejected(self):
-        for dependency_kind in (None, "build"):
-            with self.subTest(dependency_kind=dependency_kind):
-                self.assertFalse(
-                    self.check_source("fn route() {}\n", dependency_kind=dependency_kind)
-                )
+    def test_removed_workspace_dependency_is_rejected(self):
+        self.assertFalse(self.check_source("", ("crab-cell-runtime",)))
+        self.assertFalse(self.check_source("", ("crab-ltx",)))
 
-    def test_cfg_test_module_and_nested_test_module_are_admitted(self):
-        source = """fn route() {}
-
-#[cfg(test)]
-mod tests {
-    mod nested {
-        use crab_ltx::CellReplica;
-    }
-}
-
-fn later_production_code() {}
-"""
-        self.assertTrue(self.check_source(source))
-
-    def test_test_file_is_admitted_but_production_after_cfg_block_is_not(self):
-        self.assertTrue(
-            self.check_source(
-                "use crab_ltx::CellReplica;\n",
-                relative="crates/crab-http-server/src/cells/scheduler/tests.rs",
-            )
-        )
-
-    def test_production_server_component_fields_are_rejected(self):
-        for field in (
-            "cell_runtime",
-            "catalog",
-            "scheduler_status",
-            "cell_capacity",
-            "repository_cells",
-            "peer_receiver",
-            "follower_store",
-            "node_log_transport",
-        ):
-            with self.subTest(field=field):
-                self.assertFalse(
-                    self.check_source(
-                        "pub(crate) struct Server {\n"
-                        f"    {field}: usize,\n"
-                        "}\n",
-                        relative="crates/crab-http-server/src/server.rs",
-                    )
-                )
-
-    def test_test_only_server_component_fields_are_admitted(self):
-        self.assertTrue(
-            self.check_source(
-                "pub(crate) struct Server {\n"
-                "    #[cfg(test)]\n"
-                "    repository_cells: usize,\n"
-                "}\n",
-                relative="crates/crab-http-server/src/server.rs",
-            )
-        )
-        self.assertFalse(
-            self.check_source(
-                "#[cfg(test)]\nmod tests { use crab_ltx::CellReplica; }\n"
-                "use crab_ltx::Db;\n",
-            )
-        )
-
-
-class CellCoordinationKernelTests(unittest.TestCase):
-    def check_kernel(self, kernel, actor):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            kernel_path = root / GATES.CELL_RUNTIME_COORDINATION_KERNEL_PATH
-            actor_path = root / GATES.CELL_RUNTIME_COORDINATION_ACTOR_PATH
-            kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            actor_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text(kernel, encoding="utf-8")
-            actor_path.write_text(actor, encoding="utf-8")
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                return GATES.check_cell_runtime_coordination_kernel(root)
-
-    def test_pure_kernel_and_actor_adapter_are_admitted(self):
-        kernel = """pub(crate) enum CoordinationInput {}
-pub(crate) enum CoordinationDecision {}
-pub(crate) struct CoordinationState;
-impl CoordinationState {
-    pub(crate) fn step(&mut self, input: CoordinationInput) {}
-}
-"""
-        self.assertTrue(
-            self.check_kernel(
-                kernel,
-                "use crate::coordination::CoordinationState;\n"
-                "active.coordination.step(CoordinationInput::Fence);\n",
-            )
-        )
-
-    def test_kernel_rejects_async_and_provider_adapters(self):
-        kernel = """pub(crate) enum CoordinationInput {}
-pub(crate) enum CoordinationDecision {}
-pub(crate) struct CoordinationState;
-impl CoordinationState {
-    pub(crate) fn step(&mut self, input: CoordinationInput) {}
-    async fn read() { object_store::get().await; }
-}
-"""
-        self.assertFalse(
-            self.check_kernel(
-                kernel,
-                "use crate::coordination::CoordinationState;\n"
-                "active.coordination.step(CoordinationInput::Fence);\n",
-            )
-        )
-
-    def test_actor_must_retain_the_kernel_adapter_call(self):
-        kernel = """pub(crate) enum CoordinationInput {}
-pub(crate) enum CoordinationDecision {}
-pub(crate) struct CoordinationState;
-impl CoordinationState {
-    pub(crate) fn step(&mut self, input: CoordinationInput) {}
-}
-"""
-        self.assertFalse(self.check_kernel(kernel, "fn actor() {}\n"))
-
-
-class StandaloneLtxHardCutTests(unittest.TestCase):
-    def check_source(self, text, relative="crates/crab-ltx/src/lib.rs"):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / relative
-            source.parent.mkdir(parents=True)
-            source.write_text(text, encoding="utf-8")
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                return GATES.check_standalone_ltx_hard_cut(root)
-
-    def test_tenant_catalog_head_is_admitted_only_in_its_layout_method(self):
-        source = '''impl CellStorageLayout {
-    pub fn catalog_head_path(&self, tenant: &[u8; 16], shard: u8) -> Path {
-        Path::from(format!(
-            "{}/{}/{shard:02x}/head.json",
-            self.catalog_tenants_prefix(),
-            encode_hex(tenant)
-        ))
-    }
-}
-'''
-        path = "crates/crab-ltx/src/cell_layout.rs"
-        self.assertTrue(self.check_source(source, path))
-        for relative, text in (
-            ("crates/crab-ltx/src/other/cell_layout.rs", source),
-            (path, source.replace("catalog_head_path", "standalone_head_path")),
-            (path, source + 'fn head() -> &\'static str { "head.json" }\n'),
-            (path, source.replace("head.json", "manifest.json")),
-            (path, source.replace('"{}/{}/{shard:02x}/head.json",',
-                                  '"catalog/{shard:02x}/head.json", Replica,')),
-        ):
-            with self.subTest(relative=relative, source=text):
-                self.assertFalse(self.check_source(text, relative))
-
-    def test_retired_epoch_head_symbols_are_rejected(self):
-        for symbol in (
-            "Replica",
-            "ReplicaHead",
-            "PagedDatabase",
-            "PagedConnection",
-            "CompactionSchedule",
-        ):
-            with self.subTest(symbol=symbol):
-                self.assertFalse(self.check_source(f"pub struct {symbol};\n"))
-
-    def test_cell_scoped_surfaces_are_admitted(self):
-        self.assertTrue(
-            self.check_source(
-                "pub struct CellReplica;\n"
-                "pub struct CellPagedDatabase;\n"
-                "pub struct CellWritableDatabase;\n"
-            )
-        )
-
-    def test_retired_names_in_rust_comments_are_not_callable_surfaces(self):
-        self.assertTrue(
-            self.check_source(
-                "/// Replica metadata was not valid JSON.\n"
-                "    // The old head.json path is no longer used.\n"
-            )
-        )
-
-    def test_canonical_replica_module_is_admitted_but_storage_markers_are_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "crates/crab-ltx/src/replica.rs"
-            source.parent.mkdir(parents=True)
-            source.write_text("pub struct CellReplica;\n", encoding="utf-8")
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
-                io.StringIO()
-            ):
-                self.assertTrue(GATES.check_standalone_ltx_hard_cut(root))
-
-        self.assertFalse(self.check_source("const PREFIX: &str = \"ltx/<epoch>\";\n"))
-        self.assertFalse(self.check_source("const HEAD: &str = \"head.json\";\n"))
-        self.assertFalse(self.check_source("const MANIFEST: &str = \"manifest.json\";\n"))
-
-    def test_retired_directories_and_examples_are_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            paged_map = root / "crates/crab-ltx/src/paged/map.rs"
-            paged_map.parent.mkdir(parents=True)
-            paged_map.write_text("pub fn page_map() {}\n", encoding="utf-8")
-            example = root / "crates/crab-ltx/examples/replica_roundtrip.rs"
-            example.parent.mkdir(parents=True)
-            example.write_text("fn main() {}\n", encoding="utf-8")
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
-                io.StringIO()
-            ):
-                self.assertFalse(GATES.check_standalone_ltx_hard_cut(root))
+    def test_removed_import_is_rejected_even_in_tests(self):
+        self.assertFalse(self.check_source("#[cfg(test)] mod tests { use crab_ltx::CellReplica; }\n"))
 
 
 if __name__ == "__main__":
