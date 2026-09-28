@@ -4844,6 +4844,29 @@ The isolated bucket and generated data were cleaned after success; reports
 and logs remain. This subscale pass does not close the default 100 GiB gate,
 read-amplification investigation, paired v1 comparison, or CI matrix.
 
+The metered repeat `xet-scale-7p5g-20260928-r4` passed the same 3,729 checks
+with zero proxy errors and cleaned its isolated data. Its 122,468,505,110
+response bytes include 60,047,476,531 from three explicit retained-history
+verifications, 40,004,246,086 from eight hydrations, 10,848,610,358 from
+oldest-root restore, and 5,486,496,121 from remote fsck. Those measured
+read phases account for 95.0% of the total; other setup, clone, push, and
+inventory work accounts for the remaining 6,081,676,014 bytes. A single
+cold 7.5 GiB hydrate read 6,780,719,446 origin bytes in 218.074 seconds;
+rehydration from the same cache read 75,868,687 bytes in 124.214 seconds.
+Historical verification grows across generations (10.82/20.01/29.21 GB):
+its dependency proof verifies catalog xorbs, then reconstructs each distinct
+reachable file version, re-reading shared content without a cross-file origin
+cache. The verifier intentionally reads origin rather than a shared content
+cache so an unavailable or changed remote object cannot be hidden by earlier
+proofs. Reducing this recovery cost needs an equally strong current-origin
+readability contract; it is not an ordinary incremental-fetch measurement.
+This separates deliberate repeated integrity work from one cold read, but
+the Python request meter and Colima SSH tunnel make these wall times unsuitable
+as unmetered production throughput. The run's report and transport SHA-256
+values are `6ee6a476c623c4168c3f8b47d14ac25dccab01af60fd2a1e4914853625fb372c`
+and `9a27fea03fab5806e0ff5faad63b7d4129fde648b1959a7830825f5ebe5d77de`.
+The default 100 GiB, paired v1/v2, and CI gates remain open.
+
 - Run the release binary against isolated local RustFS and every supported
   hosted provider.
 - Compare v1 and v2 on the same source revision, machine class, object-store
