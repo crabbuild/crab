@@ -29,6 +29,15 @@ Meeting ten therefore needs at most two sources with the current eight control
 requests, or fewer sources together with cheaper coherent control capture;
 neither a read-window tweak nor a fan-in constant alone is sufficient.
 
+A subsequent matched 500-commit Kubernetes/RustFS diagnostic confirmed that
+four-way compaction produced six sources and 14 total fetch requests, versus
+24 sources and 32 requests with 32-way compaction. Fetch took 6.079 versus
+4.423 seconds, while average push requests rose from 7.012 to 7.488. Both
+variants passed exact-tip, clone, fsck, and sampled-byte checks, but both
+failed the unchanged ten-request fetch gate. This is one sequential local
+timing pair, not proof of a causal latency regression or remote-store behavior.
+The fan-in-only experiment was reverted; see the [matched diagnostic](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md).
+
 At 05:28 UTC on September 28, a separate cleanup removed the earlier mounted
 qualification directories and most of a fresh live replay's working files.
 That replay had reached 879 pushes, but its next push could not start because

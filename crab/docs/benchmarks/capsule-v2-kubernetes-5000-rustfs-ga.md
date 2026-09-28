@@ -1,5 +1,54 @@
 # Capsule v2: Kubernetes 5,000-commit RustFS GA qualification
 
+## September 28 matched 500-commit capsule fan-in diagnostic
+
+Two sequential, isolated RustFS 1.0.0 GA runs replayed the same 500
+first-parent upstream Kubernetes commits, from
+`4d6f7e186ca4979e6cf1a3e44bf85691dfe3bebb` through
+`a7f7e331cbb72844a632afea769ae49a6b8cebfb`. Both used the same harness
+(SHA-256 `77501e88310cc44a606a8847a66643487a495663c42ded49349e8ac4f8f1d5f1`),
+local host, RustFS endpoint, and exact-tip fetch-before-repack order. The only
+product-code difference was an **uncommitted experimental** reduction of the
+per-ref capsule compaction fan-in from 32 to four. Its binary SHA-256 was
+`b2b1b6d3f2c0e7f94f2eccc7771c85a10c38b8c5f8b781a01096eff533764653`;
+the retained 32-way binary SHA-256 was
+`019cbb5e6056def05905b0421e5303dc4180cb39b9a73ca441d0a2738f9eb4b1`.
+
+| Measured operation | Fan-in 32 | Fan-in 4 |
+| --- | ---: | ---: |
+| 500 pushes, mean / p95 latency | 233.63 / 467 ms | 244.92 / 483 ms |
+| Push requests, mean / p95 / p99 | 7.012 / 6 / 40 | 7.488 / 13 / 15 |
+| Exact-tip incremental fetch | 4.423 s / 32 requests | 6.079 s / 14 requests |
+| Fetch response bytes | 68,904,819 | 68,943,398 |
+| Interval repack | 11.381 s / 63 requests | 11.320 s / 27 requests |
+| Final cold / warm clone | 27.870 / 24.578 s | 47.435 / 34.067 s |
+
+Each run completed the seed push and repack, 500 individual pushes, one
+exact-tip incremental fetch that preserved the seed pack and installed one new
+pack, interval repack, independent final cold and warm clones, strict full Git
+fsck, seed/final remote Crab fsck, and 32 sampled blob-byte comparisons. Both
+reports are marked **failed only by the unchanged ≤10-request fetch gate**;
+push mean and fetch latency gates passed. Four-way reduced physical capsule
+reads from 24 to six, but the other eight control requests remained. Its
+request savings did not reduce observed local fetch/repack latency, and it
+raised ordinary push request counts. This single sequential pair is not an
+isolated latency distribution: seed clone and final fsck timings also varied
+substantially. No latency causation or WAN result is claimed. The experimental
+fan-in change was reverted without changing the gate; v1 retirement remains
+unqualified.
+
+The retained reports are under mounted `pr208-live-20260928/`:
+`fanin32-k8s-500-github-r3/fanin32-k8s-500-github-r3/artifacts/report.json` (SHA-256
+`76160944d99b99dff9f1df65ae2b217f981b4afb756d02e4da4089a7ec1c2f21`)
+and `fanin4-k8s-500-github-r2/fanin4-k8s-500-github-r2/artifacts/report.json`
+(SHA-256 `14e810ee24a0c9b7332d2278590ba10ad6f96030cbdc6eb9df251b6ecb569a2c`).
+Their raw request logs have SHA-256
+`865d8aeaa365d858ce95f6b8f831a5b5f0d03254c3e8e64881596df9fe98426e`
+and `7e6b041d2d6d1e539772a7ea13d8265fa1f042d2a470c2b73da33878eda9652f`,
+respectively. An earlier attempted four-way run used a different checkout
+containing two local Xet fixture commits; its push at ordinal 499 correctly
+rejected an unstaged pointer (`CRAB-E0086`). It is not counted in this A/B.
+
 ## September 28 current-head replay from a fresh GitHub clone
 
 Candidate `9b91d0b3d06620cdbadf8ae85f93955877e266c6` ran from 21:36:00 to
