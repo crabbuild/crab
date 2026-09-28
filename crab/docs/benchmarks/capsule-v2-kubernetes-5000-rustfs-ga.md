@@ -1,5 +1,46 @@
 # Capsule v2: Kubernetes 5,000-commit RustFS GA qualification
 
+## September 28 current-head replay from a fresh GitHub clone
+
+Candidate `9b91d0b3d06620cdbadf8ae85f93955877e266c6` ran from 21:36:00 to
+22:13:08 UTC against isolated local RustFS 1.0.0 GA. A new full clone of
+`kubernetes/kubernetes` from GitHub supplied upstream head
+`a7f7e331cbb72844a632afea769ae49a6b8cebfb`; the selected first-parent
+range contains exactly 5,000 commits after seed
+`1b4c3483cea4aae55d2eb815a0ff855b587c9a67`. The frozen Crab binary
+SHA-256 was `019cbb5e6056def05905b0421e5303dc4180cb39b9a73ca441d0a2738f9eb4b1`.
+No task-owned build or second bulk workload overlapped the timed replay.
+
+| Operation | Latency | Origin requests |
+|---|---:|---:|
+| Seed push | 171.452 s | 9 |
+| Incremental push mean / p50 / p95 / p99 | 227.91 / 202 / 422 / 682 ms | 7.012 mean; 6 p50/p95; 40 p99 |
+| 500-commit fetch mean / p50 / p95 | 3.582 / 3.460 / 5.996 s | 32.8 mean; 34 p95 |
+| Final cold / warm clone | 33.994 / 17.759 s | 15 / 17 |
+
+All 5,000 individual pushes and ten fetch-before-repack intervals reached
+their exact tips. Every fetch installed one new local pack. The ten 500-push
+windows averaged 208.19–255.99 ms and exactly 7.012 requests each, without
+monotonic growth. Seed/final remote Crab fsck, strict native Git fsck, both
+final clones, and 32 sampled Git blob digests against the source passed. The
+raw request log contains all 5,001 pushes, 328 fetch requests, and no 5xx.
+
+**Qualification still failed the unchanged fetch request gate:** p95 was 34
+versus the required 10. Push mean latency/request and fetch p95 latency gates
+passed. This proves the current head's Kubernetes correctness and flat push
+performance on this local backend, not full performance qualification, a
+matched-v1 comparison, hosted-provider parity, or permission to retire v1.
+The first fetch's 32 requests include 24 individual capsule GETs, as in the
+earlier retained trace below; the source fan-out remains the limiting shape.
+
+Retained artifacts under the mounted CrabBuild workspace:
+`pr208-live-20260928/k8s-head9b91-fresh-20260928-r2/artifacts/report.json`
+(SHA-256 `ed1aa107ba64d6ee8e93bda6664643b4ac6834d56364c3ff7eca748604c87182`)
+and `requests.jsonl` (SHA-256
+`01204943f823399d507732c41f3da8b417450ff0d13e3af5c32e4daaf489b2c6`).
+The initial setup attempt stopped before seed push because its isolated bucket
+had not yet been created; only this subsequent complete replay is counted.
+
 ## September 28 pinned-upstream replay after ref-head retry fix
 
 Candidate `8610ebf826e7dd5d264060381d6a2cd2ee94c853` ran from
@@ -33,11 +74,13 @@ passed. This remains a correctness pass, not full performance qualification
 or evidence to retire v1. No task-owned compilation or second bulk workload
 overlapped the timed run; shared host/backend caches were not reset.
 
-Retained artifacts: `k8s-head8610-pinned-20260928-r1/artifacts/report.json`
+Retained artifacts: `pr208-retained-evidence-20260928/k8s-head8610-pinned-20260928-r1/artifacts/report.json`
 (SHA-256 `e90be64d923f70a6be497bd7f33a12b2e7b279068eebcb0c7291c99d3bd0ad6c`)
 and `requests.jsonl` (SHA-256
 `75014191bb8c38de7a46fc5e23131696653b8cbd267f8a642415fcc459cabf4a`)
-under the mounted qualification-smokes volume. The raw log independently
+under the mounted CrabBuild workspace. A separate cleanup partially removed
+the original qualification-smokes directory; these copies were SHA-256 verified
+against the originals while they still existed. The raw log independently
 contains 324 fetch requests across the ten intervals.
 
 An earlier bounded-frontier candidate completed the full correctness workload
