@@ -34,14 +34,14 @@ async fn read_view_storage_full_preserves_existing_files_and_can_retry() {
     );
 
     let destination = directory.path().join("fresh-reader.sqlite");
-    for operation in ["create", "sync_all", "sync_parent"] {
-        faults.arm(Some(operation));
-        injected(verified.open_read_only(&destination));
-        assert!(
-            !destination.exists(),
-            "failed {operation} retained a placeholder"
-        );
-    }
+    // Snapshot placeholders are disposable and have no durability barrier.
+    // Only creation can fail here; publication and warm reuse own their fsyncs.
+    faults.arm(Some("create"));
+    injected(verified.open_read_only(&destination));
+    assert!(
+        !destination.exists(),
+        "failed create retained a placeholder"
+    );
     faults.arm(None);
     let view = verified.open_read_only(&destination).unwrap();
     assert_eq!(view.root(), root);
