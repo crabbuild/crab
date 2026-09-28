@@ -342,6 +342,36 @@ constant change alone is a qualified fix. A measured proposal must combine
 lower fan-out with authenticated control/index/payload reuse, preserve read
 admission and visibility, and recheck push latency and byte amplification.
 
+### Negative read-window diagnostic
+
+`k8s-fetch-gap-500-20260928-r1` tested a private, unmerged reader-window
+candidate on the same frozen Kubernetes source, with seed push, 500 individual
+pushes, fetch before repack, and independent cold/warm final clones. All tips,
+connectivity, seed/final Crab fsck, strict full Git fsck, and 32 sampled blob
+bytes per clone matched. The unchanged performance gates failed: pushes averaged
+579 ms and 7.012 requests, while the single incremental fetch took 16.805 s
+and **80 requests**, exactly the earlier 500-commit request count. The run was
+shared-host and no task-owned build overlapped it; these absolute latency
+differences are not an isolated performance comparison.
+
+The attempted 256 KiB gap allowance affected the direct layered-pack installer,
+not this ordinary fetch. The fetch used protocol-v2 upload-pack's
+`packed_entries` path. Its raw origin log shows 24 physical capsule sources
+read three times each: authenticated run-control suffixes, pack indexes, then
+packed-entry ranges. Eight other requests covered root, ref/admission,
+replica-discovery, and checkpoint control. Git Trace2 recorded 4.793 s in the
+remote helper, 3.171 s in `index-pack`, and 11.883 s in connectivity checking;
+the child times overlap. The ineffective source change was reverted and was
+**not** added to this PR. A fetch optimization must target this actual
+control/index/pack path and reduce physical source fan-out; changing the direct
+installer's range policy cannot meet the ten-request gate.
+
+The diagnostic binary SHA256 is
+`96e70d2c391773319716225f88099bd0c52aac5ac32af79ab0bdad3cbb8aaea7`;
+the retained report and request-log SHA256 values are
+`f3abf0de32bf914b7a2b2c076bd5d9843e34a350b3c3b7af50600028b1a4b336` and
+`7a9fd1ca69bc3ca6077b4c1937982eb2de06bdbd8eccd4d4731a3006df90efbf`.
+
 ## Completed v1 baseline: diagnostic, not isolated timing
 
 The released v1.2.4 baseline (`capsule-v1-ga-2721-20260927-r1`) completed

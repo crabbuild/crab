@@ -47,6 +47,40 @@
       "v1 retirement is not qualified"
     ]
   },
+  "fetch_read_window_negative_diagnostic": {
+    "run_id": "k8s-fetch-gap-500-20260928-r1",
+    "status": "failed",
+    "failure_scope": "Unchanged fetch latency and request-count performance gates; all correctness checks passed",
+    "candidate_change": "Unmerged direct-installer 256 KiB read-gap allowance; reverted after proving ordinary fetch uses protocol-v2 upload-pack",
+    "provenance": {
+      "binary_sha256": "96e70d2c391773319716225f88099bd0c52aac5ac32af79ab0bdad3cbb8aaea7",
+      "report_sha256": "f3abf0de32bf914b7a2b2c076bd5d9843e34a350b3c3b7af50600028b1a4b336",
+      "requests_sha256": "7a9fd1ca69bc3ca6077b4c1937982eb2de06bdbd8eccd4d4731a3006df90efbf"
+    },
+    "correctness": {
+      "individual_pushes": 500,
+      "incremental_fetch_before_repack": "passed",
+      "one_new_local_pack": true,
+      "exact_tips_and_connectivity": "passed",
+      "seed_and_final_remote_crab_fsck": "passed",
+      "cold_and_warm_strict_full_git_fsck": "passed",
+      "sampled_blob_bytes_per_final_clone": 32
+    },
+    "metrics": {
+      "push_mean_ms": 578.97,
+      "push_p95_ms": 2135,
+      "push_mean_origin_requests": 7.012,
+      "fetch_ms": 16805,
+      "fetch_origin_requests": 80,
+      "physical_capsule_sources": 24,
+      "range_gets_per_capsule_source": 3,
+      "non_capsule_requests": 8,
+      "git_fetch_remote_helper_ms": 4792.934,
+      "git_fetch_index_pack_ms": 3171.322,
+      "git_fetch_connectivity_ms": 11882.653
+    },
+    "scope_limits": "Shared host; no task-owned compilation during replay; candidate was not on the ordinary fetch path and is not retained in this PR"
+  },
   "main_integration_follow_up": {
     "run_id": "capsule-main-integration-ga-20260927-r1",
     "started_at": "2026-09-27T18:58:36+00:00",
