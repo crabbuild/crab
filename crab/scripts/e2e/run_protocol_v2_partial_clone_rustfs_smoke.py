@@ -1748,8 +1748,7 @@ class ProtocolV2PartialCloneSmoke:
         batch_oids: tuple[str, str],
         telemetry_before: dict[str, int],
     ) -> dict[str, Any]:
-        trace_path = self.artifacts / "filtered-clone.trace2.json"
-        clone_record = self.run_git(
+        self.run_git(
             self.run_root,
             [
                 "-c",
@@ -1761,23 +1760,6 @@ class ProtocolV2PartialCloneSmoke:
                 str(self.filtered),
             ],
             name="filtered blobless clone",
-            extra_env=self.trace_env(trace_path),
-        )
-        self.redact_trace(trace_path, "filtered-clone.trace2.redacted.json")
-        trace_text = "\n".join(
-            [
-                (self.artifacts / "filtered-clone.trace2.redacted.json").read_text(
-                    encoding="utf-8", errors="replace"
-                )
-                if (self.artifacts / "filtered-clone.trace2.redacted.json").exists()
-                else "",
-                Path(clone_record["stderr_log"]).read_text(encoding="utf-8", errors="replace"),
-            ]
-        )
-        self.check(
-            "protocol-v2-packet-trace",
-            "version 2" in trace_text and "command=fetch" in trace_text,
-            {"trace_artifact": str(self.artifacts / "filtered-clone.trace2.redacted.json")},
         )
 
         promisor = self.git_config(self.filtered, "remote.origin.promisor", "promisor config")
@@ -2117,6 +2099,7 @@ class ProtocolV2PartialCloneSmoke:
             name="push incremental filtered fixture",
         )
         before = self.storage_telemetry()
+        trace_path = self.artifacts / "filtered-incremental-fetch.trace2.json"
         fetch = self.run_git(
             self.filtered,
             [
@@ -2127,7 +2110,9 @@ class ProtocolV2PartialCloneSmoke:
                 "refs/heads/main:refs/remotes/origin/main",
             ],
             name="filtered incremental fetch",
+            extra_env=self.trace_env(trace_path),
         )
+        self.redact_trace(trace_path, "filtered-incremental-fetch.trace2.redacted.json")
         telemetry = self.record_telemetry_delta("filtered_incremental_fetch", before)
         fetched_commit = self.git_value(
             self.filtered,
@@ -2147,6 +2132,20 @@ class ProtocolV2PartialCloneSmoke:
                 "blob_absent": not new_blob_present,
                 "telemetry": telemetry,
             },
+        )
+        trace_artifact = self.artifacts / "filtered-incremental-fetch.trace2.redacted.json"
+        trace_text = "\n".join(
+            [
+                trace_artifact.read_text(encoding="utf-8", errors="replace")
+                if trace_artifact.exists()
+                else "",
+                Path(fetch["stderr_log"]).read_text(encoding="utf-8", errors="replace"),
+            ]
+        )
+        self.check(
+            "protocol-v2-packet-trace",
+            "version 2" in trace_text and "command=fetch" in trace_text,
+            {"trace_artifact": str(trace_artifact)},
         )
 
     def rollback_compatibility_check(self, large_oid: str) -> None:

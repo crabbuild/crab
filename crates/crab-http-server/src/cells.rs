@@ -3359,15 +3359,17 @@ mod tests {
 
         let reads = Arc::new(AtomicUsize::new(0));
         let observed_reads = Arc::clone(&reads);
-        let store = store.with_read_request_observer(Arc::new(move |_| {
-            observed_reads.fetch_add(1, Ordering::Relaxed);
-        }));
+        let store = cellule_store::Store::new(store.inner().clone()).with_read_request_observer(
+            Arc::new(move |_| {
+                observed_reads.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
         let identity = ApplicationIdentity::new(
             TenantId::from_bytes([1; 16]),
             ApplicationId::from_bytes([2; 16]),
         );
         let layout = CellStorageLayout::new(
-            cellule_store::Store::new(store.inner().clone()),
+            store,
             Path::from(prefix),
             *identity.application().as_bytes(),
         );

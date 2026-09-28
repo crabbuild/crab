@@ -1818,6 +1818,7 @@ CELL_RUNTIME_SERVER_COMPONENT_FIELDS = frozenset(
 WORKSPACE_DEPENDENCY_POLICY = {
     "crab-remote": {
         "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-metadata", "crab-read", "crab-remote-git", "crab-storage", "crab-write", "crab-xet"},
+        "dev": {"crab-cache", "crab-cache-store"},
     },
     "crab-sdk": {
         "normal": {"crab-auth", "crab-auth-store", "crab-cache", "crab-cache-store", "crab-coordination", "crab-git", "crab-lfs", "crab-metadata", "crab-read", "crab-remote", "crab-remote-git", "crab-staging", "crab-storage", "crab-types", "crab-write", "crab-xet"},
