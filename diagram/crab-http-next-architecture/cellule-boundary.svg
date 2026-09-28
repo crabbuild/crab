@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 500" role="img" aria-labelledby="title description">
+  <title id="title">Crab HTTP server and Cellule boundary</title>
+  <desc id="description">Browser and Git clients enter Crab's HTTP server. Crab owns routes, authorization, repository Cell routing, and Git read and write. The router invokes the pinned Cellule host and runtime, which manage local SQLite and verified LTX. Cellule and the Git path publish to the same operator object store.</desc>
+  <defs>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .title { fill: #f8fafc; font-size: 23px; font-weight: 700; }
+      .subtitle { fill: #94a3b8; font-size: 13px; }
+      .region { font-size: 13px; font-weight: 700; letter-spacing: 1px; }
+      .name { fill: #f8fafc; font-size: 16px; font-weight: 650; text-anchor: middle; }
+      .detail { fill: #cbd5e1; font-size: 12px; text-anchor: middle; }
+      .edge { fill: #94a3b8; font-size: 11px; text-anchor: middle; }
+    </style>
+    <marker id="arrow" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <path d="M0 0 9 3.5 0 7Z" fill="#94a3b8"/>
+    </marker>
+    <marker id="cyan" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <path d="M0 0 9 3.5 0 7Z" fill="#22d3ee"/>
+    </marker>
+    <marker id="green" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <path d="M0 0 9 3.5 0 7Z" fill="#34d399"/>
+    </marker>
+  </defs>
+
+  <rect width="1080" height="500" rx="18" fill="#0f172a"/>
+  <text x="34" y="42" class="title">One server, two durable paths</text>
+  <text x="34" y="65" class="subtitle">Crab owns product policy; pinned Cellule owns Cell execution and LTX mechanics.</text>
+
+  <rect x="225" y="95" width="320" height="350" rx="15" fill="#102535" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="245" y="122" class="region" fill="#22d3ee">CRAB · PRODUCT BOUNDARY</text>
+  <rect x="575" y="95" width="275" height="350" rx="15" fill="#12302d" stroke="#34d399" stroke-width="1.5"/>
+  <text x="595" y="122" class="region" fill="#34d399">CELLULE · PINNED DEPENDENCY</text>
+
+  <path d="M190 250 H215 V175 H255" fill="none" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M385 205 V255" fill="none" stroke="#22d3ee" stroke-width="2" marker-end="url(#cyan)"/>
+  <path d="M515 175 H555 V390 H515" fill="none" stroke="#22d3ee" stroke-width="2" marker-end="url(#cyan)"/>
+  <path d="M515 290 H605" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#green)"/>
+  <path d="M710 325 V355" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#green)"/>
+  <path d="M815 390 H905" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#green)"/>
+  <path d="M515 390 H555 V465 H955 V420" fill="none" stroke="#22d3ee" stroke-width="2" marker-end="url(#cyan)"/>
+
+  <rect x="30" y="210" width="160" height="80" rx="10" fill="#1e293b" stroke="#94a3b8"/>
+  <text x="110" y="241" class="name">Clients</text>
+  <text x="110" y="264" class="detail">browser · Git · API</text>
+
+  <rect x="255" y="145" width="260" height="60" rx="10" fill="#164255" stroke="#22d3ee"/>
+  <text x="385" y="171" class="name">crab-http-server</text>
+  <text x="385" y="190" class="detail">routes · auth · lifecycle</text>
+  <rect x="255" y="255" width="260" height="70" rx="10" fill="#164255" stroke="#22d3ee"/>
+  <text x="385" y="283" class="name">Repository Cell router</text>
+  <text x="385" y="304" class="detail">local or authenticated owner</text>
+  <rect x="255" y="355" width="260" height="70" rx="10" fill="#164255" stroke="#22d3ee"/>
+  <text x="385" y="383" class="name">Git read / write</text>
+  <text x="385" y="404" class="detail">refs · objects · LFS</text>
+
+  <rect x="605" y="255" width="210" height="70" rx="10" fill="#175045" stroke="#34d399"/>
+  <text x="710" y="282" class="name">Host + runtime</text>
+  <text x="710" y="304" class="detail">fenced Cell owner</text>
+  <rect x="605" y="355" width="210" height="70" rx="10" fill="#175045" stroke="#34d399"/>
+  <text x="710" y="382" class="name">SQLite + LTX</text>
+  <text x="710" y="404" class="detail">verified publication</text>
+
+  <rect x="905" y="240" width="145" height="180" rx="11" fill="#312448" stroke="#a78bfa"/>
+  <text x="977" y="291" class="name">Object store</text>
+  <text x="977" y="316" class="detail">Cell roots</text>
+  <text x="977" y="337" class="detail">Git objects</text>
+  <text x="977" y="358" class="detail">durable authority</text>
+  <text x="860" y="378" class="edge">publish</text>
+</svg>
