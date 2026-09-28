@@ -5251,6 +5251,29 @@ Both use isolated buckets on RustFS 1.0.0 GA through Colima and overlap the
 100 GiB Xet run. They establish bounded correctness and request counts, not
 isolated latency, 128 simultaneous writers, or the remaining full failure matrix.
 
+The September 28 current-head rerun found a new lost-response regression. In
+`concurrency-head0ba-20260928-r1`, the injected ref-head create reached RustFS
+and a fresh reader saw the exact ref, but push returned `stale info`: the
+storage retry had turned the lost successful reply into `AlreadyExists`, and
+the publication layer classified that conflict before exact readback. A
+regression test reproduced this failed outcome. The writer now compares the
+persisted candidate after every failed conditional write; identical bytes
+confirm commit, a different readable head confirms contention, and failed
+verification remains uncertain.
+
+The corrected release binary (SHA-256
+`f16f5d7172f4f488f66459119c7fd2a6f39acaff6cbd69305ead35aec6c67c31`)
+passed `head-lostreply-fault-20260928-r1`: 20/20 checks and 85 commands on a
+fresh GA RustFS bucket, including a reached response-loss fault, visible exact
+ref, successful push, fresh clone and strict fsck. The separate
+`concurrency-lostreply-fixed-20260928-r1` run passed 29/29 checks across
+2,587 commands: 128 independent branch creations, 256 updates, independent
+protocol-v2 pulls, eight same-ref contenders with one winner, and strict final
+fsck without repair. Its retained report SHA-256 is
+`a2c0af726ff66f14474c10966e115513624493148cf231fd300d4565b2a8bfca`.
+These runs do not establish the default 100 GiB Xet gate, v1 parity, or green
+hosted CI.
+
 ## 14. Rollout and rollback
 
 Development repositories using `CRBCKP03` are recreated or converted by an

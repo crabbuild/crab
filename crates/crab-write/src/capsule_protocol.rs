@@ -1419,18 +1419,24 @@ async fn write_ref_head(
     };
     match result {
         Ok(etag) => Ok(etag),
-        Err(StorageError::StateConflict { .. }) => Err(WriteError::RefChanged {
-            ref_name: original.head.ref_name().to_owned(),
-            path: path.to_string(),
-        }),
-        Err(source) => match router
-            .store()
-            .get_with_etag_bounded(&path, body.len() as u64)
-            .await
-        {
-            Ok((actual, etag)) if actual == body => Ok(etag),
-            _ => Err(source.into()),
-        },
+        Err(source) => {
+            // A lost create reply can be retried into StateConflict after the
+            // candidate committed. Only a different readable head proves contention.
+            match router
+                .store()
+                .get_with_etag_bounded(&path, body.len() as u64)
+                .await
+            {
+                Ok((actual, etag)) if actual == body => Ok(etag),
+                Ok(_) if matches!(source, StorageError::StateConflict { .. }) => {
+                    Err(WriteError::RefChanged {
+                        ref_name: original.head.ref_name().to_owned(),
+                        path: path.to_string(),
+                    })
+                }
+                _ => Err(source.into()),
+            }
+        }
     }
 }
 
@@ -3451,6 +3457,57 @@ mod tests {
             .unwrap();
         let transaction_id = transaction.id().unwrap();
         assert_eq!(head.visible.transaction_id(), Some(transaction_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn retried_lost_ref_creation_reply_reconciles_as_committed_success() {
+        let inner = Arc::new(InMemory::new());
+        let seed_store = Store::new(inner.clone());
+        let seed_router = StoreLayout::new(seed_store, "repositories/test".to_owned());
+        initialize(&seed_router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let fault_store = Store::with_retry(
+            Arc::new(LostHeadReplyStore {
+                inner,
+                head_path: seed_router
+                    .capsule_ref_head_path(&crab_metadata::capsule_protocol::capsule_ref_name_key(
+                        "refs/heads/feature",
+                    ))
+                    .to_string(),
+                lost: AtomicBool::new(false),
+                reject: AtomicBool::new(false),
+            }),
+            crab_storage::RetryPolicy {
+                max_attempts: 2,
+                base: std::time::Duration::ZERO,
+                cap: std::time::Duration::ZERO,
+            },
+        );
+        let router = StoreLayout::new(fault_store, "repositories/test".to_owned());
+        let base = open_root(&router).await.unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/feature",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+
+        let published = publish(&router, base, &transaction, &capsule(&transaction))
+            .await
+            .unwrap();
+
+        let head = read_ref_head(&router, published.record().root(), "refs/heads/feature")
+            .await
+            .unwrap();
+        assert_eq!(
+            head.visible.transaction_id(),
+            Some(transaction.id().unwrap().as_str())
+        );
     }
 
     #[tokio::test]

@@ -31,6 +31,11 @@ missing marker is repaired before its prepared state is used. The repository
 root changes only for checkpoint and maintenance work, so distinct existing
 refs share no foreground mutable object.
 
+After a failed per-ref conditional write, v2 reads back the exact candidate.
+Matching bytes confirm commit even if a lost create reply retried into an
+already-exists error. A different readable head confirms a competing writer;
+an unreadable result remains uncertain rather than being reported as stale.
+
 Ref-frontier compaction gathers the selected leaf batch and older carries, then
 performs one final `CapsuleRun::compact` on a blocking worker. Ordinary push and
 coordinated repair share this path. Source authentication, immutable upload
