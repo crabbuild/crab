@@ -4931,6 +4931,23 @@ The isolated bucket and disposable checkout/cache were cleaned after success;
 reports and logs remain. This passes the lifecycle regression at 500 MiB,
 not the 100 GiB, paired v1/v2, provider, or release gates.
 
+The same pinned binary then completed three 1 GiB, five-version rehearsals.
+The first (`xet-1g-current-20260928-r1`) passed 158 user-visible checks but
+its meter recorded one proxy `TimeoutError` and one 5xx response. That is not
+clean transport qualification, despite the old harness's `passed` status;
+the exact request was not retained. The harness now requires zero proxy errors
+before marking a run passed (35 focused Python tests pass). Two fresh traced
+repeats (`xet-1g-traced-20260928-r2/r3`) each passed 159 checks and 174
+commands, including all hydration, historical, restore and fsck paths, with
+1,511 recorded requests, no proxy errors, and no 5xx responses. The retained
+1,079,205,926 xorb bytes are 20.10% of the 5 GiB logical history;
+incremental pushes in r3 took 369–452 ms and 34 requests each. R3's report
+and transport SHA-256 values are
+`a3352f40192392cd4d760b1c871176a29dba1e7ba7772acffddf2d84b038241f`
+and `a4ee78720a26c276b3a93aff5a1beeff19b17ad0bdffcf8b58c4c235dbae0fc3`.
+The isolated data was cleaned; reports and logs remain. The one timeout's
+cause is unproven; these bounded runs do not close the 100 GiB gate.
+
 - Run the release binary against isolated local RustFS and every supported
   hosted provider.
 - Compare v1 and v2 on the same source revision, machine class, object-store

@@ -104,6 +104,11 @@ def measured_hydrate(
     return measured_read(runner, proxy, read_phases, repo, ["hydrate", "--all"], name)
 
 
+def verify_no_proxy_errors(runner: AddCommitPushSmoke, proxy: RequestCountingProxy) -> None:
+    errors = proxy.snapshot(include_paths=False)["proxy_errors"]
+    runner.check("request-meter-no-proxy-errors", not errors, {"proxy_errors": errors})
+
+
 def object_inventory(runner: AddCommitPushSmoke, prefix: str) -> dict[str, int]:
     payload = runner.aws_json(
         f"inventory {prefix}",
@@ -462,6 +467,7 @@ def verify(
         fsck_data["passed"] and fsck_data["errors"] == 0 and fsck_data["repair_failures"] == 0,
         fsck_data,
     )
+    verify_no_proxy_errors(runner, proxy)
     runner.check("binary-unchanged", sha256_file(Path(runner.crab_bin)) == runner.report.artifacts["crab_binary_sha256"])
     runner.check_credential_disclosure()
     runner.report.status = "passed"

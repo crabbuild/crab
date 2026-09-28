@@ -120,6 +120,25 @@ class CapacityPreflightTests(unittest.TestCase):
 
 
 class ReadPhaseEvidenceTests(unittest.TestCase):
+    def test_proxy_error_fails_qualification(self) -> None:
+        def reject_error(_name: str, ok: bool, _detail: dict) -> None:
+            if not ok:
+                raise StopIteration
+
+        runner = SimpleNamespace(check=reject_error)
+        proxy = SimpleNamespace(snapshot=Mock(return_value={"proxy_errors": {"TimeoutError": 1}}))
+
+        with self.assertRaises(StopIteration):
+            scale.verify_no_proxy_errors(runner, proxy)
+
+    def test_clean_proxy_allows_qualification(self) -> None:
+        runner = SimpleNamespace(check=Mock())
+        proxy = SimpleNamespace(snapshot=Mock(return_value={"proxy_errors": {}}))
+
+        scale.verify_no_proxy_errors(runner, proxy)
+
+        runner.check.assert_called_once_with("request-meter-no-proxy-errors", True, {"proxy_errors": {}})
+
     def test_hydration_records_only_its_own_origin_traffic(self) -> None:
         before = {"requests": 10, "response_body_bytes": 100, "methods": {"GET": 10}}
         after = {"requests": 13, "response_body_bytes": 900, "methods": {"GET": 13}}
