@@ -96,9 +96,10 @@ def measured_hydrate(
     cache_bytes: int,
 ):
     required = payload_bytes + cache_bytes + 20 * 1024**3
+    available = shutil.disk_usage(runner.args.root).free
     runner.check(
-        f"{name} capacity", shutil.disk_usage(runner.args.root).free >= required,
-        {"required_bytes": required},
+        f"{name} capacity", available >= required,
+        {"required_bytes": required, "available_bytes": available},
     )
     return measured_read(runner, proxy, read_phases, repo, ["hydrate", "--all"], name)
 
@@ -117,11 +118,12 @@ def object_inventory(runner: AddCommitPushSmoke, prefix: str) -> dict[str, int]:
     }
 
 
-def release_verified_cache(runner: AddCommitPushSmoke, cache: Path) -> None:
-    if cache.parent != runner.run_root or cache.is_symlink():
-        raise ValueError("refusing to release a cache outside this qualification run")
-    if cache.exists():
-        shutil.rmtree(cache)
+def release_verified_run_child(runner: AddCommitPushSmoke, path: Path) -> None:
+    if (path.parent != runner.run_root or path.is_symlink()
+            or path.resolve().parent != runner.run_root.resolve()):
+        raise ValueError("refusing to release output outside this qualification run")
+    if path.exists():
+        shutil.rmtree(path)
 
 
 def run(args: argparse.Namespace) -> None:
@@ -170,10 +172,11 @@ def verify(
     # Conservatively allow one hydrated checkout plus source, staging, origin,
     # active cache and transient work; the former two-copy estimate ran out.
     required = logical_bytes + 5 * distinct_basis_bytes + 20 * 1024**3
+    available = shutil.disk_usage(args.root).free
     runner.check(
-        "disk-capacity", shutil.disk_usage(args.root).free >= required,
+        "disk-capacity", available >= required,
         {"required_bytes": required, "logical_bytes": logical_bytes,
-         "distinct_basis_bytes": distinct_basis_bytes},
+         "distinct_basis_bytes": distinct_basis_bytes, "available_bytes": available},
     )
     repo, remote, repo_prefix = runner.prepare_repo("scale")
     outside = runner.run_root / "symlink-target"
@@ -321,7 +324,7 @@ def verify(
             "versions": args.versions,
         },
     )
-    release_verified_cache(runner, runner.cache_dir)
+    release_verified_run_child(runner, runner.cache_dir)
 
     expected = history[-1]["files"]
     (runner.artifacts / "expected-sha256.json").write_text(json.dumps(expected, indent=2))
@@ -335,6 +338,16 @@ def verify(
             output.write(source.read(MIB))
         output.write(hashlib.shake_256(b"consumer-only-tail").digest(MIB))
     consumer_digest = sha256_file(consumer_file)
+    consumer_bytes = consumer_file.stat().st_size
+    # The consumer fixture has copied the source bytes; keep the source Git
+    # repository for recovery checks without retaining another hydrated copy.
+    runner.run_crab(repo, ["dehydrate", "--all"], name="dehydrate published source")
+    for path in paths:
+        is_pointer = path.stat().st_size < 1024
+        runner.check(f"source-dehydrated-{path.name}",
+                     is_pointer and path.read_text().startswith("version https://crab.build/spec/v1"))
+    runner.run_git(repo, ["diff", "--quiet", "HEAD", "--", "models"],
+                   name="dehydrated source preserves Git index")
     runner.run_git(consumer, ["add", "model.bin"])
     inventory = runner.staging_payload_inventory(consumer)
     runner.check("cold-consumer-exceeds-one-candidate-page", inventory["chunk_payloads"] > 4096, inventory)
@@ -352,14 +365,18 @@ def verify(
                  len(added) <= 2 and added_bytes < consumer_file.stat().st_size // 4,
                  {"new_xorbs": len(added), "new_xorb_bytes": added_bytes,
                   "logical_bytes": consumer_file.stat().st_size})
-    release_verified_cache(runner, runner.run_root / "consumer-cache")
+    # The consumer's published bytes are now proven by origin inventory; its
+    # source worktree is no longer needed before the independent clone check.
+    release_verified_run_child(runner, consumer.parent)
+    release_verified_run_child(runner, runner.run_root / "consumer-cache")
     runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / "consumer-clone-cache")
     consumer_clone = runner.run_root / "consumer-clone"
     runner.run_cmd("consumer clone", [runner.crab_bin, "clone", consumer_remote, str(consumer_clone)], runner.run_root)
     measured_hydrate(runner, proxy, read_phases, consumer_clone, "consumer hydrate",
-                     consumer_file.stat().st_size, consumer_file.stat().st_size)
+                     consumer_bytes, consumer_bytes)
     runner.check("consumer-byte-identity", sha256_file(consumer_clone / "model.bin") == consumer_digest)
-    release_verified_cache(runner, runner.run_root / "consumer-clone-cache")
+    release_verified_run_child(runner, consumer_clone)
+    release_verified_run_child(runner, runner.run_root / "consumer-clone-cache")
 
     runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / "cold-clone-cache")
     clone = runner.run_root / "clone"
@@ -375,7 +392,7 @@ def verify(
             runner.check(f"{cycle}-pointer-{path.name}",
                          pointer.stat().st_size < 1024 and pointer.read_text().startswith("version https://crab.build/spec/v1"))
     runner.run_git(clone, ["fsck", "--full", "--strict"])
-    release_verified_cache(runner, runner.run_root / "cold-clone-cache")
+    release_verified_run_child(runner, runner.run_root / "cold-clone-cache")
     for snapshot in history:
         version = snapshot["version"]
         # The disposable clone starts dehydrated. Each historical checkout uses
@@ -399,7 +416,7 @@ def verify(
                      proof["generation"] == snapshot["generation"]
                      and proof["digest"] == snapshot["digest"]
                      and proof["xorbs"] > 0 and proof["shards"] > 0, proof)
-        release_verified_cache(runner, runner.run_root / f"history-cache-{version}")
+        release_verified_run_child(runner, runner.run_root / f"history-cache-{version}")
 
     # Restore only this invocation's isolated repository, then prove a fresh
     # consumer and a new-epoch publication can still read both file generations.
@@ -436,7 +453,7 @@ def verify(
         runner.run_git(restored_clone, ["fsck", "--full", "--strict"], name=f"{stage} history Git integrity")
         runner.run_crab(restored_clone, ["dehydrate", "--all"], name=f"{stage} history dehydrate")
         cache_name = "restored-clone-cache" if stage == "restored" else "republished-clone-cache"
-        release_verified_cache(runner, runner.run_root / cache_name)
+        release_verified_run_child(runner, runner.run_root / cache_name)
     fsck = measured_read(runner, proxy, read_phases, repo, ["fsck", "--json"],
                          "layered Xet remote fsck")
     fsck_data = json.loads(runner.read_stdout(fsck))["data"]

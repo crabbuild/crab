@@ -4892,7 +4892,11 @@ The harness's former two-copy capacity estimate admitted this run with about
 153 GiB free even though source/staging, co-located origin, clone output and
 retained caches exceeded its headroom. The harness now releases each
 task-owned cache only after that phase's integrity checks pass, preserving a
-fresh cache for every historical proof. Its preflight budgets one hydrated
+fresh cache for every historical proof. It also releases the consumer source
+and clone after their respective remote-reuse and byte-identity proofs, and
+dehydrates the published source worktree after copying the independent
+consumer fixture. The source Git repository remains available for later
+recovery and republish checks. Its preflight budgets one hydrated
 logical checkout, distinct source/staging/origin/active-cache copies and a
 transient-work copy, plus a 20 GiB safety reserve; it would require 160 GiB
 for this shape and 220 GiB for the default 100 GiB shape. Each hydrate
@@ -4900,6 +4904,21 @@ rechecks current free space
 before starting, so shared-volume changes after preflight fail early. These
 changes prevent the observed unsafe start and bound cache accumulation; they
 do not create capacity or close the release gate.
+
+A 500 MiB, five-version RustFS 1.0.0 GA rehearsal
+(`xet-500m-phasecache-20260928-r2`) passed all pushes, repacks, the
+independent consumer clone's byte-identity check, and the first full-clone
+hydrate. Its second hydrate did not start: 22,398,337,024 free bytes were
+below the 22,523,412,480-byte safety requirement because the source remained
+hydrated and the same-cache rehydration intentionally retained its first
+500 MiB cache. The report is **failed**, not Xet qualification or evidence
+of data corruption (report SHA-256
+`b7b224d635a67a3d7d57600828a7900cfecd5abbf2facb49be3d2365eb3ac653`).
+The newly added source dehydration should reclaim that redundant copy, but
+an end-to-end repeat is still required; the mounted volume currently has less
+than this rehearsal's 24,620,564,480-byte preflight requirement. Its isolated
+bucket and disposable checkout/cache were cleaned after the failure; the
+report and logs remain.
 
 - Run the release binary against isolated local RustFS and every supported
   hosted provider.

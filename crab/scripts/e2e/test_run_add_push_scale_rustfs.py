@@ -47,25 +47,53 @@ class CapacityPreflightTests(unittest.TestCase):
 
             self.assertEqual(checks[-1], ("disk-capacity", False))
 
-    def test_releases_a_completed_phase_cache(self) -> None:
+    def test_releases_verified_output_inside_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             cache = root / "history-cache-0"
             cache.mkdir()
             (cache / "entry").write_bytes(b"cached")
 
-            scale.release_verified_cache(SimpleNamespace(run_root=root), cache)
+            scale.release_verified_run_child(SimpleNamespace(run_root=root), cache)
 
             self.assertFalse(cache.exists())
 
-    def test_refuses_to_release_a_cache_outside_the_run(self) -> None:
+    def test_refuses_to_release_output_outside_the_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             cache = root / "unrelated" / "cache"
             cache.mkdir(parents=True)
 
             with self.assertRaises(ValueError):
-                scale.release_verified_cache(SimpleNamespace(run_root=root / "run"), cache)
+                scale.release_verified_run_child(SimpleNamespace(run_root=root / "run"), cache)
+
+            self.assertTrue(cache.exists())
+
+    def test_refuses_to_release_symlink_to_outside_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            run_root = root / "run"
+            run_root.mkdir()
+            link = run_root / "linked"
+            link.symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaises(ValueError):
+                scale.release_verified_run_child(SimpleNamespace(run_root=run_root), link)
+
+            self.assertTrue(outside.exists())
+
+    def test_refuses_to_release_parent_path_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_root = root / "run"
+            run_root.mkdir()
+
+            with self.assertRaises(ValueError):
+                scale.release_verified_run_child(SimpleNamespace(run_root=run_root), run_root / "..")
+
+            self.assertTrue(run_root.exists())
 
     def test_hydration_rechecks_headroom_before_starting(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
