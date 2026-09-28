@@ -839,6 +839,7 @@ class ProtocolV2PartialCloneSmoke:
     def storage_telemetry(self) -> dict[str, int]:
         requests = 0
         bytes_read = 0
+        git_pack_transfer_bytes = 0
         by_kind: dict[str, int] = {}
         cache_hits = 0
         cache_misses = 0
@@ -859,6 +860,15 @@ class ProtocolV2PartialCloneSmoke:
                         requests += 1
                     bytes_read += int(fields.get("storage_bytes", 0))
                     by_kind[kind] = by_kind.get(kind, 0) + 1
+                # Direct layered cold clones bypass the remote-reader counter.
+                # Compare delivered Git pack bytes across both clone paths.
+                if fields.get("message") == "layered cold clone pack ranges read":
+                    git_pack_transfer_bytes += int(fields.get("pack_bytes", 0))
+                elif fields.get("message") in (
+                    "capsule-protocol constrained fetch installed generated pack",
+                    "protocol-v2 upload-pack pack generated",
+                ):
+                    git_pack_transfer_bytes += int(fields.get("transferred_bytes", 0))
                 cache_event = str(fields.get("cache_event", "")).casefold()
                 if cache_event == "hit":
                     cache_hits += 1
@@ -867,6 +877,7 @@ class ProtocolV2PartialCloneSmoke:
         return {
             "requests": requests,
             "bytes": bytes_read,
+            "git_pack_transfer_bytes": git_pack_transfer_bytes,
             "cache_hits": cache_hits,
             "cache_misses": cache_misses,
             **by_kind,
@@ -914,6 +925,7 @@ class ProtocolV2PartialCloneSmoke:
             "stage": stage,
             "requests": after["requests"] - before["requests"],
             "bytes": after["bytes"] - before["bytes"],
+            "git_pack_transfer_bytes": after["git_pack_transfer_bytes"] - before["git_pack_transfer_bytes"],
             "range_get": after.get("range_get", 0) - before.get("range_get", 0),
             "range_get_coalesced": after.get("range_get_coalesced", 0)
             - before.get("range_get_coalesced", 0),
@@ -2005,6 +2017,8 @@ class ProtocolV2PartialCloneSmoke:
             "stage": "filtered_clone_and_lazy_fetch",
             "requests": int(initial_filtered.get("requests", 0)) + int(lazy_delta.get("requests", 0)),
             "bytes": int(initial_filtered.get("bytes", 0)) + int(lazy_delta.get("bytes", 0)),
+            "git_pack_transfer_bytes": int(initial_filtered.get("git_pack_transfer_bytes", 0))
+            + int(lazy_delta.get("git_pack_transfer_bytes", 0)),
             "range_get": int(initial_filtered.get("range_get", 0)) + int(lazy_delta.get("range_get", 0)),
             "range_get_coalesced": int(initial_filtered.get("range_get_coalesced", 0))
             + int(lazy_delta.get("range_get_coalesced", 0)),
@@ -3880,9 +3894,11 @@ class ProtocolV2PartialCloneSmoke:
         )
         full_reads = self.report["telemetry"].get("full_clone", {})
         filtered_reads = self.report["telemetry"].get("filtered_clone", {})
+        full_pack_bytes = int(full_reads.get("git_pack_transfer_bytes", 0))
+        filtered_pack_bytes = int(filtered_reads.get("git_pack_transfer_bytes", 0))
         self.check(
             "filtered-transfer-smaller",
-            int(filtered_reads.get("bytes", 0)) < int(full_reads.get("bytes", 0)),
+            0 < filtered_pack_bytes < full_pack_bytes,
             {"full_clone": full_reads, "filtered_clone_and_lazy_fetch": filtered_reads},
         )
         self.report["status"] = "passed"
