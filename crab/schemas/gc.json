@@ -1,10 +1,10 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "Terminal result payload for `--json` / `--jsonl` structured output.",
+  "description": "Terminal result payload for `--json` / `--jsonl` structured output.\n\nCapsule source-byte classes describe pre-sweep storage: complete run and pack-layer objects, including embedded indexes, but not checkpoint/history records. Shared sources count once, with active reachability taking priority.",
   "properties": {
     "active_pack_bytes": {
       "default": 0,
-      "description": "Current-manifest Git pack bytes.",
+      "description": "Physical bytes of currently reachable Git source objects.",
       "format": "uint64",
       "minimum": 0.0,
       "type": "integer"
@@ -21,7 +21,7 @@
     },
     "collectible_pack_bytes": {
       "default": 0,
-      "description": "Unreachable pack bytes eligible for collection.",
+      "description": "Unreachable source bytes eligible for collection.",
       "format": "uint64",
       "minimum": 0.0,
       "type": "integer"
@@ -46,7 +46,7 @@
     },
     "grace_period_pack_bytes": {
       "default": 0,
-      "description": "Unreachable pack bytes retained by the grace period.",
+      "description": "Unreachable source bytes retained by the grace period.",
       "format": "uint64",
       "minimum": 0.0,
       "type": "integer"
@@ -69,7 +69,7 @@
     },
     "retained_history_pack_bytes": {
       "default": 0,
-      "description": "Pack bytes retained only by history, workflows, or other recovery roots.",
+      "description": "Source bytes retained only by history or other protection roots.",
       "format": "uint64",
       "minimum": 0.0,
       "type": "integer"
