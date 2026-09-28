@@ -50,15 +50,40 @@ def verify_parallel_proofs(runner: AddCommitPushSmoke, paths: list[Path]) -> Non
 
 
 def write_transport_report(
-    runner: AddCommitPushSmoke, records: list[dict[str, Any]], total: dict[str, Any]
+    runner: AddCommitPushSmoke,
+    records: list[dict[str, Any]],
+    read_phases: list[dict[str, Any]],
+    total: dict[str, Any],
 ) -> None:
     path = runner.artifacts / "capsule-xet-transport.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"versions": records, "total": total}, indent=2, sort_keys=True) + "\n"
+        json.dumps(
+            {"versions": records, "read_phases": read_phases, "total": total},
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
     )
     runner.report.artifacts["capsule_xet_transport"] = str(path)
     runner.write_report()
+
+
+def measured_read(
+    runner: AddCommitPushSmoke,
+    proxy: RequestCountingProxy,
+    read_phases: list[dict[str, Any]],
+    repo: Path,
+    args: list[str],
+    name: str,
+):
+    before = proxy.snapshot()
+    result = runner.run_crab(repo, args, name=name)
+    read_phases.append({
+        "name": name,
+        "duration_ms": result.duration_ms,
+        "transport": RequestCountingProxy.delta(before, proxy.snapshot()),
+    })
+    return result
 
 
 def object_inventory(runner: AddCommitPushSmoke, prefix: str) -> dict[str, int]:
@@ -86,15 +111,16 @@ def run(args: argparse.Namespace) -> None:
     runner.env["AWS_ENDPOINT_URL"] = proxy.url
     runner.env["AWS_ENDPOINT_URL_S3"] = proxy.url
     records: list[dict[str, Any]] = []
+    read_phases: list[dict[str, Any]] = []
     if runner.run_root.exists():
         proxy.close()
         raise RuntimeError("use a fresh run directory")
     try:
-        verify(args, runner, proxy, records)
+        verify(args, runner, proxy, records, read_phases)
     except Exception as error:
         runner.report.status = "failed"
         runner.report.artifacts["failure"] = str(error)
-        write_transport_report(runner, records, proxy.snapshot())
+        write_transport_report(runner, records, read_phases, proxy.snapshot())
         runner.write_report()
         raise
     finally:
@@ -106,6 +132,7 @@ def verify(
     runner: AddCommitPushSmoke,
     proxy: RequestCountingProxy,
     transport_records: list[dict[str, Any]],
+    read_phases: list[dict[str, Any]],
 ) -> None:
     status, _, _ = runner.signed_s3_request("HEAD", "")
     runner.check("fresh-bucket", status == 404, {"head_status": status})
@@ -200,7 +227,7 @@ def verify(
                 "shards": object_inventory(runner, ".crab/shards/"),
             }
         )
-        write_transport_report(runner, transport_records, proxy.snapshot())
+        write_transport_report(runner, transport_records, read_phases, proxy.snapshot())
         if version == 0:
             runner.check(
                 "capsule-root-published",
@@ -244,7 +271,7 @@ def verify(
         latest = max(entries, key=lambda entry: entry["generation"])
         history[-1].update({"generation": latest["generation"], "digest": latest["digest"]})
         history_path.write_text(json.dumps(history, indent=2) + "\n")
-        write_transport_report(runner, transport_records, proxy.snapshot())
+        write_transport_report(runner, transport_records, read_phases, proxy.snapshot())
 
     initial = transport_records[0]
     final = transport_records[-1]
@@ -295,14 +322,16 @@ def verify(
     runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / "consumer-clone-cache")
     consumer_clone = runner.run_root / "consumer-clone"
     runner.run_cmd("consumer clone", [runner.crab_bin, "clone", consumer_remote, str(consumer_clone)], runner.run_root)
-    runner.run_crab(consumer_clone, ["hydrate", "--all"])
+    measured_read(runner, proxy, read_phases, consumer_clone, ["hydrate", "--all"],
+                  "consumer hydrate")
     runner.check("consumer-byte-identity", sha256_file(consumer_clone / "model.bin") == consumer_digest)
 
     runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / "cold-clone-cache")
     clone = runner.run_root / "clone"
     runner.run_cmd("scale clone", [runner.crab_bin, "clone", remote, str(clone)], runner.run_root)
     for cycle in ("cold", "rehydrated"):
-        runner.run_crab(clone, ["hydrate", "--all"], name=f"{cycle} hydrate")
+        measured_read(runner, proxy, read_phases, clone, ["hydrate", "--all"],
+                      f"{cycle} hydrate")
         for relative, digest in expected.items():
             runner.check(f"{cycle}-bytes-{relative}", sha256_file(clone / relative) == digest)
         runner.run_crab(clone, ["dehydrate", "--all"], name=f"{cycle} dehydrate")
@@ -318,14 +347,16 @@ def verify(
         runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / f"history-cache-{version}")
         runner.run_git(clone, ["checkout", "--detach", snapshot["commit"]],
                        name=f"v{version} historical checkout")
-        runner.run_crab(clone, ["hydrate", "--all"], name=f"v{version} historical hydrate")
+        measured_read(runner, proxy, read_phases, clone, ["hydrate", "--all"],
+                      f"v{version} historical hydrate")
         for relative, digest in snapshot["files"].items():
             runner.check(f"v{version}-historical-bytes-{relative}", sha256_file(clone / relative) == digest)
         runner.run_crab(clone, ["dehydrate", "--all"], name=f"v{version} historical dehydrate")
-        verified = runner.run_crab(
-            repo, ["recover", "history", "verify", str(snapshot["generation"]),
-                   "--digest", snapshot["digest"], "--json"],
-            name=f"v{version} retained history integrity",
+        verified = measured_read(
+            runner, proxy, read_phases, repo,
+            ["recover", "history", "verify", str(snapshot["generation"]),
+             "--digest", snapshot["digest"], "--json"],
+            f"v{version} retained history integrity",
         )
         proof = json.loads(runner.read_stdout(verified))["data"]
         runner.check(f"v{version}-history-verification-exact",
@@ -339,10 +370,11 @@ def verify(
     external_before = {
         prefix: runner.list_keys(prefix) for prefix in (".crab/xorbs/", ".crab/shards/")
     }
-    restored = runner.run_crab(
-        repo, ["recover", "history", "restore", str(oldest["generation"]),
-               "--digest", oldest["digest"], "--apply", "--json"],
-        name="restore oldest retained Xet history",
+    restored = measured_read(
+        runner, proxy, read_phases, repo,
+        ["recover", "history", "restore", str(oldest["generation"]),
+         "--digest", oldest["digest"], "--apply", "--json"],
+        "restore oldest retained Xet history",
     )
     runner.check("history-restore-applied", json.loads(runner.read_stdout(restored))["data"]["applied"])
     runner.check("history-restore-exact-tip",
@@ -360,12 +392,14 @@ def verify(
             runner.run_git(restored_clone, ["fetch", "origin"], name="fetch after restore and publication")
             runner.run_git(restored_clone, ["checkout", "--detach", "refs/remotes/origin/main"])
         runner.check(f"{stage}-clone-exact-tip", runner.rev_parse(restored_clone, "HEAD") == snapshot["commit"])
-        runner.run_crab(restored_clone, ["hydrate", "--all"], name=f"{stage} history hydrate")
+        measured_read(runner, proxy, read_phases, restored_clone, ["hydrate", "--all"],
+                      f"{stage} history hydrate")
         for relative, digest in snapshot["files"].items():
             runner.check(f"{stage}-history-bytes-{relative}", sha256_file(restored_clone / relative) == digest)
         runner.run_git(restored_clone, ["fsck", "--full", "--strict"], name=f"{stage} history Git integrity")
         runner.run_crab(restored_clone, ["dehydrate", "--all"], name=f"{stage} history dehydrate")
-    fsck = runner.run_crab(repo, ["fsck", "--json"], name="layered Xet remote fsck")
+    fsck = measured_read(runner, proxy, read_phases, repo, ["fsck", "--json"],
+                         "layered Xet remote fsck")
     fsck_data = json.loads(runner.read_stdout(fsck))["data"]
     runner.check(
         "layered-xet-remote-fsck-clean",
@@ -375,7 +409,7 @@ def verify(
     runner.check("binary-unchanged", sha256_file(Path(runner.crab_bin)) == runner.report.artifacts["crab_binary_sha256"])
     runner.check_credential_disclosure()
     runner.report.status = "passed"
-    write_transport_report(runner, transport_records, proxy.snapshot())
+    write_transport_report(runner, transport_records, read_phases, proxy.snapshot())
     runner.write_report()
     if args.cleanup:
         # All targets were created by this invocation; retain reports and logs.

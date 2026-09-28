@@ -4823,6 +4823,27 @@ contributor, not a proven excuse or a qualified flat-latency result. Preserve
 raw traces and compare a matching-feature v1/v2 pair in a quiet environment
 before making a protocol speedup claim.
 
+On September 28, the frozen `f990449d` release binary passed a fresh-bucket
+RustFS 1.0.0 GA Xet subscale run: fifteen 512 MiB files, three versions,
+22.5 GiB of logical history, 3,729 passing checks, and zero proxy errors.
+All versioned pushes, layered repacks, cold cross-repository chunk reuse,
+fresh-clone hydration, byte-exact historical checkouts, retained-history
+verification, restore, new-epoch republish, native Git checks, and remote Crab
+fsck passed. Retained xorbs total 5,407,593,957 bytes, or 22.38% of logical
+history. The seed push uploaded 5.387 GB in 210.680 seconds and used 229
+requests; the two incremental large-file pushes uploaded 23.47/23.34 MB in
+2.352/2.252 seconds and used 62 requests each. This is large-file Xet traffic,
+not the simple-Git-commit request target. The complete run measured 122.4 GB
+of origin response bytes across repeated cold hydration, history verification,
+recovery, and fsck, but the original meter did not attribute bytes by phase.
+Per-phase transport evidence has been added to the scale harness for the next
+run. The retained report and transport SHA-256 values are
+`132975dee61c24a3310bdcbf9e71247432590e6cc5a3a894c2073f9248ca653f`
+and `7df0cb50a2c331b29ec019fdd168b03cffd55670d328ccf22c84fa763f35d0a6`.
+The isolated bucket and generated data were cleaned after success; reports
+and logs remain. This subscale pass does not close the default 100 GiB gate,
+read-amplification investigation, paired v1 comparison, or CI matrix.
+
 - Run the release binary against isolated local RustFS and every supported
   hosted provider.
 - Compare v1 and v2 on the same source revision, machine class, object-store
