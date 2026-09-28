@@ -344,7 +344,7 @@ snapshots, and owner maps are retained under
 `overload.*`, `startup.json`, and `five-startup.json`.
 
 Healthy ingress does not imply even owner execution. See the
-[LTX audit](../../../crab-cell-runtime/docs/ltx-performance-audit.md) for the
+[LTX audit](https://github.com/crabbuild/cellule/blob/70c3c218fafc815b951a40d4df1b50bba15b7d4c/crates/cellule-runtime/docs/ltx-performance-audit.md) for the
 execution-distribution and shared-resource gates before scale comparisons.
 
 ## Measure public-host actions against RustFS
@@ -375,7 +375,7 @@ still three processes on one machine; they use the Compose RustFS service but
 do not use the 20 Compose node processes. Keep the raw test output to compare
 RustFS measurements with the in-memory baseline. Serial actions do not
 establish saturation throughput or a production SLO. See the
-[RustFS action measurements](../../../crab-cell-app/performance/2026-09-25-public-host-rustfs.md).
+[RustFS action measurements](https://github.com/crabbuild/cellule/blob/70c3c218fafc815b951a40d4df1b50bba15b7d4c/crates/cellule-app/performance/2026-09-25-public-host-rustfs.md).
 
 To stop this **disposable** project while preserving its data, use `down`
 without `--volumes`. Removing its volumes deletes the RustFS data, peer

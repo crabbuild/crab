@@ -1757,8 +1757,7 @@ if [ "${CRAB_HTTP_CLUSTER_VALIDATE:-false}" = true ]; then
   if [ "$qualified_image_ref" != source-only ]; then
     receipt_mode=release
   fi
-  CARGO_TARGET_DIR="${CRAB_HTTP_CLUSTER_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/crab-http-cluster-target}" \
-    cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+  python3 "$repo_root/crab/scripts/cellule-qualification.py" run \
       validate-cluster "$receipt_path" "$source_revision" "$qualified_image_digest" "$receipt_mode"
 fi
 cat "$receipt_path"

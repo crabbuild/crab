@@ -1,2 +1,0 @@
-tests.rs  # drives the private registry validation path through ApplicationBuilder
-lib.rs  # declares crate-private test modules

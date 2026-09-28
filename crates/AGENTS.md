@@ -24,12 +24,8 @@ Scoped rules for `crates/`. Root `AGENTS.md` also applies.
 - `crab-staging` — local segment staging, chunk indexes, prepared push plans, multipart resume, compaction, and recovery.
 - `crab-coordination` — push locks, write coordination, and feature-gated DynamoDB, Spanner, and Cosmos DB active-active backends.
 - `crab-lfs` — Git LFS object layout, storage access, and integrity checks; pointer parsing remains in `crab-git`.
-- `crab-ltx` — legacy qualification source for the LTX mechanics now owned by Cellule. Provenance remains in `crab-ltx/UPSTREAM.md` until its release gates move.
-- `crab-cell-runtime` — legacy qualification source for the Cell runtime now owned by Cellule.
-- `crab-cell-peer-http` — legacy qualification source for the peer transport now owned by Cellule.
 - `crab-http-server` consumes the pinned Cellule runtime, application, host,
-  store, and LTX crates. The in-tree Cell and LTX crates still serve legacy
-  qualification workflows; do not add a new product dependency on them.
+  store, and LTX crates. Cellule owns their source and qualification contracts.
 
 ### Read, Cache, and Virtual Filesystems
 
@@ -84,27 +80,13 @@ crab-types
 - Server crates are composition boundaries. Do not move server policy or broad dependency sets into lower libraries.
 - Preserve source errors across crate boundaries. Map errors only where the receiving layer adds a real contract or user-facing decision.
 
-## Cell and LTX Layout
+## Cellule Boundary
 
-`crab-cell-runtime`, `crab-cell-app`, `crab-cell-host`, and `crab-ltx` remain
-for Crab's legacy qualification workflows. Cellule now owns the live runtime;
-keep these source-local gates intact until their release evidence moves there:
-
-- `src/` is production code; the test surface is `tests/<suite>.rs` plus its
-  `tests/<suite>/` modules, one binary per capability suite. Never name a suite
-  after a source file it happens to exercise.
-- Shared fixtures live in `tests/support/`; a suite declares `mod support;` and
-  reaches it through the crate root. No `#[path]` attributes.
-- A test that needs private or `pub(crate)` state stays in its module and is
-  listed with a reason in that crate's `tests-allow-list.txt`; everything else
-  belongs in a suite.
-- The runtime and LTX root surfaces are frozen in `api-prelude.txt`; a new root
-  re-export edits `src/lib.rs` and that file in the same commit.
-- These four crates depend only on each other and `crab-storage`; do not add
-  product dependencies or extend their public contracts.
-- `crab/scripts/check-cell-ltx-layout.py` checks the layout and
-  `crab/scripts/check-policy-entry-points.py` the actor policy seams; the
-  per-crate `AGENTS.md` guides own the test map and read-first routes.
+`crab-http-server` embeds the pinned Cellule runtime. Keep product HTTP,
+authorization, cloud configuration, and release policy here; change reusable
+Cell and LTX mechanics in [Cellule](https://github.com/crabbuild/cellule).
+Crab's release workflow verifies the exact pinned Cellule qualification
+contracts while binding evidence to the server image and source revision.
 
 ## Feature Flags
 

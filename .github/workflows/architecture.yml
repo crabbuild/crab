@@ -163,7 +163,7 @@ jobs:
         run: exit 1
 
   cell-runtime-rustfs:
-    name: Server, Cell and LTX RustFS recovery
+    name: Server Cell RustFS recovery
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -172,11 +172,6 @@ jobs:
       AWS_DEFAULT_REGION: us-east-1
       AWS_REGION: us-east-1
       AWS_EC2_METADATA_DISABLED: true
-      CRAB_LTX_TEST_BUCKET: crab-cell-runtime
-      CRAB_LTX_TEST_ENDPOINT: http://127.0.0.1:9000
-      CRAB_CELL_TEST_BUCKET: crab-cell-runtime
-      CRAB_CELL_TEST_ENDPOINT: http://127.0.0.1:9000
-      CRAB_CELL_TEST_PREFIX: cell-${{ github.run_id }}-${{ github.run_attempt }}
       CRAB_HTTP_CELL_TEST_BUCKET: crab-cell-runtime
       CRAB_HTTP_CELL_TEST_ENDPOINT: http://127.0.0.1:9000
       CRAB_HTTP_CELL_TEST_PREFIX: server-${{ github.run_id }}-${{ github.run_attempt }}
@@ -223,10 +218,10 @@ jobs:
             -v "$data_root:/data" \
             "$RUSTFS_IMAGE" server /data --address :9000
           for _ in $(seq 1 90); do
-            if aws --endpoint-url "$CRAB_CELL_TEST_ENDPOINT" \
+            if aws --endpoint-url "$CRAB_HTTP_CELL_TEST_ENDPOINT" \
               s3api list-buckets >/dev/null 2>&1; then
-              aws --endpoint-url "$CRAB_CELL_TEST_ENDPOINT" \
-                s3api create-bucket --bucket "$CRAB_CELL_TEST_BUCKET"
+              aws --endpoint-url "$CRAB_HTTP_CELL_TEST_ENDPOINT" \
+                s3api create-bucket --bucket "$CRAB_HTTP_CELL_TEST_BUCKET"
               exit 0
             fi
             sleep 1
@@ -234,7 +229,7 @@ jobs:
           docker logs cell-runtime-rustfs >&2 || true
           exit 1
 
-      - name: Verify canonical LTX and Cell source-loss recovery
+      - name: Verify server Cell source-loss recovery
         run: |
           set -euo pipefail
           run_test() {
@@ -248,22 +243,6 @@ jobs:
               return 1
             fi
           }
-          run_test cargo test -p crab-ltx --locked --features replica --test cell \
-            cell::roots::lifecycle::exact_root_inventory_verifies_every_remote_dependency \
-            -- --exact --nocapture
-          CRAB_CELL_TEST_PREFIX="${CRAB_CELL_TEST_PREFIX}/scheduler-discovery" \
-            run_test cargo test -p crab-cell-runtime --locked --test fleet \
-            fleet::takeover::rustfs_scheduler_membership_and_recovery_share_one_fresh_directory_scan \
-            -- --ignored --exact --nocapture
-          run_test cargo test -p crab-cell-runtime --locked --test runtime \
-            runtime::lifecycle::ownership::recovery::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
-            -- --ignored --exact --nocapture
-          CRAB_CELL_TEST_PREFIX="${CRAB_CELL_TEST_PREFIX}/read-replicas" \
-            run_test cargo test -p crab-cell-runtime --locked --test runtime read_replica \
-            -- --include-ignored --test-threads=6 --nocapture
-          run_test cargo test -p crab-cell-runtime --locked --lib \
-            recovery::retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
-            -- --ignored --exact --nocapture
           run_test cargo test -p crab-http-server --locked --lib \
             server::peer_e2e_tests::rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx \
             -- --ignored --exact --nocapture

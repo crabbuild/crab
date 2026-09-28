@@ -159,23 +159,10 @@ jobs:
           npm test --prefix packages/ui
           npm run build --prefix packages/ui
 
-      - name: Check HTTP server and local LTX engine
+      - name: Check HTTP server
         run: |
-          cargo clippy -p crab-http-server -p crab-ltx --all-targets --locked -- -D warnings
+          cargo clippy -p crab-http-server --all-targets --locked -- -D warnings
           cargo test -p crab-http-server --example qualify_http_load --locked
-
-      - name: Check the Cell runtime, application, and host crates
-        run: |
-          # The HTTP server and LTX lint above does not cover these crates, and the
-          # runtime's `test-support` feature changes which items compile, so both
-          # configurations are linted.
-          cargo clippy -p crab-cell-runtime -p crab-cell-app -p crab-cell-host --all-targets --locked -- -D warnings
-          cargo clippy -p crab-cell-runtime --all-targets --features test-support --locked -- -D warnings
-
-      - name: Check LTX replica feature
-        run: |
-          cargo clippy -p crab-ltx --all-targets --features replica --locked -- -D warnings
-          cargo test -p crab-ltx --features replica --locked
 
       - name: Check formatting
         run: cargo fmt --all -- --check

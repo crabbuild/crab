@@ -1,5 +1,10 @@
 # Next-generation crab-http-server: repository SQLite cells and LTX durability
 
+> Historical design record. The server now embeds the pinned
+> [Cellule framework](https://github.com/crabbuild/cellule); its current
+> source, tests, and qualification contracts live there. Links to Cellule
+> below point to the revision used by this server.
+
 Status: target server architecture. Local and optional remote `crab-ltx`
 mechanics are implemented, and the server now has a statically registered
 repository issue/comment/label/status/check/settings/Pull/Release module proven
@@ -51,7 +56,7 @@ limits and qualification status are recorded in [crab-ltx](crab-ltx.md).
 Audience: implementers of the HTTP application, storage and publication owners,
 operators, and reviewers of correctness and migration evidence.
 
-The [embedded Rust Cell runtime specification](../../crab-cell-runtime/docs/README.md)
+The [embedded Rust Cell runtime specification](https://github.com/crabbuild/cellule/blob/70c3c218fafc815b951a40d4df1b50bba15b7d4c/crates/cellule-runtime/docs/README.md)
 now owns the low-level shared runtime APIs, Cell formats, primitive contracts and
 compiled-release lifecycle. It narrows delivery to Rust handlers embedded in this
 server; no standalone multi-language platform is planned. For overlapping runtime
@@ -65,7 +70,7 @@ modules independently. Product HTTP/Git routes remain the only public API, while
 Cell and primitive capabilities remain private Rust contracts.
 The exact source-change, registration, route-adapter, compatibility-test and
 whole-image rollout sequence is the
-[native contributor procedure](../../crab-cell-runtime/docs/rust-api.md#add-a-native-feature).
+[native contributor procedure](https://github.com/crabbuild/cellule/blob/70c3c218fafc815b951a40d4df1b50bba15b7d4c/crates/cellule-runtime/docs/rust-api.md#add-a-native-feature).
 
 The Git browse projection is now rebuilt asynchronously from the canonical
 object-store snapshot. Direct `crab`/Git pushes do not require this server:

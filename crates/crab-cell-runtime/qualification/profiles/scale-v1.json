@@ -1,1 +1,0 @@
-{"schema_version":2,"name":"scale-v1","minimum_cells":10000,"minimum_operations":10000000,"minimum_duration_secs":3600,"maximum_p99_latency_ms":500,"minimum_throughput_ops_per_sec":2777,"maximum_peak_rss_bytes":34359738368,"maximum_local_disk_bytes":214748364800,"maximum_file_descriptors":100000,"maximum_bucket_calls":100000000,"provider":"rustfs","topology":"dedicated-hosts"}
