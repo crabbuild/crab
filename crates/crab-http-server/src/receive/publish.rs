@@ -333,8 +333,10 @@ async fn publish(
     directory: crate::local_disk::StagingDirectory,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
+    // Capsule validation makes this attempt future large. Heap-place it before
+    // nesting under the lease futures or debug Tokio workers exhaust their stack.
     let Some(plan_id) = input.plan_id.clone() else {
-        return publish_attempt(
+        return Box::pin(publish_attempt(
             server,
             principal,
             entry,
@@ -345,7 +347,7 @@ async fn publish(
                 plan_id: None,
             },
             cancel,
-        )
+        ))
         .await;
     };
     let attempt = PublishAttempt {
@@ -359,7 +361,7 @@ async fn publish(
         TTL,
         cancel,
         move |plan_cancel| async move {
-            publish_attempt(
+            Box::pin(publish_attempt(
                 server,
                 principal,
                 entry,
@@ -367,7 +369,7 @@ async fn publish(
                 input,
                 attempt,
                 &plan_cancel,
-            )
+            ))
             .await
         },
     )
