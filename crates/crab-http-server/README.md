@@ -8,22 +8,7 @@ serves repositories from the operator's object storage.
 
 ## Architecture
 
-```text
-Browser                    Native Git / Git LFS
-   │                              │
-   └──────────────┬───────────────┘
-                  ▼
-          crab-http-server
-       auth · routes · lifecycle
-              ┌───┴────────────────┐
-              ▼                    ▼
-     repository Cell router   remote-git/read/write
-              │                    │
-      SQLite + cellule-ltx          │
-              └─────────┬──────────┘
-                        ▼
-                   object storage
-```
+![Crab HTTP server and pinned Cellule architecture](../../diagram/crab-http-next-architecture/cellule-boundary.svg)
 
 The server owns HTTP policy and application workflows. It uses the pinned
 [Cellule](https://github.com/crabbuild/cellule) runtime for Cell execution and
