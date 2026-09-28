@@ -1,4 +1,52 @@
 {
+  "authenticated_cutpoint_full_replay": {
+    "run_id": "k8s-5000-ready-20260927-r3",
+    "status": "failed",
+    "error": "unchanged incremental-fetch performance gates failed; correctness passed",
+    "source_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+    "provenance": {
+      "candidate": "b56625cc0e3587f3ca02e73b6b56ea80634fd9c5",
+      "binary_sha256": "c0a36f2f86a3dd2ec62fb696ad738b1dcb8ad5ca6dcefa897c70afb18fa1e117",
+      "report_sha256": "3bb4edf66068781e0f4422a54d3e9bd24834a4f7039888904235b6183ca96cb2",
+      "requests_sha256": "d025d69f7492fda99c382d56c83fed16974500a88832a46baed6dfcbcb2e8440",
+      "harness_sha256": "6129b5902f28b900b39a4bfc22f366db34298f404c402b534b8930de53098fd7"
+    },
+    "correctness": {
+      "incremental_pushes": 5000,
+      "incremental_fetches_before_repack": 10,
+      "one_new_local_pack_per_fetch": true,
+      "exact_tips_and_connectivity": "passed",
+      "seed_and_final_remote_crab_fsck": "passed",
+      "cold_and_warm_strict_full_git_fsck": "passed",
+      "sampled_blob_bytes_per_final_clone": 32
+    },
+    "metrics": {
+      "seed_push_ms": 220635,
+      "push_mean_ms": 289.65,
+      "push_p95_ms": 634,
+      "push_last_500_mean_ms": 598.0,
+      "push_mean_origin_requests": 7.012,
+      "push_total_origin_requests": 35060,
+      "fetch_mean_ms": 6298.0,
+      "fetch_p95_ms": 16503,
+      "fetch_mean_origin_requests": 82.6,
+      "fetch_p95_origin_requests": 87,
+      "cold_clone_ms": 56024,
+      "warm_clone_ms": 56277,
+      "final_clone_origin_requests_each": 15
+    },
+    "performance_gates": {
+      "push_mean_under_one_second": true,
+      "push_mean_under_ten_requests": true,
+      "fetch_p95_under_ten_seconds": false,
+      "fetch_p95_at_most_ten_requests": false
+    },
+    "scope_limits": [
+      "Shared-host timings do not prove matched-v1 performance superiority",
+      "Full 100 GiB Xet, fault/concurrency, product/provider parity and green CI remain open",
+      "v1 retirement is not qualified"
+    ]
+  },
   "main_integration_follow_up": {
     "run_id": "capsule-main-integration-ga-20260927-r1",
     "started_at": "2026-09-27T18:58:36+00:00",

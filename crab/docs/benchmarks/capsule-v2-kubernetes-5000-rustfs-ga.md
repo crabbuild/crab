@@ -441,6 +441,43 @@ gate failed at 80 > 10. A single 500-commit interval is diagnostic evidence,
 not a final-candidate 5,000-push replay, full Xet proof, matched v1 comparison,
 or a release qualification.
 
+## September 27 authenticated-cut-point full replay
+
+`k8s-5000-ready-20260927-r3` used the same installed r5 CLI as the preceding
+500-commit diagnostic (SHA-256
+`c0a36f2f86a3dd2ec62fb696ad738b1dcb8ad5ca6dcefa897c70afb18fa1e117`),
+a distinct RustFS prefix, and the retained GitHub Kubernetes source at
+`6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1`. The report SHA-256 is
+`3bb4edf66068781e0f4422a54d3e9bd24834a4f7039888904235b6183ca96cb2`.
+The seed and 5,000 **individual** pushes completed, with one incremental fetch
+before each 500-commit repack. No task-owned build overlapped the replay; the
+host was shared, so absolute timing is not a controlled v1 comparison.
+
+| Operation | Latency | Origin requests |
+|---|---:|---:|
+| Seed push | 220.635 s | 9 |
+| Incremental push mean / p50 / p95 / p99 | 289.65 / 213 / 634 / 1,303 ms | 7.012 mean; 6 p50/p95; 40 p99 |
+| 500-commit fetch mean / p50 / p95 | 6.298 / 3.883 / 16.503 s | 82.6 mean; 87 p95 |
+| Final cold / warm clone | 56.024 / 56.277 s | 15 each |
+
+All ten fetches reached the exact expected tip, passed connectivity checks,
+preserved the seed pack, and installed one new pack each. Seed and final remote
+Crab fsck passed. Both independent final clones reached the source tip, passed
+strict full native Git fsck, and matched all 32 sampled Git blobs. The 5,000
+pushes used 35,060 measured origin requests. Every 500-push window averaged
+7.012 requests, but latency was not flat: window means rose from 239.87 ms in
+the first interval to 598.00 ms in the last; the last window's p95 was 1,792
+ms. This passes only the stated *overall mean* push latency gate.
+
+Fetches at commit 3,000 and 4,000 took 11.175 and 16.503 seconds; the other
+eight took 2.388–6.441 seconds. The ten request counts ranged from 80 to 87.
+The unchanged fetch p95 limits of 10 seconds and 10 requests both failed,
+causing the harness's nonzero exit. Early authenticated negotiation removes
+repeated have rounds, but it does not reduce physical capsule source fan-out.
+The source of the two latency spikes and the last-window push rise is not
+established by this shared-host run. The result qualifies this exact correctness
+workload, not the performance target or v1 retirement.
+
 ## Correctness and open gates
 
 Completed: seed and all 5,000 pushes; ten exact-tip/connectivity fetches before
@@ -451,7 +488,8 @@ final clones. No candidate replacement or threshold relaxation occurred.
 Still open:
 
 - Fetch p95 ≤10 seconds and ≤10 requests; both failed.
-- Kubernetes-scale warm-clone pack reuse and a matched v1 performance comparison.
+- An isolated Kubernetes-scale warm-clone latency/pack-reuse comparison and a
+  matched v1 performance comparison.
 - The separate small-maintenance test's unchanged 12-request ceiling; the
   current two-publication contract still requires a design decision.
 - Full 100 GiB Xet/dedup/recovery proof, fault/concurrency/GC and product/provider
