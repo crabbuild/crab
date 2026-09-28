@@ -40,9 +40,10 @@ async fn frontier_delta_base_placement_does_not_probe_unrelated_member_indexes()
     )
     .unwrap();
     let index = std::fs::read(index_path).unwrap();
-    // Two exact index reads and both entries, excluding the header/trailer.
-    // Including the unrelated member's index cannot fit this same budget.
-    let byte_budget = 2 * index.len() as u64 + body.len() as u64 - 32;
+    // The authenticated run control retains pooled indexes. Only the two
+    // physical entries, excluding the pack header/trailer, consume this
+    // operation's origin-byte budget.
+    let byte_budget = body.len() as u64 - 32;
     let pack = CapsuleGitPack::new(
         body,
         Bytes::from(index),
@@ -105,7 +106,9 @@ async fn frontier_delta_base_placement_does_not_probe_unrelated_member_indexes()
             .values()
             .all(|objects| !objects.contains(&base.to_string()))
     );
-    let view = crab_read::capsule_protocol::open_view_from_root_with_layered_control(
+    // Keep the source lazy so the operation's fetched-byte limit covers the
+    // physical REF_DELTA base and rejects a missing or corrupt origin entry.
+    let view = crab_read::capsule_protocol::open_view_from_root_with_control(
         &layout,
         complete.root_snapshot().clone(),
         LIMITS,

@@ -344,7 +344,7 @@ async fn cancelled_physical_maintenance_keeps_its_completed_logical_publication(
 }
 
 #[tokio::test]
-async fn compacted_frontier_looks_up_indexes_in_one_read_and_verifies_payloads() {
+async fn compacted_frontier_uses_resident_indexes_and_verifies_payloads() {
     use object_store::ObjectStoreExt;
     let (layout, observations) = empty_fixture().await;
     publish_blob(&layout, "seed").await;
@@ -400,18 +400,13 @@ async fn compacted_frontier_looks_up_indexes_in_one_read_and_verifies_payloads()
     let root = crab_write::capsule_protocol::open_root(&layout)
         .await
         .unwrap();
-    let view = crab_read::capsule_protocol::open_view_from_root_with_layered_control(
-        &layout, root, LIMITS,
-    )
-    .await
-    .unwrap();
+    // A lazy source exercises the bounded origin-read and corruption contract;
+    // small resident frontiers correctly need no post-open storage request.
+    let view = crab_read::capsule_protocol::open_view_from_root_with_control(&layout, root, LIMITS)
+        .await
+        .unwrap();
     assert_eq!(view.capsule_run_sources().len(), 1);
     let source = &view.capsule_run_sources()[0];
-    let index_bytes = source
-        .members()
-        .iter()
-        .map(|member| member.index().length())
-        .sum::<u64>();
     let oids = expected.iter().map(|(oid, _)| *oid).collect::<Vec<_>>();
     let runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
     let cancel = CancellationToken::new();
@@ -434,12 +429,10 @@ async fn compacted_frontier_looks_up_indexes_in_one_read_and_verifies_payloads()
     let result = operation.pinned_object_metadata(&oids).await;
     operation.finish(result).await.unwrap();
     let reads = observations.0.lock().unwrap().clone();
-    assert_eq!(
-        reads.len(),
-        1,
-        "all 32 verified indexes must share one bounded source read"
+    assert!(
+        reads.is_empty(),
+        "authenticated resident indexes need no origin read"
     );
-    assert_eq!(reads[0].bytes_read, index_bytes);
     let operation = repository
         .operation(crab_remote_git::OperationKind::UploadPack, &cancel)
         .await
@@ -455,12 +448,10 @@ async fn compacted_frontier_looks_up_indexes_in_one_read_and_verifies_payloads()
 
     let path = layout.capsule_path(source.object_hash());
     let (original, _) = layout.store().get_with_etag(&path).await.unwrap();
-    let run = crab_metadata::capsule_protocol::CapsuleRun::decode(original.clone()).unwrap();
     for scenario in ["byte-budget", "corrupt-index"] {
         if scenario == "corrupt-index" {
             let mut corrupt = original.to_vec();
-            let ranges = run.git_index_ranges().unwrap();
-            corrupt[ranges.last().unwrap().offset() as usize] ^= 1;
+            corrupt[source.members().last().unwrap().index().offset() as usize] ^= 1;
             layout
                 .store()
                 .inner()
@@ -478,26 +469,39 @@ async fn compacted_frontier_looks_up_indexes_in_one_read_and_verifies_payloads()
                 LIMIT,
                 &cancel,
             )
-            .await
-            .unwrap();
+            .await;
+        if scenario == "corrupt-index" {
+            assert!(repository.is_err(), "corrupt pooled index must fail intake");
+            assert_eq!(runtime.snapshot().await.pack_index_entries, 0);
+            runtime.shutdown().await;
+            continue;
+        }
+        let repository = repository.unwrap();
         let operation = repository
             .operation_with_limits(
                 crab_remote_git::OperationKind::UploadPack,
                 &cancel,
                 crab_remote_git::OperationLimits {
                     max_storage_requests: 1,
-                    max_fetched_bytes: if scenario == "byte-budget" {
-                        index_bytes - 1
-                    } else {
-                        LIMIT
-                    },
+                    max_fetched_bytes: 1,
                     ..Default::default()
                 },
             )
             .await
             .unwrap();
-        let result = operation.pinned_object_metadata(&oids).await;
-        assert!(operation.finish(result).await.is_err(), "{scenario}");
+        let result = operation.read_objects(&oids[..1]).await;
+        let result = operation.finish(result).await;
+        let mut error = result.as_ref().unwrap_err();
+        while let crab_remote_git::Error::SharedRead { source } = error {
+            error = source.as_ref();
+        }
+        assert!(matches!(
+            error,
+            crab_remote_git::Error::LimitExceeded {
+                limit: "fetched bytes",
+                ..
+            }
+        ));
         assert_eq!(runtime.snapshot().await.pack_index_entries, 0, "{scenario}");
         runtime.shutdown().await;
     }
