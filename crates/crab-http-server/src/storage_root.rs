@@ -140,6 +140,7 @@ mod tests {
 
         let (body, _) = root.cell_store().get_with_etag(&path).await.unwrap();
         assert_eq!(body, Bytes::from_static(b"root"));
+    }
 
     #[test]
     fn repository_layout_keeps_shared_objects_inside_the_configured_root() {
