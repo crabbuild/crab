@@ -9,11 +9,86 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, call
+from unittest.mock import Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from run_add_push_scale_rustfs import measured_read, write_transport_report
+import run_add_push_scale_rustfs as scale
+from run_add_push_scale_rustfs import measured_read, verify, write_transport_report
+
+
+class CapacityPreflightTests(unittest.TestCase):
+    def test_rejects_the_previous_40_gib_run_capacity_level(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_root = root / "run"
+            run_root.mkdir()
+            checks: list[tuple[str, bool]] = []
+
+            def record_check(name: str, ok: bool, _detail: dict | None = None) -> None:
+                checks.append((name, ok))
+                if name == "disk-capacity":
+                    raise StopIteration
+
+            runner = SimpleNamespace(
+                run_root=run_root,
+                env={},
+                signed_s3_request=Mock(return_value=(404, None, None)),
+                preflight=Mock(),
+                check=record_check,
+            )
+            args = SimpleNamespace(root=root, files=20, file_mib=2048, versions=3)
+            with patch(
+                "run_add_push_scale_rustfs.shutil.disk_usage",
+                return_value=SimpleNamespace(free=153 * 1024**3),
+            ):
+                with self.assertRaises(StopIteration):
+                    verify(args, runner, Mock(), [], [])
+
+            self.assertEqual(checks[-1], ("disk-capacity", False))
+
+    def test_releases_a_completed_phase_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "history-cache-0"
+            cache.mkdir()
+            (cache / "entry").write_bytes(b"cached")
+
+            scale.release_verified_cache(SimpleNamespace(run_root=root), cache)
+
+            self.assertFalse(cache.exists())
+
+    def test_refuses_to_release_a_cache_outside_the_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "unrelated" / "cache"
+            cache.mkdir(parents=True)
+
+            with self.assertRaises(ValueError):
+                scale.release_verified_cache(SimpleNamespace(run_root=root / "run"), cache)
+
+    def test_hydration_rechecks_headroom_before_starting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def reject_low_capacity(_name: str, ok: bool, _detail: dict) -> None:
+                if not ok:
+                    raise StopIteration
+
+            runner = SimpleNamespace(
+                args=SimpleNamespace(root=root),
+                check=reject_low_capacity,
+                run_crab=Mock(side_effect=AssertionError("hydrate ran without capacity")),
+            )
+            with patch(
+                "run_add_push_scale_rustfs.shutil.disk_usage",
+                return_value=SimpleNamespace(free=29 * 1024**3),
+            ):
+                with self.assertRaises(StopIteration):
+                    scale.measured_hydrate(
+                        runner, Mock(), [], root, "cold hydrate",
+                        20 * 1024**3, 10 * 1024**3,
+                    )
 
 
 class ReadPhaseEvidenceTests(unittest.TestCase):

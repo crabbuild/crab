@@ -19,6 +19,16 @@ record](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md) distinguishes
 this capacity stop from the later complete replay. Fetch request performance,
 Xet, and parity gates remain open.
 
+The retained GA request trace's final fetch used one complete GET for each of
+24 distinct new capsule-run objects, plus eight root, ref-capture, admission,
+replica-discovery and checkpoint operations. Reader-side range coalescing is
+already at the one-request-per-source floor for this interval. Changing only
+the 32-leaf compaction fan-in to four predicts six sources but still about 14
+total requests with the current control path, while increasing upload bytes.
+Meeting ten therefore needs at most two sources with the current eight control
+requests, or fewer sources together with cheaper coherent control capture;
+neither a read-window tweak nor a fan-in constant alone is sufficient.
+
 At 05:28 UTC on September 28, a separate cleanup removed the earlier mounted
 qualification directories and most of a fresh live replay's working files.
 That replay had reached 879 pushes, but its next push could not start because
@@ -4866,6 +4876,30 @@ as unmetered production throughput. The run's report and transport SHA-256
 values are `6ee6a476c623c4168c3f8b47d14ac25dccab01af60fd2a1e4914853625fb372c`
 and `9a27fea03fab5806e0ff5faad63b7d4129fde648b1959a7830825f5ebe5d77de`.
 The default 100 GiB, paired v1/v2, and CI gates remain open.
+
+The September 28 fresh-bucket GA run `xet-40g-ga-20260928-r1` exercised
+twenty 2 GiB files across three versions (120 GiB logical history). Its 96
+checks passed through all three pushes, layered repacks, retained refs/history,
+cross-repository chunk reuse and byte-identical consumer hydration. The two
+incremental large-file pushes took 4.731/5.261 seconds and 72 origin requests
+each; retained xorbs were 21,535,614,886 bytes, or 16.7% of logical history.
+The full cold-clone hydrate was deliberately interrupted at the shared
+volume's 20 GiB safety floor, so the report status is **failed** and this is
+not full Xet or clone qualification. The report and phase-transport SHA-256
+values are `a40afcf6e6baf678a1e6a414e11f08a75fd7b567146b7179cbd20d7b539ee07e`
+and `acc0083c8e0535da6748b664a06512683914ac73b5a89c8ec6b74ce873e20e9d`.
+The harness's former two-copy capacity estimate admitted this run with about
+153 GiB free even though source/staging, co-located origin, clone output and
+retained caches exceeded its headroom. The harness now releases each
+task-owned cache only after that phase's integrity checks pass, preserving a
+fresh cache for every historical proof. Its preflight budgets one hydrated
+logical checkout, distinct source/staging/origin/active-cache copies and a
+transient-work copy, plus a 20 GiB safety reserve; it would require 160 GiB
+for this shape and 220 GiB for the default 100 GiB shape. Each hydrate
+rechecks current free space
+before starting, so shared-volume changes after preflight fail early. These
+changes prevent the observed unsafe start and bound cache accumulation; they
+do not create capacity or close the release gate.
 
 - Run the release binary against isolated local RustFS and every supported
   hosted provider.
