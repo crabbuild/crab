@@ -358,10 +358,7 @@ pub(crate) struct RuntimeSnapshot {
 }
 
 impl RuntimeSnapshot {
-    pub(crate) fn with_cell_runtime(
-        mut self,
-        runtime: crab_cell_runtime::CellRuntimeStats,
-    ) -> Self {
+    pub(crate) fn with_cell_runtime(mut self, runtime: cellule_runtime::CellRuntimeStats) -> Self {
         self.cell_active = runtime.active_cells();
         self.cell_active_capacity = runtime.active_cell_capacity();
         self.cell_resident_bytes = runtime.resident_bytes();
@@ -1112,15 +1109,15 @@ impl Metrics {
     }
 }
 
-impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
+impl cellule_runtime::fleet::telemetry::CellTelemetry for Metrics {
     fn primitive_operation(
         &self,
         module: &'static str,
-        kind: crab_cell_runtime::fleet::telemetry::PrimitiveOperationKind,
-        outcome: crab_cell_runtime::fleet::telemetry::PrimitiveOperationOutcome,
+        kind: cellule_runtime::fleet::telemetry::PrimitiveOperationKind,
+        outcome: cellule_runtime::fleet::telemetry::PrimitiveOperationOutcome,
         elapsed: Duration,
     ) {
-        use crab_cell_runtime::fleet::telemetry::{
+        use cellule_runtime::fleet::telemetry::{
             PrimitiveOperationKind, PrimitiveOperationOutcome,
         };
 
@@ -1149,12 +1146,12 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
 
     fn durability_proof(
         &self,
-        source: crab_cell_runtime::node::log::DurabilitySource,
+        source: cellule_runtime::node::log::DurabilitySource,
         waited: Duration,
     ) {
         let index = match source {
-            crab_cell_runtime::node::log::DurabilitySource::Fleet => 0,
-            crab_cell_runtime::node::log::DurabilitySource::Object => 1,
+            cellule_runtime::node::log::DurabilitySource::Fleet => 0,
+            cellule_runtime::node::log::DurabilitySource::Object => 1,
         };
         self.inner.durability_proofs[index].increment(1);
         self.inner.durability_wait[index].record(waited.as_secs_f64());
@@ -1162,11 +1159,11 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
 
     fn command_response(
         &self,
-        source: crab_cell_runtime::fleet::telemetry::CommandResponseSource,
+        source: cellule_runtime::fleet::telemetry::CommandResponseSource,
         elapsed: Duration,
         confirmation: Duration,
     ) {
-        use crab_cell_runtime::fleet::telemetry::CommandResponseSource;
+        use cellule_runtime::fleet::telemetry::CommandResponseSource;
 
         let index = match source {
             CommandResponseSource::Recorded => 0,
@@ -1180,13 +1177,13 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
 
     fn durability_submission(
         &self,
-        outcome: crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome,
+        outcome: cellule_runtime::fleet::telemetry::DurabilitySubmissionOutcome,
     ) {
         let index = match outcome {
-            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Fleet => 0,
-            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Unsupported => 1,
-            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Unavailable => 2,
-            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Rejected => 3,
+            cellule_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Fleet => 0,
+            cellule_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Unsupported => 1,
+            cellule_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Unavailable => 2,
+            cellule_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Rejected => 3,
         };
         self.inner.durability_submissions[index].increment(1);
     }
@@ -1200,17 +1197,17 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
         self.inner.node_log_append_bytes[usize::from(!acknowledged)].increment(bytes);
     }
 
-    fn resident_route(&self, outcome: crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome) {
+    fn resident_route(&self, outcome: cellule_runtime::fleet::telemetry::ResidentRouteOutcome) {
         let index = match outcome {
-            crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome::Hit => 0,
-            crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome::Miss => 1,
-            crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome::Refused => 2,
+            cellule_runtime::fleet::telemetry::ResidentRouteOutcome::Hit => 0,
+            cellule_runtime::fleet::telemetry::ResidentRouteOutcome::Miss => 1,
+            cellule_runtime::fleet::telemetry::ResidentRouteOutcome::Refused => 2,
         };
         self.inner.resident_routes[index].increment(1);
     }
 
-    fn pressure_state(&self, state: crab_cell_runtime::fleet::pressure::PressureState) {
-        use crab_cell_runtime::fleet::pressure::PressureState;
+    fn pressure_state(&self, state: cellule_runtime::fleet::pressure::PressureState) {
+        use cellule_runtime::fleet::pressure::PressureState;
 
         // The classifier converts `Recovering` back to `Normal` inside one
         // observation, so the tier it reports is always one of these four.
@@ -1225,32 +1222,27 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
         }
     }
 
-    fn ltx_phase(
-        &self,
-        phase: crab_cell_runtime::ltx::LtxPhase,
-        elapsed: Duration,
-        succeeded: bool,
-    ) {
+    fn ltx_phase(&self, phase: cellule_runtime::ltx::LtxPhase, elapsed: Duration, succeeded: bool) {
         let index = match phase {
-            crab_cell_runtime::ltx::LtxPhase::Capture => 0,
-            crab_cell_runtime::ltx::LtxPhase::Preparation => 1,
-            crab_cell_runtime::ltx::LtxPhase::SchemaCheck => 2,
-            crab_cell_runtime::ltx::LtxPhase::WalExistence => 3,
-            crab_cell_runtime::ltx::LtxPhase::PositionResolution => 4,
-            crab_cell_runtime::ltx::LtxPhase::WalRead => 5,
-            crab_cell_runtime::ltx::LtxPhase::PageCollection => 6,
-            crab_cell_runtime::ltx::LtxPhase::Verification => 7,
-            crab_cell_runtime::ltx::LtxPhase::Encode => 8,
-            crab_cell_runtime::ltx::LtxPhase::LocalWrite => 9,
-            crab_cell_runtime::ltx::LtxPhase::Fsync => 10,
-            crab_cell_runtime::ltx::LtxPhase::ParentSync => 11,
-            crab_cell_runtime::ltx::LtxPhase::Checkpoint => 12,
-            crab_cell_runtime::ltx::LtxPhase::RootPreparation => 13,
-            crab_cell_runtime::ltx::LtxPhase::RootOpen => 14,
-            crab_cell_runtime::ltx::LtxPhase::Directory => 15,
-            crab_cell_runtime::ltx::LtxPhase::FrameFetch => 16,
-            crab_cell_runtime::ltx::LtxPhase::RestoreWrite => 17,
-            crab_cell_runtime::ltx::LtxPhase::Compaction => 18,
+            cellule_runtime::ltx::LtxPhase::Capture => 0,
+            cellule_runtime::ltx::LtxPhase::Preparation => 1,
+            cellule_runtime::ltx::LtxPhase::SchemaCheck => 2,
+            cellule_runtime::ltx::LtxPhase::WalExistence => 3,
+            cellule_runtime::ltx::LtxPhase::PositionResolution => 4,
+            cellule_runtime::ltx::LtxPhase::WalRead => 5,
+            cellule_runtime::ltx::LtxPhase::PageCollection => 6,
+            cellule_runtime::ltx::LtxPhase::Verification => 7,
+            cellule_runtime::ltx::LtxPhase::Encode => 8,
+            cellule_runtime::ltx::LtxPhase::LocalWrite => 9,
+            cellule_runtime::ltx::LtxPhase::Fsync => 10,
+            cellule_runtime::ltx::LtxPhase::ParentSync => 11,
+            cellule_runtime::ltx::LtxPhase::Checkpoint => 12,
+            cellule_runtime::ltx::LtxPhase::RootPreparation => 13,
+            cellule_runtime::ltx::LtxPhase::RootOpen => 14,
+            cellule_runtime::ltx::LtxPhase::Directory => 15,
+            cellule_runtime::ltx::LtxPhase::FrameFetch => 16,
+            cellule_runtime::ltx::LtxPhase::RestoreWrite => 17,
+            cellule_runtime::ltx::LtxPhase::Compaction => 18,
         };
         self.inner.ltx_phase_runs[index][usize::from(!succeeded)].increment(1);
         self.inner.ltx_phase_duration[index].record(elapsed.as_secs_f64());
@@ -1258,13 +1250,13 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
 
     fn catalog_read(
         &self,
-        kind: crab_cell_runtime::fleet::telemetry::CatalogReadKind,
+        kind: cellule_runtime::fleet::telemetry::CatalogReadKind,
         elapsed: Duration,
         succeeded: bool,
     ) {
         let index = match kind {
-            crab_cell_runtime::fleet::telemetry::CatalogReadKind::Head => 0,
-            crab_cell_runtime::fleet::telemetry::CatalogReadKind::Page => 1,
+            cellule_runtime::fleet::telemetry::CatalogReadKind::Head => 0,
+            cellule_runtime::fleet::telemetry::CatalogReadKind::Page => 1,
         };
         self.inner.catalog_reads[index][usize::from(!succeeded)].increment(1);
         self.inner.catalog_read_duration[index].record(elapsed.as_secs_f64());
@@ -1279,59 +1271,59 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
 
     fn activation_phase(
         &self,
-        phase: crab_cell_runtime::fleet::telemetry::ActivationPhase,
+        phase: cellule_runtime::fleet::telemetry::ActivationPhase,
         elapsed: Duration,
     ) {
         let index = match phase {
-            crab_cell_runtime::fleet::telemetry::ActivationPhase::Ownership => 0,
-            crab_cell_runtime::fleet::telemetry::ActivationPhase::Resume => 1,
-            crab_cell_runtime::fleet::telemetry::ActivationPhase::RootOpen => 2,
-            crab_cell_runtime::fleet::telemetry::ActivationPhase::Restore => 3,
-            crab_cell_runtime::fleet::telemetry::ActivationPhase::Activate => 4,
+            cellule_runtime::fleet::telemetry::ActivationPhase::Ownership => 0,
+            cellule_runtime::fleet::telemetry::ActivationPhase::Resume => 1,
+            cellule_runtime::fleet::telemetry::ActivationPhase::RootOpen => 2,
+            cellule_runtime::fleet::telemetry::ActivationPhase::Restore => 3,
+            cellule_runtime::fleet::telemetry::ActivationPhase::Activate => 4,
         };
         self.inner.activation_phase_duration[index].record(elapsed.as_secs_f64());
     }
 
-    fn ltx_logical_read(&self, origin: crab_cell_runtime::ltx::LtxReadOrigin) {
+    fn ltx_logical_read(&self, origin: cellule_runtime::ltx::LtxReadOrigin) {
         let index = match origin {
-            crab_cell_runtime::ltx::LtxReadOrigin::Cold => 0,
-            crab_cell_runtime::ltx::LtxReadOrigin::Sparse => 1,
-            crab_cell_runtime::ltx::LtxReadOrigin::Hydrating => 2,
-            crab_cell_runtime::ltx::LtxReadOrigin::Resident => 3,
+            cellule_runtime::ltx::LtxReadOrigin::Cold => 0,
+            cellule_runtime::ltx::LtxReadOrigin::Sparse => 1,
+            cellule_runtime::ltx::LtxReadOrigin::Hydrating => 2,
+            cellule_runtime::ltx::LtxReadOrigin::Resident => 3,
         };
         self.inner.ltx_logical_reads[index].increment(1);
     }
 
     fn ltx_origin_request(
         &self,
-        origin: crab_cell_runtime::ltx::LtxReadOrigin,
-        outcome: crab_cell_runtime::ltx::LtxRequestOutcome,
+        origin: cellule_runtime::ltx::LtxReadOrigin,
+        outcome: cellule_runtime::ltx::LtxRequestOutcome,
         bytes: u64,
     ) {
         let index = match origin {
-            crab_cell_runtime::ltx::LtxReadOrigin::Cold => 0,
-            crab_cell_runtime::ltx::LtxReadOrigin::Sparse => 1,
-            crab_cell_runtime::ltx::LtxReadOrigin::Hydrating => 2,
-            crab_cell_runtime::ltx::LtxReadOrigin::Resident => 3,
+            cellule_runtime::ltx::LtxReadOrigin::Cold => 0,
+            cellule_runtime::ltx::LtxReadOrigin::Sparse => 1,
+            cellule_runtime::ltx::LtxReadOrigin::Hydrating => 2,
+            cellule_runtime::ltx::LtxReadOrigin::Resident => 3,
         };
         let outcome = match outcome {
-            crab_cell_runtime::ltx::LtxRequestOutcome::Succeeded => 0,
-            crab_cell_runtime::ltx::LtxRequestOutcome::Failed => 1,
+            cellule_runtime::ltx::LtxRequestOutcome::Succeeded => 0,
+            cellule_runtime::ltx::LtxRequestOutcome::Failed => 1,
         };
         self.inner.ltx_origin_requests[index][outcome].increment(1);
         self.inner.ltx_origin_bytes[index].increment(bytes);
     }
 
-    fn ltx_capture(&self, timing: &crab_cell_runtime::ltx::CaptureTiming, succeeded: bool) {
-        <Self as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
+    fn ltx_capture(&self, timing: &cellule_runtime::ltx::CaptureTiming, succeeded: bool) {
+        <Self as cellule_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
             self,
-            crab_cell_runtime::ltx::LtxPhase::Capture,
+            cellule_runtime::ltx::LtxPhase::Capture,
             Duration::from_nanos(timing.total_nanos),
             succeeded,
         );
         let phase = |phase, nanos| {
             if nanos > 0 {
-                <Self as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
+                <Self as cellule_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
                     self,
                     phase,
                     Duration::from_nanos(nanos),
@@ -1340,48 +1332,45 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
             }
         };
         phase(
-            crab_cell_runtime::ltx::LtxPhase::Preparation,
+            cellule_runtime::ltx::LtxPhase::Preparation,
             timing.preparation_nanos,
         );
         phase(
-            crab_cell_runtime::ltx::LtxPhase::SchemaCheck,
+            cellule_runtime::ltx::LtxPhase::SchemaCheck,
             timing.schema_check_nanos,
         );
         phase(
-            crab_cell_runtime::ltx::LtxPhase::WalExistence,
+            cellule_runtime::ltx::LtxPhase::WalExistence,
             timing.wal_existence_nanos,
         );
         phase(
-            crab_cell_runtime::ltx::LtxPhase::PositionResolution,
+            cellule_runtime::ltx::LtxPhase::PositionResolution,
             timing.position_resolution_nanos,
         );
         phase(
-            crab_cell_runtime::ltx::LtxPhase::WalRead,
+            cellule_runtime::ltx::LtxPhase::WalRead,
             timing.wal_read_nanos,
         );
         phase(
-            crab_cell_runtime::ltx::LtxPhase::PageCollection,
+            cellule_runtime::ltx::LtxPhase::PageCollection,
             timing.page_collection_nanos,
         );
         phase(
-            crab_cell_runtime::ltx::LtxPhase::Verification,
+            cellule_runtime::ltx::LtxPhase::Verification,
             timing.verification_nanos,
         );
+        phase(cellule_runtime::ltx::LtxPhase::Encode, timing.encode_nanos);
         phase(
-            crab_cell_runtime::ltx::LtxPhase::Encode,
-            timing.encode_nanos,
-        );
-        phase(
-            crab_cell_runtime::ltx::LtxPhase::LocalWrite,
+            cellule_runtime::ltx::LtxPhase::LocalWrite,
             timing.local_write_nanos,
         );
-        phase(crab_cell_runtime::ltx::LtxPhase::Fsync, timing.fsync_nanos);
+        phase(cellule_runtime::ltx::LtxPhase::Fsync, timing.fsync_nanos);
         phase(
-            crab_cell_runtime::ltx::LtxPhase::ParentSync,
+            cellule_runtime::ltx::LtxPhase::ParentSync,
             timing.parent_sync_nanos,
         );
         phase(
-            crab_cell_runtime::ltx::LtxPhase::Checkpoint,
+            cellule_runtime::ltx::LtxPhase::Checkpoint,
             timing.checkpoint_nanos,
         );
         self.inner.ltx_wal_reads[0].increment(u64::from(timing.wal_sparse_reads));
@@ -1490,7 +1479,7 @@ pub(crate) enum RecoveryPhase {
 impl Metrics {
     pub(crate) fn update_node_log(
         &self,
-        log: Option<&crab_cell_runtime::node::log_state::NodeLogStatus>,
+        log: Option<&cellule_runtime::node::log_state::NodeLogStatus>,
         lease_remaining: Duration,
     ) {
         let Some(log) = log else {
@@ -1503,11 +1492,11 @@ impl Metrics {
             return;
         };
         let state = match log.phase() {
-            crab_cell_runtime::node::log_state::NodeLogPhase::Open if log.active() => 0,
-            crab_cell_runtime::node::log_state::NodeLogPhase::Open
-            | crab_cell_runtime::node::log_state::NodeLogPhase::Recovering => 1,
-            crab_cell_runtime::node::log_state::NodeLogPhase::Sealed
-            | crab_cell_runtime::node::log_state::NodeLogPhase::Retired => 2,
+            cellule_runtime::node::log_state::NodeLogPhase::Open if log.active() => 0,
+            cellule_runtime::node::log_state::NodeLogPhase::Open
+            | cellule_runtime::node::log_state::NodeLogPhase::Recovering => 1,
+            cellule_runtime::node::log_state::NodeLogPhase::Sealed
+            | cellule_runtime::node::log_state::NodeLogPhase::Retired => 2,
         };
         for (index, lane) in self.inner.node_log_lanes.iter().enumerate() {
             lane.set(f64::from(index == state));
@@ -1578,7 +1567,7 @@ impl Metrics {
 
     pub(crate) fn record_recovery_work(
         &self,
-        work: crab_cell_runtime::node::log_recovery::RecoveryWorkSummary,
+        work: cellule_runtime::node::log_recovery::RecoveryWorkSummary,
     ) {
         let values = [
             work.candidate_count,
@@ -2380,12 +2369,12 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_snapshot_projects_live_cell_ledger() {
-        let disk_budget = crab_ltx::DiskBudget::new(8_192);
-        let runtime = crab_cell_runtime::CellRuntime::new_with_replica_host(
-            crab_cell_runtime::SqlWorkerPool::new(1, 2).unwrap(),
+        let disk_budget = cellule_ltx::DiskBudget::new(8_192);
+        let runtime = cellule_runtime::CellRuntime::new_with_replica_host(
+            cellule_runtime::SqlWorkerPool::new(1, 2).unwrap(),
             1_024,
-            crab_cell_runtime::SessionId::from_bytes([3; 16]),
-            crab_ltx::Host::default().with_local_disk_budget(disk_budget.clone()),
+            cellule_runtime::SessionId::from_bytes([3; 16]),
+            cellule_ltx::Host::default().with_local_disk_budget(disk_budget.clone()),
         )
         .unwrap();
         let reservation = runtime.try_reserve_worker_job().unwrap().unwrap();
@@ -2427,116 +2416,116 @@ mod tests {
         metrics.record_owner_hint(OwnerHintOutcome::Stale);
         metrics.record_transfer_admission_rejection(false);
         metrics.record_transfer_admission_rejection(true);
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_proof(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::durability_proof(
             &metrics,
-            crab_cell_runtime::node::log::DurabilitySource::Fleet,
+            cellule_runtime::node::log::DurabilitySource::Fleet,
             Duration::from_millis(25),
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_proof(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::durability_proof(
             &metrics,
-            crab_cell_runtime::node::log::DurabilitySource::Object,
+            cellule_runtime::node::log::DurabilitySource::Object,
             Duration::from_millis(50),
         );
         for source in [
-            crab_cell_runtime::fleet::telemetry::CommandResponseSource::Recorded,
-            crab_cell_runtime::fleet::telemetry::CommandResponseSource::Fleet,
-            crab_cell_runtime::fleet::telemetry::CommandResponseSource::Object,
+            cellule_runtime::fleet::telemetry::CommandResponseSource::Recorded,
+            cellule_runtime::fleet::telemetry::CommandResponseSource::Fleet,
+            cellule_runtime::fleet::telemetry::CommandResponseSource::Object,
         ] {
-            <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::command_response(
+            <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::command_response(
                 &metrics,
                 source,
                 Duration::from_millis(40),
                 Duration::from_millis(2),
             );
         }
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_submission(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::durability_submission(
             &metrics,
-            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Fleet,
+            cellule_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Fleet,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_submission(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::durability_submission(
             &metrics,
-            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Unavailable,
+            cellule_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Unavailable,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_submission(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::durability_submission(
             &metrics,
-            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Rejected,
+            cellule_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Rejected,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::publication_cost(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::publication_cost(
             &metrics, 5, 7_168,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::node_log_append(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::node_log_append(
             &metrics, true, 512,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::node_log_append(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::node_log_append(
             &metrics, false, 128,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::catalog_read(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::catalog_read(
             &metrics,
-            crab_cell_runtime::fleet::telemetry::CatalogReadKind::Head,
+            cellule_runtime::fleet::telemetry::CatalogReadKind::Head,
             Duration::from_millis(3),
             true,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::catalog_read(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::catalog_read(
             &metrics,
-            crab_cell_runtime::fleet::telemetry::CatalogReadKind::Page,
+            cellule_runtime::fleet::telemetry::CatalogReadKind::Page,
             Duration::from_millis(7),
             false,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::control_read(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::control_read(
             &metrics,
             Duration::from_millis(11),
             true,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::activation_phase(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::activation_phase(
             &metrics,
-            crab_cell_runtime::fleet::telemetry::ActivationPhase::Restore,
+            cellule_runtime::fleet::telemetry::ActivationPhase::Restore,
             Duration::from_millis(13),
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::resident_route(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::resident_route(
             &metrics,
-            crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome::Hit,
+            cellule_runtime::fleet::telemetry::ResidentRouteOutcome::Hit,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::resident_route(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::resident_route(
             &metrics,
-            crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome::Miss,
+            cellule_runtime::fleet::telemetry::ResidentRouteOutcome::Miss,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
             &metrics,
-            crab_cell_runtime::ltx::LtxPhase::RootOpen,
+            cellule_runtime::ltx::LtxPhase::RootOpen,
             Duration::from_millis(10),
             true,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
             &metrics,
-            crab_cell_runtime::ltx::LtxPhase::RootPreparation,
+            cellule_runtime::ltx::LtxPhase::RootPreparation,
             Duration::from_millis(15),
             true,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
             &metrics,
-            crab_cell_runtime::ltx::LtxPhase::FrameFetch,
+            cellule_runtime::ltx::LtxPhase::FrameFetch,
             Duration::from_millis(5),
             false,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_logical_read(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::ltx_logical_read(
             &metrics,
-            crab_cell_runtime::ltx::LtxReadOrigin::Resident,
+            cellule_runtime::ltx::LtxReadOrigin::Resident,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_origin_request(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::ltx_origin_request(
             &metrics,
-            crab_cell_runtime::ltx::LtxReadOrigin::Cold,
-            crab_cell_runtime::ltx::LtxRequestOutcome::Succeeded,
+            cellule_runtime::ltx::LtxReadOrigin::Cold,
+            cellule_runtime::ltx::LtxRequestOutcome::Succeeded,
             1_024,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_origin_request(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::ltx_origin_request(
             &metrics,
-            crab_cell_runtime::ltx::LtxReadOrigin::Hydrating,
-            crab_cell_runtime::ltx::LtxRequestOutcome::Failed,
+            cellule_runtime::ltx::LtxReadOrigin::Hydrating,
+            cellule_runtime::ltx::LtxRequestOutcome::Failed,
             4_096,
         );
-        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_capture(
+        <Metrics as cellule_runtime::fleet::telemetry::CellTelemetry>::ltx_capture(
             &metrics,
-            &crab_cell_runtime::ltx::CaptureTiming {
+            &cellule_runtime::ltx::CaptureTiming {
                 schema_check_nanos: 1_000_000,
                 wal_sparse_reads: 1,
                 wal_image_bytes: 8_192,
@@ -2563,7 +2552,7 @@ mod tests {
             Some(RecoveryFailureReason::Storage),
         );
         metrics.record_recovery_phase(RecoveryPhase::Witness, Duration::from_millis(20));
-        metrics.record_recovery_work(crab_cell_runtime::node::log_recovery::RecoveryWorkSummary {
+        metrics.record_recovery_work(cellule_runtime::node::log_recovery::RecoveryWorkSummary {
             candidate_count: 1,
             affected_cells: 2,
             catalog_shards: 1,
@@ -2742,12 +2731,12 @@ mod tests {
 
     #[test]
     fn pressure_tier_renders_only_the_active_state() {
-        use crab_cell_runtime::fleet::telemetry::CellTelemetry;
+        use cellule_runtime::fleet::telemetry::CellTelemetry;
 
         let metrics = Metrics::new(&[]).unwrap();
         <Metrics as CellTelemetry>::pressure_state(
             &metrics,
-            crab_cell_runtime::fleet::pressure::PressureState::Shedding,
+            cellule_runtime::fleet::pressure::PressureState::Shedding,
         );
 
         let rendered = metrics.render(snapshot());
@@ -2758,7 +2747,7 @@ mod tests {
 
     #[test]
     fn primitive_operations_render_by_module_kind_and_outcome() {
-        use crab_cell_runtime::fleet::telemetry::{
+        use cellule_runtime::fleet::telemetry::{
             CellTelemetry, PrimitiveOperationKind, PrimitiveOperationOutcome,
         };
 

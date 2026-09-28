@@ -1,13 +1,12 @@
 use super::*;
-use crab_cell_runtime::read_policy::ReadPolicyStore;
-use crab_cell_runtime::{
+use cellule_runtime::read_policy::ReadPolicyStore;
+use cellule_runtime::{
     Digest, SessionId,
     cell::worker::SqlWorkerPool,
     identity::{ApplicationId, IncarnationId, TenantId},
     node::{NodeCapacity, NodeFailureDomain},
     peer::PeerVerifier,
 };
-use crab_storage::Store;
 use ed25519_dalek::SigningKey;
 use object_store::{ObjectStoreExt, memory::InMemory, path::Path as ObjectPath};
 use std::{future::Future, pin::Pin, sync::Mutex as StdMutex};
@@ -16,7 +15,7 @@ use std::{future::Future, pin::Pin, sync::Mutex as StdMutex};
 struct ActivationProbe {
     wrong_incarnation: std::sync::atomic::AtomicBool,
     stalled: StdMutex<HashSet<SessionId>>,
-    received: StdMutex<Vec<(crab_cell_runtime::CellId, SessionId)>>,
+    received: StdMutex<Vec<(cellule_runtime::CellId, SessionId)>>,
     release: Arc<tokio::sync::Notify>,
 }
 
@@ -26,8 +25,8 @@ impl PeerRoundTrip for ActivationProbe {
         _: CellTarget,
         _: Vec<u8>,
         _: u32,
-    ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
-        Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+    ) -> Pin<Box<dyn Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>> {
+        Box::pin(async { Err(cellule_runtime::Error::CellNotActive) })
     }
 
     fn send_to_node(
@@ -36,7 +35,7 @@ impl PeerRoundTrip for ActivationProbe {
         node: NodeAdvertisement,
         request: Vec<u8>,
         _: u32,
-    ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>> {
         let now = crate::cells::unix_now_ms().unwrap() + 1;
         assert!(
             node.expires_at_ms() > now,
@@ -64,7 +63,7 @@ impl PeerRoundTrip for ActivationProbe {
             if stalled {
                 release.notified().await;
             }
-            crab_cell_runtime::peer::encode_peer_reply(&peer_wire::PeerReply {
+            cellule_runtime::peer::encode_peer_reply(&peer_wire::PeerReply {
                 outcome: Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
                     receipt: Some(peer_wire::Receipt {
                         cell_id: target.cell_id().as_bytes().to_vec(),
@@ -80,7 +79,7 @@ impl PeerRoundTrip for ActivationProbe {
 
 struct Fixture {
     router: RepositoryCellRouter,
-    recruiter: crab_cell_host::read_replicas::ReadReplicaRecruiter,
+    recruiter: cellule_host::read_replicas::ReadReplicaRecruiter,
     probe: Arc<ActivationProbe>,
     targets: Vec<CellTarget>,
     _directory: tempfile::TempDir,
@@ -93,7 +92,7 @@ impl Fixture {
             ApplicationId::from_bytes([3; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             ObjectPath::from("reader-reconciliation"),
             *identity.application().as_bytes(),
         );
@@ -138,7 +137,7 @@ impl Fixture {
             directory.path().to_path_buf(),
         )
         .unwrap();
-        let readers = crab_cell_host::read_replicas::ReadReplicaManager::new(
+        let readers = cellule_host::read_replicas::ReadReplicaManager::new(
             router.runtime.clone(),
             Arc::clone(&registry),
             layout.clone(),
@@ -373,7 +372,7 @@ async fn activation_rejects_a_receipt_from_another_cell_lifetime() {
         )
         .await;
     fixture.router.runtime.shutdown().await.unwrap();
-    assert!(matches!(result, Err(crab_cell_runtime::Error::Peer(_))));
+    assert!(matches!(result, Err(cellule_runtime::Error::Peer(_))));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -405,7 +404,7 @@ async fn pending_activation_releases_an_expired_peer_without_waiting_for_transpo
     .await;
     fixture.router.runtime.shutdown().await.unwrap();
     assert!(
-        matches!(result, Ok(Err(crab_cell_runtime::Error::Node(_)))),
+        matches!(result, Ok(Err(cellule_runtime::Error::Node(_)))),
         "expired peer stranded activation until the transport deadline: {result:?}"
     );
 }

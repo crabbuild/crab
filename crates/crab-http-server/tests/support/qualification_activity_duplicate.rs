@@ -1,11 +1,11 @@
-use crab_cell_app::ApplicationHandle;
-use crab_cell_runtime::identity::{ApplicationId, CellTarget, TenantId, partition_for_shard};
-use crab_cell_runtime::primitives::workflow::{
+use cellule_app::ApplicationHandle;
+use cellule_runtime::identity::{ApplicationId, CellTarget, TenantId, partition_for_shard};
+use cellule_runtime::primitives::workflow::{
     ActivityCompletion, ActivityCompletionOutcome, WorkflowActivityClaimCommand,
     WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowActivityValidateQuery,
     WorkflowActivityValidateRequest, WorkflowOutcome, WorkflowStatus,
 };
-use crab_cell_runtime::{Error, Result};
+use cellule_runtime::{Error, Result};
 
 use crate::{
     fixture,

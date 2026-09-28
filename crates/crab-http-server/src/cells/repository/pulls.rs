@@ -23,12 +23,12 @@ impl PullState {
         }
     }
 
-    fn from_code(code: u64) -> crab_cell_runtime::Result<Self> {
+    fn from_code(code: u64) -> cellule_runtime::Result<Self> {
         match code {
             0 => Ok(Self::Open),
             1 => Ok(Self::Closed),
             2 => Ok(Self::Merged),
-            _ => Err(crab_cell_runtime::Error::Command(
+            _ => Err(cellule_runtime::Error::Command(
                 "repository pull state is invalid",
             )),
         }
@@ -52,12 +52,12 @@ impl ReviewState {
         }
     }
 
-    fn from_code(code: u64) -> crab_cell_runtime::Result<Self> {
+    fn from_code(code: u64) -> cellule_runtime::Result<Self> {
         match code {
             0 => Ok(Self::Commented),
             1 => Ok(Self::Approved),
             2 => Ok(Self::ChangesRequested),
-            _ => Err(crab_cell_runtime::Error::Command(
+            _ => Err(cellule_runtime::Error::Command(
                 "repository review state is invalid",
             )),
         }
@@ -374,7 +374,7 @@ impl Command for CreatePull {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_create_pull(&input)?;
         let digest = create_pull_digest(&input);
         let existing = context.sql(&SqlBatch { statements: vec![statement(
@@ -387,7 +387,7 @@ impl Command for CreatePull {
             }
             return Ok(CommandResult::Success(CreatePullOutcome::Created(
                 Box::new(load_pull(context, result_u64_from_row(row, 1)?)?.ok_or(
-                    crab_cell_runtime::Error::Command("repository pull submission has no pull"),
+                    cellule_runtime::Error::Command("repository pull submission has no pull"),
                 )?),
             )));
         }
@@ -396,7 +396,7 @@ impl Command for CreatePull {
             statement("SELECT last FROM repository_sequences WHERE kind = 'pull'", vec![]),
         ] })?;
         if sequence[0].rows_affected != 1 {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository pull numbering is exhausted",
             ));
         }
@@ -444,7 +444,7 @@ impl Command for UpdatePull {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.number)?;
         validate_author(&input.actor)?;
         validate_number(input.version)?;
@@ -506,7 +506,7 @@ impl Command for UpdatePull {
             .version
             .checked_add(1)
             .filter(|value| *value < MAX_NUMBER)
-            .ok_or(crab_cell_runtime::Error::Command(
+            .ok_or(cellule_runtime::Error::Command(
                 "repository pull version is exhausted",
             ))?;
         pull.updated_at_ms = timestamp(context.now_ms())?;
@@ -530,7 +530,7 @@ impl Query for GetPull {
     fn execute(
         context: &mut QueryContext<'_>,
         number: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_number(number)?;
         load_pull_query(context, number)
     }
@@ -548,9 +548,9 @@ impl Query for GetPullSubmission {
     fn execute(
         context: &mut QueryContext<'_>,
         key: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         if key.pull.is_some() {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository pull submission scope is invalid",
             ));
         }
@@ -583,11 +583,11 @@ impl Query for ListPulls {
     fn execute(
         context: &mut QueryContext<'_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_list(input.before, input.limit)?;
         validate_query(input.query.as_deref())?;
         if input.state > 2 {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository pull list state is invalid",
             ));
         }
@@ -639,7 +639,7 @@ impl Query for ListPulls {
     }
 }
 
-fn validate_create_pull(input: &CreatePullInput) -> crab_cell_runtime::Result<()> {
+fn validate_create_pull(input: &CreatePullInput) -> cellule_runtime::Result<()> {
     validate_author(&input.author)?;
     validate_title(&input.title)?;
     validate_body(&input.body, false)?;
@@ -648,34 +648,34 @@ fn validate_create_pull(input: &CreatePullInput) -> crab_cell_runtime::Result<()
     validate_oid(&input.base_oid)?;
     validate_oid(&input.head_oid)?;
     if input.base_ref == input.head_ref || input.base_oid == input.head_oid {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull branches are invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_ref(value: &str) -> crab_cell_runtime::Result<()> {
+fn validate_ref(value: &str) -> cellule_runtime::Result<()> {
     if !value.starts_with("refs/heads/")
         || value == "refs/heads/"
         || value.len() > 1_024
         || value.chars().any(char::is_control)
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull ref is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_oid(value: &str) -> crab_cell_runtime::Result<()> {
+fn validate_oid(value: &str) -> cellule_runtime::Result<()> {
     if value.len() != 40
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         || value.bytes().all(|byte| byte == b'0')
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull object ID is invalid",
         ));
     }
@@ -700,7 +700,7 @@ fn create_pull_digest(input: &CreatePullInput) -> blake3::Hash {
     hasher.finalize()
 }
 
-fn insert_pull_statement(record: &PullRecord) -> crab_cell_runtime::Result<SqlStatement> {
+fn insert_pull_statement(record: &PullRecord) -> cellule_runtime::Result<SqlStatement> {
     Ok(statement(
         "INSERT INTO repository_pulls(number, create_request_id, author_issuer, author_subject, author_name, title, body, state, base_ref, base_oid, head_ref, head_oid, label_ids, assignee_subjects, pending_merge, completed_merge, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         vec![
@@ -731,24 +731,24 @@ fn update_pull_row(
     context: &CommandContext<'_, '_>,
     record: &PullRecord,
     expected: u64,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     let result = context.sql(&SqlBatch { statements: vec![statement("UPDATE repository_pulls SET title = ?, body = ?, state = ?, label_ids = ?, assignee_subjects = ?, pending_merge = ?, completed_merge = ?, version = ?, updated_at_ms = ? WHERE number = ? AND version = ?", vec![SqlValue::Text(record.title.clone()), SqlValue::Text(record.body.clone()), SqlValue::Integer(i64::from(record.state.code())), SqlValue::Blob(encode_label_ids(&record.label_ids)?), SqlValue::Blob(encode_assignees(&record.assignee_subjects)?), optional_wire(&record.merge_pending)?, optional_wire(&record.merge)?, integer(record.version)?, integer(record.updated_at_ms)?, integer(record.number)?, integer(expected)?])] })?;
     if result[0].rows_affected != 1 {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull update lost its transaction",
         ));
     }
     Ok(())
 }
 
-fn optional_wire<T: WireValue>(value: &Option<T>) -> crab_cell_runtime::Result<SqlValue> {
+fn optional_wire<T: WireValue>(value: &Option<T>) -> cellule_runtime::Result<SqlValue> {
     match value {
         Some(value) => {
             let mut encoder = BoundedEncoder::new(128 * 1024).map_err(|_| {
-                crab_cell_runtime::Error::Command("repository pull value is too large")
+                cellule_runtime::Error::Command("repository pull value is too large")
             })?;
             value.encode(&mut encoder).map_err(|_| {
-                crab_cell_runtime::Error::Command("repository pull value is too large")
+                cellule_runtime::Error::Command("repository pull value is too large")
             })?;
             Ok(SqlValue::Blob(encoder.finish()))
         }
@@ -756,22 +756,20 @@ fn optional_wire<T: WireValue>(value: &Option<T>) -> crab_cell_runtime::Result<S
     }
 }
 
-fn decode_optional_wire<T: WireValue>(value: &SqlValue) -> crab_cell_runtime::Result<Option<T>> {
+fn decode_optional_wire<T: WireValue>(value: &SqlValue) -> cellule_runtime::Result<Option<T>> {
     match value {
         SqlValue::Null => Ok(None),
         SqlValue::Blob(bytes) => {
-            let mut decoder = BoundedDecoder::new(bytes, 128 * 1024).map_err(|_| {
-                crab_cell_runtime::Error::Command("repository pull value is invalid")
-            })?;
-            let value = T::decode(&mut decoder).map_err(|_| {
-                crab_cell_runtime::Error::Command("repository pull value is invalid")
-            })?;
-            decoder.finish().map_err(|_| {
-                crab_cell_runtime::Error::Command("repository pull value is invalid")
-            })?;
+            let mut decoder = BoundedDecoder::new(bytes, 128 * 1024)
+                .map_err(|_| cellule_runtime::Error::Command("repository pull value is invalid"))?;
+            let value = T::decode(&mut decoder)
+                .map_err(|_| cellule_runtime::Error::Command("repository pull value is invalid"))?;
+            decoder
+                .finish()
+                .map_err(|_| cellule_runtime::Error::Command("repository pull value is invalid"))?;
             Ok(Some(value))
         }
-        _ => Err(crab_cell_runtime::Error::Command(
+        _ => Err(cellule_runtime::Error::Command(
             "repository pull value is invalid",
         )),
     }
@@ -784,7 +782,7 @@ fn pull_select() -> &'static str {
 fn load_pull(
     context: &CommandContext<'_, '_>,
     number: u64,
-) -> crab_cell_runtime::Result<Option<PullRecord>> {
+) -> cellule_runtime::Result<Option<PullRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![statement(pull_select(), vec![integer(number)?]), statement("SELECT review_number, author_issuer, author_subject, author_name, state, commit_oid FROM repository_pull_review_decisions WHERE pull_number = ? ORDER BY review_number", vec![integer(number)?])] })?;
     result[0]
         .rows
@@ -796,7 +794,7 @@ fn load_pull(
 fn load_pull_query(
     context: &QueryContext<'_>,
     number: u64,
-) -> crab_cell_runtime::Result<Option<PullRecord>> {
+) -> cellule_runtime::Result<Option<PullRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![statement(pull_select(), vec![integer(number)?]), statement("SELECT review_number, author_issuer, author_subject, author_name, state, commit_oid FROM repository_pull_review_decisions WHERE pull_number = ? ORDER BY review_number", vec![integer(number)?])] })?;
     result[0]
         .rows
@@ -808,10 +806,9 @@ fn load_pull_query(
 fn pull_from_rows(
     row: &[SqlValue],
     decisions: &[Vec<SqlValue>],
-) -> crab_cell_runtime::Result<PullRecord> {
-    let submission = <[u8; 16]>::try_from(result_blob(row, 1)?).map_err(|_| {
-        crab_cell_runtime::Error::Command("repository pull submission ID is invalid")
-    })?;
+) -> cellule_runtime::Result<PullRecord> {
+    let submission = <[u8; 16]>::try_from(result_blob(row, 1)?)
+        .map_err(|_| cellule_runtime::Error::Command("repository pull submission ID is invalid"))?;
     let review_decisions = decisions
         .iter()
         .map(|decision| {
@@ -822,7 +819,7 @@ fn pull_from_rows(
                 commit_oid: result_text(decision, 5)?,
             })
         })
-        .collect::<crab_cell_runtime::Result<Vec<_>>>()?;
+        .collect::<cellule_runtime::Result<Vec<_>>>()?;
     Ok(PullRecord {
         number: result_u64_from_row(row, 0)?,
         create_submission_id: submission,
@@ -845,7 +842,7 @@ fn pull_from_rows(
     })
 }
 
-fn author_from_row(row: &[SqlValue], start: usize) -> crab_cell_runtime::Result<RepositoryAuthor> {
+fn author_from_row(row: &[SqlValue], start: usize) -> cellule_runtime::Result<RepositoryAuthor> {
     Ok(RepositoryAuthor {
         issuer: result_text(row, start)?,
         subject: result_text(row, start + 1)?,
@@ -865,7 +862,7 @@ impl Command for CreatePullComment {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.pull)?;
         validate_author(&input.author)?;
         validate_body(&input.body, true)?;
@@ -896,7 +893,7 @@ impl Command for CreatePullComment {
                     number: result_u64_from_row(row, 1)?,
                 },
             )?
-            .ok_or(crab_cell_runtime::Error::Command(
+            .ok_or(cellule_runtime::Error::Command(
                 "repository pull comment submission has no comment",
             ))?;
             return Ok(CommandResult::Success(CreatePullCommentOutcome::Created(
@@ -937,7 +934,7 @@ impl Command for UpdatePullComment {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.key.pull)?;
         validate_number(input.key.number)?;
         validate_number(input.version)?;
@@ -975,7 +972,7 @@ impl Command for CreatePullReview {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.pull)?;
         validate_author(&input.author)?;
         validate_body(&input.body, input.state != ReviewState::Approved)?;
@@ -1002,7 +999,7 @@ impl Command for CreatePullReview {
                     number: result_u64_from_row(row, 1)?,
                 },
             )?
-            .ok_or(crab_cell_runtime::Error::Command(
+            .ok_or(cellule_runtime::Error::Command(
                 "repository pull review submission has no review",
             ))?;
             return Ok(CommandResult::Success(CreatePullReviewOutcome::Created(
@@ -1102,7 +1099,7 @@ impl Command for UpdatePullReview {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.key.pull)?;
         validate_number(input.key.number)?;
         validate_number(input.version)?;
@@ -1140,7 +1137,7 @@ impl Command for ReservePullMerge {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.pull)?;
         validate_merge(&input.merge)?;
         if load_pull(context, input.pull)?.is_none() {
@@ -1180,7 +1177,7 @@ impl Command for TransitionPullMerge {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.pull)?;
         validate_merge(&input.merge)?;
         let Some(mut pull) = load_pull(context, input.pull)? else {
@@ -1279,7 +1276,7 @@ impl Query for GetPullComment {
     fn execute(
         context: &mut QueryContext<'_>,
         key: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         load_comment_query(context, key)
     }
 }
@@ -1293,7 +1290,7 @@ impl Query for ListPullComments {
     fn execute(
         context: &mut QueryContext<'_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         if load_pull_query(context, input.pull)?.is_none() {
             return Ok(None);
         }
@@ -1306,7 +1303,7 @@ impl Query for ListPullComments {
         let items = rows
             .iter()
             .map(|row| comment_from_row(row))
-            .collect::<crab_cell_runtime::Result<Vec<_>>>()?;
+            .collect::<cellule_runtime::Result<Vec<_>>>()?;
         let (items, next) = bounded_child_page(items, input.limit, |item| item.number)?;
         Ok(Some(PullCommentPage { items, next }))
     }
@@ -1321,7 +1318,7 @@ impl Query for GetPullReview {
     fn execute(
         context: &mut QueryContext<'_>,
         key: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         load_review_query(context, key)
     }
 }
@@ -1335,7 +1332,7 @@ impl Query for ListPullReviews {
     fn execute(
         context: &mut QueryContext<'_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         if load_pull_query(context, input.pull)?.is_none() {
             return Ok(None);
         }
@@ -1348,7 +1345,7 @@ impl Query for ListPullReviews {
         let items = rows
             .iter()
             .map(|row| review_from_row(row))
-            .collect::<crab_cell_runtime::Result<Vec<_>>>()?;
+            .collect::<cellule_runtime::Result<Vec<_>>>()?;
         let (items, next) = bounded_child_page(items, input.limit, |item| item.number)?;
         Ok(Some(PullReviewPage { items, next }))
     }
@@ -1363,8 +1360,8 @@ impl Query for GetPullReviewSubmission {
     fn execute(
         context: &mut QueryContext<'_>,
         key: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
-        let pull = key.pull.ok_or(crab_cell_runtime::Error::Command(
+    ) -> cellule_runtime::Result<Self::Output> {
+        let pull = key.pull.ok_or(cellule_runtime::Error::Command(
             "repository review submission scope is invalid",
         ))?;
         let result = context.sql(&SqlBatch { statements: vec![statement("SELECT review_number FROM repository_pull_review_submissions WHERE pull_number = ? AND request_id = ?", vec![integer(pull)?, SqlValue::Blob(key.submission_id.to_vec())])] })?;
@@ -1388,8 +1385,8 @@ impl Query for GetPullMergeSubmission {
     fn execute(
         context: &mut QueryContext<'_>,
         key: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
-        let pull = key.pull.ok_or(crab_cell_runtime::Error::Command(
+    ) -> cellule_runtime::Result<Self::Output> {
+        let pull = key.pull.ok_or(cellule_runtime::Error::Command(
             "repository merge submission scope is invalid",
         ))?;
         let result = context.sql(&SqlBatch { statements: vec![statement("SELECT merge_record FROM repository_pull_merge_submissions WHERE pull_number = ? AND request_id = ?", vec![integer(pull)?, SqlValue::Blob(key.submission_id.to_vec())])] })?;
@@ -1405,7 +1402,7 @@ fn next_child_number(
     context: &CommandContext<'_, '_>,
     table: &str,
     pull: u64,
-) -> crab_cell_runtime::Result<u64> {
+) -> cellule_runtime::Result<u64> {
     let sql = format!(
         "INSERT INTO {table}(pull_number, last) VALUES (?, 1) ON CONFLICT(pull_number) DO UPDATE SET last = last + 1 WHERE last < 9007199254740991"
     );
@@ -1417,7 +1414,7 @@ fn next_child_number(
         ],
     })?;
     if result[0].rows_affected != 1 {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull child numbering is exhausted",
         ));
     }
@@ -1467,15 +1464,15 @@ fn merge_digest(pull: u64, merge: &PullMerge) -> blake3::Hash {
     }
     hasher.finalize()
 }
-fn next_version(value: u64) -> crab_cell_runtime::Result<u64> {
+fn next_version(value: u64) -> cellule_runtime::Result<u64> {
     value
         .checked_add(1)
         .filter(|value| *value < MAX_NUMBER)
-        .ok_or(crab_cell_runtime::Error::Command(
+        .ok_or(cellule_runtime::Error::Command(
             "repository pull version is exhausted",
         ))
 }
-fn validate_merge(merge: &PullMerge) -> crab_cell_runtime::Result<()> {
+fn validate_merge(merge: &PullMerge) -> cellule_runtime::Result<()> {
     validate_author(&merge.author)?;
     validate_number(merge.pull_version)?;
     validate_oid(&merge.base_oid)?;
@@ -1487,35 +1484,35 @@ fn validate_merge(merge: &PullMerge) -> crab_cell_runtime::Result<()> {
             .chars()
             .any(|character| character.is_control() && character != '\n')
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull merge message is invalid",
         ));
     }
     Ok(())
 }
-fn encode_wire<T: WireValue>(value: &T) -> crab_cell_runtime::Result<Vec<u8>> {
+fn encode_wire<T: WireValue>(value: &T) -> cellule_runtime::Result<Vec<u8>> {
     let mut encoder = BoundedEncoder::new(128 * 1024)
-        .map_err(|_| crab_cell_runtime::Error::Command("repository pull value is too large"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository pull value is too large"))?;
     value
         .encode(&mut encoder)
-        .map_err(|_| crab_cell_runtime::Error::Command("repository pull value is too large"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository pull value is too large"))?;
     Ok(encoder.finish())
 }
-fn decode_wire<T: WireValue>(bytes: &[u8]) -> crab_cell_runtime::Result<T> {
+fn decode_wire<T: WireValue>(bytes: &[u8]) -> cellule_runtime::Result<T> {
     let mut decoder = BoundedDecoder::new(bytes, 128 * 1024)
-        .map_err(|_| crab_cell_runtime::Error::Command("repository pull value is invalid"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository pull value is invalid"))?;
     let value = T::decode(&mut decoder)
-        .map_err(|_| crab_cell_runtime::Error::Command("repository pull value is invalid"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository pull value is invalid"))?;
     decoder
         .finish()
-        .map_err(|_| crab_cell_runtime::Error::Command("repository pull value is invalid"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository pull value is invalid"))?;
     Ok(value)
 }
 
 fn load_comment(
     context: &CommandContext<'_, '_>,
     key: PullChildKey,
-) -> crab_cell_runtime::Result<Option<PullCommentRecord>> {
+) -> cellule_runtime::Result<Option<PullCommentRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![statement("SELECT pull_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms FROM repository_pull_comments WHERE pull_number = ? AND number = ?", vec![integer(key.pull)?, integer(key.number)?])] })?;
     result[0]
         .rows
@@ -1526,7 +1523,7 @@ fn load_comment(
 fn load_comment_query(
     context: &QueryContext<'_>,
     key: PullChildKey,
-) -> crab_cell_runtime::Result<Option<PullCommentRecord>> {
+) -> cellule_runtime::Result<Option<PullCommentRecord>> {
     validate_number(key.pull)?;
     validate_number(key.number)?;
     let result = context.sql(&SqlBatch { statements: vec![statement("SELECT pull_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms FROM repository_pull_comments WHERE pull_number = ? AND number = ?", vec![integer(key.pull)?, integer(key.number)?])] })?;
@@ -1536,7 +1533,7 @@ fn load_comment_query(
         .map(|row| comment_from_row(row))
         .transpose()
 }
-fn comment_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<PullCommentRecord> {
+fn comment_from_row(row: &[SqlValue]) -> cellule_runtime::Result<PullCommentRecord> {
     Ok(PullCommentRecord {
         pull: result_u64_from_row(row, 0)?,
         number: result_u64_from_row(row, 1)?,
@@ -1550,7 +1547,7 @@ fn comment_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<PullCommentRe
 fn load_review(
     context: &CommandContext<'_, '_>,
     key: PullChildKey,
-) -> crab_cell_runtime::Result<Option<PullReviewRecord>> {
+) -> cellule_runtime::Result<Option<PullReviewRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![statement("SELECT pull_number, number, author_issuer, author_subject, author_name, body, state, commit_oid, version, created_at_ms, updated_at_ms FROM repository_pull_reviews WHERE pull_number = ? AND number = ?", vec![integer(key.pull)?, integer(key.number)?])] })?;
     result[0]
         .rows
@@ -1561,7 +1558,7 @@ fn load_review(
 fn load_review_query(
     context: &QueryContext<'_>,
     key: PullChildKey,
-) -> crab_cell_runtime::Result<Option<PullReviewRecord>> {
+) -> cellule_runtime::Result<Option<PullReviewRecord>> {
     validate_number(key.pull)?;
     validate_number(key.number)?;
     let result = context.sql(&SqlBatch { statements: vec![statement("SELECT pull_number, number, author_issuer, author_subject, author_name, body, state, commit_oid, version, created_at_ms, updated_at_ms FROM repository_pull_reviews WHERE pull_number = ? AND number = ?", vec![integer(key.pull)?, integer(key.number)?])] })?;
@@ -1571,7 +1568,7 @@ fn load_review_query(
         .map(|row| review_from_row(row))
         .transpose()
 }
-fn review_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<PullReviewRecord> {
+fn review_from_row(row: &[SqlValue]) -> cellule_runtime::Result<PullReviewRecord> {
     Ok(PullReviewRecord {
         pull: result_u64_from_row(row, 0)?,
         number: result_u64_from_row(row, 1)?,
@@ -1589,7 +1586,7 @@ fn list_child_rows(
     table: &str,
     input: &PullChildListInput,
     columns: &str,
-) -> crab_cell_runtime::Result<Vec<Vec<SqlValue>>> {
+) -> cellule_runtime::Result<Vec<Vec<SqlValue>>> {
     validate_number(input.pull)?;
     validate_list(input.before, input.limit)?;
     let upper = input.before.map_or(MAX_NUMBER, |value| value - 1);
@@ -1612,14 +1609,14 @@ fn bounded_child_page<T: Serialize>(
     items: Vec<T>,
     requested: u8,
     number: impl Fn(&T) -> u64,
-) -> crab_cell_runtime::Result<(Vec<T>, Option<u64>)> {
+) -> cellule_runtime::Result<(Vec<T>, Option<u64>)> {
     let total = items.len();
     let mut used =
         4 + br#"{"items":["#.len() + br#"],"next":"#.len() + MAX_NUMBER.to_string().len() + 1;
     let mut kept = Vec::with_capacity(total);
     for item in items {
         let encoded = serde_json::to_vec(&item)
-            .map_err(|_| crab_cell_runtime::Error::Command("repository pull child is invalid"))?;
+            .map_err(|_| cellule_runtime::Error::Command("repository pull child is invalid"))?;
         let separator = usize::from(!kept.is_empty());
         if used
             .checked_add(separator + encoded.len())
@@ -1631,7 +1628,7 @@ fn bounded_child_page<T: Serialize>(
         kept.push(item);
     }
     if kept.is_empty() && total != 0 {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull child exceeds the page limit",
         ));
     }

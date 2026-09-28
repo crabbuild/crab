@@ -1,20 +1,20 @@
 use std::{path::Path, sync::Arc};
 
-use crab_cell_app::CompiledApplication;
-use crab_cell_host::CellNodeBuilder;
-use crab_cell_runtime::cell::actor::CellHandle;
-use crab_cell_runtime::cell::application::ApplicationIdentity;
-use crab_cell_runtime::cell::catalog::CatalogRole;
-use crab_cell_runtime::cell::catalog::{CatalogEntry, CatalogProof, CellCatalog};
-use crab_cell_runtime::cell::worker::SqlWorkerPool;
-use crab_cell_runtime::control::authority::CellAuthority;
-use crab_cell_runtime::control::{ControlState, Owner};
-use crab_cell_runtime::identity::IncarnationId;
-use crab_cell_runtime::identity::{CellTarget, SessionId};
-use crab_cell_runtime::ltx::CellReplica;
-use crab_cell_runtime::ltx::CellStorageLayout;
-use crab_cell_runtime::recovery::release::{ReleaseState, ReleaseStore};
-use crab_cell_runtime::registry::Registry;
+use cellule_app::CompiledApplication;
+use cellule_host::CellNodeBuilder;
+use cellule_runtime::cell::actor::CellHandle;
+use cellule_runtime::cell::application::ApplicationIdentity;
+use cellule_runtime::cell::catalog::CatalogRole;
+use cellule_runtime::cell::catalog::{CatalogEntry, CatalogProof, CellCatalog};
+use cellule_runtime::cell::worker::SqlWorkerPool;
+use cellule_runtime::control::authority::CellAuthority;
+use cellule_runtime::control::{ControlState, Owner};
+use cellule_runtime::identity::IncarnationId;
+use cellule_runtime::identity::{CellTarget, SessionId};
+use cellule_runtime::ltx::CellReplica;
+use cellule_runtime::ltx::CellStorageLayout;
+use cellule_runtime::recovery::release::{ReleaseState, ReleaseStore};
+use cellule_runtime::registry::Registry;
 use uuid::Uuid;
 
 use super::{REPOSITORY_NAMESPACE, initialize_repository_schema, repository_replica_limits};
@@ -111,7 +111,7 @@ pub(crate) async fn initialize_repository_at(
             *observed.value().incarnation.as_bytes(),
             repository_replica_limits(),
         )
-        .map_err(crab_cell_runtime::Error::from)?;
+        .map_err(cellule_runtime::Error::from)?;
         let destination = directory.path().join(format!("{}.sqlite", Uuid::now_v7()));
         let handle = match (observed.value().state, observed.value().root.is_some()) {
             (ControlState::Recovering, false) => {
@@ -198,7 +198,7 @@ async fn verify_repository_identity(handle: &CellHandle, repository: Uuid) -> Re
                     [],
                     |row| row.get::<_, Vec<u8>>(0),
                 )
-                .map_err(crab_cell_runtime::Error::from)
+                .map_err(cellule_runtime::Error::from)
         })
         .await?;
     if observed.as_slice() != repository.as_bytes() {
@@ -274,15 +274,15 @@ pub(crate) async fn provision_repository(
 ) -> Result<(CatalogProof, CellAuthority)> {
     let catalog = CellCatalog::new(layout.clone(), identity.tenant());
     let (code, schema) = registry
-        .current_cell_version(REPOSITORY_NAMESPACE, CatalogRole::Repository)
-        .ok_or(crab_cell_runtime::Error::Registry(
+        .current_cell_version(REPOSITORY_NAMESPACE, CatalogRole::Application)
+        .ok_or(cellule_runtime::Error::Registry(
             "repository module is not registered",
         ))?;
     let proof = ReleaseStore::new(layout.clone(), identity)?
         .provision(
             &catalog,
             registry,
-            CatalogEntry::new(target, CatalogRole::Repository, code, schema)?,
+            CatalogEntry::new(target, CatalogRole::Application, code, schema)?,
         )
         .await?;
     Ok((proof, CellAuthority::new(layout.clone())))
@@ -292,10 +292,9 @@ pub(crate) async fn provision_repository(
 mod tests {
     use std::sync::Arc;
 
-    use crab_cell_runtime::control::ControlState;
-    use crab_cell_runtime::control::authority::CellAuthority;
-    use crab_cell_runtime::identity::{ApplicationId, CellTarget, TenantId};
-    use crab_storage::Store;
+    use cellule_runtime::control::ControlState;
+    use cellule_runtime::control::authority::CellAuthority;
+    use cellule_runtime::identity::{ApplicationId, CellTarget, TenantId};
     use object_store::{memory::InMemory, path::Path as ObjectPath};
 
     use super::*;
@@ -307,7 +306,7 @@ mod tests {
             ApplicationId::from_bytes([42; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             ObjectPath::from("repository-preflight"),
             *identity.application().as_bytes(),
         );
@@ -372,7 +371,7 @@ mod tests {
             ApplicationId::from_bytes([32; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             ObjectPath::from("repository-initializer"),
             *identity.application().as_bytes(),
         );

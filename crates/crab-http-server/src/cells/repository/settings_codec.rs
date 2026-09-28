@@ -1,4 +1,4 @@
-use crab_cell_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 
 use super::{
     BranchProtectionRecord, BranchProtectionSettings, ReplaceBranchProtectionsInput,

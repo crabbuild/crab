@@ -76,7 +76,7 @@ impl Events {
     pub(super) fn install() -> Self {
         let events = Self::default();
         let filter = tracing_subscriber::filter::Targets::new()
-            .with_target("crab_cell_runtime::action", tracing::Level::DEBUG)
+            .with_target("cellule_runtime::action", tracing::Level::DEBUG)
             .with_target("crab_http_server::action", tracing::Level::DEBUG)
             .with_target("crab_http_server::server", tracing::Level::INFO);
         let subscriber = tracing_subscriber::registry()

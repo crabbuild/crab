@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use crab_cell_runtime::{Error as CellError, read_policy::MAX_READERS};
+use cellule_runtime::{Error as CellError, read_policy::MAX_READERS};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -69,7 +69,7 @@ impl IntoResponse for Error {
                 "Read replicas require the object durability profile",
             ),
             Self::Conflict
-            | Self::Cell(CellError::Storage(crab_storage::StorageError::StateConflict {
+            | Self::Cell(CellError::Storage(cellule_store::StorageError::StateConflict {
                 ..
             })) => (
                 StatusCode::CONFLICT,
@@ -100,8 +100,8 @@ fn resolve(
     key: &(String, String),
 ) -> Result<
     (
-        crab_cell_host::read_replicas::ReadReplicaManager,
-        crab_cell_runtime::CellTarget,
+        cellule_host::read_replicas::ReadReplicaManager,
+        cellule_runtime::CellTarget,
     ),
     Error,
 > {

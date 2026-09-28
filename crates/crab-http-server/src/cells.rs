@@ -5,40 +5,40 @@ use std::{
     time::Duration,
 };
 
-use crab_cell_app::{ApplicationBuilder, CellApplication, CellType, CompiledApplication};
-use crab_cell_host::{CellNode, CellNodeBuilder};
-use crab_cell_runtime::cell::application::{ApplicationIdentity, ApplicationIdentityStore};
-use crab_cell_runtime::cell::catalog::CatalogRole;
-use crab_cell_runtime::cell::catalog::CellCatalog;
-use crab_cell_runtime::cell::worker::SqlWorkerPool;
-use crab_cell_runtime::control::authority::CellAuthority;
-use crab_cell_runtime::control::{Control, ControlState, Owner};
-use crab_cell_runtime::identity::RequestId;
-use crab_cell_runtime::identity::{
+use cellule_app::{ApplicationBuilder, CellApplication, CellType, CompiledApplication};
+use cellule_host::{CellNode, CellNodeBuilder};
+use cellule_runtime::cell::application::{ApplicationIdentity, ApplicationIdentityStore};
+use cellule_runtime::cell::catalog::CatalogRole;
+use cellule_runtime::cell::catalog::CellCatalog;
+use cellule_runtime::cell::worker::SqlWorkerPool;
+use cellule_runtime::control::authority::CellAuthority;
+use cellule_runtime::control::{Control, ControlState, Owner};
+use cellule_runtime::identity::RequestId;
+use cellule_runtime::identity::{
     ApplicationId, CellId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
-use crab_cell_runtime::ltx::CellStorageLayout;
-use crab_cell_runtime::ltx::{Host as ReplicaHost, Limits as ReplicaLimits};
-use crab_cell_runtime::node::log_state::NodeLogPhase;
-use crab_cell_runtime::node::{
+use cellule_runtime::ltx::CellStorageLayout;
+use cellule_runtime::ltx::{Host as ReplicaHost, Limits as ReplicaLimits};
+use cellule_runtime::node::log_state::NodeLogPhase;
+use cellule_runtime::node::{
     NodeAdvertisement, NodeCapacity, NodeDirectory, VersionedNodeAdvertisement,
 };
-use crab_cell_runtime::peer::{PeerRoundTrip, PeerSigner};
-use crab_cell_runtime::primitives::effects::EffectModule;
-use crab_cell_runtime::primitives::effects::register_effect_delivery;
-use crab_cell_runtime::primitives::maintenance::{MaintenanceModule, register_maintenance};
-use crab_cell_runtime::recovery::backup::{
+use cellule_runtime::peer::{PeerRoundTrip, PeerSigner};
+use cellule_runtime::primitives::effects::EffectModule;
+use cellule_runtime::primitives::effects::register_effect_delivery;
+use cellule_runtime::primitives::maintenance::{MaintenanceModule, register_maintenance};
+use cellule_runtime::recovery::backup::{
     BackupPin, BackupPinStore, BackupRestore, PinnedCatalogShard,
 };
-use crab_cell_runtime::recovery::release::{ReleaseRecord, ReleaseState, ReleaseStore};
-use crab_cell_runtime::recovery::release_progress::{
+use cellule_runtime::recovery::release::{ReleaseRecord, ReleaseState, ReleaseStore};
+use cellule_runtime::recovery::release_progress::{
     MigrationFailure, MigrationProgressState, MigrationProgressStore,
 };
-use crab_cell_runtime::recovery::retention::{CellGarbageCollector, GarbageCollectionPolicy};
-use crab_cell_runtime::registry::{
+use cellule_runtime::recovery::retention::{CellGarbageCollector, GarbageCollectionPolicy};
+use cellule_runtime::registry::{
     BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, Registry, RegistryBuilder,
 };
-use crab_cell_runtime::registry::{MigrationDescriptor, OperationDescriptor};
+use cellule_runtime::registry::{MigrationDescriptor, OperationDescriptor};
 use ed25519_dalek::SigningKey;
 use object_store::path::Path;
 use serde::Serialize;
@@ -52,7 +52,7 @@ pub(crate) mod repository;
 mod router;
 mod scheduler;
 
-pub(crate) use crab_cell_runtime::recovery::artifacts::RecoveryArtifactRegistry;
+pub(crate) use cellule_runtime::recovery::artifacts::RecoveryArtifactRegistry;
 #[cfg(test)]
 pub(crate) use initializer::initialize_repository_at;
 #[cfg(test)]
@@ -251,7 +251,7 @@ impl CellModule for RepositoryModule {
         repository_descriptor()
     }
 
-    fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
+    fn register(self, registry: &mut RegistryBuilder) -> cellule_runtime::Result<()> {
         repository::register(registry)?;
         register_maintenance::<Self>(registry)?;
         register_effect_delivery::<Self>(registry)
@@ -271,7 +271,7 @@ impl EffectModule for RepositoryModule {
     const STATUS_QUERY_ID: u32 = REPOSITORY_EFFECT_STATUS_QUERY_ID;
 }
 
-pub(crate) fn compiled_registry() -> crab_cell_runtime::Result<Registry> {
+pub(crate) fn compiled_registry() -> cellule_runtime::Result<Registry> {
     let application = compiled_application()?;
     Ok((*application.registry()).clone())
 }
@@ -279,20 +279,20 @@ pub(crate) fn compiled_registry() -> crab_cell_runtime::Result<Registry> {
 /// Compiles the repository module through the supported author boundary used
 /// by the production node host. Release and migration inspection consume the
 /// same compiled registry through [`compiled_registry`].
-pub(crate) fn compiled_application() -> crab_cell_runtime::Result<Arc<CompiledApplication>> {
+pub(crate) fn compiled_application() -> cellule_runtime::Result<Arc<CompiledApplication>> {
     struct RepositoryApplication;
 
     impl CellApplication for RepositoryApplication {
         const NAME: &'static str = "crab-repository";
 
-        fn register(builder: &mut ApplicationBuilder) -> crab_cell_runtime::Result<()> {
+        fn register(builder: &mut ApplicationBuilder) -> cellule_runtime::Result<()> {
             builder.register(RepositoryModule)?;
             builder.cell_type(
                 CellType::new(
                     RepositoryModule::NAME,
                     "repository",
                     REPOSITORY_NAMESPACE,
-                    CatalogRole::Repository,
+                    CatalogRole::Application,
                     1,
                 )?
                 .with_schema_range(1, 2)?
@@ -324,7 +324,7 @@ pub(crate) async fn prepare_release(
     image_digest(image)?;
     let root = StorageRoot::build(&config.storage)?;
     let identities =
-        ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
+        ApplicationIdentityStore::new(root.cell_store(), Path::from(root.prefix.clone()));
     let identity = match identities.load().await? {
         Some(identity) => identity,
         None => {
@@ -344,7 +344,7 @@ pub(crate) async fn prepare_release(
                 && observed.record().desired() == Some(registry.release_digest())
                 && observed.record().desired_image() == image
                 && observed.record().state()
-                    == crab_cell_runtime::recovery::release::ReleaseState::Prepared =>
+                    == cellule_runtime::recovery::release::ReleaseState::Prepared =>
         {
             observed.record().operation()
         }
@@ -365,7 +365,7 @@ pub(crate) async fn prepare_release(
 pub(crate) async fn bootstrap_release(config: &Config, image: &str) -> Result<Vec<u8>> {
     let root = StorageRoot::build(&config.storage)?;
     let identities =
-        ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
+        ApplicationIdentityStore::new(root.cell_store(), Path::from(root.prefix.clone()));
     let identity = match identities.load().await? {
         Some(identity) => identity,
         None => {
@@ -470,7 +470,7 @@ fn bootstrap_operation(registry: &Registry, image: &str) -> RequestId {
 pub(crate) async fn release_status(config: &Config) -> Result<Vec<u8>> {
     let root = StorageRoot::build(&config.storage)?;
     let identities =
-        ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
+        ApplicationIdentityStore::new(root.cell_store(), Path::from(root.prefix.clone()));
     let identity = identities
         .load()
         .await?
@@ -1065,7 +1065,7 @@ pub(crate) async fn release_migrations(
     let after = after.map(decode_cell_cursor).transpose()?;
     let root = StorageRoot::build(&config.storage)?;
     let identities =
-        ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
+        ApplicationIdentityStore::new(root.cell_store(), Path::from(root.prefix.clone()));
     let identity = identities
         .load()
         .await?
@@ -1271,7 +1271,7 @@ pub(crate) async fn verify_startup_release(config: &Config) -> Result<VerifiedCe
 async fn load_selected_release(config: &Config) -> Result<VerifiedCellRelease> {
     let root = StorageRoot::build(&config.storage)?;
     let identities =
-        ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
+        ApplicationIdentityStore::new(root.cell_store(), Path::from(root.prefix.clone()));
     let identity = identities
         .load()
         .await?
@@ -1355,7 +1355,7 @@ pub(crate) async fn activate_release(
     validate_eligible_node_quorum(minimum_eligible_nodes)?;
     let root = StorageRoot::build(&config.storage)?;
     let identities =
-        ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
+        ApplicationIdentityStore::new(root.cell_store(), Path::from(root.prefix.clone()));
     let identity = identities
         .load()
         .await?
@@ -1420,7 +1420,7 @@ pub(crate) async fn enter_maintenance(
 ) -> Result<Vec<u8>> {
     let root = StorageRoot::build(&config.storage)?;
     let identities =
-        ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
+        ApplicationIdentityStore::new(root.cell_store(), Path::from(root.prefix.clone()));
     let identity = identities
         .load()
         .await?
@@ -1755,7 +1755,7 @@ async fn migrate_maintenance_inventory(
                     && let Some(blocker) =
                         router.persisted_work_target(target).await?.first_blocker()
                 {
-                    return Err(crab_cell_runtime::Error::Release(blocker).into());
+                    return Err(cellule_runtime::Error::Release(blocker).into());
                 }
             }
         }
@@ -1881,7 +1881,7 @@ impl OfflineAdvertisement {
 
     fn advertisement(&self, now_ms: i64) -> Result<NodeAdvertisement> {
         NodeAdvertisement::sign(
-            crab_cell_runtime::identity::NodeId::from_bytes(*self.session.as_bytes()),
+            cellule_runtime::identity::NodeId::from_bytes(*self.session.as_bytes()),
             self.session,
             self.endpoint.clone(),
             self.fleet,
@@ -1894,7 +1894,7 @@ impl OfflineAdvertisement {
             now_ms.saturating_add(OFFLINE_ADVERTISEMENT_LIFETIME_MS),
             self.module_digests.clone(),
             vec![1],
-            crab_cell_runtime::node::NodeFailureDomain::default(),
+            cellule_runtime::node::NodeFailureDomain::default(),
             NodeCapacity {
                 free_memory_bytes: 0,
                 free_disk_bytes: 0,
@@ -1914,9 +1914,9 @@ impl PeerRoundTrip for OfflinePeerRoundTrip {
         _target: CellTarget,
         _request: Vec<u8>,
         _remaining_ms: u32,
-    ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>> {
         Box::pin(async {
-            Err(crab_cell_runtime::Error::PeerTransport {
+            Err(cellule_runtime::Error::PeerTransport {
                 context: "offline maintenance cannot contact a peer",
                 source: Box::new(std::io::Error::other(
                     "offline maintenance peer transport was invoked",
@@ -1928,7 +1928,7 @@ impl PeerRoundTrip for OfflinePeerRoundTrip {
 
 async fn verify_rolling_predecessor(
     releases: &ReleaseStore,
-    release: &crab_cell_runtime::recovery::release::ReleaseRecord,
+    release: &cellule_runtime::recovery::release::ReleaseRecord,
     registry: &Registry,
 ) -> Result<()> {
     let Some(current) = release.current() else {
@@ -2112,7 +2112,7 @@ fn repository_descriptor() -> &'static ModuleDescriptor {
         namespaces: &[NamespaceDescriptor {
             id: REPOSITORY_NAMESPACE,
             name: "repository",
-            role: CatalogRole::Repository,
+            role: CatalogRole::Application,
             shards: 1,
             effect_targets: &[],
             dead_letter: None,
@@ -2183,27 +2183,27 @@ mod tests {
     };
 
     use bytes::Bytes;
-    use crab_cell_runtime::cell::actor::CellRuntime;
-    use crab_cell_runtime::cell::application::ApplicationIdentity;
-    use crab_cell_runtime::cell::catalog::CatalogEntry;
-    use crab_cell_runtime::cell::executor::MutationIdentity;
-    use crab_cell_runtime::cell::worker::SqlWorkerPool;
-    use crab_cell_runtime::client::{CellClient, InvocationError};
-    use crab_cell_runtime::codec::{BoundedEncoder, WireValue};
-    use crab_cell_runtime::control::Owner;
-    use crab_cell_runtime::control::authority::CellAuthority;
-    use crab_cell_runtime::identity::IncarnationId;
-    use crab_cell_runtime::identity::{CellTarget, SessionId};
-    use crab_cell_runtime::ltx::CellReplica;
-    use crab_cell_runtime::ltx::CellStorageLayout;
-    use crab_cell_runtime::ltx::{Host as ReplicaHost, Limits as ReplicaLimits};
-    use crab_cell_runtime::node::{NodeAdvertisement, NodeCapacity};
-    use crab_cell_runtime::peer::PeerCellResolver;
-    use crab_cell_runtime::registry::{
+    use cellule_runtime::cell::actor::CellRuntime;
+    use cellule_runtime::cell::application::ApplicationIdentity;
+    use cellule_runtime::cell::catalog::CatalogEntry;
+    use cellule_runtime::cell::executor::MutationIdentity;
+    use cellule_runtime::cell::worker::SqlWorkerPool;
+    use cellule_runtime::client::{CellClient, InvocationError};
+    use cellule_runtime::codec::{BoundedEncoder, WireValue};
+    use cellule_runtime::control::Owner;
+    use cellule_runtime::control::authority::CellAuthority;
+    use cellule_runtime::identity::IncarnationId;
+    use cellule_runtime::identity::{CellTarget, SessionId};
+    use cellule_runtime::ltx::CellReplica;
+    use cellule_runtime::ltx::CellStorageLayout;
+    use cellule_runtime::ltx::{Host as ReplicaHost, Limits as ReplicaLimits};
+    use cellule_runtime::node::{NodeAdvertisement, NodeCapacity};
+    use cellule_runtime::peer::PeerCellResolver;
+    use cellule_runtime::registry::{
         BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, RegistryBuilder,
     };
-    use crab_cell_runtime::registry::{MigrationDescriptor, RetainedCodeDescriptor};
-    use crab_storage::{StorageError, Store};
+    use cellule_runtime::registry::{MigrationDescriptor, RetainedCodeDescriptor};
+    use crab_storage::Store;
     use ed25519_dalek::SigningKey;
     use object_store::memory::InMemory;
     use serde_json::Value;
@@ -2314,7 +2314,7 @@ mod tests {
             })
         }
 
-        fn register(self, _registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
+        fn register(self, _registry: &mut RegistryBuilder) -> cellule_runtime::Result<()> {
             Ok(())
         }
     }
@@ -2432,7 +2432,7 @@ mod tests {
         let now_ms = 1_000_000;
         let directory = NodeDirectory::new(
             CellStorageLayout::new(
-                Store::new(Arc::new(InMemory::new())),
+                cellule_store::Store::new(Arc::new(InMemory::new())),
                 Path::from("eligible-nodes"),
                 [9; 16],
             ),
@@ -2451,7 +2451,7 @@ mod tests {
         directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::identity::NodeId::from_bytes([13; 16]),
+                    cellule_runtime::identity::NodeId::from_bytes([13; 16]),
                     SessionId::from_bytes([13; 16]),
                     "https://node-1.internal:8081".into(),
                     fleet,
@@ -2464,7 +2464,7 @@ mod tests {
                     now_ms + 10_000,
                     registry.module_digests(),
                     vec![1],
-                    crab_cell_runtime::node::NodeFailureDomain::default(),
+                    cellule_runtime::node::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -2486,7 +2486,7 @@ mod tests {
         directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::identity::NodeId::from_bytes([15; 16]),
+                    cellule_runtime::identity::NodeId::from_bytes([15; 16]),
                     SessionId::from_bytes([15; 16]),
                     "https://node-2.internal:8081".into(),
                     fleet,
@@ -2499,7 +2499,7 @@ mod tests {
                     now_ms + 10_000,
                     registry.module_digests(),
                     vec![1],
-                    crab_cell_runtime::node::NodeFailureDomain::default(),
+                    cellule_runtime::node::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -2536,7 +2536,7 @@ mod tests {
 
         let foreign_directory = NodeDirectory::new(
             CellStorageLayout::new(
-                Store::new(Arc::new(InMemory::new())),
+                cellule_store::Store::new(Arc::new(InMemory::new())),
                 Path::from("foreign-node"),
                 [9; 16],
             ),
@@ -2547,7 +2547,7 @@ mod tests {
         foreign_directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::identity::NodeId::from_bytes([17; 16]),
+                    cellule_runtime::identity::NodeId::from_bytes([17; 16]),
                     SessionId::from_bytes([17; 16]),
                     "https://foreign-node.internal:8081".into(),
                     fleet,
@@ -2560,7 +2560,7 @@ mod tests {
                     now_ms + 10_000,
                     vec![Digest::from_bytes([19; 32])],
                     vec![1],
-                    crab_cell_runtime::node::NodeFailureDomain::default(),
+                    cellule_runtime::node::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -2588,7 +2588,7 @@ mod tests {
             ApplicationId::from_bytes([52; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             Path::from("maintenance-drain"),
             *identity.application().as_bytes(),
         );
@@ -2612,7 +2612,7 @@ mod tests {
         let session = directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::identity::NodeId::from_bytes([55; 16]),
+                    cellule_runtime::identity::NodeId::from_bytes([55; 16]),
                     SessionId::from_bytes([55; 16]),
                     "https://node.internal:8789".into(),
                     fleet,
@@ -2625,7 +2625,7 @@ mod tests {
                     now_ms - 10_000,
                     registry.module_digests(),
                     vec![1],
-                    crab_cell_runtime::node::NodeFailureDomain::default(),
+                    cellule_runtime::node::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -2677,7 +2677,7 @@ mod tests {
             ApplicationId::from_bytes([59; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             Path::from("maintenance-singleton"),
             *identity.application().as_bytes(),
         );
@@ -2785,7 +2785,7 @@ mod tests {
             ApplicationId::from_bytes([62; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             Path::from("maintenance-completion"),
             *identity.application().as_bytes(),
         );
@@ -2894,7 +2894,7 @@ mod tests {
         assert_eq!(encoded["state"], "ready");
         assert!(matches!(
             layout.store().head(&orphan_path).await,
-            Err(StorageError::NotFound { .. })
+            Err(cellule_store::StorageError::NotFound { .. })
         ));
         assert_eq!(
             enter_maintenance_at(
@@ -2918,7 +2918,7 @@ mod tests {
             ApplicationId::from_bytes([72; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             Path::from("maintenance-cell-migration"),
             *identity.application().as_bytes(),
         );
@@ -3087,7 +3087,7 @@ mod tests {
             ApplicationId::from_bytes([2; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             Path::from("release-inventory"),
             *identity.application().as_bytes(),
         );
@@ -3115,7 +3115,7 @@ mod tests {
             .provision(
                 CatalogEntry::new(
                     &supported,
-                    CatalogRole::Repository,
+                    CatalogRole::Application,
                     registry.module_code(RepositoryModule::NAME).unwrap(),
                     2,
                 )
@@ -3138,7 +3138,7 @@ mod tests {
             .provision(
                 CatalogEntry::new(
                     &unsupported,
-                    CatalogRole::Repository,
+                    CatalogRole::Application,
                     Digest::from_bytes([9; 32]),
                     2,
                 )
@@ -3164,7 +3164,7 @@ mod tests {
             ApplicationId::from_bytes([36; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             Path::from("retained-release-inventory"),
             *identity.application().as_bytes(),
         );
@@ -3236,7 +3236,7 @@ mod tests {
             ApplicationId::from_bytes([42; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             Path::from("release-migration-status"),
             *identity.application().as_bytes(),
         );
@@ -3284,7 +3284,7 @@ mod tests {
         MigrationProgressStore::new(layout.clone(), identity)
             .unwrap()
             .failed(
-                crab_cell_runtime::recovery::release_progress::MigrationProgressAttempt::new(
+                cellule_runtime::recovery::release_progress::MigrationProgressAttempt::new(
                     operation,
                     registry.release_digest(),
                     SessionId::from_bytes([44; 16]),
@@ -3367,7 +3367,7 @@ mod tests {
             ApplicationId::from_bytes([2; 16]),
         );
         let layout = CellStorageLayout::new(
-            store,
+            cellule_store::Store::new(store.inner().clone()),
             Path::from(prefix),
             *identity.application().as_bytes(),
         );
@@ -3397,7 +3397,7 @@ mod tests {
 
         let catalog = CellCatalog::new(layout.clone(), identity.tenant());
         let (code, schema) = registry
-            .current_cell_version(REPOSITORY_NAMESPACE, CatalogRole::Repository)
+            .current_cell_version(REPOSITORY_NAMESPACE, CatalogRole::Application)
             .unwrap();
         for index in 0_u32..64 {
             let target = CellTarget::new(
@@ -3409,7 +3409,7 @@ mod tests {
             .unwrap();
             catalog
                 .provision(
-                    CatalogEntry::new(&target, CatalogRole::Repository, code, schema).unwrap(),
+                    CatalogEntry::new(&target, CatalogRole::Application, code, schema).unwrap(),
                 )
                 .await
                 .unwrap();
@@ -3444,7 +3444,7 @@ mod tests {
             ApplicationId::from_bytes([2; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             Path::from("release-bootstrap"),
             *identity.application().as_bytes(),
         );
@@ -3513,7 +3513,7 @@ mod tests {
             ApplicationId::from_bytes([2; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             Path::from("backup-pin"),
             *identity.application().as_bytes(),
         );
@@ -3538,7 +3538,7 @@ mod tests {
             .provision(
                 CatalogEntry::new(
                     &target,
-                    CatalogRole::Repository,
+                    CatalogRole::Application,
                     registry.module_code(RepositoryModule::NAME).unwrap(),
                     2,
                 )
@@ -3558,7 +3558,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let replica = crab_ltx::CellReplica::new(
+        let replica = cellule_ltx::CellReplica::new(
             layout.clone(),
             *target.cell_id().as_bytes(),
             [4; 16],
@@ -3566,7 +3566,7 @@ mod tests {
         )
         .unwrap();
         let database_dir = tempfile::TempDir::new().unwrap();
-        let mut database = crab_ltx::Db::open(
+        let mut database = cellule_ltx::Db::open(
             &database_dir.path().join("repository.sqlite"),
             repository_replica_limits(),
         )
@@ -3586,7 +3586,7 @@ mod tests {
             .transition(
                 &initial,
                 published.clone(),
-                crab_cell_runtime::control::Transition::Publish,
+                cellule_runtime::control::Transition::Publish,
             )
             .await
             .unwrap();
@@ -3656,7 +3656,7 @@ mod tests {
             ApplicationId::from_bytes([2; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             Path::from("release-candidate"),
             *identity.application().as_bytes(),
         );
@@ -3695,7 +3695,7 @@ mod tests {
             ApplicationId::from_bytes([2; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             Path::from("release-predecessor-contract"),
             *identity.application().as_bytes(),
         );
@@ -3753,7 +3753,7 @@ mod tests {
             ApplicationId::from_bytes([2; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            cellule_store::Store::new(Arc::new(InMemory::new())),
             Path::from("release-provision"),
             *identity.application().as_bytes(),
         );
@@ -3784,7 +3784,7 @@ mod tests {
         .unwrap();
         let entry = CatalogEntry::new(
             &target,
-            CatalogRole::Repository,
+            CatalogRole::Application,
             registry.module_code(RepositoryModule::NAME).unwrap(),
             2,
         )
@@ -3829,7 +3829,7 @@ mod tests {
                     &registry,
                     CatalogEntry::new(
                         &blocked,
-                        CatalogRole::Repository,
+                        CatalogRole::Application,
                         registry.module_code(RepositoryModule::NAME).unwrap(),
                         2,
                     )
@@ -3852,7 +3852,11 @@ mod tests {
         let cell = target.cell_id();
         let incarnation = IncarnationId::from_bytes([4; 16]);
         let store = Store::new(Arc::new(InMemory::new()));
-        let layout = CellStorageLayout::new(store, Path::from("repository-runtime"), [2; 16]);
+        let layout = CellStorageLayout::new(
+            cellule_store::Store::new(store.inner().clone()),
+            Path::from("repository-runtime"),
+            [2; 16],
+        );
         let replica = CellReplica::new(
             layout.clone(),
             *cell.as_bytes(),
@@ -3860,12 +3864,12 @@ mod tests {
             ReplicaLimits::default(),
         )
         .unwrap();
-        let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), tenant);
+        let catalog = cellule_runtime::cell::catalog::CellCatalog::new(layout.clone(), tenant);
         let proof = catalog
             .provision(
                 CatalogEntry::new(
                     &target,
-                    CatalogRole::Repository,
+                    CatalogRole::Application,
                     registry.module_code(RepositoryModule::NAME).unwrap(),
                     2,
                 )
@@ -5207,8 +5211,8 @@ mod tests {
     }
 
     fn archive_rejection<T: WireValue>(
-        result: std::result::Result<crab_cell_runtime::client::Committed<T>, InvocationError<T>>,
-    ) -> crab_cell_runtime::client::Committed<T> {
+        result: std::result::Result<cellule_runtime::client::Committed<T>, InvocationError<T>>,
+    ) -> cellule_runtime::client::Committed<T> {
         let Err(InvocationError::Rejected(rejected)) = result else {
             panic!("archived repository accepted a fresh mutation");
         };

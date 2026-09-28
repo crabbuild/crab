@@ -39,6 +39,11 @@ repository = "https://github.com/crabbuild/crab"
 rust-version = "1.97"
 
 [workspace.dependencies]
+cellule-runtime = { git = "https://github.com/crabbuild/cellule", rev = "70c3c218fafc815b951a40d4df1b50bba15b7d4c", default-features = false }
+cellule-app = { git = "https://github.com/crabbuild/cellule", rev = "70c3c218fafc815b951a40d4df1b50bba15b7d4c", default-features = false }
+cellule-host = { git = "https://github.com/crabbuild/cellule", rev = "70c3c218fafc815b951a40d4df1b50bba15b7d4c", default-features = false }
+cellule-ltx = { git = "https://github.com/crabbuild/cellule", rev = "70c3c218fafc815b951a40d4df1b50bba15b7d4c", default-features = false }
+cellule-store = { git = "https://github.com/crabbuild/cellule", rev = "70c3c218fafc815b951a40d4df1b50bba15b7d4c", default-features = false }
 crab-auth = { version = "=0.1.0", path = "crates/crab-auth", default-features = false }
 crab-auth-server = { version = "=1.2.4", path = "crates/crab-auth-server", default-features = false }
 crab-auth-store = { version = "=0.1.0", path = "crates/crab-auth-store", default-features = false }

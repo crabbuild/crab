@@ -9,15 +9,15 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_runtime::cell::actor::CellHandle;
-use crab_cell_runtime::client::CellClient;
-use crab_cell_runtime::identity::{CellId, CellTarget, Digest, SessionId};
-use crab_cell_runtime::peer::{
+use cellule_runtime::cell::actor::CellHandle;
+use cellule_runtime::client::CellClient;
+use cellule_runtime::identity::{CellId, CellTarget, Digest, SessionId};
+use cellule_runtime::peer::{
     EffectPeerClient, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal,
     PeerRoundTrip, PeerSigner, PeerVerifier, VerifiedPeerRequest,
 };
-use crab_cell_runtime::registry::Registry;
-use crab_cell_runtime::{Error, Result};
+use cellule_runtime::registry::Registry;
+use cellule_runtime::{Error, Result};
 use ed25519_dalek::SigningKey;
 use tokio::sync::Notify;
 

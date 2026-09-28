@@ -1891,15 +1891,11 @@ WORKSPACE_DEPENDENCY_POLICY = {
         "dev": {"crab-git", "crab-xet"},
     },
     "crab-write": {"normal": {"crab-coordination", "crab-types", "crab-git", "crab-metadata", "crab-remote-git", "crab-storage", "crab-xet"}},
-    # The browser server is the product composition boundary for Git,
-    # metadata, write, coordination, LFS, and remote-read behavior.
+    # The browser server composes Git and repository behavior with the external
+    # Cellule runtime. New edges to the legacy in-tree Cell crates are forbidden.
     "crab-http-server": {
         "normal": {
-            "crab-cell-app",
-            "crab-cell-host",
-            "crab-cell-peer-http",
             "crab-coordination",
-            "crab-cell-runtime",
             "crab-git",
             "crab-lfs",
             "crab-metadata",
@@ -1909,7 +1905,6 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-write",
             "crab-remote",
         },
-        "dev": {"crab-cell-runtime", "crab-ltx"},
     },
     "crab": {
         "normal": {

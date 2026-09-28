@@ -9,7 +9,7 @@ use std::{
 };
 
 use axum::extract::connect_info::Connected;
-use crab_cell_runtime::Digest as CellDigest;
+use cellule_runtime::Digest as CellDigest;
 use ed25519_dalek::{SigningKey, pkcs8::DecodePrivateKey};
 use rustls::{
     CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig,

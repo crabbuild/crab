@@ -5,38 +5,34 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_app::ApplicationHandle;
-use crab_cell_host::CellNode;
-use crab_cell_runtime::cell::actor::CellHandle;
-use crab_cell_runtime::client::CellClient;
-use crab_cell_runtime::identity::{
-    ApplicationId, CellTarget, Digest, TenantId, partition_for_shard,
-};
-use crab_cell_runtime::primitives::blob::BlobArtifactStore;
-use crab_cell_runtime::primitives::blob::{
-    BlobCondition, BlobMutation, BlobQuery, BlobQueryResult,
-};
-use crab_cell_runtime::primitives::cron::{CronMutation, CronQueryResult};
-use crab_cell_runtime::primitives::effects::{EffectClaimRequest, EffectLeaseOutcome};
-use crab_cell_runtime::primitives::kv::{KvAtomicOutcome, KvAtomicRequest, KvMutation};
-use crab_cell_runtime::primitives::queue::{
+use cellule_app::ApplicationHandle;
+use cellule_host::CellNode;
+use cellule_runtime::cell::actor::CellHandle;
+use cellule_runtime::client::CellClient;
+use cellule_runtime::identity::{ApplicationId, CellTarget, Digest, TenantId, partition_for_shard};
+use cellule_runtime::primitives::blob::BlobArtifactStore;
+use cellule_runtime::primitives::blob::{BlobCondition, BlobMutation, BlobQuery, BlobQueryResult};
+use cellule_runtime::primitives::cron::{CronMutation, CronQueryResult};
+use cellule_runtime::primitives::effects::{EffectClaimRequest, EffectLeaseOutcome};
+use cellule_runtime::primitives::kv::{KvAtomicOutcome, KvAtomicRequest, KvMutation};
+use cellule_runtime::primitives::queue::{
     QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState,
 };
-use crab_cell_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
-use crab_cell_runtime::primitives::workflow::{
+use cellule_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
+use cellule_runtime::primitives::workflow::{
     ActivityRunOutcome, ActivitySupervisor, WorkflowOutcome, WorkflowSignal, WorkflowStatus,
 };
-use crab_cell_runtime::qualification::{
+use cellule_runtime::qualification::{
     QUALIFICATION_CASE_COVERAGE_OPERATIONS, QUALIFICATION_MATRIX_ROWS, QUALIFICATION_PRIMITIVES,
     QualificationCase, QualificationMatrixEntry, QualificationMatrixManifest, QualificationReceipt,
     QualificationRunner,
 };
-use crab_cell_runtime::qualification::{
+use cellule_runtime::qualification::{
     QualificationExecution, QualificationOperation, QualificationOperationExecutor,
     QualificationProfile, QualificationWorkload,
 };
-use crab_cell_runtime::registry::Registry;
-use crab_cell_runtime::{Error, Result};
+use cellule_runtime::registry::Registry;
+use cellule_runtime::{Error, Result};
 use crab_storage::Store;
 use ed25519_dalek::SigningKey;
 
@@ -92,7 +88,9 @@ fn independent_observer(
         .expect("independent qualification client");
     node.application_handle::<fixture::ReferenceApplication>(client, tenant, application)
         .unwrap()
-        .with_blob_artifact_store(BlobArtifactStore::new(store.clone()))
+        .with_blob_artifact_store(BlobArtifactStore::new(cellule_store::Store::new(
+            store.inner().clone(),
+        )))
 }
 
 fn smoke_executor<'n>(
@@ -371,7 +369,7 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                             return Err(Error::Control("public qualification Blob replay differs"));
                         }
                     }
-                    let crab_cell_runtime::primitives::blob::BlobMutationOutcome::Committed {
+                    let cellule_runtime::primitives::blob::BlobMutationOutcome::Committed {
                         etag,
                         size,
                     } = committed.output

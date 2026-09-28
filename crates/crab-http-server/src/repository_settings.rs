@@ -1,6 +1,6 @@
-use crab_cell_runtime::cell::executor::MutationIdentity;
-use crab_cell_runtime::client::{Committed, InvocationError, Observed};
-use crab_cell_runtime::identity::RequestId;
+use cellule_runtime::cell::executor::MutationIdentity;
+use cellule_runtime::client::{Committed, InvocationError, Observed};
+use cellule_runtime::identity::RequestId;
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, sleep};
 use uuid::Uuid;
@@ -174,7 +174,7 @@ async fn route(
                 let wait = delay.min(remaining);
                 tokio::select! {
                     () = server.cancellation.cancelled() => {
-                        return Err(Error::Cell(crab_cell_runtime::Error::RuntimeClosed));
+                        return Err(Error::Cell(cellule_runtime::Error::RuntimeClosed));
                     }
                     () = sleep(wait) => {}
                 }
@@ -189,13 +189,13 @@ async fn route(
     }
 }
 
-fn retryable_route_error(error: &crab_cell_runtime::Error) -> bool {
+fn retryable_route_error(error: &cellule_runtime::Error) -> bool {
     matches!(
         error,
-        crab_cell_runtime::Error::Capacity(_)
-            | crab_cell_runtime::Error::CellNotActive
-            | crab_cell_runtime::Error::CellDraining
-            | crab_cell_runtime::Error::Deadline
+        cellule_runtime::Error::Capacity(_)
+            | cellule_runtime::Error::CellNotActive
+            | cellule_runtime::Error::CellDraining
+            | cellule_runtime::Error::Deadline
     )
 }
 

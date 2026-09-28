@@ -3,9 +3,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_host::CellNode;
-use crab_cell_runtime::cell::executor::MutationIdentity;
-use crab_cell_runtime::identity::RequestId;
+use cellule_host::CellNode;
+use cellule_runtime::cell::executor::MutationIdentity;
+use cellule_runtime::identity::RequestId;
 use crab_storage::{ObjectStoreCredentials, Store, build_explicit_store};
 use object_store::path::Path;
 

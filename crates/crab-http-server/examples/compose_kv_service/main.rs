@@ -14,32 +14,32 @@ use axum::{
     routing::get,
 };
 use bytes::Bytes;
-use crab_cell_app::{ApplicationBuilder, CellApplication, CellType};
-use crab_cell_host::{CellNode, CellNodeBuilder};
-use crab_cell_runtime::NodeLeaseGuard;
-use crab_cell_runtime::cell::{
+use cellule_app::{ApplicationBuilder, CellApplication, CellType};
+use cellule_host::{CellNode, CellNodeBuilder};
+use cellule_ltx::{CellReplica, DiskBudget, Host, Limits};
+use cellule_runtime::NodeLeaseGuard;
+use cellule_runtime::cell::{
     catalog::{CatalogEntry, CatalogRole, CellCatalog},
     executor::MutationIdentity,
     worker::SqlWorkerPool,
 };
-use crab_cell_runtime::client::CellClient;
-use crab_cell_runtime::control::{Owner, authority::CellAuthority};
-use crab_cell_runtime::identity::{
+use cellule_runtime::client::CellClient;
+use cellule_runtime::control::{Owner, authority::CellAuthority};
+use cellule_runtime::identity::{
     ApplicationId, CellTarget, Digest, IncarnationId, NamespaceId, RequestId, SessionId, TenantId,
     partition_for_shard,
 };
-use crab_cell_runtime::ltx::CellStorageLayout;
-use crab_cell_runtime::primitives::kv::{
+use cellule_runtime::ltx::CellStorageLayout;
+use cellule_runtime::primitives::kv::{
     KvAtomicOutcome, KvAtomicRequest, KvModule, KvMutation, KvNamespace, install_kv_schema,
     register_kv,
 };
-use crab_cell_runtime::registry::{
+use cellule_runtime::registry::{
     BuildDescriptor, CellModule, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor,
     OperationDescriptor, RegistryBuilder,
 };
-use crab_cell_runtime::{Error, Result};
-use crab_ltx::{CellReplica, DiskBudget, Host, Limits};
-use crab_storage::{ObjectStoreCredentials, Store, build_explicit_store};
+use cellule_runtime::{Error, Result};
+use cellule_store::{ObjectStoreCredentials, Store, build_explicit_store};
 use object_store::path::Path as ObjectPath;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -167,7 +167,7 @@ async fn main() -> Result<()> {
         true,
     )?;
     let layout = CellStorageLayout::new(
-        store.clone(),
+        cellule_store::Store::new(store.inner().clone()),
         ObjectPath::from(prefix.clone()),
         *APPLICATION.as_bytes(),
     );

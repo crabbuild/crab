@@ -1525,6 +1525,111 @@ dependencies = [
 ]
 
 [[package]]
+name = "cellule-app"
+version = "0.1.0"
+source = "git+https://github.com/crabbuild/cellule?rev=70c3c218fafc815b951a40d4df1b50bba15b7d4c#70c3c218fafc815b951a40d4df1b50bba15b7d4c"
+dependencies = [
+ "blake3",
+ "cellule-runtime",
+]
+
+[[package]]
+name = "cellule-host"
+version = "0.1.0"
+source = "git+https://github.com/crabbuild/cellule?rev=70c3c218fafc815b951a40d4df1b50bba15b7d4c#70c3c218fafc815b951a40d4df1b50bba15b7d4c"
+dependencies = [
+ "cellule-app",
+ "cellule-runtime",
+ "futures-util",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "cellule-ltx"
+version = "0.1.0"
+source = "git+https://github.com/crabbuild/cellule?rev=70c3c218fafc815b951a40d4df1b50bba15b7d4c#70c3c218fafc815b951a40d4df1b50bba15b7d4c"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "bytes",
+ "cellule-store",
+ "crc-fast",
+ "futures-util",
+ "lz4_flex 0.11.6",
+ "object_store",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "cellule-runtime"
+version = "0.1.0"
+source = "git+https://github.com/crabbuild/cellule?rev=70c3c218fafc815b951a40d4df1b50bba15b7d4c#70c3c218fafc815b951a40d4df1b50bba15b7d4c"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "bytes",
+ "cellule-ltx",
+ "cellule-store",
+ "ed25519-dalek",
+ "fs4",
+ "futures-util",
+ "object_store",
+ "prost",
+ "prost-build",
+ "protoc-bin-vendored",
+ "rand 0.9.4",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "cellule-store"
+version = "0.1.0"
+source = "git+https://github.com/crabbuild/cellule?rev=70c3c218fafc815b951a40d4df1b50bba15b7d4c#70c3c218fafc815b951a40d4df1b50bba15b7d4c"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "bytes",
+ "cellule-types",
+ "futures-util",
+ "hyper 1.11.1",
+ "object_store",
+ "rand 0.9.4",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "cellule-types"
+version = "0.1.0"
+source = "git+https://github.com/crabbuild/cellule?rev=70c3c218fafc815b951a40d4df1b50bba15b7d4c#70c3c218fafc815b951a40d4df1b50bba15b7d4c"
+dependencies = [
+ "schemars 0.8.22",
+ "serde",
+]
+
+[[package]]
 name = "cfg-if"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2348,14 +2453,15 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "bytes",
+ "cellule-app",
+ "cellule-host",
+ "cellule-ltx",
+ "cellule-runtime",
+ "cellule-store",
  "clap",
- "crab-cell-app",
- "crab-cell-host",
- "crab-cell-runtime",
  "crab-coordination",
  "crab-git",
  "crab-lfs",
- "crab-ltx",
  "crab-metadata",
  "crab-read",
  "crab-remote",

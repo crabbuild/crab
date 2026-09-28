@@ -9,16 +9,16 @@ use axum::{
     routing::post,
 };
 use bytes::Bytes;
-use crab_cell_runtime::cell::application::ApplicationIdentity;
-use crab_cell_runtime::control::authority::CellAuthority;
-use crab_cell_runtime::control::{Control, Owner};
-use crab_cell_runtime::identity::IncarnationId;
-use crab_cell_runtime::identity::{
+use cellule_runtime::cell::application::ApplicationIdentity;
+use cellule_runtime::control::authority::CellAuthority;
+use cellule_runtime::control::{Control, Owner};
+use cellule_runtime::identity::IncarnationId;
+use cellule_runtime::identity::{
     ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
-use crab_cell_runtime::ltx::CellStorageLayout;
-use crab_cell_runtime::node::{NodeAdvertisement, NodeCapacity, NodeDirectory};
-use crab_cell_runtime::peer::{PeerRoundTrip, wire as peer_wire};
+use cellule_runtime::ltx::CellStorageLayout;
+use cellule_runtime::node::{NodeAdvertisement, NodeCapacity, NodeDirectory};
+use cellule_runtime::peer::{PeerRoundTrip, wire as peer_wire};
 use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path as ObjectPath};
 
@@ -31,8 +31,8 @@ use crate::{
 #[tokio::test]
 async fn enrollment_io_releases_codec_capacity_and_obeys_the_received_budget() {
     use axum::extract::ConnectInfo;
-    use crab_cell_runtime::peer::{PeerOperation, PeerPrincipal, PeerSigner};
-    use crab_cell_runtime::{CellRuntime, SqlWorkerPool};
+    use cellule_runtime::peer::{PeerOperation, PeerPrincipal, PeerSigner};
+    use cellule_runtime::{CellRuntime, SqlWorkerPool};
     use object_store::throttle::{ThrottleConfig, ThrottledStore};
     use std::time::{Duration, Instant};
 
@@ -51,7 +51,7 @@ async fn enrollment_io_releases_codec_capacity_and_obeys_the_received_budget() {
         },
     );
     let layout = CellStorageLayout::new(
-        Store::new(Arc::new(provider)),
+        cellule_store::Store::new(Arc::new(provider)),
         ObjectPath::from("enrollment"),
         [1; 16],
     );
@@ -63,7 +63,7 @@ async fn enrollment_io_releases_codec_capacity_and_obeys_the_received_budget() {
     directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::identity::NodeId::from_bytes([5; 16]),
+                cellule_runtime::identity::NodeId::from_bytes([5; 16]),
                 session,
                 endpoint.clone(),
                 loaded.fleet(),
@@ -76,7 +76,7 @@ async fn enrollment_io_releases_codec_capacity_and_obeys_the_received_budget() {
                 now + 15_000,
                 vec![Digest::from_bytes([6; 32])],
                 vec![1],
-                crab_cell_runtime::node::NodeFailureDomain::default(),
+                cellule_runtime::node::NodeFailureDomain::default(),
                 NodeCapacity::default(),
             )
             .unwrap(),
@@ -110,7 +110,7 @@ async fn enrollment_io_releases_codec_capacity_and_obeys_the_received_budget() {
                     drop(available);
                     match verification.await {
                         Ok(_) => StatusCode::OK,
-                        Err(crate::Error::Cell(crab_cell_runtime::Error::Deadline)) => {
+                        Err(crate::Error::Cell(cellule_runtime::Error::Deadline)) => {
                             StatusCode::GATEWAY_TIMEOUT
                         }
                         Err(error) => panic!("unexpected verification result: {error}"),
@@ -196,7 +196,11 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
     let loaded =
         LoadedPeerTls::load(&files.config(url::Url::parse(&first_endpoint).unwrap())).unwrap();
     let store = Store::new(Arc::new(InMemory::new()));
-    let layout = CellStorageLayout::new(store, ObjectPath::from("root"), [21; 16]);
+    let layout = CellStorageLayout::new(
+        cellule_store::Store::new(store.inner().clone()),
+        ObjectPath::from("root"),
+        [21; 16],
+    );
     let image = Digest::from_bytes([22; 32]);
     let release = Digest::from_bytes([23; 32]);
     let directory = NodeDirectory::new(layout.clone(), loaded.fleet(), image, release);
@@ -210,7 +214,7 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
         directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::identity::NodeId::from_bytes(*session.as_bytes()),
+                    cellule_runtime::identity::NodeId::from_bytes(*session.as_bytes()),
                     session,
                     endpoint,
                     loaded.fleet(),
@@ -223,7 +227,7 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
                     now_ms + 15_000,
                     vec![Digest::from_bytes([26; 32])],
                     vec![1],
-                    crab_cell_runtime::node::NodeFailureDomain::default(),
+                    cellule_runtime::node::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1_000,
                         free_disk_bytes: 2_000,
@@ -294,7 +298,7 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
             }
         }),
     );
-    let expected = crab_cell_runtime::peer::encode_peer_reply(&peer_wire::PeerReply {
+    let expected = cellule_runtime::peer::encode_peer_reply(&peer_wire::PeerReply {
         outcome: Some(peer_wire::peer_reply::Outcome::Error(peer_wire::Error {
             code: peer_wire::error::Code::NotFound as i32,
             outcome: peer_wire::error::Outcome::NotStarted as i32,
@@ -394,7 +398,7 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
         if status == StatusCode::BAD_GATEWAY {
             assert!(matches!(
                 result,
-                Err(crab_cell_runtime::Error::PeerTransportUnknown { .. })
+                Err(cellule_runtime::Error::PeerTransportUnknown { .. })
             ));
         } else {
             assert!(result.is_err());
@@ -425,7 +429,7 @@ async fn failed_refresh_retires_an_expired_owner_observation() {
     )
     .unwrap();
     let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
+        cellule_store::Store::new(Arc::new(InMemory::new())),
         ObjectPath::from("expired-hint"),
         *identity.application().as_bytes(),
     );
@@ -460,7 +464,7 @@ async fn failed_refresh_retires_an_expired_owner_observation() {
     );
     assert!(matches!(
         round_trip.send(target.clone(), vec![1, 2, 3], 5_000).await,
-        Err(crab_cell_runtime::Error::CellNotActive)
+        Err(cellule_runtime::Error::CellNotActive)
     ));
     assert!(!round_trip.has_owner_hint(target.cell_id()));
 }

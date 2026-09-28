@@ -20,10 +20,10 @@ impl RepositoryCellRouter {
         &self,
         repository: Uuid,
         principal: &Identity,
-        local: &crab_cell_host::read_replicas::ReadReplicaManager,
+        local: &cellule_host::read_replicas::ReadReplicaManager,
         minimum: Option<Receipt>,
         input: Q::Input,
-    ) -> crab_cell_runtime::Result<(Observed<Q::Output>, NodeId)> {
+    ) -> cellule_runtime::Result<(Observed<Q::Output>, NodeId)> {
         let target = self.repository_target(repository)?;
         let client = ReplicaPeerClient::new(
             Arc::clone(&self.registry),
@@ -44,13 +44,13 @@ impl RepositoryCellRouter {
     pub(crate) async fn read_replica_status(
         &self,
         target: &CellTarget,
-        local: &crab_cell_host::read_replicas::ReadReplicaManager,
-    ) -> crab_cell_runtime::Result<ReadReplicaStatus> {
+        local: &cellule_host::read_replicas::ReadReplicaManager,
+    ) -> cellule_runtime::Result<ReadReplicaStatus> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let initial = tokio::time::timeout_at(deadline, self.authority.load(target.cell_id()))
             .await
-            .map_err(|_| crab_cell_runtime::Error::Deadline)??
-            .ok_or(crab_cell_runtime::Error::Fenced)?;
+            .map_err(|_| cellule_runtime::Error::Deadline)??
+            .ok_or(cellule_runtime::Error::Fenced)?;
         if initial.value().state != ControlState::Serving
             || initial.value().recovery.is_some()
             || initial.value().owner.is_none()
@@ -66,7 +66,7 @@ impl RepositoryCellRouter {
         let (expected, selected) =
             tokio::time::timeout_at(deadline, self.replica_routing.selected(target))
                 .await
-                .map_err(|_| crab_cell_runtime::Error::Deadline)??;
+                .map_err(|_| cellule_runtime::Error::Deadline)??;
         let mut status = ReadReplicaStatus {
             owner_serving: true,
             selected_readers: selected.len(),
@@ -98,8 +98,8 @@ impl RepositoryCellRouter {
         }
         let current = tokio::time::timeout_at(deadline, self.authority.load(target.cell_id()))
             .await
-            .map_err(|_| crab_cell_runtime::Error::Deadline)??
-            .ok_or(crab_cell_runtime::Error::Fenced)?;
+            .map_err(|_| cellule_runtime::Error::Deadline)??
+            .ok_or(cellule_runtime::Error::Fenced)?;
         let initial = initial.value();
         let current = current.value();
         if current.state != ControlState::Serving
@@ -110,7 +110,7 @@ impl RepositoryCellRouter {
             || current.code != expected.code
             || current.schema != expected.schema
         {
-            return Err(crab_cell_runtime::Error::Fenced);
+            return Err(cellule_runtime::Error::Fenced);
         }
         Ok(status)
     }
@@ -120,8 +120,8 @@ impl RepositoryCellRouter {
         target: &CellTarget,
         node: NodeAdvertisement,
         expected: CellDescription,
-        local: &crab_cell_host::read_replicas::ReadReplicaManager,
-    ) -> crab_cell_runtime::Result<(Receipt, bool)> {
+        local: &cellule_host::read_replicas::ReadReplicaManager,
+    ) -> cellule_runtime::Result<(Receipt, bool)> {
         if node.session() == self.peer.owner.session {
             return local.status(target.clone()).await;
         }
@@ -144,12 +144,12 @@ impl RepositoryCellRouter {
         )
     }
 
-    fn read_recruiter(&self) -> crate::Result<crab_cell_host::read_replicas::ReadReplicaRecruiter> {
+    fn read_recruiter(&self) -> crate::Result<cellule_host::read_replicas::ReadReplicaRecruiter> {
         let readers = self
             .read_replicas
             .clone()
-            .ok_or(crab_cell_runtime::Error::ReplicaUnavailable)?;
-        Ok(crab_cell_host::read_replicas::ReadReplicaRecruiter::new(
+            .ok_or(cellule_runtime::Error::ReplicaUnavailable)?;
+        Ok(cellule_host::read_replicas::ReadReplicaRecruiter::new(
             readers,
             self.identity,
             self.read_replica_peer(),
@@ -161,7 +161,7 @@ impl RepositoryCellRouter {
             || target.application() != self.identity.application()
             || target.namespace() != REPOSITORY_NAMESPACE
         {
-            return Err(crab_cell_runtime::Error::PeerAuthorization(
+            return Err(cellule_runtime::Error::PeerAuthorization(
                 "read-replica target is outside the repository application",
             )
             .into());
@@ -195,21 +195,21 @@ impl RepositoryCellRouter {
             }),
         )?;
         let reply = self.peer.round_trip.send(target, request, 30_000).await?;
-        let reply = crab_cell_runtime::peer::decode_peer_reply(&reply)?;
+        let reply = cellule_runtime::peer::decode_peer_reply(&reply)?;
         match reply.outcome {
             Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
                 receipt: None,
                 result: Some(peer_wire::read_reply::Result::ReplicaReconciled(true)),
             })) => Ok(()),
             _ => Err(
-                crab_cell_runtime::Error::Peer("owner rejected read-replica reconciliation").into(),
+                cellule_runtime::Error::Peer("owner rejected read-replica reconciliation").into(),
             ),
         }
     }
 
     pub(crate) fn with_read_replicas(
         mut self,
-        readers: Option<crab_cell_host::read_replicas::ReadReplicaManager>,
+        readers: Option<cellule_host::read_replicas::ReadReplicaManager>,
     ) -> Self {
         self.read_replicas = readers;
         self
@@ -246,7 +246,7 @@ impl RepositoryCellRouter {
                     return Ok(Some(node));
                 }
             }
-            Ok::<_, crab_cell_runtime::Error>(None)
+            Ok::<_, cellule_runtime::Error>(None)
         };
         match tokio::time::timeout(Duration::from_secs(5), probe).await {
             Ok(Ok(node)) => Ok(node),

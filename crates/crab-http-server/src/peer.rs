@@ -14,27 +14,27 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use crab_cell_host::{NodeDurabilityProvider, NodeDurabilityRotation};
-use crab_cell_runtime::Error as CellError;
-use crab_cell_runtime::cell::actor::CellHandle;
-use crab_cell_runtime::cell::actor::CellRuntime;
-use crab_cell_runtime::cell::application::ApplicationIdentity;
-use crab_cell_runtime::cell::catalog::CellCatalog;
-use crab_cell_runtime::control::authority::CellAuthority;
-use crab_cell_runtime::identity::NodeId;
-use crab_cell_runtime::identity::{CellTarget, Digest, SessionId};
-use crab_cell_runtime::ltx::CellStorageLayout;
-use crab_cell_runtime::node::durability::NodeLogAuthority;
-use crab_cell_runtime::node::{
+use cellule_host::{NodeDurabilityProvider, NodeDurabilityRotation};
+use cellule_runtime::Error as CellError;
+use cellule_runtime::cell::actor::CellHandle;
+use cellule_runtime::cell::actor::CellRuntime;
+use cellule_runtime::cell::application::ApplicationIdentity;
+use cellule_runtime::cell::catalog::CellCatalog;
+use cellule_runtime::control::authority::CellAuthority;
+use cellule_runtime::identity::NodeId;
+use cellule_runtime::identity::{CellTarget, Digest, SessionId};
+use cellule_runtime::ltx::CellStorageLayout;
+use cellule_runtime::node::durability::NodeLogAuthority;
+use cellule_runtime::node::{
     NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain, NodePlacementCapacity,
     VersionedNodeAdvertisement,
 };
-use crab_cell_runtime::peer::{
+use cellule_runtime::peer::{
     PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerRoundTrip, VerifiedPeerRequest,
     encode_peer_reply, wire as peer_wire,
 };
-use crab_cell_runtime::recovery::release::{ReleaseState, ReleaseStore};
-use crab_cell_runtime::registry::Registry;
+use cellule_runtime::recovery::release::{ReleaseState, ReleaseStore};
+use cellule_runtime::registry::Registry;
 use ed25519_dalek::SigningKey;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -58,7 +58,7 @@ const HEARTBEAT_RETRY: Duration = Duration::from_millis(500);
 
 fn reserve_peer_codec(
     runtime: &CellRuntime,
-) -> Option<crab_cell_runtime::cell::actor::NodeJobReservation> {
+) -> Option<cellule_runtime::cell::actor::NodeJobReservation> {
     runtime.try_reserve_worker_job().ok().flatten()
 }
 
@@ -73,7 +73,7 @@ async fn verify_forwarded_request(
         let _codec = runtime
             .reserve_worker_job(started + Duration::from_secs(60))
             .await?;
-        crab_cell_runtime::peer::UnverifiedPeerRequest::decode(body)?
+        cellule_runtime::peer::UnverifiedPeerRequest::decode(body)?
     };
     let deadline = started + Duration::from_millis(u64::from(request.remaining_ms()));
     if Instant::now() >= deadline {
@@ -103,7 +103,7 @@ pub(crate) struct PeerReceiver {
     releases: Arc<ReleaseStore>,
     resolver: LocalCellResolver,
     round_trip: Arc<dyn PeerRoundTrip>,
-    read_replicas: Option<crab_cell_host::read_replicas::ReadReplicaManager>,
+    read_replicas: Option<cellule_host::read_replicas::ReadReplicaManager>,
 }
 
 impl PeerReceiver {
@@ -115,7 +115,7 @@ impl PeerReceiver {
         releases: Arc<ReleaseStore>,
         resolver: LocalCellResolver,
         round_trip: Arc<dyn PeerRoundTrip>,
-        read_replicas: Option<crab_cell_host::read_replicas::ReadReplicaManager>,
+        read_replicas: Option<cellule_host::read_replicas::ReadReplicaManager>,
     ) -> Self {
         Self {
             node,
@@ -129,9 +129,7 @@ impl PeerReceiver {
         }
     }
 
-    pub(crate) fn read_replicas(
-        &self,
-    ) -> Option<crab_cell_host::read_replicas::ReadReplicaManager> {
+    pub(crate) fn read_replicas(&self) -> Option<cellule_host::read_replicas::ReadReplicaManager> {
         self.read_replicas.clone()
     }
 }
@@ -151,12 +149,12 @@ pub(crate) struct NodePublisher {
     data_dir: PathBuf,
     local_disk_limit_bytes: u64,
     scheduler: crate::cells::SchedulerStatus,
-    follower_store: Option<crab_cell_runtime::FollowerStore>,
+    follower_store: Option<cellule_runtime::FollowerStore>,
     runtime: Option<CellRuntime>,
-    telemetry: crab_cell_runtime::fleet::telemetry::CellTelemetryHandle,
+    telemetry: cellule_runtime::fleet::telemetry::CellTelemetryHandle,
     metrics: Option<crate::metrics::Metrics>,
-    node_log_transport: OnceLock<Arc<dyn crab_cell_runtime::node::log_transport::NodeLogTransport>>,
-    lease: OnceLock<crab_cell_runtime::NodeLeaseGuard>,
+    node_log_transport: OnceLock<Arc<dyn cellule_runtime::node::log_transport::NodeLogTransport>>,
+    lease: OnceLock<cellule_runtime::NodeLeaseGuard>,
     observed: OnceLock<tokio::sync::Mutex<VersionedNodeAdvertisement>>,
 }
 
@@ -215,7 +213,7 @@ impl NodePublisher {
             scheduler,
             follower_store: None,
             runtime: None,
-            telemetry: crab_cell_runtime::fleet::telemetry::CellTelemetryHandle::default(),
+            telemetry: cellule_runtime::fleet::telemetry::CellTelemetryHandle::default(),
             metrics: None,
             node_log_transport: OnceLock::new(),
             lease: OnceLock::new(),
@@ -225,7 +223,7 @@ impl NodePublisher {
 
     pub(crate) fn with_follower_store(
         mut self,
-        follower_store: crab_cell_runtime::FollowerStore,
+        follower_store: cellule_runtime::FollowerStore,
     ) -> Self {
         self.follower_store = Some(follower_store);
         self
@@ -238,7 +236,7 @@ impl NodePublisher {
 
     pub(crate) fn with_telemetry(
         mut self,
-        telemetry: crab_cell_runtime::fleet::telemetry::CellTelemetryHandle,
+        telemetry: cellule_runtime::fleet::telemetry::CellTelemetryHandle,
     ) -> Self {
         self.telemetry = telemetry;
         self
@@ -251,7 +249,7 @@ impl NodePublisher {
 
     pub(crate) fn install_node_log_transport(
         &self,
-        transport: Arc<dyn crab_cell_runtime::node::log_transport::NodeLogTransport>,
+        transport: Arc<dyn cellule_runtime::node::log_transport::NodeLogTransport>,
     ) -> crate::Result<()> {
         self.node_log_transport
             .set(transport)
@@ -272,7 +270,7 @@ impl NodePublisher {
                 now_ms,
             )
             .await?;
-        let lease = crab_cell_runtime::NodeLeaseGuard::new(
+        let lease = cellule_runtime::NodeLeaseGuard::new(
             now_ms,
             published.advertisement().expires_at_ms(),
         )?;
@@ -288,7 +286,7 @@ impl NodePublisher {
         Ok(published)
     }
 
-    pub(crate) fn lease_guard(&self) -> crate::Result<crab_cell_runtime::NodeLeaseGuard> {
+    pub(crate) fn lease_guard(&self) -> crate::Result<cellule_runtime::NodeLeaseGuard> {
         self.lease
             .get()
             .cloned()
@@ -311,11 +309,11 @@ impl NodePublisher {
 
     pub(crate) async fn recruit_node_durability_config(
         self: &Arc<Self>,
-        transport: Arc<dyn crab_cell_runtime::node::log_transport::NodeLogTransport>,
-        limits: crab_cell_runtime::ltx::Limits,
+        transport: Arc<dyn cellule_runtime::node::log_transport::NodeLogTransport>,
+        limits: cellule_runtime::ltx::Limits,
         required_follower_bytes: u64,
         live_node_limit: usize,
-    ) -> crate::Result<Option<crab_cell_runtime::NodeDurabilityConfig>> {
+    ) -> crate::Result<Option<cellule_runtime::NodeDurabilityConfig>> {
         let now_ms = now_ms()?;
         let mut observed = self.observed().map_err(crate::Error::from)?.lock().await;
         if observed.advertisement().log().is_none() {
@@ -343,7 +341,7 @@ impl NodePublisher {
             .log()
             .ok_or(CellError::Node("enrolled node session lost its log"))?;
         let authority: Arc<dyn NodeLogAuthority> = self.clone();
-        let config = crab_cell_runtime::NodeDurabilityConfig::new(
+        let config = cellule_runtime::NodeDurabilityConfig::new(
             self.session,
             self.node,
             log.epoch(),
@@ -454,9 +452,7 @@ impl NodePublisher {
         }
     }
 
-    fn observed(
-        &self,
-    ) -> crab_cell_runtime::Result<&tokio::sync::Mutex<VersionedNodeAdvertisement>> {
+    fn observed(&self) -> cellule_runtime::Result<&tokio::sync::Mutex<VersionedNodeAdvertisement>> {
         self.observed
             .get()
             .ok_or(CellError::Node("node advertisement is not initialized"))
@@ -486,7 +482,7 @@ impl NodePublisher {
                 log_protocol: self
                     .follower_store
                     .as_ref()
-                    .map_or(0, |_| crab_cell_runtime::node::NODE_LOG_PROTOCOL_VERSION),
+                    .map_or(0, |_| cellule_runtime::node::NODE_LOG_PROTOCOL_VERSION),
             }
         } else {
             node_capacity(
@@ -551,7 +547,7 @@ impl NodePublisher {
 fn constrain_capacity_to_runtime(
     capacity: &mut NodeCapacity,
     resources: LocalResources,
-    runtime: crab_cell_runtime::CellRuntimeStats,
+    runtime: cellule_runtime::CellRuntimeStats,
 ) {
     let reserved_memory = u64::try_from(runtime.resident_bytes())
         .unwrap_or(u64::MAX)
@@ -581,7 +577,7 @@ impl NodeLogAuthority for NodePublisher {
     fn activate<'a>(
         &'a self,
         log_epoch: u64,
-    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+    ) -> futures_util::future::BoxFuture<'a, cellule_runtime::Result<()>> {
         Box::pin(async move {
             let now_ms = now_ms().map_err(|_| CellError::Node("node-log time is unavailable"))?;
             let mut observed = self.observed()?.lock().await;
@@ -604,7 +600,7 @@ impl NodeLogAuthority for NodePublisher {
         &'a self,
         log_epoch: u64,
         tiered_through: u64,
-    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+    ) -> futures_util::future::BoxFuture<'a, cellule_runtime::Result<()>> {
         Box::pin(async move {
             let now_ms = now_ms().map_err(|_| CellError::Node("node-log time is unavailable"))?;
             let mut observed = self.observed()?.lock().await;
@@ -628,8 +624,8 @@ impl NodeLogAuthority for NodePublisher {
 
     fn close<'a>(
         &'a self,
-        barrier: &'a crab_cell_runtime::node::log::NodeLogRotationBarrier,
-    ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<()>> {
+        barrier: &'a cellule_runtime::node::log::NodeLogRotationBarrier,
+    ) -> futures_util::future::BoxFuture<'a, cellule_runtime::Result<()>> {
         Box::pin(async move {
             let now_ms = now_ms().map_err(|_| CellError::Node("node-log time is unavailable"))?;
             let mut observed = self.observed()?.lock().await;
@@ -649,14 +645,14 @@ impl NodeLogAuthority for NodePublisher {
 impl NodeDurabilityProvider for NodePublisher {
     fn recruit(
         self: Arc<Self>,
-        limits: crab_cell_runtime::ltx::Limits,
+        limits: cellule_runtime::ltx::Limits,
         required_follower_bytes: u64,
         live_node_limit: usize,
     ) -> Pin<
         Box<
             dyn Future<
-                    Output = crab_cell_host::FacilityResult<
-                        Option<crab_cell_runtime::NodeDurabilityConfig>,
+                    Output = cellule_host::FacilityResult<
+                        Option<cellule_runtime::NodeDurabilityConfig>,
                     >,
                 > + Send,
         >,
@@ -709,7 +705,7 @@ impl LocalCellResolver {
         layout: CellStorageLayout,
         identity: ApplicationIdentity,
         runtime: CellRuntime,
-        telemetry: crab_cell_runtime::fleet::telemetry::CellTelemetryHandle,
+        telemetry: cellule_runtime::fleet::telemetry::CellTelemetryHandle,
     ) -> Self {
         Self {
             identity,
@@ -728,7 +724,7 @@ impl PeerCellResolver for LocalCellResolver {
     fn resolve(
         &self,
         target: CellTarget,
-    ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<CellHandle>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Future<Output = cellule_runtime::Result<CellHandle>> + Send + 'static>> {
         let resolver = self.clone();
         Box::pin(async move {
             if target.tenant() != resolver.identity.tenant()
@@ -761,7 +757,7 @@ impl PeerCellResolver for LocalCellResolver {
 }
 
 impl PeerAuthorizer for Server {
-    fn authorize(&self, request: &VerifiedPeerRequest) -> crab_cell_runtime::Result<()> {
+    fn authorize(&self, request: &VerifiedPeerRequest) -> cellule_runtime::Result<()> {
         let receiver = self.peer_receiver().ok_or_else(denied)?;
         if matches!(
             request.operation(),
@@ -819,7 +815,7 @@ async fn authorize_forwarded_request(
 fn authorize_runtime_effect(
     fleet: Digest,
     request: &VerifiedPeerRequest,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     let action = match request.operation() {
         Some(peer_wire::peer_request::Operation::DeliverEffect(_)) => "cell.effect.deliver",
         Some(peer_wire::peer_request::Operation::ResolveEffect(_)) => "cell.effect.resolve",
@@ -832,7 +828,7 @@ fn authorize_runtime_action(
     fleet: Digest,
     request: &VerifiedPeerRequest,
     action: &'static str,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     let principal = request.principal();
     if principal.issuer != format!("crab-runtime:{}", encode_digest(fleet))
         || principal.subject != encode_session(request.origin_session())
@@ -1352,7 +1348,7 @@ async fn receiver_is_current(receiver: &PeerReceiver, now_ms: i64) -> bool {
     current.advertisement().node() == receiver.node
 }
 
-fn follower_receipt_response(receipt: crab_cell_runtime::follower::FollowerReceipt) -> Response {
+fn follower_receipt_response(receipt: cellule_runtime::follower::FollowerReceipt) -> Response {
     (
         StatusCode::OK,
         [(header::CACHE_CONTROL, "no-store")],
@@ -1365,7 +1361,7 @@ fn follower_receipt_response(receipt: crab_cell_runtime::follower::FollowerRecei
 }
 
 fn encode_tail_page(
-    page: crab_cell_runtime::follower::FollowerTailPage,
+    page: cellule_runtime::follower::FollowerTailPage,
 ) -> std::result::Result<Vec<u8>, ()> {
     if page.frames.len() > NODE_LOG_TAIL_PAGE_FRAMES {
         return Err(());
@@ -1470,7 +1466,7 @@ fn now_ms() -> crate::Result<i64> {
         .map_err(|_| crate::Error::Config("system clock exceeds the Cell time range"))
 }
 
-fn remaining_timeout(started: Instant, original_ms: u32) -> crab_cell_runtime::Result<u32> {
+fn remaining_timeout(started: Instant, original_ms: u32) -> cellule_runtime::Result<u32> {
     let elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     original_ms
         .checked_sub(elapsed_ms)
@@ -1481,7 +1477,7 @@ fn remaining_timeout(started: Instant, original_ms: u32) -> crab_cell_runtime::R
 fn node_capacity(
     data_dir: &Path,
     local_disk_limit_bytes: u64,
-    follower_store: Option<&crab_cell_runtime::FollowerStore>,
+    follower_store: Option<&cellule_runtime::FollowerStore>,
 ) -> crate::Result<NodeCapacity> {
     let mut system = sysinfo::System::new();
     system.refresh_memory();
@@ -1495,15 +1491,15 @@ fn node_capacity(
         free_memory_bytes,
         free_disk_bytes,
         follower_free_bytes: follower_store
-            .map(crab_cell_runtime::FollowerStore::available_bytes)
+            .map(cellule_runtime::FollowerStore::available_bytes)
             .unwrap_or(0)
             .min(free_disk_bytes),
         follower_retained_bytes: follower_store
-            .map(crab_cell_runtime::FollowerStore::retained_bytes)
+            .map(cellule_runtime::FollowerStore::retained_bytes)
             .unwrap_or(0),
         job_credits,
         log_protocol: follower_store
-            .map_or(0, |_| crab_cell_runtime::node::NODE_LOG_PROTOCOL_VERSION),
+            .map_or(0, |_| cellule_runtime::node::NODE_LOG_PROTOCOL_VERSION),
     })
 }
 
@@ -1800,7 +1796,7 @@ fn authorize_repository(
     repository: &RepositoryConfig,
     issuer: Option<&str>,
     request: &VerifiedPeerRequest,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     let principal = request.principal();
     let access = match issuer {
         Some(expected) if principal.issuer == expected => repository
@@ -1923,10 +1919,10 @@ const fn denied() -> CellError {
 
 #[cfg(test)]
 mod tests {
-    use crab_cell_runtime::identity::RequestId;
-    use crab_cell_runtime::identity::SessionId;
-    use crab_cell_runtime::ltx::CellStorageLayout;
-    use crab_cell_runtime::peer::{PeerOperation, PeerPrincipal, PeerSigner, PeerVerifier};
+    use cellule_runtime::identity::RequestId;
+    use cellule_runtime::identity::SessionId;
+    use cellule_runtime::ltx::CellStorageLayout;
+    use cellule_runtime::peer::{PeerOperation, PeerPrincipal, PeerSigner, PeerVerifier};
     use crab_storage::Store;
     use ed25519_dalek::SigningKey;
     use object_store::{memory::InMemory, path::Path as ObjectPath};
@@ -1957,7 +1953,7 @@ mod tests {
         trailing.extend_from_slice(b"bad");
         assert!(decode_append_batch(Bytes::from(trailing)).is_err());
         assert!(
-            encode_tail_page(crab_cell_runtime::follower::FollowerTailPage {
+            encode_tail_page(cellule_runtime::follower::FollowerTailPage {
                 frames: vec![Bytes::from_static(b"frame"); NODE_LOG_TAIL_PAGE_FRAMES + 1],
                 next_sequence: None,
             })
@@ -1972,8 +1968,8 @@ mod tests {
 
     #[tokio::test]
     async fn peer_codec_reservation_uses_primitive_job_budget() {
-        let runtime = crab_cell_runtime::CellRuntime::new(
-            crab_cell_runtime::SqlWorkerPool::new(1, 1).unwrap(),
+        let runtime = cellule_runtime::CellRuntime::new(
+            cellule_runtime::SqlWorkerPool::new(1, 1).unwrap(),
             1_024,
             SessionId::from_bytes([2; 16]),
         )
@@ -2054,12 +2050,12 @@ mod tests {
     async fn placement_capacity_respects_runtime_reservations() {
         // Host::default shares one process-wide disk budget; this fixture must
         // not cross-charge unrelated tests that run in parallel.
-        let disk_budget = crab_ltx::DiskBudget::new(1_000);
-        let runtime = crab_cell_runtime::CellRuntime::new_with_replica_host(
-            crab_cell_runtime::SqlWorkerPool::new(2, 4).unwrap(),
+        let disk_budget = cellule_ltx::DiskBudget::new(1_000);
+        let runtime = cellule_runtime::CellRuntime::new_with_replica_host(
+            cellule_runtime::SqlWorkerPool::new(2, 4).unwrap(),
             2_048,
             SessionId::from_bytes([21; 16]),
-            crab_ltx::Host::default().with_local_disk_budget(disk_budget.clone()),
+            cellule_ltx::Host::default().with_local_disk_budget(disk_budget.clone()),
         )
         .unwrap();
         let disk = disk_budget.try_reserve(100).unwrap();
@@ -2228,8 +2224,8 @@ mod tests {
             Digest::from_bytes([3; 32]),
             SigningKey::from_bytes(&[1; 32]),
         );
-        let source_cell = crab_cell_runtime::CellId::from_bytes([20; 32]);
-        let source_incarnation = crab_cell_runtime::identity::IncarnationId::from_bytes([21; 16]);
+        let source_cell = cellule_runtime::CellId::from_bytes([20; 32]);
+        let source_incarnation = cellule_runtime::identity::IncarnationId::from_bytes([21; 16]);
         let source_sequence = 4;
         let ordinal = 1;
         let encoded = signer
@@ -2251,7 +2247,7 @@ mod tests {
                     }),
                     destination_incarnation: vec![8; 16],
                     identity: Some(peer_wire::EffectIdentity {
-                        effect_id: crab_cell_runtime::primitives::effects::effect_id(
+                        effect_id: cellule_runtime::primitives::effects::effect_id(
                             source_cell,
                             source_incarnation,
                             source_sequence,
@@ -2518,7 +2514,11 @@ mod tests {
     #[tokio::test]
     async fn node_publisher_creates_one_local_session_and_publishes_before_serving() {
         let store = Store::new(Arc::new(InMemory::new()));
-        let layout = CellStorageLayout::new(store, ObjectPath::from("root"), [9; 16]);
+        let layout = CellStorageLayout::new(
+            cellule_store::Store::new(store.inner().clone()),
+            ObjectPath::from("root"),
+            [9; 16],
+        );
         let fleet = Digest::from_bytes([10; 32]);
         let image = Digest::from_bytes([11; 32]);
         let release = Digest::from_bytes([12; 32]);
@@ -2542,17 +2542,18 @@ mod tests {
             crate::cells::SchedulerStatus::new(now_ms().unwrap()).unwrap(),
         )
         .unwrap();
-        let follower_store = crab_cell_runtime::FollowerStore::open(
+        let follower_store = cellule_runtime::FollowerStore::open(
             data_dir.path().to_owned(),
-            crab_ltx::Limits::default(),
-            crab_ltx::DiskBudget::new(1 << 20),
+            cellule_ltx::Limits::default(),
+            cellule_ltx::DiskBudget::new(1 << 20),
         )
         .unwrap();
-        let runtime = crab_cell_runtime::CellRuntime::new_with_replica_host(
-            crab_cell_runtime::SqlWorkerPool::new(2, 4).unwrap(),
+        let runtime = cellule_runtime::CellRuntime::new_with_replica_host(
+            cellule_runtime::SqlWorkerPool::new(2, 4).unwrap(),
             2_048,
             session,
-            crab_ltx::Host::default().with_local_disk_budget(crab_ltx::DiskBudget::new(1 << 20)),
+            cellule_ltx::Host::default()
+                .with_local_disk_budget(cellule_ltx::DiskBudget::new(1 << 20)),
         )
         .unwrap();
         let retained = runtime.try_reserve_node_bytes(512).unwrap();
@@ -2568,7 +2569,7 @@ mod tests {
         publisher.lease_guard().unwrap().check().unwrap();
         assert_eq!(
             published.advertisement().capacity().log_protocol,
-            crab_cell_runtime::node::NODE_LOG_PROTOCOL_VERSION
+            cellule_runtime::node::NODE_LOG_PROTOCOL_VERSION
         );
         assert!(published.advertisement().capacity().follower_free_bytes > 0);
         let resources = publisher.local_resources().unwrap();
@@ -2595,7 +2596,7 @@ mod tests {
         let draining = publisher.advertisement(2, now_ms().unwrap(), true).unwrap();
         assert!(draining.has_signed_placement());
         assert!(
-            crab_cell_runtime::fleet::placement::PlacementObservation::from_signed_advertisement(
+            cellule_runtime::fleet::placement::PlacementObservation::from_signed_advertisement(
                 &draining,
                 now_ms().unwrap(),
                 false,
@@ -2611,7 +2612,7 @@ mod tests {
                 follower_free_bytes: 0,
                 follower_retained_bytes: 0,
                 job_credits: 0,
-                log_protocol: crab_cell_runtime::node::NODE_LOG_PROTOCOL_VERSION,
+                log_protocol: cellule_runtime::node::NODE_LOG_PROTOCOL_VERSION,
             }
         );
         let loaded = directory
@@ -2623,10 +2624,10 @@ mod tests {
         assert_eq!(loaded.advertisement(), published.advertisement());
         assert_eq!(loaded.advertisement().node(), publisher.node());
         let follower_dir = TempDir::new().unwrap();
-        let follower_store = crab_cell_runtime::FollowerStore::open(
+        let follower_store = cellule_runtime::FollowerStore::open(
             follower_dir.path().to_owned(),
-            crab_ltx::Limits::default(),
-            crab_ltx::DiskBudget::new(1 << 20),
+            cellule_ltx::Limits::default(),
+            cellule_ltx::DiskBudget::new(1 << 20),
         )
         .unwrap();
         let follower = NodePublisher::new(
@@ -2647,8 +2648,8 @@ mod tests {
         .unwrap()
         .with_follower_store(follower_store.clone());
         follower.publish_initial().await.unwrap();
-        let transport: Arc<dyn crab_cell_runtime::node::log_transport::NodeLogTransport> = Arc::new(
-            crab_cell_runtime::node::log_transport::LocalFollowerTransport::new(
+        let transport: Arc<dyn cellule_runtime::node::log_transport::NodeLogTransport> = Arc::new(
+            cellule_runtime::node::log_transport::LocalFollowerTransport::new(
                 follower.node(),
                 follower_store,
             ),
@@ -2656,7 +2657,7 @@ mod tests {
         let first = publisher
             .recruit_node_durability_config(
                 Arc::clone(&transport),
-                crab_ltx::Limits::default(),
+                cellule_ltx::Limits::default(),
                 1,
                 10,
             )
@@ -2676,7 +2677,7 @@ mod tests {
             .epoch();
         first.shutdown().await.unwrap();
         let second = publisher
-            .recruit_node_durability_config(transport, crab_ltx::Limits::default(), 1, 10)
+            .recruit_node_durability_config(transport, cellule_ltx::Limits::default(), 1, 10)
             .await
             .unwrap()
             .unwrap()

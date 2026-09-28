@@ -26,7 +26,7 @@ pub(crate) enum Error {
 #[derive(Clone)]
 pub(crate) struct LocalStaging {
     root: Arc<PathBuf>,
-    budget: crab_cell_runtime::ltx::DiskBudget,
+    budget: cellule_runtime::ltx::DiskBudget,
     disk_reserve_bytes: u64,
     restart_inventory: Option<Arc<RestartDiskInventory>>,
     #[cfg(test)]
@@ -35,7 +35,7 @@ pub(crate) struct LocalStaging {
 
 #[derive(Debug)]
 struct RestartDiskInventory {
-    _reservation: crab_cell_runtime::ltx::DiskReservation,
+    _reservation: cellule_runtime::ltx::DiskReservation,
     bytes: u64,
     sessions: usize,
 }
@@ -55,7 +55,7 @@ impl RestartDiskInventory {
 impl LocalStaging {
     pub(crate) fn new(
         root: PathBuf,
-        budget: crab_cell_runtime::ltx::DiskBudget,
+        budget: cellule_runtime::ltx::DiskBudget,
         disk_reserve_bytes: u64,
     ) -> Result<Self, Error> {
         if budget.capacity() == 0 {
@@ -74,7 +74,7 @@ impl LocalStaging {
 
     pub(crate) fn new_with_restart_inventory(
         root: PathBuf,
-        budget: crab_cell_runtime::ltx::DiskBudget,
+        budget: cellule_runtime::ltx::DiskBudget,
         disk_reserve_bytes: u64,
         data_dir: &Path,
         current_session: &Path,
@@ -95,7 +95,7 @@ impl LocalStaging {
         let root = owner.path().join("staging");
         let mut staging = Self::new(
             root,
-            crab_cell_runtime::ltx::DiskBudget::new(8 * 1024 * MIB),
+            cellule_runtime::ltx::DiskBudget::new(8 * 1024 * MIB),
             0,
         )
         .unwrap();
@@ -185,7 +185,7 @@ impl LocalStaging {
 fn reserve_restart_inventory(
     data_dir: &Path,
     current_session: &Path,
-    budget: crab_cell_runtime::ltx::DiskBudget,
+    budget: cellule_runtime::ltx::DiskBudget,
 ) -> Result<RestartDiskInventory, Error> {
     let sessions = data_dir.join("sessions");
     let current_name = current_session
@@ -265,7 +265,7 @@ fn invalid_inventory(message: &'static str) -> io::Error {
 
 pub(crate) struct StagingDirectory {
     directory: tempfile::TempDir,
-    _reservation: crab_cell_runtime::ltx::DiskReservation,
+    _reservation: cellule_runtime::ltx::DiskReservation,
 }
 
 impl StagingDirectory {
@@ -294,7 +294,7 @@ mod tests {
         .unwrap();
         std::fs::write(current.join("new.sqlite"), [0_u8; 101]).unwrap();
 
-        let budget = crab_cell_runtime::ltx::DiskBudget::new(40);
+        let budget = cellule_runtime::ltx::DiskBudget::new(40);
         let inventory = reserve_restart_inventory(data.path(), &current, budget.clone()).unwrap();
 
         assert_eq!(inventory.bytes(), 40);
@@ -314,7 +314,7 @@ mod tests {
         std::fs::write(cell.join(".crab-compaction-source-indexes"), [0_u8; 13]).unwrap();
         std::fs::write(cell.join(".crab-recovery-bundle"), [0_u8; 17]).unwrap();
 
-        let budget = crab_cell_runtime::ltx::DiskBudget::new(30);
+        let budget = cellule_runtime::ltx::DiskBudget::new(30);
         let inventory = reserve_restart_inventory(data.path(), &current, budget.clone()).unwrap();
 
         assert_eq!(inventory.bytes(), 30);
@@ -332,7 +332,7 @@ mod tests {
         std::fs::create_dir_all(&current).unwrap();
         std::fs::write(stale.join("cell.sqlite"), [0_u8; 9]).unwrap();
 
-        let budget = crab_cell_runtime::ltx::DiskBudget::new(8);
+        let budget = cellule_runtime::ltx::DiskBudget::new(8);
         assert!(matches!(
             reserve_restart_inventory(data.path(), &current, budget.clone()),
             Err(Error::Busy)
@@ -349,7 +349,7 @@ mod tests {
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::create_dir_all(&current).unwrap();
         std::fs::write(stale.join("cell.sqlite"), [0_u8; 7]).unwrap();
-        let budget = crab_cell_runtime::ltx::DiskBudget::new(16);
+        let budget = cellule_runtime::ltx::DiskBudget::new(16);
 
         let staging = LocalStaging::new_with_restart_inventory(
             current.join("transfers"),
@@ -374,7 +374,7 @@ mod tests {
         for restart in 0..3 {
             let current = sessions.join(format!("session-{restart}"));
             std::fs::create_dir_all(&current).unwrap();
-            let budget = crab_cell_runtime::ltx::DiskBudget::new(50);
+            let budget = cellule_runtime::ltx::DiskBudget::new(50);
             let staging = LocalStaging::new_with_restart_inventory(
                 current.join("transfers"),
                 budget.clone(),
@@ -396,7 +396,7 @@ mod tests {
 
         let current = sessions.join("session-3");
         std::fs::create_dir_all(&current).unwrap();
-        let budget = crab_cell_runtime::ltx::DiskBudget::new(50);
+        let budget = cellule_runtime::ltx::DiskBudget::new(50);
         let staging = LocalStaging::new_with_restart_inventory(
             current.join("transfers"),
             budget.clone(),
@@ -433,7 +433,7 @@ mod tests {
         let error = reserve_restart_inventory(
             data.path(),
             &current,
-            crab_cell_runtime::ltx::DiskBudget::new(16),
+            cellule_runtime::ltx::DiskBudget::new(16),
         )
         .unwrap_err();
         assert!(matches!(error, Error::Io(source) if source.kind() == io::ErrorKind::InvalidData));
@@ -444,7 +444,7 @@ mod tests {
         let owner = tempfile::TempDir::new().unwrap();
         let staging = LocalStaging::new(
             owner.path().join("staging"),
-            crab_cell_runtime::ltx::DiskBudget::new(2 * MIB),
+            cellule_runtime::ltx::DiskBudget::new(2 * MIB),
             0,
         )
         .unwrap();
@@ -465,7 +465,7 @@ mod tests {
     #[tokio::test]
     async fn staging_shares_capacity_with_cell_disk_reservations() {
         let owner = tempfile::TempDir::new().unwrap();
-        let budget = crab_cell_runtime::ltx::DiskBudget::new(2 * MIB);
+        let budget = cellule_runtime::ltx::DiskBudget::new(2 * MIB);
         let staging = LocalStaging::new(owner.path().join("staging"), budget.clone(), 0).unwrap();
         let cell = budget.try_reserve(MIB + 1).unwrap();
 
@@ -482,7 +482,7 @@ mod tests {
         let owner = tempfile::TempDir::new().unwrap();
         let staging = LocalStaging::new(
             owner.path().join("staging"),
-            crab_cell_runtime::ltx::DiskBudget::new(3 * MIB),
+            cellule_runtime::ltx::DiskBudget::new(3 * MIB),
             0,
         )
         .unwrap();
@@ -505,12 +505,8 @@ mod tests {
     async fn oversized_and_cancelled_requests_never_create_a_directory() {
         let owner = tempfile::TempDir::new().unwrap();
         let root = owner.path().join("staging");
-        let staging = LocalStaging::new(
-            root.clone(),
-            crab_cell_runtime::ltx::DiskBudget::new(MIB),
-            0,
-        )
-        .unwrap();
+        let staging =
+            LocalStaging::new(root.clone(), cellule_runtime::ltx::DiskBudget::new(MIB), 0).unwrap();
         assert!(matches!(
             staging.create(2 * MIB, &CancellationToken::new()).await,
             Err(Error::TooLarge)
@@ -532,7 +528,7 @@ mod tests {
         let reserve = u64::MAX - MIB;
         let staging = LocalStaging::new(
             root.clone(),
-            crab_cell_runtime::ltx::DiskBudget::new(MIB),
+            cellule_runtime::ltx::DiskBudget::new(MIB),
             reserve,
         )
         .unwrap();

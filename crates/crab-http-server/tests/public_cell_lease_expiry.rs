@@ -1,16 +1,16 @@
 use std::time::Duration;
 
-use crab_cell_runtime::client::{CellClient, InvocationError};
-use crab_cell_runtime::identity::{CellTarget, partition_for_shard};
-use crab_cell_runtime::primitives::blob::BlobArtifactStore;
-use crab_cell_runtime::primitives::blob::{
+use cellule_runtime::client::{CellClient, InvocationError};
+use cellule_runtime::identity::{CellTarget, partition_for_shard};
+use cellule_runtime::primitives::blob::BlobArtifactStore;
+use cellule_runtime::primitives::blob::{
     BlobCondition, BlobMutation, BlobMutationOutcome, BlobQuery, BlobQueryResult,
 };
-use crab_cell_runtime::primitives::effects::{EffectClaimRequest, EffectLeaseOutcome};
-use crab_cell_runtime::primitives::queue::{
+use cellule_runtime::primitives::effects::{EffectClaimRequest, EffectLeaseOutcome};
+use cellule_runtime::primitives::queue::{
     QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState,
 };
-use crab_cell_runtime::primitives::workflow::{
+use cellule_runtime::primitives::workflow::{
     ActivityCompletion, ActivityCompletionOutcome, WorkflowActivityClaimCommand,
     WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowActivityValidateQuery,
     WorkflowActivityValidateRequest, WorkflowOutcome, WorkflowStatus,
@@ -545,7 +545,9 @@ async fn run_blob_expiry(
             application,
         )
         .unwrap()
-        .with_blob_artifact_store(BlobArtifactStore::new(store));
+        .with_blob_artifact_store(BlobArtifactStore::new(cellule_store::Store::new(
+            store.inner().clone(),
+        )));
     let blob = writer
         .blob::<fixture::ReferenceBlob>()
         .expect("writer Blob");
