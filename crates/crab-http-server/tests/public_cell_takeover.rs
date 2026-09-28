@@ -3,38 +3,38 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_host::CellNodeBuilder;
-use crab_cell_runtime::cell::catalog::CatalogRole;
-use crab_cell_runtime::cell::catalog::CellCatalog;
-use crab_cell_runtime::cell::worker::SqlWorkerPool;
-use crab_cell_runtime::client::CellClient;
-use crab_cell_runtime::control::Owner;
-use crab_cell_runtime::control::authority::CellAuthority;
-use crab_cell_runtime::identity::IncarnationId;
-use crab_cell_runtime::identity::{
+use cellule_host::CellNodeBuilder;
+use cellule_runtime::cell::catalog::CatalogRole;
+use cellule_runtime::cell::catalog::CellCatalog;
+use cellule_runtime::cell::worker::SqlWorkerPool;
+use cellule_runtime::client::CellClient;
+use cellule_runtime::control::Owner;
+use cellule_runtime::control::authority::CellAuthority;
+use cellule_runtime::identity::IncarnationId;
+use cellule_runtime::identity::{
     ApplicationId, CellTarget, SessionId, TenantId, partition_for_shard,
 };
-use crab_cell_runtime::ltx::{CellReplica, CellStorageLayout};
-use crab_cell_runtime::node::lease::NodeLeaseGuard;
-use crab_cell_runtime::primitives::blob::BlobArtifactStore;
-use crab_cell_runtime::primitives::blob::{
+use cellule_runtime::ltx::{CellReplica, CellStorageLayout};
+use cellule_runtime::node::lease::NodeLeaseGuard;
+use cellule_runtime::primitives::blob::BlobArtifactStore;
+use cellule_runtime::primitives::blob::{
     BlobCondition, BlobMutation, BlobQuery, BlobQueryResult, install_blob_schema,
 };
-use crab_cell_runtime::primitives::cron::{CronMutation, CronQueryResult, install_cron_schema};
-use crab_cell_runtime::primitives::effects::{EffectClaimRequest, EffectLeaseOutcome};
-use crab_cell_runtime::primitives::kv::{
+use cellule_runtime::primitives::cron::{CronMutation, CronQueryResult, install_cron_schema};
+use cellule_runtime::primitives::effects::{EffectClaimRequest, EffectLeaseOutcome};
+use cellule_runtime::primitives::kv::{
     KvAtomicOutcome, KvAtomicRequest, KvMutation, install_kv_schema,
 };
-use crab_cell_runtime::primitives::queue::{
+use cellule_runtime::primitives::queue::{
     QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState,
     install_queue_schema,
 };
-use crab_cell_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
-use crab_cell_runtime::primitives::workflow::{
+use cellule_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
+use cellule_runtime::primitives::workflow::{
     ActivityRunOutcome, ActivitySupervisor, WorkflowOutcome, WorkflowStatus,
     install_workflow_schema,
 };
-use crab_cell_runtime::recovery::manifest::RecoveryManifestStore;
+use cellule_runtime::recovery::manifest::RecoveryManifestStore;
 use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 use tokio_util::sync::CancellationToken;
@@ -53,7 +53,11 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
     let application = Arc::new(fixture::compiled());
     let tenant = TenantId::from_bytes([71; 16]);
     let application_id = ApplicationId::from_bytes([72; 16]);
-    let layout = CellStorageLayout::new(store.clone(), root, *application_id.as_bytes());
+    let layout = CellStorageLayout::new(
+        cellule_store::Store::new(store.inner().clone()),
+        root,
+        *application_id.as_bytes(),
+    );
     let source_session = SessionId::from_bytes([24; 16]);
     let successor_session = SessionId::from_bytes([70; 16]);
     let source = CellNodeBuilder::new(Arc::clone(&application))
@@ -194,7 +198,9 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             application_id,
         )
         .unwrap()
-        .with_blob_artifact_store(BlobArtifactStore::new(store.clone()));
+        .with_blob_artifact_store(BlobArtifactStore::new(cellule_store::Store::new(
+            store.inner().clone(),
+        )));
     let source_kv = source_handle
         .kv::<fixture::ReferenceKv>(fixture::KV_NAMESPACE)
         .expect("source typed KV");
@@ -312,7 +318,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
         )
         .await
         .expect("acknowledged Blob commit");
-    let crab_cell_runtime::primitives::blob::BlobMutationOutcome::Committed { etag, size } =
+    let cellule_runtime::primitives::blob::BlobMutationOutcome::Committed { etag, size } =
         committed.output
     else {
         panic!("source Blob was not committed");
@@ -355,7 +361,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
         .expect("acknowledged Cron schedule");
     assert!(matches!(
         scheduled.output,
-        crab_cell_runtime::primitives::cron::CronMutationOutcome::Applied { .. }
+        cellule_runtime::primitives::cron::CronMutationOutcome::Applied { .. }
     ));
     let source_workflow = source_handle
         .workflow::<fixture::ReferenceWorkflow>()
@@ -491,7 +497,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
                     fenced.direct_takeover().expect("direct takeover proof"),
                     RecoveryManifestStore::new(
                         layout.clone(),
-                        crab_cell_runtime::ltx::Limits::default(),
+                        cellule_runtime::ltx::Limits::default(),
                     ),
                     successor_dir.path().join("rejected-recovery.sqlite"),
                     owner.clone(),
@@ -501,7 +507,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
                 .expect("recovery limits must match the application descriptor");
             assert!(matches!(
                 rejected,
-                crab_cell_runtime::Error::Control("Cell storage limits differ from application")
+                cellule_runtime::Error::Control("Cell storage limits differ from application")
             ));
             assert_eq!(
                 authority
@@ -550,7 +556,9 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             application_id,
         )
         .unwrap()
-        .with_blob_artifact_store(BlobArtifactStore::new(store));
+        .with_blob_artifact_store(BlobArtifactStore::new(cellule_store::Store::new(
+            store.inner().clone(),
+        )));
     let successor_sql = successor_handle
         .sql::<fixture::ReferenceSql>(sql_target)
         .expect("successor typed SQL");

@@ -4,47 +4,47 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use crab_cell_app::{ApplicationBuilder, CellApplication, CellType};
-use crab_cell_runtime::Result;
-use crab_cell_runtime::cell::actor::CellHandle;
-use crab_cell_runtime::cell::actor::CellRuntime;
-use crab_cell_runtime::cell::catalog::CatalogEntry;
-use crab_cell_runtime::cell::catalog::CatalogRole;
-use crab_cell_runtime::codec::{BoundedEncoder, WireValue};
-use crab_cell_runtime::control::Owner;
-use crab_cell_runtime::control::authority::CellAuthority;
-use crab_cell_runtime::identity::IncarnationId;
-use crab_cell_runtime::identity::{
+use cellule_app::{ApplicationBuilder, CellApplication, CellType};
+use cellule_ltx::{CellReplica, DiskBudget, Host, Limits};
+use cellule_runtime::Result;
+use cellule_runtime::cell::actor::CellHandle;
+use cellule_runtime::cell::actor::CellRuntime;
+use cellule_runtime::cell::catalog::CatalogEntry;
+use cellule_runtime::cell::catalog::CatalogRole;
+use cellule_runtime::codec::{BoundedEncoder, WireValue};
+use cellule_runtime::control::Owner;
+use cellule_runtime::control::authority::CellAuthority;
+use cellule_runtime::identity::IncarnationId;
+use cellule_runtime::identity::{
     ApplicationId, CellTarget, Digest, NamespaceId, TenantId, partition_for_shard,
 };
-use crab_cell_runtime::ltx::CellStorageLayout;
-use crab_cell_runtime::primitives::blob::BlobModule;
-use crab_cell_runtime::primitives::blob::register_blob;
-use crab_cell_runtime::primitives::cron::CronModule;
-use crab_cell_runtime::primitives::cron::{CronInvocation, CronTarget, register_cron};
-use crab_cell_runtime::primitives::effects::EffectModule;
-use crab_cell_runtime::primitives::effects::register_effect_delivery;
-use crab_cell_runtime::primitives::kv::KvModule;
-use crab_cell_runtime::primitives::kv::register_kv;
-use crab_cell_runtime::primitives::maintenance::{MaintenanceModule, register_maintenance};
-use crab_cell_runtime::primitives::queue::QueueModule;
-use crab_cell_runtime::primitives::queue::{QueueDeadLetterTarget, register_queue};
-use crab_cell_runtime::primitives::sql::SqlModule;
-use crab_cell_runtime::primitives::sql::{
+use cellule_runtime::ltx::CellStorageLayout;
+use cellule_runtime::primitives::blob::BlobModule;
+use cellule_runtime::primitives::blob::register_blob;
+use cellule_runtime::primitives::cron::CronModule;
+use cellule_runtime::primitives::cron::{CronInvocation, CronTarget, register_cron};
+use cellule_runtime::primitives::effects::EffectModule;
+use cellule_runtime::primitives::effects::register_effect_delivery;
+use cellule_runtime::primitives::kv::KvModule;
+use cellule_runtime::primitives::kv::register_kv;
+use cellule_runtime::primitives::maintenance::{MaintenanceModule, register_maintenance};
+use cellule_runtime::primitives::queue::QueueModule;
+use cellule_runtime::primitives::queue::{QueueDeadLetterTarget, register_queue};
+use cellule_runtime::primitives::sql::SqlModule;
+use cellule_runtime::primitives::sql::{
     SqlBatch, SqlResultSet, SqlStatement, SqlValue, register_sql,
 };
-use crab_cell_runtime::primitives::workflow::{
+use cellule_runtime::primitives::workflow::{
     ActivityContext, ActivityExecution, ActivityHandler, WorkflowAction, WorkflowContext,
     WorkflowDecision, WorkflowDefinition, WorkflowStatus, register_activity, register_workflow,
     register_workflow_activities,
 };
-use crab_cell_runtime::primitives::workflow::{WorkflowActivityModule, WorkflowModule};
-use crab_cell_runtime::registry::{
+use cellule_runtime::primitives::workflow::{WorkflowActivityModule, WorkflowModule};
+use cellule_runtime::registry::{
     BuildDescriptor, CellModule, Command, ModuleDescriptor, NamespaceDescriptor, Registry,
     RegistryBuilder,
 };
-use crab_cell_runtime::registry::{CommandContext, CommandResult, OperationDescriptor};
-use crab_ltx::{CellReplica, DiskBudget, Host, Limits};
+use cellule_runtime::registry::{CommandContext, CommandResult, OperationDescriptor};
 
 pub const SQL_NAMESPACE: NamespaceId = NamespaceId::from_bytes([1; 16]);
 pub const KV_NAMESPACE: NamespaceId = NamespaceId::from_bytes([2; 16]);
@@ -74,19 +74,17 @@ fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-fn migration() -> &'static [crab_cell_runtime::registry::MigrationDescriptor] {
-    static MIGRATION: OnceLock<&'static [crab_cell_runtime::registry::MigrationDescriptor]> =
+fn migration() -> &'static [cellule_runtime::registry::MigrationDescriptor] {
+    static MIGRATION: OnceLock<&'static [cellule_runtime::registry::MigrationDescriptor]> =
         OnceLock::new();
     MIGRATION.get_or_init(|| {
-        Box::leak(Box::new([
-            crab_cell_runtime::registry::MigrationDescriptor {
-                version: 1,
-                sql: "-- reference application migration v1",
-                digest: Digest::from_bytes(
-                    *blake3::hash(b"-- reference application migration v1").as_bytes(),
-                ),
-            },
-        ]))
+        Box::leak(Box::new([cellule_runtime::registry::MigrationDescriptor {
+            version: 1,
+            sql: "-- reference application migration v1",
+            digest: Digest::from_bytes(
+                *blake3::hash(b"-- reference application migration v1").as_bytes(),
+            ),
+        }]))
     })
 }
 
@@ -158,7 +156,7 @@ pub struct ReferenceSql;
 pub struct ReferenceCronDestination;
 
 pub fn install_reference_sql_schema(
-    transaction: &crab_ltx::rusqlite::Transaction<'_>,
+    transaction: &cellule_ltx::rusqlite::Transaction<'_>,
 ) -> Result<()> {
     transaction.execute_batch(
         "CREATE TABLE qualification_rows (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);
@@ -179,9 +177,9 @@ impl Command for ReferenceCronDestination {
         invocation: Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
         let generation = i64::try_from(invocation.generation)
-            .map_err(|_| crab_cell_runtime::Error::Command("cron generation overflow"))?;
+            .map_err(|_| cellule_runtime::Error::Command("cron generation overflow"))?;
         let occurrence = i64::try_from(invocation.occurrence)
-            .map_err(|_| crab_cell_runtime::Error::Command("cron occurrence overflow"))?;
+            .map_err(|_| cellule_runtime::Error::Command("cron occurrence overflow"))?;
         let rows = context.sql(&SqlBatch {
             statements: vec![SqlStatement {
                 sql: "INSERT INTO qualification_cron_invocations (schedule_id, generation, occurrence, scheduled_at_ms, payload) VALUES (?1, ?2, ?3, ?4, ?5)".into(),
@@ -454,7 +452,7 @@ impl WorkflowDefinition for ReferenceDefinition {
                 state: b"effect-valid-published".to_vec(),
                 result: Some(b"effect-valid-scheduled".to_vec()),
                 actions: vec![WorkflowAction::Effect {
-                    intent: crab_cell_runtime::primitives::effects::EffectCommandIntent {
+                    intent: cellule_runtime::primitives::effects::EffectCommandIntent {
                         target: CellTarget::new(
                             context.source().tenant(),
                             context.source().application(),
@@ -475,7 +473,7 @@ impl WorkflowDefinition for ReferenceDefinition {
                 state: b"effect-published".to_vec(),
                 result: Some(b"effect-scheduled".to_vec()),
                 actions: vec![WorkflowAction::Effect {
-                    intent: crab_cell_runtime::primitives::effects::EffectCommandIntent {
+                    intent: cellule_runtime::primitives::effects::EffectCommandIntent {
                         target: CellTarget::new(
                             context.source().tenant(),
                             context.source().application(),
@@ -624,7 +622,7 @@ impl CellApplication for ReferenceApplication {
     }
 }
 
-pub fn compiled() -> crab_cell_app::CompiledApplication {
+pub fn compiled() -> cellule_app::CompiledApplication {
     ReferenceApplication::compile(BuildDescriptor {
         source_revision: "reference-source".into(),
         cargo_lock_digest: Digest::from_bytes([42; 32]),
@@ -648,29 +646,29 @@ pub async fn bootstrap_reference_cell<F>(
     shard: u32,
     incarnation_byte: u8,
     initialize: F,
-) -> crab_cell_runtime::Result<CellHandle>
+) -> cellule_runtime::Result<CellHandle>
 where
     F: for<'connection> FnOnce(
-            &crab_ltx::rusqlite::Transaction<'connection>,
-        ) -> crab_cell_runtime::Result<()>
+            &cellule_ltx::rusqlite::Transaction<'connection>,
+        ) -> cellule_runtime::Result<()>
         + Send
         + 'static,
 {
     let target = CellTarget::new(tenant, application, namespace, &partition_for_shard(shard))?;
-    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), tenant);
+    let catalog = cellule_runtime::cell::catalog::CellCatalog::new(layout.clone(), tenant);
     let proof = catalog
         .provision(CatalogEntry::new(
             &target,
             role,
             registry
                 .module_code(module)
-                .ok_or(crab_cell_runtime::Error::Registry("module code is missing"))?,
+                .ok_or(cellule_runtime::Error::Registry("module code is missing"))?,
             1,
         )?)
         .await?;
     let authority = CellAuthority::new(layout.clone());
     let incarnation = IncarnationId::from_bytes([incarnation_byte; 16]);
-    let session = crab_cell_runtime::SessionId::from_bytes([24; 16]);
+    let session = cellule_runtime::SessionId::from_bytes([24; 16]);
     let observed = authority
         .create_initial(
             &proof,

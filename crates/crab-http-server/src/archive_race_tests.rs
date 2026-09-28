@@ -1,6 +1,6 @@
-use crab_cell_runtime::cell::executor::MutationIdentity;
-use crab_cell_runtime::client::{Committed, InvocationError};
-use crab_cell_runtime::identity::RequestId;
+use cellule_runtime::cell::executor::MutationIdentity;
+use cellule_runtime::client::{Committed, InvocationError};
+use cellule_runtime::identity::RequestId;
 use futures_util::future::join_all;
 use uuid::Uuid;
 

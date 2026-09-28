@@ -1,28 +1,27 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
-use crab_cell_app::{ApplicationBuilder, CellApplication, CellType, CompiledApplication};
-use crab_cell_host::CellNodeBuilder;
-use crab_cell_runtime::cell::catalog::CatalogRole;
-use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
-use crab_cell_runtime::cell::executor::MutationIdentity;
-use crab_cell_runtime::cell::worker::SqlWorkerPool;
-use crab_cell_runtime::client::CellClient;
-use crab_cell_runtime::control::Owner;
-use crab_cell_runtime::control::authority::CellAuthority;
-use crab_cell_runtime::identity::{
+use cellule_app::{ApplicationBuilder, CellApplication, CellType, CompiledApplication};
+use cellule_host::CellNodeBuilder;
+use cellule_runtime::cell::catalog::CatalogRole;
+use cellule_runtime::cell::catalog::{CatalogEntry, CellCatalog};
+use cellule_runtime::cell::executor::MutationIdentity;
+use cellule_runtime::cell::worker::SqlWorkerPool;
+use cellule_runtime::client::CellClient;
+use cellule_runtime::control::Owner;
+use cellule_runtime::control::authority::CellAuthority;
+use cellule_runtime::identity::{
     CellTarget, Digest, NamespaceId, SessionId, TenantId, partition_for_shard,
 };
-use crab_cell_runtime::identity::{IncarnationId, RequestId};
-use crab_cell_runtime::ltx::{CellReplica, CellStorageLayout};
-use crab_cell_runtime::ltx::{Host as ReplicaHost, Limits as ReplicaLimits};
-use crab_cell_runtime::node::lease::NodeLeaseGuard;
-use crab_cell_runtime::primitives::sql::SqlModule;
-use crab_cell_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue, register_sql};
-use crab_cell_runtime::registry::{
+use cellule_runtime::identity::{IncarnationId, RequestId};
+use cellule_runtime::ltx::{CellReplica, CellStorageLayout};
+use cellule_runtime::ltx::{Host as ReplicaHost, Limits as ReplicaLimits};
+use cellule_runtime::node::lease::NodeLeaseGuard;
+use cellule_runtime::primitives::sql::SqlModule;
+use cellule_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue, register_sql};
+use cellule_runtime::registry::{
     BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, RegistryBuilder,
 };
-use crab_cell_runtime::registry::{MigrationDescriptor, OperationDescriptor};
-use crab_storage::Store;
+use cellule_runtime::registry::{MigrationDescriptor, OperationDescriptor};
 use object_store::{memory::InMemory, path::Path};
 use tokio_util::sync::CancellationToken;
 
@@ -90,7 +89,7 @@ impl CellModule for PublicSql {
         &DESCRIPTOR
     }
 
-    fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
+    fn register(self, registry: &mut RegistryBuilder) -> cellule_runtime::Result<()> {
         register_sql::<Self>(registry)
     }
 }
@@ -100,7 +99,7 @@ struct PublicApplication;
 impl CellApplication for PublicApplication {
     const NAME: &'static str = "public-host-application";
 
-    fn register(builder: &mut ApplicationBuilder) -> crab_cell_runtime::Result<()> {
+    fn register(builder: &mut ApplicationBuilder) -> cellule_runtime::Result<()> {
         builder.register(PublicSql)?;
         builder.cell_type(CellType::new(
             MODULE,
@@ -127,11 +126,11 @@ fn compiled_application() -> Arc<CompiledApplication> {
 async fn node_public_application_handle_executes_typed_sql() {
     let application = compiled_application();
     let tenant = TenantId::from_bytes([64; 16]);
-    let application_id = crab_cell_runtime::ApplicationId::from_bytes([65; 16]);
+    let application_id = cellule_runtime::ApplicationId::from_bytes([65; 16]);
     let target =
         CellTarget::new(tenant, application_id, NAMESPACE, &partition_for_shard(0)).unwrap();
     let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
+        cellule_store::Store::new(Arc::new(InMemory::new())),
         Path::from("public-host-application"),
         *application_id.as_bytes(),
     );
@@ -196,7 +195,7 @@ async fn node_public_application_handle_executes_typed_sql() {
         .expect("descriptor limits must reject a larger replica ceiling");
     assert!(matches!(
         rejected,
-        crab_cell_runtime::Error::Control("Cell storage limits differ from application")
+        cellule_runtime::Error::Control("Cell storage limits differ from application")
     ));
     assert!(
         authority

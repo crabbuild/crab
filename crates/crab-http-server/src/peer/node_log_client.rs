@@ -2,13 +2,13 @@ use std::time::Duration;
 
 use axum::http::{StatusCode, header};
 use bytes::Bytes;
-use crab_cell_runtime::Error as CellError;
-use crab_cell_runtime::follower::FollowerReceipt;
-use crab_cell_runtime::follower::FollowerStore;
-use crab_cell_runtime::identity::NodeId;
-use crab_cell_runtime::identity::SessionId;
-use crab_cell_runtime::node::NodeDirectory;
-use crab_cell_runtime::node::log_transport::{
+use cellule_runtime::Error as CellError;
+use cellule_runtime::follower::FollowerReceipt;
+use cellule_runtime::follower::FollowerStore;
+use cellule_runtime::identity::NodeId;
+use cellule_runtime::identity::SessionId;
+use cellule_runtime::node::NodeDirectory;
+use cellule_runtime::node::log_transport::{
     AppendRequest, NodeLogTransport, RetireRequest, SealRequest, TailRequest,
 };
 use futures_util::{StreamExt, future::BoxFuture};
@@ -59,7 +59,7 @@ impl NodeLogHttpTransport {
             .flatten()
     }
 
-    async fn remote(&self, member: NodeId) -> crab_cell_runtime::Result<RemoteFollower> {
+    async fn remote(&self, member: NodeId) -> cellule_runtime::Result<RemoteFollower> {
         let advertisement = self
             .directory
             .resolve_node(member, now_ms().map_err(transport_error)?)
@@ -81,7 +81,7 @@ impl NodeLogHttpTransport {
         &self,
         member: NodeId,
         request: AppendRequest,
-    ) -> crab_cell_runtime::Result<FollowerReceipt> {
+    ) -> cellule_runtime::Result<FollowerReceipt> {
         if let Some(store) = self.local_store(member) {
             let now_ms = now_ms().map_err(transport_error)?;
             self.directory
@@ -126,7 +126,7 @@ impl NodeLogHttpTransport {
         &self,
         member: NodeId,
         request: SealRequest,
-    ) -> crab_cell_runtime::Result<FollowerReceipt> {
+    ) -> cellule_runtime::Result<FollowerReceipt> {
         if let Some(store) = self.local_store(member) {
             let now_ms = now_ms().map_err(transport_error)?;
             self.directory
@@ -162,7 +162,7 @@ impl NodeLogHttpTransport {
         &self,
         member: NodeId,
         request: RetireRequest,
-    ) -> crab_cell_runtime::Result<FollowerReceipt> {
+    ) -> cellule_runtime::Result<FollowerReceipt> {
         if let Some(store) = self.local_store(member) {
             let now_ms = now_ms().map_err(transport_error)?;
             self.directory
@@ -204,7 +204,7 @@ impl NodeLogHttpTransport {
         &self,
         member: NodeId,
         request: TailRequest,
-    ) -> crab_cell_runtime::Result<Vec<Bytes>> {
+    ) -> cellule_runtime::Result<Vec<Bytes>> {
         let mut first = request.first_sequence;
         let mut frames = Vec::new();
         let mut retained_bytes = 0_usize;
@@ -253,7 +253,7 @@ impl NodeLogHttpTransport {
         &self,
         member: NodeId,
         request: TailRequest,
-    ) -> crab_cell_runtime::Result<crab_cell_runtime::follower::FollowerTailPage> {
+    ) -> cellule_runtime::Result<cellule_runtime::follower::FollowerTailPage> {
         if let Some(store) = self.local_store(member) {
             let now_ms = now_ms().map_err(transport_error)?;
             self.directory
@@ -290,7 +290,7 @@ impl NodeLogHttpTransport {
             .await
             .map_err(transport_unknown)?;
         let page = decode_tail_page(response).await?;
-        Ok(crab_cell_runtime::follower::FollowerTailPage {
+        Ok(cellule_runtime::follower::FollowerTailPage {
             next_sequence: page.next_sequence,
             frames: page.frames,
         })
@@ -302,7 +302,7 @@ impl NodeLogTransport for NodeLogHttpTransport {
         &'a self,
         member: NodeId,
         request: AppendRequest,
-    ) -> BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
+    ) -> BoxFuture<'a, cellule_runtime::Result<FollowerReceipt>> {
         Box::pin(self.append_inner(member, request))
     }
 
@@ -310,7 +310,7 @@ impl NodeLogTransport for NodeLogHttpTransport {
         &'a self,
         member: NodeId,
         request: SealRequest,
-    ) -> BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
+    ) -> BoxFuture<'a, cellule_runtime::Result<FollowerReceipt>> {
         Box::pin(self.seal_inner(member, request))
     }
 
@@ -318,7 +318,7 @@ impl NodeLogTransport for NodeLogHttpTransport {
         &'a self,
         member: NodeId,
         request: RetireRequest,
-    ) -> BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
+    ) -> BoxFuture<'a, cellule_runtime::Result<FollowerReceipt>> {
         Box::pin(self.retire_inner(member, request))
     }
 
@@ -326,7 +326,7 @@ impl NodeLogTransport for NodeLogHttpTransport {
         &'a self,
         member: NodeId,
         request: TailRequest,
-    ) -> BoxFuture<'a, crab_cell_runtime::Result<Vec<Bytes>>> {
+    ) -> BoxFuture<'a, cellule_runtime::Result<Vec<Bytes>>> {
         Box::pin(self.tail_inner(member, request))
     }
 
@@ -334,8 +334,7 @@ impl NodeLogTransport for NodeLogHttpTransport {
         &'a self,
         member: NodeId,
         request: TailRequest,
-    ) -> BoxFuture<'a, crab_cell_runtime::Result<crab_cell_runtime::follower::FollowerTailPage>>
-    {
+    ) -> BoxFuture<'a, cellule_runtime::Result<cellule_runtime::follower::FollowerTailPage>> {
         Box::pin(self.tail_page_inner(member, request))
     }
 }
@@ -357,7 +356,7 @@ struct TailPage {
     frames: Vec<Bytes>,
 }
 
-fn encode_append(request: AppendRequest) -> crab_cell_runtime::Result<Vec<u8>> {
+fn encode_append(request: AppendRequest) -> cellule_runtime::Result<Vec<u8>> {
     if request.frames.is_empty() || request.frames.len() > 64 {
         return Err(CellError::Peer("node-log append frame count is invalid"));
     }
@@ -377,7 +376,7 @@ fn encode_append(request: AppendRequest) -> crab_cell_runtime::Result<Vec<u8>> {
     Ok(body)
 }
 
-async fn decode_receipt(response: reqwest::Response) -> crab_cell_runtime::Result<FollowerReceipt> {
+async fn decode_receipt(response: reqwest::Response) -> cellule_runtime::Result<FollowerReceipt> {
     validate_status(response.status())?;
     let body = read_bounded(response, 1024).await?;
     let raw: RawReceipt = serde_json::from_slice(&body)
@@ -388,7 +387,7 @@ async fn decode_receipt(response: reqwest::Response) -> crab_cell_runtime::Resul
     })
 }
 
-async fn decode_tail_page(response: reqwest::Response) -> crab_cell_runtime::Result<TailPage> {
+async fn decode_tail_page(response: reqwest::Response) -> cellule_runtime::Result<TailPage> {
     validate_status(response.status())?;
     if response
         .headers()
@@ -402,7 +401,7 @@ async fn decode_tail_page(response: reqwest::Response) -> crab_cell_runtime::Res
     decode_tail_body(&body)
 }
 
-fn decode_tail_body(body: &[u8]) -> crab_cell_runtime::Result<TailPage> {
+fn decode_tail_body(body: &[u8]) -> cellule_runtime::Result<TailPage> {
     let next = u64::from_le_bytes(
         body.get(..8)
             .ok_or(CellError::Peer("follower tail header is truncated"))?
@@ -458,7 +457,7 @@ fn decode_tail_body(body: &[u8]) -> crab_cell_runtime::Result<TailPage> {
 async fn read_bounded(
     response: reqwest::Response,
     limit: usize,
-) -> crab_cell_runtime::Result<Vec<u8>> {
+) -> cellule_runtime::Result<Vec<u8>> {
     if response
         .content_length()
         .is_some_and(|length| length > limit as u64)
@@ -477,7 +476,7 @@ async fn read_bounded(
     Ok(body)
 }
 
-fn validate_status(status: StatusCode) -> crab_cell_runtime::Result<()> {
+fn validate_status(status: StatusCode) -> cellule_runtime::Result<()> {
     match status {
         StatusCode::OK => Ok(()),
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(CellError::PeerAuthorization(
@@ -488,7 +487,7 @@ fn validate_status(status: StatusCode) -> crab_cell_runtime::Result<()> {
     }
 }
 
-fn decimal(value: &str) -> crab_cell_runtime::Result<u64> {
+fn decimal(value: &str) -> cellule_runtime::Result<u64> {
     let parsed = value
         .parse::<u64>()
         .map_err(|_| CellError::Peer("follower receipt decimal is invalid"))?;
@@ -534,7 +533,7 @@ mod tests {
         .unwrap();
         assert_eq!(u64::from_le_bytes(append[..8].try_into().unwrap()), 7);
 
-        let page = super::super::encode_tail_page(crab_cell_runtime::follower::FollowerTailPage {
+        let page = super::super::encode_tail_page(cellule_runtime::follower::FollowerTailPage {
             frames: vec![Bytes::from_static(b"one"), Bytes::from_static(b"two")],
             next_sequence: Some(9),
         })

@@ -2,20 +2,20 @@
 
 use super::*;
 
-use crab_cell_runtime::cell::application::ApplicationIdentity;
-use crab_cell_runtime::client::CellDescription;
-use crab_cell_runtime::control::authority::CellAuthority;
-use crab_cell_runtime::identity::{ApplicationId, Digest, SessionId, TenantId};
-use crab_cell_runtime::ltx::CellStorageLayout;
-use crab_cell_runtime::node::NodeDirectory;
-use crab_cell_runtime::peer::{PeerReplicaResolver, ReplicaPeerClient};
+use cellule_runtime::cell::application::ApplicationIdentity;
+use cellule_runtime::client::CellDescription;
+use cellule_runtime::control::authority::CellAuthority;
+use cellule_runtime::identity::{ApplicationId, Digest, SessionId, TenantId};
+use cellule_runtime::ltx::CellStorageLayout;
+use cellule_runtime::node::NodeDirectory;
+use cellule_runtime::peer::{PeerReplicaResolver, ReplicaPeerClient};
 use crab_storage::{ObjectStoreCredentials, build_explicit_store};
 use object_store::throttle::{ThrottleConfig, ThrottledStore};
 use object_store::{memory::InMemory, path::Path as ObjectPath};
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crab_cell_runtime::fleet::telemetry::{CatalogReadKind, CellTelemetry, CellTelemetryHandle};
+use cellule_runtime::fleet::telemetry::{CatalogReadKind, CellTelemetry, CellTelemetryHandle};
 
 use crate::{
     auth::Identity,
@@ -50,11 +50,11 @@ impl CellTelemetry for ReceiverReads {
     fn primitive_operation(
         &self,
         _module: &'static str,
-        kind: crab_cell_runtime::fleet::telemetry::PrimitiveOperationKind,
-        _outcome: crab_cell_runtime::fleet::telemetry::PrimitiveOperationOutcome,
+        kind: cellule_runtime::fleet::telemetry::PrimitiveOperationKind,
+        _outcome: cellule_runtime::fleet::telemetry::PrimitiveOperationOutcome,
         _elapsed: Duration,
     ) {
-        if kind == crab_cell_runtime::fleet::telemetry::PrimitiveOperationKind::Query {
+        if kind == cellule_runtime::fleet::telemetry::PrimitiveOperationKind::Query {
             self.queries.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -104,13 +104,13 @@ async fn json_get(client: &reqwest::Client, url: impl reqwest::IntoUrl) -> (Stat
 impl PeerRoundTrip for UnavailablePeer {
     fn send(
         &self,
-        _target: crab_cell_runtime::CellTarget,
+        _target: cellule_runtime::CellTarget,
         _request: Vec<u8>,
         _remaining_ms: u32,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+        Box<dyn std::future::Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>,
     > {
-        Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+        Box::pin(async { Err(cellule_runtime::Error::CellNotActive) })
     }
 }
 
@@ -178,7 +178,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         ApplicationId::from_bytes([3; 16]),
     );
     let cell_layout = CellStorageLayout::new(
-        store.clone(),
+        cellule_store::Store::new(store.inner().clone()),
         ObjectPath::from(format!("{root}/cells")),
         *identity.application().as_bytes(),
     );
@@ -257,7 +257,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             peer_tls.signing_key().clone(),
             ingress_session,
             ingress_management_endpoint.clone(),
-            crab_cell_runtime::node::NodeFailureDomain::default(),
+            cellule_runtime::node::NodeFailureDomain::default(),
             peer_tls.fleet(),
             peer_tls.certificate(),
             image,
@@ -275,7 +275,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             peer_tls.signing_key().clone(),
             owner_session,
             management_endpoint.clone(),
-            crab_cell_runtime::node::NodeFailureDomain::default(),
+            cellule_runtime::node::NodeFailureDomain::default(),
             peer_tls.fleet(),
             peer_tls.certificate(),
             image,
@@ -302,9 +302,11 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     let activation_reads = Arc::new(AtomicUsize::new(0));
     let observed_activation_reads = Arc::clone(&activation_reads);
     let activation_layout = CellStorageLayout::new(
-        Store::new(activation_store.clone()).with_read_request_observer(Arc::new(move |_| {
-            observed_activation_reads.fetch_add(1, Ordering::Relaxed);
-        })),
+        cellule_store::Store::new(activation_store.clone()).with_read_request_observer(Arc::new(
+            move |_| {
+                observed_activation_reads.fetch_add(1, Ordering::Relaxed);
+            },
+        )),
         ObjectPath::from(format!("{root}/cells")),
         *identity.application().as_bytes(),
     );
@@ -316,7 +318,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         crate::cells::RepositoryCellPeer::new(
             owner_hints.clone(),
             directory.clone(),
-            Arc::new(crab_cell_runtime::peer::PeerSigner::new(
+            Arc::new(cellule_runtime::peer::PeerSigner::new(
                 owner_session,
                 registry.release_digest(),
                 peer_tls.signing_key().clone(),
@@ -329,7 +331,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
                 peer_tls.client_identity(),
                 owner_session,
             )),
-            crab_cell_runtime::control::Owner {
+            cellule_runtime::control::Owner {
                 session: owner_session,
                 endpoint: management_endpoint.clone(),
             },
@@ -344,7 +346,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     };
 
     let authority = CellAuthority::new(cell_layout.clone());
-    let target = crab_cell_runtime::CellTarget::new(
+    let target = cellule_runtime::CellTarget::new(
         identity.tenant(),
         identity.application(),
         crate::cells::REPOSITORY_NAMESPACE,
@@ -352,7 +354,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     )
     .unwrap();
 
-    let owner_read_replicas = crab_cell_host::read_replicas::ReadReplicaManager::new(
+    let owner_read_replicas = cellule_host::read_replicas::ReadReplicaManager::new(
         owner_runtime.clone(),
         Arc::clone(&registry),
         cell_layout.clone(),
@@ -372,7 +374,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         ThrottleConfig::default(),
     ));
     let resolver_layout = CellStorageLayout::new(
-        Store::new(resolver_store.clone()),
+        cellule_store::Store::new(resolver_store.clone()),
         ObjectPath::from(format!("{root}/cells")),
         *identity.application().as_bytes(),
     );
@@ -387,7 +389,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             directory.clone(),
             Arc::clone(&registry),
             Arc::new(
-                crab_cell_runtime::recovery::release::ReleaseStore::new(
+                cellule_runtime::recovery::release::ReleaseStore::new(
                     cell_layout.clone(),
                     identity,
                 )
@@ -446,7 +448,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         ingress_publisher.lease_guard().unwrap(),
         512,
     );
-    let reader = crab_cell_host::read_replicas::ReadReplicaManager::new(
+    let reader = cellule_host::read_replicas::ReadReplicaManager::new(
         ingress_runtime.clone(),
         Arc::clone(&registry),
         cell_layout.clone(),
@@ -477,13 +479,13 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         crate::cells::RepositoryCellPeer::new(
             owner_hints.clone(),
             directory.clone(),
-            Arc::new(crab_cell_runtime::peer::PeerSigner::new(
+            Arc::new(cellule_runtime::peer::PeerSigner::new(
                 ingress_session,
                 registry.release_digest(),
                 peer_tls.signing_key().clone(),
             )),
             Arc::clone(&round_trip),
-            crab_cell_runtime::control::Owner {
+            cellule_runtime::control::Owner {
                 session: ingress_session,
                 endpoint: ingress_management_endpoint.clone(),
             },
@@ -503,7 +505,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             directory.clone(),
             Arc::clone(&registry),
             Arc::new(
-                crab_cell_runtime::recovery::release::ReleaseStore::new(
+                cellule_runtime::recovery::release::ReleaseStore::new(
                     cell_layout.clone(),
                     identity,
                 )
@@ -572,14 +574,14 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert!(owner_server.repositories.by_id(repository_id).is_some());
     let reads_after_discovery = catalog_reads.load(Ordering::Relaxed);
     let queries_before_denial = receiver_reads.queries.load(Ordering::Relaxed);
-    let unauthorized = crab_cell_runtime::CellClient::peer(
+    let unauthorized = cellule_runtime::CellClient::peer(
         Arc::clone(&registry),
-        Arc::new(crab_cell_runtime::peer::PeerSigner::new(
+        Arc::new(cellule_runtime::peer::PeerSigner::new(
             ingress_session,
             registry.release_digest(),
             peer_tls.signing_key().clone(),
         )),
-        crab_cell_runtime::peer::PeerPrincipal {
+        cellule_runtime::peer::PeerPrincipal {
             issuer: local_operator.issuer.clone(),
             subject: "not-the-local-operator".into(),
             actions: vec!["repository.read".into()],
@@ -590,8 +592,8 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         unauthorized
             .query::<crate::cells::repository::GetIssueDetail>(&target, None, 1)
             .await,
-        Err(crab_cell_runtime::client::InvocationError::NotStarted(
-            crab_cell_runtime::Error::PeerAuthorization(_)
+        Err(cellule_runtime::client::InvocationError::NotStarted(
+            cellule_runtime::Error::PeerAuthorization(_)
         ))
     ));
     assert_eq!(
@@ -792,14 +794,14 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(comment.0, StatusCode::CREATED);
     assert_eq!(comment.1["number"], 1);
     eprintln!("qualified issue comment mutation");
-    let peer_client = crab_cell_runtime::client::CellClient::peer(
+    let peer_client = cellule_runtime::client::CellClient::peer(
         Arc::clone(&registry),
-        Arc::new(crab_cell_runtime::peer::PeerSigner::new(
+        Arc::new(cellule_runtime::peer::PeerSigner::new(
             ingress_session,
             registry.release_digest(),
             peer_tls.signing_key().clone(),
         )),
-        crab_cell_runtime::peer::PeerPrincipal {
+        cellule_runtime::peer::PeerPrincipal {
             issuer: local_operator.issuer.clone(),
             subject: local_operator.subject.clone(),
             actions: vec!["repository.read".into()],
@@ -861,9 +863,9 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     );
     // Delay only post-authentication resolution. Expiration must stop before
     // the query handler, even though the signed request itself remains valid.
-    use crab_cell_runtime::codec::{BoundedEncoder, WireValue};
-    use crab_cell_runtime::peer::{PeerOperation, PeerPrincipal, PeerSigner, wire};
-    use crab_cell_runtime::registry::Query;
+    use cellule_runtime::codec::{BoundedEncoder, WireValue};
+    use cellule_runtime::peer::{PeerOperation, PeerPrincipal, PeerSigner, wire};
+    use cellule_runtime::registry::Query;
     let mut input = BoundedEncoder::new(1024).unwrap();
     crate::cells::repository::ListCommentsInput {
         issue: 1,
@@ -960,7 +962,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     let idle = authority.load(target.cell_id()).await.unwrap().unwrap();
     assert_eq!(
         idle.value().state,
-        crab_cell_runtime::control::ControlState::Idle
+        cellule_runtime::control::ControlState::Idle
     );
     let activation_reads_before = activation_reads.load(Ordering::Relaxed);
     let queries_before = receiver_reads.queries.load(Ordering::Relaxed);
@@ -1278,7 +1280,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .clone();
     let replica_peer = ReplicaPeerClient::new(
         Arc::clone(&registry),
-        Arc::new(crab_cell_runtime::peer::PeerSigner::new(
+        Arc::new(cellule_runtime::peer::PeerSigner::new(
             owner_session,
             registry.release_digest(),
             peer_tls.signing_key().clone(),
@@ -1420,14 +1422,14 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     // lease must also prevent graceful release, so recovery still takes over
     // a Serving owner rather than acquiring an idle Cell.
     match owner_server.shutdown_runtimes().await {
-        Ok(()) | Err(crate::Error::Cell(crab_cell_runtime::Error::Fenced)) => {}
+        Ok(()) | Err(crate::Error::Cell(cellule_runtime::Error::Fenced)) => {}
         Err(error) => panic!("unexpected stale-owner shutdown result: {error}"),
     }
     assert_eq!(owner_runtime.stats().file_descriptors(), 0);
     let stale_owner = authority.load(target.cell_id()).await.unwrap().unwrap();
     assert_eq!(
         stale_owner.value().state,
-        crab_cell_runtime::control::ControlState::Serving
+        cellule_runtime::control::ControlState::Serving
     );
     assert_eq!(
         stale_owner.value().owner.as_ref().unwrap().session,
@@ -1441,7 +1443,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         stale_reader
             .query::<crate::cells::repository::GetIssue>(None, 1)
             .await,
-        Err(crab_cell_runtime::Error::Fenced)
+        Err(cellule_runtime::Error::Fenced)
     ));
     assert!(
         peer_client
@@ -1479,7 +1481,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         stale_reader
             .query::<crate::cells::repository::GetIssue>(None, 1)
             .await,
-        Err(crab_cell_runtime::Error::Fenced)
+        Err(cellule_runtime::Error::Fenced)
     ));
     drop(stale_reader);
 
@@ -1686,7 +1688,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     let released = authority.load(target.cell_id()).await.unwrap().unwrap();
     assert_eq!(
         released.value().state,
-        crab_cell_runtime::control::ControlState::Idle
+        cellule_runtime::control::ControlState::Idle
     );
     assert!(released.value().owner.is_none());
     assert!(
@@ -1723,14 +1725,14 @@ async fn repository(store: Store, bucket: &str, prefix: String) -> Arc<Repositor
 
 fn runtime(
     session: SessionId,
-    lease: crab_cell_runtime::NodeLeaseGuard,
+    lease: cellule_runtime::NodeLeaseGuard,
     queue_capacity: usize,
 ) -> CellRuntime {
     let runtime = CellRuntime::new_with_replica_host_requiring_node_lease(
         SqlWorkerPool::new(1, queue_capacity).unwrap(),
         16 * 1024 * 1024,
         session,
-        crab_ltx::Host::default(),
+        cellule_ltx::Host::default(),
     )
     .unwrap();
     runtime.install_node_lease(lease).unwrap();

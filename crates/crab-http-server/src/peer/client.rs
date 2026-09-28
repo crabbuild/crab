@@ -7,14 +7,14 @@ use std::{
 };
 
 use axum::http::{StatusCode, header};
-use crab_cell_runtime::Error as CellError;
-use crab_cell_runtime::cell::application::ApplicationIdentity;
-use crab_cell_runtime::client::CellDescription;
-use crab_cell_runtime::control::ControlState;
-use crab_cell_runtime::control::authority::CellAuthority;
-use crab_cell_runtime::identity::{CellId, CellTarget, Digest, SessionId};
-use crab_cell_runtime::node::{NodeAdvertisement, NodeDirectory};
-use crab_cell_runtime::peer::{PeerRoundTrip, wire as peer_wire};
+use cellule_runtime::Error as CellError;
+use cellule_runtime::cell::application::ApplicationIdentity;
+use cellule_runtime::client::CellDescription;
+use cellule_runtime::control::ControlState;
+use cellule_runtime::control::authority::CellAuthority;
+use cellule_runtime::identity::{CellId, CellTarget, Digest, SessionId};
+use cellule_runtime::node::{NodeAdvertisement, NodeDirectory};
+use cellule_runtime::peer::{PeerRoundTrip, wire as peer_wire};
 use futures_util::StreamExt;
 
 use super::{now_ms, remaining_timeout};
@@ -94,8 +94,8 @@ impl PeerHttpRoundTrip {
         target: CellTarget,
         request: Vec<u8>,
         timeout_ms: u32,
-    ) -> crab_cell_runtime::Result<Vec<u8>> {
-        if request.len() > crab_cell_runtime::peer::MAX_PEER_REQUEST_BYTES {
+    ) -> cellule_runtime::Result<Vec<u8>> {
+        if request.len() > cellule_runtime::peer::MAX_PEER_REQUEST_BYTES {
             return Err(CellError::Peer("request exceeds peer byte limit"));
         }
         let started = Instant::now();
@@ -142,7 +142,7 @@ impl PeerHttpRoundTrip {
         node: NodeAdvertisement,
         request: Vec<u8>,
         timeout_ms: u32,
-    ) -> crab_cell_runtime::Result<Vec<u8>> {
+    ) -> cellule_runtime::Result<Vec<u8>> {
         if target.tenant() != self.identity.tenant()
             || target.application() != self.identity.application()
         {
@@ -177,7 +177,7 @@ impl PeerHttpRoundTrip {
         &self,
         target: &CellTarget,
         allow_hint: bool,
-    ) -> crab_cell_runtime::Result<RemotePeer> {
+    ) -> cellule_runtime::Result<RemotePeer> {
         if target.tenant() != self.identity.tenant()
             || target.application() != self.identity.application()
         {
@@ -302,7 +302,7 @@ impl PeerHttpRoundTrip {
         }
     }
 
-    fn client(&self, owner: &RemotePeer) -> crab_cell_runtime::Result<reqwest::Client> {
+    fn client(&self, owner: &RemotePeer) -> cellule_runtime::Result<reqwest::Client> {
         {
             let clients = self
                 .clients
@@ -341,7 +341,7 @@ impl PeerHttpRoundTrip {
         owner: &RemotePeer,
         request: Vec<u8>,
         remaining_ms: u32,
-    ) -> crab_cell_runtime::Result<PeerHttpAttempt> {
+    ) -> cellule_runtime::Result<PeerHttpAttempt> {
         let client = self.client(owner)?;
         let url = owner
             .endpoint
@@ -389,9 +389,9 @@ impl PeerHttpRoundTrip {
                 .get(header::CACHE_CONTROL)
                 .and_then(|value| value.to_str().ok())
                 != Some("no-store")
-            || response.content_length().is_some_and(|length| {
-                length > crab_cell_runtime::peer::MAX_PEER_REQUEST_BYTES as u64
-            })
+            || response
+                .content_length()
+                .is_some_and(|length| length > cellule_runtime::peer::MAX_PEER_REQUEST_BYTES as u64)
         {
             return Ok(PeerHttpAttempt::Unknown(CellError::Peer(
                 "remote peer response metadata is invalid",
@@ -405,7 +405,7 @@ impl PeerHttpRoundTrip {
                 Err(error) => return Ok(PeerHttpAttempt::Unknown(peer_transport(error))),
             };
             if body.len().saturating_add(chunk.len())
-                > crab_cell_runtime::peer::MAX_PEER_REQUEST_BYTES
+                > cellule_runtime::peer::MAX_PEER_REQUEST_BYTES
             {
                 return Ok(PeerHttpAttempt::Unknown(CellError::Peer(
                     "remote peer response exceeds the byte limit",
@@ -413,7 +413,7 @@ impl PeerHttpRoundTrip {
             }
             body.extend_from_slice(&chunk);
         }
-        let decoded = match crab_cell_runtime::peer::decode_peer_reply(&body) {
+        let decoded = match cellule_runtime::peer::decode_peer_reply(&body) {
             Ok(decoded) => decoded,
             Err(error) => return Ok(PeerHttpAttempt::Unknown(error)),
         };
@@ -441,7 +441,7 @@ impl PeerRoundTrip for PeerHttpRoundTrip {
         target: CellTarget,
         request: Vec<u8>,
         remaining_ms: u32,
-    ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>> {
         let round_trip = self.clone();
         Box::pin(async move { round_trip.send_inner(target, request, remaining_ms).await })
     }
@@ -452,7 +452,7 @@ impl PeerRoundTrip for PeerHttpRoundTrip {
         node: NodeAdvertisement,
         request: Vec<u8>,
         remaining_ms: u32,
-    ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>> {
         let round_trip = self.clone();
         Box::pin(async move {
             round_trip
@@ -515,7 +515,7 @@ enum PeerHttpAttempt {
 
 fn peer_transport(
     source: impl std::error::Error + Send + Sync + 'static,
-) -> crab_cell_runtime::Error {
+) -> cellule_runtime::Error {
     CellError::PeerTransport {
         context: "peer HTTP transport failed",
         source: Box::new(source),

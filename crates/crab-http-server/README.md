@@ -19,14 +19,16 @@ Browser                    Native Git / Git LFS
               ▼                    ▼
      repository Cell router   remote-git/read/write
               │                    │
-        SQLite + crab-ltx           │
+      SQLite + cellule-ltx          │
               └─────────┬──────────┘
                         ▼
                    object storage
 ```
 
-The server owns HTTP policy and application workflows. Shared crates own Git
-reading, validation, publication, Cell execution, and storage mechanics. Issues,
+The server owns HTTP policy and application workflows. It uses the pinned
+[Cellule](https://github.com/crabbuild/cellule) runtime for Cell execution and
+LTX publication; shared Crab crates own Git reading, validation, and storage
+mechanics. Issues,
 comments, Labels, commit statuses, check runs, branch protections, repository
 lifecycle, Pull requests, reviews, and Release metadata use typed Rust commands
 against one SQLite/LTX Cell per repository. The remote-owner path is verified

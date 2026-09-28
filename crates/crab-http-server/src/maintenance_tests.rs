@@ -13,16 +13,16 @@ const TTL: Duration = Duration::from_secs(60);
 
 struct UnavailableRoundTrip;
 
-impl crab_cell_runtime::peer::PeerRoundTrip for UnavailableRoundTrip {
+impl cellule_runtime::peer::PeerRoundTrip for UnavailableRoundTrip {
     fn send(
         &self,
-        _target: crab_cell_runtime::CellTarget,
+        _target: cellule_runtime::CellTarget,
         _request: Vec<u8>,
         _remaining_ms: u32,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+        Box<dyn std::future::Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>,
     > {
-        Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+        Box::pin(async { Err(cellule_runtime::Error::CellNotActive) })
     }
 }
 
@@ -97,7 +97,7 @@ pub(crate) fn init_test_tracing() {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
         let _ = tracing_subscriber::fmt()
-            .with_env_filter("crab_cell_runtime=warn")
+            .with_env_filter("cellule_runtime=warn")
             .with_test_writer()
             .try_init();
     });
@@ -114,12 +114,12 @@ pub(super) async fn fixture() -> Arc<Server> {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap();
-    let identity = crab_cell_runtime::cell::application::ApplicationIdentity::new(
-        crab_cell_runtime::TenantId::from_bytes([31; 16]),
-        crab_cell_runtime::ApplicationId::from_bytes([32; 16]),
+    let identity = cellule_runtime::cell::application::ApplicationIdentity::new(
+        cellule_runtime::TenantId::from_bytes([31; 16]),
+        cellule_runtime::ApplicationId::from_bytes([32; 16]),
     );
-    let layout = crab_cell_runtime::ltx::CellStorageLayout::new(
-        repository.store.clone(),
+    let layout = cellule_runtime::ltx::CellStorageLayout::new(
+        cellule_store::Store::new(repository.store.inner().clone()),
         object_store::path::Path::from("maintenance-test-cells"),
         *identity.application().as_bytes(),
     );
@@ -146,9 +146,9 @@ pub(super) async fn fixture() -> Arc<Server> {
     )
     .await
     .unwrap();
-    let cell_session = crab_cell_runtime::SessionId::from_bytes([33; 16]);
-    let cell_runtime = crab_cell_runtime::CellRuntime::new(
-        crab_cell_runtime::SqlWorkerPool::new(1, 16).unwrap(),
+    let cell_session = cellule_runtime::SessionId::from_bytes([33; 16]);
+    let cell_runtime = cellule_runtime::CellRuntime::new(
+        cellule_runtime::SqlWorkerPool::new(1, 16).unwrap(),
         16 * 1024 * 1024,
         cell_session,
     )
@@ -160,19 +160,19 @@ pub(super) async fn fixture() -> Arc<Server> {
         cell_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
             crate::peer::PeerOwnerHints::default(),
-            crab_cell_runtime::node::NodeDirectory::new(
+            cellule_runtime::node::NodeDirectory::new(
                 layout,
-                crab_cell_runtime::Digest::from_bytes([34; 32]),
-                crab_cell_runtime::Digest::from_bytes([35; 32]),
+                cellule_runtime::Digest::from_bytes([34; 32]),
+                cellule_runtime::Digest::from_bytes([35; 32]),
                 registry.release_digest(),
             ),
-            Arc::new(crab_cell_runtime::peer::PeerSigner::new(
+            Arc::new(cellule_runtime::peer::PeerSigner::new(
                 cell_session,
                 registry.release_digest(),
                 ed25519_dalek::SigningKey::from_bytes(&[36; 32]),
             )),
             Arc::new(UnavailableRoundTrip),
-            crab_cell_runtime::control::Owner {
+            cellule_runtime::control::Owner {
                 session: cell_session,
                 endpoint: "https://server.test:8081".into(),
             },
@@ -263,12 +263,12 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
         store.clone(),
         "catalog",
     )));
-    let identity = crab_cell_runtime::cell::application::ApplicationIdentity::new(
-        crab_cell_runtime::TenantId::from_bytes([1; 16]),
-        crab_cell_runtime::ApplicationId::from_bytes([2; 16]),
+    let identity = cellule_runtime::cell::application::ApplicationIdentity::new(
+        cellule_runtime::TenantId::from_bytes([1; 16]),
+        cellule_runtime::ApplicationId::from_bytes([2; 16]),
     );
-    let layout = crab_cell_runtime::ltx::CellStorageLayout::new(
-        store,
+    let layout = cellule_runtime::ltx::CellStorageLayout::new(
+        cellule_store::Store::new(store.inner().clone()),
         object_store::path::Path::from("catalog"),
         *identity.application().as_bytes(),
     );
@@ -280,14 +280,14 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
         server.cell_runtime.telemetry_handle(),
     );
     let releases =
-        crab_cell_runtime::recovery::release::ReleaseStore::new(layout.clone(), identity).unwrap();
+        cellule_runtime::recovery::release::ReleaseStore::new(layout.clone(), identity).unwrap();
     server.peer_receiver = Some(crate::peer::PeerReceiver::new(
-        crab_cell_runtime::identity::NodeId::from_bytes([9; 16]),
-        crab_cell_runtime::SessionId::from_bytes([9; 16]),
-        crab_cell_runtime::node::NodeDirectory::new(
+        cellule_runtime::identity::NodeId::from_bytes([9; 16]),
+        cellule_runtime::SessionId::from_bytes([9; 16]),
+        cellule_runtime::node::NodeDirectory::new(
             layout,
-            crab_cell_runtime::Digest::from_bytes([3; 32]),
-            crab_cell_runtime::Digest::from_bytes([4; 32]),
+            cellule_runtime::Digest::from_bytes([3; 32]),
+            cellule_runtime::Digest::from_bytes([4; 32]),
             registry.release_digest(),
         ),
         registry,

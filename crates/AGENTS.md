@@ -24,9 +24,12 @@ Scoped rules for `crates/`. Root `AGENTS.md` also applies.
 - `crab-staging` — local segment staging, chunk indexes, prepared push plans, multipart resume, compaction, and recovery.
 - `crab-coordination` — push locks, write coordination, and feature-gated DynamoDB, Spanner, and Cosmos DB active-active backends.
 - `crab-lfs` — Git LFS object layout, storage access, and integrity checks; pointer parsing remains in `crab-git`.
-- `crab-ltx` — managed SQLite WAL capture, checksum-bearing LTX, exact recovery; optional `replica` adds crab-storage transport, epoch inheritance/head CAS, bundles, range compaction and immutable/writable sparse SQL with hydration. Provenance in `crab-ltx/UPSTREAM.md`; provider construction, leases and HTTP control policy remain outside.
-- `crab-cell-runtime` — embedded Rust Cell identities, control/CAS authority, SQLite runtime schema, actors, primitive mechanics and LTX publication. HTTP/auth/provider construction remain in the server composition boundary.
-- `crab-cell-peer-http` — shared owner-resolving HTTP peer round trip and pinned mTLS identity/listener. Product servers supply target scope, TLS files and name, and authenticated receivers.
+- `crab-ltx` — legacy qualification source for the LTX mechanics now owned by Cellule. Provenance remains in `crab-ltx/UPSTREAM.md` until its release gates move.
+- `crab-cell-runtime` — legacy qualification source for the Cell runtime now owned by Cellule.
+- `crab-cell-peer-http` — legacy qualification source for the peer transport now owned by Cellule.
+- `crab-http-server` consumes the pinned Cellule runtime, application, host,
+  store, and LTX crates. The in-tree Cell and LTX crates still serve legacy
+  qualification workflows; do not add a new product dependency on them.
 
 ### Read, Cache, and Virtual Filesystems
 
@@ -83,9 +86,9 @@ crab-types
 
 ## Cell and LTX Layout
 
-`crab-cell-runtime`, `crab-cell-app`, `crab-cell-host`, and `crab-ltx` are the
-source of the Cellule workspace, so their layout is inherited by a published
-framework rather than being a local style choice:
+`crab-cell-runtime`, `crab-cell-app`, `crab-cell-host`, and `crab-ltx` remain
+for Crab's legacy qualification workflows. Cellule now owns the live runtime;
+keep these source-local gates intact until their release evidence moves there:
 
 - `src/` is production code; the test surface is `tests/<suite>.rs` plus its
   `tests/<suite>/` modules, one binary per capability suite. Never name a suite
@@ -97,8 +100,8 @@ framework rather than being a local style choice:
   belongs in a suite.
 - The runtime and LTX root surfaces are frozen in `api-prelude.txt`; a new root
   re-export edits `src/lib.rs` and that file in the same commit.
-- These four crates depend only on each other and `crab-storage` (renamed
-  `cellule-store` on extraction), so a new `crab-*` edge blocks the extraction.
+- These four crates depend only on each other and `crab-storage`; do not add
+  product dependencies or extend their public contracts.
 - `crab/scripts/check-cell-ltx-layout.py` checks the layout and
   `crab/scripts/check-policy-entry-points.py` the actor policy seams; the
   per-crate `AGENTS.md` guides own the test map and read-first routes.

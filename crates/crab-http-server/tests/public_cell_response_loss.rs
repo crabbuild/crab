@@ -3,22 +3,20 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_runtime::cell::executor::Resolution;
-use crab_cell_runtime::cell::executor::StoredOutcome;
-use crab_cell_runtime::client::InvocationError;
-use crab_cell_runtime::identity::{CellTarget, partition_for_shard};
-use crab_cell_runtime::primitives::blob::BlobArtifactStore;
-use crab_cell_runtime::primitives::blob::{
-    BlobCondition, BlobMutation, BlobQuery, BlobQueryResult,
-};
-use crab_cell_runtime::primitives::cron::{CronMutation, CronQueryResult};
-use crab_cell_runtime::primitives::effects::EffectClaimRequest;
-use crab_cell_runtime::primitives::kv::{KvAtomicRequest, KvMutation};
-use crab_cell_runtime::primitives::queue::{
+use cellule_runtime::cell::executor::Resolution;
+use cellule_runtime::cell::executor::StoredOutcome;
+use cellule_runtime::client::InvocationError;
+use cellule_runtime::identity::{CellTarget, partition_for_shard};
+use cellule_runtime::primitives::blob::BlobArtifactStore;
+use cellule_runtime::primitives::blob::{BlobCondition, BlobMutation, BlobQuery, BlobQueryResult};
+use cellule_runtime::primitives::cron::{CronMutation, CronQueryResult};
+use cellule_runtime::primitives::effects::EffectClaimRequest;
+use cellule_runtime::primitives::kv::{KvAtomicRequest, KvMutation};
+use cellule_runtime::primitives::queue::{
     QueueClaimRequest, QueueLeaseOutcome, QueueSendRequest, QueueState,
 };
-use crab_cell_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
-use crab_cell_runtime::primitives::workflow::WorkflowStatus;
+use cellule_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
+use cellule_runtime::primitives::workflow::WorkflowStatus;
 
 #[path = "support/reference_application.rs"]
 mod fixture;
@@ -566,7 +564,9 @@ async fn run_public_blob_lost_response(
     let peer = node
         .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
         .unwrap()
-        .with_blob_artifact_store(BlobArtifactStore::new(store));
+        .with_blob_artifact_store(BlobArtifactStore::new(cellule_store::Store::new(
+            store.inner().clone(),
+        )));
     let peer_blob = peer.blob::<fixture::ReferenceBlob>().expect("peer Blob");
     let observer_blob = local
         .blob::<fixture::ReferenceBlob>()

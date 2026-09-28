@@ -106,7 +106,8 @@ jobs:
           compose logs --no-color > "$CRAB_REFERENCE_STATE/evidence/compose.log"
           containers=$(compose ps -aq)
           if [ -n "$containers" ]; then
-            docker inspect $containers > "$CRAB_REFERENCE_STATE/evidence/containers.json"
+            mapfile -t container_ids <<< "$containers"
+            docker inspect "${container_ids[@]}" > "$CRAB_REFERENCE_STATE/evidence/containers.json"
           fi
           docker image ls -a --digests --no-trunc > "$CRAB_REFERENCE_STATE/evidence/images.txt"
           compose stop

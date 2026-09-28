@@ -18,16 +18,16 @@ const KEY_TWO: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEICIiIiIi
 
 struct UnavailablePeer;
 
-impl crab_cell_runtime::peer::PeerRoundTrip for UnavailablePeer {
+impl cellule_runtime::peer::PeerRoundTrip for UnavailablePeer {
     fn send(
         &self,
-        _target: crab_cell_runtime::CellTarget,
+        _target: cellule_runtime::CellTarget,
         _request: Vec<u8>,
         _remaining_ms: u32,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+        Box<dyn std::future::Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>,
     > {
-        Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+        Box::pin(async { Err(cellule_runtime::Error::CellNotActive) })
     }
 }
 
@@ -333,12 +333,12 @@ impl Harness {
             .await
             .unwrap();
         repository.id = record.id;
-        let cell_identity = crab_cell_runtime::cell::application::ApplicationIdentity::new(
-            crab_cell_runtime::TenantId::from_bytes([2; 16]),
-            crab_cell_runtime::ApplicationId::from_bytes([3; 16]),
+        let cell_identity = cellule_runtime::cell::application::ApplicationIdentity::new(
+            cellule_runtime::TenantId::from_bytes([2; 16]),
+            cellule_runtime::ApplicationId::from_bytes([3; 16]),
         );
-        let cell_layout = crab_cell_runtime::ltx::CellStorageLayout::new(
-            admission_store.clone(),
+        let cell_layout = cellule_runtime::ltx::CellStorageLayout::new(
+            cellule_store::Store::new(admission_store.inner().clone()),
             object_store::path::Path::from("test-cells"),
             *cell_identity.application().as_bytes(),
         );
@@ -365,9 +365,9 @@ impl Harness {
         )
         .await
         .unwrap();
-        let cell_session = crab_cell_runtime::SessionId::from_bytes([4; 16]);
-        let cell_runtime = crab_cell_runtime::CellRuntime::new(
-            crab_cell_runtime::SqlWorkerPool::new(1, 16).unwrap(),
+        let cell_session = cellule_runtime::SessionId::from_bytes([4; 16]);
+        let cell_runtime = cellule_runtime::CellRuntime::new(
+            cellule_runtime::SqlWorkerPool::new(1, 16).unwrap(),
             16 * 1024 * 1024,
             cell_session,
         )
@@ -379,19 +379,19 @@ impl Harness {
             cell_runtime.clone(),
             crate::cells::RepositoryCellPeer::new(
                 crate::peer::PeerOwnerHints::default(),
-                crab_cell_runtime::node::NodeDirectory::new(
+                cellule_runtime::node::NodeDirectory::new(
                     cell_layout,
-                    crab_cell_runtime::Digest::from_bytes([6; 32]),
-                    crab_cell_runtime::Digest::from_bytes([7; 32]),
+                    cellule_runtime::Digest::from_bytes([6; 32]),
+                    cellule_runtime::Digest::from_bytes([7; 32]),
                     registry.release_digest(),
                 ),
-                Arc::new(crab_cell_runtime::peer::PeerSigner::new(
+                Arc::new(cellule_runtime::peer::PeerSigner::new(
                     cell_session,
                     registry.release_digest(),
                     ed25519_dalek::SigningKey::from_bytes(&[5; 32]),
                 )),
                 Arc::new(UnavailablePeer),
-                crab_cell_runtime::control::Owner {
+                cellule_runtime::control::Owner {
                     session: cell_session,
                     endpoint: "https://server.test:8081".into(),
                 },

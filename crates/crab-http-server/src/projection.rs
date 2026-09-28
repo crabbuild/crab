@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crab_cell_runtime::cell::executor::MutationIdentity;
-use crab_cell_runtime::client::{CellClient, Committed, InvocationError};
-use crab_cell_runtime::identity::CellTarget;
-use crab_cell_runtime::identity::RequestId;
+use cellule_runtime::cell::executor::MutationIdentity;
+use cellule_runtime::client::{CellClient, Committed, InvocationError};
+use cellule_runtime::identity::CellTarget;
+use cellule_runtime::identity::RequestId;
 use crab_metadata::manifest_store::{RepositorySnapshot, read_repository_snapshot};
 use crab_metadata::path_state::{PathStateIndex, load_path_state};
 use crab_metadata::split_commit_graph::{SplitCommitGraph, load_split_commit_graph};
@@ -936,10 +936,10 @@ fn mutation_identity() -> crate::Result<MutationIdentity> {
 fn invocation_error<T>(error: InvocationError<T>) -> crate::Error {
     match error {
         InvocationError::NotStarted(error) => crate::Error::Cell(error),
-        InvocationError::Rejected(_) => crate::Error::Cell(crab_cell_runtime::Error::Command(
+        InvocationError::Rejected(_) => crate::Error::Cell(cellule_runtime::Error::Command(
             "projection command rejected",
         )),
-        InvocationError::Pending(_) => crate::Error::Cell(crab_cell_runtime::Error::Command(
+        InvocationError::Pending(_) => crate::Error::Cell(cellule_runtime::Error::Command(
             "projection command pending",
         )),
         InvocationError::InvalidPublishedResult { source, .. } => crate::Error::Cell(*source),

@@ -1,13 +1,13 @@
 use std::{sync::atomic::Ordering, time::Duration};
 
-use crab_cell_runtime::Error;
-use crab_cell_runtime::client::{CellClient, InvocationError};
-use crab_cell_runtime::identity::{CellTarget, partition_for_shard};
-use crab_cell_runtime::primitives::effects::{
+use cellule_runtime::Error;
+use cellule_runtime::client::{CellClient, InvocationError};
+use cellule_runtime::identity::{CellTarget, partition_for_shard};
+use cellule_runtime::primitives::effects::{
     EffectClaimRequest, EffectLeaseOutcome, EffectState, EffectStatus,
 };
-use crab_cell_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
-use crab_cell_runtime::primitives::workflow::{WorkflowOutcome, WorkflowStatus};
+use cellule_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
+use cellule_runtime::primitives::workflow::{WorkflowOutcome, WorkflowStatus};
 
 #[path = "support/reference_application.rs"]
 mod fixture;

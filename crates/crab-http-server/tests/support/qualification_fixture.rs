@@ -1,22 +1,22 @@
 use std::{sync::Arc, time::Duration};
 
-use crab_cell_app::ApplicationHandle;
-use crab_cell_host::{CellNode, CellNodeBuilder};
-use crab_cell_runtime::Error;
-use crab_cell_runtime::cell::actor::CellHandle;
-use crab_cell_runtime::cell::catalog::CatalogRole;
-use crab_cell_runtime::cell::worker::SqlWorkerPool;
-use crab_cell_runtime::client::CellClient;
-use crab_cell_runtime::identity::{ApplicationId, TenantId};
-use crab_cell_runtime::ltx::CellStorageLayout;
-use crab_cell_runtime::node::lease::NodeLeaseGuard;
-use crab_cell_runtime::primitives::blob::BlobArtifactStore;
-use crab_cell_runtime::primitives::blob::install_blob_schema;
-use crab_cell_runtime::primitives::cron::install_cron_schema;
-use crab_cell_runtime::primitives::kv::install_kv_schema;
-use crab_cell_runtime::primitives::queue::install_queue_schema;
-use crab_cell_runtime::primitives::workflow::install_workflow_schema;
-use crab_cell_runtime::registry::Registry;
+use cellule_app::ApplicationHandle;
+use cellule_host::{CellNode, CellNodeBuilder};
+use cellule_runtime::Error;
+use cellule_runtime::cell::actor::CellHandle;
+use cellule_runtime::cell::catalog::CatalogRole;
+use cellule_runtime::cell::worker::SqlWorkerPool;
+use cellule_runtime::client::CellClient;
+use cellule_runtime::identity::{ApplicationId, TenantId};
+use cellule_runtime::ltx::CellStorageLayout;
+use cellule_runtime::node::lease::NodeLeaseGuard;
+use cellule_runtime::primitives::blob::BlobArtifactStore;
+use cellule_runtime::primitives::blob::install_blob_schema;
+use cellule_runtime::primitives::cron::install_cron_schema;
+use cellule_runtime::primitives::kv::install_kv_schema;
+use cellule_runtime::primitives::queue::install_queue_schema;
+use cellule_runtime::primitives::workflow::install_workflow_schema;
+use cellule_runtime::registry::Registry;
 use crab_storage::Store;
 use object_store::path::Path;
 use tokio_util::sync::CancellationToken;
@@ -38,9 +38,13 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
     let application = Arc::new(fixture::compiled());
     let tenant = TenantId::from_bytes([71; 16]);
     let application_id = ApplicationId::from_bytes([72; 16]);
-    let layout = CellStorageLayout::new(store.clone(), root, *application_id.as_bytes());
+    let layout = CellStorageLayout::new(
+        cellule_store::Store::new(store.inner().clone()),
+        root,
+        *application_id.as_bytes(),
+    );
     let directory = tempfile::tempdir().expect("qualification directory");
-    let session = crab_cell_runtime::SessionId::from_bytes([24; 16]);
+    let session = cellule_runtime::SessionId::from_bytes([24; 16]);
     let node = CellNodeBuilder::new(Arc::clone(&application))
         .with_runtime(
             SqlWorkerPool::new(4, 32).expect("qualification pool"),
@@ -192,7 +196,9 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
     let typed = node
         .application_handle::<fixture::ReferenceApplication>(client, tenant, application_id)
         .unwrap()
-        .with_blob_artifact_store(BlobArtifactStore::new(store.clone()));
+        .with_blob_artifact_store(BlobArtifactStore::new(cellule_store::Store::new(
+            store.inner().clone(),
+        )));
     (
         node,
         typed,

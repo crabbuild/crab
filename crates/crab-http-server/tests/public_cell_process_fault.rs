@@ -6,44 +6,44 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_host::CellNodeBuilder;
-use crab_cell_runtime::cell::catalog::CellCatalog;
-use crab_cell_runtime::cell::executor::Resolution;
-use crab_cell_runtime::cell::executor::{MutationIdentity, StoredOutcome};
-use crab_cell_runtime::cell::worker::SqlWorkerPool;
-use crab_cell_runtime::client::{CellClient, InvocationError};
-use crab_cell_runtime::codec::{BoundedEncoder, WireValue};
-use crab_cell_runtime::control::Owner;
-use crab_cell_runtime::control::authority::CellAuthority;
-use crab_cell_runtime::identity::IncarnationId;
-use crab_cell_runtime::identity::{
+use cellule_host::CellNodeBuilder;
+use cellule_runtime::cell::catalog::CellCatalog;
+use cellule_runtime::cell::executor::Resolution;
+use cellule_runtime::cell::executor::{MutationIdentity, StoredOutcome};
+use cellule_runtime::cell::worker::SqlWorkerPool;
+use cellule_runtime::client::{CellClient, InvocationError};
+use cellule_runtime::codec::{BoundedEncoder, WireValue};
+use cellule_runtime::control::Owner;
+use cellule_runtime::control::authority::CellAuthority;
+use cellule_runtime::identity::IncarnationId;
+use cellule_runtime::identity::{
     ApplicationId, CellTarget, SessionId, TenantId, partition_for_shard,
 };
-use crab_cell_runtime::ltx::{CellReplica, CellStorageLayout};
-use crab_cell_runtime::node::lease::NodeLeaseGuard;
-use crab_cell_runtime::primitives::blob::BlobArtifactStore;
-use crab_cell_runtime::primitives::blob::{
+use cellule_runtime::ltx::{CellReplica, CellStorageLayout};
+use cellule_runtime::node::lease::NodeLeaseGuard;
+use cellule_runtime::primitives::blob::BlobArtifactStore;
+use cellule_runtime::primitives::blob::{
     BlobCondition, BlobMutation, BlobMutationOutcome, BlobQuery, BlobQueryResult,
 };
-use crab_cell_runtime::primitives::cron::{CronMutation, CronMutationOutcome, CronQueryResult};
-use crab_cell_runtime::primitives::effects::{
+use cellule_runtime::primitives::cron::{CronMutation, CronMutationOutcome, CronQueryResult};
+use cellule_runtime::primitives::effects::{
     EffectAckRequest, EffectClaimRequest, EffectLease, EffectLeaseCommand, EffectLeaseOutcome,
     EffectLeaseRequest, EffectState, EffectStatus,
 };
-use crab_cell_runtime::primitives::kv::{KvAtomicOutcome, KvAtomicRequest, KvMutation};
-use crab_cell_runtime::primitives::maintenance::{
+use cellule_runtime::primitives::kv::{KvAtomicOutcome, KvAtomicRequest, KvMutation};
+use cellule_runtime::primitives::maintenance::{
     MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
 };
-use crab_cell_runtime::primitives::queue::{
+use cellule_runtime::primitives::queue::{
     QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState,
 };
-use crab_cell_runtime::primitives::sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
-use crab_cell_runtime::primitives::workflow::{
+use cellule_runtime::primitives::sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
+use cellule_runtime::primitives::workflow::{
     ActivityCompletion, ActivityCompletionOutcome, ActivityRunOutcome, ActivitySupervisor,
     WorkflowActivityClaimCommand, WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand,
     WorkflowOutcome, WorkflowStatus,
 };
-use crab_cell_runtime::recovery::manifest::RecoveryManifestStore;
+use cellule_runtime::recovery::manifest::RecoveryManifestStore;
 use crab_storage::Store;
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
@@ -203,7 +203,7 @@ fn process_case() -> String {
 fn process_store() -> (Store, Path) {
     if env::var(STORE_BACKEND_ENV).ok().as_deref() == Some(FILESYSTEM_STORE_BACKEND) {
         let path = env::var(STORE_PATH_ENV).expect("filesystem fault store path");
-        let store = crab_cell_runtime::test_support::FilesystemCasStore::new(FilePath::new(&path))
+        let store = cellule_runtime::test_support::FilesystemCasStore::new(FilePath::new(&path))
             .expect("filesystem fault store");
         return (
             Store::new(Arc::new(store)),

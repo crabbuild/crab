@@ -8,9 +8,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use crab_cell_runtime::cell::executor::MutationIdentity;
-use crab_cell_runtime::client::{Committed, InvocationError, Observed, Receipt};
-use crab_cell_runtime::identity::{IncarnationId, RequestId};
+use cellule_runtime::cell::executor::MutationIdentity;
+use cellule_runtime::client::{Committed, InvocationError, Observed, Receipt};
+use cellule_runtime::identity::{IncarnationId, RequestId};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -357,7 +357,7 @@ async fn detail(
             let local = server
                 .peer_receiver()
                 .and_then(|receiver| receiver.read_replicas())
-                .ok_or(Error::Cell(crab_cell_runtime::Error::ReplicaUnavailable))?;
+                .ok_or(Error::Cell(cellule_runtime::Error::ReplicaUnavailable))?;
             let (observed, reader_node) = router
                 .query_replica::<GetIssueDetail>(repo.id, &author, &local, minimum, number(id)?)
                 .await

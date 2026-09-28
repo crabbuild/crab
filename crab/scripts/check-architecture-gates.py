@@ -1748,7 +1748,6 @@ DELETED_WORKFLOW_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
     "pub use yaml::",
 }
 PRIVATE_INTERNAL_PACKAGES = {
-    "beyonddb",
     "crab-cell-app",
     "crab-cell-host",
     "crab-cell-peer-http",
@@ -1884,9 +1883,6 @@ WORKSPACE_DEPENDENCY_POLICY = {
     "crab-cell-peer-http": {"normal": {"crab-cell-runtime"}},
     "crab-cell-runtime": {"normal": {"crab-ltx", "crab-storage"}},
     "crab-ltx": {"normal": {"crab-storage"}},
-    "beyonddb": {
-        "normal": {"crab-cell-app", "crab-cell-host", "crab-cell-peer-http", "crab-cell-runtime", "crab-ltx", "crab-storage"},
-    },
     "crab-remote": {
         "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-metadata", "crab-read", "crab-remote-git", "crab-storage", "crab-write", "crab-xet"},
     },
@@ -1895,15 +1891,11 @@ WORKSPACE_DEPENDENCY_POLICY = {
         "dev": {"crab-git", "crab-xet"},
     },
     "crab-write": {"normal": {"crab-coordination", "crab-types", "crab-git", "crab-metadata", "crab-remote-git", "crab-storage", "crab-xet"}},
-    # The browser server is the product composition boundary for Git,
-    # metadata, write, coordination, LFS, and remote-read behavior.
+    # The browser server composes Git and repository behavior with the external
+    # Cellule runtime. New edges to the legacy in-tree Cell crates are forbidden.
     "crab-http-server": {
         "normal": {
-            "crab-cell-app",
-            "crab-cell-host",
-            "crab-cell-peer-http",
             "crab-coordination",
-            "crab-cell-runtime",
             "crab-git",
             "crab-lfs",
             "crab-metadata",
@@ -1913,7 +1905,6 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-write",
             "crab-remote",
         },
-        "dev": {"crab-cell-runtime", "crab-ltx"},
     },
     "crab": {
         "normal": {
@@ -2032,7 +2023,6 @@ WORKSPACE_DEPENDENCY_POLICY = {
     "crab-xet": {},
 }
 WORKSPACE_DEPENDENCY_PATHS = {
-    "beyonddb": "crates/beyonddb",
     "crab-cell-app": "crates/crab-cell-app",
     "crab-cell-host": "crates/crab-cell-host",
     "crab-cell-peer-http": "crates/crab-cell-peer-http",

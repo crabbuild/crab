@@ -1,9 +1,9 @@
 //! Rebuildable Git browse projections stored in the repository Cell.
 
-use crab_cell_runtime::codec::{BoundedDecoder, BoundedEncoder, WireValue};
-use crab_cell_runtime::primitives::sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
-use crab_cell_runtime::registry::{CellModule, Command, Query, RegistryBuilder};
-use crab_cell_runtime::registry::{CommandContext, CommandResult, QueryContext};
+use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, WireValue};
+use cellule_runtime::primitives::sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
+use cellule_runtime::registry::{CellModule, Command, Query, RegistryBuilder};
+use cellule_runtime::registry::{CommandContext, CommandResult, QueryContext};
 use serde::{Deserialize, Serialize};
 
 use super::RepositoryModule;
@@ -34,9 +34,9 @@ impl WireValue for ProjectionBatch {
     fn encode(
         &self,
         encoder: &mut BoundedEncoder,
-    ) -> Result<(), crab_cell_runtime::codec::CodecError> {
+    ) -> Result<(), cellule_runtime::codec::CodecError> {
         if self.source.len() > MAX_SOURCE_BYTES || self.payload.len() > MAX_BATCH_BYTES {
-            return Err(crab_cell_runtime::codec::CodecError::Limit);
+            return Err(cellule_runtime::codec::CodecError::Limit);
         }
         encoder.write_u8(self.operation)?;
         encoder.write_u64(self.epoch_id)?;
@@ -46,13 +46,13 @@ impl WireValue for ProjectionBatch {
 
     fn decode(
         decoder: &mut BoundedDecoder<'_>,
-    ) -> Result<Self, crab_cell_runtime::codec::CodecError> {
+    ) -> Result<Self, cellule_runtime::codec::CodecError> {
         let operation = decoder.read_u8()?;
         let epoch_id = decoder.read_u64()?;
         let source = decoder.read_bytes()?;
         let payload = decoder.read_bytes()?;
         if source.len() > MAX_SOURCE_BYTES || payload.len() > MAX_BATCH_BYTES {
-            return Err(crab_cell_runtime::codec::CodecError::Limit);
+            return Err(cellule_runtime::codec::CodecError::Limit);
         }
         Ok(Self {
             operation,
@@ -72,13 +72,13 @@ impl WireValue for ProjectionAck {
     fn encode(
         &self,
         encoder: &mut BoundedEncoder,
-    ) -> Result<(), crab_cell_runtime::codec::CodecError> {
+    ) -> Result<(), cellule_runtime::codec::CodecError> {
         self.epoch_id.encode(encoder)
     }
 
     fn decode(
         decoder: &mut BoundedDecoder<'_>,
-    ) -> Result<Self, crab_cell_runtime::codec::CodecError> {
+    ) -> Result<Self, cellule_runtime::codec::CodecError> {
         Ok(Self {
             epoch_id: Option::<u64>::decode(decoder)?,
         })
@@ -92,13 +92,13 @@ impl WireValue for ProjectionState {
     fn encode(
         &self,
         _encoder: &mut BoundedEncoder,
-    ) -> Result<(), crab_cell_runtime::codec::CodecError> {
+    ) -> Result<(), cellule_runtime::codec::CodecError> {
         Ok(())
     }
 
     fn decode(
         _decoder: &mut BoundedDecoder<'_>,
-    ) -> Result<Self, crab_cell_runtime::codec::CodecError> {
+    ) -> Result<Self, cellule_runtime::codec::CodecError> {
         Ok(Self)
     }
 }
@@ -114,7 +114,7 @@ impl WireValue for ProjectionStateView {
     fn encode(
         &self,
         encoder: &mut BoundedEncoder,
-    ) -> Result<(), crab_cell_runtime::codec::CodecError> {
+    ) -> Result<(), cellule_runtime::codec::CodecError> {
         self.ready_epoch.encode(encoder)?;
         self.source_token.encode(encoder)?;
         self.generation.encode(encoder)
@@ -122,7 +122,7 @@ impl WireValue for ProjectionStateView {
 
     fn decode(
         decoder: &mut BoundedDecoder<'_>,
-    ) -> Result<Self, crab_cell_runtime::codec::CodecError> {
+    ) -> Result<Self, cellule_runtime::codec::CodecError> {
         Ok(Self {
             ready_epoch: Option::<u64>::decode(decoder)?,
             source_token: Option::<String>::decode(decoder)?,
@@ -233,14 +233,14 @@ impl Command for ApplyProjectionBatch {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         if input.source.len() > MAX_SOURCE_BYTES || input.payload.len() > MAX_BATCH_BYTES {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "projection batch exceeds input limit",
             ));
         }
         let source: SourceIdentity = serde_json::from_slice(&input.source).map_err(|_| {
-            crab_cell_runtime::Error::Command("projection source identity is invalid")
+            cellule_runtime::Error::Command("projection source identity is invalid")
         })?;
         validate_source(&source)?;
         let payload = &input.payload;
@@ -250,7 +250,7 @@ impl Command for ApplyProjectionBatch {
                 require_epoch(context, input.epoch_id, &source)?;
                 let rows: Vec<RefRow> = decode_payload(payload)?;
                 if rows.len() > MAX_BATCH_ROWS {
-                    return Err(crab_cell_runtime::Error::Command(
+                    return Err(cellule_runtime::Error::Command(
                         "projection ref batch is too large",
                     ));
                 }
@@ -261,7 +261,7 @@ impl Command for ApplyProjectionBatch {
                 require_epoch(context, input.epoch_id, &source)?;
                 let rows: Vec<CommitRow> = decode_payload(payload)?;
                 if rows.len() > MAX_BATCH_ROWS {
-                    return Err(crab_cell_runtime::Error::Command(
+                    return Err(cellule_runtime::Error::Command(
                         "projection commit batch is too large",
                     ));
                 }
@@ -272,7 +272,7 @@ impl Command for ApplyProjectionBatch {
                 require_epoch(context, input.epoch_id, &source)?;
                 let rows: Vec<TreeRow> = decode_payload(payload)?;
                 if rows.len() > MAX_BATCH_ROWS {
-                    return Err(crab_cell_runtime::Error::Command(
+                    return Err(cellule_runtime::Error::Command(
                         "projection tree batch is too large",
                     ));
                 }
@@ -286,7 +286,7 @@ impl Command for ApplyProjectionBatch {
                     || batch.edges.len() > MAX_BATCH_ROWS.saturating_mul(8)
                     || batch.roots.len() > MAX_BATCH_ROWS
                 {
-                    return Err(crab_cell_runtime::Error::Command(
+                    return Err(cellule_runtime::Error::Command(
                         "projection attribution batch is too large",
                     ));
                 }
@@ -308,7 +308,7 @@ impl Command for ApplyProjectionBatch {
                 None
             }
             _ => {
-                return Err(crab_cell_runtime::Error::Command(
+                return Err(cellule_runtime::Error::Command(
                     "unknown projection operation",
                 ));
             }
@@ -330,7 +330,7 @@ impl Query for GetProjectionState {
     fn execute(
         context: &mut QueryContext<'_>,
         _input: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
                 "SELECT s.ready_epoch, e.source_token, e.manifest_generation FROM git_projection_state s LEFT JOIN git_projection_epochs e ON e.epoch_id = s.ready_epoch WHERE s.singleton = 1",
@@ -338,7 +338,7 @@ impl Query for GetProjectionState {
             )],
         })?;
         let Some(row) = result[0].rows.first() else {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "projection state row is missing",
             ));
         };
@@ -385,18 +385,18 @@ impl Query for GetProjectionAttribution {
     fn execute(
         context: &mut QueryContext<'_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         let request: AttributionQuery = serde_json::from_slice(&input).map_err(|_| {
-            crab_cell_runtime::Error::Command("projection attribution input is invalid")
+            cellule_runtime::Error::Command("projection attribution input is invalid")
         })?;
         let response = attribution(context, &request)?;
         serde_json::to_vec(&response).map_err(|_| {
-            crab_cell_runtime::Error::Command("projection attribution output is invalid")
+            cellule_runtime::Error::Command("projection attribution output is invalid")
         })
     }
 }
 
-pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
+pub(crate) fn register(registry: &mut RegistryBuilder) -> cellule_runtime::Result<()> {
     registry.bind_command::<ApplyProjectionBatch>()?;
     registry.bind_query::<GetProjectionState>()?;
     registry.bind_query::<GetProjectionAttribution>()?;
@@ -406,7 +406,7 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
 fn attribution(
     context: &QueryContext<'_>,
     request: &AttributionQuery,
-) -> crab_cell_runtime::Result<AttributionResponse> {
+) -> cellule_runtime::Result<AttributionResponse> {
     if request.source_token.len() > 128
         || request.commit_oid.len() != 20
         || request.paths.len() > 200
@@ -415,7 +415,7 @@ fn attribution(
             .iter()
             .any(|path| path.is_empty() || path.len() > 1024 * 1024 || path.contains(&0))
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "projection attribution input is out of bounds",
         ));
     }
@@ -537,7 +537,7 @@ fn attribution(
 fn begin(
     context: &CommandContext<'_, '_>,
     source: &SourceIdentity,
-) -> crab_cell_runtime::Result<Option<u64>> {
+) -> cellule_runtime::Result<Option<u64>> {
     let existing = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT epoch_id, state FROM git_projection_epochs WHERE source_token = ?",
@@ -547,9 +547,9 @@ fn begin(
     if let Some(row) = existing[0].rows.first() {
         let epoch_id = match row.first() {
             Some(SqlValue::Integer(value)) => u64::try_from(*value)
-                .map_err(|_| crab_cell_runtime::Error::Command("projection epoch is negative"))?,
+                .map_err(|_| cellule_runtime::Error::Command("projection epoch is negative"))?,
             _ => {
-                return Err(crab_cell_runtime::Error::Command(
+                return Err(cellule_runtime::Error::Command(
                     "projection epoch is invalid",
                 ));
             }
@@ -584,7 +584,7 @@ fn begin(
                         "UPDATE git_projection_epochs SET state = 'building', started_at_ms = ?, verified_at_ms = NULL WHERE epoch_id = ?",
                         vec![
                             integer(u64::try_from(context.now_ms()).map_err(|_| {
-                                crab_cell_runtime::Error::Command(
+                                cellule_runtime::Error::Command(
                                     "projection timestamp is negative",
                                 )
                             })?)?,
@@ -606,7 +606,7 @@ fn begin(
     let previous = result_u64(&result, 0, 0)?;
     let epoch_id = previous
         .checked_add(1)
-        .ok_or(crab_cell_runtime::Error::Command(
+        .ok_or(cellule_runtime::Error::Command(
             "projection epoch is exhausted",
         ))?;
     context.sql(&SqlBatch {
@@ -630,7 +630,7 @@ fn begin(
                 optional_text_value(source.path_state_hash.as_deref()),
                 SqlValue::Blob(source.head_ref.clone()),
                 integer(u64::try_from(context.now_ms()).map_err(|_| {
-                    crab_cell_runtime::Error::Command("projection timestamp is negative")
+                    cellule_runtime::Error::Command("projection timestamp is negative")
                 })?)?,
             ],
         )],
@@ -642,9 +642,9 @@ fn begin(
 fn update_probe_state(
     context: &CommandContext<'_, '_>,
     source: &SourceIdentity,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     let now = u64::try_from(context.now_ms())
-        .map_err(|_| crab_cell_runtime::Error::Command("projection timestamp is negative"))?;
+        .map_err(|_| cellule_runtime::Error::Command("projection timestamp is negative"))?;
     context.sql(&SqlBatch {
         statements: vec![statement(
             "UPDATE git_projection_state SET desired_source_token = ?, desired_manifest_generation = ?, desired_manifest_etag = ?, desired_journal_digest = ?, last_probe_at_ms = ?, next_probe_at_ms = ? WHERE singleton = 1",
@@ -665,7 +665,7 @@ fn apply_refs(
     context: &CommandContext<'_, '_>,
     epoch_id: u64,
     rows: &[RefRow],
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     let mut statements = Vec::with_capacity(rows.len());
     for row in rows {
         statements.push(statement(
@@ -690,7 +690,7 @@ fn apply_commits(
     context: &CommandContext<'_, '_>,
     epoch_id: u64,
     rows: &[CommitRow],
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     let mut statements = Vec::with_capacity(rows.len().saturating_mul(3));
     for row in rows {
         statements.push(statement(
@@ -725,7 +725,7 @@ fn apply_commits(
                 vec![
                     SqlValue::Blob(row.oid.clone()),
                     integer(u64::try_from(index).map_err(|_| {
-                        crab_cell_runtime::Error::Command("projection parent index overflowed")
+                        cellule_runtime::Error::Command("projection parent index overflowed")
                     })?)?,
                     SqlValue::Blob(parent.clone()),
                 ],
@@ -736,10 +736,7 @@ fn apply_commits(
     Ok(())
 }
 
-fn apply_trees(
-    context: &CommandContext<'_, '_>,
-    rows: &[TreeRow],
-) -> crab_cell_runtime::Result<()> {
+fn apply_trees(context: &CommandContext<'_, '_>, rows: &[TreeRow]) -> cellule_runtime::Result<()> {
     let mut statements = Vec::new();
     for row in rows {
         statements.push(statement(
@@ -747,11 +744,11 @@ fn apply_trees(
             vec![
                 SqlValue::Blob(row.tree_oid.clone()),
                 integer(u64::try_from(row.entries.len()).map_err(|_| {
-                    crab_cell_runtime::Error::Command("projection tree entry count overflowed")
+                    cellule_runtime::Error::Command("projection tree entry count overflowed")
                 })?)?,
                 integer(row.encoded_bytes)?,
                 integer(u64::try_from(context.now_ms()).map_err(|_| {
-                    crab_cell_runtime::Error::Command("projection timestamp is negative")
+                    cellule_runtime::Error::Command("projection timestamp is negative")
                 })?)?,
             ],
         ));
@@ -787,7 +784,7 @@ fn apply_attribution(
     context: &CommandContext<'_, '_>,
     epoch_id: u64,
     batch: &AttributionBatch,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     let mut statements = Vec::new();
     for node in &batch.nodes {
         statements.push(statement(
@@ -828,14 +825,14 @@ fn promote(
     context: &CommandContext<'_, '_>,
     epoch_id: u64,
     source: &SourceIdentity,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     verify_epoch(context, epoch_id, source)?;
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
             "UPDATE git_projection_epochs SET state = 'ready', verified_at_ms = ? WHERE epoch_id = ? AND source_token = ? AND state = 'building'",
             vec![
                 integer(u64::try_from(context.now_ms()).map_err(|_| {
-                    crab_cell_runtime::Error::Command("projection timestamp is negative")
+                    cellule_runtime::Error::Command("projection timestamp is negative")
                 })?)?,
                 integer(epoch_id)?,
                 text(&source.source_token),
@@ -843,7 +840,7 @@ fn promote(
         )],
     })?;
     if result[0].rows_affected != 1 {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "projection epoch cannot be promoted",
         ));
     }
@@ -860,7 +857,7 @@ fn verify_epoch(
     context: &CommandContext<'_, '_>,
     epoch_id: u64,
     source: &SourceIdentity,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     let result = context.sql(&SqlBatch {
         statements: vec![
             statement(
@@ -882,7 +879,7 @@ fn verify_epoch(
         ],
     })?;
     let Some(row) = result[0].rows.first() else {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "projection epoch count is missing",
         ));
     };
@@ -891,7 +888,7 @@ fn verify_epoch(
     let maximum = result_i64(row, 2)?;
     if count != 0 && (minimum != 0 || maximum < 0 || u64::try_from(maximum).ok() != Some(count - 1))
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "projection commit ordinals are not contiguous",
         ));
     }
@@ -899,14 +896,14 @@ fn verify_epoch(
         || (source.path_state_hash.is_some() && !result[2].rows.is_empty())
         || (source.path_state_hash.is_some() && !result[3].rows.is_empty())
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "projection epoch has dangling rows",
         ));
     }
     Ok(())
 }
 
-fn supersede(context: &CommandContext<'_, '_>, epoch_id: u64) -> crab_cell_runtime::Result<()> {
+fn supersede(context: &CommandContext<'_, '_>, epoch_id: u64) -> cellule_runtime::Result<()> {
     context.sql(&SqlBatch {
         statements: vec![statement(
             "UPDATE git_projection_epochs SET state = 'superseded' WHERE epoch_id = ? AND state = 'building'",
@@ -916,7 +913,7 @@ fn supersede(context: &CommandContext<'_, '_>, epoch_id: u64) -> crab_cell_runti
     Ok(())
 }
 
-fn collect(context: &CommandContext<'_, '_>) -> crab_cell_runtime::Result<()> {
+fn collect(context: &CommandContext<'_, '_>) -> cellule_runtime::Result<()> {
     let keep = r#"
         WITH keep(epoch_id) AS (
             SELECT ready_epoch
@@ -1003,9 +1000,9 @@ fn require_epoch(
     context: &CommandContext<'_, '_>,
     epoch_id: u64,
     source: &SourceIdentity,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     if epoch_id == 0 {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "projection epoch is missing",
         ));
     }
@@ -1016,19 +1013,19 @@ fn require_epoch(
         )],
     })?;
     let Some(row) = result[0].rows.first() else {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "projection epoch is missing",
         ));
     };
     if result_text(row, 0)? != source.source_token || result_text(row, 1)? != "building" {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "projection epoch identity or state differs",
         ));
     }
     Ok(())
 }
 
-fn validate_source(source: &SourceIdentity) -> crab_cell_runtime::Result<()> {
+fn validate_source(source: &SourceIdentity) -> cellule_runtime::Result<()> {
     if source.source_token.is_empty()
         || source.source_token.len() > 128
         || source.manifest_etag.len() > 1024
@@ -1037,16 +1034,16 @@ fn validate_source(source: &SourceIdentity) -> crab_cell_runtime::Result<()> {
         || source.git_validation_digest.len() > 128
         || source.head_ref.len() > 1024
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "projection source identity is out of bounds",
         ));
     }
     Ok(())
 }
 
-fn decode_payload<T: for<'de> Deserialize<'de>>(payload: &[u8]) -> crab_cell_runtime::Result<T> {
+fn decode_payload<T: for<'de> Deserialize<'de>>(payload: &[u8]) -> cellule_runtime::Result<T> {
     serde_json::from_slice(payload)
-        .map_err(|_| crab_cell_runtime::Error::Command("projection batch payload is invalid"))
+        .map_err(|_| cellule_runtime::Error::Command("projection batch payload is invalid"))
 }
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
@@ -1059,7 +1056,7 @@ fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
 fn execute_statements(
     context: &CommandContext<'_, '_>,
     mut statements: Vec<SqlStatement>,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     while !statements.is_empty() {
         let count = statements.len().min(MAX_SQL_STATEMENTS);
         let tail = statements.split_off(count);
@@ -1069,9 +1066,9 @@ fn execute_statements(
     Ok(())
 }
 
-fn integer(value: u64) -> crab_cell_runtime::Result<SqlValue> {
+fn integer(value: u64) -> cellule_runtime::Result<SqlValue> {
     Ok(SqlValue::Integer(i64::try_from(value).map_err(|_| {
-        crab_cell_runtime::Error::Command("projection integer exceeds SQLite range")
+        cellule_runtime::Error::Command("projection integer exceeds SQLite range")
     })?))
 }
 
@@ -1083,64 +1080,64 @@ fn optional_text_value(value: Option<&str>) -> SqlValue {
     value.map_or(SqlValue::Null, text)
 }
 
-fn result_u64(sets: &[SqlResultSet], set: usize, column: usize) -> crab_cell_runtime::Result<u64> {
+fn result_u64(sets: &[SqlResultSet], set: usize, column: usize) -> cellule_runtime::Result<u64> {
     match sets
         .get(set)
         .and_then(|set| set.rows.first())
         .and_then(|row| row.get(column))
     {
         Some(SqlValue::Integer(value)) => u64::try_from(*value)
-            .map_err(|_| crab_cell_runtime::Error::Command("projection integer is negative")),
-        _ => Err(crab_cell_runtime::Error::Command(
+            .map_err(|_| cellule_runtime::Error::Command("projection integer is negative")),
+        _ => Err(cellule_runtime::Error::Command(
             "projection query returned invalid integer",
         )),
     }
 }
 
-fn result_text(row: &[SqlValue], column: usize) -> crab_cell_runtime::Result<String> {
+fn result_text(row: &[SqlValue], column: usize) -> cellule_runtime::Result<String> {
     match row.get(column) {
         Some(SqlValue::Text(value)) => Ok(value.clone()),
-        _ => Err(crab_cell_runtime::Error::Command(
+        _ => Err(cellule_runtime::Error::Command(
             "projection query returned invalid text",
         )),
     }
 }
 
-fn result_i64(row: &[SqlValue], column: usize) -> crab_cell_runtime::Result<i64> {
+fn result_i64(row: &[SqlValue], column: usize) -> cellule_runtime::Result<i64> {
     match row.get(column) {
         Some(SqlValue::Integer(value)) => Ok(*value),
-        _ => Err(crab_cell_runtime::Error::Command(
+        _ => Err(cellule_runtime::Error::Command(
             "projection query returned invalid integer",
         )),
     }
 }
 
-fn blob(row: &[SqlValue], column: usize) -> crab_cell_runtime::Result<Vec<u8>> {
+fn blob(row: &[SqlValue], column: usize) -> cellule_runtime::Result<Vec<u8>> {
     match row.get(column) {
         Some(SqlValue::Blob(value)) => Ok(value.clone()),
-        _ => Err(crab_cell_runtime::Error::Command(
+        _ => Err(cellule_runtime::Error::Command(
             "projection query returned invalid blob",
         )),
     }
 }
 
-fn optional_u64(row: &[SqlValue], column: usize) -> crab_cell_runtime::Result<Option<u64>> {
+fn optional_u64(row: &[SqlValue], column: usize) -> cellule_runtime::Result<Option<u64>> {
     match row.get(column) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Integer(value)) => u64::try_from(*value)
             .map(Some)
-            .map_err(|_| crab_cell_runtime::Error::Command("projection integer is negative")),
-        _ => Err(crab_cell_runtime::Error::Command(
+            .map_err(|_| cellule_runtime::Error::Command("projection integer is negative")),
+        _ => Err(cellule_runtime::Error::Command(
             "projection query returned invalid optional integer",
         )),
     }
 }
 
-fn optional_text(row: &[SqlValue], column: usize) -> crab_cell_runtime::Result<Option<String>> {
+fn optional_text(row: &[SqlValue], column: usize) -> cellule_runtime::Result<Option<String>> {
     match row.get(column) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Text(value)) => Ok(Some(value.clone())),
-        _ => Err(crab_cell_runtime::Error::Command(
+        _ => Err(cellule_runtime::Error::Command(
             "projection query returned invalid optional text",
         )),
     }

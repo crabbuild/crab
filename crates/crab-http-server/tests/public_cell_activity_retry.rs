@@ -3,9 +3,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_runtime::cell::executor::Resolution;
-use crab_cell_runtime::cell::executor::StoredOutcome;
-use crab_cell_runtime::primitives::workflow::{
+use cellule_runtime::cell::executor::Resolution;
+use cellule_runtime::cell::executor::StoredOutcome;
+use cellule_runtime::primitives::workflow::{
     ActivityRunOutcome, ActivitySupervisor, ActivitySupervisorError, WorkflowOutcome,
     WorkflowStatus,
 };
