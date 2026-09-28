@@ -11,6 +11,14 @@
 | Replaces | Whole-repository Git-pack replacement during every v2 checkpoint |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Kubernetes 4,500-commit RustFS benchmark](../benchmarks/kubernetes-4500-rustfs.md) |
 
+The later bounded-frontier reader candidate stopped after 1,112 of 5,000
+incremental pushes because the shared qualification volume ran low. Its two
+500-commit fetches preserved the exact tips and installed one new pack each,
+but took 11.565/10.910 seconds and 32 requests each. The [retained GA
+qualification record](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md)
+distinguishes this capacity stop from protocol correctness and leaves the
+full replay, performance, Xet, and parity gates open.
+
 ## 1. Decision
 
 Protocol v2 will publish an authenticated **pack set** whose members are

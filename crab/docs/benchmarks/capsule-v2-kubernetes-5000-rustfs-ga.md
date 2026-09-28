@@ -5,6 +5,10 @@ incremental-fetch latency and request-count gates. Push performance passed its
 sub-second mean and under-ten-request average gates; this is not a matched v1
 comparison or permission to retire v1.
 
+A newer bounded-frontier reader candidate has not completed this workload:
+its September 28 replay was stopped for host capacity after 1,112 incremental
+pushes. Its passing 500/1,000-commit fetches are diagnostic, not qualification.
+
 ## Reconciled-main candidate: full replay, still not qualified
 
 `capsule-main-integration-ga-20260927-r1` ran from 18:58:36 to 19:52:21 UTC
@@ -400,6 +404,33 @@ the frozen source. Focused `crab-read` capsule tests (31) and metadata run
 tests (17) passed. The candidate has **not** completed the full 5,000-push
 replay, large-frontier fallback, Xet workload or all CI gates; v1 retirement
 remains blocked.
+
+### September 28 current-binary capacity stop
+
+`k8s-5000-inline-20260928-r1` used the rebased release binary SHA-256
+`9e12ab8cde084c9ca2831b3b2ab8727ccd425e9a010409e0fcca05445a40b027`
+on RustFS 1.0.0 GA. Seed publication, seed repack, an independent seed clone,
+strict full Git fsck and remote Crab fsck passed. The run completed 1,112
+individual incremental pushes before the operator stopped it at 19 GiB free
+on the shared qualification volume. The harness records `status=failed` with
+an empty error after `KeyboardInterrupt`; this is a capacity stop, not a
+protocol failure or a passing 5,000-commit replay.
+
+| Operation | Latency | Origin requests | Result |
+|---|---:|---:|---|
+| First 1,000 incremental pushes, mean / p95 | 723.792 / 3,502 ms | 7.013 mean | completed; latency not flat |
+| Fetch before repack at 500 / 1,000 | 11.565 / 10.910 s | 32 / 32 | exact tips; one new local pack each |
+| Repack at 500 / 1,000 | 14.891 / 22.758 s | 63 / 64 | completed |
+
+The fetches each read a bounded frontier and passed tip/connectivity checks,
+but both exceeded the unchanged ten-second and ten-request ceilings. The
+remaining 3,888 pushes, eight later fetch/repack intervals, final clones and
+integrity gates did not run. Raw report SHA-256 is
+`8ea8b84d18aab5933ad0f4b7c25fe0aafc57f05d5cf98cadd2fc70aaff55b1a4`;
+request-log SHA-256 is
+`ba7b7a48d5bc292f1fdaabe0e367b17c9c92570025c89b411865967a53986ce2`.
+The retained `capacity-stop.md` note records why the raw report is incomplete.
+No v1 parity or release claim follows from this partial run.
 
 ## Completed v1 baseline: diagnostic, not isolated timing
 
