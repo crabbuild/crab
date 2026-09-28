@@ -6,7 +6,7 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Protocol-v2 checkpoint Git packs, clone/fetch, repack, fsck, history, and GC |
-| Status | Working implementation, not qualified. The current bounded-frontier candidate completed RustFS 1.0.0 GA seed + 5,000 individual pushes, ten fetch-before-repack intervals, cold/warm clones, strict Git/Crab integrity and 32 sampled blob comparisons. Pushes averaged 255.56 ms / 7.012 requests; fetch p95 was 8.655 seconds / 34 requests. The latency gate passed but the unchanged ten-request fetch gate failed. See the [GA qualification report](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md). Xet/recovery/GC, matched v1, full product/provider parity, green CI and v1 retirement remain unqualified. |
+| Status | Working implementation, not qualified. The latest pinned-upstream RustFS 1.0.0 GA replay completed seed + 5,000 individual pushes, ten fetch-before-repack intervals, cold/warm clones, strict Git/Crab integrity and 32 sampled blob comparisons. Pushes averaged 215.03 ms / 7.012 requests; fetch p95 was 5.077 seconds / 34 requests. The latency gate passed but the unchanged ten-request fetch gate failed. See the [GA qualification report](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md). Xet/recovery/GC, matched v1, full product/provider parity, green CI and v1 retirement remain unqualified. |
 | Priority | Correctness, stable incremental cost, then clone throughput and storage efficiency |
 | Replaces | Whole-repository Git-pack replacement during every v2 checkpoint |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Kubernetes 4,500-commit RustFS benchmark](../benchmarks/kubernetes-4500-rustfs.md) |

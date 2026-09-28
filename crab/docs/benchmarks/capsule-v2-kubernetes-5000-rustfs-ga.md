@@ -1,6 +1,46 @@
 # Capsule v2: Kubernetes 5,000-commit RustFS GA qualification
 
-The current bounded-frontier candidate completed the full correctness workload
+## September 28 pinned-upstream replay after ref-head retry fix
+
+Candidate `8610ebf826e7dd5d264060381d6a2cd2ee94c853` ran from
+10:49:52 to 11:25:22 UTC against local RustFS 1.0.0 GA. The immutable
+`crab 1.2.4` binary SHA-256 was
+`f16f5d7172f4f488f66459119c7fd2a6f39acaff6cbd69305ead35aec6c67c31`;
+the harness SHA-256 was
+`77501e88310cc44a606a8847a66643487a495663c42ded49349e8ac4f8f1d5f1`.
+An independent local Kubernetes clone was pinned to upstream GitHub commit
+`e72c2715ade37738aa5c029e8de5285cbe1c9441`, excluding two unrelated
+local Xet-pointer fixture commits in the pre-existing source checkout. Its
+first-parent range contains exactly 5,000 commits after seed
+`b17f5ff9ae26d81f1520e797c6a68556bdd103a6`.
+
+| Operation | Latency | Origin requests |
+|---|---:|---:|
+| Seed push | 167.185 s | 9 |
+| Incremental push mean / p50 / p95 / p99 | 215.03 / 184 / 390 / 652 ms | 7.012 mean; 6 p50/p95; 40 p99 |
+| 500-commit fetch mean / p50 / p95 | 3.376 / 3.299 / 5.077 s | 32.4 mean; 34 p95 |
+| Final cold / warm clone | 36.828 / 22.233 s | 16 / 14 |
+
+All 5,000 individual pushes succeeded. Each of ten fetch-before-repack
+intervals reached the exact tip and installed one new local pack. Push request
+count was exactly 7.012 in each 500-commit window; window mean latency ranged
+from 200.49 to 241.15 ms, without monotonic growth. Seed/final remote Crab
+fsck, strict native Git fsck, independent final cold/warm clones, and 32 sampled
+blob digests against source all passed. The request log contains no 5xx.
+The harness **failed only the unchanged fetch request gate**: p95 34 versus
+the required 10. Its push mean latency/request and fetch p95 latency gates
+passed. This remains a correctness pass, not full performance qualification
+or evidence to retire v1. No task-owned compilation or second bulk workload
+overlapped the timed run; shared host/backend caches were not reset.
+
+Retained artifacts: `k8s-head8610-pinned-20260928-r1/artifacts/report.json`
+(SHA-256 `e90be64d923f70a6be497bd7f33a12b2e7b279068eebcb0c7291c99d3bd0ad6c`)
+and `requests.jsonl` (SHA-256
+`75014191bb8c38de7a46fc5e23131696653b8cbd267f8a642415fcc459cabf4a`)
+under the mounted qualification-smokes volume. The raw log independently
+contains 324 fetch requests across the ten intervals.
+
+An earlier bounded-frontier candidate completed the full correctness workload
 on RustFS 1.0.0 GA. **Qualification still failed** the unchanged incremental-fetch
 request-count gate: fetch p95 was 34 requests against a limit of 10. Pushes
 passed the sub-second mean and under-ten-request average gates, and fetch p95
