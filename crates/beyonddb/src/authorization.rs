@@ -1,4 +1,4 @@
-//! Durable user policies for ExtendDB authorization decisions.
+//! Durable user and role policies for ExtendDB authorization decisions.
 
 use crab_cell_runtime::client::{CellClient, InvocationError};
 use crab_cell_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
@@ -14,75 +14,100 @@ use crate::table::statement;
 use crate::{Error, Json, MODULE, Result, SqlValue, account_target};
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct UserPolicy {
+pub(crate) enum PrincipalKind {
+    User,
+    Role,
+}
+
+impl PrincipalKind {
+    fn code(&self) -> i64 {
+        match self {
+            Self::User => 0,
+            Self::Role => 1,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct PrincipalPolicy {
     account_id: String,
-    user_name: String,
+    kind: PrincipalKind,
+    principal_name: String,
     policy_name: String,
     document: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct UserPolicyKey {
+pub(crate) struct PrincipalPolicyKey {
     account_id: String,
-    user_name: String,
+    kind: PrincipalKind,
+    principal_name: String,
     policy_name: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct UserPrincipal {
+pub(crate) struct Principal {
     account_id: String,
-    user_name: String,
+    kind: PrincipalKind,
+    name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum PutUserPolicyOutcome {
+pub(crate) enum PutPrincipalPolicyOutcome {
     Stored,
     Invalid,
 }
 
-pub(crate) struct PutUserPolicy;
+pub(crate) struct PutPrincipalPolicy;
 
-impl Command for PutUserPolicy {
+impl Command for PutPrincipalPolicy {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 13;
     const CODEC_VERSION: u32 = 1;
-    type Input = Json<UserPolicy>;
-    type Output = Json<PutUserPolicyOutcome>;
+    type Input = Json<PrincipalPolicy>;
+    type Output = Json<PutPrincipalPolicyOutcome>;
 
     fn execute(
         context: &mut CommandContext<'_, '_>,
         Json(policy): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
         if account_target(&policy.account_id)? != *context.target() {
-            return Err(Error::Identity("user policy reached the wrong account"));
+            return Err(Error::Identity(
+                "principal policy reached the wrong account",
+            ));
         }
-        if !valid_name(&policy.user_name)
+        if !valid_name(&policy.principal_name)
             || !valid_name(&policy.policy_name)
             || PolicyDocument::from_json(&policy.document).is_err()
         {
-            return Ok(CommandResult::Rejected(Json(PutUserPolicyOutcome::Invalid)));
+            return Ok(CommandResult::Rejected(Json(
+                PutPrincipalPolicyOutcome::Invalid,
+            )));
         }
         context.sql(&statement(
-            "INSERT INTO ddb_iam_user_policies (user_name, policy_name, document) \
-             VALUES (?1, ?2, ?3) ON CONFLICT (user_name, policy_name) \
+            "INSERT INTO ddb_iam_principal_policies (principal_kind, principal_name, policy_name, document) \
+             VALUES (?1, ?2, ?3, ?4) ON CONFLICT (principal_kind, principal_name, policy_name) \
              DO UPDATE SET document = excluded.document",
             vec![
-                SqlValue::Text(policy.user_name),
+                SqlValue::Integer(policy.kind.code()),
+                SqlValue::Text(policy.principal_name),
                 SqlValue::Text(policy.policy_name),
                 SqlValue::Text(policy.document),
             ],
         ))?;
-        Ok(CommandResult::Success(Json(PutUserPolicyOutcome::Stored)))
+        Ok(CommandResult::Success(Json(
+            PutPrincipalPolicyOutcome::Stored,
+        )))
     }
 }
 
-pub(crate) struct DeleteUserPolicy;
+pub(crate) struct DeletePrincipalPolicy;
 
-impl Command for DeleteUserPolicy {
+impl Command for DeletePrincipalPolicy {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 14;
     const CODEC_VERSION: u32 = 1;
-    type Input = Json<UserPolicyKey>;
+    type Input = Json<PrincipalPolicyKey>;
     type Output = Json<bool>;
 
     fn execute(
@@ -91,16 +116,17 @@ impl Command for DeleteUserPolicy {
     ) -> Result<CommandResult<Self::Output>> {
         if account_target(&key.account_id)? != *context.target() {
             return Err(Error::Identity(
-                "user policy removal reached the wrong account",
+                "principal policy removal reached the wrong account",
             ));
         }
-        if !valid_name(&key.user_name) || !valid_name(&key.policy_name) {
-            return Err(Error::Identity("invalid user policy name"));
+        if !valid_name(&key.principal_name) || !valid_name(&key.policy_name) {
+            return Err(Error::Identity("invalid principal policy name"));
         }
         let changed = context.sql(&statement(
-            "DELETE FROM ddb_iam_user_policies WHERE user_name = ?1 AND policy_name = ?2",
+            "DELETE FROM ddb_iam_principal_policies WHERE principal_kind = ?1 AND principal_name = ?2 AND policy_name = ?3",
             vec![
-                SqlValue::Text(key.user_name),
+                SqlValue::Integer(key.kind.code()),
+                SqlValue::Text(key.principal_name),
                 SqlValue::Text(key.policy_name),
             ],
         ))?;
@@ -108,31 +134,35 @@ impl Command for DeleteUserPolicy {
     }
 }
 
-pub(crate) struct ReadUserPolicies;
+pub(crate) struct ReadPrincipalPolicies;
 
-impl Query for ReadUserPolicies {
+impl Query for ReadPrincipalPolicies {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 13;
     const CODEC_VERSION: u32 = 1;
-    type Input = Json<UserPrincipal>;
+    type Input = Json<Principal>;
     type Output = Json<Vec<String>>;
 
-    fn execute(context: &mut QueryContext<'_>, Json(user): Self::Input) -> Result<Self::Output> {
-        if account_target(&user.account_id)?.cell_id() != context.cell_id() {
-            return Err(Error::Identity("user policies reached the wrong account"));
+    fn execute(
+        context: &mut QueryContext<'_>,
+        Json(principal): Self::Input,
+    ) -> Result<Self::Output> {
+        if account_target(&principal.account_id)?.cell_id() != context.cell_id() {
+            return Err(Error::Identity(
+                "principal policies reached the wrong account",
+            ));
         }
-        if !valid_name(&user.user_name) {
-            return Err(Error::Identity("invalid user name"));
+        if !valid_name(&principal.name) {
+            return Err(Error::Identity("invalid principal name"));
         }
         let result = context.sql(&statement(
-            "SELECT document FROM ddb_iam_user_policies WHERE user_name = ?1 \
-             ORDER BY policy_name",
-            vec![SqlValue::Text(user.user_name)],
+            "SELECT document FROM ddb_iam_principal_policies WHERE principal_kind = ?1 AND principal_name = ?2 ORDER BY policy_name",
+            vec![SqlValue::Integer(principal.kind.code()), SqlValue::Text(principal.name)],
         ))?;
         let mut documents = Vec::with_capacity(result[0].rows.len());
         for row in &result[0].rows {
             let [SqlValue::Text(document)] = row.as_slice() else {
-                return Err(Error::Command("invalid user policy row"));
+                return Err(Error::Command("invalid principal policy row"));
             };
             documents.push(document.clone());
         }
@@ -144,9 +174,9 @@ fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 128 && name.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
-/// Cell-backed inline user policies for the ExtendDB authorization cache.
+/// Cell-backed inline principal policies for the ExtendDB authorization cache.
 ///
-/// Group, role, boundary, session, and tag state have no provisioning path yet;
+/// Group, boundary, session, and tag state have no provisioning path yet;
 /// those lookups are empty. Serving callers must disable the authorization
 /// cache until policy mutation invalidation is connected.
 pub struct CellAuthorizationStore {
@@ -167,27 +197,64 @@ impl CellAuthorizationStore {
         policy_name: &str,
         document: &str,
     ) -> std::result::Result<(), StorageError> {
+        self.put_policy(
+            account_id,
+            PrincipalKind::User,
+            user_name,
+            policy_name,
+            document,
+        )
+        .await
+    }
+
+    /// Validate and durably attach or replace one inline role policy.
+    pub async fn put_role_policy(
+        &self,
+        account_id: &str,
+        role_name: &str,
+        policy_name: &str,
+        document: &str,
+    ) -> std::result::Result<(), StorageError> {
+        self.put_policy(
+            account_id,
+            PrincipalKind::Role,
+            role_name,
+            policy_name,
+            document,
+        )
+        .await
+    }
+
+    async fn put_policy(
+        &self,
+        account_id: &str,
+        kind: PrincipalKind,
+        principal_name: &str,
+        policy_name: &str,
+        document: &str,
+    ) -> std::result::Result<(), StorageError> {
         let target = account_target(account_id)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
-        let policy = UserPolicy {
+        let policy = PrincipalPolicy {
             account_id: account_id.into(),
-            user_name: user_name.into(),
+            kind,
+            principal_name: principal_name.into(),
             policy_name: policy_name.into(),
             document: document.into(),
         };
         match self
             .client
-            .command::<PutUserPolicy>(&target, mutation_identity()?, Json(policy))
+            .command::<PutPrincipalPolicy>(&target, mutation_identity()?, Json(policy))
             .await
         {
-            Ok(committed) if committed.output.0 == PutUserPolicyOutcome::Stored => Ok(()),
+            Ok(committed) if committed.output.0 == PutPrincipalPolicyOutcome::Stored => Ok(()),
             Err(InvocationError::Rejected(committed))
-                if committed.output.0 == PutUserPolicyOutcome::Invalid =>
+                if committed.output.0 == PutPrincipalPolicyOutcome::Invalid =>
             {
-                Err(StorageError::Validation("invalid user policy".into()))
+                Err(StorageError::Validation("invalid principal policy".into()))
             }
             Ok(_) => Err(StorageError::Internal(
-                "unexpected user policy result".into(),
+                "unexpected principal policy result".into(),
             )),
             Err(error) => Err(cell_error(error)),
         }
@@ -200,22 +267,74 @@ impl CellAuthorizationStore {
         user_name: &str,
         policy_name: &str,
     ) -> std::result::Result<bool, StorageError> {
-        if !valid_name(user_name) || !valid_name(policy_name) {
-            return Err(StorageError::Validation("invalid user policy name".into()));
+        self.delete_policy(account_id, PrincipalKind::User, user_name, policy_name)
+            .await
+    }
+
+    /// Durably remove one inline role policy; false means it was absent.
+    pub async fn delete_role_policy(
+        &self,
+        account_id: &str,
+        role_name: &str,
+        policy_name: &str,
+    ) -> std::result::Result<bool, StorageError> {
+        self.delete_policy(account_id, PrincipalKind::Role, role_name, policy_name)
+            .await
+    }
+
+    async fn delete_policy(
+        &self,
+        account_id: &str,
+        kind: PrincipalKind,
+        principal_name: &str,
+        policy_name: &str,
+    ) -> std::result::Result<bool, StorageError> {
+        if !valid_name(principal_name) || !valid_name(policy_name) {
+            return Err(StorageError::Validation(
+                "invalid principal policy name".into(),
+            ));
         }
         let target = account_target(account_id)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
-        let key = UserPolicyKey {
+        let key = PrincipalPolicyKey {
             account_id: account_id.into(),
-            user_name: user_name.into(),
+            kind,
+            principal_name: principal_name.into(),
             policy_name: policy_name.into(),
         };
         let result = self
             .client
-            .command::<DeleteUserPolicy>(&target, mutation_identity()?, Json(key))
+            .command::<DeletePrincipalPolicy>(&target, mutation_identity()?, Json(key))
             .await
             .map_err(cell_error)?;
         Ok(result.output.0)
+    }
+
+    fn policies(
+        &self,
+        account_id: &str,
+        kind: PrincipalKind,
+        name: &str,
+    ) -> BoxedFuture<'_, OpResult<Vec<String>>> {
+        let account_id = account_id.to_owned();
+        let name = name.to_owned();
+        Box::pin(async move {
+            let target = account_target(&account_id)
+                .map_err(|_| OpError::Validation("invalid account ID".into()))?;
+            self.client
+                .query::<ReadPrincipalPolicies>(
+                    &target,
+                    None,
+                    Json(Principal {
+                        account_id,
+                        kind,
+                        name,
+                    }),
+                )
+                .await
+                .map(|result| result.output.0)
+                .map_err(|_| OpError::Internal("authorization Cell unavailable".into()))
+        })
     }
 }
 
@@ -225,24 +344,7 @@ impl AuthorizationStore for CellAuthorizationStore {
         account_id: &str,
         user_name: &str,
     ) -> BoxedFuture<'_, OpResult<Vec<String>>> {
-        let account_id = account_id.to_owned();
-        let user_name = user_name.to_owned();
-        Box::pin(async move {
-            let target = account_target(&account_id)
-                .map_err(|_| OpError::Validation("invalid account ID".into()))?;
-            self.client
-                .query::<ReadUserPolicies>(
-                    &target,
-                    None,
-                    Json(UserPrincipal {
-                        account_id,
-                        user_name,
-                    }),
-                )
-                .await
-                .map(|result| result.output.0)
-                .map_err(|_| OpError::Internal("authorization Cell unavailable".into()))
-        })
+        self.policies(account_id, PrincipalKind::User, user_name)
     }
 
     fn fetch_user_group_policies(
@@ -263,10 +365,10 @@ impl AuthorizationStore for CellAuthorizationStore {
 
     fn fetch_role_policies(
         &self,
-        _account_id: &str,
-        _role_name: &str,
+        account_id: &str,
+        role_name: &str,
     ) -> BoxedFuture<'_, OpResult<Vec<String>>> {
-        Box::pin(async { Ok(Vec::new()) })
+        self.policies(account_id, PrincipalKind::Role, role_name)
     }
 
     fn fetch_role_boundary(

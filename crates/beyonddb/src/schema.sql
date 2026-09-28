@@ -23,11 +23,12 @@ CREATE TABLE ddb_items (
 );
 CREATE INDEX ddb_account_items_query ON ddb_items (table_id, partition_key, sort_key, item_key);
 
-CREATE TABLE ddb_iam_user_policies (
-    user_name TEXT NOT NULL,
+CREATE TABLE ddb_iam_principal_policies (
+    principal_kind INTEGER NOT NULL CHECK (principal_kind IN (0, 1)),
+    principal_name TEXT NOT NULL,
     policy_name TEXT NOT NULL,
     document TEXT NOT NULL,
-    PRIMARY KEY (user_name, policy_name)
+    PRIMARY KEY (principal_kind, principal_name, policy_name)
 );
 
 CREATE TABLE ddb_table_tags (

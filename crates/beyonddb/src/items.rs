@@ -324,7 +324,7 @@ pub struct QueryAccountItems;
 
 impl Query for QueryAccountItems {
     const MODULE: &'static str = MODULE;
-    const ID: u32 = 40;
+    const ID: u32 = 42;
     const CODEC_VERSION: u32 = 1;
     type Input = Json<crate::PartitionQueryInput>;
     type Output = Json<crate::PartitionQueryOutcome>;

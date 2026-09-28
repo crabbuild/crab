@@ -237,9 +237,11 @@ leased Cell node. ExtendDB requires a `CatalogStore` even for DynamoDB request
 authorization. BeyondDB supplies a Cell-backed catalog for authorization reads;
 management, admin login, settings, and metrics methods return explicit errors
 until their Cell implementations exist.
-Long-lived SigV4 credentials now live in 256 key-derived Cells. A server-held
-AES-256 key encrypts secrets before Cell commands; temporary sessions are
-explicitly unsupported until their token and expiry contract is implemented.
+Long-lived and externally provisioned temporary SigV4 credentials live in 256
+key-derived Cells. A server-held AES-256 key encrypts access secrets and session
+tokens separately before Cell commands. Session records require a name, token,
+and expiry; the credential store rejects expired sessions on lookup. BeyondDB
+does not issue STS sessions yet.
 Revocation is a durable Cell command; an inactive key is rejected by ExtendDB
 authentication and stays inactive after owner recovery.
 The provisioner can inspect a table's active data Cells, resume a pending split,
@@ -260,11 +262,13 @@ committed in its own Cell before the request; the test verifies its ciphertext
 does not contain the secret and reopens it after owner restart. The test uses
 the Cell catalog to satisfy ExtendDB's server wiring. Developer authorization
 is disabled: the signed request is evaluated
-against an inline user policy stored in the account Cell. The test verifies
+against inline user and role policies stored in the account Cell. The test verifies
 denial without a policy, denial for an unlisted table, immediate denial after
-policy removal, and policy recovery after owner restart. Group, role, boundary,
-and tag policy storage, credential provisioning, Cell-backed management
-operations remain unfinished. Until policy-cache
+policy removal, and policy recovery after owner restart. It also signs a request
+with a session token, checks role-policy denial and grant, rejects wrong and
+expired tokens, and reads the item after the credential and account owners
+restart. Group, boundary, session-policy, and tag storage, STS issuance, and
+Cell-backed management operations remain unfinished. Until policy-cache
 invalidation is wired, serving composition must use ExtendDB's pass-through
 authorization cache so removal takes effect immediately.
 The same SDK client creates another table and writes through its newly admitted

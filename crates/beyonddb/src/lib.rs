@@ -188,7 +188,7 @@ static QUERIES: [OperationDescriptor; 24] = [
     operation(37),
     operation(38),
     participant::phase_operation(39),
-    operation(40),
+    operation(42),
 ];
 
 /// Statically linked account application.
@@ -367,8 +367,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<UpdateTable>()?;
         registry.bind_command::<UpdateItem>()?;
         registry.bind_command::<ActivateTableRoute>()?;
-        registry.bind_command::<authorization::PutUserPolicy>()?;
-        registry.bind_command::<authorization::DeleteUserPolicy>()?;
+        registry.bind_command::<authorization::PutPrincipalPolicy>()?;
+        registry.bind_command::<authorization::DeletePrincipalPolicy>()?;
         registry.bind_command::<tags::UpdateTags>()?;
         registry.bind_command::<ttl::UpdateTtl>()?;
         registry.bind_command::<ttl::AdvanceTtlSweep>()?;
@@ -386,7 +386,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<DescribeTableById>()?;
         registry.bind_query::<ScanItems>()?;
         registry.bind_query::<secondary_index::QueryAccountIndex>()?;
-        registry.bind_query::<authorization::ReadUserPolicies>()?;
+        registry.bind_query::<authorization::ReadPrincipalPolicies>()?;
         registry.bind_query::<tags::ReadTags>()?;
         registry.bind_query::<ttl::ReadTtl>()?;
         registry.bind_query::<ttl::ListTtlTables>()?;
