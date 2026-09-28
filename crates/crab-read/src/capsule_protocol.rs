@@ -27,6 +27,7 @@ const LAYERED_SIDECAR_READ_CONCURRENCY: usize = 8;
 const LAYERED_LARGE_RANGE_THRESHOLD_BYTES: u64 = 128 * 1024 * 1024;
 const LAYERED_LARGE_RANGE_CHUNK_BYTES: u64 = 128 * 1024 * 1024;
 const LAYERED_LARGE_RANGE_READ_CONCURRENCY: usize = 6;
+const LAYERED_INLINE_FRONTIER_MAX_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Caller-owned memory admission for one capsule-protocol repository view.
 #[derive(Debug, Clone, Copy)]
@@ -81,6 +82,7 @@ pub struct CapsuleRepositoryView {
     ref_capsule_counts: BTreeMap<String, u32>,
     capsule_run_pointers: Vec<CapsulePointer>,
     capsule_run_sources: Vec<PackSourceDescriptor>,
+    capsule_run_bytes: BTreeMap<String, Bytes>,
     capsule_run_indexes: BTreeMap<String, Vec<PackRange>>,
     capsule_run_member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
     frontier_object_admission: BTreeMap<[u8; 20], Vec<String>>,
@@ -948,6 +950,9 @@ impl CapsuleRepositoryView {
                 let member_read = LayeredMemberRead {
                     source_path: source_path.clone(),
                     source_size: source.object_size(),
+                    source_bytes: matches!(source.kind(), PackSourceKind::CapsuleRun)
+                        .then(|| self.capsule_run_bytes.get(source.object_hash()).cloned())
+                        .flatten(),
                     pack_id,
                     member: member.clone(),
                 };
@@ -1019,14 +1024,10 @@ impl CapsuleRepositoryView {
                 )?);
             }
         }
-        // Keep every layered member source lazy. Incremental fetches first
-        // probe the frontier pack indexes; reverse indexes and kind metadata
-        // are fetched only by explicit pack installation or repack callers.
-        // This removes the eager full-sidecar wave while retaining the
-        // descriptor hashes and exact pack-index validation at first use.
-        // Captured compacted runs name pooled index copies. Checkpoint sources
-        // keep their canonical index ranges; neither path relocates pack bodies
-        // or changes the sidecars used by whole-member installation.
+        // Complete bounded frontiers reuse authenticated resident bytes;
+        // checkpoint and larger-frontier sources stay lazy. Captured runs may
+        // name pooled index copies, while checkpoint sources keep canonical
+        // ranges. Both paths validate descriptor hashes before use.
         for member_read in all_members {
             if cancellation.is_cancelled() {
                 return Err(ReadError::Cancelled);
@@ -1037,22 +1038,31 @@ impl CapsuleRepositoryView {
             let index = lookup_indexes
                 .get(&pack_id)
                 .unwrap_or_else(|| member.index());
-            let source = crab_remote_git::RemoteGitPackSource::embedded_lazy_index(
-                member_read.source_path.clone(),
-                member.pack().offset(),
-                member.pack().length(),
-                member_read.source_size,
-                crab_remote_git::RemoteGitSidecarRange {
-                    offset: index.offset(),
-                    length: index.length(),
-                    blake3: index.blake3().to_owned(),
-                },
-                crab_remote_git::RemoteGitSidecarRange {
-                    offset: member.reverse_index().offset(),
-                    length: member.reverse_index().length(),
-                    blake3: member.reverse_index().blake3().to_owned(),
-                },
-            )?;
+            let source = if let Some(bytes) = &member_read.source_bytes {
+                crab_remote_git::RemoteGitPackSource::inline(
+                    layered_range_bytes(bytes, 0, member.pack())?,
+                    layered_range_bytes(bytes, 0, index)?,
+                    layered_range_bytes(bytes, 0, member.reverse_index())?,
+                    None,
+                )?
+            } else {
+                crab_remote_git::RemoteGitPackSource::embedded_lazy_index(
+                    member_read.source_path.clone(),
+                    member.pack().offset(),
+                    member.pack().length(),
+                    member_read.source_size,
+                    crab_remote_git::RemoteGitSidecarRange {
+                        offset: index.offset(),
+                        length: index.length(),
+                        blake3: index.blake3().to_owned(),
+                    },
+                    crab_remote_git::RemoteGitSidecarRange {
+                        offset: member.reverse_index().offset(),
+                        length: member.reverse_index().length(),
+                        blake3: member.reverse_index().blake3().to_owned(),
+                    },
+                )?
+            };
             let preferred_pack_ids = if admitted_pack_ids.is_empty() {
                 &frontier_pack_ids
             } else {
@@ -2731,6 +2741,7 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
                 member: LayeredMemberRead {
                     source_path: path.clone(),
                     source_size: source.object_size(),
+                    source_bytes: None,
                     pack_id: crab_xet::hash::MerkleHash::from_hex(&content_hash)
                         .map_err(|error| corrupt_path("capsule Git pack", error.to_string()))?,
                     member: member.clone(),
@@ -3186,6 +3197,7 @@ async fn read_layered_source_range_single(
 struct LayeredMemberRead {
     source_path: object_store::path::Path,
     source_size: u64,
+    source_bytes: Option<Bytes>,
     pack_id: crab_xet::hash::MerkleHash,
     member: PackMemberDescriptor,
 }
@@ -3934,6 +3946,7 @@ pub fn compacted_view_from_checkpoint(
         ref_capsule_counts: BTreeMap::new(),
         capsule_run_pointers: Vec::new(),
         capsule_run_sources: Vec::new(),
+        capsule_run_bytes: BTreeMap::new(),
         capsule_run_indexes: BTreeMap::new(),
         capsule_run_member_oids: BTreeMap::new(),
         frontier_object_admission: BTreeMap::new(),
@@ -4213,6 +4226,7 @@ async fn assemble_view(
         ref_capsule_counts,
         capsule_run_pointers: pointers,
         capsule_run_sources,
+        capsule_run_bytes: BTreeMap::new(),
         capsule_run_indexes,
         capsule_run_member_oids,
         frontier_object_admission,
@@ -4247,28 +4261,38 @@ async fn assemble_layered_control_view(
         }
         None => None,
     };
-    let loaded = try_join_all(
-        pointers
+    // Retain complete small frontiers for pack-index and entry reads. Larger
+    // frontiers keep bounded suffix/range reads instead of resident pack bodies.
+    let inline_frontier = footer_only
+        && pointers
             .iter()
-            .map(|pointer| load_run_control(router, pointer)),
-    )
+            .try_fold(0_u64, |total, pointer| total.checked_add(pointer.size()))
+            .is_some_and(|total| total <= LAYERED_INLINE_FRONTIER_MAX_BYTES);
+    let loaded = try_join_all(pointers.iter().map(|pointer| async {
+        if inline_frontier {
+            let run = load_run(router, pointer).await?;
+            let (control, capsules) = run.verified_controls()?;
+            Ok::<_, ReadError>((control, capsules, Some(run.bytes().clone())))
+        } else {
+            let (control, capsules) = load_run_control(router, pointer).await?;
+            Ok((control, capsules, None))
+        }
+    }))
     .await?;
-    let runs = loaded
-        .into_iter()
-        .map(|(control, capsules)| {
-            let hash = control.hash().to_owned();
-            // Ref-only runs have no pack source; validate the source boundary
-            // only when this run actually contributes Git members.
-            if !control.git_packs().is_empty() {
-                control.source_descriptor()?;
-            }
-            Ok((hash, control, capsules))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let runs = runs
-        .into_iter()
-        .map(|(hash, control, capsules)| (hash, (control, capsules)))
-        .collect::<BTreeMap<_, _>>();
+    let mut runs = BTreeMap::new();
+    let mut capsule_run_bytes = BTreeMap::new();
+    for (control, capsules, bytes) in loaded {
+        let hash = control.hash().to_owned();
+        // Ref-only runs have no pack source; validate the source boundary
+        // only when this run actually contributes Git members.
+        if !control.git_packs().is_empty() {
+            control.source_descriptor()?;
+        }
+        if let Some(bytes) = bytes {
+            capsule_run_bytes.insert(hash.clone(), bytes);
+        }
+        runs.insert(hash, (control, capsules));
+    }
     let all_capsule_controls = runs
         .values()
         .flat_map(|(_, capsules)| capsules.iter().cloned())
@@ -4438,6 +4462,7 @@ async fn assemble_layered_control_view(
             ref_capsule_counts,
             capsule_run_pointers: pointers,
             capsule_run_sources,
+            capsule_run_bytes,
             capsule_run_indexes,
             capsule_run_member_oids,
             frontier_object_admission,
@@ -4501,6 +4526,7 @@ async fn assemble_layered_control_view(
         ref_capsule_counts,
         capsule_run_pointers: pointers,
         capsule_run_sources,
+        capsule_run_bytes,
         capsule_run_indexes,
         capsule_run_member_oids,
         frontier_object_admission,
@@ -5365,34 +5391,14 @@ fn admit_frontier(pointers: &[CapsulePointer], limits: CapsuleReadLimits) -> Res
 }
 
 async fn load_run(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> Result<CapsuleRun> {
-    let path = router.capsule_path(pointer.hash());
-    let (bytes, _) = router
-        .store()
-        .get_with_etag_bounded(&path, pointer.size())
-        .await?;
-    let actual_size = u64::try_from(bytes.len())
-        .map_err(|_| ReadError::internal("capsule size cannot be represented as u64"))?;
-    if actual_size != pointer.size() {
-        return Err(corrupt(
-            &path,
-            format!(
-                "capsule size is {actual_size} bytes; root declares {}",
-                pointer.size()
-            ),
-        ));
+    match crab_metadata::capsule_protocol::load_capsule_run(router, pointer).await {
+        Ok(run) => Ok(run),
+        // Read callers distinguish malformed committed data from transport errors.
+        Err(crab_metadata::error::MetadataError::CorruptObject { path, reason }) => {
+            Err(ReadError::CorruptObject { path, reason })
+        }
+        Err(error) => Err(error.into()),
     }
-    let run = CapsuleRun::decode(bytes)?;
-    if run.hash() != pointer.hash()
-        || run.level() != pointer.level()
-        || run.transaction_ids() != pointer.transaction_ids()
-        || run.newest_base_root_digest() != pointer.newest_base_root_digest()
-    {
-        return Err(corrupt(
-            &path,
-            "capsule run does not match its authenticated root pointer",
-        ));
-    }
-    Ok(run)
 }
 
 async fn load_run_control(
@@ -5713,6 +5719,7 @@ mod tests {
         LayeredMemberRead {
             source_path: object_store::path::Path::from(path),
             source_size: sidecar_start + 30,
+            source_bytes: None,
             pack_id: crab_xet::hash::MerkleHash::from_hex(&seed.to_string().repeat(64)).unwrap(),
             member,
         }
@@ -6069,6 +6076,36 @@ mod tests {
                 StorageOperation::Get,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn bounded_layered_control_reads_the_complete_frontier_once() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner).with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let root = load_root(&router).await.unwrap();
+        let expected = vec![
+            root.record().bytes().len() as u64,
+            root.record().root().capsule_frontier()[0].size(),
+        ];
+
+        open_view_from_root_with_layered_control(&router, root, TEST_LIMITS)
+            .await
+            .unwrap();
+        let observed = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| {
+                observation.operation == StorageOperation::Get
+                    && observation.outcome == StorageOutcome::Success
+            })
+            .map(|observation| observation.bytes_read)
+            .collect::<Vec<_>>();
+        assert_eq!(observed, expected);
     }
 
     #[tokio::test]

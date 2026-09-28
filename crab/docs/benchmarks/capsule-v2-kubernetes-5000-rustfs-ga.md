@@ -372,6 +372,35 @@ the retained report and request-log SHA256 values are
 `f3abf0de32bf914b7a2b2c076bd5d9843e34a350b3c3b7af50600028b1a4b336` and
 `7a9fd1ca69bc3ca6077b4c1937982eb2de06bdbd8eccd4d4731a3006df90efbf`.
 
+### Bounded single-read frontier diagnostic
+
+`k8s-pr208-prerepack-20260928-r1` used the same frozen Kubernetes seed and
+500 individual pushes on a fresh RustFS namespace, then deliberately stopped
+before interval fetch/repack. The exact PR-head baseline binary
+(`2f5ed770afb8d57292ed6711f2a1b970a20609a7077f8c6a215a5b898db66c14`)
+fetched from a seed-only client in 11.138 s and 80 requests. The pushes averaged
+516 ms and 7.012 requests; the large seed push took 664.936 s under shared-host
+load. No candidate performance result is inferred from that seed timing.
+
+The bounded complete-frontier reader candidate
+(`977261d27981d5e8f03bd8f70c89041416cf8e27e27447be71ccb14cc234e3c0`)
+read each of 24 capsule sources once, reducing total origin requests to 32.
+Its first fetch took 27.857 s while concurrent local Git validation also
+slowed sharply. A subsequent sequential A/B check on fresh seed clients took
+11.876 s / 82 requests with the earlier off-path diagnostic binary
+(`96e70d2c391773319716225f88099bd0c52aac5ac32af79ab0bdad3cbb8aaea7`)
+and 4.653 s / 32 requests with the candidate. The older A/B trial had two
+additional 4xx responses; both trials succeeded with no proxy errors. These
+shared-host, sequential observations prove the request-shape reduction, not
+an isolated latency speedup or a passing ten-request gate.
+
+The candidate returned the exact 500th tip, installed one new pack, passed
+strict full Git fsck, and matched 32 deterministic small-blob digests against
+the frozen source. Focused `crab-read` capsule tests (31) and metadata run
+tests (17) passed. The candidate has **not** completed the full 5,000-push
+replay, large-frontier fallback, Xet workload or all CI gates; v1 retirement
+remains blocked.
+
 ## Completed v1 baseline: diagnostic, not isolated timing
 
 The released v1.2.4 baseline (`capsule-v1-ga-2721-20260927-r1`) completed

@@ -3521,6 +3521,17 @@ the number of new physical sources before the fetch, without adding a
 whole-repository rewrite or blocking ordinary pushes. This remains an open
 design/performance gate, not an implemented guarantee.
 
+A bounded ordinary-fetch read now retains complete, pointer-verified frontier
+runs when their aggregate size is at most 128 MiB. The same authenticated bytes
+supply run controls, pooled/original indexes and pack entries, while larger
+frontiers and stable checkpoint sources remain lazy. On a fresh 500-push
+Kubernetes frontier this reduced 24 capsule sources from three GETs each to one,
+and total origin operations from 80 to 32. It does not meet the ten-operation
+gate: physical source fan-out and eight setup/admission operations remain.
+Full-run decoding and retained bytes are bounded costs, not free optimizations;
+qualification must keep testing latency, RSS, integrity and large-frontier
+behavior before v1 can be retired.
+
 Request count alone is insufficient. The fetch gate also measures source bytes,
 local bytes written, number of input sources, response-pack generation CPU,
 local validation CPU, parent Git automatic-maintenance time, and peak RSS.

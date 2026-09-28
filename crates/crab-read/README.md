@@ -223,6 +223,11 @@ Checkpoints use the layered source directory exclusively. Ordinary fetch uses
 cold; `open_view_from_root_with_control` loads those bodies for consumers that
 need full authorization or pointer catalogs. These entry points differ in read
 requirements, not storage-format compatibility.
+For an ordinary fetch whose admitted capsule frontier totals at most 128 MiB,
+the reader verifies each complete run once and reuses its resident pack and
+index bytes. Larger frontiers retain bounded suffix and range reads; stable
+checkpoint pack bodies stay cold in either case. This is a read strategy, not
+a new format or an authorization shortcut.
 
 `CapsuleRepositoryView::git_snapshot` captures the same canonical pack inventory
 and Git identity used by both capsule Git readers. It performs no storage I/O

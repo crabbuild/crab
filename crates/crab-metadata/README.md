@@ -91,6 +91,9 @@ Run pointers require explicit control offsets, lengths and footer hashes; the
 unshipped offset-discovery shape is rejected. Full and control-only storage
 reads validate descriptors before I/O and bind the loaded run to the same
 control boundary and footer hash. This does not change the v1 manifest reader.
+An already verified complete run can yield the same authenticated control
+view, including detached visibility/catalog sections, from its resident bytes;
+consumers need not reread its control suffix.
 
 Run compaction preserves exact Git object-to-member admission across ref-only
 runs. Their authenticated empty pack directory proves an empty contribution;

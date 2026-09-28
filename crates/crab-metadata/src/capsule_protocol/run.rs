@@ -1051,6 +1051,46 @@ impl CapsuleRun {
         &self.bytes
     }
 
+    /// Recover the authenticated control view from an already verified complete run.
+    #[cfg(any(feature = "storage", test))]
+    pub fn verified_controls(&self) -> Result<(CapsuleRunControl, Vec<CapsuleControl>)> {
+        let control_offset = usize::try_from(self.control_offset())
+            .map_err(|_| corrupt("capsule run control offset cannot be represented"))?;
+        let control = CapsuleRunControl::decode_suffix(
+            self.bytes.slice(control_offset..),
+            self.bytes.len() as u64,
+            self.hash(),
+            self.level(),
+            &self.transaction_ids(),
+            self.newest_base_root_digest(),
+        )?;
+        let mut detached = BTreeMap::new();
+        for (hash, kind, range) in control
+            .capsule_locations()
+            .iter()
+            .flat_map(CapsuleControlLocation::detached_controls)
+        {
+            let start = usize::try_from(range.offset()).map_err(|_| {
+                corrupt("capsule run detached control offset cannot be represented")
+            })?;
+            let end = range
+                .offset()
+                .checked_add(range.length())
+                .and_then(|end| usize::try_from(end).ok())
+                .ok_or_else(|| corrupt("capsule run detached control end cannot be represented"))?;
+            let bytes = self
+                .bytes
+                .get(start..end)
+                .ok_or_else(|| corrupt("capsule run detached control is out of bounds"))?;
+            if blake3::hash(bytes).to_hex().as_str() != range.blake3() {
+                return Err(corrupt("capsule run detached control hash does not match"));
+            }
+            detached.insert((hash, kind), self.bytes.slice(start..end));
+        }
+        let capsules = control.materialize_capsules_with_external_controls(&detached)?;
+        Ok((control, capsules))
+    }
+
     /// Return the BLAKE3 object identity of the run.
     #[must_use]
     pub fn hash(&self) -> &str {
@@ -1914,5 +1954,6 @@ mod tests {
             )]))
             .unwrap();
         assert_eq!(controls[0].visibility_delta().unwrap().edits().len(), 1);
+        assert_eq!(run.verified_controls().unwrap().1, controls);
     }
 }
