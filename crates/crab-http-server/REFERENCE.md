@@ -1846,7 +1846,11 @@ acknowledging log's epoch and membership again immediately before the kill.
 The receipt validator requires that active log and binds the successor and
 selection evidence to its members. The second fault already checks its sole
 replacement member after the write; the object-covered fallback separately
-requires a successor outside the failed log's members.
+requires a successor outside the failed log's members. That fallback requires
+the failed log to remain inactive: an active log needs a complete follower
+witness even when all its bytes are object-covered. The Compose qualifier
+therefore expires the original members before issuing the fallback mutation and
+verifies the mutation does not activate fleet durability.
 
 The deterministic evidence tests run without Docker:
 
