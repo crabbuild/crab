@@ -56,7 +56,10 @@ pub(super) async fn load_changed_capsule_history(
     let runtime = Arc::new(RemoteGitRuntime::default());
     let options = RepositoryOptions::default();
     let repository = view
-        .git_repository(
+        // Layered checkpoints keep pack bodies in immutable store objects;
+        // opening the in-memory reader would reject this published format.
+        .git_repository_from_store(
+            layout,
             identity,
             Arc::clone(&runtime),
             options,
