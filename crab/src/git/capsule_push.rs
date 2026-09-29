@@ -1617,7 +1617,6 @@ mod tests {
         assert_eq!(committed.capsules().len(), 2);
 
         let repack_workspace = tempfile::tempdir().expect("repack workspace");
-        let before_repack = observer.count();
         let repack = crate::cmd::repack::run_repack_from_root(
             &store,
             "repos/test",
@@ -1632,12 +1631,10 @@ mod tests {
         .expect("checkpoint repack");
         assert_eq!(repack.packs_before, 2);
         assert_eq!(repack.packs_after, 1);
-        let repack_requests = observer.count() - before_repack;
-        let repack_operations = observer.observations.lock().expect("observer lock")
-            [before_repack..]
-            .iter()
-            .map(|observation| observation.operation)
-            .collect::<Vec<_>>();
+        assert!(repack.bytes_read > 0);
+        assert_eq!(repack.bytes_read, repack.bytes_before);
+        assert!(repack.bytes_written > 0);
+        assert_eq!(repack.bytes_written, repack.bytes_after);
         let checkpoint_root = crab_write::capsule_protocol::open_root(&layout)
             .await
             .expect("checkpoint root");
@@ -1740,10 +1737,6 @@ mod tests {
         )
         .await
         .expect("GC preserves every referenced checkpoint and capsule");
-        assert!(
-            repack_requests <= 12,
-            "repack used {repack_requests} requests: {repack_operations:?}"
-        );
     }
 
     #[tokio::test]

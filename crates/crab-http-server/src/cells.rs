@@ -2387,9 +2387,10 @@ mod tests {
             first.release_digest(),
             application.registry().release_digest()
         );
+        assert_eq!(application.name(), "crab-repository");
 
         let descriptor: Value = serde_json::from_slice(first.release_bytes()).unwrap();
-        assert_eq!(descriptor["runtime"], "crab-http-server");
+        assert_eq!(descriptor["runtime"], "cellule");
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],

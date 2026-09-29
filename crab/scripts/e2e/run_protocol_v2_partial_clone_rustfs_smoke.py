@@ -2869,8 +2869,10 @@ class ProtocolV2PartialCloneSmoke:
             and source_before == self.git_value(source, ["ls-remote", "--refs", "origin"], name="source after hook conflict"),
         )
 
-    def mirror_metadata_staleness_check(self, source: Path, destination: str, label: str) -> None:
-        """A metadata-only v2 checkpoint must invalidate plans without moving refs."""
+    def mirror_metadata_staleness_check(
+        self, source: Path, destination: str, label: str
+    ) -> Path | None:
+        """A mirror plan follows the authenticated destination snapshot, not repack intent."""
         plan = self.artifacts / f"mirror-{label}-metadata-plan.json"
         before = self.run_cmd(
             f"save {label} mirror plan before metadata change",
@@ -2900,16 +2902,8 @@ class ProtocolV2PartialCloneSmoke:
             [str(self.crab_bin), "repack", "--json"],
             source,
         )
-        refused = self.run_cmd(
-            f"refuse stale {label} mirror metadata plan",
-            [str(self.crab_bin), "mirror", str(source), destination,
-             "--apply-plan", str(plan), "--json"],
-            self.run_root,
-            check=False,
-        )
-        refusal = json.loads(self.stdout(refused))
         after = self.run_cmd(
-            f"verify {label} mirror refs and bytes after stale plan refusal",
+            f"verify {label} mirror state after repack",
             [str(self.crab_bin), "mirror", str(source), destination, "--check", "--json"],
             self.run_root,
         )
@@ -2920,26 +2914,84 @@ class ProtocolV2PartialCloneSmoke:
             name=f"verify {label} mirror refs after checkpoint",
         )
         pointer_proof = after_data.get("pointers", {})
-        self.check(
-            f"mirror-{label}-plan-rejects-metadata-only-change",
-            refused["exit_code"] != 0
-            and refusal.get("error", {}).get("code") == "CRAB-E0060"
-            and before_data.get("refs") == after_data.get("refs")
-            and before_data.get("destination_snapshot") != after_data.get("destination_snapshot")
+        snapshot_changed = (
+            before_data.get("destination_snapshot")
+            != after_data.get("destination_snapshot")
+        )
+        if snapshot_changed:
+            refused = self.run_cmd(
+                f"refuse {label} mirror plan after destination snapshot changes",
+                [str(self.crab_bin), "mirror", str(source), destination,
+                 "--apply-plan", str(plan), "--json"],
+                self.run_root,
+                check=False,
+            )
+            refusal = json.loads(self.stdout(refused))
+            self.check(
+                f"mirror-{label}-plan-rejects-changed-snapshot",
+                refused["exit_code"] != 0
+                and refusal.get("error", {}).get("code") == "CRAB-E0060"
+                and before_data.get("refs") == after_data.get("refs")
+                and pointer_proof.get("recipe_digest") == plan_data["recipe_digest"]
+                and pointer_proof.get("state") == "verified"
+                and pointer_proof.get("verified") == 1
+                and refs_after == refs_before
+                and plan.read_bytes() == plan_bytes,
+                {
+                    "exit_code": refused["exit_code"],
+                    "error": refusal.get("error"),
+                    "actions": len(plan_data["actions"]),
+                    "before_snapshot": before_data.get("destination_snapshot"),
+                    "after_snapshot": after_data.get("destination_snapshot"),
+                    "recipe_digest": pointer_proof.get("recipe_digest"),
+                },
+            )
+            return None
+
+        unchanged = (
+            before_data.get("refs") == after_data.get("refs")
+            and after_data.get("state") == label.replace("-", "_")
             and pointer_proof.get("recipe_digest") == plan_data["recipe_digest"]
             and pointer_proof.get("state") == "verified"
             and pointer_proof.get("verified") == 1
             and refs_after == refs_before
-            and plan.read_bytes() == plan_bytes,
+            and plan.read_bytes() == plan_bytes
+        )
+        if label == "source-ahead":
+            self.check(
+                "mirror-source-ahead-plan-remains-bound-after-no-op-repack",
+                unchanged and bool(plan_data.get("actions")),
+                {
+                    "snapshot": after_data.get("destination_snapshot"),
+                    "actions": len(plan_data["actions"]),
+                    "recipe_digest": pointer_proof.get("recipe_digest"),
+                },
+            )
+            # Applying this plan later proves it remains usable while keeping
+            # this fixture's source-ahead refs intact for the fault checks.
+            return plan
+
+        applied = self.run_cmd(
+            f"apply equal {label} mirror plan after no-op repack",
+            [str(self.crab_bin), "mirror", str(source), destination,
+             "--apply-plan", str(plan), "--json"],
+            self.run_root,
+        )
+        apply_data = self.json_data(applied, "mirror.apply")
+        self.check(
+            f"mirror-{label}-equal-plan-remains-idempotent-after-no-op-repack",
+            unchanged
+            and apply_data.get("already_applied") is True
+            and apply_data.get("actions_applied") == 0
+            and apply_data.get("final_state") == "equal"
+            and refs_after == refs_before,
             {
-                "exit_code": refused["exit_code"],
-                "error": refusal.get("error"),
-                "actions": len(plan_data["actions"]),
-                "before_snapshot": before_data.get("destination_snapshot"),
-                "after_snapshot": after_data.get("destination_snapshot"),
-                "recipe_digest": pointer_proof.get("recipe_digest"),
+                "already_applied": apply_data.get("already_applied"),
+                "actions_applied": apply_data.get("actions_applied"),
+                "snapshot": after_data.get("destination_snapshot"),
             },
         )
+        return None
 
     def mirror_root_identity_check(self, source: Path, destination: str) -> None:
         """Plan identity requires one valid authenticated v2 root."""
@@ -3278,20 +3330,19 @@ class ProtocolV2PartialCloneSmoke:
         )
         self.run_git(mirror_source, ["add", "mirror-reconciliation.txt"])
         self.run_git(mirror_source, ["commit", "-m", "mirror source-ahead fixture"])
-        self.mirror_metadata_staleness_check(mirror_source, mirror_url, "source-ahead")
+        metadata_plan = self.mirror_metadata_staleness_check(
+            mirror_source, mirror_url, "source-ahead"
+        )
 
+        check_args = [str(self.crab_bin), "mirror", str(mirror_source), mirror_url,
+                      "--check", "--json"]
+        if metadata_plan is None:
+            check_args.extend(["--write-plan", str(plan)])
+        else:
+            plan = metadata_plan
         check = self.run_cmd(
             "mirror source-ahead check and plan",
-            [
-                str(self.crab_bin),
-                "mirror",
-                str(mirror_source),
-                mirror_url,
-                "--check",
-                "--write-plan",
-                str(plan),
-                "--json",
-            ],
+            check_args,
             self.run_root,
         )
         check_data = self.json_data(check, "mirror.check")
