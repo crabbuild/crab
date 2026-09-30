@@ -2910,7 +2910,6 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
                 None,
                 capsules,
                 &cached_payloads,
-                selected,
                 git_dir,
                 max_input_bytes,
                 selection,
@@ -2956,7 +2955,6 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
                     Some(pack_read),
                     capsules,
                     &cached_payloads,
-                    selected,
                     git_dir,
                     max_input_bytes,
                     selection,
@@ -2973,7 +2971,6 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
         None,
         capsules,
         &cached_payloads,
-        selected,
         git_dir,
         max_input_bytes,
         selection,
@@ -3055,11 +3052,15 @@ async fn build_layered_payload_install(
     packs: Option<LayeredPayloadRead<'_>>,
     capsules: &[Capsule],
     cached_payloads: &BTreeMap<String, GitPackPayload>,
-    selected: Option<&BTreeSet<String>>,
     git_dir: &Path,
     max_input_bytes: u64,
     selection: LayeredInstallSelection<'_>,
 ) -> Result<Vec<PathBuf>> {
+    let selected = match selection {
+        LayeredInstallSelection::Native => None,
+        LayeredInstallSelection::Maintenance(packs) => packs,
+        LayeredInstallSelection::Fetch { packs, .. } => Some(packs),
+    };
     let mut payloads = Vec::with_capacity(members.len());
     for (member_index, member_read) in members.iter().enumerate() {
         if matches!(selection, LayeredInstallSelection::Fetch { .. }) && member_read.complete_local
