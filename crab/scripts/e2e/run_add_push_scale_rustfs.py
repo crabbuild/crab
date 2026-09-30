@@ -95,11 +95,36 @@ def measured_hydrate(
     payload_bytes: int,
     cache_bytes: int,
 ):
-    required = payload_bytes + cache_bytes + 20 * 1024**3
+    cache_resident_bytes = 0
+    cache_dir = getattr(runner, "env", {}).get("CRAB_CACHE_DIR")
+    if cache_bytes and cache_dir and Path(cache_dir).is_dir():
+        cache_stats = runner.run_crab(
+            repo,
+            ["cache", "stats", "--json"],
+            name=f"{name} cache capacity inventory",
+        )
+        data = json.loads(runner.read_stdout(cache_stats))["data"]
+        family = data.get("families", {}).get("decoded-range", {})
+        if (
+            data.get("scan_complete") is True
+            and family.get("complete") is True
+            and family.get("issues") == 0
+        ):
+            cache_resident_bytes = min(
+                cache_bytes,
+                max(0, int(family.get("allocated_bytes", 0))),
+            )
+    cache_growth_bytes = cache_bytes - cache_resident_bytes
+    required = payload_bytes + cache_growth_bytes + 20 * 1024**3
     available = shutil.disk_usage(runner.args.root).free
     runner.check(
         f"{name} capacity", available >= required,
-        {"required_bytes": required, "available_bytes": available},
+        {
+            "required_bytes": required,
+            "cache_resident_bytes": cache_resident_bytes,
+            "cache_growth_bytes": cache_growth_bytes,
+            "available_bytes": available,
+        },
     )
     return measured_read(runner, proxy, read_phases, repo, ["hydrate", "--all"], name)
 
@@ -123,6 +148,161 @@ def object_inventory(runner: AddCommitPushSmoke, prefix: str) -> dict[str, int]:
     }
 
 
+def validate_capacity_stop_report(args: argparse.Namespace) -> tuple[dict[str, Any], str]:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.run_id):
+        raise ValueError("capacity stop run id is unsafe")
+    run_root = args.root / args.run_id
+    report_path = run_root / "artifacts" / "report.json"
+    if run_root.is_symlink() or not run_root.is_dir() or report_path.is_symlink():
+        raise ValueError("capacity stop report is missing or unsafe")
+    try:
+        report_bytes = report_path.read_bytes()
+        report = json.loads(report_bytes)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("capacity stop report is unreadable") from error
+    artifacts_dir = run_root / "artifacts"
+    if (not isinstance(report, dict) or artifacts_dir.is_symlink()
+            or run_root.resolve().parent != args.root.resolve()):
+        raise ValueError("capacity stop report is missing or unsafe")
+
+    if report.get("run_id") != args.run_id:
+        raise ValueError("capacity stop run id does not match")
+    if Path(report.get("root", "")).resolve() != run_root.resolve():
+        raise ValueError("capacity stop root does not match")
+    if report.get("bucket") != args.bucket:
+        raise ValueError("capacity stop bucket does not match")
+    if report.get("endpoint_url") != args.endpoint_url:
+        raise ValueError("capacity stop endpoint does not match")
+    if report.get("status") != "failed":
+        raise ValueError("capacity stop report is not a failed run")
+
+    artifacts = report.get("artifacts")
+    checks = report.get("checks")
+    if (not isinstance(artifacts, dict) or not isinstance(checks, list) or not checks
+            or any(not isinstance(check, dict) for check in checks)
+            or any(check.get("ok") is not True for check in checks[:-1])
+            or checks[-1].get("name") != "rehydrated hydrate capacity"
+            or checks[-1].get("ok") is not False
+            or artifacts.get("failure") != "check failed: rehydrated hydrate capacity"):
+        raise ValueError("report is not a terminal rehydrated hydrate capacity stop")
+
+    workload_checks = [item for item in checks if item.get("name") == "workload-shape"]
+    if len(workload_checks) != 1 or workload_checks[0].get("ok") is not True:
+        raise ValueError("capacity stop workload evidence is missing")
+    workload = workload_checks[0].get("detail")
+    if not isinstance(workload, dict):
+        raise ValueError("capacity stop workload evidence is invalid")
+    if (
+        workload.get("large_files") != args.files
+        or workload.get("logical_bytes") != args.files * args.file_mib * MIB
+        or workload.get("small_code_files") != args.code_files
+        or workload.get("versions") != args.versions
+    ):
+        raise ValueError("capacity stop workload does not match")
+
+    binary_value = artifacts.get("crab_binary")
+    if not isinstance(binary_value, str):
+        raise ValueError("capacity stop Crab binary identity is missing")
+    binary_path = Path(binary_value)
+    binary_sha256 = artifacts.get("crab_binary_sha256")
+    source_head_sha = artifacts.get("source_head_sha")
+    if (not binary_path.is_file() or binary_path.is_symlink()
+            or binary_sha256 != sha256_file(binary_path)
+            or Path(args.crab_bin).resolve() != binary_path.resolve()):
+        raise ValueError("capacity stop Crab binary identity does not match")
+    if not isinstance(source_head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", source_head_sha):
+        raise ValueError("capacity stop source revision is missing")
+
+    def artifact_path(name: str) -> Path:
+        raw = artifacts.get(name)
+        path = Path(raw) if isinstance(raw, str) else Path()
+        if (not path.is_absolute() or path.is_symlink() or not path.is_file()
+                or path.resolve().parent != artifacts_dir.resolve()):
+            raise ValueError(f"capacity stop {name} artifact is missing or unsafe")
+        return path
+
+    history_path = artifact_path("expected_history")
+    transport_path = artifact_path("capsule_xet_transport")
+    expected_path = artifacts_dir / "expected-sha256.json"
+    if expected_path.is_symlink() or not expected_path.is_file():
+        raise ValueError("capacity stop expected SHA-256 inventory is missing")
+    try:
+        history = json.loads(history_path.read_text(encoding="utf-8"))
+        expected = json.loads(expected_path.read_text(encoding="utf-8"))
+        transport = json.loads(transport_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("capacity stop verification artifacts are unreadable") from error
+
+    expected_file_count = args.files + args.code_files
+    if not isinstance(history, list) or len(history) != args.versions or not isinstance(expected, dict):
+        raise ValueError("capacity stop history inventory is incomplete")
+    for version, snapshot in enumerate(history):
+        if not isinstance(snapshot, dict):
+            raise ValueError("capacity stop history inventory is invalid")
+        files = snapshot.get("files")
+        if (snapshot.get("version") != version
+                or not isinstance(snapshot.get("generation"), int)
+                or snapshot["generation"] < 0
+                or not isinstance(snapshot.get("commit"), str)
+                or not re.fullmatch(r"[0-9a-f]{40}", snapshot["commit"])
+                or not isinstance(snapshot.get("digest"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", snapshot["digest"])
+                or not isinstance(files, dict) or len(files) != expected_file_count
+                or any(not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                       for digest in files.values())):
+            raise ValueError("capacity stop history inventory is invalid")
+        if (sum(path.startswith("models/") for path in files) != args.files
+                or sum(path.startswith("src/") for path in files) != args.code_files):
+            raise ValueError("capacity stop history file inventory does not match the workload")
+    if expected != history[-1]["files"]:
+        raise ValueError("capacity stop final byte inventory does not match history")
+    if (not isinstance(transport, dict)
+            or not isinstance(transport.get("total"), dict)
+            or transport["total"].get("proxy_errors") != {}):
+        raise ValueError("capacity stop request meter recorded proxy errors")
+
+    commands = report.get("commands", [])
+    clone = run_root / "clone"
+    repo = run_root / "scale" / "repo"
+    if (not isinstance(commands, list) or not commands
+            or any(not isinstance(command, dict) for command in commands)
+            or commands[-1].get("name") != "cold dehydrate"
+            or commands[-1].get("exit_code") != 0
+            or Path(commands[-1].get("cwd", "")).resolve() != clone.resolve()
+            or any(command.get("name") == "rehydrated hydrate" for command in commands)
+            or clone.is_symlink() or repo.is_symlink()
+            or (clone / ".git").is_symlink() or (repo / ".git").is_symlink()
+            or not (clone / ".git").exists() or not (repo / ".git").exists()):
+        raise ValueError("capacity stop is not safe to resume from the cold-dehydrated clone")
+
+    return report, hashlib.sha256(report_bytes).hexdigest()
+
+
+def write_resume_transport_report(
+    runner: AddCommitPushSmoke,
+    prior_report_sha256: str,
+    prior_transport_sha256: str,
+    records: list[dict[str, Any]],
+    read_phases: list[dict[str, Any]],
+    total: dict[str, Any],
+) -> None:
+    path = runner.artifacts / "capsule-xet-transport.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "scope": "capacity-stop continuation only",
+            "prior_report_sha256": prior_report_sha256,
+            "prior_transport_sha256": prior_transport_sha256,
+            "versions": records,
+            "read_phases": read_phases,
+            "total": total,
+        }, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    runner.report.artifacts["capsule_xet_transport"] = str(path)
+    runner.write_report()
+
+
 def release_verified_run_child(runner: AddCommitPushSmoke, path: Path) -> None:
     if (path.parent != runner.run_root or path.is_symlink()
             or path.resolve().parent != runner.run_root.resolve()):
@@ -131,7 +311,144 @@ def release_verified_run_child(runner: AddCommitPushSmoke, path: Path) -> None:
         shutil.rmtree(path)
 
 
+def verify_hydrated_clone(
+    runner: AddCommitPushSmoke,
+    proxy: RequestCountingProxy,
+    read_phases: list[dict[str, Any]],
+    clone: Path,
+    expected: dict[str, str],
+    large_files: list[str],
+    logical_bytes: int,
+    cache_bytes: int,
+    cycle: str,
+) -> None:
+    measured_hydrate(
+        runner, proxy, read_phases, clone, f"{cycle} hydrate", logical_bytes, cache_bytes
+    )
+    for relative, digest in expected.items():
+        runner.check(f"{cycle}-bytes-{relative}", sha256_file(clone / relative) == digest)
+    runner.run_crab(clone, ["dehydrate", "--all"], name=f"{cycle} dehydrate")
+    for relative in large_files:
+        pointer = clone / relative
+        runner.check(
+            f"{cycle}-pointer-{pointer.name}",
+            pointer.stat().st_size < 1024
+            and pointer.read_text().startswith("version https://crab.build/spec/v1"),
+        )
+
+
+def verify_history_and_restore(
+    args: argparse.Namespace,
+    runner: AddCommitPushSmoke,
+    proxy: RequestCountingProxy,
+    transport_records: list[dict[str, Any]],
+    read_phases: list[dict[str, Any]],
+    repo: Path,
+    remote: str,
+    clone: Path,
+    history: list[dict[str, Any]],
+    logical_bytes: int,
+    cache_bytes: int,
+    *,
+    output_prefix: str = "",
+    preserve_cold_clone_cache: bool = False,
+    resume_metadata: tuple[str, str] | None = None,
+) -> None:
+    def output_name(name: str) -> str:
+        return f"{output_prefix}-{name}" if output_prefix else name
+
+    runner.run_git(clone, ["fsck", "--full", "--strict"])
+    if not preserve_cold_clone_cache:
+        release_verified_run_child(runner, runner.run_root / "cold-clone-cache")
+    for snapshot in history:
+        version = snapshot["version"]
+        cache_name = output_name(f"history-cache-{version}")
+        runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / cache_name)
+        runner.run_git(clone, ["checkout", "--detach", snapshot["commit"]],
+                       name=f"v{version} historical checkout")
+        measured_hydrate(runner, proxy, read_phases, clone, f"v{version} historical hydrate",
+                         logical_bytes, cache_bytes)
+        for relative, digest in snapshot["files"].items():
+            runner.check(f"v{version}-historical-bytes-{relative}", sha256_file(clone / relative) == digest)
+        runner.run_crab(clone, ["dehydrate", "--all"], name=f"v{version} historical dehydrate")
+        verified = measured_read(
+            runner, proxy, read_phases, repo,
+            ["recover", "history", "verify", str(snapshot["generation"]),
+             "--digest", snapshot["digest"], "--json"],
+            f"v{version} retained history integrity",
+        )
+        proof = json.loads(runner.read_stdout(verified))["data"]
+        runner.check(f"v{version}-history-verification-exact",
+                     proof["generation"] == snapshot["generation"]
+                     and proof["digest"] == snapshot["digest"]
+                     and proof["xorbs"] > 0 and proof["shards"] > 0, proof)
+        release_verified_run_child(runner, runner.run_root / cache_name)
+
+    oldest = history[0]
+    external_before = {
+        prefix: runner.list_keys(prefix) for prefix in (".crab/xorbs/", ".crab/shards/")
+    }
+    restored = measured_read(
+        runner, proxy, read_phases, repo,
+        ["recover", "history", "restore", str(oldest["generation"]),
+         "--digest", oldest["digest"], "--apply", "--json"],
+        "restore oldest retained Xet history",
+    )
+    runner.check("history-restore-applied", json.loads(runner.read_stdout(restored))["data"]["applied"])
+    runner.check("history-restore-exact-tip",
+                 runner.ls_remote(remote, name="restored refs").get("refs/heads/main") == oldest["commit"])
+    for prefix, keys in external_before.items():
+        runner.check(f"history-restore-preserves-{prefix}", runner.list_keys(prefix) == keys)
+
+    restored_clone_name = output_name("restored-clone")
+    restored_clone = runner.run_root / restored_clone_name
+    restored_cache_name = output_name("restored-clone-cache")
+    republished_cache_name = output_name("republished-clone-cache")
+    runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / restored_cache_name)
+    runner.run_cmd("restored history clone", [runner.crab_bin, "clone", remote, str(restored_clone)], runner.run_root)
+    for stage, snapshot in (("restored", oldest), ("republished", history[-1])):
+        if stage == "republished":
+            runner.run_crab(repo, ["push", "origin", "HEAD:refs/heads/main"],
+                            name="publish current version after history restore")
+            runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / republished_cache_name)
+            runner.run_git(restored_clone, ["fetch", "origin"], name="fetch after restore and publication")
+            runner.run_git(restored_clone, ["checkout", "--detach", "refs/remotes/origin/main"])
+        runner.check(f"{stage}-clone-exact-tip", runner.rev_parse(restored_clone, "HEAD") == snapshot["commit"])
+        measured_hydrate(runner, proxy, read_phases, restored_clone, f"{stage} history hydrate",
+                         logical_bytes, cache_bytes)
+        for relative, digest in snapshot["files"].items():
+            runner.check(f"{stage}-history-bytes-{relative}", sha256_file(restored_clone / relative) == digest)
+        runner.run_git(restored_clone, ["fsck", "--full", "--strict"], name=f"{stage} history Git integrity")
+        runner.run_crab(restored_clone, ["dehydrate", "--all"], name=f"{stage} history dehydrate")
+        cache_name = restored_cache_name if stage == "restored" else republished_cache_name
+        release_verified_run_child(runner, runner.run_root / cache_name)
+
+    fsck = measured_read(runner, proxy, read_phases, repo, ["fsck", "--json"],
+                         "layered Xet remote fsck")
+    fsck_data = json.loads(runner.read_stdout(fsck))["data"]
+    runner.check(
+        "layered-xet-remote-fsck-clean",
+        fsck_data["passed"] and fsck_data["errors"] == 0 and fsck_data["repair_failures"] == 0,
+        fsck_data,
+    )
+    verify_no_proxy_errors(runner, proxy)
+    runner.check("binary-unchanged", sha256_file(Path(runner.crab_bin)) == runner.report.artifacts["crab_binary_sha256"])
+    runner.check_credential_disclosure()
+    runner.report.status = "passed"
+    if resume_metadata is None:
+        write_transport_report(runner, transport_records, read_phases, proxy.snapshot())
+    else:
+        write_resume_transport_report(
+            runner, resume_metadata[0], resume_metadata[1], transport_records,
+            read_phases, proxy.snapshot(),
+        )
+    runner.write_report()
+
+
 def run(args: argparse.Namespace) -> None:
+    if getattr(args, "resume_capacity_stop", False):
+        resume_capacity_stop(args)
+        return
     proxy = RequestCountingProxy(args.endpoint_url, args.bucket)
     proxy.start()
     runner = AddCommitPushSmoke(args)
@@ -152,6 +469,121 @@ def run(args: argparse.Namespace) -> None:
         runner.report.status = "failed"
         runner.report.artifacts["failure"] = str(error)
         write_transport_report(runner, records, read_phases, proxy.snapshot())
+        runner.write_report()
+        raise
+    finally:
+        proxy.close()
+
+
+def resume_capacity_stop(args: argparse.Namespace) -> None:
+    if getattr(args, "cleanup", False):
+        raise ValueError("capacity-stop resume cannot clean up the qualification run")
+    report, report_sha256 = validate_capacity_stop_report(args)
+    run_root = args.root / args.run_id
+    report_path = run_root / "artifacts" / "report.json"
+    prior_transport_path = Path(report["artifacts"]["capsule_xet_transport"])
+    prior_transport_bytes = prior_transport_path.read_bytes()
+    prior_transport_sha256 = hashlib.sha256(prior_transport_bytes).hexdigest()
+    prior_transport = json.loads(prior_transport_bytes)
+    history = json.loads(Path(report["artifacts"]["expected_history"]).read_text(encoding="utf-8"))
+    expected = json.loads((run_root / "artifacts" / "expected-sha256.json").read_text(encoding="utf-8"))
+    if not getattr(args, "release_cold_clone_cache_after_rehydration", False):
+        logical_bytes = args.files * args.file_mib * MIB
+        cache_bytes = min(10, args.files) * args.file_mib * MIB
+        required_for_history = logical_bytes + cache_bytes + 20 * 1024**3
+        available = shutil.disk_usage(args.root).free
+        if available < required_for_history:
+            raise ValueError(
+                "capacity-stop resume requires at least "
+                f"{required_for_history} free bytes for isolated history hydration; "
+                "provide more space or explicitly authorize releasing the cold-clone cache"
+            )
+
+    attempt = 1
+    while True:
+        attempt_name = f"resume-{attempt}"
+        attempt_root = run_root / attempt_name
+        try:
+            attempt_root.mkdir(mode=0o700)
+            break
+        except FileExistsError:
+            attempt += 1
+
+    runner = AddCommitPushSmoke(args)
+    runner.logs = attempt_root / "logs"
+    runner.artifacts = attempt_root / "artifacts"
+    runner.report.run_id = f"{args.run_id}-{attempt_name}"
+    runner.report.root = str(run_root)
+    runner.report.artifacts.update({
+        "resume_scope": "rehydrated hydrate and retained-history continuation",
+        "resume_parent_report": str(report_path),
+        "resume_parent_report_sha256": report_sha256,
+        "resume_parent_transport": str(prior_transport_path),
+        "resume_parent_transport_sha256": prior_transport_sha256,
+        "source_head_sha": report["artifacts"]["source_head_sha"],
+        "crab_binary": runner.crab_bin,
+        "crab_binary_sha256": report["artifacts"]["crab_binary_sha256"],
+        "scale_harness_sha256": sha256_file(Path(__file__)),
+        "request_meter_sha256": sha256_file(Path(__file__).with_name("run_concurrent_push_smoke.py")),
+    })
+
+    proxy = RequestCountingProxy(args.endpoint_url, args.bucket)
+    records: list[dict[str, Any]] = []
+    read_phases: list[dict[str, Any]] = []
+    runner.write_report()
+    try:
+        proxy.start()
+        runner.env["AWS_ENDPOINT_URL"] = proxy.url
+        runner.env["AWS_ENDPOINT_URL_S3"] = proxy.url
+        remote, _ = runner.remote_for_case("scale")
+        repo = run_root / "scale" / "repo"
+        clone = run_root / "clone"
+        latest_commit = history[-1]["commit"]
+        runner.check(
+            "resume-parent-request-meter-clean",
+            not prior_transport["total"]["proxy_errors"],
+            {"proxy_errors": prior_transport["total"]["proxy_errors"]},
+        )
+        runner.check("resume-source-tip-unchanged", runner.rev_parse(repo, "HEAD") == latest_commit)
+        runner.check("resume-clone-tip-unchanged", runner.rev_parse(clone, "HEAD") == latest_commit)
+        runner.check(
+            "resume-remote-tip-unchanged",
+            runner.ls_remote(remote, name="resume remote refs").get("refs/heads/main") == latest_commit,
+        )
+        runner.env["CRAB_CACHE_DIR"] = str(run_root / "cold-clone-cache")
+        large_files = [path for path in expected if path.startswith("models/")]
+        logical_bytes = args.files * args.file_mib * MIB
+        cache_bytes = min(10, args.files) * args.file_mib * MIB
+        verify_hydrated_clone(
+            runner, proxy, read_phases, clone, expected, large_files,
+            logical_bytes, cache_bytes, "rehydrated",
+        )
+        verify_history_and_restore(
+            args, runner, proxy, records, read_phases, repo, remote, clone,
+            history, logical_bytes, cache_bytes,
+            output_prefix=attempt_name,
+            preserve_cold_clone_cache=not getattr(
+                args, "release_cold_clone_cache_after_rehydration", False
+            ),
+            resume_metadata=(report_sha256, prior_transport_sha256),
+        )
+        runner.check(
+            "resume-parent-report-unchanged",
+            sha256_file(report_path) == report_sha256,
+            {"sha256": report_sha256},
+        )
+        runner.check(
+            "resume-parent-transport-unchanged",
+            sha256_file(prior_transport_path) == prior_transport_sha256,
+            {"sha256": prior_transport_sha256},
+        )
+    except Exception as error:
+        runner.report.status = "failed"
+        runner.report.artifacts["failure"] = str(error)
+        write_resume_transport_report(
+            runner, report_sha256, prior_transport_sha256,
+            records, read_phases, proxy.snapshot(),
+        )
         runner.write_report()
         raise
     finally:
@@ -386,95 +818,19 @@ def verify(
     runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / "cold-clone-cache")
     clone = runner.run_root / "clone"
     runner.run_cmd("scale clone", [runner.crab_bin, "clone", remote, str(clone)], runner.run_root)
+    large_files = [str(path.relative_to(repo)) for path in paths]
     for cycle in ("cold", "rehydrated"):
-        measured_hydrate(runner, proxy, read_phases, clone, f"{cycle} hydrate",
-                         logical_bytes, distinct_basis_bytes)
-        for relative, digest in expected.items():
-            runner.check(f"{cycle}-bytes-{relative}", sha256_file(clone / relative) == digest)
-        runner.run_crab(clone, ["dehydrate", "--all"], name=f"{cycle} dehydrate")
-        for path in paths:
-            pointer = clone / path.relative_to(repo)
-            runner.check(f"{cycle}-pointer-{path.name}",
-                         pointer.stat().st_size < 1024 and pointer.read_text().startswith("version https://crab.build/spec/v1"))
-    runner.run_git(clone, ["fsck", "--full", "--strict"])
-    release_verified_run_child(runner, runner.run_root / "cold-clone-cache")
-    for snapshot in history:
-        version = snapshot["version"]
-        # The disposable clone starts dehydrated. Each historical checkout uses
-        # a fresh cache so current-version hydration cannot mask lost dependencies.
-        runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / f"history-cache-{version}")
-        runner.run_git(clone, ["checkout", "--detach", snapshot["commit"]],
-                       name=f"v{version} historical checkout")
-        measured_hydrate(runner, proxy, read_phases, clone, f"v{version} historical hydrate",
-                         logical_bytes, distinct_basis_bytes)
-        for relative, digest in snapshot["files"].items():
-            runner.check(f"v{version}-historical-bytes-{relative}", sha256_file(clone / relative) == digest)
-        runner.run_crab(clone, ["dehydrate", "--all"], name=f"v{version} historical dehydrate")
-        verified = measured_read(
-            runner, proxy, read_phases, repo,
-            ["recover", "history", "verify", str(snapshot["generation"]),
-             "--digest", snapshot["digest"], "--json"],
-            f"v{version} retained history integrity",
+        verify_hydrated_clone(
+            runner, proxy, read_phases, clone, expected, large_files,
+            logical_bytes, distinct_basis_bytes, cycle,
         )
-        proof = json.loads(runner.read_stdout(verified))["data"]
-        runner.check(f"v{version}-history-verification-exact",
-                     proof["generation"] == snapshot["generation"]
-                     and proof["digest"] == snapshot["digest"]
-                     and proof["xorbs"] > 0 and proof["shards"] > 0, proof)
-        release_verified_run_child(runner, runner.run_root / f"history-cache-{version}")
-
-    # Restore only this invocation's isolated repository, then prove a fresh
-    # consumer and a new-epoch publication can still read both file generations.
-    oldest = history[0]
-    external_before = {
-        prefix: runner.list_keys(prefix) for prefix in (".crab/xorbs/", ".crab/shards/")
-    }
-    restored = measured_read(
-        runner, proxy, read_phases, repo,
-        ["recover", "history", "restore", str(oldest["generation"]),
-         "--digest", oldest["digest"], "--apply", "--json"],
-        "restore oldest retained Xet history",
+    verify_history_and_restore(
+        args, runner, proxy, transport_records, read_phases, repo, remote, clone,
+        history, logical_bytes, distinct_basis_bytes,
     )
-    runner.check("history-restore-applied", json.loads(runner.read_stdout(restored))["data"]["applied"])
-    runner.check("history-restore-exact-tip",
-                 runner.ls_remote(remote, name="restored refs").get("refs/heads/main") == oldest["commit"])
-    for prefix, keys in external_before.items():
-        runner.check(f"history-restore-preserves-{prefix}", runner.list_keys(prefix) == keys)
-    restored_clone = runner.run_root / "restored-clone"
-    runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / "restored-clone-cache")
-    runner.run_cmd("restored history clone", [runner.crab_bin, "clone", remote, str(restored_clone)], runner.run_root)
-    for stage, snapshot in (("restored", oldest), ("republished", history[-1])):
-        if stage == "republished":
-            runner.run_crab(repo, ["push", "origin", "HEAD:refs/heads/main"],
-                            name="publish current version after history restore")
-            runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / "republished-clone-cache")
-            runner.run_git(restored_clone, ["fetch", "origin"], name="fetch after restore and publication")
-            runner.run_git(restored_clone, ["checkout", "--detach", "refs/remotes/origin/main"])
-        runner.check(f"{stage}-clone-exact-tip", runner.rev_parse(restored_clone, "HEAD") == snapshot["commit"])
-        measured_hydrate(runner, proxy, read_phases, restored_clone, f"{stage} history hydrate",
-                         logical_bytes, distinct_basis_bytes)
-        for relative, digest in snapshot["files"].items():
-            runner.check(f"{stage}-history-bytes-{relative}", sha256_file(restored_clone / relative) == digest)
-        runner.run_git(restored_clone, ["fsck", "--full", "--strict"], name=f"{stage} history Git integrity")
-        runner.run_crab(restored_clone, ["dehydrate", "--all"], name=f"{stage} history dehydrate")
-        cache_name = "restored-clone-cache" if stage == "restored" else "republished-clone-cache"
-        release_verified_run_child(runner, runner.run_root / cache_name)
-    fsck = measured_read(runner, proxy, read_phases, repo, ["fsck", "--json"],
-                         "layered Xet remote fsck")
-    fsck_data = json.loads(runner.read_stdout(fsck))["data"]
-    runner.check(
-        "layered-xet-remote-fsck-clean",
-        fsck_data["passed"] and fsck_data["errors"] == 0 and fsck_data["repair_failures"] == 0,
-        fsck_data,
-    )
-    verify_no_proxy_errors(runner, proxy)
-    runner.check("binary-unchanged", sha256_file(Path(runner.crab_bin)) == runner.report.artifacts["crab_binary_sha256"])
-    runner.check_credential_disclosure()
-    runner.report.status = "passed"
-    write_transport_report(runner, transport_records, read_phases, proxy.snapshot())
-    runner.write_report()
     if args.cleanup:
         # All targets were created by this invocation; retain reports and logs.
+        restored_clone = runner.run_root / "restored-clone"
         for path in (repo.parent, consumer.parent, clone, consumer_clone, restored_clone,
                      runner.run_root / "restored-clone-cache", runner.run_root / "republished-clone-cache",
                      runner.cache_dir, runner.run_root / "consumer-cache",
@@ -501,11 +857,25 @@ def main() -> None:
     parser.add_argument("--code-files", type=int, default=500)
     parser.add_argument("--versions", type=int, default=3)
     parser.add_argument("--cleanup", action="store_true")
+    parser.add_argument(
+        "--resume-capacity-stop",
+        action="store_true",
+        help="continue only a verified terminal rehydrated-hydrate capacity stop",
+    )
+    parser.add_argument(
+        "--release-cold-clone-cache-after-rehydration",
+        action="store_true",
+        help="delete only the original cold-clone cache after hydrated bytes and Git fsck pass",
+    )
     args = parser.parse_args()
     if args.files < 1 or args.file_mib < 500 or not 1 <= args.versions <= 11 or args.code_files < 1:
         parser.error("require positive file counts, >=500 MiB/file, and 1–11 versions")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.run_id):
         parser.error("run-id must be a single safe directory name")
+    if args.resume_capacity_stop and args.cleanup:
+        parser.error("--cleanup is not permitted when resuming a capacity stop")
+    if args.release_cold_clone_cache_after_rehydration and not args.resume_capacity_stop:
+        parser.error("cache release is only valid with --resume-capacity-stop")
     args.access_key = "crab"
     args.secret_key = "crab"
     args.session_token = ""
