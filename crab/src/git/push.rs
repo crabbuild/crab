@@ -4268,6 +4268,7 @@ pub struct PushPipeline {
 /// Shared add-time classifier backed by the push pipeline's full proof path.
 pub(crate) struct AddRemoteChunkClassifier {
     pipeline: PushPipeline,
+    remote_chunk_index: tokio::sync::OnceCell<Option<crate::metadata::ChunkIndexStore>>,
     candidate_cache: Option<Arc<crate::cache::add_remote_candidates::AddRemoteCandidateCache>>,
     candidate_cache_hits: std::sync::atomic::AtomicU64,
     candidate_cache_misses: std::sync::atomic::AtomicU64,
@@ -4326,6 +4327,7 @@ impl AddRemoteChunkClassifier {
             };
         Self {
             pipeline,
+            remote_chunk_index: tokio::sync::OnceCell::new(),
             candidate_cache,
             candidate_cache_hits: std::sync::atomic::AtomicU64::new(0),
             candidate_cache_misses: std::sync::atomic::AtomicU64::new(0),
@@ -4457,16 +4459,41 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
         self.candidate_cache_misses
             .fetch_add(misses.len() as u64, std::sync::atomic::Ordering::Relaxed);
         if !misses.is_empty() {
-            let fetched = self
-                .pipeline
-                .lookup_proven_remote_chunks_for_add(&misses)
-                .await
-                .map_err(|error| match error {
-                    CrabError::Cancelled => crab_staging::StagingError::Cancelled,
-                    error => crab_staging::StagingError::Internal(format!(
-                        "remote add classifier failed: {error}"
-                    )),
-                })?;
+            let fetched = async {
+                check_cancelled(&self.pipeline.cancel)?;
+                let chunk_index = self
+                    .remote_chunk_index
+                    .get_or_try_init(|| async {
+                        let guard = self.pipeline.metadb.lock().await;
+                        let Some(guard) = guard.as_ref() else {
+                            return Ok(None);
+                        };
+                        match guard.chunk_index().await {
+                            Ok(store) => Ok(Some(store)),
+                            Err(error) if error.is_metadb_read_only_uninitialized() => Ok(None),
+                            Err(error) => Err(error),
+                        }
+                    })
+                    .await?;
+                check_cancelled(&self.pipeline.cancel)?;
+                // An absent index cannot supply remote candidates during this add.
+                // Packing locally remains correct even if another writer creates
+                // the index later; transient open failures are still retried.
+                if let Some(chunk_index) = chunk_index {
+                    self.pipeline
+                        .lookup_proven_remote_chunks_for_add(&misses, chunk_index.clone())
+                        .await
+                } else {
+                    Ok(HashMap::new())
+                }
+            }
+            .await
+            .map_err(|error| match error {
+                CrabError::Cancelled => crab_staging::StagingError::Cancelled,
+                error => crab_staging::StagingError::Internal(format!(
+                    "remote add classifier failed: {error}"
+                )),
+            })?;
             let mut updates = Vec::with_capacity(misses.len());
             for chunk_hash in misses {
                 let candidate = fetched.get(&chunk_hash).copied();
@@ -14982,24 +15009,12 @@ impl PushPipeline {
     async fn lookup_proven_remote_chunks_for_add(
         &self,
         chunk_hashes: &[MerkleHash],
+        chunk_store: crate::metadata::ChunkIndexStore,
     ) -> Result<HashMap<MerkleHash, crab_staging::push_plan::ExistingChunkCandidate>> {
         if chunk_hashes.is_empty() {
             return Ok(HashMap::new());
         }
         check_cancelled(&self.cancel)?;
-        let chunk_store = {
-            let guard = self.metadb.lock().await;
-            let Some(guard) = guard.as_ref() else {
-                return Ok(HashMap::new());
-            };
-            match guard.chunk_index().await {
-                Ok(store) => store,
-                Err(error) if error.is_metadb_read_only_uninitialized() => {
-                    return Ok(HashMap::new());
-                }
-                Err(error) => return Err(error),
-            }
-        };
         let remote_candidates = tokio::time::timeout(
             GLOBAL_CHUNK_LOOKUP_BUDGET,
             chunk_store.get_committed_candidates_batch(chunk_hashes),
@@ -22030,6 +22045,81 @@ mod tests {
                 .all(|path| !path.starts_with(".crab/chunk_index_db/")),
             "unscoped chunk_index_db path escaped the managed grant: {seen:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_classifier_does_not_repeat_an_uninitialized_index_probe() {
+        let inner = Arc::new(object_store::memory::InMemory::new());
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let recording_store: Arc<dyn ObjectStore> = Arc::new(RecordingReadStore {
+            inner,
+            reads: Arc::clone(&reads),
+        });
+        let store = Store::new(recording_store);
+        let router = StoreLayout::new(store.clone(), "repo-add-uninitialized-index".to_owned());
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            Vec::new(),
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.install_metadb(build_push_metadb_guard(
+            &store,
+            &router,
+            None,
+            &crate::core::config::MetaDbTomlConfig::default(),
+            true,
+        ));
+        let classifier = AddRemoteChunkClassifier {
+            pipeline,
+            remote_chunk_index: tokio::sync::OnceCell::new(),
+            candidate_cache: None,
+            candidate_cache_hits: std::sync::atomic::AtomicU64::new(0),
+            candidate_cache_misses: std::sync::atomic::AtomicU64::new(0),
+        };
+        let first = crab_staging::push_plan::ExistingChunkLookup::lookup_existing_candidates(
+            &classifier,
+            &[(MerkleHash::from([1; 32]), 4)],
+        )
+        .await
+        .expect("first absent-index lookup");
+        assert_eq!(first, vec![None]);
+        let manifest_probes = || {
+            reads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .filter(|path| path.contains("chunk_index_db/"))
+                .count()
+        };
+        let initial_probes = manifest_probes();
+        assert!(initial_probes > 0, "the missing index must be checked once");
+
+        let second = crab_staging::push_plan::ExistingChunkLookup::lookup_existing_candidates(
+            &classifier,
+            &[(MerkleHash::from([2; 32]), 4)],
+        )
+        .await
+        .expect("second absent-index lookup");
+        assert_eq!(second, vec![None]);
+        assert_eq!(manifest_probes(), initial_probes);
+
+        classifier.pipeline.cancel.cancel();
+        let cancelled = crab_staging::push_plan::ExistingChunkLookup::lookup_existing_candidates(
+            &classifier,
+            &[(MerkleHash::from([3; 32]), 4)],
+        )
+        .await
+        .expect_err("cancelled add must not return cached absence");
+        assert!(matches!(cancelled, crab_staging::StagingError::Cancelled));
+        assert_eq!(manifest_probes(), initial_probes);
+        classifier.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

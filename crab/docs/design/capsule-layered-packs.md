@@ -6,7 +6,7 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Protocol-v2 checkpoint Git packs, clone/fetch, repack, fsck, history, and GC |
-| Status | Working implementation, not qualified. A fresh-GitHub Kubernetes replay on head `9b91d0b3` completed seed + 5,000 individual pushes, ten fetch-before-repack intervals, cold/warm clones, strict Git/Crab integrity and 32 sampled blob comparisons. Pushes averaged 227.91 ms / 7.012 requests; fetch p95 was 5.996 seconds / 34 requests. The unchanged ten-request fetch gate failed. See the [GA qualification report](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md). A later [100 GiB Xet GA rerun](../benchmarks/capsule-v2-xet-100g-rustfs-ga.md) passed byte, restore, fsck and zero-proxy-error checks on a frozen binary predating the current PR head. Current-head replay, matched v1, full product/provider parity, green CI and v1 retirement remain unqualified. |
+| Status | Working implementation, not qualified. The [current-code-head GA replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md) on `9415c4b0` completed seed + 5,000 individual Kubernetes pushes, ten fetch-before-repack intervals, cold/warm clones, strict Git/Crab integrity and 32 sampled blob comparisons. Pushes averaged 559.77 ms / 7.012 requests; fetch p95 was 9.920 seconds / 34 requests. The unchanged ten-request fetch gate failed. An earlier [100 GiB Xet GA rerun](../benchmarks/capsule-v2-xet-100g-rustfs-ga.md) passed byte, restore, fsck and zero-proxy-error checks on a binary predating this code head. The exact-head Xet rerun stopped without a terminal report after 839 passing checks at the rehydrated-hydrate capacity preflight; that hydration and all later checks are unverified, so a fresh run is required. Current-head CI is green; matched v1, full product/provider parity and v1 retirement remain unqualified. |
 | Priority | Correctness, stable incremental cost, then clone throughput and storage efficiency |
 | Replaces | Whole-repository Git-pack replacement during every v2 checkpoint |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Kubernetes 4,500-commit RustFS benchmark](../benchmarks/kubernetes-4500-rustfs.md) |
@@ -19,15 +19,32 @@ record](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md) distinguishes
 this capacity stop from the later complete replay. Fetch request performance,
 Xet, and parity gates remain open.
 
-The retained GA request trace's final fetch used one complete GET for each of
-24 distinct new capsule-run objects, plus eight root, ref-capture, admission,
-replica-discovery and checkpoint operations. Reader-side range coalescing is
-already at the one-request-per-source floor for this interval. Changing only
-the 32-leaf compaction fan-in to four predicts six sources but still about 14
-total requests with the current control path, while increasing upload bytes.
-Meeting ten therefore needs at most two sources with the current eight control
-requests, or fewer sources together with cheaper coherent control capture;
-neither a read-window tweak nor a fan-in constant alone is sufficient.
+The current-head GA trace's final fetch used one complete GET for each of 24
+distinct new capsule-run objects, plus ten root, ref-capture, admission,
+replica-discovery and checkpoint operations. Earlier traces had eight such
+control operations. Reader-side range coalescing is already at the
+one-request-per-source floor for this interval. Changing only the 32-leaf
+compaction fan-in to four produced six sources and 14 total requests in the
+matched diagnostic below, while increasing upload bytes. Meeting ten needs
+both less source fan-out and cheaper coherent control capture: even one source
+plus the current ten control requests would miss the gate.
+
+The exact-head commit-5,000 trace accounts for all 34 requests:
+
+| Request group | Count | Observed operations |
+| --- | ---: | --- |
+| Capsule sources | 24 | One authenticated full-object GET per distinct run |
+| Root and replica routing | 2 | Root GET; replica-discovery GET returning 404 |
+| Read admission | 4 | Conditional create returning 412, GET, conditional update, release PUT |
+| Ref capture | 3 | LIST, selected ref-head GET, second LIST to detect a changed set |
+| Checkpoint control | 1 | Authenticated suffix range GET |
+
+The 404 and 412 are expected protocol responses but still incur requests.
+The double listing protects the captured ref set; the admission lifetime
+protects read/GC coordination. A lower-request path must replace those proofs
+with equivalent coherent capture and release, not omit them or exclude their
+requests from the meter. The source and control budgets must be evaluated
+together on a fetch-before-repack replay, including conflicts and retries.
 
 A subsequent matched 500-commit Kubernetes/RustFS diagnostic confirmed that
 four-way compaction produced six sources and 14 total fetch requests, versus
