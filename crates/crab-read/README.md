@@ -274,7 +274,7 @@ declared object totals, and visibility identity use the same member inventory.
 Concurrent source-range reads own their request descriptors before suspension,
 so HTTP and background-maintenance tasks retain Tokio's `Send` contract.
 
-Captured `CRBRUN06` frontier controls supply contiguous lookup-index ranges for
+Captured `CRBRUN07` frontier controls supply contiguous lookup-index ranges for
 compacted runs. The shared Git reader still validates each original index hash,
 checksum and inventory under its existing request/byte limits. Canonical pack
 and sidecar ranges remain authoritative for installation and maintenance; the

@@ -10,8 +10,8 @@ use crate::capsule_protocol::{
 use crate::error::{MetadataError, Result};
 use crate::validation::validate_content_hash;
 
-const RUN_MAGIC: &[u8; 8] = b"CRBRUN06";
-const RUN_VERSION: u32 = 6;
+const RUN_MAGIC: &[u8; 8] = b"CRBRUN07";
+const RUN_VERSION: u32 = 7;
 const RUN_TRAILER_BYTES: usize = 8 + 32 + RUN_MAGIC.len();
 const MAX_RUN_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INLINE_RUN_CONTROL_SECTION_BYTES: usize = 512 * 1024;
@@ -273,7 +273,7 @@ impl CapsuleRunAdmission {
     }
 }
 
-/// Immutable power-of-two run of complete push capsules.
+/// Immutable bounded run of complete push capsules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapsuleRun {
     bytes: Bytes,
@@ -728,19 +728,18 @@ impl CapsuleRun {
 
     /// Compact ordered adjacent runs without changing their capsule bytes.
     ///
-    /// Requires at least two runs with a bounded power-of-two total capsule count.
+    /// Requires at least two runs and a bounded total capsule count.
     pub fn compact(runs: Vec<Self>) -> Result<Self> {
         let count = runs
             .iter()
             .try_fold(0_usize, |count, run| count.checked_add(run.capsules.len()))
             .ok_or_else(|| contract_error("capsule run count overflowed"))?;
-        if runs.len() < 2 || !count.is_power_of_two() {
+        if runs.len() < 2 || count > MAX_CAPSULES_PER_RUN {
             return Err(contract_error(
-                "capsule compaction requires multiple runs with a power-of-two capsule count",
+                "capsule compaction requires multiple runs within the capsule-count bound",
             ));
         }
-        let level = u8::try_from(count.ilog2())
-            .map_err(|_| contract_error("capsule compaction level overflowed"))?;
+        let level = level_for_count(count)?;
         validate_level_count(level, count)?;
         // Ref-only runs prove an empty contribution. Any unproven pack-bearing
         // member disqualifies the whole join, even across a mixed-level carry.
@@ -1097,7 +1096,7 @@ impl CapsuleRun {
         &self.hash
     }
 
-    /// Return the binary merge level, where level zero contains one capsule.
+    /// Return the size class `ceil(log2(capsule_count))`; singleton runs use zero.
     #[must_use]
     pub fn level(&self) -> u8 {
         self.footer.level
@@ -1181,16 +1180,21 @@ impl CapsuleRun {
     }
 }
 
-fn validate_level_count(level: u8, count: usize) -> Result<()> {
-    let expected = 1_usize
-        .checked_shl(u32::from(level))
-        .ok_or_else(|| contract_error("capsule run level is too large"))?;
-    if expected != count || count > MAX_CAPSULES_PER_RUN {
+pub(super) fn validate_level_count(level: u8, count: usize) -> Result<()> {
+    if level_for_count(count)? != level {
         return Err(contract_error(
-            "capsule run count must equal its power-of-two level",
+            "capsule run level does not match its bounded size class",
         ));
     }
     Ok(())
+}
+
+fn level_for_count(count: usize) -> Result<u8> {
+    if count == 0 || count > MAX_CAPSULES_PER_RUN {
+        return Err(contract_error("capsule run count is outside its bound"));
+    }
+    u8::try_from(usize::BITS - (count - 1).leading_zeros())
+        .map_err(|_| contract_error("capsule run level cannot be represented"))
 }
 
 fn pack_members(
@@ -1604,14 +1608,41 @@ mod tests {
     }
 
     #[test]
-    fn non_power_of_two_capsule_counts_cannot_compact() {
-        let leaf = CapsuleRun::leaf(capsule('1', '2')).unwrap();
-        let level_one = CapsuleRun::compact(vec![leaf.clone(), leaf.clone()]).unwrap();
+    fn non_power_of_two_capsule_counts_compact_and_round_trip() {
+        let leaves = vec![
+            CapsuleRun::leaf(capsule('1', '2')).unwrap(),
+            CapsuleRun::leaf(capsule('3', '4')).unwrap(),
+            CapsuleRun::leaf(capsule('5', '6')).unwrap(),
+        ];
+        let expected = leaves
+            .iter()
+            .flat_map(|run| run.transaction_ids())
+            .collect::<Vec<_>>();
 
-        let error = CapsuleRun::compact(vec![level_one, leaf])
-            .expect_err("three capsules cannot form a binary run");
+        let compacted = CapsuleRun::compact(leaves).unwrap();
+        let decoded = CapsuleRun::decode(compacted.bytes().clone()).unwrap();
+        let control = CapsuleRunControl::decode_suffix(
+            compacted
+                .bytes()
+                .slice(compacted.control_offset() as usize..),
+            compacted.bytes().len() as u64,
+            compacted.hash(),
+            compacted.level(),
+            &compacted.transaction_ids(),
+            compacted.newest_base_root_digest(),
+        )
+        .unwrap();
 
-        assert!(matches!(error, MetadataError::CapsuleContract { .. }));
+        assert_eq!(compacted.level(), 2);
+        assert_eq!(decoded.transaction_ids(), expected);
+        assert_eq!(
+            control
+                .capsule_locations()
+                .iter()
+                .map(|location| location.transaction_id().to_owned())
+                .collect::<Vec<_>>(),
+            expected
+        );
     }
 
     #[test]
@@ -1668,7 +1699,7 @@ mod tests {
     #[test]
     fn compaction_rejects_empty_singleton_and_oversized_inputs() {
         let leaf = CapsuleRun::leaf(capsule('1', '2')).unwrap();
-        for count in [0, 1, MAX_CAPSULES_PER_RUN * 2] {
+        for count in [0, 1, MAX_CAPSULES_PER_RUN + 1] {
             assert!(CapsuleRun::compact(vec![leaf.clone(); count]).is_err());
         }
     }
@@ -1722,7 +1753,7 @@ mod tests {
     #[test]
     fn retired_run_magic_is_rejected() {
         let run = CapsuleRun::leaf(capsule('1', '2')).unwrap();
-        for magic in [b"CRBRUN04", b"CRBRUN05"] {
+        for magic in [b"CRBRUN04", b"CRBRUN05", b"CRBRUN06"] {
             let mut bytes = run.bytes().to_vec();
             let start = bytes.len() - RUN_MAGIC.len();
             bytes[start..].copy_from_slice(magic);

@@ -224,11 +224,13 @@ through the combined view.
 
 Each ref head contains committed state and, only for a multi-ref transaction,
 one prepared state. A state binds the ref OID, peeled OID, newest transaction,
-and a bounded frontier of immutable capsule runs. The foreground writer always
-publishes the coordinator-bound leaf, then folds each 32-run equal-level suffix
+and a bounded frontier of immutable capsule runs. The foreground writer
+publishes the coordinator-bound leaf and folds each 32-run equal-level suffix
 through one concurrent predecessor-read wave and one immutable support-run
-write. Checkpoints may split a support run; readers authenticate the run and
-skip through the exact compacted transaction before replaying its suffix, so a
+write. Once the newest per-ref suffix reaches 500 capsules, it coalesces that
+bounded suffix into one CRBRUN07 run; prior 500-capsule runs remain immutable.
+Checkpoints may split a support run; readers authenticate the run and skip
+through the exact compacted transaction before replaying its suffix, so a
 concurrent checkpoint cannot invalidate compaction. Background checkpoint
 maintenance folds a complete authenticated view after 32 visible capsules; the
 next writer drops the exact checkpointed prefix and preserves any concurrently
@@ -309,7 +311,7 @@ A `CRBCKP05` layered checkpoint compacts metadata, not payloads. It contains:
 - visibility state;
 - covered root generation and digest.
 
-Git pack bodies remain in `CRBRUN06` capsule runs or standalone `CRBPKL01`
+Git pack bodies remain in `CRBRUN07` capsule runs or standalone `CRBPKL01`
 layers; canonical xorbs and shards remain external and are not rewritten by
 checkpoint publication. Clearing a capsule from a transaction frontier does
 not make its source collectible: the new checkpoint may still name its Git
@@ -845,12 +847,16 @@ Implemented:
    transaction.
 9. Foreground ref publication appends one immutable leaf capsule. Every 32
    equal-level suffix runs fold through one parallel predecessor-read wave and
-   one support-run write; higher-level carries join that same wave. Server
-   maintenance checkpoints at 32 visible capsules. A foreground checkpoint is
-   forced at 56 capsules if maintenance falls behind; runs cap at 512 capsules
-   and per-ref frontiers reject more than 64 segments if maintenance still
-   cannot preserve the bounded-read contract. Checkpoint positions may split a
-   run, and readers replay only the authenticated suffix after that position.
+   one support-run write; higher-level carries join that same wave. At 500
+   capsules, the newest bounded per-ref suffix is coalesced into one CRBRUN07
+   run without rewriting prior rollups. Server maintenance checkpoints at 32
+   visible capsules. A foreground checkpoint is forced at 56 capsules if
+   maintenance falls behind; runs cap at 512 capsules and per-ref frontiers
+   reject more than 64 segments if maintenance still cannot preserve the
+   bounded-read contract. Checkpoint positions may split a run, and readers
+   replay only the authenticated suffix after that position. Focused tests pass;
+   RustFS push/fetch latency and byte amplification for the new format remain
+   unqualified.
 10. Readers retain authenticated predecessor edges from every per-ref
     frontier while ordering capsules. Expected-old OIDs remain a consistency
     check, but do not define causality by themselves: a force-push sequence
@@ -943,14 +949,21 @@ every shipped user operation to either use v2 authority or be intentionally
 removed as a product decision. No command may silently fall back to v1, and an
 explicit `not yet part of the capsule protocol` error is a parity blocker.
 
+Current qualification update: CRBRUN07 now rolls each 500-capsule per-ref
+window into one bounded run; focused metadata, read, and write tests pass. The
+5,000-push RustFS measurements below are pre-rollup evidence and do not qualify
+this change. A retained 100 GiB Xet run stopped at the rehydrated-hydrate
+capacity check (139,818,655,744 bytes available; 150,323,855,360 required), so
+exact-head Xet and later restore/fsck phases remain unverified.
+
 | Surface | Current v2 state | Work required for parity | Acceptance proof |
 | --- | --- | --- | --- |
-| Repository initialization and ordinary single-/multi-ref push | Implemented with per-ref heads, transaction records, and bounded batched run compaction. The current-head September 28 fresh-GitHub RustFS replay completed 5,000 pushes at 227.91 ms and 7.012 requests mean per push, with no monotonic window growth. The unchanged fetch request gate failed | Close fetch fan-out, then repeat the complete workload on the final candidate; qualify provider conditional-write and uncertain-response behavior | Flat request/latency distributions through 5,000 same-ref pushes with periodic fetch/checkpoint, plus concurrent same-ref and disjoint-ref pushes on S3, GCS, and Azure; fresh clone and fsck after every run |
-| Full clone, fetch, pull, and ref advertisement | `CRBCKP05` is metadata-only: it names stable Git pack bodies in `CRBRUN06` capsule runs and `CRBPKL01` layers. Readers authenticate checkpoint/source controls, select required members or ranges, and preserve checksum, entry CRC/delta, visibility and object-identity validation. Checkpoints do not contain Git pack bodies. The current-head 5,000-push run passed all ten exact-tip fetches and final cold/warm clones, but fetch p95 was 34 requests against a ten-request gate | Reduce the physical capsule tail and coherent control-read fan-out without weakening authentication; complete corruption, warm-cache, many-ref and hosted-provider proof | Repositories with thousands of refs; exact refs, byte-identical checkout, strict fsck, bounded requests and memory; metadata-only open transfers zero source-pack bytes; incremental fetch reads only its selected delta and no already-installed stable body |
+| Repository initialization and ordinary single-/multi-ref push | Per-ref transactional publication and bounded batched compaction are implemented. The pre-rollup 5,000-push RustFS replay passed content/integrity checks but missed fetch gates; CRBRUN07 now coalesces each newest 500-capsule window. Focused tests pass, but no post-change live replay exists yet | Repeat the full workload on the final candidate; qualify push tails, upload amplification, conditional writes, and uncertain-response behavior on each provider | Flat request/latency distributions through 5,000 same-ref pushes with periodic fetch/checkpoint, plus concurrent same-ref and disjoint-ref pushes on S3, GCS, and Azure; fresh clone and fsck after every run |
+| Full clone, fetch, pull, and ref advertisement | `CRBCKP05` remains metadata-only and names stable Git pack bodies in CRBRUN07 capsule runs or `CRBPKL01` layers. Readers authenticate checkpoint/source controls, select required members or ranges, and preserve checksum, entry CRC/delta, visibility and object-identity validation. The prior 5,000-push replay passed correctness but fetch p95 was 34 requests against the ten-request gate; the new one-run-per-window behavior is only focused-test verified | Measure end-to-end fetch request/latency, corruption, warm-cache, many-ref and hosted-provider behavior after the rollup change | Repositories with thousands of refs; exact refs, byte-identical checkout, strict fsck, bounded requests and memory; metadata-only open transfers zero source-pack bytes; incremental fetch reads only its selected delta and no already-installed stable body |
 | Shallow, deepen, unshallow, filtered/partial, and raw-object/promisor fetch | Terminal Git protocol-v2 and classic capsule fetch use the same canonical filter/shallow planner. Classic fetch retains filters negotiated after capabilities, serializes pack installation, records promisor markers for filtered packs, and transactionally updates `.git/shallow`. Relative deepening, follow-tags, filtered full/shallow histories, and byte-identical promised-blob recovery are covered at the helper boundary. Timestamp and excluded-ref selectors use verified ancestry, with hidden refs rejected and optimized full-closure paths disabled. Raw-OID recovery uses the same pinned view and authorization proof. See `capsule-layered-packs.md` §2.5.60 for the one-pack routing regression and current qualification evidence | Complete released-shape, older-Git, hosted-provider, interrupted-resume, hidden-ref, cancellation, and adversarial transport qualification, including the new timestamp/exclusion selectors | Git compatibility matrix for every fetch mode, including lazy recovery after process restart, interrupted installation, hidden-only objects, and adversarial missing objects |
 | Explicit tag push | Uses the ordinary ref transaction; `crab push --follow-tags` adds only missing reachable annotated tags, and `--no-incremental` publishes the full outgoing Git/LFS closure | Complete hosted-provider and adversarial multi-ref qualification | Annotated/lightweight tag creation, replacement, deletion, atomic branch-plus-tag push, follow-tags missing-only behavior, and full-closure clone/fsck |
 | Managed/protected push and active-active publication | Direct and protected active-active pushes bind the exact v2 base root, transaction, activation, capsule run, ref edits, and verified dependency closure in coordinator truth, materialize per-ref heads after consensus, preserve coordinator metadata in the client result, and retain ordered regional repair records. Active-active mirror plans replicate their immutable intent and repair terminal receipts after a replacement regional activation. Protected admission selects v2 authority before any v1 compatibility read, double-reads only the destination ref heads, resolves transaction-consistent per-ref state without repository-wide LIST or capsule payload downloads, fails closed on corrupt v2 metadata, and persists the exact root digest plus authorized old OIDs. The client stages the thin capsule and its Xet/LFS dependencies under the authorization grant without mutating GC or ref state; protected capsule pushes now retain the mirror plan identity in the authenticated transaction so the same capsule plan receipt closes the protected path. Direct-source verification binds the staged run, Git closure and visibility, changed paths, Crab shard/xorb closure, LFS bodies, and complete staged-object inventory. Finalize revalidates its evidence, promotes immutable dependencies, registers verified shard roots, and recognizes the exact already-visible transaction on retry. Path-scoped v2 views publish native capsules with authenticated Git visibility, external xorb/shard catalog entries, LFS dependencies, GC roots, and a fail-closed readiness record. Protected filtered pushes deterministically synthesize source commits, preserve hidden paths, carry required view-local shard/xorb bodies into source storage, and retry against the same source transaction. The integration path proves pointer identity, byte-identical Xet reconstruction through the published source catalog, and LFS body equality | Complete RustFS, Crab Auth, and managed-provider active-active qualification | Deny/allow/stale-policy races, pointer and LFS view pushes, lost responses, regional failover, ordered repair, receipt recovery, and all-old/all-new multi-ref visibility |
-| Xet add, dedup, push, clone checkout, smudge, hydrate, prefetch, and diff | Whole-object RustFS path implemented; the earlier `9b91d0b3` 100 GiB run passed seven byte-identity sweeps, cross-repository dedup, retained-history restore/republish, and remote fsck, but failed its zero-proxy-error gate after three seed-push meter timeouts. A later run against PR source head `85dc8ab0` stopped without a terminal report after 839 passing checks at the rehydrated-hydrate capacity preflight; all later hydration, restore, and final zero-error checks are unverified. Format-aware diff annotations range-read only required safetensors or Parquet chunks | Complete a fresh exact-source 100 GiB run with zero proxy errors; trace and resolve any seed-push timeout, then complete hosted checksum/multipart, corrupt-object and annotation qualification | Byte equality, dedup accounting, retry safety, integrity failures, and correct format annotations across supported providers and object sizes |
+| Xet add, dedup, push, clone checkout, smudge, hydrate, prefetch, and diff | Whole-object RustFS path is implemented. An older 100 GiB run passed byte/restore/fsck checks with zero proxy errors, but it did not use the current source. The retained current-format run stopped at hydrate capacity (139,818,655,744 available vs 150,323,855,360 required); all subsequent hydration, restore, and final checks are unverified. | Complete a fresh exact-source 100 GiB run with zero proxy errors, then hosted checksum/multipart, corruption, and annotation qualification | Byte equality, dedup accounting, retry safety, integrity failures, and correct format annotations across supported providers and object sizes |
 | FUSE/NFS mount | Shared v2 file-index and hydrator wiring implemented; remote mount contexts pin an authenticated control-view catalog and all external shard/xorb reads honor archive-restore admission. The standalone mount builder fails closed when a `crab://` source cannot obtain that read context instead of starting with stub readers | Qualify range reads, cold/warm cache, eviction, cancellation, unmount, replica failover, and restored-tier objects | Mount/read/stat/range/concurrent-reader suite on every supported mount platform and provider |
 | `download`, `export`, and remote `run` inputs | Remote snapshot materialization resolves refs from one authenticated v2 view, range-loads only missing checkpoint pack bodies from its control suffix, and carries that view's immutable file→shard catalog into pointer reconstruction; direct RustFS file equality is proven | Complete every revision form, selector shape, pointer payload, missing/corrupt-pack, and cancellation case | Output equality against a local clone for `download`, `export`, and workflow `--pull` |
 | Import publication | Canonical staging recipes now publish through the one v2 capsule publisher; imports commit portable Crab configuration, report origin-verified newly created xorb/shard counts and bytes, preserve empty files, and create no v1 manifest or file-index metadata. S3/GCS/Azure version-aware listers use their native version APIs; Azure listing honors either access-key or Entra token credentials and custom blob endpoints | Complete hosted-provider, interrupted-resume, cancellation, and cross-import dedup qualification | Large-file import, resume, cancellation, dedup, clone, hydrate, and fsck without a v1 manifest |

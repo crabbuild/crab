@@ -9,7 +9,7 @@ use crate::validation::{validate_content_hash, validate_sha1};
 use super::{HistorySegmentPointer, valid_ref_name, valid_ref_namespace};
 
 const ROOT_MAGIC: &[u8; 8] = b"CRBROOT2";
-const ROOT_VERSION: u32 = 3;
+const ROOT_VERSION: u32 = 4;
 const ROOT_HEADER_BYTES: usize = ROOT_MAGIC.len() + 4 + 8;
 const ROOT_DIGEST_BYTES: usize = 32;
 /// Maximum encoded repository-root size accepted by readers and writers.
@@ -110,7 +110,7 @@ impl CapsulePointer {
         self.size
     }
 
-    /// Return the binary merge level of this capsule run.
+    /// Return the size class `ceil(log2(capsule_count))`; singleton runs use zero.
     #[must_use]
     pub fn level(&self) -> u8 {
         self.level
@@ -885,11 +885,13 @@ pub(super) fn validate_capsule_pointer(pointer: &CapsulePointer) -> Result<()> {
         "root capsule base digest",
         "capsule-protocol root",
     )?;
-    let expected_count = 1_u32
-        .checked_shl(u32::from(pointer.level))
-        .ok_or_else(|| contract_error("root capsule run level is too large"))?;
+    super::run::validate_level_count(
+        pointer.level,
+        usize::try_from(pointer.capsule_count)
+            .map_err(|_| contract_error("root capsule count cannot be represented"))?,
+    )
+    .map_err(|_| contract_error("root capsule run descriptor is invalid"))?;
     if pointer.size == 0
-        || pointer.capsule_count != expected_count
         || usize::try_from(pointer.capsule_count).ok() != Some(pointer.transaction_ids.len())
     {
         return Err(contract_error("root capsule run descriptor is invalid"));
@@ -1061,9 +1063,9 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
     let mut capsule_count = 0_u32;
     for run in &root.capsule_frontier {
         validate_capsule_pointer(run)?;
-        if previous_level.is_some_and(|level| level <= run.level) {
+        if previous_level.is_some_and(|level| level < run.level) {
             return Err(contract_error(
-                "root capsule run levels must be strictly descending",
+                "root capsule run levels must be non-increasing",
             ));
         }
         previous_level = Some(run.level);
@@ -1166,6 +1168,39 @@ mod tests {
                 0,
                 vec!["3".repeat(64)],
                 "4".repeat(64),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn run_pointer_validates_bounded_size_class_counts() {
+        let transactions = (1..=500)
+            .map(|sequence| format!("{sequence:064x}"))
+            .collect::<Vec<_>>();
+        let pointer = CapsulePointer::new(
+            "1".repeat(64),
+            200,
+            100,
+            100,
+            "2".repeat(64),
+            9,
+            transactions.clone(),
+            "4".repeat(64),
+        )
+        .unwrap();
+
+        assert_eq!(pointer.capsule_count(), 500);
+        assert!(
+            CapsulePointer::new(
+                pointer.hash(),
+                pointer.size(),
+                pointer.control_offset(),
+                pointer.control_size(),
+                pointer.footer_hash(),
+                8,
+                transactions,
+                pointer.newest_base_root_digest(),
             )
             .is_err()
         );

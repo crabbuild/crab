@@ -1098,53 +1098,76 @@ async fn compact_ref_frontier(
     frontier: &mut Vec<CapsulePointer>,
     known_leaf: &CapsuleRun,
 ) -> Result<Option<CapsuleRun>> {
-    let fan_in = crab_metadata::capsule_protocol::CAPSULE_REF_COMPACTION_FAN_IN;
-    if !fan_in.is_power_of_two() {
-        return Err(WriteError::Internal(
-            "capsule compaction fan-in is not a power of two".to_owned(),
-        ));
-    }
-    let Some(level) = frontier.last().map(CapsulePointer::level) else {
-        return Ok(None);
-    };
-    let suffix_len = frontier
+    let rollup_window = crab_metadata::capsule_protocol::CAPSULE_REF_ROLLUP_WINDOW;
+    let rollup_start = frontier
         .iter()
-        .rev()
-        .take_while(|pointer| pointer.level() == level)
-        .count();
-    if suffix_len < fan_in {
-        return Ok(None);
-    }
+        .rposition(|pointer| pointer.capsule_count() as usize >= rollup_window)
+        .map_or(0, |index| index + 1);
+    // Roll up only the newest bounded fetch window; earlier immutable runs stay
+    // stable so this boundary never rewrites already-published history.
+    let rollup_suffix = &frontier[rollup_start..];
+    let rollup_count = rollup_suffix.iter().try_fold(0_usize, |count, pointer| {
+        count
+            .checked_add(pointer.capsule_count() as usize)
+            .ok_or_else(|| WriteError::Internal("capsule rollup count overflowed".to_owned()))
+    })?;
+    let compact_start = if rollup_count >= rollup_window {
+        if rollup_count > crab_metadata::capsule_protocol::MAX_CAPSULES_PER_RUN {
+            return Err(WriteError::Internal(
+                "capsule rollup exceeds the run bound".to_owned(),
+            ));
+        }
+        rollup_start
+    } else {
+        let fan_in = crab_metadata::capsule_protocol::CAPSULE_REF_COMPACTION_FAN_IN;
+        if !fan_in.is_power_of_two() {
+            return Err(WriteError::Internal(
+                "capsule compaction fan-in is not a power of two".to_owned(),
+            ));
+        }
+        let Some(level) = frontier.last().map(CapsulePointer::level) else {
+            return Ok(None);
+        };
+        let suffix_len = frontier
+            .iter()
+            .rev()
+            .take_while(|pointer| pointer.level() == level)
+            .count();
+        if suffix_len < fan_in {
+            return Ok(None);
+        }
 
-    let capsules_per_run = 1_usize
-        .checked_shl(u32::from(level))
-        .ok_or_else(|| WriteError::Internal("capsule compaction level overflowed".to_owned()))?;
-    if capsules_per_run
-        .checked_mul(fan_in)
-        .is_none_or(|count| count > crab_metadata::capsule_protocol::MAX_CAPSULES_PER_RUN)
-    {
-        return Ok(None);
-    }
-
-    let suffix_start = frontier.len() - fan_in;
-    let level_delta = u8::try_from(fan_in.ilog2())
-        .map_err(|_| WriteError::Internal("capsule compaction level overflowed".to_owned()))?;
-    let mut next_level = level
-        .checked_add(level_delta)
-        .ok_or_else(|| WriteError::Internal("capsule compaction level overflowed".to_owned()))?;
-    let mut carry_start = suffix_start;
-    while carry_start > 0
-        && frontier[carry_start - 1].level() == next_level
-        && (1_usize << usize::from(next_level))
-            < crab_metadata::capsule_protocol::MAX_CAPSULES_PER_RUN
-    {
-        carry_start -= 1;
-        next_level = next_level.checked_add(1).ok_or_else(|| {
+        let capsules_per_run = 1_usize.checked_shl(u32::from(level)).ok_or_else(|| {
             WriteError::Internal("capsule compaction level overflowed".to_owned())
         })?;
-    }
+        if capsules_per_run
+            .checked_mul(fan_in)
+            .is_none_or(|count| count > crab_metadata::capsule_protocol::MAX_CAPSULES_PER_RUN)
+        {
+            return Ok(None);
+        }
 
-    let pointers = frontier[carry_start..].to_vec();
+        let suffix_start = frontier.len() - fan_in;
+        let level_delta = u8::try_from(fan_in.ilog2())
+            .map_err(|_| WriteError::Internal("capsule compaction level overflowed".to_owned()))?;
+        let mut next_level = level.checked_add(level_delta).ok_or_else(|| {
+            WriteError::Internal("capsule compaction level overflowed".to_owned())
+        })?;
+        let mut carry_start = suffix_start;
+        while carry_start > 0
+            && frontier[carry_start - 1].level() == next_level
+            && (1_usize << usize::from(next_level))
+                < crab_metadata::capsule_protocol::MAX_CAPSULES_PER_RUN
+        {
+            carry_start -= 1;
+            next_level = next_level.checked_add(1).ok_or_else(|| {
+                WriteError::Internal("capsule compaction level overflowed".to_owned())
+            })?;
+        }
+        carry_start
+    };
+
+    let pointers = frontier[compact_start..].to_vec();
     let pointer_count = pointers.len();
     let runs = try_join_all(
         pointers
@@ -1163,7 +1186,7 @@ async fn compact_ref_frontier(
     // Only the final run is published. Encode and authenticate it once rather
     // than copying every capsule through each discarded binary merge level.
     let compacted = tokio::task::spawn_blocking(move || CapsuleRun::compact(runs)).await??;
-    frontier.truncate(carry_start);
+    frontier.truncate(compact_start);
     frontier.push(CapsulePointer::new(
         compacted.hash(),
         compacted.bytes().len() as u64,
@@ -2890,6 +2913,83 @@ mod tests {
             .count();
         assert!(request_count < 650, "request count was {request_count}");
         assert!((request_count as f64 / 65.0) < 10.0);
+    }
+
+    #[tokio::test]
+    async fn five_hundred_pushes_roll_up_to_one_bounded_ref_run() {
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(Arc::new(InMemory::new()))
+            .with_immutable_write_verification(ImmutableWriteVerification::Sha256Checksum)
+            .with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let mut base = initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let mut previous = None;
+        let mut expected_transactions = Vec::with_capacity(1000);
+        let mut total_requests = 0_usize;
+        let mut first_run_hash = None;
+
+        observer.observations.lock().unwrap().clear();
+        for sequence in 1..=1000_u64 {
+            let next = format!("{sequence:040x}");
+            let transaction = transaction(&base, previous.as_deref(), &next);
+            expected_transactions.push(transaction.id().unwrap().to_owned());
+            observer.observations.lock().unwrap().clear();
+            base = publish(&router, base, &transaction, &capsule(&transaction))
+                .await
+                .unwrap();
+            total_requests += observer
+                .observations
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|observation| observation.outcome == StorageOutcome::Success)
+                .count();
+            previous = Some(next);
+            if sequence == 500 {
+                let head = read_ref_head(&router, base.record().root(), "refs/heads/main")
+                    .await
+                    .unwrap();
+                assert_eq!(head.visible.oid(), previous.as_deref());
+                assert_eq!(head.visible.frontier().len(), 1);
+                let pointer = &head.visible.frontier()[0];
+                assert_eq!(pointer.capsule_count(), 500);
+                let run = crab_metadata::capsule_protocol::load_capsule_run(&router, pointer)
+                    .await
+                    .unwrap();
+                assert_eq!(run.transaction_ids(), expected_transactions[..500]);
+                first_run_hash = Some(pointer.hash().to_owned());
+            }
+        }
+
+        let head = read_ref_head(&router, base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(head.visible.oid(), previous.as_deref());
+        assert_eq!(head.visible.frontier().len(), 2);
+        assert!(
+            head.visible
+                .frontier()
+                .iter()
+                .all(|pointer| pointer.capsule_count() == 500)
+        );
+        assert_eq!(
+            head.visible.frontier()[0].hash(),
+            first_run_hash.as_deref().unwrap()
+        );
+        for (pointer, expected) in head
+            .visible
+            .frontier()
+            .iter()
+            .zip(expected_transactions.chunks(500))
+        {
+            let run = crab_metadata::capsule_protocol::load_capsule_run(&router, pointer)
+                .await
+                .unwrap();
+            assert_eq!(run.transaction_ids(), expected);
+        }
+        assert!((total_requests as f64 / 1000.0) < 10.0);
     }
 
     #[tokio::test]

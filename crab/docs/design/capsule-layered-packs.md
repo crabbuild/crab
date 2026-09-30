@@ -6,7 +6,7 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Protocol-v2 checkpoint Git packs, clone/fetch, repack, fsck, history, and GC |
-| Status | Working implementation, not qualified. The [exact PR-head GA replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md) on `53b11070` completed 5,000 individual Kubernetes pushes, ten exact-tip fetch-before-repack intervals, cold/warm clones, strict Git/Crab integrity and 32 sampled blob comparisons. Push mean/p95 were 483/793 ms at 7.012 requests on average, with no monotonic growth; push p99 was 1.208 seconds / 40 requests. Fetch p95 was 11.068 seconds / 34 requests, failing both the 10-second and 10-request gates. Cold/warm clones took 48.683/28.526 seconds. A completed 100 GiB Xet run passed byte/restore/fsck checks with zero proxy errors on an older dirty source/binary, not this exact PR head; exact-head Xet qualification remains open. Runnable current-head CI checks pass, but provider, Kubernetes, and some NFS/fleet jobs are skipped. Matched v1, full product/provider parity and v1 retirement remain unqualified. |
+| Status | Working implementation, not qualified. The [retained exact-head GA replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md) on `53b11070` completed 5,000 Kubernetes pushes, ten exact-tip fetch/repack intervals, cold/warm clones, strict Git/Crab integrity and sampled blob comparisons, but fetch p95 was 11.068 seconds / 34 requests and clones took 48.683 / 28.526 seconds. A new CRBRUN07 per-ref rollup is locally covered by 236 metadata, 219 reader and 31 writer tests, including 1,000 sequential publications; it has not yet been replayed on RustFS. PR #208's current baseline head is `c3ce1439`, so the final candidate needs a fresh 5,000-push replay. Exact-head 100 GiB Xet, hosted providers, full product parity, paired v1 and v1 retirement remain open. |
 | Priority | Correctness, stable incremental cost, then clone throughput and storage efficiency |
 | Replaces | Whole-repository Git-pack replacement during every v2 checkpoint |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Kubernetes 4,500-commit RustFS benchmark](../benchmarks/kubernetes-4500-rustfs.md) |
@@ -2576,6 +2576,33 @@ does not by itself prove eviction versus a later lookup phase. Reproducing
 that path under cache pressure is separate from the larger source/control
 fan-out problem. No cache limit or correctness check has been relaxed.
 
+### 2.5.65 Bounded per-ref capsule-window rollup
+
+The retained 5,000-push trace showed a 24-source frontier at each
+500-commit fetch boundary. The existing 32-run batching reduced interim
+publication cost but left too many immutable sources for the unchanged
+ten-request fetch gate.
+
+CRBRUN07 changes run levels from exact powers of two to authenticated size
+classes: `level = ceil(log2(capsule_count))`, with the exact count still stored
+and capped at 512. Root, history, and ref-head contracts move together to
+versions 4, 3, and 5. Readers reject CRBRUN06 and older layouts; this is an
+unshipped hard cutover, not a compatibility reader.
+
+After every 500 capsules since the prior rollup, the per-ref writer reads the
+selected suffix and publishes one immutable run. Older completed rollups retain
+their identities. The ordinary 32-run batching remains for sub-window writes;
+all capsule bytes, transaction ordering, pooled-index checks, and object/member
+admission are preserved. Xorbs and shards remain external and are not copied
+into the run. The two-window regression proves one run at commit 500, two runs
+at commit 1,000, exact transaction order, unchanged first-run identity, and
+average observed in-memory store operations below ten per push.
+
+Metadata (236), reader (219), and writer (31) unit tests pass. This is focused
+in-memory proof only: boundary push tail latency, write amplification, request
+counts against RustFS, the 5,000-push workload, fetch latency, and the 100 GiB
+Xet workload must be measured on the final immutable binary before qualification.
+
 ## 3. Goals
 
 The implementation MUST:
@@ -2872,7 +2899,7 @@ eligible capsule-run source descriptors into the candidate pack set. It then:
 No stable pack body is copied, downloaded, or uploaded merely to make a
 checkpoint. The checkpoint keeps source runs and their capsules reachable after
 clearing their transaction frontier entries. The current maintenance reader
-uses the authenticated `CRBRUN06` control suffix, its embedded control bundle,
+uses the authenticated `CRBRUN07` control suffix, its embedded control bundle,
 and its exact admission sidecar; it does not load frontier Git/file payload sections. Complete run
 decoding remains reserved for strict fsck, history, and recovery paths.
 

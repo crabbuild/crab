@@ -98,17 +98,20 @@ consumers need not reread its control suffix.
 Run compaction preserves exact Git object-to-member admission across ref-only
 runs. Their authenticated empty pack directory proves an empty contribution;
 a pack-bearing run without admission still prevents a complete merged proof.
-`CapsuleRun::compact` consumes ordered runs with a bounded power-of-two total
-capsule count and encodes/authenticates the final run once. Mixed-level carries
-retain canonical capsule bytes and member ordinals without encoding discarded
-intermediate runs; complete capsule verification remains mandatory.
+`CapsuleRun::compact` consumes ordered runs with a bounded total of at most 512
+capsules and encodes/authenticates the final run once. Run level is the
+`ceil(log2(count))` size class; the authenticated capsule count remains exact.
+Mixed-level carries retain canonical capsule bytes and member ordinals without
+encoding discarded intermediate runs; complete capsule verification remains
+mandatory. The v2 cutover uses CRBRUN07 and root/history/ref-head versions
+4/3/5; there is no reader fallback to earlier run or pointer semantics.
 Runs may contain byte-identical packs from different transactions. Their source
 directories retain every physical member and ordinal; identical content is
 deduplicated only by readers. Source validation and readers share the same
 content comparison, rejecting conflicting range lengths/hashes, sidecars, Git
 checksums, object counts or external delta bases without comparing offsets.
 
-`CRBRUN06` compacted runs also concatenate copies of their Git indexes into an
+`CRBRUN07` compacted runs also concatenate copies of their Git indexes into an
 authenticated lookup pool. Original capsules and canonical member ranges stay
 unchanged for recovery, installation and repack. Control-only readers derive
 pool ranges in member order with the original index hashes; full decoding checks
@@ -118,7 +121,7 @@ with the footer, so control loading needs no second admission request. The
 decoder verifies the entire admission hash and exact suffix boundary before
 exposing placement hints. Payload bytes and the lookup pool remain outside the
 suffix. Detached large visibility/catalog sections retain their separate bounded
-reads. The unshipped `CRBRUN04`/`CRBRUN05` development formats are rejected, not
+reads. The unshipped `CRBRUN04`/`CRBRUN05`/`CRBRUN06` formats are rejected, not
 read through a compatibility path; readers and writers must cut over together.
 
 Payload modules cover manifests, segmented lists, pack metadata, commit-graph

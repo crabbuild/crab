@@ -45,10 +45,11 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
 - capsule and checkpoint records persist ref-keyed Git visibility closures;
   upload-pack authenticates those closures before reading embedded packs and
   uses embedded locator metadata for exact filtered-object selection;
-- foreground per-ref publication appends one leaf capsule; every 32 equal-level
-  suffix runs are folded in one parallel read wave and one immutable support-run
-  write, while server maintenance checkpoints after 32 visible capsules and
-  writers discard the exact checkpointed prefix;
+- foreground per-ref publication appends one leaf capsule and folds 32-run
+  equal-level suffixes in a bounded read wave. At 500 capsules it rolls only
+  that newest window into one CRBRUN07 run, preserving prior run identities;
+  server maintenance checkpoints after 32 visible capsules and writers discard
+  the exact checkpointed prefix;
 - CLI and remote-helper push admission use a payload-free ref view; checkpoint
   and capsule payloads remain exclusive to Git transfer, pointer-catalog, and
   maintenance consumers, so foreground pointer-free push traffic is flat over
@@ -430,9 +431,11 @@ The coordinator-bound leaf is always written unchanged. Once 32 equal-level
 suffix runs accumulate, the writer reads the older 31 runs concurrently,
 folds them with the in-memory leaf, consumes any higher-level carries already
 named by the head in the same read wave, and writes one immutable support run.
-The published ref head replaces only that suffix. Ordinary pushes do no
-history reads; compaction pushes pay one bounded extra read wave, and the
-amortized request count stays flat as history grows.
+At 500 capsules, it separately coalesces only the newest bounded window into
+one CRBRUN07 run; earlier rollup identities remain stable. The published ref
+head replaces only the selected suffix. The 500-boundary write amplification
+and tail latency remain qualification gates; no amortized performance claim is
+made from the focused in-memory tests.
 
 Server maintenance captures a complete view after 32 visible capsules and
 publishes one checkpoint root CAS. A later writer rebases the head onto that
@@ -758,14 +761,15 @@ normally needs three origin reads for a full authorized clone and at most 35
 while checkpoint publication is pending; batched run compaction usually makes
 the actual suffix-read count smaller. The tradeoff is deliberate: an ordinary
 incremental push remains four qualified or five readback-required operations.
-One push per 32 equal-level runs adds at most 31 concurrent predecessor reads,
-bounded carry reads, and one support-run write. Over a complete 512-capsule
-cycle this adds fewer than 1.04 qualified or 1.07 readback-required operations
-per push on average. Checkpoint construction installs and validates the pinned
-pack inventory, verifies the current ref graph with strict Git fsck, and emits
-one complete replacement pack through the same implementation used by
-`crab repack`. Checkpoint bytes still grow with the reachable Git object graph
-and remain a measured throughput and storage gate before release.
+The 32-run policy and 500-capsule rollup together govern write amplification.
+The earlier estimate of average compaction operations predates CRBRUN07 and
+must not be reused as a v7 performance claim. Re-measure requests, copied bytes,
+and the boundary-push latency on the final RustFS and hosted-provider builds.
+Checkpoint construction installs and validates the pinned pack inventory,
+verifies the current ref graph with strict Git fsck, and emits one complete
+replacement pack through the same implementation used by `crab repack`.
+Checkpoint bytes still grow with the reachable Git object graph and remain a
+measured throughput and storage gate before release.
 
 These are origin-request minima, not universal guarantees. A selected object
 and its delta bases may span multiple runs; authorization or filtering may
@@ -1030,11 +1034,13 @@ production wiring and format freeze require these decisions to be closed:
 - **Partly decided:** roots are capped at 8 MiB. Repositories whose complete
   ref map cannot fit require a separately designed protocol and cannot use v2;
 - the maximum capsule size before multipart and the multipart part policy;
-- **Decided for foreground publication:** per-ref heads append leaf capsules
-  and fold 32 equal-level suffix runs in one bounded parallel wave. Maintenance
-  starts at 32 visible capsules, receive forces a checkpoint at 56, runs cap at
-  512 capsules, and the hard frontier limit is 64 run segments. Checkpoint
-  positions may split a run and readers replay only its authenticated suffix.
+- **Decided for foreground publication:** per-ref heads append leaf capsules,
+  fold 32 equal-level suffix runs in one bounded parallel wave, and roll each
+  newest 500-capsule window into CRBRUN07. Maintenance starts at 32 visible
+  capsules, receive forces a checkpoint at 56, runs cap at 512 capsules, and
+  the hard frontier limit is 64 run segments. Checkpoint positions may split a
+  run and readers replay only its authenticated suffix. V7 tail latency and
+  byte amplification remain unqualified.
   This keeps incremental writes amortized history-flat without depending on a
   hot repository root. Checkpoints consolidate the complete reachable Git
   graph into one verified pack; byte-growth and final clone-read bounds remain

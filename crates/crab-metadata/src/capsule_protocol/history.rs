@@ -9,7 +9,7 @@ use crate::validation::{validate_content_hash, validate_sha1};
 use super::root::{validate_capsule_pointer, validate_checkpoint_pointer};
 use super::{CapsulePointer, CheckpointPointer, valid_ref_name, valid_ref_namespace};
 
-const HISTORY_SEGMENT_VERSION: u32 = 2;
+const HISTORY_SEGMENT_VERSION: u32 = 3;
 /// Maximum encoded history-segment size accepted by readers and writers.
 pub const MAX_HISTORY_SEGMENT_BYTES: u64 = 32 * 1024 * 1024;
 /// Maximum authenticated segments retained by one repository root.
