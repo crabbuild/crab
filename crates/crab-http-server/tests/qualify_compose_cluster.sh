@@ -554,6 +554,45 @@ for origin in "${read_origins[@]}"; do
     "${origin} did not expose the initial owner write."
 done
 
+wait_for_object_coverage() {
+  local phase="$1" covered=false previous_sequence="" observed_sequence=""
+  local uncovered="" control="" metrics=""
+  for _ in $(seq 1 60); do
+    control="$("${compose[@]}" exec -T "$b_service" crab-http-server \
+      --config /etc/crab/server.toml cells status --owner demo --name hello)"
+    metrics="$("${compose[@]}" exec -T "$b_service" crab-http-server \
+      --config /etc/crab/server.toml cells metrics)"
+    uncovered="$(awk \
+      '$1 == "crab_cell_node_log_uncovered_bytes" { print $2 }' \
+      <<<"$metrics")"
+    observed_sequence="$(jq --raw-output '.root.commit_sequence' \
+      <<<"$control")"
+    if awk -v value="${uncovered:-1}" \
+        'BEGIN { exit !(value + 0 == 0) }' &&
+      [ "$observed_sequence" = "$previous_sequence" ]; then
+      covered=true
+      covered_sequence="$observed_sequence"
+      fleet_only_control="$control"
+      break
+    fi
+    previous_sequence="$observed_sequence"
+    sleep 1
+  done
+  if ! $covered; then
+    echo "The owner did not finish publishing ${phase}." >&2
+    printf '%s\n' "${control:-<unreadable>}" >&2
+    printf '%s\n' "${metrics:-<unreadable>}" \
+      | grep -E 'crab_cell_node_log_uncovered_bytes|crab_cell_follower_retained_bytes' >&2 || true
+    return 1
+  fi
+}
+
+# A follower-visible write may still be waiting for object publication. Drain
+# that exact write before denying its required immutable uploads; otherwise the
+# injected policy can fence the pending publication instead of testing the
+# subsequent fleet-only mutation.
+wait_for_object_coverage "before immutable object writes are denied"
+
 deny_cell_objects='{"Version":"2012-10-17","Statement":[{"Sid":"DenyCellImmutableObjectWrites","Effect":"Deny","Principal":"*","Action":"s3:PutObject","Resource":"arn:aws:s3:::crab-http-server/repositories/cells/v1/apps/*/cells/*/inc/*/objects/*"}]}'
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api put-bucket-policy \
@@ -583,39 +622,7 @@ if ! $immutable_object_put_rejected; then
   echo "The Cell immutable object deny policy does not reject writes." >&2
   exit 1
 fi
-# The deny stops new immutable uploads, but a publication that started before
-# the policy can still publish its root, and that advance would look like a
-# fleet-only violation. Object coverage is asynchronous here for the same
-# reason the fallback phase waits for it, so wait for the owner to cover every
-# retained byte with a stable root before recording the baseline the
-# fleet-only label is compared against.
-covered=false
-covered_sequence=""
-previous_sequence=""
-for _ in $(seq 1 60); do
-  fleet_only_control="$("${compose[@]}" exec -T "$b_service" crab-http-server \
-    --config /etc/crab/server.toml cells status --owner demo --name hello)"
-  fleet_only_metrics="$("${compose[@]}" exec -T "$b_service" crab-http-server \
-    --config /etc/crab/server.toml cells metrics)"
-  uncovered_before_fleet_only="$(awk \
-    '$1 == "crab_cell_node_log_uncovered_bytes" { print $2 }' \
-    <<<"$fleet_only_metrics")"
-  observed_sequence="$(jq --raw-output '.root.commit_sequence' <<<"$fleet_only_control")"
-  if awk -v value="${uncovered_before_fleet_only:-1}" \
-      'BEGIN { exit !(value + 0 == 0) }' &&
-    [ "$observed_sequence" = "$previous_sequence" ]; then
-    covered=true
-    covered_sequence="$observed_sequence"
-    break
-  fi
-  previous_sequence="$observed_sequence"
-  sleep 1
-done
-if ! $covered; then
-  echo "The owner did not finish publishing before the fleet-only phase." >&2
-  printf '%s\n' "${fleet_only_control:-<unreadable>}" >&2
-  exit 1
-fi
+wait_for_object_coverage "after immutable object writes are denied"
 control_before="$fleet_only_control"
 if ! jq --exit-status --arg session "$session_before" --argjson epoch "$epoch_before" \
   '.state == "serving" and .owner.session == $session and .epoch == $epoch' \
