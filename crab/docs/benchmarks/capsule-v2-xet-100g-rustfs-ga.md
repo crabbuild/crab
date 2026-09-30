@@ -53,3 +53,25 @@ The isolated remote and failed-run evidence were retained.
 The path-traced diagnostic is retained separately as
 `pr208-live-20260928/xet-seed-trace-head9b91-r1/artifacts/capsule-xet-transport.json`
 (SHA-256 `26f4ffa668aff149e1d751f674643f00ed48a7fd92928aae6221296cbd576d4f`).
+
+## September 29 GA rerun: byte and transport gates passed
+
+The isolated `xet-100g-headc7c88-ga-20260929-r2` rerun completed the same
+three-version 100 GiB workload on RustFS 1.0.0 GA with the frozen binary
+SHA-256 `019cbb5e6056def05905b0421e5303dc4180cb39b9a73ca441d0a2738f9eb4b1`.
+Its report records `passed`, 4,207/4,207 checks, 322 commands, no failed
+checks, and no request-meter proxy errors across 16,219 object-store requests.
+All historical and restored-file byte checks passed; final remote fsck found
+zero errors and performed zero repairs. The initial push used 749 requests,
+successive pushes 132 each; the three repacks used 11, 18 and 18 requests.
+The earlier failed r1 and diagnostic remain retained; this clean run does not
+erase their evidence.
+
+The report identifies source commit `c7c88bfd57dea16368e4180138ed40295aa73a5e`
+with a dirty source worktree, but verifies that the selected binary stayed
+unchanged. The run therefore qualifies that frozen binary and fixture, **not**
+the later PR head or a reproducible clean source commit. It also does not
+establish v1 parity or hosted-provider qualification. Retained report and
+transport SHA-256 values are respectively
+`b0d2786be6fa9b16777885290a37b927f7befef6a2a187c58e6a1ef952805b29`
+and `d7afceffb4689ebb65bc06d00fbe1c679a3b56874098fcecf75a259e0225d37a`.
