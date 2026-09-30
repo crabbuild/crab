@@ -5364,6 +5364,20 @@ fsck without repair. Its retained report SHA-256 is
 These runs do not establish the default 100 GiB Xet gate, v1 parity, or green
 hosted CI.
 
+The September 29 interactive-repack follow-up removes the earlier
+17-versus-12 request failure without changing the background maintenance
+contract. Explicit CLI repack consolidates the selected pack suffix and
+publishes its logical checkpoint with one root CAS. A pinned frontier of at
+most 64 MiB retains authenticated capsule bodies for repack; installation
+reuses those bytes only after checking each pack and sidecar against the
+source descriptor, while larger frontiers use bounded control/range reads.
+The metadata owner and HTTP server retain separate logical and physical
+publication/cancellation boundaries. Current-source reader and checkpoint
+suites pass 37 and 38 tests, and the real-Git two-push, repack, post-repack
+push, fresh-install, and GC round trip meets the unchanged twelve-request
+repack ceiling. This focused fixture does not establish the larger live
+provider, Xet, or v1-performance gates.
+
 ## 14. Rollout and rollback
 
 Development repositories using `CRBCKP03` are recreated or converted by an

@@ -23,6 +23,7 @@ const LAYERED_SIDECAR_MAX_EXTRA_BYTES: u64 = 4 * 1024 * 1024;
 const LAYERED_SIDECAR_MAX_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
 const LAYERED_PACK_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const LAYERED_FULL_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
+const LAYERED_REPACK_IN_MEMORY_FRONTIER_BYTES: u64 = LAYERED_FULL_MAX_WINDOW_BYTES;
 const LAYERED_SIDECAR_READ_CONCURRENCY: usize = 8;
 const LAYERED_LARGE_RANGE_THRESHOLD_BYTES: u64 = 128 * 1024 * 1024;
 const LAYERED_LARGE_RANGE_CHUNK_BYTES: u64 = 128 * 1024 * 1024;
@@ -1704,7 +1705,7 @@ pub async fn install_git_packs_with_candidates(
     install_git_pack_payloads(git_dir, payloads, max_input_bytes, true).await
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct GitPackPayload {
     pack: Option<Bytes>,
     index: Bytes,
@@ -2691,6 +2692,30 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
             required,
         } => (Some(packs), Some(member_oids), Some((allowed, required))),
     };
+    let mut cached_payloads = BTreeMap::new();
+    if matches!(selection, LayeredInstallSelection::Maintenance(_)) {
+        for capsule in capsules.iter().cloned() {
+            for payload in payloads_from_capsule(capsule)? {
+                if selected.is_some_and(|selected| !selected.contains(&payload.content_hash)) {
+                    continue;
+                }
+                match cached_payloads.entry(payload.content_hash.clone()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(payload);
+                    }
+                    std::collections::btree_map::Entry::Occupied(entry)
+                        if !same_git_pack_payload(entry.get(), &payload) =>
+                    {
+                        return Err(corrupt_path(
+                            "capsule Git pack",
+                            "capsule payloads disagree about one pack identity",
+                        ));
+                    }
+                    std::collections::btree_map::Entry::Occupied(_) => {}
+                }
+            }
+        }
+    }
     let pack_dir = git_dir.join("objects").join("pack");
     tokio::fs::create_dir_all(&pack_dir).await?;
     let mut seen_packs = BTreeMap::new();
@@ -2750,16 +2775,16 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
             });
         }
     }
-    let sidecar_members = admission.map_or_else(
-        || (0..members.len()).collect::<BTreeSet<_>>(),
-        |_| {
-            members
-                .iter()
-                .enumerate()
-                .filter_map(|(index, member)| (!member.complete_local).then_some(index))
-                .collect::<BTreeSet<_>>()
-        },
-    );
+    let sidecar_members = members
+        .iter()
+        .enumerate()
+        .filter_map(|(index, member)| {
+            let cached = !member.complete_local
+                && cached_payloads.contains_key(member.member.member.pack().blake3());
+            let local_fetch = admission.is_some() && member.complete_local;
+            (!cached && !local_fetch).then_some(index)
+        })
+        .collect::<BTreeSet<_>>();
     let payload_plan = if admission.is_some() {
         let pre_admitted_members = match pre_admit_layered_members(
             &members,
@@ -2789,7 +2814,21 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
         LayeredPayloadWindowPlan::Separate { sidecars, .. } => sidecars,
     };
     let planned_sidecar_bytes = layered_payload_window_bytes(sidecar_windows)?;
-    if max_input_bytes > 0 && planned_sidecar_bytes > max_input_bytes {
+    let cached_payload_bytes = members.iter().try_fold(0_u64, |total, member| {
+        if member.complete_local {
+            return Ok(total);
+        }
+        let Some(payload) = cached_payloads.get(member.member.member.pack().blake3()) else {
+            return Ok(total);
+        };
+        total
+            .checked_add(git_pack_payload_bytes(payload)?)
+            .ok_or_else(|| ReadError::internal("layered payload byte count overflowed"))
+    })?;
+    let planned_input_bytes = planned_sidecar_bytes
+        .checked_add(cached_payload_bytes)
+        .ok_or_else(|| ReadError::internal("layered payload byte count overflowed"))?;
+    if max_input_bytes > 0 && planned_input_bytes > max_input_bytes {
         return Err(ReadError::CapsuleReadLimit {
             resource: "layered Git payload ranges",
             maximum: max_input_bytes,
@@ -2800,7 +2839,10 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
         () = cancel.cancelled() => return Err(ReadError::Cancelled),
         result = fetch_layered_payload_windows(router.store(), sidecar_windows) => result?,
     };
-    if max_input_bytes > 0 && fetched_bytes > max_input_bytes {
+    let fetched_input_bytes = fetched_bytes
+        .checked_add(cached_payload_bytes)
+        .ok_or_else(|| ReadError::internal("layered payload byte count overflowed"))?;
+    if max_input_bytes > 0 && fetched_input_bytes > max_input_bytes {
         return Err(ReadError::CapsuleReadLimit {
             resource: "layered Git payload ranges",
             maximum: max_input_bytes,
@@ -2867,6 +2909,7 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
                 sidecar_read,
                 None,
                 capsules,
+                &cached_payloads,
                 selected,
                 git_dir,
                 max_input_bytes,
@@ -2878,6 +2921,7 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
                 let planned_pack_bytes = layered_payload_window_bytes(packs)?;
                 let planned_total_bytes = fetched_bytes
                     .checked_add(planned_pack_bytes)
+                    .and_then(|bytes| bytes.checked_add(cached_payload_bytes))
                     .ok_or_else(|| ReadError::internal("layered payload byte count overflowed"))?;
                 if max_input_bytes > 0 && planned_total_bytes > max_input_bytes {
                     return Err(ReadError::CapsuleReadLimit {
@@ -2893,7 +2937,10 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
                 fetched_bytes = fetched_bytes
                     .checked_add(pack_read)
                     .ok_or_else(|| ReadError::internal("layered payload byte count overflowed"))?;
-                if max_input_bytes > 0 && fetched_bytes > max_input_bytes {
+                let fetched_input_bytes = fetched_bytes
+                    .checked_add(cached_payload_bytes)
+                    .ok_or_else(|| ReadError::internal("layered payload byte count overflowed"))?;
+                if max_input_bytes > 0 && fetched_input_bytes > max_input_bytes {
                     return Err(ReadError::CapsuleReadLimit {
                         resource: "layered Git payload ranges",
                         maximum: max_input_bytes,
@@ -2908,6 +2955,7 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
                     sidecar_read,
                     Some(pack_read),
                     capsules,
+                    &cached_payloads,
                     selected,
                     git_dir,
                     max_input_bytes,
@@ -2924,6 +2972,7 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
         sidecar_read,
         None,
         capsules,
+        &cached_payloads,
         selected,
         git_dir,
         max_input_bytes,
@@ -3005,6 +3054,7 @@ async fn build_layered_payload_install(
     sidecars: LayeredPayloadRead<'_>,
     packs: Option<LayeredPayloadRead<'_>>,
     capsules: &[Capsule],
+    cached_payloads: &BTreeMap<String, GitPackPayload>,
     selected: Option<&BTreeSet<String>>,
     git_dir: &Path,
     max_input_bytes: u64,
@@ -3017,6 +3067,18 @@ async fn build_layered_payload_install(
             continue;
         }
         let member = &member_read.member.member;
+        if !member_read.complete_local
+            && let Some(payload) = cached_payloads.get(member.pack().blake3())
+        {
+            if !capsule_payload_matches_member(payload, member) {
+                return Err(corrupt_path(
+                    "capsule Git pack",
+                    "in-memory capsule payload differs from its authenticated source",
+                ));
+            }
+            payloads.push(payload.clone());
+            continue;
+        }
         let (start, sidecar_body) = sidecars.member_window(member_index)?;
         let index = layered_range_bytes(sidecar_body, start, member.index())?;
         let reverse_index = layered_range_bytes(sidecar_body, start, member.reverse_index())?;
@@ -3055,12 +3117,7 @@ async fn build_layered_payload_install(
                 .iter()
                 .find(|existing| existing.content_hash == payload.content_hash)
             {
-                if existing.git_checksum != payload.git_checksum
-                    || existing.object_count != payload.object_count
-                    || existing.index != payload.index
-                    || existing.reverse_index != payload.reverse_index
-                    || existing.locator != payload.locator
-                {
+                if !same_git_pack_payload(existing, &payload) {
                     return Err(corrupt_path(
                         "capsule Git pack",
                         "layered sources disagree about one pack identity",
@@ -3089,6 +3146,57 @@ fn verified_layered_pack_identity(
     Ok(crab_git::pack::VerifiedPackIdentity {
         git_sha1,
         content_hash,
+    })
+}
+
+fn capsule_payload_matches_member(payload: &GitPackPayload, member: &PackMemberDescriptor) -> bool {
+    let Some(pack) = payload.pack.as_ref() else {
+        return false;
+    };
+    let matches_range = |bytes: &Bytes, range: &PackRange| {
+        bytes.len() as u64 == range.length()
+            && blake3::hash(bytes).to_hex().as_str() == range.blake3()
+    };
+    payload.content_hash == member.pack().blake3()
+        && matches_range(pack, member.pack())
+        && matches_range(&payload.index, member.index())
+        && matches_range(&payload.reverse_index, member.reverse_index())
+        && matches_range(&payload.locator, member.locator())
+        && payload.git_checksum == member.git_checksum()
+        && payload.object_count == member.object_count()
+        && payload.external_delta_bases == member.external_delta_bases()
+}
+
+fn same_git_pack_payload(left: &GitPackPayload, right: &GitPackPayload) -> bool {
+    left.content_hash == right.content_hash
+        && left
+            .pack
+            .as_ref()
+            .zip(right.pack.as_ref())
+            .is_none_or(|(left, right)| left == right)
+        && left.index == right.index
+        && left.reverse_index == right.reverse_index
+        && left.locator == right.locator
+        && left.git_checksum == right.git_checksum
+        && left.object_count == right.object_count
+        && left.external_delta_bases == right.external_delta_bases
+}
+
+fn git_pack_payload_bytes(payload: &GitPackPayload) -> Result<u64> {
+    [
+        payload.pack.as_ref().map(|bytes| bytes.len()),
+        Some(payload.index.len()),
+        Some(payload.reverse_index.len()),
+        Some(payload.locator.len()),
+    ]
+    .into_iter()
+    .flatten()
+    .try_fold(0_u64, |total, length| {
+        let length = u64::try_from(length)
+            .map_err(|_| ReadError::internal("layered payload length cannot be represented"))?;
+        total
+            .checked_add(length)
+            .ok_or_else(|| ReadError::internal("layered payload byte count overflowed"))
     })
 }
 
@@ -3851,6 +3959,37 @@ pub async fn open_view_from_root(
         CheckpointLoad::Complete,
     )
     .await
+}
+
+/// Open a pinned repack view, retaining only a small frontier's pack bodies in memory.
+pub async fn open_view_from_root_for_repack(
+    router: &StoreLayout<Store>,
+    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
+    limits: CapsuleReadLimits,
+) -> Result<CapsuleRepositoryView> {
+    let root = snapshot.record().root();
+    let (heads, active) = capture_ref_heads(router, root).await?;
+    let pointers = materialize_visible_ref_heads(root, &heads, &active)?.pointers;
+    let frontier_bytes = pointers.iter().try_fold(0_u64, |total, pointer| {
+        total
+            .checked_add(pointer.size())
+            .ok_or(ReadError::CapsuleReadLimit {
+                resource: "frontier bytes",
+                maximum: limits.max_frontier_bytes,
+            })
+    })?;
+    if frontier_bytes <= LAYERED_REPACK_IN_MEMORY_FRONTIER_BYTES {
+        return assemble_view(
+            router,
+            snapshot,
+            limits,
+            heads,
+            active,
+            CheckpointLoad::Complete,
+        )
+        .await;
+    }
+    assemble_layered_control_view(router, snapshot, limits, heads, active, false).await
 }
 
 /// Load complete checkpoint catalog/visibility metadata and frontier controls.

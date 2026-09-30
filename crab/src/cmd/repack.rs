@@ -228,10 +228,9 @@ pub async fn run_repack_from_root(
         )
     } else {
         check_cancelled(cancel)?;
-        let maintenance = crab_remote::checkpoint::maintain_capsule_repository_from_view(
+        let repack = crab_remote::checkpoint::repack_capsule_repository_from_view(
             &layout,
             &view,
-            1,
             MAX_CHECKPOINT_BYTES,
             cancel,
         )
@@ -239,14 +238,7 @@ pub async fn run_repack_from_root(
         .map_err(map_checkpoint_error)?;
         // Report this pass's exact publication, not a later ref capture that
         // could attribute another writer's packs to our repack.
-        (
-            maintenance
-                .checkpointed
-                .combine(maintenance.repacked)
-                .map_err(map_checkpoint_error)?,
-            maintenance.packs_after,
-            maintenance.bytes_after,
-        )
+        (repack.work, repack.packs_after, repack.bytes_after)
     };
     Ok(RepackOutcome {
         packs_before,
@@ -268,7 +260,7 @@ async fn open_repack_view(
         max_capsule_bytes: maximum_bytes,
         max_frontier_bytes: maximum_bytes,
     };
-    crab_read::capsule_protocol::open_view_from_root_for_checkpoint(layout, root, limits).await
+    crab_read::capsule_protocol::open_view_from_root_for_repack(layout, root, limits).await
 }
 
 fn map_checkpoint_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {

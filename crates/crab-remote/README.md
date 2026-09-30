@@ -23,8 +23,11 @@ only the hard 64-source limit can force a minimal suffix roll-up. Background
 owners then pin the published checkpoint for geometric repacking without folding
 newer per-ref heads. The shared maintenance pass retains the successful root-CAS
 receipt and complete checkpoint between phases; it does not reread its own
-publication. CLI repack and the metadata owner use the same pinned-view pass as
-server maintenance. Each phase still has a separate CAS and cancellation boundary.
+publication. The metadata owner and HTTP server use this two-phase pass, with
+separate CAS and cancellation boundaries. Explicit CLI repack consolidates the
+selected suffix and checkpoints its pinned view with one root CAS. Small
+frontiers reuse already authenticated capsule bodies; large frontiers retain
+bounded control and range reads.
 A stale root loses its CAS without changing visible refs or
 history. Suffix installation is restricted to selected physical sources, and
 stable-prefix descriptors and member positions remain unchanged even when the

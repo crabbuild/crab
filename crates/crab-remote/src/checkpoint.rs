@@ -75,6 +75,17 @@ pub struct MaintenanceOutcome {
     pub bytes_after: u64,
 }
 
+/// One atomic interactive repack and its resulting pinned inventory.
+#[derive(Debug, Clone, Copy)]
+pub struct CapsuleRepackOutcome {
+    /// Body work and publication status for this pass.
+    pub work: CheckpointOutcome,
+    /// Distinct pack bodies in the published inventory, or the input inventory on CAS loss.
+    pub packs_after: usize,
+    /// Authenticated pack-body bytes in that inventory.
+    pub bytes_after: u64,
+}
+
 #[derive(Default)]
 struct CheckpointPublication {
     work: CheckpointOutcome,
@@ -238,6 +249,91 @@ pub async fn maintain_capsule_repository_from_view(
     })
 }
 
+/// Checkpoint and geometrically compact one pinned view with a single root CAS.
+///
+/// Interactive repack has one publication boundary. Background maintenance
+/// retains its independently cancellable logical and physical phases.
+pub async fn repack_capsule_repository_from_view(
+    layout: &StoreLayout<Store>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    maximum_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<CapsuleRepackOutcome, CheckpointError> {
+    check_cancelled(cancel)?;
+    let sources = checkpoint_sources(view);
+    let logical_due = view.capsule_count()? > 0;
+    let mut publication = CheckpointPublication::default();
+
+    if !sources.is_empty() {
+        let geometric_start = layered_suffix_start(&sources)?;
+        let admission_start = (sources.len() > LAYERED_MAX_PHYSICAL_SOURCES)
+            .then_some(LAYERED_MAX_PHYSICAL_SOURCES - 1);
+        let selected_start = match (geometric_start, admission_start) {
+            (Some(geometric), Some(admission)) => Some(geometric.min(admission)),
+            (Some(geometric), None) => Some(geometric),
+            (None, Some(admission)) => Some(admission),
+            (None, None) => None,
+        };
+
+        if let Some(selected_start) = selected_start {
+            let consolidation = consolidate_layered_suffix(
+                layout,
+                view,
+                sources,
+                selected_start,
+                maximum_bytes,
+                cancel,
+            )
+            .await?;
+            let mut member_oids = view.capsule_run_member_oids().clone();
+            member_oids.extend(consolidation.member_oids);
+            let committed = publish_layered_sources(
+                layout,
+                view,
+                consolidation.sources,
+                member_oids,
+                view.pointer_catalog()?,
+                maximum_bytes,
+                cancel,
+            )
+            .await?;
+            publication = CheckpointPublication {
+                work: CheckpointOutcome {
+                    published: committed.is_some(),
+                    ..consolidation.work
+                },
+                committed,
+            };
+        } else if logical_due {
+            publication = publish_checkpoint_with_catalog(
+                layout,
+                view,
+                view.pointer_catalog()?,
+                maximum_bytes,
+                cancel,
+            )
+            .await?;
+        }
+    }
+
+    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+        max_capsule_bytes: maximum_bytes,
+        max_frontier_bytes: maximum_bytes,
+    };
+    let published = publication
+        .committed
+        .map(|(root, checkpoint)| {
+            crab_read::capsule_protocol::compacted_view_from_checkpoint(root, checkpoint, limits)
+        })
+        .transpose()?;
+    let inventory = published.as_ref().unwrap_or(view);
+    Ok(CapsuleRepackOutcome {
+        work: publication.work,
+        packs_after: inventory.git_pack_count(),
+        bytes_after: inventory.git_pack_bytes()?,
+    })
+}
+
 /// Compact one already authenticated repository view when its frontier is due.
 ///
 /// Reusing the caller's pinned view avoids a second mutable-root and ref-head
@@ -286,20 +382,7 @@ async fn publish_checkpoint_with_catalog(
     cancel: &CancellationToken,
 ) -> Result<CheckpointPublication, CheckpointError> {
     check_cancelled(cancel)?;
-    let mut sources = Vec::new();
-    let mut source_hashes = BTreeSet::new();
-    if let Some(existing) = view.layered_checkpoint() {
-        for source in existing.sources() {
-            if source_hashes.insert(source.object_hash().to_owned()) {
-                sources.push(source.clone());
-            }
-        }
-    }
-    for source in view.capsule_run_sources() {
-        if source_hashes.insert(source.object_hash().to_owned()) {
-            sources.push(source.clone());
-        }
-    }
+    let mut sources = checkpoint_sources(view);
     if sources.is_empty() {
         return Ok(CheckpointPublication::default());
     }
@@ -334,6 +417,26 @@ async fn publish_checkpoint_with_catalog(
     .await?;
     work.published = committed.is_some();
     Ok(CheckpointPublication { work, committed })
+}
+
+fn checkpoint_sources(
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+) -> Vec<PackSourceDescriptor> {
+    let mut sources = Vec::new();
+    let mut source_hashes = BTreeSet::new();
+    if let Some(existing) = view.layered_checkpoint() {
+        for source in existing.sources() {
+            if source_hashes.insert(source.object_hash().to_owned()) {
+                sources.push(source.clone());
+            }
+        }
+    }
+    for source in view.capsule_run_sources() {
+        if source_hashes.insert(source.object_hash().to_owned()) {
+            sources.push(source.clone());
+        }
+    }
+    sources
 }
 
 /// Repack a bounded source suffix belonging to one already published checkpoint.
@@ -533,7 +636,7 @@ async fn consolidate_layered_suffix(
         crab_read::capsule_protocol::install_layered_git_packs_from_store_sources_selected(
             &sources[selected_start..],
             &[],
-            &[],
+            view.capsules(),
             layout,
             &git_dir,
             maximum_bytes,
