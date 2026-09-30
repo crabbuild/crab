@@ -179,7 +179,7 @@ def compose(
             "image": server_image,
             "environment": {
                 **storage_env,
-                "RUST_LOG": "info,crab_cell_runtime::action=debug,crab_http_server::action=debug",
+                "RUST_LOG": "info,cellule_runtime::action=debug,crab_http_server::action=debug",
             },
             "network_mode": "service:fleet-net",
             "volumes": [

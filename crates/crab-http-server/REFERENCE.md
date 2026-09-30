@@ -494,7 +494,7 @@ adjust tracing filters; the default level is `info`.
 ### Attribute acknowledged Cell writes
 
 The Compose fleet renderer enables
-`RUST_LOG=info,crab_cell_runtime::action=debug,crab_http_server::action=debug`
+`RUST_LOG=info,cellule_runtime::action=debug,crab_http_server::action=debug`
 on Cell nodes. The existing filter controls this diagnostic overhead; include
 it in comparisons and measure with and without tracing before setting limits.
 The load report records each node's configured filter.
