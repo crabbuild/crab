@@ -1,5 +1,49 @@
 # Capsule v2: Kubernetes 5,000-commit RustFS GA qualification
 
+## September 30 exact PR-head replay
+
+PR #208 head `53b11070b66ee307f7c632e9202146b9c5224673` was built as
+`crab 1.2.4` (binary SHA-256
+`da77f35d17c1e25c15649f94b09b9f932b464d1d0914315e74d654ca20eee1e1`). A fresh
+full GitHub clone of Kubernetes supplied upstream head
+`6d1d025050cb63ae5b8e53037aced205e6a28410`. The isolated RustFS 1.0.0 GA run
+replayed 5,000 first-parent pushes from seed
+`0556b20d3d4aa378b080c1b9375bc59f799464fd`, fetching before repack every 500
+pushes. It ran 12:03:11–13:11:41 UTC with harness SHA-256
+`77501e88310cc44a606a8847a66643487a495663c42ded49349e8ac4f8f1d5f1` and
+request-meter SHA-256
+`bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879`.
+
+| Operation | Latency | Object-store requests |
+| --- | ---: | ---: |
+| Seed push | 264.643 s | 9 |
+| Incremental push mean / p50 / p95 / p99 | 483.22 / 437 / 793 / 1,208 ms | 7.012 mean; 6 p50/p95; 40 p99 |
+| 500-commit fetch mean / p50 / p95 | 6.306 / 5.853 / 11.068 s | 32.8 mean; 34 p95 |
+| Repack interval range | 12.056–27.711 s | 36–62 |
+| Final cold / warm clone | 48.683 / 28.526 s | 17 / 17 |
+
+All 5,000 pushes and ten exact-tip fetch-before-repack intervals completed.
+Every fetch installed one new local pack; no Git repack ran during fetch.
+Push windows averaged 427.56–520.86 ms and exactly 7.012 requests per push,
+without monotonic latency growth. Seed/final remote Crab fsck, strict full Git
+fsck, both clones, and 32 sampled blob comparisons passed. No fetch returned a
+5xx response. Push mean latency/request gates passed; the p99 still shows a
+tail (1.208 s and 40 requests).
+
+**Qualification failed both unchanged incremental-fetch gates:** p95 was
+11.068 seconds against 10 seconds and 34 requests against 10. An ordinary
+fetch read 24 capsule source objects plus 8–10 control/admission requests
+(32–34 total). Cold and warm clone latency also remains far from the desired
+few-second target. This is correctness evidence on local RustFS, not a matched
+v1 comparison, hosted-provider qualification, or permission to retire v1.
+
+Retained report SHA-256:
+`0a2bd38b213cee8bc9edb0ea6dd3d1e0e01275eae0663829ec17416f3dc4c8dd`; request
+log SHA-256:
+`ebc62a28909ecb9afb27d9b35de60c9a8106799b2a2e61ebc4c9b6a0f308d046`.
+The run and its RustFS objects remain retained under the mounted qualification
+workspace.
+
 ## September 30 PR-head replay after Cellule integration
 
 PR #208 head `9415c4b0e130aed02f28a02c5f18f74463d81a79` was built as
