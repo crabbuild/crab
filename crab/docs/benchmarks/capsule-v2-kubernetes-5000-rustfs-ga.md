@@ -1,5 +1,51 @@
 # Capsule v2: Kubernetes 5,000-commit RustFS GA qualification
 
+## September 30 PR-head replay after Cellule integration
+
+PR #208 head `9415c4b0e130aed02f28a02c5f18f74463d81a79` was built as
+`crab 1.2.4` (binary SHA-256
+`ef294c01fa88684ce517256faafcdcb3e6287d19ca5572ec22892cc8d8448401`).
+An isolated RustFS 1.0.0 GA namespace replayed 5,000 individual first-parent
+pushes from upstream Kubernetes seed
+`b17f5ff9ae26d81f1520e797c6a68556bdd103a6` to
+`e72c2715ade37738aa5c029e8de5285cbe1c9441`, with incremental fetch
+**before** repack every 500 pushes. It ran 02:37:25–03:57:51 UTC with the
+unchanged harness SHA-256
+`77501e88310cc44a606a8847a66643487a495663c42ded49349e8ac4f8f1d5f1`.
+
+| Operation | Latency | Object-store requests |
+| --- | ---: | ---: |
+| Seed push | 372.726 s | 9 |
+| Incremental push mean / p50 / p95 / p99 | 559.77 / 474 / 1,103 / 1,765 ms | 7.012 mean; 6 p50/p95; 40 p99 |
+| 500-commit fetch mean / p50 / p95 | 7.111 / 6.560 / 9.920 s | 32.4 mean; 34 p95 |
+| Final cold / warm clone | 56.277 / 34.045 s | 14 / 14 |
+
+All 5,000 pushes and ten exact-tip fetch-before-repack intervals completed.
+Each fetch installed exactly one new local pack, with no Git repack during
+fetch. The ten push windows averaged 439.54–748.40 ms and exactly 7.012
+requests each; latency varied with shared-host load and did not grow
+monotonically. Seed and final remote Crab fsck, strict full native Git fsck,
+both final clones, and 32 sampled blob-byte comparisons passed. The raw
+request log has no 5xx responses or proxy errors.
+
+**Overall qualification failed the unchanged fetch request gate:** p95 was
+34 requests against a limit of 10. Push mean latency and request gates and
+fetch p95 latency passed. The 24 capsule-source GETs in an ordinary 500-commit
+fetch remain the dominant request-count floor. This run does not establish
+matched-v1 performance, provider/product parity, or permission to retire v1.
+It also does not establish a few-second cold clone: the measured cold clone
+took 56.277 seconds on this shared host.
+
+Retained artifacts under the mounted CrabBuild workspace:
+`pr208-live-20260929/k8s-head9415-upstream-ga-20260929-r2/artifacts/report.json`
+(SHA-256 `c02342372fcc4a4fbac162a2fb891ea50497ecde8d4e54c6ccc4e5d9dfe69909`)
+and `requests.jsonl` (SHA-256
+`745a2c64a0d27c8b830bfc37bdd293066352d7d19f1f3d6c53f03dc9ecea32ba`).
+An earlier run used a checkout containing two local Xet pointer commits.
+Its push at ordinal 4,999 correctly rejected an unstaged pointer with
+`CRAB-E0086`; that input-invalidated run and its remote objects are retained
+but are not counted as a protocol failure or qualification pass.
+
 ## September 28 matched 500-commit capsule fan-in diagnostic
 
 Two sequential, isolated RustFS 1.0.0 GA runs replayed the same 500
