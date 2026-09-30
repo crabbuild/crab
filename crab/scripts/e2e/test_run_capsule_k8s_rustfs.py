@@ -53,6 +53,62 @@ class CapsuleKubernetesQualificationTests(unittest.TestCase):
                 (qualification.bin_dir / "git-remote-crab").resolve(), qualification.crab,
             )
 
+    def test_partial_clone_source_is_rejected_before_remote_initialization(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "Fixture"], check=True)
+            subprocess.run(
+                ["git", "-C", str(source), "config", "user.email", "fixture@example.invalid"],
+                check=True,
+            )
+            for name in ("first", "second"):
+                (source / "history").write_text(name)
+                subprocess.run(
+                    ["git", "-C", str(source), "add", "history"], check=True, capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "-C", str(source), "commit", "-m", name], check=True, capture_output=True,
+                )
+            subprocess.run(
+                ["git", "-C", str(source), "config", "remote.origin.url", "https://example.invalid/repo"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "config", "remote.origin.promisor", "true"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(source), "config", "remote.origin.partialclonefilter", "blob:none"],
+                check=True,
+            )
+            binary = root / "candidate"
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            binary.chmod(0o755)
+            qualification = QUALIFICATION.Qualification(argparse.Namespace(
+                root=root / "runs",
+                run_id="partial-source",
+                endpoint_url="http://127.0.0.1:9000",
+                bucket="fixture",
+                access_key="fixture-access",
+                secret_key="fixture-secret",
+                region="auto",
+                git_bin="git",
+                source=str(source),
+                commits=1,
+                crab_bin=str(binary),
+            ))
+            qualification.proxy = Mock()
+            qualification.proxy.url = "http://127.0.0.1:9001"
+
+            with self.assertRaisesRegex(RuntimeError, "source Git repository uses promisor objects"):
+                qualification.initialize()
+
+            self.assertFalse(qualification.replay.exists())
+            self.assertFalse(qualification.report_path.exists())
+
     def test_saved_diagnostics_redact_credentials_without_changing_command_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

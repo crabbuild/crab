@@ -623,6 +623,8 @@ class Qualification:
         if len(commits) != self.args.commits:
             raise RuntimeError(f"expected {self.args.commits} commits, got {len(commits)}")
 
+        self.reject_promisor_source(source)
+
         self.git(["clone", "--shared", "--no-checkout", str(source), str(self.replay)], self.root)
         self.git(["remote", "remove", "origin"], self.replay)
         self.git(["symbolic-ref", "HEAD", "refs/heads/main"], self.replay)
@@ -685,6 +687,41 @@ class Qualification:
             "metrics": {},
         }
         self.save()
+
+    def reject_promisor_source(self, source: Path) -> None:
+        result = subprocess.run(
+            [
+                self.args.git_bin,
+                "config",
+                "--local",
+                "--get-regexp",
+                r"^(extensions\.partialclone|remote\..*\.(promisor|partialclonefilter))$",
+            ],
+            cwd=source,
+            env=self.env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if result.returncode not in (0, 1):
+            raise RuntimeError(f"could not inspect source Git configuration: {result.stderr.strip()}")
+
+        partial_clone = False
+        for line in result.stdout.splitlines():
+            fields = line.split(None, 1)
+            if len(fields) != 2:
+                continue
+            key, value = fields
+            partial_clone |= (
+                key == "extensions.partialclone"
+                or key.endswith(".partialclonefilter")
+                or (key.endswith(".promisor") and value.strip().lower() == "true")
+            )
+        if partial_clone:
+            raise RuntimeError(
+                "source Git repository uses promisor objects; use a full clone for the replay source"
+            )
 
     def copy_staging_source(self, source: Path) -> None:
         source = source.resolve()
