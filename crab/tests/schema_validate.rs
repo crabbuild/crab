@@ -484,6 +484,7 @@ fn validate_gc() {
         "gc",
         &GcSummary {
             packs_deleted: 2,
+            derived_index_objects_deleted: 3,
             xorbs_deleted: 5,
             shards_deleted: 1,
             file_index_entries_deleted: 3,

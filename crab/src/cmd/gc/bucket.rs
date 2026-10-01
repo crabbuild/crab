@@ -105,6 +105,7 @@ impl BucketGcOutcome {
     pub fn to_summary(&self) -> super::GcSummary {
         super::GcSummary {
             packs_deleted: 0,
+            derived_index_objects_deleted: 0,
             xorbs_deleted: self.xorbs_deleted,
             shards_deleted: self.shards_deleted,
             file_index_entries_deleted: self.file_index_deleted,

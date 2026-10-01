@@ -4011,8 +4011,9 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                     "deleted"
                                 };
                                 eprintln!(
-                                    "crab gc: repo remote GC complete; {verb} {} pack(s), {} xorb(s), {} shard(s), reclaimed {} byte(s).",
+                                    "crab gc: repo remote GC complete; {verb} {} pack(s), {} derived index object(s), {} xorb(s), {} shard(s), reclaimed {} byte(s).",
                                     summary.packs_deleted,
+                                    summary.derived_index_objects_deleted,
                                     summary.xorbs_deleted,
                                     summary.shards_deleted,
                                     summary.bytes_reclaimed,

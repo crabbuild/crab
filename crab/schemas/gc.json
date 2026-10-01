@@ -33,6 +33,13 @@
       "minimum": 0.0,
       "type": "integer"
     },
+    "derived_index_objects_deleted": {
+      "default": 0,
+      "description": "Number of unreachable v2 browse-index objects deleted or planned.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
     "dry_run": {
       "description": "Whether this was a dry-run (no mutations).",
       "type": "boolean"

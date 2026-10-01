@@ -3955,10 +3955,17 @@ The two regressions failed before the fix and pass afterward. All 15 graph/path
 tests, 27 repository-reader tests, 38 checkpoint tests and the main/trunk HTTP
 scenario pass; 16 focused storage checks and strict scoped library lint pass.
 This bounds encoded intake, not the memory occupied by decoded indexes.
-The current repo GC sweeps only capsule, checkpoint, pack-layer and history
-prefixes; derived-index reclamation remains unimplemented, not implicitly
-qualified by their exclusion from those candidates. Whole-root backup copies
-include derived metadata, but live restore/projection proof remains required.
+The v2 repo sweep now lists the graph and path-state descriptor, layer, and
+work-checkpoint prefixes. It retains every browse-index graph/path object named
+by a record matching the captured state digest, so a stale-generation pointer
+cannot become dangling during a read; corrupt referenced descriptors fail the
+sweep closed. Partial path-state work is rooted only when its generation,
+pack-index hash, Git-validation digest, and descriptor count match the captured
+manifest. Unmatched objects enter the existing immutable-reader grace period
+and deletion revalidation, and the result reports derived-index deletes
+separately from packs. A behavioral GC test retains current indexes while
+deleting aged stale-generation descriptors, layers, and work records. This
+does not close the live restore/projection or full provider/product matrix.
 
 ### Phase 7: Update fsck, history, recovery, and GC
 

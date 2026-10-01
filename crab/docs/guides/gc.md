@@ -21,10 +21,15 @@ Garbage collection operates on the remote store, not the local cache. Use
 ### Protocol-v2 repositories
 
 Repository-scoped v2 GC marks the current checkpoint and ref frontier,
-retained history checkpoints, and coordinator-protected sources. It sweeps
-the repository's capsule, checkpoint, pack-layer, and history namespaces under
-the root fence and sweep lease. Shared xorbs and shards are outside this sweep.
-This is one fenced operation; `--resume` is not supported for v2 repository GC.
+retained history checkpoints, coordinator-protected sources, and graph/path-state
+objects referenced by a browse-index record for the captured state. It sweeps the
+repository's capsule, checkpoint, pack-layer, history, commit-graph, and
+path-state namespaces, and selects graph/path-state descriptors from the
+repository's `manifests/` listing under the root fence and sweep lease. Shared
+xorbs and shards are outside this sweep. The mutable browse-index pointer is not
+changed by GC; corrupt referenced descriptors fail the sweep closed. Unreachable
+derived-index objects are reported separately from pack objects. This is one
+fenced operation; `--resume` is not supported for v2 repository GC.
 
 V2 retains the immutable-reader grace period even with `--force`. Both the
 initial LIST and final HEAD must establish that a candidate is old enough.
@@ -244,6 +249,7 @@ Supports `--json` and `--jsonl`.
   "timestamp": "2026-04-24T18:32:20.400Z",
   "data": {
     "packs_deleted": 0,
+    "derived_index_objects_deleted": 0,
     "xorbs_deleted": 42,
     "shards_deleted": 8,
     "bytes_reclaimed": 1342177280,
@@ -261,7 +267,7 @@ Supports `--json` and `--jsonl`.
 ### crab gc --jsonl
 
 ```
-{"schema":"gc.event","version":"1.0","timestamp":"2026-04-24T18:32:20.400Z","type":"result","data":{"packs_deleted":0,"xorbs_deleted":42,"shards_deleted":8,"bytes_reclaimed":1342177280,"dry_run":false,"cancelled":false,"partial_enumeration":false,"active_pack_bytes":2300000000,"retained_history_pack_bytes":900000000,"grace_period_pack_bytes":12000000,"collectible_pack_bytes":48000000}}
+{"schema":"gc.event","version":"1.0","timestamp":"2026-04-24T18:32:20.400Z","type":"result","data":{"packs_deleted":0,"derived_index_objects_deleted":0,"xorbs_deleted":42,"shards_deleted":8,"bytes_reclaimed":1342177280,"dry_run":false,"cancelled":false,"partial_enumeration":false,"active_pack_bytes":2300000000,"retained_history_pack_bytes":900000000,"grace_period_pack_bytes":12000000,"collectible_pack_bytes":48000000}}
 ```
 
 See [Structured Output](structured-output.md) for envelope details, event types,

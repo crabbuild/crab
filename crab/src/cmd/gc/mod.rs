@@ -151,6 +151,7 @@ pub struct ObjectMeta {
 #[derive(Debug, Clone, Default)]
 pub struct GcOutcome {
     pub packs_deleted: u64,
+    pub derived_index_objects_deleted: u64,
     pub xorbs_deleted: u64,
     pub shards_deleted: u64,
     pub bytes_reclaimed: u64,
@@ -179,6 +180,7 @@ impl GcOutcome {
         if self.dry_run {
             info!(
                 packs = self.packs_deleted,
+                derived_index_objects = self.derived_index_objects_deleted,
                 xorbs = self.xorbs_deleted,
                 shards = self.shards_deleted,
                 bytes = self.bytes_reclaimed,
@@ -190,6 +192,7 @@ impl GcOutcome {
         } else if self.cancelled || self.delete_failures > 0 || self.reconciliation_failed {
             warn!(
                 packs = self.packs_deleted,
+                derived_index_objects = self.derived_index_objects_deleted,
                 xorbs = self.xorbs_deleted,
                 shards = self.shards_deleted,
                 bytes = self.bytes_reclaimed,
@@ -201,6 +204,7 @@ impl GcOutcome {
         } else {
             info!(
                 packs = self.packs_deleted,
+                derived_index_objects = self.derived_index_objects_deleted,
                 xorbs = self.xorbs_deleted,
                 shards = self.shards_deleted,
                 bytes = self.bytes_reclaimed,
@@ -216,6 +220,7 @@ impl GcOutcome {
     pub fn to_summary(&self) -> GcSummary {
         GcSummary {
             packs_deleted: self.packs_deleted,
+            derived_index_objects_deleted: self.derived_index_objects_deleted,
             xorbs_deleted: self.xorbs_deleted,
             shards_deleted: self.shards_deleted,
             file_index_entries_deleted: 0,
@@ -254,6 +259,9 @@ pub struct ListOutcome {
 pub struct GcSummary {
     /// Number of pack objects deleted (or would-be-deleted in dry-run).
     pub packs_deleted: u64,
+    /// Number of unreachable v2 browse-index objects deleted or planned.
+    #[serde(default)]
+    pub derived_index_objects_deleted: u64,
     /// Number of xorb objects deleted.
     pub xorbs_deleted: u64,
     /// Number of shard objects deleted.
@@ -3125,12 +3133,16 @@ async fn run_capsule_gc(
                 },
             )
             .await?;
+            let snapshot = view.git_snapshot()?;
+            let state_digest = view.state_digest().to_owned();
             sweep_capsule_objects(
                 args,
                 store,
                 &layout,
                 fenced.record().root(),
                 view.capsule_run_pointers(),
+                &state_digest,
+                &snapshot.manifest,
                 coordinator_protected_keys,
                 cancel,
                 snapshot_at,
@@ -3171,6 +3183,8 @@ async fn sweep_capsule_objects(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     root: &crab_metadata::capsule_protocol::RepositoryRoot,
     capsule_runs: &[crab_metadata::capsule_protocol::CapsulePointer],
+    state_digest: &str,
+    manifest: &crab_metadata::manifests::Manifest,
     coordinator_protected_keys: &HashSet<String>,
     cancel: &CancellationToken,
     snapshot_at: SystemTime,
@@ -3221,17 +3235,54 @@ async fn sweep_capsule_objects(
         }
     }
     reachable.extend(coordinator_protected_keys.iter().cloned());
+    mark_derived_index_objects(
+        store.as_storage(),
+        layout,
+        state_digest,
+        manifest,
+        &mut reachable,
+    )
+    .await?;
 
     let capsule_prefix = layout.repo_path("v2/capsules/");
     let checkpoint_prefix = layout.repo_path("v2/checkpoints/");
     let pack_layer_prefix = layout.repo_path("v2/pack-layers/");
     let history_prefix = layout.repo_path("v2/history/");
-    let (capsules, checkpoints, pack_layers, history) = tokio::try_join!(
+    let path_state_prefix = layout.repo_path("metadata/path-state/");
+    let commit_graph_prefix = layout.repo_path("metadata/commit-graph/");
+    let manifests_prefix = layout.repo_path("manifests/");
+    let path_state_descriptor_prefix = layout.repo_path("manifests/path-state-");
+    let commit_graph_descriptor_prefix = layout.repo_path("manifests/commit-graph-");
+    let (
+        capsules,
+        checkpoints,
+        pack_layers,
+        history,
+        path_state_objects,
+        commit_graph_objects,
+        manifests,
+    ) = tokio::try_join!(
         store.list_prefix(&capsule_prefix),
         store.list_prefix(&checkpoint_prefix),
         store.list_prefix(&pack_layer_prefix),
         store.list_prefix(&history_prefix),
+        store.list_prefix(&path_state_prefix),
+        store.list_prefix(&commit_graph_prefix),
+        store.list_prefix(&manifests_prefix),
     )?;
+    let derived_index_objects = path_state_objects
+        .into_iter()
+        .chain(commit_graph_objects)
+        .chain(manifests.into_iter().filter(|object| {
+            let key = object.location.as_ref();
+            key.starts_with(path_state_descriptor_prefix.as_ref())
+                || key.starts_with(commit_graph_descriptor_prefix.as_ref())
+        }))
+        .collect::<Vec<_>>();
+    let derived_index_keys = derived_index_objects
+        .iter()
+        .map(|object| object.location.to_string())
+        .collect::<HashSet<_>>();
     let cutoff = snapshot_at - grace_period.max(MIN_GRACE_PERIOD);
     // Classify the same unique source objects used by the sweep, not members
     // repeated across checkpoints. Provider sizes avoid extra payload reads.
@@ -3253,6 +3304,7 @@ async fn sweep_capsule_objects(
         .chain(checkpoints)
         .chain(pack_layers)
         .chain(history)
+        .chain(derived_index_objects)
         .filter(|object| !reachable.contains(object.location.as_ref()))
         // Per-ref publications do not register in one shared writer object.
         // Snapshot readers may still hold an older head, so even forced GC
@@ -3260,7 +3312,12 @@ async fn sweep_capsule_objects(
         .filter(|object| SystemTime::from(object.last_modified) < cutoff)
         .collect::<Vec<_>>();
     if args.dry_run {
-        accounting.packs_deleted = candidates.len() as u64;
+        accounting.derived_index_objects_deleted = candidates
+            .iter()
+            .filter(|object| derived_index_keys.contains(object.location.as_ref()))
+            .count() as u64;
+        accounting.packs_deleted =
+            candidates.len() as u64 - accounting.derived_index_objects_deleted;
         accounting.bytes_reclaimed = candidates
             .iter()
             .fold(0u64, |bytes, object| bytes.saturating_add(object.size));
@@ -3275,6 +3332,7 @@ async fn sweep_capsule_objects(
         };
         let concurrency = args.delete_concurrency.max(1);
         let mut deletes = futures_util::stream::iter(candidates.iter().map(|object| {
+            let derived_index = derived_index_keys.contains(object.location.as_ref());
             let meta = ObjectMeta {
                 key: object.location.to_string(),
                 size: object.size,
@@ -3285,26 +3343,123 @@ async fn sweep_capsule_objects(
                 transitioned_at: None,
             };
             let deleter = &deleter;
-            async move { (meta.size, deleter.delete_candidate(&meta, policy).await) }
+            async move {
+                (
+                    meta.size,
+                    derived_index,
+                    deleter.delete_candidate(&meta, policy).await,
+                )
+            }
         }))
         .buffer_unordered(concurrency);
-        while let Some((size, result)) = deletes.next().await {
+        while let Some((size, derived_index, result)) = deletes.next().await {
             check_cancelled(cancel)?;
             // HEAD may retain a candidate whose identity or freshness changed
             // after LIST. Planned bytes are not reclaimed in that case.
             if result? == CandidateDelete::Deleted {
-                accounting.packs_deleted += 1;
+                if derived_index {
+                    accounting.derived_index_objects_deleted += 1;
+                } else {
+                    accounting.packs_deleted += 1;
+                }
                 accounting.bytes_reclaimed = accounting.bytes_reclaimed.saturating_add(size);
             }
         }
     }
     Ok(GcOutcome {
-        list_requests: 4,
-        list_parallelism: 4,
+        list_requests: 7,
+        list_parallelism: 7,
         list_wall_seconds: started.elapsed().as_secs_f64(),
         dry_run: args.dry_run,
         ..accounting
     })
+}
+
+async fn mark_derived_index_objects(
+    store: &crab_storage::Store,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    state_digest: &str,
+    manifest: &crab_metadata::manifests::Manifest,
+    reachable: &mut HashSet<String>,
+) -> Result<()> {
+    if let Some(indexes) = crab_metadata::capsule_protocol::load_browse_indexes(layout).await?
+        && indexes.state_digest() == state_digest
+    {
+        let graph_hash = indexes.commit_graph_hash();
+        let graph_path = layout.bulk_manifest_path("commit-graph", graph_hash);
+        let graph = crab_metadata::split_commit_graph::load_split_commit_graph_descriptor(
+            store,
+            layout,
+            graph_hash,
+            crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+        )
+        .await?;
+        reachable.insert(graph_path.to_string());
+        reachable.extend(
+            graph
+                .layers
+                .iter()
+                .map(|layer| layout.repo_path(&layer.path).to_string()),
+        );
+
+        let path_state_hash = indexes.path_state_hash();
+        let path_state_path = layout.bulk_manifest_path("path-state", path_state_hash);
+        let path_state = crab_metadata::path_state::load_path_state_descriptor(
+            store,
+            layout,
+            path_state_hash,
+            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+        )
+        .await?;
+        reachable.insert(path_state_path.to_string());
+        reachable.extend(
+            path_state
+                .layers
+                .iter()
+                .map(|layer| layout.repo_path(&layer.path).to_string()),
+        );
+    }
+
+    if let Some(checkpoint) = crab_metadata::path_state::load_path_state_checkpoint_record(
+        store,
+        layout,
+        &manifest.git_validation_digest,
+    )
+    .await?
+        && checkpoint.generation == manifest.generation
+        && checkpoint.pack_index_hash == manifest.pack_index_hash
+        && checkpoint.git_validation_digest == manifest.git_validation_digest
+    {
+        let descriptor_path = layout.bulk_manifest_path("path-state", &checkpoint.descriptor_hash);
+        let descriptor = crab_metadata::path_state::load_path_state_descriptor(
+            store,
+            layout,
+            &checkpoint.descriptor_hash,
+            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+        )
+        .await?;
+        if descriptor.generation == manifest.generation
+            && descriptor.pack_index_hash == manifest.pack_index_hash
+            && descriptor.git_validation_digest == manifest.git_validation_digest
+            && descriptor.commit_count == checkpoint.commit_count
+        {
+            reachable.insert(
+                layout
+                    .repo_path(&crab_metadata::path_state::path_state_checkpoint_path(
+                        &manifest.git_validation_digest,
+                    ))
+                    .to_string(),
+            );
+            reachable.insert(descriptor_path.to_string());
+            reachable.extend(
+                descriptor
+                    .layers
+                    .iter()
+                    .map(|layer| layout.repo_path(&layer.path).to_string()),
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn mark_layered_checkpoint_sources(
@@ -5336,6 +5491,18 @@ mod tests {
         )
         .await
         .unwrap();
+        let current_view = crab_read::capsule_protocol::open_view_from_root(
+            &layout,
+            root.clone(),
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 1024 * 1024,
+                max_frontier_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+        let snapshot = current_view.git_snapshot().unwrap();
+        let state_digest = current_view.state_digest().to_owned();
         assert_eq!(
             root.record().root().compacted_ref_transactions(),
             captured.visible_ref_transactions()
@@ -5376,6 +5543,8 @@ mod tests {
                 &layout,
                 root.record().root(),
                 &[],
+                &state_digest,
+                &snapshot.manifest,
                 &protected,
                 &CancellationToken::new(),
                 SystemTime::now(),
@@ -5402,6 +5571,8 @@ mod tests {
             &layout,
             root.record().root(),
             &[],
+            &state_digest,
+            &snapshot.manifest,
             &protected,
             &CancellationToken::new(),
             SystemTime::now() + Duration::from_secs(2 * 3600),
@@ -5436,8 +5607,252 @@ mod tests {
                 Err(CrabError::NotFound { .. })
             ));
         }
-        assert_eq!(outcome.list_requests, 4);
-        assert_eq!(outcome.list_parallelism, 4);
+        assert_eq!(outcome.list_requests, 7);
+        assert_eq!(outcome.list_parallelism, 7);
+    }
+
+    #[tokio::test]
+    async fn capsule_protocol_gc_retains_current_indexes_and_collects_stale_index_generations() {
+        use crab_metadata::capsule_protocol::BrowseIndexes;
+        use crab_metadata::path_state::{
+            PathStateInput, PathStateMutation, append_path_state, publish_path_state_checkpoint,
+            upload_path_state,
+        };
+        use crab_metadata::split_commit_graph::{
+            CommitGraphInput, append_split_commit_graph, load_split_commit_graph,
+            upload_split_commit_graph,
+        };
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        async fn write_indexes(
+            store: &crab_storage::Store,
+            layout: &crab_storage::StoreLayout<crab_storage::Store>,
+            generation: u64,
+            pack_index_hash: &str,
+            git_validation_digest: &str,
+            oid: [u8; 20],
+            tree_oid: [u8; 20],
+        ) -> (
+            String,
+            String,
+            crab_metadata::split_commit_graph::SplitCommitGraph,
+            u32,
+        ) {
+            let graph_write = append_split_commit_graph(
+                None,
+                generation,
+                pack_index_hash.to_owned(),
+                git_validation_digest.to_owned(),
+                &[oid],
+                vec![CommitGraphInput {
+                    oid,
+                    tree_oid,
+                    commit_time: i64::try_from(generation).unwrap(),
+                    parents: Vec::new(),
+                }],
+            )
+            .unwrap()
+            .unwrap();
+            let graph_hash = graph_write.descriptor_hash.clone();
+            upload_split_commit_graph(store, layout, &graph_write)
+                .await
+                .unwrap();
+            let graph = load_split_commit_graph(
+                store,
+                layout,
+                &graph_hash,
+                crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+            )
+            .await
+            .unwrap();
+            let path_state = append_path_state(
+                None,
+                &graph,
+                vec![PathStateInput {
+                    oid,
+                    first_parent: None,
+                    author: b"author".to_vec(),
+                    author_seconds: i64::try_from(generation).unwrap(),
+                    message: b"change".to_vec(),
+                    mutations: vec![PathStateMutation {
+                        path: b"file".to_vec(),
+                        present: true,
+                        reset: true,
+                    }],
+                }],
+            )
+            .unwrap();
+            let path_state_hash = path_state.descriptor_hash.clone();
+            let commit_count = path_state.commit_count();
+            upload_path_state(store, layout, &path_state).await.unwrap();
+            (graph_hash, path_state_hash, graph, commit_count)
+        }
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/gc-derived-indexes".to_owned());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = root.record().root().generation();
+        manifest.pack_index_hash = "1".repeat(64);
+        manifest.seal_git_validation();
+        let state_digest = "a".repeat(64);
+        let (current_graph_hash, current_path_state_hash, current_graph, current_count) =
+            write_indexes(
+                store.as_storage(),
+                &layout,
+                manifest.generation,
+                &manifest.pack_index_hash,
+                &manifest.git_validation_digest,
+                [3; 20],
+                [4; 20],
+            )
+            .await;
+        publish_path_state_checkpoint(
+            store.as_storage(),
+            &layout,
+            &current_graph,
+            &current_path_state_hash,
+            current_count,
+            None,
+        )
+        .await
+        .unwrap();
+        let indexes = BrowseIndexes::new(
+            state_digest.clone(),
+            current_graph_hash.clone(),
+            current_path_state_hash.clone(),
+        )
+        .unwrap();
+        store
+            .put(
+                &layout.capsule_browse_indexes_path(),
+                indexes.encode().unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let stale_git_validation_digest = "f".repeat(64);
+        let (stale_graph_hash, stale_path_state_hash, stale_graph, stale_count) = write_indexes(
+            store.as_storage(),
+            &layout,
+            manifest.generation + 1,
+            &"f".repeat(64),
+            &stale_git_validation_digest,
+            [5; 20],
+            [6; 20],
+        )
+        .await;
+        publish_path_state_checkpoint(
+            store.as_storage(),
+            &layout,
+            &stale_graph,
+            &stale_path_state_hash,
+            stale_count,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let current_graph_descriptor =
+            layout.bulk_manifest_path("commit-graph", &current_graph_hash);
+        let current_graph_layer = layout.repo_path(&current_graph.descriptor.layers[0].path);
+        let current_path_state_descriptor =
+            layout.bulk_manifest_path("path-state", &current_path_state_hash);
+        let current_checkpoint = layout.repo_path(
+            &crab_metadata::path_state::path_state_checkpoint_path(&manifest.git_validation_digest),
+        );
+        let stale_graph_descriptor = layout.bulk_manifest_path("commit-graph", &stale_graph_hash);
+        let stale_graph_layer = layout.repo_path(&stale_graph.descriptor.layers[0].path);
+        let stale_path_state_descriptor =
+            layout.bulk_manifest_path("path-state", &stale_path_state_hash);
+        let stale_path_state = crab_metadata::path_state::load_path_state_descriptor(
+            store.as_storage(),
+            &layout,
+            &stale_path_state_hash,
+            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+        )
+        .await
+        .unwrap();
+        let stale_path_state_layer = layout.repo_path(&stale_path_state.layers[0].path);
+        let stale_checkpoint = layout.repo_path(
+            &crab_metadata::path_state::path_state_checkpoint_path(&stale_git_validation_digest),
+        );
+        let current_indexes = [
+            current_graph_descriptor.clone(),
+            current_graph_layer.clone(),
+            current_path_state_descriptor.clone(),
+            current_checkpoint.clone(),
+        ];
+        let stale_indexes = [
+            stale_graph_descriptor.clone(),
+            stale_graph_layer.clone(),
+            stale_path_state_descriptor.clone(),
+            stale_path_state_layer.clone(),
+            stale_checkpoint.clone(),
+        ];
+        for path in current_indexes.iter().chain(stale_indexes.iter()) {
+            assert!(store.head(path).await.is_ok(), "expected object at {path}");
+        }
+
+        let preview = sweep_capsule_objects(
+            &GcArgs {
+                dry_run: true,
+                ..GcArgs::default()
+            },
+            &store,
+            &layout,
+            root.record().root(),
+            &[],
+            &state_digest,
+            &manifest,
+            &HashSet::new(),
+            &CancellationToken::new(),
+            SystemTime::now(),
+            Duration::from_secs(3600),
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(preview.derived_index_objects_deleted, 0);
+
+        let outcome = sweep_capsule_objects(
+            &GcArgs::default(),
+            &store,
+            &layout,
+            root.record().root(),
+            &[],
+            &state_digest,
+            &manifest,
+            &HashSet::new(),
+            &CancellationToken::new(),
+            SystemTime::now() + Duration::from_secs(2 * 3600),
+            Duration::from_secs(3600),
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+
+        for path in current_indexes {
+            assert!(store.head(&path).await.is_ok());
+        }
+        for path in stale_indexes {
+            let head = store.head(&path).await;
+            assert!(
+                matches!(head, Err(CrabError::NotFound { .. })),
+                "expected stale index object to be deleted at {path}: {head:?}"
+            );
+        }
+        assert_eq!(outcome.packs_deleted, 0);
+        assert_eq!(outcome.derived_index_objects_deleted, 5);
     }
 
     #[tokio::test]
