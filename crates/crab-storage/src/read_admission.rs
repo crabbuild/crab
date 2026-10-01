@@ -17,6 +17,8 @@ use object_store::{
 /// at their HTTP boundary and charge every response-body chunk. Other stores
 /// reserve successful object-body lengths from response headers; reservations
 /// are not refunded on cancellation or incomplete delivery.
+// async_trait adds `must_use` to boxed futures; newer Clippy flags that generated duplicate.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait ReadAdmission: Send + Sync {
     /// Cancellation scope for admission, response headers and streamed body reads.

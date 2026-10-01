@@ -87,6 +87,8 @@ struct SignedFileTarget<'a> {
 ///
 /// Each whole-upload retry may read the same ranges again. Implementations must
 /// therefore keep the source immutable until this operation returns.
+// async_trait adds `must_use` to boxed futures; newer Clippy flags that generated duplicate.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait MultipartUploadSource: Send + Sync {
     /// Returns the complete source length.

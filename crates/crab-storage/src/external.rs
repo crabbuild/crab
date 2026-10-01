@@ -46,6 +46,8 @@ pub struct ExternalObjectMeta {
 pub type ExternalByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static>>;
 
 /// Provider-neutral external data operations.
+// async_trait adds `must_use` to boxed futures; newer Clippy flags that generated duplicate.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ExternalDataStore: Send + Sync {
     /// Return the operations proven by this adapter.

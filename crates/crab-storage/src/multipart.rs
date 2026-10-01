@@ -142,6 +142,8 @@ pub enum ResumableUploadOutcome {
 /// Implementations must make `claim` and every ownership-checked mutation
 /// atomic across processes. Returning `false` from a mutation means the lease
 /// was lost; the caller must stop using the provider session immediately.
+// async_trait adds `must_use` to boxed futures; newer Clippy flags that generated duplicate.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait MultipartJournal: Send + Sync {
     #[allow(clippy::too_many_arguments)]
