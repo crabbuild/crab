@@ -85,7 +85,7 @@ impl LocalCache {
 
         let mut output = pending.file()?;
         let validation = if copy_on_write {
-            verify_pack_file(&mut output, hash, expected_len, &path).await?
+            verify_pack_file(&mut input, hash, expected_len, &path).await?
         } else {
             copy_pack_file(&mut input, &mut output, hash, expected_len, &path).await?
         };
@@ -174,7 +174,11 @@ async fn verify_pack_file(
     let mut remaining = expected_len;
     let mut buffer = vec![0; 1024 * 1024];
     loop {
-        let read = input.read(&mut buffer).await?;
+        // A source read failure is a cache miss; the caller can retry from origin.
+        let read = match input.read(&mut buffer).await {
+            Ok(read) => read,
+            Err(error) => return Ok(Err(CacheError::Io(error))),
+        };
         if read == 0 {
             return Ok(validate_pack_hash(hasher.finalize(), remaining, hash));
         }
@@ -301,6 +305,26 @@ mod tests {
                 .is_err()
         );
         assert!(!cache.git_pack_path(&hash).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copy_on_write_verification_turns_cache_read_errors_into_misses() {
+        let directory = private_tempdir();
+        let mut input = tokio::fs::File::open(directory.path()).await.unwrap();
+
+        let result = verify_pack_file(
+            &mut input,
+            &blake3::hash(b"authenticated pack bytes"),
+            25,
+            directory.path(),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Ok(Err(CacheError::Io(_)))),
+            "unexpected verification result: {result:?}"
+        );
     }
 
     #[tokio::test]
