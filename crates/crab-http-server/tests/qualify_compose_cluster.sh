@@ -1325,13 +1325,20 @@ fallback_session_for_service() {
   esac
 }
 
-node_b_before_fallback="$(fallback_node_for_service "$b_service")"
+# The serving control is authoritative for the owner boot identity. Pin both
+# observations to that session so a service-local session cannot mask a change.
+node_b_before_fallback="$(service_cli "$b_service" cells node \
+  --session "$session_after_second_loss" --json)"
+fallback_log_epoch="$(jq --raw-output '.advertisement.log.epoch' \
+  <<<"$node_b_before_fallback")"
 fallback_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
 # No fleet proof may have escaped the replacement owner's log. Active logs
 # require a complete follower witness during recovery, even after object
 # coverage, so this fallback specifically exercises an inactive log.
 if ! jq --exit-status \
-  '.live == true and .advertisement.log.state == "open" and
+  --arg session "$session_after_second_loss" \
+  '.session == $session and .live == true and
+   .advertisement.log.state == "open" and
    .advertisement.log.active == false and
    (.advertisement.log.member_nodes | length > 0)' \
   <<<"$node_b_before_fallback" >/dev/null; then
@@ -1397,13 +1404,16 @@ node_b_before_fallback="$(service_cli "$b_service" cells node \
   --session "$session_after_second_loss" --json)"
 if ! jq --exit-status \
   --arg session "$session_after_second_loss" \
+  --argjson epoch "$fallback_log_epoch" \
   --argjson members "$fallback_members" \
   '.session == $session and .live == true and
    .advertisement.log.state == "open" and
+   .advertisement.log.epoch == $epoch and
    .advertisement.log.active == false and
    .advertisement.log.member_nodes == $members' \
   <<<"$node_b_before_fallback" >/dev/null; then
   echo "The fallback owner's inactive log changed after its original members expired." >&2
+  echo "Expected session=${session_after_second_loss} epoch=${fallback_log_epoch} members=${fallback_members}" >&2
   jq . <<<"$node_b_before_fallback" >&2 || true
   exit 1
 fi
