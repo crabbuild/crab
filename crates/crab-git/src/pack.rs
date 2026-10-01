@@ -102,7 +102,6 @@ pub enum PackError {
     /// Pack reverse-index generation or validation failed.
     #[error(transparent)]
     ReverseIndex {
-        #[from]
         source: crate::pack_locator::PackLocatorError,
     },
 
@@ -136,6 +135,12 @@ pub enum PackError {
     /// Git could not return validated object kinds for a local object database.
     #[error("git object-kind query failed for {path}: {detail}")]
     ObjectKindQuery { path: PathBuf, detail: String },
+}
+
+impl From<crate::pack_locator::PackLocatorError> for PackError {
+    fn from(source: crate::pack_locator::PackLocatorError) -> Self {
+        Self::ReverseIndex { source }
+    }
 }
 
 /// Verify the trailing SHA-1 checksum of a Git pack.
@@ -1394,6 +1399,21 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use super::*;
+
+    #[test]
+    fn locator_error_converts_to_the_transparent_pack_variant() {
+        let error = PackError::from(crate::pack_locator::PackLocatorError::InvalidPackLength {
+            pack_len: 0,
+            minimum: 12,
+        });
+
+        assert!(matches!(
+            error,
+            PackError::ReverseIndex {
+                source: crate::pack_locator::PackLocatorError::InvalidPackLength { .. }
+            }
+        ));
+    }
 
     fn pack_with_sha1(content: &[u8]) -> Vec<u8> {
         let mut hasher = Sha1::new();

@@ -174,16 +174,10 @@ pub enum RepackError {
     },
     /// A source pack failed Git pack validation.
     #[error(transparent)]
-    Pack {
-        #[from]
-        source: PackError,
-    },
+    Pack { source: PackError },
     /// A generated or installed pack index failed locator validation.
     #[error(transparent)]
-    Locator {
-        #[from]
-        source: PackLocatorError,
-    },
+    Locator { source: PackLocatorError },
     /// A source pack no longer matches its manifest commitment.
     #[error("source pack {pack_id} failed its manifest commitment: {reason}")]
     SourceIntegrity { pack_id: String, reason: String },
@@ -199,6 +193,18 @@ pub enum RepackError {
     /// A selected-object pack contained an object outside the requested set.
     #[error("selected pack {pack_id} failed exact object-set validation: {reason}")]
     SelectedObjectSet { pack_id: String, reason: String },
+}
+
+impl From<PackError> for RepackError {
+    fn from(source: PackError) -> Self {
+        Self::Pack { source }
+    }
+}
+
+impl From<PackLocatorError> for RepackError {
+    fn from(source: PackLocatorError) -> Self {
+        Self::Locator { source }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1835,6 +1841,18 @@ mod tests {
     use std::{collections::BTreeMap, process::Output, sync::atomic::AtomicBool};
 
     use super::*;
+
+    #[test]
+    fn transparent_errors_convert_without_changing_their_variant() {
+        let pack_error = RepackError::from(PackError::Cancelled);
+        assert!(matches!(pack_error, RepackError::Pack { .. }));
+
+        let locator_error = RepackError::from(PackLocatorError::InvalidPackLength {
+            pack_len: 0,
+            minimum: 12,
+        });
+        assert!(matches!(locator_error, RepackError::Locator { .. }));
+    }
 
     #[test]
     fn geometric_cut_leaves_valid_large_prefix_untouched() {
