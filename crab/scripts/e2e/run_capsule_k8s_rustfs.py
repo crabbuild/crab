@@ -854,7 +854,7 @@ class Qualification:
                 "GIT_TRACE2_EVENT": str(self.trace_path(name)),
                 "CRAB_LOG": (
                     "error,crab_remote_git::telemetry=info,crab_read::upload_pack=info,"
-                    "crab::git::upload_pack_wire=info"
+                    "crab::git::upload_pack_wire=info,crab::git::remote_helper=info"
                 ),
             },
         )

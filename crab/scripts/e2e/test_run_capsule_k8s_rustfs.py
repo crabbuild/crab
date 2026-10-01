@@ -206,6 +206,7 @@ class CapsuleKubernetesQualificationTests(unittest.TestCase):
                 self.assertEqual(cwd, qualification.incremental)
                 self.assertTrue(options["meter"])
                 self.assertIn("crab_remote_git::telemetry=info", options["extra_env"]["CRAB_LOG"])
+                self.assertIn("crab::git::remote_helper=info", options["extra_env"]["CRAB_LOG"])
                 trace = Path(options["extra_env"]["GIT_TRACE2_EVENT"])
                 trace.write_text('\n'.join(json.dumps(event) for event in [
                     {"event": "start", "sid": "fetch"},
