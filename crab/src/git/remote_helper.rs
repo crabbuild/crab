@@ -2896,9 +2896,15 @@ async fn fetch_capsule_packs(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<FetchBatchResult> {
     let maximum = capsule_fetch_maximum(config);
+    let git_dir_started = std::time::Instant::now();
     let git_dir = super::discover::discover_git_dir()?;
+    let git_dir_discovery_ms = git_dir_started.elapsed().as_millis() as u64;
+    let haves_started = std::time::Instant::now();
     let haves = local_fetch_have_tips(&git_dir)?;
+    let local_haves_ms = haves_started.elapsed().as_millis() as u64;
+    let view_started = std::time::Instant::now();
     let mut view = open_capsule_fetch_view_minimal(store, router, config, cached_view).await?;
+    let view_open_ms = view_started.elapsed().as_millis() as u64;
     let advertisement = crab_read::capsule_ref_advertisement(&view, &config.transfer_hide_refs);
     let visible = advertisement
         .refs
@@ -3053,6 +3059,15 @@ async fn fetch_capsule_packs(
         .iter()
         .map(|reference| reference.ref_name.clone())
         .collect::<Vec<_>>();
+    tracing::info!(
+        git_dir_discovery_ms,
+        local_haves_ms,
+        view_open_ms,
+        haves = haves.len(),
+        visible_refs = visible_ref_names.len(),
+        generation = view.root().root().generation(),
+        "capsule-protocol incremental fetch view prepared"
+    );
     // Keep the large upload-pack planner and response-pack state off this
     // legacy fetch future's worker stack. Classic shallow fetches do not need
     // the layered path, but the compiler otherwise gives both paths the same
@@ -3096,13 +3111,16 @@ async fn fetch_capsule_incremental_packs(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let repository_started = std::time::Instant::now();
     let repository = capsule_git_repository(view, store, router, config, runtime, cancel).await?;
+    let repository_open_ms = repository_started.elapsed().as_millis() as u64;
     let request = crab_read::UploadPackRequest {
         wants,
         haves,
         include_tags: false,
         ..Default::default()
     };
+    let planning_started = std::time::Instant::now();
     let plan = if view
         .layered_checkpoint()
         .is_some_and(|checkpoint| checkpoint.is_control_only())
@@ -3126,6 +3144,13 @@ async fn fetch_capsule_incremental_packs(
         .await
     }
     .map_err(|error| CrabError::Protocol(format!("incremental fetch planning failed: {error}")))?;
+    let planning_ms = planning_started.elapsed().as_millis() as u64;
+    let mut member_admission_ms = 0;
+    let mut direct_install_ms = 0;
+    let mut install_lock_wait_ms = 0;
+    let mut pack_generation_ms = 0;
+    let mut pack_install_ms = 0;
+    let ref_validation_ms;
     if !plan.object_ids.is_empty() {
         let layout = crab_storage::StoreLayout::with_global_prefix(
             store.as_storage().clone(),
@@ -3136,12 +3161,15 @@ async fn fetch_capsule_incremental_packs(
         // Direct layered installation publishes several immutable files. Keep
         // the same per-repository install fence as generated response packs so
         // concurrent fetches cannot observe or create a partial pack set.
+        let lock_wait_started = std::time::Instant::now();
         let direct_install_lock = crate::git::fetch::acquire_fetch_install_lock(&pack_dir).await?;
+        install_lock_wait_ms += lock_wait_started.elapsed().as_millis() as u64;
         // Compact frontier admission normally identifies the exact members
         // without another lookup. A ref update can, however, reintroduce an
         // object from an older stable layer; join those misses once against
         // the authenticated locator instead of falling through to a full
         // response-pack materialization.
+        let admission_started = std::time::Instant::now();
         let complete_local_base = local_fetch_thin_pack_eligible(&git_dir);
         let (selected, selection_source) = if !complete_local_base {
             // A shallow or promisor repository cannot use its local haves as
@@ -3173,12 +3201,14 @@ async fn fetch_capsule_incremental_packs(
                 }
             }
         };
+        member_admission_ms = admission_started.elapsed().as_millis() as u64;
         tracing::debug!(
             selection_source,
             selected_members = selected.as_ref().map_or(0, BTreeSet::len),
             planned_objects = plan.object_ids.len(),
             "incremental layered member admission resolved"
         );
+        let direct_install_started = std::time::Instant::now();
         let direct_install = if let Some(selected) = selected.as_ref() {
             crab_read::capsule_protocol::install_layered_git_packs_for_fetch_selected(
                 view,
@@ -3194,6 +3224,7 @@ async fn fetch_capsule_incremental_packs(
         } else {
             None
         };
+        direct_install_ms = direct_install_started.elapsed().as_millis() as u64;
         if let Some(installed) = direct_install {
             let ref_tips = entries
                 .iter()
@@ -3210,13 +3241,21 @@ async fn fetch_capsule_incremental_packs(
             // below still proves the complete delta closure.
             let mut validation_tips = ref_tips.clone();
             validation_tips.extend(frontier.iter().cloned());
+            let validation_started = std::time::Instant::now();
             crate::git::pack::validate_fetched_ref_tips(&git_dir, &validation_tips).await?;
             configure_fetched_repository(&git_dir)?;
+            ref_validation_ms = validation_started.elapsed().as_millis() as u64;
             tracing::info!(
                 common_haves = plan.common_haves.len(),
                 planned_objects = plan.object_ids.len(),
                 installed_packs = installed.len(),
                 generation = view.root().root().generation(),
+                repository_open_ms,
+                planning_ms,
+                member_admission_ms,
+                direct_install_ms,
+                install_lock_wait_ms,
+                ref_validation_ms,
                 strategy = "direct_layered_members",
                 "capsule-protocol fetch installed authenticated layered packs"
             );
@@ -3247,6 +3286,7 @@ async fn fetch_capsule_incremental_packs(
         // complete local base closure.
         let use_external_bases =
             !plan.common_haves.is_empty() && local_fetch_thin_pack_eligible(&git_dir);
+        let pack_generation_started = std::time::Instant::now();
         let pack = if use_external_bases {
             repository
                 .generate_pack_with_external_bases(&plan.object_ids, &plan.common_haves, cancel)
@@ -3259,13 +3299,17 @@ async fn fetch_capsule_incremental_packs(
         .map_err(|error| {
             CrabError::Protocol(format!("incremental fetch pack generation failed: {error}"))
         })?;
+        pack_generation_ms = pack_generation_started.elapsed().as_millis() as u64;
         let pack_dir = git_dir.join("objects").join("pack");
+        let lock_wait_started = std::time::Instant::now();
         let _install_lock = crate::git::fetch::acquire_fetch_install_lock(&pack_dir).await?;
+        install_lock_wait_ms += lock_wait_started.elapsed().as_millis() as u64;
         let canonical_name = format!("incremental-{}", pack.checksum_hex());
         let pack_was_present = pack_dir
             .join(format!("pack-{canonical_name}.pack"))
             .exists()
             && pack_dir.join(format!("pack-{canonical_name}.idx")).exists();
+        let pack_install_started = std::time::Instant::now();
         let install = if use_external_bases {
             crate::git::pack::install_thin_pack_file_locally_with_timeout(
                 &pack_dir,
@@ -3285,6 +3329,7 @@ async fn fetch_capsule_incremental_packs(
             )
             .await
         };
+        pack_install_ms = pack_install_started.elapsed().as_millis() as u64;
         if let Err(error) = install {
             if !pack_was_present
                 && let Err(rollback_error) =
@@ -3297,6 +3342,7 @@ async fn fetch_capsule_incremental_packs(
             return Err(error);
         }
     }
+    let validation_started = std::time::Instant::now();
     crate::git::pack::validate_fetched_ref_tips(
         &git_dir,
         &entries
@@ -3306,10 +3352,24 @@ async fn fetch_capsule_incremental_packs(
     )
     .await?;
     configure_fetched_repository(&git_dir)?;
+    ref_validation_ms = validation_started.elapsed().as_millis() as u64;
     tracing::info!(
         common_haves = plan.common_haves.len(),
         planned_objects = plan.object_ids.len(),
         generation = view.root().root().generation(),
+        repository_open_ms,
+        planning_ms,
+        member_admission_ms,
+        direct_install_ms,
+        install_lock_wait_ms,
+        pack_generation_ms,
+        pack_install_ms,
+        ref_validation_ms,
+        strategy = if plan.object_ids.is_empty() {
+            "empty_delta"
+        } else {
+            "response_pack"
+        },
         "capsule-protocol fetch installed authenticated incremental pack"
     );
     if !check_connectivity {
@@ -3324,10 +3384,12 @@ async fn fetch_capsule_incremental_packs(
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
+    let connectivity_started = std::time::Instant::now();
     let connectivity = crate::git::connectivity::check_connectivity_with_frontier_quiet(
         &git_dir, &ref_tips, &frontier, cancel,
     )
     .await?;
+    let connectivity_ms = connectivity_started.elapsed().as_millis() as u64;
     if !connectivity.complete || !connectivity.missing.is_empty() {
         return Err(CrabError::Protocol(format!(
             "incremental fetch is not connected (complete={}, missing={})",
@@ -3337,6 +3399,7 @@ async fn fetch_capsule_incremental_packs(
     }
     tracing::debug!(
         objects_checked = connectivity.objects_checked,
+        connectivity_ms,
         "incremental fetch proved connectivity without response pack"
     );
     Ok(FetchBatchResult {
