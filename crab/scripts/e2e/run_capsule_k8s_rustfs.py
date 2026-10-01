@@ -110,6 +110,22 @@ def push_window_summaries(pushes: list[dict[str, Any]], window_size: int) -> lis
     return summaries
 
 
+def push_window_performance_gate(windows: list[dict[str, Any]]) -> dict[str, Any]:
+    p95_values = [int(window["latency_ms"]["p95"]) for window in windows]
+    max_p95_ms = max(p95_values, default=None)
+    if not p95_values:
+        status = "not_evaluated"
+    elif max_p95_ms is not None and max_p95_ms <= 1_000:
+        status = "passed"
+    else:
+        status = "failed"
+    return {
+        "status": status,
+        "p95_limit_ms": 1_000,
+        "max_window_p95_ms": max_p95_ms,
+    }
+
+
 def fetch_summary(fetches: list[dict[str, Any]]) -> dict[str, Any]:
     latencies = [int(item["elapsed_ms"]) for item in fetches]
     requests = [int(item["object_store"]["requests"]) for item in fetches]
@@ -163,11 +179,20 @@ def fetch_performance_gate(
 
 
 def qualification_performance_status(
-    *, push_requests_ok: bool, push_latency_ok: bool, fetch_status: str
+    *,
+    push_requests_ok: bool,
+    push_latency_ok: bool,
+    push_window_status: str,
+    fetch_status: str,
 ) -> str:
-    if not push_requests_ok or not push_latency_ok or fetch_status == "failed":
+    if (
+        not push_requests_ok
+        or not push_latency_ok
+        or push_window_status == "failed"
+        or fetch_status == "failed"
+    ):
         return "failed"
-    if fetch_status != "passed":
+    if push_window_status != "passed" or fetch_status != "passed":
         return "not_evaluated"
     return "passed"
 
@@ -938,11 +963,14 @@ class Qualification:
         fetch_gate = fetch_performance_gate(
             fetch_metrics, commits=self.args.commits, interval=self.args.interval
         )
+        push_windows = push_window_summaries(pushes, self.args.interval)
+        push_window_gate = push_window_performance_gate(push_windows)
         push_requests_ok = mean_push_requests < 10
         push_latency_ok = mean_push_latency_ms < 1_000
         performance_status = qualification_performance_status(
             push_requests_ok=push_requests_ok,
             push_latency_ok=push_latency_ok,
+            push_window_status=push_window_gate["status"],
             fetch_status=fetch_gate["status"],
         )
         self.report["metrics"] = {
@@ -972,9 +1000,10 @@ class Qualification:
                 "status": performance_status,
                 "push_mean_latency_ms_under_1000": push_latency_ok,
                 "push_mean_requests_under_10": push_requests_ok,
+                "push_window_p95_ms_under_1000": push_window_gate,
                 "500_commit_fetch": fetch_gate,
             },
-            "push_windows": push_window_summaries(pushes, self.args.interval),
+            "push_windows": push_windows,
             "git_auto_maintenance_events": auto_events,
             "git_fetch_repack_events": fetch_repacks,
         }

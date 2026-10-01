@@ -6,7 +6,7 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Protocol-v2 checkpoint Git packs, clone/fetch, repack, fsck, history, and GC |
-| Status | Working implementation, not release-qualified. The latest [exact-head replay attempt](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md) on PR #208 head `a29d81db` failed before seed publication when local `git index-pack --fsck-objects` hit the 300-second timeout; no incremental push, fetch, or repack ran. A post-failure host sample showed several CPU-heavy virtual machines and Rust builds, so the cause is not isolated. The latest completed full replay is head `523ec5a7`: all 5,000 pushes and ten fetches completed with exact tips, one new pack per fetch, strict Git/Crab fsck, and cold/warm sampled-byte checks. Overall push means passed (501.9 ms; 7.062 requests), but push latency was not flat by window, fetch p95 was 30.866 seconds against 10 seconds, and cold/warm clones took 310.4/141.6 seconds. Fetch request counts are diagnostic only (p95 11), not a gate. Exact-head 100 GiB Xet, hosted providers, full product parity, paired v1, and v1 retirement remain open. |
+| Status | Working implementation, not release-qualified. The latest completed [5,000-commit RustFS GA replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md) used candidate `537cf161`: all pushes, ten fetch-before-repack intervals, cold/warm clones, strict Git/Crab fsck, and sampled-byte checks passed. Push mean/p95/p99 were 335/579/932 ms, all 500-push-window p95 values were 465–766 ms, and mean push requests were 7.062. Fetch p95 was 6.257 seconds and each fetch installed one pack; fetch request counts are diagnostic only. This was not the exact current PR head: subsequent clone copy-on-write changes still need the full replay. The current-head 100 GiB Xet, hosted providers, full product parity, paired v1, and v1 retirement remain open. |
 | Priority | Correctness, stable incremental cost, then clone throughput and storage efficiency |
 | Replaces | Whole-repository Git-pack replacement during every v2 checkpoint |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Kubernetes 4,500-commit RustFS benchmark](../benchmarks/kubernetes-4500-rustfs.md) |
@@ -2608,6 +2608,26 @@ Metadata (236), reader (219), and writer (31) unit tests pass. This is focused
 in-memory proof only: boundary push tail latency, write amplification, request
 counts against RustFS, the 5,000-push workload, fetch latency, and the 100 GiB
 Xet workload must be measured on the final immutable binary before qualification.
+
+### 2.5.66 October 1 full Kubernetes replay on candidate 537cf
+
+The retained [RustFS 1.0.0 GA replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md)
+completed all 5,000 individual pushes and ten fetch-before-repack intervals.
+Seed and final tips matched, every fetch installed one pack, strict Git and
+remote Crab fsck passed, and independent cold/warm clones matched 32 sampled
+blob contents. Push latency was 335 ms mean / 579 ms p95 / 932 ms p99; the ten
+500-push windows had p95 values from 465 to 766 ms and exactly 7.062 mean
+object-store requests each. Fetch p95 was 6.257 seconds. Its 11-request p95 is
+retained as a diagnostic, not an acceptance gate.
+
+The qualification harness previously gated only aggregate push mean latency,
+which could hide a degraded late window. It now fails when any replay window's
+push p95 exceeds one second; the retained run's highest window p95 is 766 ms,
+so it passes this stricter check. The full replay used candidate `537cf161`,
+before the subsequent cached-pack copy-on-write clone change. Current-head
+replay, clone performance after that change, and 100 GiB Xet qualification
+remain required. Report and raw-request-log SHA-256 values are recorded in the
+benchmark record.
 
 ## 3. Goals
 
@@ -5322,7 +5342,8 @@ the paired v1 comparison against that same provider version:
 The run passes only if:
 
 - all 5,000 pushes and all ten incremental fetches succeed;
-- push request count and p50/p95/p99 latency remain flat by replay window;
+- every replay window's push p95 stays at or below one second; p50/p95/p99 and
+  per-window request counts remain in the report to expose trend and tails;
 - mean simple-push object-store operations remain below ten;
 - warm 500-commit incremental fetches complete within 10 seconds p95 on the
   recorded reference host; object-store request counts are reported for

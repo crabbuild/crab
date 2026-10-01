@@ -413,6 +413,26 @@ class CapsuleKubernetesQualificationTests(unittest.TestCase):
         self.assertEqual(windows[0]["resource_sample_count"], 1)
         self.assertEqual(windows[0]["children_max_rss"], 50)
 
+    def test_push_window_gate_rejects_subsecond_p95_regression(self) -> None:
+        windows = [
+            {"start_ordinal": 1, "end_ordinal": 500, "latency_ms": {"p95": 999}},
+            {"start_ordinal": 501, "end_ordinal": 1000, "latency_ms": {"p95": 1001}},
+        ]
+
+        gate = QUALIFICATION.push_window_performance_gate(windows)
+
+        self.assertEqual(gate["status"], "failed")
+        self.assertEqual(gate["max_window_p95_ms"], 1001)
+        self.assertEqual(
+            QUALIFICATION.push_window_performance_gate(
+                [{"latency_ms": {"p95": 1000}}]
+            )["status"],
+            "passed",
+        )
+        self.assertEqual(
+            QUALIFICATION.push_window_performance_gate([])["status"], "not_evaluated"
+        )
+
     def test_fetch_summary_reports_latency_io_and_pack_counts(self) -> None:
         fetches = [
             {
@@ -480,14 +500,7 @@ class CapsuleKubernetesQualificationTests(unittest.TestCase):
             QUALIFICATION.qualification_performance_status(
                 push_requests_ok=True,
                 push_latency_ok=True,
-                fetch_status="failed",
-            ),
-            "failed",
-        )
-        self.assertEqual(
-            QUALIFICATION.qualification_performance_status(
-                push_requests_ok=False,
-                push_latency_ok=True,
+                push_window_status="failed",
                 fetch_status="passed",
             ),
             "failed",
@@ -496,10 +509,65 @@ class CapsuleKubernetesQualificationTests(unittest.TestCase):
             QUALIFICATION.qualification_performance_status(
                 push_requests_ok=True,
                 push_latency_ok=True,
+                push_window_status="failed",
+                fetch_status="failed",
+            ),
+            "failed",
+        )
+        self.assertEqual(
+            QUALIFICATION.qualification_performance_status(
+                push_requests_ok=False,
+                push_latency_ok=True,
+                push_window_status="passed",
+                fetch_status="passed",
+            ),
+            "failed",
+        )
+        self.assertEqual(
+            QUALIFICATION.qualification_performance_status(
+                push_requests_ok=True,
+                push_latency_ok=True,
+                push_window_status="passed",
                 fetch_status="not_evaluated",
             ),
             "not_evaluated",
         )
+
+    def test_summarize_fails_when_a_push_window_tail_exceeds_one_second(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "crab"
+            binary.write_bytes(b"qualification binary")
+            binary_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
+            qualification = object.__new__(QUALIFICATION.Qualification)
+            qualification.crab = binary
+            qualification.args = argparse.Namespace(commits=2, interval=2)
+            qualification.trace2_root = root / "trace2"
+            qualification.trace2_root.mkdir()
+            qualification.save = Mock()
+            qualification.report = {
+                "provenance": {"crab_sha256": binary_hash},
+                "pushes": [
+                    {"ordinal": 0, "elapsed_ms": 50, "object_store": {"requests": 6}},
+                    {"ordinal": 1, "elapsed_ms": 100, "object_store": {"requests": 6}},
+                    {"ordinal": 2, "elapsed_ms": 1001, "object_store": {"requests": 6}},
+                ],
+                "maintenance": [
+                    {
+                        "operation": "incremental-fetch",
+                        "elapsed_ms": 500,
+                        "object_store": {"requests": 27},
+                    },
+                ],
+            }
+
+            with self.assertRaisesRegex(RuntimeError, "performance gates failed"):
+                qualification.summarize()
+
+            gates = qualification.report["metrics"]["performance_gates"]
+            self.assertLess(qualification.report["metrics"]["push_latency_ms"]["mean"], 1000)
+            self.assertEqual(gates["push_window_p95_ms_under_1000"]["status"], "failed")
+            self.assertEqual(gates["500_commit_fetch"]["status"], "not_evaluated")
 
     def test_git_auto_maintenance_parser_ignores_other_children(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

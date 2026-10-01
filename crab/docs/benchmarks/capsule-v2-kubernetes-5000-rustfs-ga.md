@@ -5,6 +5,56 @@ gate. Older entries below retain the gate language used when those runs were
 scored. Current fetch performance scoring uses exact correctness and p95
 latency at or below 10 seconds.
 
+## October 1 full replay on candidate 537cf (passed)
+
+Candidate `537cf161b929b17f8ccdc72075544fa2102fd6a6` (`crab 1.2.4`, binary
+SHA-256 `d0085f9758f24535ee12c2b3154ee8b68a497ce9bd4be9dda2eabafb0df1d301`)
+completed a 5,000-commit Kubernetes replay against local RustFS 1.0.0 GA. The
+RustFS container image was pinned to
+`ghcr.io/rustfs/rustfs@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858`.
+The run used bucket `crab-v2-pr208-537cf-k8s-5000-20261001-r2`, started at
+13:01:03 UTC, and finished at 13:51:25 UTC on October 1. The source repository
+was the full Kubernetes clone from base `0125bc12bc227cef2444fac719a3200feb52bc85`
+through head `44da53440764e494a06f2259f3629b4dd4294b21`.
+
+| Operation | Latency | Object-store requests / result |
+| --- | ---: | ---: |
+| Seed push | 213.280 s | 9 |
+| 5,000 incremental pushes, mean / p50 / p95 / p99 | 335.27 / 300 / 579 / 932 ms | 7.062 mean; every 500-push window 7.062 mean |
+| Push-window p95 range | 465–766 ms | Passes the later per-window 1,000 ms gate |
+| 500-commit fetch, mean / p50 / p95 | 4.487 / 4.228 / 6.257 s | 9.6 mean; 11 p95, diagnostic only |
+| Interval repack range | 10.475–28.074 s | Fetch ran before each repack |
+| Final cold / warm clone | 68.149 / 25.703 s | 17 / 15; 3 local packs each |
+
+All 5,000 individual pushes and ten exact-tip fetch-before-repack intervals
+completed. Every fetch installed exactly one new pack. Seed and final remote
+Crab fsck, strict full native Git fsck on the seed/cold/warm clones, exact
+final tips, and 32 sampled blob-byte comparisons for each final clone passed.
+Fetch response bytes totalled 598,647,595. The cold clone fetched
+1,319,883,247 response bytes; the warm clone fetched 55,967,981. No
+object-store request-count threshold was applied to fetches.
+
+This completed run passes the fetch-latency and correctness checks and, when
+evaluated by the subsequently added per-window gate, the sub-second push p95
+check. It does not qualify the exact current PR head: the later cached-pack
+copy-on-write clone change still needs full-replay coverage. Clone wall time
+also remains substantial despite integrity success. The report's aggregate
+push mean was 335.27 ms; its 3.592-second maximum is retained as an outlier,
+not hidden by the per-window p95 gate.
+
+The binary was unchanged through the run. Harness SHA-256:
+`3c515510dd54f4bce15efa761e6849f254674eb39c26f58312517957a09312ea`; request-proxy
+SHA-256 `bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879`.
+Retained `artifacts/report.json` SHA-256 is
+`e5c82112fa8c37fe7a57c78a2b02bcbfab11b1ae57c478c3777e30db9a1dc3df`, and
+`artifacts/requests.jsonl` SHA-256 is
+`e00b69695231869c7ae5f449a69b78e28f234b762e22096c362a77a59c530fe1`.
+
+The run proves correctness and bounded incremental behavior for this candidate
+on local RustFS only. Current-head replay, cold/warm clone performance after
+the copy-on-write change, 100 GiB Xet, hosted-provider/product parity, and a
+matched v1 comparison remain open; v1 retirement is not qualified.
+
 ## October 1 member-rollup attempt (no protocol interval reached)
 
 PR #208 head `a29d81db44de4137029b1f291ad2d9ee267ada81` was built as
