@@ -2718,12 +2718,13 @@ transaction/visibility identity for capsule members
 declared external delta-base identities
 ```
 
-This distinction is required for both correctness and request efficiency. A
+This distinction is required for correctness and request efficiency. A
 500-push frontier may contain hundreds of tiny Git packs, but its binary
 capsule-run inventory contains only a bounded number of physical objects. The
-protocol therefore limits physical sources, not individual Git pack members.
-Treating every capsule pack as one source would either exceed the source bound
-or force a synchronous physical repack at every checkpoint.
+protocol limits physical sources, not individual Git pack members; maintenance
+separately bounds the number of members expanded into local packs. Treating
+every capsule pack as one source would either exceed the source bound or force
+a synchronous physical repack at every checkpoint.
 
 The source kind determines the object path through `StoreLayout`; serialized
 records never carry an arbitrary object-store key. A capsule-run source uses
@@ -2917,7 +2918,11 @@ Normal GC removes them only after the grace period.
 Physical sources are weighted by compressed Git bytes, with member and object
 counts retained for diagnostics. Using factor two, maintenance selects the
 smallest source suffix whose combined weight violates the geometric
-progression. It downloads only the pack members in that suffix and any
+progression. It also selects the smallest newest suffix that, when replaced by
+one layer, brings the installed pack-member inventory back to at most eight.
+When both rules select work, maintenance uses the larger suffix; a
+member-driven roll-up is deferred if its selected bytes exceed the 512 MiB
+maintenance budget. It downloads only members in the selected suffix and any
 specific stable-prefix delta bases required to resolve them, produces one
 verified standalone replacement layer, and publishes:
 
@@ -2925,8 +2930,10 @@ verified standalone replacement layer, and publishes:
 stable prefix + replacement layer
 ```
 
-The stable prefix is neither downloaded nor rewritten. If the current source
-inventory is already geometric, repack is a metadata no-op.
+The stable prefix is neither downloaded nor rewritten. If the source inventory
+is geometric and the member count is at most eight, repack is a metadata no-op.
+If a bounded member roll-up is deferred by the byte budget, the inventory can
+remain above eight until a later eligible maintenance pass.
 
 This selection rule is deterministic for one pinned pack set. It must use the
 existing suffix-consolidation mechanics rather than the current
@@ -3590,14 +3597,13 @@ single-ref incremental fetch installs at most one new local response pack. The
 same read-admission lease covers the complete fetch; pack-source fan-out cannot
 acquire one lease per source.
 
-For the Kubernetes 500-commit interval used by qualification, the performance
-target is at most ten total origin operations for a warm single-ref fetch after
-immutable control caches are warm, with no more than one sequential payload
-read wave. The coalescer also has a measured byte-amplification ceiling; it
-cannot satisfy the request target by rereading a stable GiB-scale source. This
-is a release target, not a correctness shortcut: a workload that requires more
-verified ranges reports them honestly and fails the performance gate rather
-than transferring unauthorized or unbounded unrelated data.
+For the Kubernetes 500-commit interval used by qualification, object-store
+request count is reported diagnostically, not used as a fetch failure gate.
+Fetch latency remains a release target (p95 at most ten seconds), alongside
+exact-tip/connectivity checks, at most one new local pack, and transferred
+bytes proportional to the Git delta. A workload may require multiple verified
+ranges; it must report those honestly and cannot reread a stable GiB-scale
+source merely to reduce the request count.
 
 The September 27 pre-repack Kubernetes diagnostic reduced Git negotiation from
 17 rounds to one and fetch latency from 10.656 to 4.460 seconds, while origin

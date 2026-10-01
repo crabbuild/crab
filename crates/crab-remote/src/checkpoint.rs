@@ -10,12 +10,15 @@ use crab_git::pack::VerifiedPackIdentity;
 use crab_git::repack::{GeometricRepackedPack, RepackSource};
 use crab_metadata::capsule_protocol::{
     CapsuleGitPack, LayeredCheckpoint, LayeredObjectMember, LayeredVisibilitySnapshot, PackLayer,
-    PackSourceDescriptor, PointerCatalog, source_catalog_digest,
+    PackMemberDescriptor, PackRange, PackSourceDescriptor, PackSourceKind, PointerCatalog,
+    source_catalog_digest,
 };
 use crab_storage::{Store, StoreLayout};
 use tokio_util::sync::CancellationToken;
 
 const LAYERED_MAX_PHYSICAL_SOURCES: usize = 64;
+// One run can expand to hundreds of local packs; bound clone/index work after roll-up.
+const LAYERED_PACK_MEMBER_TARGET: usize = 8;
 // Physical maintenance is bounded independently of logical checkpointing.
 // The format's hard source limit can still require a minimal admission roll-up.
 const LAYERED_SUFFIX_BYTE_BUDGET: u64 = 512 * 1024 * 1024;
@@ -921,7 +924,51 @@ fn layered_suffix_start(
         .iter()
         .map(PackSourceDescriptor::compressed_bytes)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(layered_suffix_start_for_weights(&weights))
+    let member_counts = sources
+        .iter()
+        .map(|source| source.members().len())
+        .collect::<Vec<_>>();
+    Ok(layered_suffix_start_for_inventory(&weights, &member_counts))
+}
+
+fn layered_suffix_start_for_inventory(weights: &[u64], member_counts: &[usize]) -> Option<usize> {
+    if weights.len() != member_counts.len() {
+        return None;
+    }
+    let geometric = layered_suffix_start_for_weights(weights);
+    let member_bound = layered_member_suffix_start(member_counts).filter(|start| {
+        weights[*start..]
+            .iter()
+            .copied()
+            .fold(0_u64, u64::saturating_add)
+            <= LAYERED_SUFFIX_BYTE_BUDGET
+    });
+    match (geometric, member_bound) {
+        (Some(geometric), Some(member_bound)) => Some(geometric.min(member_bound)),
+        (Some(geometric), None) => Some(geometric),
+        (None, Some(member_bound)) => Some(member_bound),
+        (None, None) => None,
+    }
+}
+
+fn layered_member_suffix_start(member_counts: &[usize]) -> Option<usize> {
+    let total_members = member_counts
+        .iter()
+        .copied()
+        .fold(0_usize, usize::saturating_add);
+    if total_members <= LAYERED_PACK_MEMBER_TARGET {
+        return None;
+    }
+
+    let members_to_replace = total_members - LAYERED_PACK_MEMBER_TARGET + 1;
+    let mut selected_members = 0_usize;
+    for (index, member_count) in member_counts.iter().enumerate().rev() {
+        selected_members = selected_members.saturating_add(*member_count);
+        if selected_members >= members_to_replace {
+            return Some(index);
+        }
+    }
+    None
 }
 
 fn layered_suffix_start_for_weights(weights: &[u64]) -> Option<usize> {
@@ -1177,6 +1224,36 @@ mod tests {
             .expect("source descriptor")
     }
 
+    fn capsule_run_source(member_count: usize) -> PackSourceDescriptor {
+        let mut members = Vec::with_capacity(member_count);
+        for index in 0..member_count {
+            let offset = u64::try_from(index).unwrap() * 16;
+            let pack_bytes = u64::try_from(index).unwrap().to_be_bytes();
+            members.push(
+                PackMemberDescriptor::new(
+                    PackRange::new(offset, &pack_bytes).unwrap(),
+                    PackRange::new(offset + 8, b"i").unwrap(),
+                    PackRange::new(offset + 9, b"r").unwrap(),
+                    PackRange::new(offset + 10, b"l").unwrap(),
+                    format!("{index:040x}"),
+                    1,
+                    Vec::new(),
+                )
+                .unwrap(),
+            );
+        }
+        PackSourceDescriptor::new(
+            PackSourceKind::CapsuleRun,
+            "a".repeat(64),
+            u64::try_from(member_count).unwrap() * 16 + 8,
+            u64::try_from(member_count).unwrap() * 16,
+            8,
+            "b".repeat(64),
+            members,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn layered_suffix_uses_weighted_geometric_cut() {
         let sources = [900, 700, 9, 9].into_iter().map(source).collect::<Vec<_>>();
@@ -1189,6 +1266,31 @@ mod tests {
         let sources = [900, 9].into_iter().map(source).collect::<Vec<_>>();
 
         assert_eq!(layered_suffix_start(&sources).expect("selection"), None);
+    }
+
+    #[test]
+    fn layered_suffix_compacts_member_heavy_run_after_large_stable_source() {
+        let sources = vec![source(100_000), capsule_run_source(500)];
+
+        assert_eq!(layered_suffix_start(&sources).expect("selection"), Some(1));
+    }
+
+    #[test]
+    fn layered_member_suffix_stays_at_target_after_one_pack_replacement() {
+        assert_eq!(layered_member_suffix_start(&[1_usize; 8]), None);
+        assert_eq!(layered_member_suffix_start(&[1_usize; 9]), Some(7));
+    }
+
+    #[test]
+    fn layered_suffix_defers_member_rollup_over_byte_budget() {
+        let weights = [100_000, LAYERED_SUFFIX_BYTE_BUDGET + 1];
+        let member_counts = [1, LAYERED_PACK_MEMBER_TARGET + 1];
+
+        assert_eq!(layered_member_suffix_start(&member_counts), Some(1));
+        assert_eq!(
+            layered_suffix_start_for_inventory(&weights, &member_counts),
+            None
+        );
     }
 
     #[test]
