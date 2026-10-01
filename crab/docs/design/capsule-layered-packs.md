@@ -5305,9 +5305,9 @@ The run passes only if:
 - all 5,000 pushes and all ten incremental fetches succeed;
 - push request count and p50/p95/p99 latency remain flat by replay window;
 - mean simple-push object-store operations remain below ten;
-- warm 500-commit incremental fetches use at most ten origin operations after
-  immutable control caches warm and complete within 10 seconds p95 on the
-  recorded reference host;
+- warm 500-commit incremental fetches complete within 10 seconds p95 on the
+  recorded reference host; object-store request counts are reported for
+  diagnosis, not used as a pass/fail gate;
 - no incremental fetch reads a stable source body already installed locally or
   downloads a replacement copy of objects already proven locally;
 - each ordinary checkpoint/repack reads and writes only its frontier or

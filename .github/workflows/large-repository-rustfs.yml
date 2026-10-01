@@ -6,6 +6,9 @@ on:
       - ".github/workflows/large-repository-rustfs.yml"
       - "crab/scripts/e2e/run_large_repo_rustfs.py"
       - "crab/scripts/e2e/test_verify_large_repo_rustfs_report.py"
+      - "crab/scripts/e2e/run_capsule_k8s_rustfs.py"
+      - "crab/scripts/e2e/test_run_capsule_k8s_rustfs.py"
+      - "crab/docs/design/capsule-layered-packs.md"
       - "crab/scripts/verify-large-repo-rustfs-report.py"
       - "crab/docs/guides/large-repository-qualification.md"
       - "crates/crab-read/src/upload_pack.rs"
@@ -37,6 +40,9 @@ on:
       - ".github/workflows/large-repository-rustfs.yml"
       - "crab/scripts/e2e/run_large_repo_rustfs.py"
       - "crab/scripts/e2e/test_verify_large_repo_rustfs_report.py"
+      - "crab/scripts/e2e/run_capsule_k8s_rustfs.py"
+      - "crab/scripts/e2e/test_run_capsule_k8s_rustfs.py"
+      - "crab/docs/design/capsule-layered-packs.md"
       - "crab/scripts/verify-large-repo-rustfs-report.py"
       - "crab/docs/guides/large-repository-qualification.md"
       - "crates/crab-read/src/upload_pack.rs"
@@ -85,9 +91,11 @@ jobs:
       - name: Verify report contract tests
         run: |
           python3 -m unittest crab/scripts/e2e/test_verify_large_repo_rustfs_report.py
+          python3 -m unittest crab/scripts/e2e/test_run_capsule_k8s_rustfs.py
           python3 -m py_compile \
             crab/scripts/e2e/run_large_repo_rustfs.py \
-            crab/scripts/verify-large-repo-rustfs-report.py
+            crab/scripts/verify-large-repo-rustfs-report.py \
+            crab/scripts/e2e/run_capsule_k8s_rustfs.py
 
   kubernetes-rustfs:
     name: Kubernetes 1,000-commit RustFS qualification

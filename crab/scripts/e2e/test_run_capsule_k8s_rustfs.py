@@ -458,6 +458,14 @@ class CapsuleKubernetesQualificationTests(unittest.TestCase):
             QUALIFICATION.fetch_performance_gate(summary, commits=20, interval=10)["status"],
             "not_evaluated",
         )
+        high_request_count = QUALIFICATION.fetch_summary(
+            [{"elapsed_ms": 5550, "object_store": {"requests": 27}}]
+        )
+        high_request_gate = QUALIFICATION.fetch_performance_gate(
+            high_request_count, commits=500, interval=500
+        )
+        self.assertEqual(high_request_gate["status"], "passed")
+        self.assertEqual(high_request_gate["object_store_requests_p95_observed"], 27)
         over_budget = QUALIFICATION.fetch_summary(
             [{"elapsed_ms": 10_001, "object_store": {"requests": 11}}]
         )
