@@ -884,7 +884,7 @@ mod platform {
                 }
                 self.file.set_len(0)?;
                 self.file.seek(std::io::SeekFrom::Start(0))?;
-                return Ok(false);
+                Ok(false)
             }
 
             #[cfg(target_os = "macos")]
