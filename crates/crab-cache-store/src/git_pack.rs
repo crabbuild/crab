@@ -26,8 +26,9 @@ pub struct GitPackSource<'a> {
 
 /// Stage verified pack bytes and return sidecars for caller-owned Git/visibility checks.
 ///
-/// `destination` must be an unpublished caller-owned file. The selected origin,
-/// not the cache's construction-time store, remains authoritative for misses.
+/// `destination` must be an unpublished caller-owned file below an existing
+/// owner-private staging directory. The selected origin, not the cache's
+/// construction-time store, remains authoritative for misses.
 /// Cache hits prove byte identity only; sidecars and authorization are not cached.
 /// Token cancellation stops source waits and drains local writes before return.
 /// Await completion before destination cleanup; dropping this future is not a drain.
@@ -50,15 +51,10 @@ pub async fn read_pack_ranges(
     }
     let length = source.pack.end - source.pack.start;
     if let Some(cache) = cache {
-        let mut output = tokio::fs::File::create(destination)
-            .await
-            .map_err(StorageError::from)?;
         let hit = cache
             .local_cache
-            .copy_git_pack_if_present(&source.pack_hash, length, &mut output)
+            .copy_git_pack_if_present(&source.pack_hash, length, destination)
             .await?;
-        output.flush().await.map_err(StorageError::from)?;
-        drop(output);
         if cancel.is_cancelled() {
             return Err(StorageError::Cancelled.into());
         }
@@ -74,6 +70,9 @@ pub async fn read_pack_ranges(
         if hit {
             return read_sidecars(origin, source, cancel).await;
         }
+        tokio::fs::File::create(destination)
+            .await
+            .map_err(StorageError::from)?;
     }
 
     let accelerated = origin
@@ -197,6 +196,17 @@ mod tests {
 
     use super::*;
 
+    fn private_tempdir_in(parent: &Path) -> tempfile::TempDir {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("git-pack-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        builder.tempdir_in(parent).unwrap()
+    }
+
     #[derive(Default)]
     struct Reads(Mutex<Vec<StorageObservation>>);
 
@@ -222,6 +232,7 @@ mod tests {
             Some(1024),
             None,
         ));
+        let staging = private_tempdir_in(directory.path());
         // Construction-time origin has no data; routing must honor the pinned origin argument.
         let cache = CachingStore::new_with_local_cache(
             Store::new(Arc::new(InMemory::new())),
@@ -238,9 +249,13 @@ mod tests {
             sidecars: 12..17,
             pack_hash: blake3::hash(b"pack"),
         };
-        for (name, expected_bytes) in [("cold", 9), ("warm", 5)] {
+        for (name, expected_bytes) in [
+            ("cold", 9),
+            ("warm", 5),
+            ("warm-after-destination-write", 5),
+        ] {
             observer.0.lock().unwrap().clear();
-            let destination = directory.path().join(name);
+            let destination = staging.path().join(name);
             assert_eq!(
                 read_pack_ranges(
                     &origin,
@@ -253,7 +268,7 @@ mod tests {
                 .unwrap(),
                 b"index"[..]
             );
-            assert_eq!(tokio::fs::read(destination).await.unwrap(), b"pack");
+            assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"pack");
             assert_eq!(
                 observer
                     .0
@@ -264,6 +279,11 @@ mod tests {
                     .sum::<u64>(),
                 expected_bytes
             );
+            if name == "warm" {
+                tokio::fs::write(&destination, b"changed destination")
+                    .await
+                    .unwrap();
+            }
         }
     }
 

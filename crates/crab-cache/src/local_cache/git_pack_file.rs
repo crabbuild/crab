@@ -1,4 +1,5 @@
 use super::*;
+use crate::private_fs::{PendingFile, PinnedRoot};
 
 impl LocalCache {
     /// Retain a native Git pack file under its authenticated byte-content identity.
@@ -45,16 +46,18 @@ impl LocalCache {
         Ok(())
     }
 
-    /// Copy a hash-verified cached pack to a caller-owned unpublished file.
+    /// Materialize a hash-verified cached pack at an unpublished destination.
     ///
-    /// A miss, corrupt entry or cache read error returns false. The destination
-    /// may contain rejected bytes and must be reset before origin fallback.
-    /// Destination write errors propagate without evicting a healthy cache entry.
+    /// A hit uses a filesystem copy-on-write clone when available and a bounded
+    /// copy otherwise; it never hard-links the mutable repository pack to cache.
+    /// The destination parent must be an existing private directory. A miss or
+    /// corrupt entry returns false. Destination errors propagate without
+    /// evicting a healthy cache entry.
     pub async fn copy_git_pack_if_present(
         &self,
         hash: &blake3::Hash,
         expected_len: u64,
-        output: &mut tokio::fs::File,
+        destination: &Path,
     ) -> Result<bool> {
         let path = self.git_pack_path(hash);
         let Ok((entry, mut input)) = PayloadRead::open(&self.root, &path).await else {
@@ -69,45 +72,33 @@ impl LocalCache {
         {
             return Ok(false);
         }
-        let mut hasher = blake3::Hasher::new();
-        let mut remaining = expected_len;
-        let mut buffer = vec![0; 1024 * 1024];
-        let validation = loop {
-            let read = match input.read(&mut buffer).await {
-                Ok(read) => read,
-                Err(error) => break Err(CacheError::Io(error)),
-            };
-            if read == 0 {
-                let actual = hasher.finalize();
-                break if remaining == 0 && actual == *hash {
-                    Ok(())
-                } else {
-                    Err(CacheError::HashMismatch {
-                        requested: hash.to_hex().to_string(),
-                        actual: actual.to_hex().to_string(),
-                    })
-                };
-            }
-            let Some(rest) = remaining.checked_sub(read as u64) else {
-                break Err(CacheError::CorruptObject {
-                    path: path.display().to_string(),
-                    reason: "cached Git pack exceeds its authenticated length".to_owned(),
-                });
-            };
-            // An output failure is not evidence that the cached source is bad.
-            output.write_all(&buffer[..read]).await?;
-            hasher.update(&buffer[..read]);
-            remaining = rest;
+
+        let destination = destination.to_owned();
+        let pending = new_pack_pending_file(&destination).await?;
+        #[cfg(unix)]
+        let (pending, copy_on_write) = match entry.copy_on_write_to(pending).await? {
+            Some(pending) => (pending, true),
+            None => (new_pack_pending_file(&destination).await?, false),
         };
-        drop(input);
-        if validation.is_ok() {
-            // Tokio file writes may defer their I/O error until flush. Surface
-            // destination failures before reporting a hit or repairing source.
-            output.flush().await?;
-        }
-        let Ok(((), entry)) = entry.finish(validation).await else {
+        #[cfg(not(unix))]
+        let (mut pending, copy_on_write) = (pending, false);
+
+        let mut output = pending.file()?;
+        let validation = if copy_on_write {
+            verify_pack_file(&mut output, hash, expected_len, &path).await?
+        } else {
+            copy_pack_file(&mut input, &mut output, hash, expected_len, &path).await?
+        };
+        drop(output);
+        if let Err(error) = validation {
+            drop(pending);
+            let _ = entry.finish::<(), CacheError>(Err(error)).await;
             return Ok(false);
-        };
+        }
+        tokio::task::spawn_blocking(move || pending.commit_sync())
+            .await
+            .map_err(|error| CacheError::Io(std::io::Error::other(error)))??;
+        let (_, entry) = entry.finish::<(), CacheError>(Ok(())).await?;
         entry.touch().await;
         Ok(true)
     }
@@ -121,14 +112,117 @@ impl LocalCache {
     }
 }
 
+async fn new_pack_pending_file(destination: &Path) -> Result<PendingFile> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| CacheError::Internal("Git pack destination has no parent".into()))?
+        .to_owned();
+    let name = destination
+        .file_name()
+        .ok_or_else(|| CacheError::Internal("Git pack destination has no filename".into()))?;
+    let name = PathBuf::from(name);
+    tokio::task::spawn_blocking(move || {
+        let root = PinnedRoot::open(&parent)?;
+        root.pending_file(&name)
+    })
+    .await
+    .map_err(|error| CacheError::Io(std::io::Error::other(error)))?
+}
+
+async fn copy_pack_file(
+    input: &mut tokio::fs::File,
+    output: &mut tokio::fs::File,
+    hash: &blake3::Hash,
+    expected_len: u64,
+    path: &Path,
+) -> Result<std::result::Result<(), CacheError>> {
+    let mut hasher = blake3::Hasher::new();
+    let mut remaining = expected_len;
+    let mut buffer = vec![0; 1024 * 1024];
+    let validation = loop {
+        let read = match input.read(&mut buffer).await {
+            Ok(read) => read,
+            Err(error) => break Err(CacheError::Io(error)),
+        };
+        if read == 0 {
+            break validate_pack_hash(hasher.finalize(), remaining, hash);
+        }
+        let Some(rest) = remaining.checked_sub(read as u64) else {
+            break Err(CacheError::CorruptObject {
+                path: path.display().to_string(),
+                reason: "cached Git pack exceeds its authenticated length".to_owned(),
+            });
+        };
+        // A destination failure does not prove that the cached source is bad.
+        output.write_all(&buffer[..read]).await?;
+        hasher.update(&buffer[..read]);
+        remaining = rest;
+    };
+    if validation.is_ok() {
+        output.flush().await?;
+    }
+    Ok(validation)
+}
+
+async fn verify_pack_file(
+    input: &mut tokio::fs::File,
+    hash: &blake3::Hash,
+    expected_len: u64,
+    path: &Path,
+) -> Result<std::result::Result<(), CacheError>> {
+    let mut hasher = blake3::Hasher::new();
+    let mut remaining = expected_len;
+    let mut buffer = vec![0; 1024 * 1024];
+    loop {
+        let read = input.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(validate_pack_hash(hasher.finalize(), remaining, hash));
+        }
+        let Some(rest) = remaining.checked_sub(read as u64) else {
+            return Ok(Err(CacheError::CorruptObject {
+                path: path.display().to_string(),
+                reason: "cached Git pack exceeds its authenticated length".to_owned(),
+            }));
+        };
+        hasher.update(&buffer[..read]);
+        remaining = rest;
+    }
+}
+
+fn validate_pack_hash(
+    actual: blake3::Hash,
+    remaining: u64,
+    requested: &blake3::Hash,
+) -> std::result::Result<(), CacheError> {
+    if remaining == 0 && actual == *requested {
+        Ok(())
+    } else {
+        Err(CacheError::HashMismatch {
+            requested: requested.to_hex().to_string(),
+            actual: actual.to_hex().to_string(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio_util::sync::CancellationToken;
 
+    fn private_tempdir() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        directory
+    }
+
     #[tokio::test]
     async fn git_pack_cache_roundtrip_accounting_and_cleanup() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_tempdir();
         let body = b"authenticated pack bytes";
         let hash = blake3::hash(body);
         let source = directory.path().join("source");
@@ -139,14 +233,12 @@ mod tests {
             .await
             .unwrap();
         let destination = directory.path().join("output");
-        let mut output = tokio::fs::File::create(&destination).await.unwrap();
         assert!(
             cache
-                .copy_git_pack_if_present(&hash, body.len() as u64, &mut output)
+                .copy_git_pack_if_present(&hash, body.len() as u64, &destination)
                 .await
                 .unwrap()
         );
-        output.flush().await.unwrap();
         assert_eq!(tokio::fs::read(&destination).await.unwrap(), body);
         let stats = cache.stats().await.unwrap();
         assert_eq!(
@@ -173,7 +265,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_pack_cache_rejects_corruption_and_respects_capacity() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_tempdir();
         let body = b"authenticated pack bytes";
         let hash = blake3::hash(body);
         let source = directory.path().join("source");
@@ -193,12 +285,10 @@ mod tests {
         tokio::fs::write(cache.git_pack_path(&hash), &corrupt)
             .await
             .unwrap();
-        let mut output = tokio::fs::File::create(directory.path().join("output"))
-            .await
-            .unwrap();
+        let destination = directory.path().join("output");
         assert!(
             !cache
-                .copy_git_pack_if_present(&hash, body.len() as u64, &mut output)
+                .copy_git_pack_if_present(&hash, body.len() as u64, &destination)
                 .await
                 .unwrap()
         );
@@ -215,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_pack_request_and_destination_failures_do_not_evict_healthy_bytes() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_tempdir();
         let body = b"authenticated pack bytes";
         let hash = blake3::hash(body);
         let source = directory.path().join("source");
@@ -225,18 +315,21 @@ mod tests {
             .put_git_pack_file(&hash, &source, body.len() as u64)
             .await
             .unwrap();
-        // A read-only destination makes a real writer failure without relying
-        // on mode bits, which a privileged test runner could bypass.
-        let mut output = tokio::fs::File::open(&source).await.unwrap();
+        let blocked_destination = directory.path().join("blocked-destination");
+        tokio::fs::create_dir(&blocked_destination).await.unwrap();
         assert!(
             !cache
-                .copy_git_pack_if_present(&hash, body.len() as u64 + 1, &mut output)
+                .copy_git_pack_if_present(
+                    &hash,
+                    body.len() as u64 + 1,
+                    &directory.path().join("wrong-length"),
+                )
                 .await
                 .unwrap()
         );
         assert!(matches!(
             cache
-                .copy_git_pack_if_present(&hash, body.len() as u64, &mut output)
+                .copy_git_pack_if_present(&hash, body.len() as u64, &blocked_destination)
                 .await,
             Err(CacheError::Io(_))
         ));
@@ -244,6 +337,14 @@ mod tests {
             tokio::fs::read(cache.git_pack_path(&hash)).await.unwrap(),
             body
         );
+        let destination = directory.path().join("output");
+        assert!(
+            cache
+                .copy_git_pack_if_present(&hash, body.len() as u64, &destination)
+                .await
+                .unwrap()
+        );
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), body);
         let prune = LocalCache::with_limits(cache.root.clone(), Some(0), None)
             .prune()
             .await

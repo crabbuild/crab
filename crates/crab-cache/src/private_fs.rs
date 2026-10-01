@@ -310,6 +310,11 @@ impl PendingFile {
         Ok(tokio::fs::File::from_std(self.0.file().try_clone()?))
     }
 
+    #[cfg(unix)]
+    pub(crate) fn copy_on_write_from(&mut self, source_file: &std::fs::File) -> Result<bool> {
+        self.0.copy_on_write_from(source_file)
+    }
+
     #[cfg(all(feature = "remote-client", feature = "local-cache"))]
     pub(crate) fn into_unlinked_file(self) -> Result<std::fs::File> {
         self.0.into_unlinked_file()
@@ -358,6 +363,8 @@ mod platform {
     use std::ffi::{CString, OsStr};
     use std::fs::{File, OpenOptions};
     use std::io;
+    #[cfg(target_os = "linux")]
+    use std::io::Seek as _;
     use std::os::fd::IntoRawFd as _;
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
     use std::os::unix::ffi::OsStrExt as _;
@@ -694,6 +701,14 @@ mod platform {
         Ok(())
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn copy_on_write_unavailable(error: &io::Error) -> bool {
+        matches!(
+            error.raw_os_error(),
+            Some(libc::EOPNOTSUPP | libc::ENOTTY | libc::EXDEV | libc::EINVAL)
+        )
+    }
+
     fn validate_permissions(mode: impl Into<u32>, owner: libc::uid_t, path: &Path) -> Result<()> {
         // SAFETY: geteuid only reads the calling process's effective identity.
         let uid = unsafe { libc::geteuid() };
@@ -845,6 +860,74 @@ mod platform {
             &self.file
         }
 
+        pub(super) fn copy_on_write_from(&mut self, source_file: &File) -> Result<bool> {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::fd::AsRawFd as _;
+
+                // SAFETY: both descriptors remain open for the ioctl; the
+                // destination is this unpublished regular file and FICLONE
+                // takes the source descriptor as its third argument.
+                let result = unsafe {
+                    libc::ioctl(
+                        self.file.as_raw_fd(),
+                        libc::FICLONE as libc::c_ulong,
+                        source_file.as_raw_fd(),
+                    )
+                };
+                if result == 0 {
+                    return Ok(true);
+                }
+                let error = io::Error::last_os_error();
+                if !copy_on_write_unavailable(&error) {
+                    return Err(error.into());
+                }
+                self.file.set_len(0)?;
+                self.file.seek(std::io::SeekFrom::Start(0))?;
+                return Ok(false);
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                let _destination_mutation = self.directory.mutation()?;
+                self.directory.remove(&self.temporary)?;
+                let clone_path = self
+                    .directory
+                    .path
+                    .join(OsStr::from_bytes(self.temporary.as_bytes()));
+                // SAFETY: the source descriptor and destination directory stay
+                // open; the single-component destination is pinned. fclonefileat
+                // creates an independent copy-on-write file, not a hard link.
+                let result = unsafe {
+                    libc::fclonefileat(
+                        source_file.as_raw_fd(),
+                        self.directory.file.as_raw_fd(),
+                        self.temporary.as_ptr(),
+                        0,
+                    )
+                };
+                if result != 0 {
+                    let error = io::Error::last_os_error();
+                    if copy_on_write_unavailable(&error) {
+                        return Ok(false);
+                    }
+                    return Err(error.into());
+                }
+                let cloned_file =
+                    self.directory
+                        .open_component(&self.temporary, libc::O_RDWR, &clone_path)?;
+                validate_metadata(&cloned_file.metadata()?, &clone_path, false)?;
+                self.file = cloned_file;
+                Ok(true)
+            }
+
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                let _ = source_file;
+                Ok(false)
+            }
+        }
+
         pub(super) fn lease(&self) -> Result<File> {
             let file = self.file.try_clone()?;
             if !fs4::fs_std::FileExt::try_lock_shared(&file)? {
@@ -953,6 +1036,32 @@ mod platform {
             let mut bytes = Vec::new();
             reader.read_to_end(&mut bytes).unwrap();
             assert_eq!(bytes, b"original");
+        }
+
+        #[test]
+        fn copy_on_write_git_pack_is_independent_from_its_cache_source() {
+            let temporary = tempfile::tempdir().unwrap();
+            let cache_path = temporary.path().join("cache");
+            let target_path = temporary.path().join("target");
+            let cache = Directory::root(&cache_path, true).unwrap();
+            let mut source = TemporaryFile::new_at(&cache, Path::new("pack")).unwrap();
+            source.file.write_all(b"verified pack bytes").unwrap();
+            source.commit().unwrap();
+            let source_file = cache.open_read(Path::new("pack")).unwrap();
+
+            let target = Directory::root(&target_path, true).unwrap();
+            let mut destination = TemporaryFile::new_at(&target, Path::new("pack")).unwrap();
+            let copied_on_write = destination.copy_on_write_from(&source_file).unwrap();
+            if !copied_on_write {
+                return;
+            }
+            destination.commit().unwrap();
+
+            std::fs::write(target_path.join("pack"), b"changed destination").unwrap();
+            assert_eq!(
+                std::fs::read(cache_path.join("pack")).unwrap(),
+                b"verified pack bytes"
+            );
         }
 
         #[test]

@@ -39,11 +39,12 @@ content validation remains caller-owned, and separate manifest body/ETag
 publication is not an atomic pair.
 
 Native Git pack files have a separate `git-packs/aa/<plain-blake3>` identity,
-not a Xet hash or a named-manifest key. File-backed fills and copies retain
-bounded buffers, validate the exact byte length and hash, and use the same
-private publication/read-repair owners as other payloads. A conflicting caller
-length is a miss, not deletion authority; hash corruption invokes descriptor-bound
-repair. Destination write failures propagate without evicting the healthy source.
+not a Xet hash or a named-manifest key. File-backed fills use bounded buffers
+and validate the exact byte length and hash. Hits verify that identity before
+publishing an independent copy-on-write clone when supported, or a bounded
+copy otherwise; cache and repository files are never hard-linked. A conflicting
+caller length is a miss, not deletion authority; hash corruption invokes
+descriptor-bound repair. Destination failures do not evict a healthy source.
 No entry is installed on a failed fill. Git semantics and visibility remain
 outside this byte cache. Concurrent fills may duplicate work; this path does
 not yet provide per-key single-flight or remote cache-service pack retention.

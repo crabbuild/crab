@@ -2120,9 +2120,15 @@ async fn install_layered_cold_clone_packs_from_store(
         .collect::<Vec<_>>();
     let pack_dir = git_dir.join("objects").join("pack");
     tokio::fs::create_dir_all(&pack_dir).await?;
-    let temporary = tempfile::Builder::new()
-        .prefix(".crab-cold-pack-")
-        .tempdir_in(&pack_dir)?;
+    // Cache pack clones require an owner-private unpublished destination.
+    let mut staging = tempfile::Builder::new();
+    staging.prefix(".crab-cold-pack-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        staging.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let temporary = staging.tempdir_in(&pack_dir)?;
     let mut staged = Vec::with_capacity(admitted.len());
     let mut object_ids = Vec::new();
     for (ordinal, (admitted, (source, member))) in
