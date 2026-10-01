@@ -10,9 +10,10 @@ use crab_git::pack::VerifiedPackIdentity;
 use crab_git::repack::{GeometricRepackedPack, RepackSource};
 use crab_metadata::capsule_protocol::{
     CapsuleGitPack, LayeredCheckpoint, LayeredObjectMember, LayeredVisibilitySnapshot, PackLayer,
-    PackMemberDescriptor, PackRange, PackSourceDescriptor, PackSourceKind, PointerCatalog,
-    source_catalog_digest,
+    PackSourceDescriptor, PointerCatalog, source_catalog_digest,
 };
+#[cfg(test)]
+use crab_metadata::capsule_protocol::{PackMemberDescriptor, PackRange, PackSourceKind};
 use crab_storage::{Store, StoreLayout};
 use tokio_util::sync::CancellationToken;
 
