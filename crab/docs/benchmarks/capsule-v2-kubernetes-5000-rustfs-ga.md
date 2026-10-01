@@ -1,5 +1,60 @@
 # Capsule v2: Kubernetes 5,000-commit RustFS GA qualification
 
+Fetch request-count policy: request counts are diagnostic, not a pass/fail
+gate. Older entries below retain the gate language used when those runs were
+scored. Current fetch performance scoring uses exact correctness and p95
+latency at or below 10 seconds.
+
+## October 1 exact PR-head replay (fetch request counts informational)
+
+PR #208 head `523ec5a79d484f25fbad281d433a66635feb3343` was built as
+`crab 1.2.4` (binary SHA-256
+`6590e71ede272852f9b6408af6f3e1fb8576db0d38c3992b4cfa164f4fb3feea`). A fresh
+full Kubernetes clone supplied head `08147af84478f859c2e2234d71ceace8bdb412c7`
+from seed `b363f196c517c8e069e2b91995accf3afd389bb9`. The local RustFS 1.0.0
+GA run replayed 5,000 first-parent pushes, fetching and then repacking every
+500 pushes. It ran 04:28:27–06:16:19 UTC on October 1 with harness SHA-256
+`905054d8d4f344b070451d069c9c35e4d352b134790ac5beec7f928cf44936c2` and
+request-meter SHA-256
+`bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879`.
+
+| Operation | Latency | Object-store requests / result |
+| --- | ---: | ---: |
+| Seed push | 509.333 s | 9 |
+| 5,000 incremental pushes, mean / p50 / p95 / p99 | 501.90 / 345 / 1,238 / 2,325 ms | 7.062 mean; 6 p50/p95; 40 p99 |
+| Push windows, mean latency | 313.31–1,035.87 ms | 7.062 requests mean in every window |
+| 500-commit fetch, mean / p50 / p95 | 8.080 / 5.100 / 30.866 s | 9.6 mean; 11 p95, diagnostic only |
+| Interval repack range | 6.009–32.715 s | Final interval was metadata-only (502 packs before/after) |
+| Final cold / warm clone | 310.400 / 141.621 s | 518 / 516; 502 local packfiles each |
+| Final remote Crab fsck | 899.072 s | 562 requests; 4.285 GB response |
+
+All 5,000 pushes and ten exact-tip fetches completed. Every fetch installed
+exactly one new pack; the final cold and warm clones reached the expected tip,
+passed strict full Git fsck, and matched 32 sampled blob byte sequences to the
+source. Seed and final remote Crab fsck passed, with no proxy errors. The
+overall push mean-latency and mean-request gates passed. Fetch request count
+does not gate this run: its p95 of 11 is retained for diagnosis. **The
+fetch-latency gate failed:** p95 was 30.866 seconds against 10 seconds.
+
+Push latency was not flat by window: the first and last 500-push means were
+1,022 and 1,036 ms, while the intervening windows ranged from 313 to 434 ms.
+The last push was an 8.639-second Kubernetes merge commit. Cold clone fetched
+1.361 GB across 507 capsule GETs; its remote-helper phase took 277.7 seconds.
+Warm clone still made 507 capsule GETs and took 141.6 seconds. Both ended with
+502 local packfiles. These timings were captured on a saturated shared host
+(0% idle in contemporaneous samples, with unrelated Rust builds and virtual
+machines active), so they remain measured failures but cannot be attributed
+to Crab or RustFS alone without an isolated repeat. No matched-v1 result is
+claimed; Xet, hosted-provider, and full product-parity qualification remain
+open.
+
+Retained artifacts under the mounted CrabBuild workspace:
+`pr208-live-20260930/capsule-rollup-c3ce/k8s-runs/k8s-upstream-08147af-523ec5a-exact-r1/artifacts/report.json`
+(SHA-256 `8ca62a920d2ed84f3cb07681485b718d334eb4d3f6c78f215c216abefcd65b11`),
+`requests.jsonl` (SHA-256
+`c16aa86c8eb1a80171728d82615ad3729240bf64b13647f84887195ec4be7076`), and
+the `trace2/` directory.
+
 ## September 30 exact PR-head replay
 
 PR #208 head `53b11070b66ee307f7c632e9202146b9c5224673` was built as

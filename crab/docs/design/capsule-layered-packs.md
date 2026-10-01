@@ -6,7 +6,7 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Protocol-v2 checkpoint Git packs, clone/fetch, repack, fsck, history, and GC |
-| Status | Working implementation, not qualified. The [retained exact-head GA replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md) on `53b11070` completed 5,000 Kubernetes pushes, ten exact-tip fetch/repack intervals, cold/warm clones, strict Git/Crab integrity and sampled blob comparisons, but fetch p95 was 11.068 seconds / 34 requests and clones took 48.683 / 28.526 seconds. A new CRBRUN07 per-ref rollup is locally covered by 236 metadata, 219 reader and 31 writer tests, including 1,000 sequential publications; it has not yet been replayed on RustFS. PR #208's current baseline head is `c3ce1439`, so the final candidate needs a fresh 5,000-push replay. Exact-head 100 GiB Xet, hosted providers, full product parity, paired v1 and v1 retirement remain open. |
+| Status | Working implementation, not release-qualified. The latest [exact PR-head RustFS replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md) on PR #208 head `523ec5a7` completed all 5,000 pushes and ten fetches with exact tips, one new pack per fetch, strict Git/Crab fsck, and cold/warm sampled-byte checks. Overall push means passed (501.9 ms; 7.062 requests), but push latency was not flat by window, fetch p95 was 30.866 seconds against 10 seconds, and cold/warm clones took 310.4/141.6 seconds. Fetch request counts are diagnostic only (p95 11), not a gate. The run host was saturated, so a matched isolated performance run is still needed. Exact-head 100 GiB Xet, hosted providers, full product parity, paired v1, and v1 retirement remain open. |
 | Priority | Correctness, stable incremental cost, then clone throughput and storage efficiency |
 | Replaces | Whole-repository Git-pack replacement during every v2 checkpoint |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Kubernetes 4,500-commit RustFS benchmark](../benchmarks/kubernetes-4500-rustfs.md) |
@@ -14,20 +14,22 @@
 An earlier bounded-frontier replay stopped after 1,112 of 5,000 incremental
 pushes because the shared qualification volume ran low. Its two 500-commit
 fetches preserved the exact tips and installed one new pack each, but took
-11.565/10.910 seconds and 32 requests each. The [retained GA qualification
+11.565/10.910 seconds. Their request counts (32 each) were recorded under the
+former request-count gate; counts are diagnostic now, while both observed
+latencies still exceed the 10-second target. The [retained GA qualification
 record](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md) distinguishes
-this capacity stop from the later complete replay. Fetch request performance,
-Xet, and parity gates remain open.
+this capacity stop from the later complete replay. Fetch latency, Xet, and
+parity gates remain open.
 
-The current-head GA trace's final fetch used one complete GET for each of 24
-distinct new capsule-run objects, plus ten root, ref-capture, admission,
-replica-discovery and checkpoint operations. Earlier traces had eight such
-control operations. Reader-side range coalescing is already at the
+The historical `53b11070` exact-head GA trace's final fetch used one complete
+GET for each of 24 distinct new capsule-run objects, plus ten root, ref-capture,
+admission, replica-discovery and checkpoint operations. Earlier traces had
+eight such control operations. Reader-side range coalescing is already at the
 one-request-per-source floor for this interval. Changing only the 32-leaf
 compaction fan-in to four produced six sources and 14 total requests in the
-matched diagnostic below, while increasing upload bytes. Meeting ten needs
-both less source fan-out and cheaper coherent control capture: even one source
-plus the current ten control requests would miss the gate.
+matched diagnostic below, while increasing upload bytes. These request counts
+are useful for optimizing latency and throughput, not a fetch acceptance
+threshold. Any optimization must retain the same coherent control capture.
 
 The exact-head commit-5,000 trace accounts for all 34 requests:
 
@@ -50,10 +52,12 @@ A subsequent matched 500-commit Kubernetes/RustFS diagnostic confirmed that
 four-way compaction produced six sources and 14 total fetch requests, versus
 24 sources and 32 requests with 32-way compaction. Fetch took 6.079 versus
 4.423 seconds, while average push requests rose from 7.012 to 7.488. Both
-variants passed exact-tip, clone, fsck, and sampled-byte checks, but both
-failed the unchanged ten-request fetch gate. This is one sequential local
-timing pair, not proof of a causal latency regression or remote-store behavior.
-The fan-in-only experiment was reverted; see the [matched diagnostic](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md).
+variants passed exact-tip, clone, fsck, and sampled-byte checks. Under the
+current gate, their single observed fetch latencies are below 10 seconds;
+their request counts are diagnostic, and a one-fetch pair cannot establish a
+p95. This is one sequential local timing pair, not proof of causal latency or
+remote-store behavior. The fan-in-only experiment was reverted; see the
+[matched diagnostic](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md).
 
 At 05:28 UTC on September 28, a separate cleanup removed the earlier mounted
 qualification directories and most of a fresh live replay's working files.
@@ -61,9 +65,11 @@ That replay had reached 879 pushes, but its next push could not start because
 its binary link was gone; only a failed report and a truncated request log
 survived. A new sibling-directory run copied the binary locally and completed
 all 5,000 pushes and correctness gates; its raw report and request log remain
-inspectable. Its fetch request gate still fails at 34 p95, so this is not
-release or v1-retirement qualification. The benchmark record separates this
-result from earlier lost-artifact and stopped runs.
+inspectable. That run's p95 request count of 34 was scored under the former
+request-count gate; under the current policy it is diagnostic, while its
+11.068-second fetch p95 still exceeds the 10-second latency target. The
+benchmark record separates this result from earlier lost-artifact and stopped
+runs.
 
 ## 1. Decision
 
