@@ -5,6 +5,44 @@ gate. Older entries below retain the gate language used when those runs were
 scored. Current fetch performance scoring uses exact correctness and p95
 latency at or below 10 seconds.
 
+## October 1 member-rollup attempt (no protocol interval reached)
+
+PR #208 head `a29d81db44de4137029b1f291ad2d9ee267ada81` was built as
+`crab 1.2.4` (binary SHA-256
+`d1928c16de32e33926644d50220e0b6f1e1f498757eeaad4b24797cb6f70e506`). The
+fresh local RustFS 1.0.0 GA run used bucket
+`crab-v2-pr208-a29d81-20261001-r1` and the same full Kubernetes source clone,
+seed `b363f196c517c8e069e2b91995accf3afd389bb9`, and head
+`08147af84478f859c2e2234d71ceace8bdb412c7`. It started at 07:25:46 UTC and
+failed at 07:32:58 UTC, before the seed push completed.
+
+The seed push generated a 1,102,888,397-byte Git pack, then its local
+`git index-pack --fsck-objects` subprocess exceeded Crab's existing 300-second
+timeout. Trace2 records indexing from 07:27:57.531 through the timeout at
+07:32:58.225; Crab returned `CRAB-E0099`. The five object-store calls were
+repository initialization/root/ref probes: two expected missing-object 404s,
+three 200 responses. No seed pack was uploaded; a direct bucket listing found
+only the initialized `v2/root` object. No incremental push, fetch, or repack
+ran, so this attempt supplies no score for member roll-up, clone fan-out, or
+performance gates.
+
+A post-failure host sample showed three CPU-heavy virtual-machine processes
+and active Rust builds. This does not prove host load caused the timeout; the
+previous completed exact-source replay's seed push took 509.333 seconds overall
+and succeeded. Preserve this run as a seed-index timeout, not a protocol or
+member-rollup correctness result. Do not relax the 300-second guard without
+separate safety analysis. Retry qualification only when the host is sufficiently
+isolated to make the result useful.
+
+Retained artifacts under
+`pr208-live-20260930/capsule-member-rollup-a29d81-20261001-r1/`:
+`artifacts/report.json` (SHA-256
+`421034f4d712f46eaf194ffc9267227cacb6b7ec4c99c673dc1fd1183b8250bf`),
+`artifacts/requests.jsonl` (SHA-256
+`1c2bcbd9446b7e8bb8b43725b0d7878bcb48c30865b5d493c0b4e52e81a813af`), and
+`capsule-member-rollup-a29d81-20261001-r1.stdout.log` (SHA-256
+`3bc7add1a3a5af78223953ec72e6d4280e5f6bf97d1b95e2084f75d915109a12`).
+
 ## October 1 exact PR-head replay (fetch request counts informational)
 
 PR #208 head `523ec5a79d484f25fbad281d433a66635feb3343` was built as
