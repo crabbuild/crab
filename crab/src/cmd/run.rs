@@ -661,7 +661,7 @@ async fn run_inline_single_stage(
     // Build the remote store for cache pull (and push if --cache-push).
     // An explicitly requested push must not silently become a local-only run;
     // callers can resume from the local journal/cache after the remote error.
-    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await?;
+    let remote = try_build_workflow_remote(config, args.cache_push).await?;
     let remote_store = remote.as_ref().map(|remote| remote.store.clone());
     let remote_prefix = remote.as_ref().map(|remote| remote.prefix.clone());
     let remote_primary_fallback_store = remote
@@ -1074,7 +1074,7 @@ async fn replay_yaml_cache(
     let _lock = SchedulerLock::acquire(&workflow_root, compute_lock_timeout(args, config)).await?;
     let lockfile = lock_ctx.load(repo_root)?;
     let selected = filter_stages(args, workflow, graph)?;
-    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await?;
+    let remote = try_build_workflow_remote(config, args.cache_push).await?;
     let mut results = Vec::new();
     let mut succeeded = BTreeSet::new();
     let started_at = Instant::now();
@@ -1387,7 +1387,7 @@ async fn run_yaml_single_stage(
     journal.insert_run_start(run_id, env!("CARGO_PKG_VERSION"), &host_fingerprint())?;
 
     let run_state = RunState::new();
-    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await?;
+    let remote = try_build_workflow_remote(config, args.cache_push).await?;
     let mut executor_cfg = build_executor_cfg(
         &workflow_root,
         &cache_root,
@@ -1536,7 +1536,7 @@ async fn run_dag(
     // (skipped) so the scheduler never dispatches them.
     let stage_filter = filter_stages(args, workflow, graph)?;
 
-    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await?;
+    let remote = try_build_workflow_remote(config, args.cache_push).await?;
     let mut executor_cfg = build_executor_cfg(
         &workflow_root,
         &cache_root,
@@ -2678,23 +2678,20 @@ struct CacheOnlyContext<'a> {
 /// configured, malformed configuration or credential/transport failures are
 /// returned instead of being downgraded to a local-only run.
 async fn try_build_workflow_remote(
-    repo_root: &Path,
     config: &Config,
     cache_push: bool,
 ) -> Result<Option<WorkflowRemote>> {
-    let url_str = match crate::cmd::workflow::read_crab_remote_url(repo_root) {
-        Ok(url) => url,
-        Err(CrabError::Configuration { .. }) if !cache_push => return Ok(None),
-        Err(CrabError::Configuration { .. }) => {
-            return Err(CrabError::Configuration {
-                key: "workflow_remote_required".into(),
-                origin: "--cache-push requires a configured crab:// remote".into(),
-            });
+    let Some(url_str) = config.remote_url.as_deref() else {
+        if !cache_push {
+            return Ok(None);
         }
-        Err(error) => return Err(error),
+        return Err(CrabError::Configuration {
+            key: "workflow_remote_required".into(),
+            origin: "--cache-push requires a configured crab:// remote".into(),
+        });
     };
     let crab_url =
-        crate::git::url::CrabUrl::parse(&url_str).map_err(|error| CrabError::Configuration {
+        crate::git::url::CrabUrl::parse(url_str).map_err(|error| CrabError::Configuration {
             key: "workflow_remote_url_invalid".into(),
             origin: error.to_string(),
         })?;
