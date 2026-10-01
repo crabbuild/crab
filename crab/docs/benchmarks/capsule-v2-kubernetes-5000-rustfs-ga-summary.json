@@ -1068,6 +1068,69 @@
     "proxy_errors": {"RemoteDisconnected": 8, "operation": "incremental-fetch-04000", "retained_in_totals": true},
     "caveat": "Unrelated host load and task-owned low-priority single-job builds overlapped from 09:58 UTC; no controlled speedup claim"
   },
+  "october_1_full_replay_537cf": {
+    "run_id": "capsule-537cf-k8s-5000-ga-r2",
+    "started_at": "2026-10-01T13:01:03+00:00",
+    "finished_at": "2026-10-01T13:51:25+00:00",
+    "status": "passed",
+    "candidate_commit": "537cf161b929b17f8ccdc72075544fa2102fd6a6",
+    "scope": "Full 5,000-commit correctness and local RustFS latency qualification; not exact current PR head",
+    "environment": {
+      "provider": "RustFS 1.0.0 GA on Colima",
+      "image": "ghcr.io/rustfs/rustfs@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858",
+      "bucket": "crab-v2-pr208-537cf-k8s-5000-20261001-r2"
+    },
+    "source": {
+      "repository": "Kubernetes",
+      "base": "0125bc12bc227cef2444fac719a3200feb52bc85",
+      "head": "44da53440764e494a06f2259f3629b4dd4294b21"
+    },
+    "provenance": {
+      "binary_sha256": "d0085f9758f24535ee12c2b3154ee8b68a497ce9bd4be9dda2eabafb0df1d301",
+      "binary_unchanged": true,
+      "harness_sha256": "3c515510dd54f4bce15efa761e6849f254674eb39c26f58312517957a09312ea",
+      "request_proxy_sha256": "bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879",
+      "report_sha256": "e5c82112fa8c37fe7a57c78a2b02bcbfab11b1ae57c478c3777e30db9a1dc3df",
+      "requests_sha256": "e00b69695231869c7ae5f449a69b78e28f234b762e22096c362a77a59c530fe1"
+    },
+    "correctness": {
+      "incremental_pushes": 5000,
+      "incremental_fetches_before_repack": 10,
+      "one_new_local_pack_per_fetch": true,
+      "exact_seed_and_final_tips": true,
+      "seed_and_final_remote_crab_fsck": "passed",
+      "seed_cold_and_warm_strict_full_git_fsck": "passed",
+      "sampled_blob_bytes_per_final_clone": 32,
+      "cold_and_warm_sampled_blob_bytes": "matched source"
+    },
+    "metrics": {
+      "seed_push_ms": 213280,
+      "push_latency_ms": {"mean": 335.27, "p50": 300, "p95": 579, "p99": 932, "max": 3592},
+      "push_requests": {"mean": 7.062, "p50": 6, "p95": 6, "p99": 40, "max": 42},
+      "push_500_window_p95_ms_min": 465,
+      "push_500_window_p95_ms_max": 766,
+      "fetch_latency_ms": {"mean": 4486.5, "p50": 4228, "p95": 6257, "p99": 6257},
+      "fetch_requests": {"mean": 9.6, "p95": 11, "pass_fail": "diagnostic only"},
+      "fetch_response_body_bytes": 598647595,
+      "cold_clone": {"elapsed_ms": 68149, "requests": 17, "response_body_bytes": 1319883247, "local_pack_count": 3},
+      "warm_clone": {"elapsed_ms": 25703, "requests": 15, "response_body_bytes": 55967981, "local_pack_count": 3},
+      "interval_repack_ms_min": 10475,
+      "interval_repack_ms_max": 28074
+    },
+    "posthoc_performance_gates": {
+      "push_mean_under_one_second": true,
+      "push_mean_under_ten_requests": true,
+      "every_500_push_window_p95_at_most_one_second": true,
+      "max_observed_window_p95_ms": 766,
+      "fetch_p95_at_most_ten_seconds": true,
+      "fetch_request_count_gate": "informational"
+    },
+    "scope_limits": [
+      "This report predates the cached-pack copy-on-write clone change and is not exact current PR-head evidence",
+      "Current-head 5,000-commit replay and clone timing remain open",
+      "Full 100 GiB Xet, matched v1 performance, hosted-provider/product parity, and v1 retirement remain open"
+    ]
+  },
   "scope_limits": [
     "No matched v1 performance result yet",
     "No full 100 GiB Xet qualification",
