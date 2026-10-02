@@ -1402,20 +1402,31 @@ done
 # session stays live. Root-only fallback is safe only while the new log remains
 # open and inactive; preserving the old membership snapshot would reject that
 # required expiry transition.
-node_b_before_fallback="$(service_cli "$b_service" cells node \
-  --session "$session_after_second_loss" --json)"
-if ! jq --exit-status \
-  --arg session "$session_after_second_loss" \
-  --argjson epoch "$fallback_initial_log_epoch" \
-  --argjson members "$fallback_initial_members" \
-  '.session == $session and .live == true and
-   .advertisement.log.state == "open" and
-   .advertisement.log.epoch > $epoch and
-   .advertisement.log.active == false and
-   (.advertisement.log.member_nodes | type) == "array" and
-   (.advertisement.log.member_nodes | length) > 0 and
-   (.advertisement.log.member_nodes - $members) == .advertisement.log.member_nodes' \
-  <<<"$node_b_before_fallback" >/dev/null; then
+# The five-second host controller closes the old log before recruiting the
+# replacement epoch, during which object-store proof remains the safe path.
+# Observe the published rotation instead of sampling that no-log interval.
+fallback_log_rotated=false
+for _ in $(seq 1 30); do
+  node_b_before_fallback="$(service_cli "$b_service" cells node \
+    --session "$session_after_second_loss" --json 2>/dev/null || true)"
+  if jq --exit-status \
+    --arg session "$session_after_second_loss" \
+    --argjson epoch "$fallback_initial_log_epoch" \
+    --argjson members "$fallback_initial_members" \
+    '.session == $session and .live == true and
+     .advertisement.log.state == "open" and
+     .advertisement.log.epoch > $epoch and
+     .advertisement.log.active == false and
+     (.advertisement.log.member_nodes | type) == "array" and
+     (.advertisement.log.member_nodes | length) > 0 and
+     (.advertisement.log.member_nodes - $members) == .advertisement.log.member_nodes' \
+    <<<"$node_b_before_fallback" >/dev/null 2>&1; then
+    fallback_log_rotated=true
+    break
+  fi
+  sleep 1
+done
+if ! $fallback_log_rotated; then
   echo "The fallback owner's inactive log did not rotate after its original members expired." >&2
   echo "Expected live session=${session_after_second_loss}, epoch>${fallback_initial_log_epoch}, and no expired members=${fallback_initial_members}" >&2
   jq . <<<"$node_b_before_fallback" >&2 || true
