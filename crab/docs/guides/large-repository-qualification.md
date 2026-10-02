@@ -72,14 +72,17 @@ CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-large-repo-qualificati
 
 Start RustFS using the local development guide or point the command at an
 existing isolated RustFS deployment. Pin and record the RustFS image version
-for comparable evidence.
+for comparable evidence. The dedicated workflow pins RustFS 1.0.0 GA to
+`ghcr.io/rustfs/rustfs@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858`,
+checks the running executable's version, and retains its complete version
+output with the report. Supply the actual `rustfs --version` first line, not
+just an image tag, for manual runs.
 
 ```bash
 python3 crab/scripts/e2e/run_large_repo_rustfs.py \
   --crab-bin /Volumes/Workspace/crabbuild-target/crab-large-repo-qualification/release/crab \
   --run-id kubernetes-baseline-a \
-  --object-store-version rustfs/rustfs:1.0.0-beta.8-glibc \
-  --cleanup-remote
+  --object-store-version "rustfs 1.0.0"
 
 python3 crab/scripts/verify-large-repo-rustfs-report.py \
   /Volumes/Workspace/CrabBuild/crabbuild-qualification/kubernetes-baseline-a/artifacts/report.json
@@ -91,12 +94,11 @@ For the full large-team gate, use the dedicated workflow's equivalent:
 python3 crab/scripts/e2e/run_large_repo_rustfs.py \
   --crab-bin /Volumes/Workspace/crabbuild-target/crab-large-repo-qualification/release/crab \
   --run-id kubernetes-team-load-a \
-  --object-store-version rustfs/rustfs:1.0.0-beta.8-glibc \
+  --object-store-version "rustfs 1.0.0" \
   --cold-clone-fanout 50 \
   --warm-clone-fanout 100 \
   --require-cache-service \
-  --team-load \
-  --cleanup-remote
+  --team-load
 
 python3 crab/scripts/verify-large-repo-rustfs-report.py \
   /Volumes/Workspace/CrabBuild/crabbuild-qualification/kubernetes-team-load-a/artifacts/report.json \
@@ -109,11 +111,14 @@ under `/Volumes/Workspace/CrabBuild/crabbuild-qualification/<run-id>`. The sourc
 checkout is cloned with `--shared --no-checkout`, is never reset, cleaned, or
 updated, and its initial status and revision are verified again at the end.
 
-`--cleanup-remote` deletes only keys below
-`e2e-large-repository/<run-id>/`. It never invokes bucket-wide GC or deletes
-other repository prefixes. Keep the local run directory until evidence has
-been reviewed. Replay and clone worktrees are removed after a successful run
-to bound disk usage; logs, reports, and correctness samples remain. Pass
+Remote objects and the workflow's run-scoped RustFS data directory are retained,
+including on failure. The optional `--cleanup-remote` deletes only keys below
+`e2e-large-repository/<run-id>/`, but also runs after a failed qualification.
+Use it only when that evidence no longer needs inspection. It never invokes
+bucket-wide GC or deletes other repository prefixes. Keep the local run
+directory until evidence has been reviewed. Replay and clone worktrees are
+removed after a successful run to bound disk usage; logs, reports, and
+correctness samples remain. Pass
 `--retain-worktrees` only when a successful checkout must be inspected.
 
 For a fast harness check, supply a small Git repository with at least four
