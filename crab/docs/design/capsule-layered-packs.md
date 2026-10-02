@@ -5138,8 +5138,12 @@ streamed PUT with a GET on the same client connection. The fresh full rerun,
 `candidate-meter-drain-20260926-r9`, completed at 16:05:28 UTC on September 26.
 All 5,000 pushes, ten fetch-before-repack intervals, seed/final Crab fsck,
 independent cold/warm clones, strict native Git fsck, exact tips, and 32 sampled
-blob comparisons passed. The report deliberately exits failed because the
-unchanged fetch request-count gate still fails:
+blob comparisons passed. The preserved report marks this historical run failed
+because request count was still a pass/fail criterion at the time. Under the
+current acceptance rule, its 9.830-second fetch p95 meets the 10-second latency
+cap and request count is diagnostic only; this historical binary does not
+qualify the current head or close the remaining clone, provider, Xet, and
+v1-parity gates:
 
 | Operation | Latency | Object-store requests |
 | --- | --- | --- |
