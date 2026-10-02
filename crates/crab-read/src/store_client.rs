@@ -40,6 +40,10 @@ pub trait ReadMetrics: Send + Sync {
     fn shard_hint_miss(&self);
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait marks boxed futures must-use; Result is also must-use"
+)]
 #[async_trait::async_trait]
 /// Checks whether an immutable xorb or shard object must be restored before a read.
 pub trait XorbAvailability: Send + Sync {

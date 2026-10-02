@@ -42,7 +42,6 @@ pub enum MetadataError {
     /// Local filesystem operation failed.
     #[error("metadata I/O error: {source}")]
     Io {
-        #[from]
         #[source]
         source: std::io::Error,
     },
@@ -63,18 +62,12 @@ pub enum MetadataError {
 
     /// Xet-backed metadata payload operation failed.
     #[error(transparent)]
-    Xet {
-        #[from]
-        source: crab_xet::error::XetError,
-    },
+    Xet { source: crab_xet::error::XetError },
 
     /// Object-store transport failed while reading or writing metadata.
     #[cfg(feature = "storage")]
     #[error(transparent)]
-    Storage {
-        #[from]
-        source: crab_storage::StorageError,
-    },
+    Storage { source: crab_storage::StorageError },
 
     /// Publication was cancelled before attempting the active marker.
     #[cfg(feature = "storage")]
@@ -192,4 +185,23 @@ pub enum MetadataError {
     /// Internal invariant failure in metadata helper code.
     #[error("internal metadata error: {0}")]
     Internal(String),
+}
+
+impl From<std::io::Error> for MetadataError {
+    fn from(source: std::io::Error) -> Self {
+        Self::Io { source }
+    }
+}
+
+impl From<crab_xet::error::XetError> for MetadataError {
+    fn from(source: crab_xet::error::XetError) -> Self {
+        Self::Xet { source }
+    }
+}
+
+#[cfg(feature = "storage")]
+impl From<crab_storage::StorageError> for MetadataError {
+    fn from(source: crab_storage::StorageError) -> Self {
+        Self::Storage { source }
+    }
 }
