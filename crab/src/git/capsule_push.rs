@@ -749,6 +749,10 @@ fn hidden_ref_matcher(patterns: &[String]) -> Result<globset::GlobSet> {
 }
 
 fn is_ancestor(git_dir: &Path, old_oid: &str, new_oid: &str) -> Result<Option<bool>> {
+    if has_direct_parent(git_dir, old_oid, new_oid) {
+        return Ok(Some(true));
+    }
+
     let output = std::process::Command::new("git")
         .args(["--git-dir"])
         .arg(git_dir)
@@ -770,6 +774,54 @@ fn is_ancestor(git_dir: &Path, old_oid: &str, new_oid: &str) -> Result<Option<bo
             )))
         }
     }
+}
+
+// A direct parent edge proves fast-forward without scanning prior history.
+// Other shapes keep merge-base so missing-object and shallow outcomes remain unchanged.
+fn has_direct_parent(git_dir: &Path, old_oid: &str, new_oid: &str) -> bool {
+    let (Ok(old_oid), Ok(new_oid)) = (
+        gix_hash::ObjectId::from_hex(old_oid.as_bytes()),
+        gix_hash::ObjectId::from_hex(new_oid.as_bytes()),
+    ) else {
+        return false;
+    };
+    let old_commit = format!("{old_oid}^{{commit}}");
+    let old_exists = std::process::Command::new("git")
+        .args(["--git-dir"])
+        .arg(git_dir)
+        .args(["cat-file", "-e", &old_commit])
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    if !old_exists.is_ok_and(|status| status.success()) {
+        return false;
+    }
+    let new_oid = new_oid.to_string();
+    let output = std::process::Command::new("git")
+        .args(["--git-dir"])
+        .arg(git_dir)
+        .args(["rev-list", "--parents", "-n", "1", &new_oid])
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(output) = String::from_utf8(output.stdout) else {
+        return false;
+    };
+    let mut fields = output.split_whitespace();
+    if fields.next() != Some(new_oid.as_str()) {
+        return false;
+    }
+    fields
+        .filter_map(|parent| gix_hash::ObjectId::from_hex(parent.as_bytes()).ok())
+        .any(|parent| parent == old_oid)
 }
 
 fn validate_candidate_namespace(
@@ -1256,6 +1308,69 @@ mod tests {
             is_ancestor(&source.path().join(".git"), &"f".repeat(40), &tip)
                 .expect("missing object is a normal refresh condition"),
             None
+        );
+    }
+
+    #[test]
+    fn direct_parent_proves_fast_forward() {
+        let source = tempfile::tempdir().expect("source repository");
+        git(source.path(), &["init", "--initial-branch=main"]);
+        git(source.path(), &["config", "user.name", "Crab Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "crab@example.invalid"],
+        );
+        let parent = commit(source.path(), "parent");
+        let child = commit(source.path(), "child");
+        let git_dir = source.path().join(".git");
+
+        assert!(has_direct_parent(&git_dir, &parent, &child));
+        assert_eq!(is_ancestor(&git_dir, &parent, &child).unwrap(), Some(true));
+
+        git(source.path(), &["branch", "side", &parent]);
+        git(source.path(), &["checkout", "side"]);
+        std::fs::write(source.path().join("side.txt"), "side").expect("write side fixture");
+        git(source.path(), &["add", "side.txt"]);
+        git(source.path(), &["commit", "-m", "side"]);
+        let second_parent = git(source.path(), &["rev-parse", "HEAD"]);
+        git(source.path(), &["checkout", "main"]);
+        git(source.path(), &["merge", "--no-ff", "--no-edit", "side"]);
+        let merge = git(source.path(), &["rev-parse", "HEAD"]);
+
+        assert!(has_direct_parent(&git_dir, &child, &merge));
+        assert!(has_direct_parent(&git_dir, &second_parent, &merge));
+        assert_eq!(
+            is_ancestor(&git_dir, &second_parent, &merge).unwrap(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn non_direct_ancestry_and_divergence_keep_the_git_graph_check() {
+        let source = tempfile::tempdir().expect("source repository");
+        git(source.path(), &["init", "--initial-branch=main"]);
+        git(source.path(), &["config", "user.name", "Crab Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "crab@example.invalid"],
+        );
+        let root = commit(source.path(), "root");
+        git(source.path(), &["branch", "side"]);
+        let main_tip = commit(source.path(), "main");
+        let main_descendant = commit(source.path(), "main descendant");
+        git(source.path(), &["checkout", "side"]);
+        let side_tip = commit(source.path(), "side");
+        let git_dir = source.path().join(".git");
+
+        assert!(!has_direct_parent(&git_dir, &root, &main_descendant));
+        assert_eq!(
+            is_ancestor(&git_dir, &root, &main_descendant).unwrap(),
+            Some(true)
+        );
+        assert!(!has_direct_parent(&git_dir, &main_tip, &side_tip));
+        assert_eq!(
+            is_ancestor(&git_dir, &main_tip, &side_tip).unwrap(),
+            Some(false)
         );
     }
 
