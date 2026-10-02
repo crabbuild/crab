@@ -27,6 +27,30 @@ request count is diagnostic only. Historical entries retain the harness
 verdict and request threshold used at the time; a request-count-only failure
 is not a current fetch blocker.
 
+### Closeout decision — October 2
+
+Do not conclude the implementation or retire v1 yet. The fresh-source run
+`k8s-5000-head0747011-r4` uses runtime source `0747011dbf262ff08ce727da20e0596d89a36daf`
+and frozen binary SHA-256
+`a48c1e437806a277bfaa84ce79d0928dcb7a35235853cd4a755a4dd0a48ce74d`.
+Its independent GitHub Kubernetes source is `839853cd72a9464fc4e44980dbb9c2fb78d9ba8e`,
+with first-parent range base `cd451c6a368a854526ed0afe81af1b5a0e888815`.
+Seed push, verification clone, strict native Git fsck, and remote Crab fsck
+passed. The first 500 pushes and fetch/repack interval completed without
+recorded proxy errors, but push mean/p95 were 1.012/2.370 seconds and the
+one-pack fetch took 32.567 seconds with nine requests. Those latency results
+keep the existing performance gates open; the full 5,000-push run is ongoing.
+
+The trace of push 321 attributes 15.607 seconds to Git object enumeration and
+4.169 seconds to pack generation within its 21.048-second wall time; its
+slowest store request took 76 ms. Fetch's remote-helper and `index-pack`
+children took 27.659 and 18.882 seconds and overlap, so they must not be added.
+The host has concurrent unrelated workloads. These observations identify
+local work in slow samples, not an isolated-host regression verdict or proof
+that every tail sample has the same cause. Exact-runtime scale performance,
+zero-error 100 GiB Xet, the failure/provider/product matrix, matched v1, and
+green current-head CI remain required before closeout.
+
 The historical `53b11070` exact-head GA trace's final fetch used one complete
 GET for each of 24 distinct new capsule-run objects, plus ten root, ref-capture,
 admission, replica-discovery and checkpoint operations. Earlier traces had
