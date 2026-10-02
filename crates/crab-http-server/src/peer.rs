@@ -700,7 +700,7 @@ impl NodeDurabilityProvider for NodePublisher {
                 Ok(!members_live)
             }
             .await;
-            result.map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
+            result.map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
         })
     }
 
