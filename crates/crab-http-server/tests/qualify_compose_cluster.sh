@@ -1329,9 +1329,9 @@ fallback_session_for_service() {
 # observations to that session so a service-local session cannot mask a change.
 node_b_before_fallback="$(service_cli "$b_service" cells node \
   --session "$session_after_second_loss" --json)"
-fallback_log_epoch="$(jq --raw-output '.advertisement.log.epoch' \
+fallback_initial_log_epoch="$(jq --raw-output '.advertisement.log.epoch' \
   <<<"$node_b_before_fallback")"
-fallback_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
+fallback_initial_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
 # No fleet proof may have escaped the replacement owner's log. Active logs
 # require a complete follower witness during recovery, even after object
 # coverage, so this fallback specifically exercises an inactive log.
@@ -1356,7 +1356,7 @@ for candidate in "${fallback_services[@]}"; do
   candidate_json="$(fallback_node_for_service "$candidate")"
   candidate_node="$(jq -r '.advertisement.node' <<<"$candidate_json")"
   if ! jq --exit-status --arg node "$candidate_node" \
-    'any(.[]; . == $node)' <<<"$fallback_members" >/dev/null; then
+    'any(.[]; . == $node)' <<<"$fallback_initial_members" >/dev/null; then
     fallback_candidate_service="$candidate"
     fallback_candidate_session="$(jq -r '.session' <<<"$candidate_json")"
     fallback_candidate_node="$candidate_node"
@@ -1398,23 +1398,46 @@ for member_service in "${fallback_services[@]}"; do
   fi
 done
 
-# Re-read the exact failed session after member loss. The root-only fallback is
-# safe without follower recovery only while this log remains inactive.
+# Member loss rotates the log membership and epoch, even while the owner's
+# session stays live. Root-only fallback is safe only while the new log remains
+# open and inactive; preserving the old membership snapshot would reject that
+# required expiry transition.
 node_b_before_fallback="$(service_cli "$b_service" cells node \
   --session "$session_after_second_loss" --json)"
 if ! jq --exit-status \
   --arg session "$session_after_second_loss" \
-  --argjson epoch "$fallback_log_epoch" \
-  --argjson members "$fallback_members" \
+  --argjson epoch "$fallback_initial_log_epoch" \
+  --argjson members "$fallback_initial_members" \
   '.session == $session and .live == true and
    .advertisement.log.state == "open" and
-   .advertisement.log.epoch == $epoch and
+   .advertisement.log.epoch > $epoch and
    .advertisement.log.active == false and
-   .advertisement.log.member_nodes == $members' \
+   (.advertisement.log.member_nodes | type) == "array" and
+   (.advertisement.log.member_nodes | length) > 0 and
+   (.advertisement.log.member_nodes - $members) == .advertisement.log.member_nodes' \
   <<<"$node_b_before_fallback" >/dev/null; then
-  echo "The fallback owner's inactive log changed after its original members expired." >&2
-  echo "Expected session=${session_after_second_loss} epoch=${fallback_log_epoch} members=${fallback_members}" >&2
+  echo "The fallback owner's inactive log did not rotate after its original members expired." >&2
+  echo "Expected live session=${session_after_second_loss}, epoch>${fallback_initial_log_epoch}, and no expired members=${fallback_initial_members}" >&2
   jq . <<<"$node_b_before_fallback" >&2 || true
+  exit 1
+fi
+
+fallback_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
+fallback_candidate_record="$(service_cli "$fallback_candidate_service" cells node \
+  --session "$fallback_candidate_session" --json)"
+if ! jq --exit-status \
+  --arg session "$fallback_candidate_session" \
+  --arg node "$fallback_candidate_node" \
+  '.session == $session and .live == true and .advertisement.node == $node' \
+  <<<"$fallback_candidate_record" >/dev/null; then
+  echo "The non-member fallback candidate changed identity or expired during log rotation." >&2
+  jq . <<<"$fallback_candidate_record" >&2 || true
+  exit 1
+fi
+if jq --exit-status --arg node "$fallback_candidate_node" \
+  'any(.[]; . == $node)' <<<"$fallback_members" >/dev/null; then
+  echo "The preserved fallback candidate became a member of the rotated log." >&2
+  echo "Candidate=${fallback_candidate_node} members=${fallback_members}" >&2
   exit 1
 fi
 
