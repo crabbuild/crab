@@ -30,6 +30,13 @@ are diagnostic, not an acceptance gate. Current-runtime latency, the zero-error
 100 GiB Xet run, hosted-provider/product parity, paired v1 performance, and
 green CI remain release blockers.
 
+The October 2 [bounded Xorb rewrite probe](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-2-bounded-xorb-rewrite-reconciliation-failed-closed)
+also failed closed before checkpoint publication: the executor merges source
+xorbs, but reconciliation requires every merged destination chunk to belong
+to each individual source. The published root remained byte-identical.
+Shared-destination reconciliation and its live history/restore proof remain
+open; the earlier large-file hydration evidence does not qualify this path.
+
 The hard-cutover implementation is wired to the user-facing ordinary Git path:
 
 - `crab-metadata::capsule_protocol` owns bounded, versioned, checksum-bearing

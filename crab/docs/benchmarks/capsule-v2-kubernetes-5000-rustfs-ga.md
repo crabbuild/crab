@@ -5,6 +5,69 @@ gate. Older entries below retain the gate language used when those runs were
 scored. Current fetch performance scoring uses exact correctness and p95
 latency at or below 10 seconds.
 
+## October 2 generated-sideband comparison: no qualified speedup
+
+Run `sideband-fetch-abba-20261002-r2` completed at 21:56:33 UTC against the
+same local RustFS 1.0.0 GA instance, in a separate repository prefix. This was
+a synthetic shared-host diagnostic, not another Kubernetes qualification.
+Forty new deterministic 1 MiB native Git blobs forced the generated sideband
+path. Four independent seed clones fetched the same tip with fresh caches in
+baseline/candidate/candidate/baseline order.
+
+| Trial | Fetch latency | Origin requests |
+| --- | ---: | ---: |
+| Baseline A | 2.096 s | 17 |
+| Buffered candidate B | 2.730 s | 17 |
+| Buffered candidate B | 2.849 s | 19 |
+| Baseline A | 3.696 s | 19 |
+
+Each response selected and reconstructed exactly 120 objects and transferred
+41,965,067 generated-pack bytes. Exact tips, one new pack, strict Git fsck,
+the final blob digest, and zero proxy transport errors passed. Git index-pack
+timings ranged from 0.683 to 2.235 seconds and overlap helper timings. The
+small sample and host variation do not establish a speedup or fix the failed
+full-replay latency gates.
+
+The baseline binary SHA-256 was
+`a48c1e437806a277bfaa84ce79d0928dcb7a35235853cd4a755a4dd0a48ce74d`;
+the private buffered candidate was
+`41a305294f870cac251bc760cd0fc9bf973282d19726fe260fb5fe9b13fe6847`.
+Candidate source was `3252010b` plus the retained output-only overlay SHA-256
+`8aced3e0d01f0a119c4df427288b97f9ea3f259a80977ae543e8bf359eb21bbf`.
+The report SHA-256 is
+`e9d3650f88b95dc53b4756d5a36b33f27769114f4786ce934e985a330ba7ddbc`.
+The first attempt failed in the private driver's meter preflight, before
+remote initialization; its source and failure evidence remain preserved.
+
+## October 2 bounded Xorb rewrite: reconciliation failed closed
+
+Run `xorb-optimizer-native-ga-20261002-r1` used that same frozen private
+candidate and a new prefix. Two 12 MiB nonzero-entropy files across two versions
+passed pointer staging, publication, checkpointing, independent lazy clone,
+exact-byte hydration, strict Git fsck, and remote Crab fsck. The live optimizer
+selected three source xorbs totaling 26,334,541 bytes. Apply failed with
+`CRAB-E0020` while loading the completed source-to-destination mapping, before
+publishing a replacement checkpoint.
+
+The executor shares one deduplicating builder across a source batch. Its
+journal recorded several sources referencing one merged destination, whereas
+reconciliation rejected a destination chunk absent from each individual
+source. Current main has the same per-source restriction in its shared loader;
+this is not evidence of damaged source data or a capsule-only format error.
+A source-catalog union alone is insufficient: every destination chunk must
+belong to a verified source that explicitly maps to that destination, and every
+source chunk must retain one size-preserving placement. Regression work is
+pending; no integrity check has been waived.
+
+A read-only postfailure GET proved the published root byte-identical to its
+pre-optimization value, SHA-256
+`7a597931b9c16320347d6211d9d45fd93405dabd21397c807f345db20adee37c`.
+The failed report SHA-256 is
+`7a4a6c852db7281f03ec7ac1ea633758104ed46abbac61e20b552e540143894a`.
+Journal, uploaded destinations, logs, and original failed report are retained.
+Post-rewrite hydration, historical restore, and republishing were not reached.
+This 24 MiB probe does not replace the zero-error 100 GiB release gate.
+
 ## October 2 current-runtime replay: correctness passed, performance failed
 
 Run `k8s-5000-head0747011-r4` completed from 18:06:10 to 20:21:20 UTC.
