@@ -5,6 +5,73 @@ gate. Older entries below retain the gate language used when those runs were
 scored. Current fetch performance scoring uses exact correctness and p95
 latency at or below 10 seconds.
 
+## October 2 current-runtime replay: correctness passed, performance failed
+
+Run `k8s-5000-head0747011-r4` completed from 18:06:10 to 20:21:20 UTC.
+Runtime source was `0747011dbf262ff08ce727da20e0596d89a36daf`; subsequent
+documentation and provider-workflow commits did not change that runtime.
+The frozen `crab 1.2.4` binary SHA-256 was
+`a48c1e437806a277bfaa84ce79d0928dcb7a35235853cd4a755a4dd0a48ce74d`.
+A fresh independent full GitHub Kubernetes clone supplied 5,000 first-parent
+commits from seed `cd451c6a368a854526ed0afe81af1b5a0e888815` through
+`839853cd72a9464fc4e44980dbb9c2fb78d9ba8e`, with no alternates or promisor.
+Each commit was pushed individually; ordinary Git fetch ran before Crab repack
+every 500 pushes. Bucket `crab-v2-5000-0747011-r4` used local RustFS 1.0.0 GA
+in a native arm64 Colima VM with four vCPUs and approximately 4 GiB RAM.
+The image index remained pinned to
+`ghcr.io/rustfs/rustfs@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858`.
+
+| Operation | Latency | Object-store requests / result |
+| --- | ---: | ---: |
+| Seed push | 1,010.413 s | 10 |
+| 5,000 incremental pushes, mean / p50 / p95 / p99 | 710.06 / 590 / 1,357 / 2,828 ms | 7.062 mean; 35,310 total |
+| Push-window p95 range | 1,036–2,370 ms | All ten windows fail the unchanged <1,000 ms gate |
+| 500-commit fetch, mean / p50 / p95 | 12.862 / 8.859 / 32.567 s | 9.4 mean; 11 p95, diagnostic only |
+| Interval repack range | 16.891–51.886 s | 13–17 requests; fetch preceded each repack |
+| Final cold / warm clone | 66.002 / 54.687 s | 17 / 15 requests |
+| Final remote Crab fsck | 635.589 s | Passed |
+
+All 5,000 pushes and ten fetch intervals reached their exact expected tips.
+Every fetch installed exactly one new pack and retained the seed pack, with no
+fetch-triggered Git repack. Seed and final remote Crab fsck, strict full native
+Git fsck on all verification clones, and 32 sampled blob digests in each final
+clone passed. The raw trace records no proxy errors. Incremental fetches
+transferred 597,797,267 response bytes in total. Cold/warm final clones fetched
+1,314,719,752 / 55,995,614 bytes, proving substantial warm pack-body reuse,
+not a few-second clone.
+
+Independent trace aggregation shows that every fetch made zero seed-capsule
+or standalone pack-layer reads, one full new-capsule payload GET, and one
+checkpoint-control range GET. The request counts were 9/9/11/9/9/9/9/11/9/9.
+Push requests averaged exactly 7.062 in every 500-push window. These are
+stable-prefix and request-shape proofs, not evidence that latency targets pass.
+The harness exited nonzero because fetch p95 exceeded ten seconds and all ten
+push-window p95 values exceeded one second. Overall mean push latency and mean
+push requests passed; the 21.048-second maximum push is retained.
+
+No task-owned compilation or second task-owned bulk workload overlapped the
+replay. Other host workloads were active; this is not an isolated comparison
+with the previous candidate or v1. Trace2 attributes 15.607 seconds of the
+slowest push to Git object enumeration and 4.169 seconds to pack generation;
+its slowest store request took 76 ms. Helper, receiver, and connectivity timings
+can overlap and must not be added. These samples identify local work, without
+establishing a universal cause or a qualified optimization.
+
+Retained artifacts are under the mounted CrabBuild workspace's
+`pr208-qualification-20261002/k8s-5000-head0747011-r4/artifacts/`.
+The final report SHA-256 is
+`4067ee977a84c77ad2bea9dd333b2eb0c08db0097f7d5c3310d9ba69e98f84a4`;
+the full request-log SHA-256 is
+`2de3b42d5f77a163d2f134d72deaf3bed2a9ed600a901f743ed937e165d9f4b2`.
+The original harness and request-proxy sources are preserved alongside them as
+`run_capsule_k8s_rustfs.frozen.py` and `run_concurrent_push_smoke.frozen.py`,
+matching provenance hashes
+`fac35e660a8bd402a242fcb9f5249d4debef080bfb2b36f99796221b530dfb5a` and
+`bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879`.
+The binary remained unchanged through the run. Current-runtime performance,
+zero-error 100 GiB Xet, complete provider/product parity, matched v1, and green
+current-head CI remain open. v1 retirement is not qualified.
+
 ## October 1 full replay on candidate 537cf (passed)
 
 Candidate `537cf161b929b17f8ccdc72075544fa2102fd6a6` (`crab 1.2.4`, binary

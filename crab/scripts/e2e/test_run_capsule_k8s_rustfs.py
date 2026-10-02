@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 SCRIPT_ROOT = Path(__file__).resolve().parent
@@ -303,6 +303,78 @@ class CapsuleKubernetesQualificationTests(unittest.TestCase):
         qualification.push = push
         with self.assertRaisesRegex(RuntimeError, "stop after verified seed"):
             qualification.execute()
+
+    def test_completed_integrity_proofs_survive_later_failure(self) -> None:
+        proofs = (
+            ("seed_strict_full_git_fsck", "passed"), ("seed_remote_crab_fsck", "passed"),
+            ("cold_clone_strict_full_git_fsck", "passed"),
+            ("cold_clone_sampled_blob_bytes", "matched source"),
+            ("warm_clone_strict_full_git_fsck", "passed"),
+            ("warm_clone_sampled_blob_bytes", "matched source"), ("remote_crab_fsck", "passed"),
+        )
+        for failure, completed in (
+            ("seed-native", 0), ("seed-remote", 1), ("cold-native", 2), ("cold-bytes", 3),
+            ("warm-native", 4), ("warm-bytes", 5), ("final-remote", 6),
+        ):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                qualification = object.__new__(QUALIFICATION.Qualification)
+                qualification.report_path = root / "report.json"
+                qualification.args = argparse.Namespace(source=root, git_bin="git", interval=500)
+                qualification.replay = root / "replay"
+                qualification.incremental = root / "seed"
+                qualification.final_clone = root / "cold"
+                qualification.warm_clone = root / "warm"
+                qualification.report = {
+                    "source": {"base": "base", "head": "tip"},
+                    "commit_oids": ["tip"], "correctness": {}, "status": "running",
+                }
+                qualification.proxy = Mock()
+                qualification.initialize = Mock()
+                qualification.push = Mock()
+                qualification.repack = Mock()
+                qualification.clone = Mock()
+                qualification.summarize = Mock()
+
+                def git(args: list[str], repository: Path, **_options: object) -> str:
+                    if args[0] == "rev-parse":
+                        return "base" if repository == qualification.incremental else "tip"
+                    if args[0] == "fsck" and (
+                        (failure == "seed-native" and repository == qualification.incremental)
+                        or (failure == "cold-native" and repository == qualification.final_clone)
+                        or (failure == "warm-native" and repository == qualification.warm_clone)
+                    ):
+                        raise RuntimeError("native integrity failure")
+                    return ""
+
+                def remote_fsck(_ordinal: int, phase: str) -> None:
+                    if (failure == "seed-remote" and phase == "seed") or (
+                        failure == "final-remote" and phase == "final"
+                    ):
+                        raise RuntimeError("remote integrity failure")
+
+                def samples(_git: str, repository: Path, _tip: str) -> dict:
+                    if (failure == "cold-bytes" and repository == qualification.final_clone) or (
+                        failure == "warm-bytes" and repository == qualification.warm_clone
+                    ):
+                        return {}
+                    return {"blob": {"sha256": "identical bytes"}}
+
+                qualification.git = git
+                qualification.remote_fsck = remote_fsck
+                with patch.object(QUALIFICATION, "sampled_blob_digests", side_effect=samples):
+                    with self.assertRaises(RuntimeError):
+                        qualification.execute()
+
+                saved = json.loads(qualification.report_path.read_text())
+                self.assertEqual(
+                    {key: saved["correctness"][key] for key, _ in proofs
+                     if key in saved["correctness"]},
+                    dict(proofs[:completed]),
+                )
+                self.assertEqual(saved["status"], "failed")
+                qualification.summarize.assert_not_called()
+                qualification.proxy.close.assert_called_once()
 
     def test_staging_source_snapshot_includes_uncheckpointed_wal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -6,7 +6,7 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Protocol-v2 checkpoint Git packs, clone/fetch, repack, fsck, history, and GC |
-| Status | Working implementation, not release-qualified. The latest completed [5,000-commit RustFS GA replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md) used candidate `537cf161`: all pushes, ten fetch-before-repack intervals, cold/warm clones, strict Git/Crab fsck, and sampled-byte checks passed. Push mean/p95/p99 were 335/579/932 ms, all 500-push-window p95 values were 465–766 ms, and mean push requests were 7.062. Fetch p95 was 6.257 seconds and each fetch installed one pack; fetch request counts are diagnostic only. This was not the exact current PR head: subsequent clone copy-on-write changes still need the full replay. The current-head 100 GiB Xet, hosted providers, full product parity, paired v1, and v1 retirement remain open. |
+| Status | Working implementation, not release-qualified. The latest completed [5,000-commit RustFS GA replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-2-current-runtime-replay-correctness-passed-performance-failed) used current runtime source `0747011`: all pushes, ten fetch-before-repack intervals, cold/warm clones, strict Git/Crab fsck, and sampled-byte checks passed. Push mean/p95/p99 were 710/1,357/2,828 ms, every 500-push-window p95 exceeded one second, and mean push requests were 7.062. Fetch p95 was 32.567 seconds; each fetch installed one pack and request counts are diagnostic only. No task-owned build overlapped the replay, but the host was shared. Performance, current-head 100 GiB Xet, hosted providers, full product parity, paired v1, and v1 retirement remain open. |
 | Priority | Correctness, stable incremental cost, then clone throughput and storage efficiency |
 | Replaces | Whole-repository Git-pack replacement during every v2 checkpoint |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Kubernetes 4,500-commit RustFS benchmark](../benchmarks/kubernetes-4500-rustfs.md) |
@@ -36,10 +36,27 @@ and frozen binary SHA-256
 Its independent GitHub Kubernetes source is `839853cd72a9464fc4e44980dbb9c2fb78d9ba8e`,
 with first-parent range base `cd451c6a368a854526ed0afe81af1b5a0e888815`.
 Seed push, verification clone, strict native Git fsck, and remote Crab fsck
-passed. The first 500 pushes and fetch/repack interval completed without
-recorded proxy errors, but push mean/p95 were 1.012/2.370 seconds and the
-one-pack fetch took 32.567 seconds with nine requests. Those latency results
-keep the existing performance gates open; the full 5,000-push run is ongoing.
+passed. All 5,000 pushes and ten fetch/repack intervals have now completed
+without recorded proxy errors. Each fetch preserved the exact tip and installed
+one pack. Incremental push mean/p95/p99 were 710/1,357/2,828 ms and mean
+requests were 7.062. Every 500-push-window p95 exceeded one second
+(1.036–2.370 seconds); fetch p95 was 32.567 seconds with 9–11 requests per
+interval. The independent final cold/warm clones completed in 66.002/54.687
+seconds. Both final clones reached the expected source tip, passed strict
+full native Git fsck, and matched all 32 sampled blob digests. Final remote
+Crab fsck passed. The run finished at 20:21:20 UTC with qualification failure
+solely for the unchanged latency gates; completed correctness is not a
+performance or complete-product qualification.
+
+The capsule replay reporter now persists each successful native fsck, remote
+fsck, and sampled-byte proof before the next failure boundary. Seven injected
+failure positions verify that a failed report preserves exactly its completed
+checks, omits unfinished proofs, and still fails qualification. The regression
+first failed in five positions and passes after the change; all 28 harness
+tests pass. This did not change the completed frozen replay or relax any gate.
+The manual provider-contract workflow now pins the verified RustFS 1.0.0 GA
+image index and retains the runtime version with its report. Its live run is
+separate storage-contract evidence, not complete capsule or Xet qualification.
 
 The trace of push 321 attributes 15.607 seconds to Git object enumeration and
 4.169 seconds to pack generation within its 21.048-second wall time; its

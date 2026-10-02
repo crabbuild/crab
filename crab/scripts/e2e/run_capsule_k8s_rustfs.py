@@ -1025,12 +1025,15 @@ class Qualification:
             if seed_tip != base:
                 raise RuntimeError(f"seed clone tip {seed_tip} does not match {base}")
             self.git(["fsck", "--strict", "--full", "--no-reflogs"], self.incremental, timeout=7200)
-            self.remote_fsck(0, "seed")
+            # Persist independent proofs before the next failure boundary so
+            # failed runs retain completed checks without claiming unfinished ones.
             self.report["correctness"].update(
                 seed_tip=seed_tip,
                 seed_strict_full_git_fsck="passed",
-                seed_remote_crab_fsck="passed",
             )
+            self.save()
+            self.remote_fsck(0, "seed")
+            self.report["correctness"]["seed_remote_crab_fsck"] = "passed"
             self.save()
 
             commits: list[str] = self.report["commit_oids"]
@@ -1057,12 +1060,23 @@ class Qualification:
             if actual != expected:
                 raise RuntimeError(f"cold clone tip {actual} does not match {expected}")
             self.git(["fsck", "--strict", "--full"], self.final_clone, timeout=7200)
+            self.report["correctness"].update(
+                final_tip=actual,
+                expected_tip=expected,
+                cold_clone_strict_full_git_fsck="passed",
+            )
+            self.save()
             source_samples = sampled_blob_digests(
                 self.args.git_bin, Path(self.args.source).resolve(), expected
             )
             cold_samples = sampled_blob_digests(self.args.git_bin, self.final_clone, expected)
             if cold_samples != source_samples:
                 raise RuntimeError("cold clone sampled Git blob bytes differ from source")
+            self.report["correctness"].update(
+                sampled_blob_count=len(source_samples),
+                cold_clone_sampled_blob_bytes="matched source",
+            )
+            self.save()
             self.clone(
                 self.warm_clone,
                 "warm-final-clone",
@@ -1075,23 +1089,20 @@ class Qualification:
             if warm_tip != expected:
                 raise RuntimeError(f"warm clone tip {warm_tip} does not match {expected}")
             self.git(["fsck", "--strict", "--full"], self.warm_clone, timeout=7200)
+            self.report["correctness"].update(
+                warm_clone_tip=warm_tip,
+                warm_clone_strict_full_git_fsck="passed",
+            )
+            self.save()
             warm_samples = sampled_blob_digests(self.args.git_bin, self.warm_clone, expected)
             if warm_samples != source_samples:
                 raise RuntimeError("warm clone sampled Git blob bytes differ from source")
+            self.report["correctness"]["warm_clone_sampled_blob_bytes"] = "matched source"
+            self.save()
             self.remote_fsck(len(commits), "final")
             self.report["correctness"].update(
-                {
-                    "final_tip": actual,
-                    "warm_clone_tip": warm_tip,
-                    "expected_tip": expected,
-                    "cold_clone_strict_full_git_fsck": "passed",
-                    "warm_clone_strict_full_git_fsck": "passed",
-                    "remote_crab_fsck": "passed",
-                    "sampled_blob_count": len(source_samples),
-                    "cold_clone_sampled_blob_bytes": "matched source",
-                    "warm_clone_sampled_blob_bytes": "matched source",
-                    "incremental_fetches": self.args.commits // self.args.interval,
-                }
+                remote_crab_fsck="passed",
+                incremental_fetches=self.args.commits // self.args.interval,
             )
             self.summarize()
         except BaseException as error:
