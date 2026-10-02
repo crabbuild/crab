@@ -13,12 +13,22 @@
 
 ### Implementation status
 
-The current `CRBCKP03` complete-pack checkpoint is a measured scaling blocker,
-not the final v2 storage shape. The [stable layered-pack
-plan](capsule-layered-packs.md) replaces it with metadata-only checkpoints and
-content-addressed geometric pack layers. Until that plan passes its full
-qualification matrix, the complete-pack clauses below describe current
-behavior and correctness constraints rather than an accepted release design.
+The implemented checkpoint is metadata-only `CRBCKP05`. Its ordered source
+directory binds immutable `CRBRUN07` capsule runs and `CRBPKL01` pack layers;
+canonical xorbs and shards remain external. The [stable layered-pack
+design](capsule-layered-packs.md) is the detailed read, maintenance, and
+qualification contract. It supersedes the measured `CRBCKP03` complete-pack
+design, not the durable-before-visible, authorization, CAS, or GC invariants.
+
+Do not close the design or retire v1 yet. The October 2 current-runtime
+[5,000-commit Kubernetes replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-2-current-runtime-replay-correctness-passed-performance-failed)
+passed exact refs, one pack per fetch, cold/warm clone, strict Git/Crab fsck,
+and sampled-byte checks with no proxy errors. Mean push latency was 710 ms,
+but all ten 500-push-window p95 values exceeded one second; fetch p95 was
+32.567 seconds against the unchanged 10-second gate. Fetch request counts
+are diagnostic, not an acceptance gate. Current-runtime latency, the zero-error
+100 GiB Xet run, hosted-provider/product parity, paired v1 performance, and
+green CI remain release blockers.
 
 The hard-cutover implementation is wired to the user-facing ordinary Git path:
 
@@ -29,12 +39,11 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   or ref-head CAS according to the authority being changed;
 - `crab-read::capsule_protocol` loads the root and its bounded capsule frontier
   concurrently, verifying every size, content, transaction, and base binding;
-- checkpoint format `CRBCKP03` writes Git pack bodies before one contiguous,
-  footer-authenticated control suffix. Ordinary clone/fetch opens that suffix
-  with one range read; selected checkpoint pack ranges are source-backed and
-  verified by the Git pack checksum, entry CRC/delta evidence, and reconstructed
-  object IDs. Full checkpoint decoding remains the authenticated path for
-  maintenance that intentionally needs every pack byte;
+- checkpoint format `CRBCKP05` binds the immutable source directory, pointer
+  catalog, compact ordinal visibility, and bounded transition evidence.
+  Ordinary incremental reads authenticate its footer range without transferring
+  the complete visibility body or stable pack bodies. Selected source ranges
+  retain Git pack checksum, entry CRC/delta, and reconstructed-object checks;
 - terminal unfiltered thin-pack fetches retain only delta bases covered by the
   complete authenticated common-have set. OFS deltas are rewritten to
   REF_DELTA without a full dependency sort; filtered, shallow, deepen, and
@@ -85,8 +94,8 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   requests, or 4.988 per incremental push: p50 4, p95 8, p99 10, maximum 12
   at binary carry boundaries. Incremental latency was p50 273 ms, p95 545 ms,
   and p99 927 ms. Those results do not qualify the current batched-run
-  implementation or the CRBCKP03 read path; the same workload must be rerun
-  with a release binary before release.
+  implementation or layered read path; they cannot replace the later
+  current-runtime replay and its measured latency failure.
 
 The hard cutover never falls back after a v2 root is selected. Direct
 active-active pushes place the linearizable coordinator between immutable
@@ -179,8 +188,10 @@ The protocol MUST:
 5. Prevent GC from deleting data required by a committed or in-flight push.
 6. Preserve byte-identical Git and file reconstruction or return an error.
 7. Use four requests for an uncontended small push on a checksum-qualified
-   provider, including advertisement and post-publication ref-epoch
+   provider after root/view capture, including post-publication ref-epoch
    confirmation; use five when independent capsule readback is required.
+   Advertisement, product admission, compaction, and retries are separately
+   counted in end-to-end measurements.
 8. Add no foreground `HEAD`, `LIST`, lease, heartbeat, admission, journal, or
    GC-fence requests on that path.
 9. Bound cold-clone metadata amplification through immutable checkpoints.
@@ -237,7 +248,8 @@ still uses one capsule upload if it fits the selected upload mechanism.
 
 ### 5.2 Latency waves
 
-The checksum-qualified clean path has three ordered waves:
+The checksum-qualified writer-core path has four ordered waves after root/view
+capture, including authority confirmation:
 
 ```text
 client                         object store
@@ -247,12 +259,15 @@ client                         object store
   |<--- checksum/version ------------|
   |---- PUT ref head, if-match ----->|  single-ref publication point
   |<--- new version -----------------|
+  |---- GET root ------------------->|  confirm unchanged ref-authority epoch
+  |<--- authenticated root ----------|
 ```
 
 Local capsule construction may overlap advertisement. The data PUT cannot be
-skipped, and the ref-head CAS cannot start until capsule durability is proven. Those
-dependencies define the minimum critical path on an object store with no
-multi-object transaction.
+skipped, and the ref-head CAS cannot start until capsule durability is proven.
+Success also requires the final epoch confirmation or exact recovery of the
+attempted transaction. Those dependencies define the writer-core critical path
+on an object store with no multi-object transaction.
 
 ## 6. Storage layout
 
@@ -272,6 +287,7 @@ immutable:
 ├── transactions/committed/{activation-id}.json
 ├── capsules/{first-two-hex}/{blake3}
 ├── checkpoints/{first-two-hex}/{blake3}
+├── pack-layers/{first-two-hex}/{blake3}
 └── gc/runs/{run-id}/...
 ```
 
@@ -299,7 +315,6 @@ refs[]                    // checkpointed name, object ID, peeled ID baseline
 compacted_ref_positions[] // last transaction folded into each ref
 capsule_frontier[]        // legacy/root-owned maintenance transactions only
 checkpoint                // hash, size, covered generation
-checkpoint_pack           // capsule, byte range, Git checksum, object count
 delta_depth
 capabilities
 root_digest
@@ -386,45 +401,44 @@ Capsules form immutable per-ref histories. Each ref head carries its bounded
 post-checkpoint frontier, so disjoint branch writers never update one shared
 mutable object. Reading unbounded frontiers would move request amplification
 from push to clone, so a checkpoint periodically materializes a complete
-repository view:
+repository view. A `CRBCKP05` checkpoint contains:
 
-- one ordinary, non-thin, self-contained Git pack covering the checkpoint's
-  complete Git object catalog;
-- the pack checksum, object count, byte range, `.idx`, and `.rev` evidence;
-- full Git object locator;
-- complete file and chunk reconstruction indexes;
-- current visibility state;
-- the generation and root digest it covers.
+- the ordered immutable capsule-run and standalone-layer source descriptors;
+- source/member identities and commitments to their Git pack/index/locator
+  ranges, checksums, object counts, and external delta bases;
+- the pointer catalog authenticating external shard/xorb reconstruction;
+- source-bound ordinal visibility, complete transition history, and a bounded
+  recent transition suffix in the footer;
+- the generation and exact root digest it covers.
 
-The checkpoint object MUST place Git pack payload sections first and one
-contiguous control suffix last. The control suffix contains the pack indexes,
-reverse indexes, object locators, pointer catalog, visibility snapshot, and
-footer. Its root pointer binds the whole-object identity and size plus the
-control-suffix offset, length, and footer BLAKE3. The footer in turn binds every
-section's kind, range, and BLAKE3. This lets a cold reader fetch and
-authenticate the complete control plane in one range request without
-downloading the Git pack payload.
+Git pack bodies and sidecars remain in their immutable sources. The root
+pointer authenticates checkpoint identity, size, coverage, and footer range;
+the footer authenticates the source directory and metadata section hashes.
+A control-only open verifies that footer without reading the complete
+visibility/catalog body or source payloads. Consumers needing those sections
+load and authenticate them explicitly; a footer-only handle cannot synthesize
+the omitted catalog or full visibility proof.
 
-Metadata consumers MUST NOT call the whole-object checkpoint decoder. They
-read the authenticated control suffix, validate every complete metadata
-section, and fetch pack ranges only after authorization selects them. A full
-clone still streams and verifies the complete pack section. A selected range
-is accepted only after its pack-entry CRC and delta evidence, and reconstructed
-Git object ID all verify; a full materialization additionally verifies the
-footer-bound pack-section BLAKE3. A missing, truncated, or
-corrupt control suffix or range fails closed; silently retrying with an
-unbounded whole-checkpoint GET is forbidden.
+Logical checkpointing preserves existing source descriptors and admits newly
+stable capsule-run descriptors without copying Git bodies. Physical maintenance
+selects a weighted geometric or member-heavy suffix, publishes verified
+replacement layers, and leaves the stable prefix unchanged. Only exceeding
+the hard 64-source format bound makes minimum admission consolidation a
+logical-publication prerequisite. Neither ordinary checkpointing nor repack
+implicitly rewrites the complete repository.
 
-The checkpoint locator maps each Git object ID to its checkpoint or retained
-capsule, pack-section base, pack-relative offset, encoded length, CRC, kind,
-and delta-base evidence. Physical reads add the pack-section base to the
-pack-relative offset; the latter remains available for `OFS_DELTA` validation.
+The source-local locator binds Git IDs to authenticated member ranges, entry
+CRCs, kinds, and delta-base evidence. Physical reads add the source's pack-section
+base while retaining pack-relative offsets for `OFS_DELTA` validation. Selected
+entries require reconstructed-object-ID proof; complete downloads additionally
+verify bound body hashes and Git pack checksums. Missing or corrupt controls,
+members, or delta dependencies fail closed.
 
-The checkpoint pack is a storage optimization, not an authorization bypass.
-It may be streamed unchanged only when the requested authorized object closure
-equals its complete catalog. Hidden refs, partial-clone filters, shallow
-boundaries, or any smaller selection require Crab to generate a pack containing
-only the authorized selected objects.
+A pack set is a storage optimization, not an authorization bypass. Direct
+source installation or streaming requires the caller's complete object-set and
+dependency proof. Hidden refs, filters, shallow boundaries, or smaller selections
+must not expose unselected objects. See the companion design's clone/fetch
+contract for direct-install and generated-response selection.
 
 Each ref head points to a bounded frontier of post-checkpoint capsule runs.
 The coordinator-bound leaf is always written unchanged. Once 32 equal-level
@@ -643,7 +657,7 @@ first opens one immutable repository view:
 3. pin the root generation, compacted refs, visible heads, checkpoint, and
    bounded per-ref frontiers;
 4. range-load the checkpoint's authenticated control suffix and bounded
-   post-checkpoint metadata without reading checkpoint pack payloads;
+   post-checkpoint metadata without reading stable source pack payloads;
 5. validate that the combined locator, catalog, and visibility proof cover the
    exact pinned generation;
 6. advertise refs from the pinned view, applying hidden-ref policy.
@@ -657,20 +671,21 @@ A fresh clone has wants and no haves. Crab:
 
 1. authorizes the requested advertised refs and computes their complete
    reachable Git object closure;
-2. compares that closure with the checkpoint pack catalog;
-3. if the root is exactly at the checkpoint and the authorized closure equals
-   the complete catalog, range-GETs and streams the checkpoint pack section;
-4. otherwise reads the checkpoint pack plus at most `D` post-checkpoint pack
-   sections, where `D` is the hard delta-depth bound, and consolidates the
-   selected objects into one self-contained non-thin response pack;
-5. verifies the response pack's object catalog and trailer before writing the
-   upload-pack `packfile` section;
-6. lets Git validate, index, and install the pack normally.
+2. binds that selection to the immutable source/member catalog;
+3. reuses verified local packs by their authenticated body identity, independent
+   of checkpoint generation;
+4. for a complete authorized inventory, downloads and verifies eligible source
+   packs concurrently; the classic helper may directly install the bounded
+   inventory, while upload-pack still emits one Git response pack;
+5. otherwise reads only selected entries and required delta bases and generates
+   one self-contained response;
+6. verifies exact object coverage, pack identities, and successful installation
+   before reporting fetch completion.
 
-The direct checkpoint path is forbidden when hidden refs, authorization,
-partial-clone filters, or shallow boundaries make the requested closure
-smaller than the checkpoint catalog. Those requests use selected-object pack
-generation so unrequested or unauthorized objects do not cross the wire.
+Direct inventory reuse is forbidden when hidden refs, authorization, filters,
+or shallow boundaries reduce the selection. A storage capsule is never installed
+as a Git pack, and multiple source bodies cannot be concatenated without
+rebuilding a valid pack and proving its exact object set.
 
 ### 10.3 Incremental fetch and pull
 
@@ -738,50 +753,36 @@ these budgets until section 18's LFS protocol decision is closed.
 
 ### 10.6 Read request budgets
 
-Let `C` be one cold checkpoint-control-suffix range (`0` after an immutable
-cache hit), `D` the number of distinct post-checkpoint capsule runs, and `R`
-the number of coalesced pack ranges needed for an incremental selection.
-Assuming one GET can return a complete run or required contiguous range, the
-theoretical minima for a single-ref view are:
+The layered protocol has no universal three-read clone budget. Count transport
+attempts in disjoint groups:
 
-| Operation | Minimum object-store reads | Qualification |
-| --- | ---: | --- |
-| Ref advertisement | **1** | Root GET |
-| Full authorized clone at checkpoint generation | **3** | Root GET, checkpoint control-suffix range, and checkpoint pack range |
-| Full clone ahead of checkpoint | **3 + D** | Root, checkpoint control suffix and pack range, plus each capsule run; run reads are concurrent |
-| Incremental fetch or pull | **1 + C + D + R** | Root, cold control suffix, visible runs, and selected pack ranges |
-| Lazy object fetch | **1 + C + D + R** | `R = 1` only when the object and required bases co-locate |
+- `H`: root/ref capture, activation resolution, routing, and read admission;
+- `C`: checkpoint footer and any additional metadata sections actually required;
+- `S`: selected source control/index reads not supplied by a full source download;
+- `P`: pack-body or selected-entry range reads, including required delta bases.
 
-Ref-head capture adds its bounded LIST/GET work when refs are not represented
-by the checkpoint baseline. Many-ref qualification reports those requests
-separately; it may not hide them inside the payload-range budget.
+The total is `H + C + S + P`, with retries counted again. A full-object read
+that supplies control and payload counts once, not in both `S` and `P`.
+Verified immutable cache hits can remove origin reads, never authorization or
+integrity requirements. Many-ref capture and read-admission traffic are not
+hidden inside payload budgets.
 
-At the 32-capsule maintenance threshold, a healthy checkpointed repository
-normally needs three origin reads for a full authorized clone and at most 35
-while checkpoint publication is pending; batched run compaction usually makes
-the actual suffix-read count smaller. The tradeoff is deliberate: an ordinary
-incremental push remains four qualified or five readback-required operations.
-The 32-run policy and 500-capsule rollup together govern write amplification.
-The earlier estimate of average compaction operations predates CRBRUN07 and
-must not be reused as a v7 performance claim. Re-measure requests, copied bytes,
-and the boundary-push latency on the final RustFS and hosted-provider builds.
-Checkpoint construction installs and validates the pinned pack inventory,
-verifies the current ref graph with strict Git fsck, and emits one complete
-replacement pack through the same implementation used by `crab repack`.
-Checkpoint bytes still grow with the reachable Git object graph and remain a
-measured throughput and storage gate before release.
+Cold clone transfers every required missing source. Incremental fetch reuses
+stable local pack identities and targets the exact wants-minus-haves selection;
+an older or incomplete transition proof requires the bounded authenticated
+planner. Source count, fragmentation, and delta dependencies govern reads,
+not the number of new commits alone. Hydration and LFS add their own reads.
 
-These are origin-request minima, not universal guarantees. A selected object
-and its delta bases may span multiple runs; authorization or filtering may
-force selected-object reconstruction; retries count again; hydrate and LFS add
-their own reads. Claiming a constant two-request fetch would therefore be
-incorrect.
+The current-runtime Kubernetes replay measured 9–11 requests per 500-commit
+fetch, one new installed pack, and no seed-capsule or standalone-layer reads.
+These counts are diagnostic. The unchanged exact-tip, one-pack,
+no-fetch-repack, and p95-latency gates still apply; its 32.567-second fetch p95
+failed. A request reduction alone does not qualify the reader.
 
-A two-request clone for every generation would require publishing a complete
-checkpoint pack with every push. That would replace request latency with
-full-repository upload and repack cost and is rejected. The bounded `2 + D`
-design amortizes checkpoint construction while enforcing a finite worst-case
-source-capsule count.
+Logical checkpoints do not copy stable Git bodies. Physical repack amortizes
+suffix consolidation rather than publishing a complete pack with every push.
+Measure source/member count, copied bytes, checkpoint metadata growth, clone
+throughput, and boundary-push tails on the final binary and provider.
 
 Fresh-clone throughput should prefer full parallel capsule downloads when
 consolidation is required. Partial clone, mount, and sparse hydration should
@@ -975,11 +976,12 @@ safe while omitted required bytes violate reconstruction.
 
 ## 17. Implementation sequence
 
-1. **Complete:** freeze the v2 root, capsule, embedded Git pack, checkpoint,
-   locator, checksum, visibility, fence, and error contracts.
+1. **Implemented:** bounded, versioned root, capsule, Git pack, layered
+   checkpoint, locator, checksum, visibility, fence, and error contracts.
+   Release acceptance remains contingent on the qualification gates.
 2. **Complete:** build deterministic writers/readers and a corruption corpus.
-   The CRBCKP03 control suffix and source-backed selected-range reader are now
-   implemented; complete-pack authentication remains the maintenance path.
+   CRBCKP05 footer-only opens and source-backed selected-range readers are
+   implemented; deep integrity checks remain distinct from checkpointing.
 3. **Complete:** enforce exact transport-level request budgets for qualified
    checksum and mandatory-readback stores.
 4. **Complete:** qualify official AWS S3 checksum responses explicitly; custom
@@ -988,10 +990,10 @@ safe while omitted required bytes violate reconstruction.
    upload plus per-ref heads and activation records.
 6. **Complete for the ordinary read path:** checkpoint and capsule packs carry
    authenticated indexes, reverse indexes, object locators, and visibility
-   closures. CRBCKP03 binds one contiguous root-authenticated control suffix;
-   metadata-only open and incremental fetch range-load that suffix and never
-   download or hash the complete pack payload. Production-scale and hosted
-   qualification remain open.
+   closures. CRBCKP05 binds the immutable source set and metadata; incremental
+   reads range-load its footer and select admitted source members. They do not
+   materialize stable bodies merely because the checkpoint changed.
+   Current-runtime latency and hosted qualification remain open.
 7. **Complete for ordinary full, shallow, and filtered clone/fetch/pull and
    raw lazy-object recovery:** remove their v1 runtime path. A later promisor
    request re-enters the line-oriented helper, pins one authenticated capsule
@@ -1000,19 +1002,22 @@ safe while omitted required bytes violate reconstruction.
 8. **Complete in the HTTP server:** append leaf capsules with bounded batched
    run compaction, checkpoint after 32 visible capsules, and force a
    foreground checkpoint at 56. Background, foreground, and manual checkpoints
-   share one strict-fsck, complete-pack consolidation path. Long-run hosted
-   qualification remains open.
+   use the same layered owner: foreground admission publishes a logical
+   checkpoint, background maintenance independently consolidates a geometric
+   suffix, and interactive repack commits both in one exact-root CAS. Long-run
+   hosted qualification remains open.
 9. **Complete:** fence repository GC with one root transition, recheck object
    identity before delete, and release through another root transition.
-10. **Incomplete on RustFS:** live-qualify a fresh Kubernetes source with 5,000
-    incremental pushes, 10 fetches, 11 checkpoints including the seed, a final
-    independent clone, and full Git integrity verification using the CRBCKP03
-    reader. The first checkpoint-history rerun exposed whole-checkpoint payload
-    loading; the control-suffix path now exists, but its release replay must
-    also stage or intentionally exclude pointer-bearing source commits before
-    it can be evidence. Hosted-provider, injected-failure, and concurrency
-    qualification remain release gates.
-11. **Complete on RustFS:** live-qualify external xorbs and shards with ten
+10. **Correctness passed; performance failed on the latest RustFS replay:**
+    the fresh-source 5,000-push run completed ten fetch-before-repack intervals,
+    independent cold/warm clones, strict Git/Crab fsck, and sampled-byte checks.
+    Every fetch installed one new pack without reading stable bodies. Every
+    push-window p95 and the fetch p95 missed their latency gates. Final-runtime
+    performance, hosted-provider, injected-failure, and concurrency
+    qualification remain release gates; an earlier source's faster replay
+    cannot replace this result.
+11. **Earlier focused RustFS proof; current-scale qualification open:** external
+    xorbs and shards were exercised with ten
     non-zero 512 MiB files, ten versioned edits, cold cross-repository reuse,
     independent clone, two hydrate/dehydrate cycles, byte-digest comparison,
     and strict Git fsck. See the companion design's section 17.1 for metrics.
@@ -1040,11 +1045,12 @@ production wiring and format freeze require these decisions to be closed:
   capsules, receive forces a checkpoint at 56, runs cap at 512 capsules, and
   the hard frontier limit is 64 run segments. Checkpoint positions may split a
   run and readers replay only its authenticated suffix. V7 tail latency and
-  byte amplification remain unqualified.
-  This keeps incremental writes amortized history-flat without depending on a
-  hot repository root. Checkpoints consolidate the complete reachable Git
-  graph into one verified pack; byte-growth and final clone-read bounds remain
-  release measurements;
+  byte amplification remain qualification gates.
+  This keeps pointer-free request means history-flat without depending on a
+  hot repository root. Metadata-only checkpoints retain stable sources;
+  geometric maintenance rewrites only selected suffixes. Current push/fetch
+  tail latency and clone throughput have not passed final-runtime release
+  qualification;
 - whether native LFS bodies are capsule sections or retain a separately
   counted protocol;
 - the exact active-active boundary, which cannot use one object-store root as
