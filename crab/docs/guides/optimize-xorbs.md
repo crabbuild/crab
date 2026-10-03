@@ -58,6 +58,12 @@ and verifies source and destination size/hash. V2 rebuilds affected shards,
 verifies the complete replacement dependency closure, and publishes it in an
 exact-root-CAS checkpoint without creating legacy metadata. V1 retains its
 manifest-CAS path. Old roots remain protected until reconciliation completes.
+Sources may share a destination: every source chunk must retain a unique,
+size-preserving placement, and every destination chunk must be covered by a
+source mapped to that destination. Missing, foreign, or ambiguous placements
+fail before shard publication. Source mappings sharing a destination are
+committed as one journal page, after all immutable destinations are uploaded;
+an interrupted page cannot leave a partially completed source mapping.
 If the process is interrupted, rerun with `--resume`; uploaded immutable
 objects are safe to reuse and old objects remain eligible for normal garbage
 collection.

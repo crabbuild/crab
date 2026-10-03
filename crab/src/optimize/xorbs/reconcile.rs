@@ -272,7 +272,7 @@ fn xorb_info(hash: MerkleHash, parser: &XorbParser, path: &str) -> Result<Arc<MD
 
 /// Load source chunk sequences and the destination xorb metadata referenced by
 /// a completed journal. This is done once; immutable xorb objects do not need
-/// to be reread after a manifest CAS conflict.
+/// to be reread after an authority CAS conflict.
 async fn load_mapping(
     store: &Store,
     router: &StoreLayout,
@@ -281,6 +281,7 @@ async fn load_mapping(
 ) -> Result<LoadedMapping> {
     let mut loaded = LoadedMapping::default();
     let mut loaded_chunk_entries = 0usize;
+    let mut destination_coverage = HashMap::<MerkleHash, Vec<bool>>::new();
 
     for (source_text, destination_texts) in mapping {
         check_cancelled(cancel)?;
@@ -339,15 +340,16 @@ async fn load_mapping(
                 info
             };
 
-            for (index, chunk) in info.chunks.iter().enumerate() {
+            // The executor merges sources into shared destinations. Prove each
+            // source's placements now and the complete mapped-source coverage
+            // of each destination after every source has been verified.
+            let coverage = destination_coverage
+                .entry(destination_hash)
+                .or_insert_with(|| vec![false; info.chunks.len()]);
+            for (index, (chunk, covered)) in info.chunks.iter().zip(coverage.iter_mut()).enumerate()
+            {
                 if !source_hashes.contains(&chunk.chunk_hash) {
-                    return Err(CrabError::CorruptObject {
-                        path: router.xorb_path(&destination_hash).to_string(),
-                        reason: format!(
-                            "destination xorb contains chunk {} absent from source {}",
-                            chunk.chunk_hash, source_hash
-                        ),
-                    });
+                    continue;
                 }
                 let chunk_index = u32::try_from(index).map_err(|_| CrabError::CorruptObject {
                     path: router.xorb_path(&destination_hash).to_string(),
@@ -369,6 +371,7 @@ async fn load_mapping(
                         ),
                     });
                 }
+                *covered = true;
             }
         }
 
@@ -399,6 +402,18 @@ async fn load_mapping(
                 key: "xorb optimization reconciliation mapping count".to_owned(),
                 origin: format!(
                     "reconciliation loaded more than {MAX_RECONCILIATION_MAPPING_ENTRIES} source xorbs"
+                ),
+            });
+        }
+    }
+
+    for (destination_hash, coverage) in destination_coverage {
+        check_cancelled(cancel)?;
+        if let Some(index) = coverage.iter().position(|covered| !covered) {
+            return Err(CrabError::CorruptObject {
+                path: router.xorb_path(&destination_hash).to_string(),
+                reason: format!(
+                    "destination chunk at index {index} is not covered by its mapped source xorbs"
                 ),
             });
         }
@@ -1396,6 +1411,255 @@ mod tests {
             segments: vec![FileDataSequenceEntry::new(xorb_hash, size, 0, 1)],
             verification: Vec::new(),
             metadata_ext: None,
+        }
+    }
+
+    async fn put_xorb(
+        store: &Store,
+        router: &StoreLayout,
+        chunks: &[crab_xet::xorb::format::Chunk],
+    ) -> crab_xet::xorb::builder::XorbResult {
+        let mut builder = crab_xet::xorb::builder::XorbBuilder::new();
+        for chunk in chunks {
+            builder
+                .push(chunk, crab_xet::xorb::builder::RunId(0))
+                .unwrap();
+        }
+        let xorb = builder.finalize().unwrap().remove(0);
+        store
+            .put(
+                &router.xorb_path(&xorb.hash),
+                Bytes::from(xorb.bytes.clone()),
+            )
+            .await
+            .unwrap();
+        xorb
+    }
+
+    #[tokio::test]
+    async fn executor_shared_destinations_preserve_every_source_chunk() {
+        use crate::optimize::xorbs::executor::{ExecutorConfig, execute};
+        use crate::optimize::xorbs::profile::Profile;
+        use crab_xet::xorb::format::Chunk;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/shared-rewrite".to_owned());
+        let shared = Chunk::new(Bytes::from(vec![1_u8; 1024]));
+        let a = Chunk::new(Bytes::from(vec![2_u8; 1024]));
+        let b = Chunk::new(Bytes::from(vec![3_u8; 1024]));
+        let sources = [
+            put_xorb(&store, &router, &[a, shared.clone()]).await,
+            put_xorb(&store, &router, &[shared, b]).await,
+        ];
+        let directory = tempfile::tempdir().unwrap();
+        let journal = OptimizeXorbsJournal::open(&directory.path().join("journal.db")).unwrap();
+        let profile = Profile::code();
+        journal
+            .start_run("shared-rewrite", &profile.to_json())
+            .unwrap();
+        for source in &sources {
+            journal
+                .insert_source("shared-rewrite", &source.hash.hex())
+                .unwrap();
+        }
+        let cancel = CancellationToken::new();
+        execute(
+            &journal,
+            "shared-rewrite",
+            &profile,
+            &ExecutorConfig::default(),
+            &cancel,
+            Some(&store),
+            Some(&router),
+            None,
+        )
+        .await
+        .unwrap();
+        let (mapping, _, _) = build_mapping(&journal, "shared-rewrite").unwrap();
+        assert_eq!(
+            mapping[&sources[0].hash.hex()],
+            mapping[&sources[1].hash.hex()]
+        );
+        let loaded = load_mapping(&store, &router, &mapping, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(loaded.destination_infos.len(), 1);
+        assert_eq!(
+            loaded
+                .destination_infos
+                .values()
+                .next()
+                .unwrap()
+                .chunks
+                .len(),
+            3
+        );
+        for source in sources {
+            let parser = XorbParser::parse(Bytes::from(source.bytes)).unwrap();
+            let placement = &loaded.sources[&source.hash];
+            for (index, chunk) in placement.chunks.iter().enumerate() {
+                let target = placement.refs[&chunk.hash];
+                let (destination, _) = load_xorb(&store, &router, target.xorb_hash).await.unwrap();
+                assert_eq!(
+                    destination.get_chunk(target.chunk_index).unwrap().data,
+                    parser.get_chunk(index as u32).unwrap().data,
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_executor_page_resumes_with_complete_destination_coverage() {
+        use crate::optimize::xorbs::executor::{ExecutorConfig, execute};
+        use crate::optimize::xorbs::profile::Profile;
+        use crab_xet::xorb::format::Chunk;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/rewrite-resume".to_owned());
+        let shared = Chunk::new(Bytes::from(vec![11_u8; 1024]));
+        let sources = [
+            put_xorb(
+                &store,
+                &router,
+                &[Chunk::new(Bytes::from(vec![12_u8; 1024])), shared.clone()],
+            )
+            .await,
+            put_xorb(
+                &store,
+                &router,
+                &[shared, Chunk::new(Bytes::from(vec![13_u8; 1024]))],
+            )
+            .await,
+        ];
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("journal.db");
+        let profile = Profile::code();
+        {
+            let journal = OptimizeXorbsJournal::open(&path).unwrap();
+            journal
+                .start_run("rewrite-resume", &profile.to_json())
+                .unwrap();
+            for source in &sources {
+                journal
+                    .insert_source("rewrite-resume", &source.hash.hex())
+                    .unwrap();
+            }
+        }
+        let last_source = sources
+            .iter()
+            .map(|source| source.hash.hex())
+            .max()
+            .unwrap();
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(&format!(
+                    "CREATE TRIGGER fail_completion BEFORE UPDATE OF status ON sources
+                 WHEN NEW.status = 'done' AND NEW.src_xorb = '{last_source}'
+                 BEGIN SELECT RAISE(ABORT, 'injected source completion failure'); END;"
+                ))
+                .unwrap();
+        }
+        let cancel = CancellationToken::new();
+        let journal = OptimizeXorbsJournal::open(&path).unwrap();
+        let result = execute(
+            &journal,
+            "rewrite-resume",
+            &profile,
+            &ExecutorConfig::default(),
+            &cancel,
+            Some(&store),
+            Some(&router),
+            None,
+        )
+        .await;
+        let error = result.unwrap_err();
+        let CrabError::Io(error) = error else {
+            panic!("journal failures must preserve the SQLite source");
+        };
+        assert!(
+            std::error::Error::source(error.get_ref().unwrap())
+                .unwrap()
+                .is::<rusqlite::Error>()
+        );
+        let counts = journal.count_by_status("rewrite-resume").unwrap();
+        assert_eq!((counts.done, counts.pending), (0, 2));
+        drop(journal);
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch("DROP TRIGGER fail_completion;")
+                .unwrap();
+        }
+        let journal = OptimizeXorbsJournal::open(&path).unwrap();
+        execute(
+            &journal,
+            "rewrite-resume",
+            &profile,
+            &ExecutorConfig::default(),
+            &cancel,
+            Some(&store),
+            Some(&router),
+            None,
+        )
+        .await
+        .unwrap();
+        let (mapping, _, _) = build_mapping(&journal, "rewrite-resume").unwrap();
+        let loaded = load_mapping(&store, &router, &mapping, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(loaded.sources.len(), 2);
+        assert_eq!(loaded.destination_infos.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn mapping_rejects_uncovered_or_ambiguous_destination_chunks() {
+        use crab_xet::xorb::format::Chunk;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/invalid-rewrite".to_owned());
+        let a = Chunk::new(Bytes::from(vec![4_u8; 1024]));
+        let b = Chunk::new(Bytes::from(vec![5_u8; 1024]));
+        let foreign = Chunk::new(Bytes::from(vec![6_u8; 1024]));
+        let source_a = put_xorb(&store, &router, std::slice::from_ref(&a)).await;
+        let source_b = put_xorb(&store, &router, std::slice::from_ref(&b)).await;
+        let merged = put_xorb(&store, &router, &[a.clone(), b.clone()]).await;
+        let extra = put_xorb(&store, &router, &[a, b, foreign]).await;
+        for (case, a_destinations, b_destinations) in [
+            ("foreign chunk", vec![extra.hash], vec![extra.hash]),
+            (
+                "source not mapped to destination",
+                vec![merged.hash],
+                vec![source_b.hash],
+            ),
+            (
+                "missing source chunk",
+                vec![source_b.hash],
+                vec![source_b.hash],
+            ),
+            (
+                "ambiguous placement",
+                vec![source_a.hash, merged.hash],
+                vec![merged.hash],
+            ),
+        ] {
+            let mapping = HashMap::from([
+                (
+                    source_a.hash.hex(),
+                    a_destinations.iter().map(MerkleHash::hex).collect(),
+                ),
+                (
+                    source_b.hash.hex(),
+                    b_destinations.iter().map(MerkleHash::hex).collect(),
+                ),
+            ]);
+            assert!(
+                matches!(
+                    load_mapping(&store, &router, &mapping, &CancellationToken::new()).await,
+                    Err(CrabError::CorruptObject { .. })
+                ),
+                "{case} must fail closed",
+            );
         }
     }
 

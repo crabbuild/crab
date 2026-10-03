@@ -31,11 +31,14 @@ are diagnostic, not an acceptance gate. Current-runtime latency, the zero-error
 green CI remain release blockers.
 
 The October 2 [bounded Xorb rewrite probe](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-2-bounded-xorb-rewrite-reconciliation-failed-closed)
-also failed closed before checkpoint publication: the executor merges source
-xorbs, but reconciliation requires every merged destination chunk to belong
-to each individual source. The published root remained byte-identical.
-Shared-destination reconciliation and its live history/restore proof remain
-open; the earlier large-file hydration evidence does not qualify this path.
+failed closed before checkpoint publication; the published root remained
+byte-identical. The shared loader now verifies complete mapped-source coverage
+instead of rejecting valid merged destinations, and the journal commits shared
+source pages atomically. All 64 focused Xorb tests and the separate October 3
+[49-check real RustFS regression](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-bounded-xorb-rewrite-fixed-and-live-verified)
+pass, including exact cold hydration, retained-history integrity, restore,
+and republishing. This bounded proof does not qualify the 100 GiB workload,
+live crash/concurrency/GC matrix, or recovery of older partial-page journals.
 
 The hard-cutover implementation is wired to the user-facing ordinary Git path:
 

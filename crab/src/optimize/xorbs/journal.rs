@@ -110,6 +110,14 @@ pub struct OptimizeXorbsJournal {
     path: PathBuf,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("failed to write xorb optimization journal at {}: {source}", path.display())]
+struct JournalWriteError {
+    path: PathBuf,
+    #[source]
+    source: rusqlite::Error,
+}
+
 impl OptimizeXorbsJournal {
     /// Open or create the journal database.
     ///
@@ -339,8 +347,38 @@ impl OptimizeXorbsJournal {
                  WHERE run_id = ?4 AND src_xorb = ?5",
                 params![status.as_str(), dest_xorbs, now, run_id, src_xorb],
             )
-            .map_err(|e| CrabError::Internal(format!("failed to update source status: {e}")))?;
+            .map_err(|source| self.write_error(source))?;
         Ok(())
+    }
+
+    pub(super) fn complete_sources(
+        &self,
+        run_id: &str,
+        sources: &[(String, String)],
+    ) -> Result<()> {
+        if sources.is_empty() {
+            return Ok(());
+        }
+        // Sources can share a destination. A partial page commit would strand
+        // that destination's coverage when pending sources are packed on resume.
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|source| self.write_error(source))?;
+        for (source, destinations) in sources {
+            self.update_source_status(run_id, source, SourceStatus::Done, Some(destinations))?;
+        }
+        transaction
+            .commit()
+            .map_err(|source| self.write_error(source))?;
+        Ok(())
+    }
+
+    fn write_error(&self, source: rusqlite::Error) -> CrabError {
+        CrabError::Io(std::io::Error::other(JournalWriteError {
+            path: self.path.clone(),
+            source,
+        }))
     }
 
     /// Mark a source as corrupt with an error message.

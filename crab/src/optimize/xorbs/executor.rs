@@ -3,7 +3,7 @@
 //! Source rows are consumed in deterministic pages. A page shares one
 //! bounded builder, so fragments from multiple source xorbs are consolidated
 //! without loading the entire journal into memory. Immutable destinations are
-//! uploaded before any source row is committed as done.
+//! uploaded before the page's source mappings are committed atomically as done.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -201,14 +201,18 @@ fn mark_batch_without_store(
     rows: &[SourceRow],
     cancel: &CancellationToken,
 ) -> Result<BatchResult> {
-    let mut result = BatchResult::default();
+    let mut completions = Vec::with_capacity(rows.len());
     for row in rows {
         check_cancelled(cancel)?;
-        journal.update_source_status(run_id, &row.src_xorb, SourceStatus::Done, Some("[]"))?;
-        result.processed = result.processed.saturating_add(1);
-        result.done = result.done.saturating_add(1);
+        completions.push((row.src_xorb.clone(), "[]".to_owned()));
     }
-    Ok(result)
+    check_cancelled(cancel)?;
+    journal.complete_sources(run_id, &completions)?;
+    Ok(BatchResult {
+        processed: rows.len() as u64,
+        done: rows.len() as u64,
+        ..BatchResult::default()
+    })
 }
 
 #[derive(Debug)]
@@ -404,6 +408,7 @@ async fn process_batch(
         );
     }
     check_cancelled(cancel)?;
+    let mut completions = Vec::with_capacity(prepared.len());
     for source in prepared {
         check_cancelled(cancel)?;
         let mut destinations = source
@@ -424,9 +429,11 @@ async fn process_batch(
         let encoded = serde_json::to_string(&destinations).map_err(|error| {
             CrabError::Internal(format!("destination list serialize failed: {error}"))
         })?;
-        journal.update_source_status(run_id, &source.hash, SourceStatus::Done, Some(&encoded))?;
-        outcome.done = outcome.done.saturating_add(1);
+        completions.push((source.hash, encoded));
     }
+    check_cancelled(cancel)?;
+    journal.complete_sources(run_id, &completions)?;
+    outcome.done = completions.len() as u64;
     Ok(outcome)
 }
 

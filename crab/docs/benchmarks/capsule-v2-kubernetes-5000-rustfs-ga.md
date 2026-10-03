@@ -39,6 +39,18 @@ The report SHA-256 is
 The first attempt failed in the private driver's meter preflight, before
 remote initialization; its source and failure evidence remain preserved.
 
+The October 3 shared HTTP consumer proof also passes without fixture changes:
+`native_http_push_publishes_exact_objects_and_rejects_rewrites_atomically`
+completed both branch cases over real TCP/native Git in 28.48 seconds, then
+`native_http_push_rustfs` passed in 23.80 seconds against the GA endpoint and a
+fresh isolated prefix. These exercise atomic receive rejection, clone/fetch,
+browser mutations and index repair, exact object reads without a surviving
+client database, and explicit runtime shutdown. The test binary SHA-256 is
+`89ae24044511feac5af233b0cd3b0d5ad3a9e1c700132dfde8f147a0d11a620d`,
+from `29d1eb21` plus the six-file overlay recorded in the Xorb follow-up below.
+This is focused consumer proof, not fleet/provider parity or a qualified
+full-workload speedup.
+
 ## October 2 bounded Xorb rewrite: reconciliation failed closed
 
 Run `xorb-optimizer-native-ga-20261002-r1` used that same frozen private
@@ -56,8 +68,9 @@ source. Current main has the same per-source restriction in its shared loader;
 this is not evidence of damaged source data or a capsule-only format error.
 A source-catalog union alone is insufficient: every destination chunk must
 belong to a verified source that explicitly maps to that destination, and every
-source chunk must retain one size-preserving placement. Regression work is
-pending; no integrity check has been waived.
+source chunk must retain one size-preserving placement. The failed run remains
+unchanged; the follow-up below records the separate fix and verification.
+No integrity check has been waived.
 
 A read-only postfailure GET proved the published root byte-identical to its
 pre-optimization value, SHA-256
@@ -67,6 +80,57 @@ The failed report SHA-256 is
 Journal, uploaded destinations, logs, and original failed report are retained.
 Post-rewrite hydration, historical restore, and republishing were not reached.
 This 24 MiB probe does not replace the zero-error 100 GiB release gate.
+
+## October 3 bounded Xorb rewrite: fixed and live-verified
+
+The shared loader now checks destination coverage across only the verified
+sources explicitly mapped to that destination, preserving unique,
+size-preserving placement for every source chunk. Foreign, globally known but
+unmapped, missing, and ambiguous placements still fail closed. This loader
+serves both v1 manifest and v2 checkpoint reconciliation.
+
+A second regression exposed the producer's completion boundary: committing
+source mappings individually can strand a shared destination after a failure
+between rows. The actual executor/WAL SQLite test reproduced one `done` and
+one `pending` source, instead of zero partial completions. The journal now
+commits each bounded source page atomically after destination uploads. Both
+executor paths use that boundary, and journal write errors retain the typed
+SQLite cause. Schema, remote formats, dependencies, and store requests are
+unchanged. The original loader and per-row producer also exist in released
+`v1.2.4`; this is not a capsule-only correction.
+
+All 64 focused Xorb tests passed, including the actual second-row failure,
+rollback, journal close/reopen, successful resume, complete mapped-source
+closure, and negative placement cases. The pre-fix failures and post-fix test
+transcripts are retained separately. Post-fix test-binary SHA-256 is
+`86608624958e074706d15ce5662fa00ef19d5fc1cf4ea3e52d68e8e2d57154bf`.
+
+Fresh private `make install` completed all three locked release stages without
+changing global binaries. Run `xorb-optimizer-atomic-ga-20261003-r2` then passed
+all 49 checks on the same RustFS 1.0.0 GA endpoint, from 00:32:30 to 00:33:24
+UTC, in a new isolated prefix. It rewrote three source xorbs into two
+destinations, including one shared by all three sources, read 26,334,541 bytes,
+wrote 26,334,718 bytes, and completed with
+zero corrupt, skipped, or pending sources. The replacement checkpoint advanced
+without legacy repository metadata or ref changes. Independent cold clones
+hydrated byte-identical files before and after rewriting, after restoring the
+old checkpoint, and after republishing the current version. Strict Git and
+remote Crab fsck passed; both retained checkpoints verified their external
+xorb/shard dependency closures.
+
+The frozen CLI SHA-256 is
+`f8da0969942734159cd1acb2d92aa75021dfe38fc0afcfc666b7d3cbf4ef959f`;
+source is `29d1eb21` plus overlay SHA-256
+`61d4395aaafd6ddddf3662d58b01f0b1f69af45304b98569c7f958ecd9d3c950`.
+Report SHA-256 is
+`3a9363c9ccd20b4cc2fbc4e8746350cab5f8f48e66ad192973f87d8daaf77867`;
+driver SHA-256 is
+`7c49aaebacc6034a8e5e627015031cf23cf87e1e0489052b93d91c6a864b3708`.
+The original failed report, journal, remote destinations, and unchanged-root
+proof remain intact. This 24 MiB live regression and SQLite fault proof do not
+qualify 100 GiB performance, real process-kill/concurrent-maintenance/GC, or
+recovery of journals with partial pages produced by an older version. Those
+gates, final-head CI, and the full product/provider matrix remain open.
 
 ## October 2 current-runtime replay: correctness passed, performance failed
 

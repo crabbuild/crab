@@ -68,6 +68,15 @@ that every tail sample has the same cause. Exact-runtime scale performance,
 zero-error 100 GiB Xet, the failure/provider/product matrix, matched v1, and
 green current-head CI remain required before closeout.
 
+The separate October 3 [bounded Xorb maintenance regression](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-bounded-xorb-rewrite-fixed-and-live-verified)
+now passes 49 real CLI/RustFS checks after correcting mapped-source coverage
+and atomic source-page completion. All 64 focused Xorb tests pass, including
+an actual SQLite second-row failure, rollback, reopen, and resume. Cold exact
+hydration, retained-checkpoint verification, restore, and republishing passed
+on two 12 MiB files across two versions. This closes the reproduced merged-Xorb
+failure for that bounded case, not the 100 GiB, live crash/concurrency/GC,
+older partial-page journal recovery, or complete product/provider gates.
+
 The historical `53b11070` exact-head GA trace's final fetch used one complete
 GET for each of 24 distinct new capsule-run objects, plus ten root, ref-capture,
 admission, replica-discovery and checkpoint operations. Earlier traces had
