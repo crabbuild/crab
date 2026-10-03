@@ -57,18 +57,6 @@ pub(crate) async fn prepare_delta(
     )
     .await?;
     let base_catalog = view.pointer_catalog()?;
-    let mut xorb_entries = HashMap::<MerkleHash, XorbCatalogEntry>::new();
-    let mut placements = ChunkPlacementMap::new();
-    for (hash, entry) in base_catalog.xorbs() {
-        let hash = parse_merkle_hash(hash, "base xorb")?;
-        let xorb_placements = placements_for_catalog_xorb(hash, entry)?;
-        for placement in &xorb_placements {
-            placements
-                .entry(placement.chunk_hash)
-                .or_insert_with(|| placement.clone());
-        }
-        xorb_entries.insert(hash, entry.clone());
-    }
 
     let mut pointer_sizes = BTreeMap::<MerkleHash, u64>::new();
     for pointer in pointers {
@@ -112,6 +100,22 @@ pub(crate) async fn prepare_delta(
             example_size: size,
         }
     })?;
+
+    // The pinned catalog already validates hashes and dependency closure.
+    // Known files need no new recipe; expand placements only for unresolved
+    // files, avoiding a second full chunk index and descriptor copy.
+    let mut xorb_entries = HashMap::<MerkleHash, XorbCatalogEntry>::new();
+    let mut placements = ChunkPlacementMap::new();
+    for (hash, entry) in base_catalog.xorbs() {
+        let hash = parse_merkle_hash(hash, "base xorb")?;
+        let xorb_placements = placements_for_catalog_xorb(hash, entry)?;
+        for placement in &xorb_placements {
+            placements
+                .entry(placement.chunk_hash)
+                .or_insert_with(|| placement.clone());
+        }
+        xorb_entries.insert(hash, entry.clone());
+    }
 
     let mut delta = PointerCatalog::new();
     let mut shard_session = PushShardSession::new();
@@ -938,6 +942,8 @@ fn placements_for_catalog_xorb(
     xorb_hash: MerkleHash,
     entry: &crab_metadata::capsule_protocol::XorbCatalogEntry,
 ) -> Result<Vec<ChunkPlacement>> {
+    #[cfg(test)]
+    tests::EXPANDED_CATALOG_CHUNKS.with(|count| count.set(count.get() + entry.chunks().len()));
     entry
         .chunks()
         .iter()
@@ -964,13 +970,240 @@ fn parse_merkle_hash(value: &str, label: &str) -> Result<MerkleHash> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::sync::Arc;
+    use std::time::Instant;
 
+    use crab_metadata::capsule_protocol::{
+        Capsule, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
+        FileCatalogEntry, PointerCatalog, RootSnapshot, ShardCatalogEntry, XorbCatalogEntry,
+        XorbChunkEntry,
+    };
+    use crab_types::pointer::Pointer;
     use crab_xet::hash::compute_data_hash;
     use crab_xet::xorb::builder::{CompressionPolicy, FixedCompression};
     use crab_xet::xorb::format::CompressionScheme;
 
     use super::*;
+
+    thread_local! {
+        pub(super) static EXPANDED_CATALOG_CHUNKS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn pointer_catalog(xorb_count: usize, chunks_per_xorb: usize) -> (PointerCatalog, Pointer) {
+        let pointer = Pointer {
+            file_hash: [3; 32],
+            size: 9,
+            shard_hint: None,
+        };
+        let mut catalog = PointerCatalog::new();
+        let mut xorb_hashes = Vec::new();
+        for xorb in 0..xorb_count {
+            let hash = compute_data_hash(format!("xorb {xorb}").as_bytes()).hex();
+            catalog
+                .insert_xorb(
+                    hash.clone(),
+                    XorbCatalogEntry::new(
+                        100,
+                        "4".repeat(64),
+                        (0..chunks_per_xorb)
+                            .map(|chunk| {
+                                let ordinal = xorb * chunks_per_xorb + chunk;
+                                XorbChunkEntry::new(
+                                    compute_data_hash(format!("chunk {ordinal}").as_bytes()).hex(),
+                                    9,
+                                )
+                            })
+                            .collect(),
+                    ),
+                )
+                .unwrap();
+            xorb_hashes.push(hash);
+        }
+        xorb_hashes.sort();
+        let shard_hash = "2".repeat(64);
+        catalog
+            .insert_shard(shard_hash.clone(), ShardCatalogEntry::new(50, xorb_hashes))
+            .unwrap();
+        catalog
+            .insert_file(
+                MerkleHash::from(pointer.file_hash).hex(),
+                FileCatalogEntry::new(pointer.size, shard_hash),
+            )
+            .unwrap();
+        (catalog, pointer)
+    }
+
+    async fn publish_catalog(
+        bytes: Bytes,
+    ) -> (crab_storage::StoreLayout<crab_storage::Store>, RootSnapshot) {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store, "repo".to_owned());
+        let base =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(CapsuleSectionKind::CatalogDelta, bytes)],
+        )
+        .unwrap();
+        let base = crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        (layout, base)
+    }
+
+    #[tokio::test]
+    async fn known_pointers_do_not_expand_catalog_chunk_placements() {
+        let (catalog, pointer) = pointer_catalog(64, 1024);
+        let (layout, base) = publish_catalog(catalog.encode().unwrap()).await;
+        EXPANDED_CATALOG_CHUNKS.set(0);
+        let started = Instant::now();
+        let mut outcome = None;
+        for _ in 0..3 {
+            outcome = Some(
+                prepare_delta(
+                    &layout,
+                    &base,
+                    std::slice::from_ref(&pointer),
+                    None,
+                    None,
+                    None,
+                    true,
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let elapsed = started.elapsed();
+        let expanded = EXPANDED_CATALOG_CHUNKS.replace(0);
+        eprintln!(
+            "known-pointer preparation: {elapsed:?} for three calls, {expanded} expanded chunks"
+        );
+        let (delta, stats) = outcome.unwrap();
+        assert_eq!(
+            (
+                delta.is_empty(),
+                stats.xorbs_uploaded,
+                stats.shards_uploaded,
+                stats.xorb_bytes_uploaded,
+                expanded
+            ),
+            (true, 0, 0, 0, 0),
+        );
+    }
+
+    #[tokio::test]
+    async fn known_pointers_reject_declared_size_conflicts() {
+        let (catalog, pointer) = pointer_catalog(1, 1);
+        let (layout, base) = publish_catalog(catalog.encode().unwrap()).await;
+        for (pointers, duplicate_conflict) in [
+            (
+                vec![Pointer {
+                    size: pointer.size + 1,
+                    ..pointer.clone()
+                }],
+                false,
+            ),
+            (
+                vec![
+                    pointer.clone(),
+                    Pointer {
+                        size: pointer.size + 1,
+                        ..pointer.clone()
+                    },
+                ],
+                true,
+            ),
+        ] {
+            let error = prepare_delta(
+                &layout,
+                &base,
+                &pointers,
+                None,
+                None,
+                None,
+                true,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                (error, duplicate_conflict),
+                (CrabError::StagingCorrupt(_), true) | (CrabError::CorruptObject { .. }, false)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn known_pointers_do_not_bypass_catalog_validation() {
+        let (catalog, pointer) = pointer_catalog(1, 1);
+        let chunk_hash = catalog.xorbs().values().next().unwrap().chunks()[0].hash();
+        let bytes = String::from_utf8(catalog.encode().unwrap().to_vec())
+            .unwrap()
+            .replace(
+                &format!("\"hash\":\"{chunk_hash}\""),
+                "\"hash\":\"invalid\"",
+            );
+        let (layout, base) = publish_catalog(Bytes::from(bytes)).await;
+        let error = prepare_delta(
+            &layout,
+            &base,
+            &[pointer],
+            None,
+            None,
+            None,
+            true,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, CrabError::CorruptObject { reason, .. } if reason.contains("chunk"))
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_pointers_still_require_staged_content() {
+        let (catalog, pointer) = pointer_catalog(1, 1);
+        let (layout, base) = publish_catalog(catalog.encode().unwrap()).await;
+        let error = prepare_delta(
+            &layout,
+            &base,
+            &[Pointer {
+                file_hash: [9; 32],
+                ..pointer
+            }],
+            None,
+            None,
+            None,
+            true,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CrabError::PointerMissingStaging {
+                total: 1,
+                missing: 1,
+                ..
+            }
+        ));
+    }
 
     fn build_xorb(data: &[u8], scheme: CompressionScheme) -> XorbResult {
         let chunk = Chunk {

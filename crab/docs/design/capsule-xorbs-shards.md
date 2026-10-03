@@ -339,7 +339,15 @@ concurrent push to another branch.
 ### 7.2 Discover pointers and staged content
 
 The writer walks the outgoing Git object closure relative to the pinned base
-and parses candidate pointer blobs. For each distinct `(file_hash, size)` it:
+and parses candidate pointer blobs. It normalizes file identities and rejects
+conflicting declared sizes. After authenticating the complete pinned catalog,
+a file with the same catalog size needs no new pointer delta or local staging.
+If every outgoing file is already known, preparation returns before building
+the chunk-to-xorb placement map. Catalog decoding, hash validation, dependency
+closure validation, and control reads still occur; this is a local-work
+optimization, not a lower request budget or an unvalidated cache fast path.
+
+For each file absent from the pinned catalog it:
 
 1. loads the complete staged chunk sequence;
 2. validates chunk hashes and total file size;
