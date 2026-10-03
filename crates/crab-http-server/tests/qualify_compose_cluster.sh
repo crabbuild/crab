@@ -210,10 +210,10 @@ remove_project_service_containers() {
   container_ids="$(docker container ls --all \
     --filter "label=com.docker.compose.project=${project}" \
     --filter "label=com.docker.compose.service=${service}" \
-    --format '{{.ID}}')"
+    --format '{{.ID}}')" || return 1
   while IFS= read -r container; do
     [ -n "$container" ] || continue
-    docker rm --force "$container" >/dev/null
+    docker rm --force "$container" >/dev/null || return 1
     if docker container inspect "$container" >/dev/null 2>&1; then
       echo "${service} container ${container} remained after forced removal." >&2
       return 1
