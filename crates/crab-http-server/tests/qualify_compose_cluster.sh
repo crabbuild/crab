@@ -1320,6 +1320,36 @@ for candidate in server server-b server-c server-d; do
     fallback_services+=("$candidate")
   fi
 done
+# Snapshot the old cohort before replacements start; the owner may rotate and
+# enroll fresh node IDs while replacement services boot.
+node_b_before_fallback=""
+for _ in $(seq 1 45); do
+  node_b_before_fallback="$(service_cli "$b_service" cells node \
+    --session "$session_after_second_loss" --json 2>/dev/null || true)"
+  if jq --exit-status \
+    --arg session "$session_after_second_loss" \
+    '.session == $session and .live == true and
+     .advertisement.log.state == "open" and
+     (.advertisement.log.member_nodes | length > 0)' \
+    <<<"$node_b_before_fallback" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+if ! jq --exit-status \
+  --arg session "$session_after_second_loss" \
+  '.session == $session and .live == true and
+   .advertisement.log.state == "open" and
+   (.advertisement.log.member_nodes | length > 0)' \
+  <<<"$node_b_before_fallback" >/dev/null 2>&1; then
+  echo "Fallback owner B did not expose an open durability log before replacement." >&2
+  jq . <<<"$node_b_before_fallback" >&2 || true
+  exit 1
+fi
+fallback_initial_log_epoch="$(jq --raw-output '.advertisement.log.epoch' \
+  <<<"$node_b_before_fallback")"
+fallback_initial_members="$(jq -c '.advertisement.log.member_nodes' \
+  <<<"$node_b_before_fallback")"
 replacement_services=(proxy "${fallback_services[@]}")
 replacement_config_dir="$(mktemp -d "${TMPDIR:-/tmp}/crab-cluster-replacement.XXXXXX")"
 replacement_instance="${replacement_config_dir##*/}"
@@ -1402,25 +1432,8 @@ fallback_session_for_service() {
   esac
 }
 
-# The serving control is authoritative for the owner boot identity. Pin both
-# observations to that session so a service-local session cannot mask a change.
-node_b_before_fallback="$(service_cli "$b_service" cells node \
-  --session "$session_after_second_loss" --json)"
-fallback_initial_log_epoch="$(jq --raw-output '.advertisement.log.epoch' \
-  <<<"$node_b_before_fallback")"
-fallback_initial_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
 # The current epoch may remain active until its signed members expire. The
 # rotation below must publish a fresh inactive epoch before testing fallback.
-if ! jq --exit-status \
-  --arg session "$session_after_second_loss" \
-  '.session == $session and .live == true and
-   .advertisement.log.state == "open" and
-   (.advertisement.log.member_nodes | length > 0)' \
-  <<<"$node_b_before_fallback" >/dev/null; then
-  echo "Fallback owner B did not expose an open durability log." >&2
-  jq . <<<"$node_b_before_fallback" >&2 || true
-  exit 1
-fi
 for service in "${fallback_services[@]}"; do
   candidate_node="$(jq --raw-output '.advertisement.node' \
     <<<"$(fallback_node_for_service "$service")")"
