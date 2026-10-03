@@ -1277,23 +1277,45 @@ stop_fallback_member() {
 # Replace every non-owner process so its prior session and follower state
 # cannot satisfy the previous epoch. Keep all three fresh peers through log
 # rotation so the two-member selector leaves a live non-member candidate.
-# A stale process fences itself once its lease is renewed after the freeze.
-# Remove the stopped node and its namespace proxy explicitly so the next start
-# models an orchestrator replacement rather than reusing the fenced process.
+# This models node replacement, not process restart: node-id is stable within
+# cells.data_dir, so the old container and its tmpfs must actually be removed.
 fallback_services=()
 for candidate in server server-b server-c server-d; do
   if [ "$candidate" != "$b_service" ]; then
     fallback_services+=("$candidate")
   fi
 done
-for service in proxy "${fallback_services[@]}"; do
-  kill_service "$service" >/dev/null 2>&1 || true
-  remove_stopped_service "$service" >/dev/null 2>&1 || true
+fallback_container_ids=()
+for service in "${fallback_services[@]}"; do
+  fallback_container_ids+=("$(compose_container_id "$service")")
+done
+proxy_container_id="$(compose_container_id proxy)"
+replacement_services=(proxy "${fallback_services[@]}")
+replacement_container_ids=("$proxy_container_id" "${fallback_container_ids[@]}")
+for index in "${!replacement_services[@]}"; do
+  service="${replacement_services[$index]}"
+  container="${replacement_container_ids[$index]}"
+  if [ "$(docker inspect --format '{{.State.Running}}' "$container")" = true ]; then
+    docker kill --signal KILL "$container" >/dev/null
+  fi
+  docker rm --force "$container" >/dev/null
+  if docker container inspect "$container" >/dev/null 2>&1; then
+    echo "${service} container ${container} remained after forced removal." >&2
+    exit 1
+  fi
 done
 "${compose[@]}" up --detach --no-build "${fallback_services[@]}" >/dev/null
 "${compose[@]}" up --detach --no-build proxy >/dev/null
 for service in "${fallback_services[@]}"; do
   wait_for_healthy "$service"
+done
+for index in "${!fallback_services[@]}"; do
+  service="${fallback_services[$index]}"
+  current_container_id="$(compose_container_id "$service")"
+  if [ "$current_container_id" = "${fallback_container_ids[$index]}" ]; then
+    echo "${service} reused its old container; the node-replacement fixture is invalid." >&2
+    exit 1
+  fi
 done
 session_server_fallback="$(fallback_session server)"
 session_server_b_fallback="$(fallback_session server-b)"
