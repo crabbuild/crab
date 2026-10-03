@@ -6,7 +6,7 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Protocol-v2 checkpoint Git packs, clone/fetch, repack, fsck, history, and GC |
-| Status | Working implementation, not release-qualified. The latest earlier end-to-end 5,000-commit GA replay is recorded in the [Kubernetes qualification](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-final-runtime-replay). The exact current-PR-head attempt and its remaining failures are recorded below. Fetch request counts are diagnostic only. Push latency, clone throughput, exact-head final integrity, push-request measurement, old Xorb journal recovery, 100 GiB Xet, hosted providers, full product parity, paired v1, green CI, and v1 retirement remain open. |
+| Status | Working implementation, not release-qualified. The latest complete 5,000-commit GA replay is recorded in the [Kubernetes qualification](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-final-runtime-replay). The replay at `db928679` predates current PR head `2bbb0fb`, which updates qualification checks but has not completed a full replay. Fetch request counts are diagnostic only. Push latency, clone throughput, exact-head final integrity, push-request measurement, old Xorb journal recovery, 100 GiB Xet, hosted providers, full product parity, paired v1, green CI, and v1 retirement remain open. |
 | Priority | Correctness, stable incremental cost, then clone throughput and storage efficiency |
 | Replaces | Whole-repository Git-pack replacement during every v2 checkpoint |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Kubernetes 4,500-commit RustFS benchmark](../benchmarks/kubernetes-4500-rustfs.md) |
@@ -26,6 +26,36 @@ no fetch-triggered repack, and p95 latency at or below 10 seconds. Fetch
 request count is diagnostic only. Historical entries retain the harness
 verdict and request threshold used at the time; a request-count-only failure
 is not a current fetch blocker.
+
+The 500-commit incremental fetch that completed correctly in 5.55 seconds with
+27 object-store requests is acceptable under this policy. Keep its request
+count as diagnostic telemetry; do not fail fetch qualification for that count.
+
+### Current PR-head qualification status (2026-10-03)
+
+PR #208 targets `crab-v2` and is currently at `2bbb0fb660f8dfbd9eb8e6ba551e0cd4a62be1f7`.
+That commit strengthens the blobless-clone proof: the harness checks promisor
+configuration, omitted sampled blobs, byte-identical lazy hydration, and
+post-hydration presence rather than requiring one particular locator telemetry
+event. The full replay recorded at `db928679` predates this harness change, so
+it is not a completed current-head qualification.
+
+Current-head CI is not green. The Compose failover job recovered and served
+the exact acknowledged data, then failed because the eventual owner was not a
+member of the previous owner's log. Pinned Cellule selects a live,
+recovery-eligible log member as its preferred recovery node; Crab may use an
+eligible fallback when that destination is unavailable. The failing run did
+not capture the member's eligibility at the transition, so it does not yet
+distinguish a product regression from an incomplete fixture precondition. The
+member-affinity assertion is unchanged pending that contract decision.
+
+The newer full 5,000-commit replay passed correctness and fetch latency but
+missed the one-second push-window p95 target in five of ten windows. Cold and
+warm clones took 53.724 and 20.008 seconds, with no matched v1 run. The latest
+100 GiB Xet attempt failed during hydration with SIGBUS. Do not conclude the
+design or retire v1 until exact-head final integrity, push and clone
+performance, Xet, recovery/GC, provider/product parity, paired-v1, and green
+CI gates pass.
 
 ### October 3 exact-PR-head qualification (`db928679`)
 
