@@ -9,6 +9,7 @@ repo_root="$(cd "${crate_dir}/../.." && pwd)"
 compose_file="${crate_dir}/deploy/compose.yaml"
 cluster_file="${crate_dir}/deploy/compose.cluster.yaml"
 project="${CRAB_HTTP_CLUSTER_PROJECT:-crab-http-cluster-qualification-$$}"
+replacement_config_dir=""
 
 if [[ ! "$project" =~ ^crab-http-cluster-qualification-[A-Za-z0-9_-]+$ ]]; then
   echo "CRAB_HTTP_CLUSTER_PROJECT must be a unique crab-http-cluster-qualification-* name." >&2
@@ -86,6 +87,9 @@ cleanup() {
     "${compose[@]}" logs --no-color >&2 || true
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  if [ -n "$replacement_config_dir" ]; then
+    rm -rf -- "$replacement_config_dir"
+  fi
   if $failed; then
     echo "Compose cluster qualification failed." >&2
   fi
@@ -104,17 +108,18 @@ stop_service() {
 
 node_session() {
   local service="$1"
+  local data_dir="${2:-/var/lib/crab/cells}"
   # The single-quoted script must expand path inside the container, not locally.
   # shellcheck disable=SC2016
   "${compose[@]}" exec -T "$service" sh -ec '
-    for path in /var/lib/crab/cells/sessions/*; do
+    for path in "$1"/sessions/*; do
       if [ -d "$path" ]; then
         printf "%s\n" "${path##*/}"
         exit 0
       fi
     done
     exit 1
-  '
+  ' sh "$data_dir"
 }
 
 resume_service() {
@@ -1235,14 +1240,14 @@ service_origin() {
 }
 
 service_session() {
-  node_session "$1"
+  node_session "$1" "${2:-/var/lib/crab/cells}"
 }
 
 fallback_session() {
   local service="$1"
   local session=""
   for _ in $(seq 1 45); do
-    if session="$(service_session "$service" 2>/dev/null)" &&
+    if session="$(service_session "$service" "/var/lib/crab/cells/replacement-${service}" 2>/dev/null)" &&
       [[ "$session" =~ ^[0-9a-f]{32}$ ]]; then
       printf '%s\n' "$session"
       return 0
@@ -1292,10 +1297,9 @@ stop_fallback_member() {
 }
 
 # Replace every non-owner process so its prior session and follower state
-# cannot satisfy the previous epoch. Keep all three fresh peers through log
-# rotation so the two-member selector leaves a live non-member candidate.
-# This models node replacement, not process restart: node-id is stable within
-# cells.data_dir, so every existing peer container must actually be removed.
+# cannot satisfy the previous epoch. Give each replacement a fresh data dir:
+# node-id is stable within cells.data_dir, so reusing that path can resurrect
+# an expired member identity and prevent the membership-rotation check.
 # Earlier owner-loss rounds may already have removed some non-owner peers.
 fallback_services=()
 for candidate in server server-b server-c server-d; do
@@ -1304,6 +1308,32 @@ for candidate in server server-b server-c server-d; do
   fi
 done
 replacement_services=(proxy "${fallback_services[@]}")
+replacement_config_dir="$(mktemp -d "${TMPDIR:-/tmp}/crab-cluster-replacement.XXXXXX")"
+replacement_compose_file="${replacement_config_dir}/compose.yaml"
+printf 'services:\n' > "$replacement_compose_file"
+for service in "${fallback_services[@]}"; do
+  case "$service" in
+    server) config_source="${crate_dir}/deploy/compose.server.toml" ;;
+    server-b) config_source="${crate_dir}/deploy/compose.node-b.toml" ;;
+    server-c) config_source="${crate_dir}/deploy/compose.node-c.toml" ;;
+    server-d) config_source="${crate_dir}/deploy/compose.node-d.toml" ;;
+  esac
+  replacement_config="${replacement_config_dir}/${service}.toml"
+  sed -E \
+    "s#^data_dir = \"[^\"]+\"\$#data_dir = \"/var/lib/crab/cells/replacement-${service}\"#" \
+    "$config_source" > "$replacement_config"
+  if ! grep -F -x \
+    "data_dir = \"/var/lib/crab/cells/replacement-${service}\"" \
+    "$replacement_config" >/dev/null; then
+    echo "${service} replacement config did not isolate its local cell state." >&2
+    exit 1
+  fi
+  printf '  %s:\n    volumes:\n      - type: bind\n        source: %s\n        target: /etc/crab/server.toml\n        read_only: true\n      - type: volume\n        source: peer-identity\n        target: /run/secrets/crab-peer\n        read_only: true\n' \
+    "$service" "$(jq --null-input --arg path "$replacement_config" '$path')" \
+    >> "$replacement_compose_file"
+done
+compose+=(--file "$replacement_compose_file")
+"${compose[@]}" config --quiet
 replaced_container_ids=()
 for service in "${replacement_services[@]}"; do
   container_ids="$(remove_project_service_containers "$service")"
@@ -1378,6 +1408,16 @@ if ! jq --exit-status \
   jq . <<<"$node_b_before_fallback" >&2 || true
   exit 1
 fi
+for service in "${fallback_services[@]}"; do
+  candidate_node="$(jq --raw-output '.advertisement.node' \
+    <<<"$(fallback_node_for_service "$service")")"
+  if jq --exit-status --arg node "$candidate_node" \
+    'any(.[]; . == $node)' <<<"$fallback_initial_members" >/dev/null; then
+    echo "${service} reused a node identity from the pre-replacement membership." >&2
+    echo "Replacement node=${candidate_node}; old members=${fallback_initial_members}" >&2
+    exit 1
+  fi
+done
 
 # Member loss rotates the log membership and epoch, even while the owner's
 # session stays live. Root-only fallback is safe only while the new log remains
