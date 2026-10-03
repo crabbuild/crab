@@ -20,15 +20,23 @@ design](capsule-layered-packs.md) is the detailed read, maintenance, and
 qualification contract. It supersedes the measured `CRBCKP03` complete-pack
 design, not the durable-before-visible, authorization, CAS, or GC invariants.
 
-Do not close the design or retire v1 yet. The October 2 current-runtime
-[5,000-commit Kubernetes replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-2-current-runtime-replay-correctness-passed-performance-failed)
-passed exact refs, one pack per fetch, cold/warm clone, strict Git/Crab fsck,
-and sampled-byte checks with no proxy errors. Mean push latency was 710 ms,
-but all ten 500-push-window p95 values exceeded one second; fetch p95 was
-32.567 seconds against the unchanged 10-second gate. Fetch request counts
-are diagnostic, not an acceptance gate. Current-runtime latency, the zero-error
-100 GiB Xet run, hosted-provider/product parity, paired v1 performance, and
-green CI remain release blockers.
+Do not close the design or retire v1 yet. The latest complete
+[5,000-commit Kubernetes replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-final-runtime-replay)
+used published runtime `18e7d618`, not the current PR head `822e88a`. It passed
+all push/fetch correctness, strict Git/Crab fsck, sampled-byte, and exact-tip
+checks. Fetch p95 was 8.581 seconds with one new pack per interval and no
+stable-pack rereads; fetch request counts are diagnostic, not an acceptance
+gate. Five of ten 500-push windows still miss the one-second p95 target, and
+cold/warm clone took 53.724/20.008 seconds. The current PR head has not had its
+own full replay, and no matched v1 performance comparison exists.
+
+A RustFS 1.0.0 GA 100 GiB Xet run passed 4,207/4,207 checks with zero proxy
+errors, but its frozen binary came from dirty source revision `c7c88bfd`, not
+the current PR head. It does not qualify `822e88a`. Current-head CI also has a
+failed Compose crash/restart qualification; 25 checks pass and 10 optional or
+provider/platform scenarios are skipped. Current-head replay, Xet, push-tail
+and clone-throughput qualification, hosted-provider/product parity, paired v1
+performance, and green CI remain release blockers.
 
 The October 2 [bounded Xorb rewrite probe](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-2-bounded-xorb-rewrite-reconciliation-failed-closed)
 failed closed before checkpoint publication; the published root remained
