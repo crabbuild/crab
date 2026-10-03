@@ -33,8 +33,10 @@ count as diagnostic telemetry; do not fail fetch qualification for that count.
 
 ### Current PR-head qualification status (2026-10-03)
 
-PR #208 targets `crab-v2` and is currently at `2bbb0fb660f8dfbd9eb8e6ba551e0cd4a62be1f7`.
-That commit strengthens the blobless-clone proof: the harness checks promisor
+PR #208 targets `crab-v2`. The source/test head audited here is
+`2bbb0fb660f8dfbd9eb8e6ba551e0cd4a62be1f7`; subsequent closeout commits only
+update this documentation, not product or harness behavior. That source/test
+commit strengthens the blobless-clone proof: the harness checks promisor
 configuration, omitted sampled blobs, byte-identical lazy hydration, and
 post-hydration presence rather than requiring one particular locator telemetry
 event. The full replay recorded at `db928679` predates this harness change, so
