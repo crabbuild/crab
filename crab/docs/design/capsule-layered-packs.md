@@ -6,7 +6,7 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Protocol-v2 checkpoint Git packs, clone/fetch, repack, fsck, history, and GC |
-| Status | Working implementation, not release-qualified. The latest completed [5,000-commit RustFS GA replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-final-runtime-replay) uses published runtime `18e7d618`: all pushes, ten fetch-before-repack intervals, cold/warm clones, strict Git/Crab fsck, and sampled-byte checks pass. Mean push requests remain 7.062 in every window; five window-p95 latency checks fail. Fetch p95 is 8.581 seconds, with exactly one new pack and no stable-body rereads or fetch-triggered repack. Request counts are diagnostic for fetch. Push performance, clone throughput, old Xorb journal recovery, 100 GiB Xet, hosted providers, full product parity, paired v1, green CI, and v1 retirement remain open. |
+| Status | Working implementation, not release-qualified. The latest earlier end-to-end 5,000-commit GA replay is recorded in the [Kubernetes qualification](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-final-runtime-replay). The exact current-PR-head attempt and its remaining failures are recorded below. Fetch request counts are diagnostic only. Push latency, clone throughput, exact-head final integrity, push-request measurement, old Xorb journal recovery, 100 GiB Xet, hosted providers, full product parity, paired v1, green CI, and v1 retirement remain open. |
 | Priority | Correctness, stable incremental cost, then clone throughput and storage efficiency |
 | Replaces | Whole-repository Git-pack replacement during every v2 checkpoint |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Kubernetes 4,500-commit RustFS benchmark](../benchmarks/kubernetes-4500-rustfs.md) |
@@ -26,6 +26,38 @@ no fetch-triggered repack, and p95 latency at or below 10 seconds. Fetch
 request count is diagnostic only. Historical entries retain the harness
 verdict and request threshold used at the time; a request-count-only failure
 is not a current fetch blocker.
+
+### October 3 exact-PR-head qualification (`db928679`)
+
+Run `k8s-5000-headdb928-20261003-r1` used a fresh Kubernetes checkout at
+`12eb5840594c0b9b1454b6b809d2aa2c9447c9b9`, a frozen Crab binary built from
+`db9286794b34282eb75d3a552655170f7f531c3a` (SHA-256
+`4db4f941264e5632d7a2d2594384f98ab599a21d06dd8553787bb0c50dfb2831`), and
+RustFS 1.0.0 GA. All 5,000 replay pushes exited successfully. All ten 500-push
+fetches returned their exact expected tips in 2.482–7.035 seconds. Fetch
+request counts varied from 2 to 586; these remain diagnostic, not a gate.
+
+Push mean latency was 342.8 ms, aggregate p95 710 ms, and maximum 9.731 seconds.
+Nine of ten 500-push windows met the 1-second p95 target; window 2,501–3,000
+failed at 1.144 seconds. Per-push object-store request telemetry is absent in
+this run: zero-valued report fields are not measured zero-request pushes.
+The 4,000- and 5,000-push fetches each used two storage reads, but that does not
+explain the intermittent push tail.
+
+The final cold/warm full clones completed in 19.323/15.704 seconds for a
+1.315 GB object database. Their strict Git fscks passed in 125.815/122.781
+seconds. The blobless clone command exited successfully in 50.282 seconds,
+but the harness then failed `blob-none-ordinal-metadata-lookup` because it saw
+zero matching telemetry events. This is not proof that blob omission or lazy
+hydration failed; those behaviors were not verified before the harness stopped.
+Consequently, final source/sample comparison, the incremental clone's final
+fsck, and remote Crab fsck did not run. The retained report SHA-256 is
+`dc02b49e5d1f880240e8b7ccac730646fea95ac48335eb9d0a903ff576a2b467`.
+
+This exact-head attempt is not a release pass. The >1-second push window,
+unmeasured per-push request count, slow full clones/fscks, stopped final
+integrity checks, Compose CI failure, 100 GiB Xet qualification, matched v1,
+provider/product parity, and recovery/concurrency/GC matrix remain open.
 
 ### October 3 closeout decision
 
