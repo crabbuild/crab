@@ -6,7 +6,7 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Protocol-v2 checkpoint Git packs, clone/fetch, repack, fsck, history, and GC |
-| Status | Working implementation, not release-qualified. The latest completed [5,000-commit RustFS GA replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-2-current-runtime-replay-correctness-passed-performance-failed) used current runtime source `0747011`: all pushes, ten fetch-before-repack intervals, cold/warm clones, strict Git/Crab fsck, and sampled-byte checks passed. Push mean/p95/p99 were 710/1,357/2,828 ms, every 500-push-window p95 exceeded one second, and mean push requests were 7.062. Fetch p95 was 32.567 seconds; each fetch installed one pack and request counts are diagnostic only. No task-owned build overlapped the replay, but the host was shared. Performance, current-head 100 GiB Xet, hosted providers, full product parity, paired v1, and v1 retirement remain open. |
+| Status | Working implementation, not release-qualified. The latest completed [5,000-commit RustFS GA replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-final-runtime-replay) uses published runtime `18e7d618`: all pushes, ten fetch-before-repack intervals, cold/warm clones, strict Git/Crab fsck, and sampled-byte checks pass. Mean push requests remain 7.062 in every window; five window-p95 latency checks fail. Fetch p95 is 8.581 seconds, with exactly one new pack and no stable-body rereads or fetch-triggered repack. Request counts are diagnostic for fetch. Push performance, clone throughput, old Xorb journal recovery, 100 GiB Xet, hosted providers, full product parity, paired v1, green CI, and v1 retirement remain open. |
 | Priority | Correctness, stable incremental cost, then clone throughput and storage efficiency |
 | Replaces | Whole-repository Git-pack replacement during every v2 checkpoint |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Kubernetes 4,500-commit RustFS benchmark](../benchmarks/kubernetes-4500-rustfs.md) |
@@ -27,7 +27,37 @@ request count is diagnostic only. Historical entries retain the harness
 verdict and request threshold used at the time; a request-count-only failure
 is not a current fetch blocker.
 
-### Closeout decision — October 2
+### October 3 closeout decision
+
+Do not conclude the implementation or retire v1. The final-runtime full replay
+passes correctness and fetch latency, but fails push-window p95 in five of ten
+windows. Push mean/p95 are 533.21/1,026 ms; cold/warm clones take 53.724/20.008
+seconds. Final remote Crab fsck passes, and all 35,697 recorded requests have
+zero proxy errors or HTTP 5xx. The frozen binary is unchanged. No task-owned
+build or second timing workload overlaps this run, but the shared host and
+unmatched v1 workload preclude a causal speedup or parity claim. The benchmark
+record above binds the complete report, request log and runtime provenance.
+
+Atomic Xorb source-page completion prevents new partial journals; it does not
+repair journals produced by the released per-row writer. `--resume` accepts
+schema version 1 and executes only pending sources, without a migration or
+recovery guard. A previously completed source can still point to a shared
+destination whose other source is pending; repacking that pending source into
+a different destination leaves the old mapping incomplete. Strict
+reconciliation correctly rejects that closure before publication. Recovery
+must preserve unrelated completed work and all placement/integrity checks;
+the new rollback/reopen test does not qualify this historical shape.
+
+Final-runtime CI also fails the Compose fixture's preserved non-member
+assumption under the pinned Cellule recruitment contract. Fixing that setup
+must preserve genuine non-member takeover, exact data/root, expiry, fencing,
+and the receipt contract; approval remains pending. Zero-error 100 GiB Xet
+needs capacity beyond the unchanged 220 GiB preflight and current 40 GB
+backend. Complete provider/product and fault/concurrency/GC qualification,
+matched v1 performance, and clone-throughput proof remain open. These are
+release gates, not permission to relax correctness or retire v1.
+
+### October 2 closeout decision
 
 Do not conclude the implementation or retire v1 yet. The fresh-source run
 `k8s-5000-head0747011-r4` uses runtime source `0747011dbf262ff08ce727da20e0596d89a36daf`

@@ -5,6 +5,95 @@ gate. Older entries below retain the gate language used when those runs were
 scored. Current fetch performance scoring uses exact correctness and p95
 latency at or below 10 seconds.
 
+## October 3 final runtime replay
+
+Run `k8s-5000-head18e7d6-20261003-r1` started at 01:08:56 UTC on October 3
+against published runtime head `18e7d6182c4656e22270e3a156a34d5a7f1ea4c7`.
+The run finished at 02:23:20 UTC with a performance-only failure. All 5,000
+pushes and ten fetch-before-repack intervals completed. Independent cold and
+warm clones passed exact-tip, strict full native Git fsck, and all 32 sampled
+blob comparisons against the unchanged source. Seed and final remote Crab
+fsck passed; the final remote check took 229.038 seconds. The frozen binary
+remained unchanged throughout the run.
+
+The frozen CLI SHA-256 is
+`f8da0969942734159cd1acb2d92aa75021dfe38fc0afcfc666b7d3cbf4ef959f`.
+Its runtime files match the six-file tested overlay SHA-256
+`61d4395aaafd6ddddf3662d58b01f0b1f69af45304b98569c7f958ecd9d3c950`
+over `29d1eb21`, subsequently published in `e5b07c80699` and `18e7d6182c4`.
+The fresh full GitHub Kubernetes input has no alternates or promisor, with
+first-parent seed `cd451c6a368a854526ed0afe81af1b5a0e888815` and final tip
+`839853cd72a9464fc4e44980dbb9c2fb78d9ba8e`. The new bucket
+`crab-v2-5000-18e7d6-20261003-r1` was verified absent before creation and empty
+before initialization. RustFS uses the same pinned 1.0.0 GA image index and
+four-vCPU native arm64 Colima instance described below.
+
+| Operation | Measured result |
+| --- | ---: |
+| Seed push | 277.187 s |
+| Incremental push mean / p50 / p95 / p99 | 533.21 / 429 / 1,026 / 2,210 ms |
+| Maximum incremental push | 9.092 s |
+| Mean incremental push requests | 7.062 in every 500-push window |
+| Fetch mean / p50 / p95 | 6.339 / 6.407 / 8.581 s |
+| Fetch request counts | 9 / 9 / 9 / 9 / 9 / 9 / 9 / 11 / 11 / 11, diagnostic only |
+| New packs per fetch | Exactly one in all ten intervals |
+| Final cold / warm clone | 53.724 / 20.008 s |
+| Cold / warm origin response bytes | 1,315,710,440 / 55,995,710 |
+| Interval repack latency range | 11.686–42.402 s |
+
+Push-window p95 values are 1,109 / 922 / 724 / 2,161 / 955 / 1,145 / 904 /
+977 / 1,005 / 1,180 ms. Five windows fail the unchanged 1,000 ms gate;
+passing mean latency and flat request counts do not erase these misses.
+All ten fetch latencies pass the ten-second gate. Independent raw-trace
+grouping confirms one new-capsule body GET and one checkpoint-control range
+GET per interval, with no stable pack-layer body reads. Each full capsule GET
+names a different new run, not the seed capsule. All fetch Trace2 files
+contain zero native Git repack starts. The incremental client's actual final
+tip matches the source, independently of the report's exact-tip checks.
+
+No task-owned build or second bulk/timing workload overlapped this replay.
+Other host workloads remained active; differences from earlier runs do not
+establish a causal speedup or matched-v1 performance. Ordinary push 82 spent
+2.487 seconds in native pack preparation despite six requests and a 33 ms
+slowest store request. Push 1,877 spent 3.629 seconds in native object
+enumeration and 1.842 seconds in visibility enumeration, with a 54 ms
+slowest store request. Rollup push 500 instead uploaded 61.7 MB in 31
+requests while native pack generation took 23 ms. These are distinct local
+and rollup costs, not one universal latency explanation; overlapping timings
+must not be added.
+
+The harness SHA-256 is
+`c613499c3c0427753af2a8ad3cbe006badeb7a384c0132129e299f61ae026da7`;
+proxy SHA-256 is
+`bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879`.
+Exact sources and preflight provenance are preserved alongside the new run.
+The harness differs from the previous full-run snapshot only in completed-proof
+persistence at failure boundaries, not workload or gates. The terminal raw
+trace contains 35,697 requests, zero proxy errors and zero HTTP 5xx. Report
+SHA-256 is
+`4e42cb7bb07660bc181839c74355ff3184e03cd5c0d1bf209f9296621f4bbd9c`;
+request-log SHA-256 is
+`84b0794491078a1f8ac1f1b105243f9cc0bee3f5b2a50b40caac0b74cccf610d`.
+The original report, request log, binary, preflight and snapshots remain intact.
+Push tails, clone throughput, old partial-page Xorb journal recovery,
+zero-error 100 GiB Xet, complete provider/product parity, matched v1, and green
+CI remain open. This result does not qualify v1 retirement.
+
+After the full run terminated, a separate native-pack ABBA diagnostic replayed
+push 82's frozen adjacent revision pair. One excluded default warmup took
+523.614 ms. Four measured default trials averaged 131.962 ms (122.959–151.412);
+four `--threads=1` trials averaged 139.350 ms (129.951–164.621). Every trial
+generated the same 621,193-byte pack, verified its trailer and native index,
+passed strict object/link checks against the source, retained the exact 128
+object/type/size entries and semantic closure, and reconstructed identical
+bytes from the trial pack without alternates. The source remained clean and
+unchanged. This small warm shared-host probe did not reproduce the captured
+2.610-second pack-generation tail or establish a threading optimization; no
+production change follows from it. Report SHA-256 is
+`a090f471466bf10516af0226196a8efaffd92a96229ff1c1a6bc6df4b54a8f9c`;
+the private diagnostic driver SHA-256 is
+`5e6246ce80d47ce4dc825545ec75fc52ec987c913b0b9961ca1d973a2bb2db2f`.
+
 ## October 2 generated-sideband comparison: no qualified speedup
 
 Run `sideband-fetch-abba-20261002-r2` completed at 21:56:33 UTC against the
