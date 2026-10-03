@@ -72,14 +72,17 @@ CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-large-repo-qualificati
 
 Start RustFS using the local development guide or point the command at an
 existing isolated RustFS deployment. Pin and record the RustFS image version
-for comparable evidence.
+for comparable evidence. The dedicated workflow pins RustFS 1.0.0 GA to
+`ghcr.io/rustfs/rustfs@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858`,
+checks the running executable's version, and retains its complete version
+output with the report. Supply the actual `rustfs --version` first line, not
+just an image tag, for manual runs.
 
 ```bash
 python3 crab/scripts/e2e/run_large_repo_rustfs.py \
   --crab-bin /Volumes/Workspace/crabbuild-target/crab-large-repo-qualification/release/crab \
   --run-id kubernetes-baseline-a \
-  --object-store-version rustfs/rustfs:1.0.0-beta.8-glibc \
-  --cleanup-remote
+  --object-store-version "rustfs 1.0.0"
 
 python3 crab/scripts/verify-large-repo-rustfs-report.py \
   /Volumes/Workspace/CrabBuild/crabbuild-qualification/kubernetes-baseline-a/artifacts/report.json
@@ -91,12 +94,11 @@ For the full large-team gate, use the dedicated workflow's equivalent:
 python3 crab/scripts/e2e/run_large_repo_rustfs.py \
   --crab-bin /Volumes/Workspace/crabbuild-target/crab-large-repo-qualification/release/crab \
   --run-id kubernetes-team-load-a \
-  --object-store-version rustfs/rustfs:1.0.0-beta.8-glibc \
+  --object-store-version "rustfs 1.0.0" \
   --cold-clone-fanout 50 \
   --warm-clone-fanout 100 \
   --require-cache-service \
-  --team-load \
-  --cleanup-remote
+  --team-load
 
 python3 crab/scripts/verify-large-repo-rustfs-report.py \
   /Volumes/Workspace/CrabBuild/crabbuild-qualification/kubernetes-team-load-a/artifacts/report.json \
@@ -109,11 +111,14 @@ under `/Volumes/Workspace/CrabBuild/crabbuild-qualification/<run-id>`. The sourc
 checkout is cloned with `--shared --no-checkout`, is never reset, cleaned, or
 updated, and its initial status and revision are verified again at the end.
 
-`--cleanup-remote` deletes only keys below
-`e2e-large-repository/<run-id>/`. It never invokes bucket-wide GC or deletes
-other repository prefixes. Keep the local run directory until evidence has
-been reviewed. Replay and clone worktrees are removed after a successful run
-to bound disk usage; logs, reports, and correctness samples remain. Pass
+Remote objects and the workflow's run-scoped RustFS data directory are retained,
+including on failure. The optional `--cleanup-remote` deletes only keys below
+`e2e-large-repository/<run-id>/`, but also runs after a failed qualification.
+Use it only when that evidence no longer needs inspection. It never invokes
+bucket-wide GC or deletes other repository prefixes. Keep the local run
+directory until evidence has been reviewed. Replay and clone worktrees are
+removed after a successful run to bound disk usage; logs, reports, and
+correctness samples remain. Pass
 `--retain-worktrees` only when a successful checkout must be inspected.
 
 For a fast harness check, supply a small Git repository with at least four
@@ -185,7 +190,7 @@ non-zero; it is never accepted as performance evidence.
 ## Report contract
 
 The versioned JSON report uses schema `crab.large-repository-rustfs`, version
-`1.3`. Its main sections are:
+`1.4`. Its main sections are:
 
 | Field | Evidence |
 |---|---|
@@ -197,7 +202,7 @@ The versioned JSON report uses schema `crab.large-repository-rustfs`, version
 | `team_load` | Optional controlled concurrent fetch and push outcomes, including distinct seed/final checkpoints and tips, per-client failures, and cold-fanout pack producer, cache-event, and origin-request proof; `--require-team-load` makes it mandatory for a full gate and requires one or two generated-pack producers |
 | `cache_service` | Optional service health/capability proof and aggregate Git-pack cache traffic; `--require-cache-service` makes the service and observed pack traffic mandatory |
 | `store_snapshots` | Physical object, byte, and pack growth at seed/checkpoints/final state |
-| `correctness` | Advertised refs, clone tips, full/incremental fsck evidence, deterministic object sample, and fingerprint |
+| `correctness` | Advertised refs, clone tips, full/incremental fsck evidence, deterministic object sample, byte-identical lazy blob hydration, and fingerprint |
 | `metrics` | Count and min/median/p95/p99/max duration summaries by operation family |
 
 The verifier fails closed on missing stages or checks, failed commands,
@@ -213,9 +218,11 @@ Remote-operation telemetry is emitted once per bounded operation. It records
 only numeric counts and durations, including the source-pack download portion
 of response-pack generation, plus bounded counts for locator lookup modes;
 per-object debug logging is disabled because its volume would distort both
-timing and storage evidence on large histories. The blobless catalog-filter
-stage must record ordinal-metadata lookup activity, proving that the optimized
-ordinal path was exercised.
+timing and storage evidence on large histories. The blobless-clone proof checks
+that every sampled source blob is absent before hydration, that the clone has a
+promisor pack and `blob:none` configuration, and that lazy hydration returns
+byte-identical content. It uses the deterministic correctness sample instead of
+walking the clone's entire object database.
 Cache hit/miss parsing is case-insensitive because generated-pack cache events
 are emitted from a Rust debug enum (`Hit`/`Miss`) while object-cache events use
 lowercase strings. This keeps warm-fanout measurements faithful to the logs.

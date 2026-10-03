@@ -1422,13 +1422,13 @@ impl EvidenceVerifier {
             return;
         };
         self.check(
-            "cli-dedup-advisory-queries-bypassed",
-            int_field(&record, "dedup_queries_delta") == Some(0),
+            "cli-dedup-advisory-query-used",
+            int_field(&record, "dedup_queries_delta").is_some_and(|value| value > 0),
             json!({ "dedup_queries_delta": record.get("dedup_queries_delta") }),
         );
         self.check(
-            "cli-dedup-advisory-known-chunks-empty",
-            int_field(&record, "dedup_known_chunks_delta") == Some(0),
+            "cli-dedup-advisory-known-chunks-returned",
+            int_field(&record, "dedup_known_chunks_delta").is_some_and(|value| value > 0),
             json!({ "dedup_known_chunks_delta": record.get("dedup_known_chunks_delta") }),
         );
         self.check(
@@ -1452,8 +1452,8 @@ impl EvidenceVerifier {
             json!({ "shard_gets_delta": record.get("shard_gets_delta") }),
         );
         self.check(
-            "cli-dedup-metadata-read",
-            int_field(&record, "metadata_gets_delta").is_some_and(|value| value > 0),
+            "cli-dedup-retired-v1-metadata-unused",
+            int_field(&record, "metadata_gets_delta") == Some(0),
             json!({ "metadata_gets_delta": record.get("metadata_gets_delta") }),
         );
         let cacheable_keys = record
@@ -1476,11 +1476,11 @@ impl EvidenceVerifier {
                 "origin_get_key_delta": record.get("origin_get_key_delta"),
             }),
         );
-        let expected_manifest = self
+        let expected_root = self
             .report
             .get("run_id")
             .and_then(Value::as_str)
-            .map(|run_id| format!("e2e-cache-service/{run_id}/cli-dedup/manifest"));
+            .map(|run_id| format!("e2e-cache-service/{run_id}/cli-dedup/v2/root"));
         let mutable_keys = record
             .get("mutable_origin_get_key_delta")
             .and_then(Value::as_object)
@@ -1495,19 +1495,19 @@ impl EvidenceVerifier {
             .iter()
             .filter(|(key, _)| key.starts_with(".crab/xorbs/") || key.starts_with(".crab/shards/"))
             .all(|(key, value)| cacheable_keys.get(key) == Some(value));
-        let manifest_cas = expected_manifest.as_ref().is_some_and(|manifest_key| {
+        let root_cas = expected_root.as_ref().is_some_and(|root_key| {
             int_field(&record, "mutable_origin_gets_delta").is_some_and(|value| value > 0)
                 && mutable_keys
-                    .get(manifest_key)
+                    .get(root_key)
                     .and_then(Value::as_i64)
                     .is_some_and(|value| value > 0)
                 && immutable_origin_keys_are_cacheable
         });
         self.check(
-            "cli-dedup-manifest-cas-origin-read",
-            manifest_cas,
+            "cli-dedup-root-cas-origin-read",
+            root_cas,
             json!({
-                "expected_key": expected_manifest,
+                "expected_key": expected_root,
                 "actual": record.get("origin_get_key_delta"),
                 "mutable_actual": mutable_keys,
                 "origin_gets_delta": record.get("origin_gets_delta"),

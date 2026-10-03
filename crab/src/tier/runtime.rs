@@ -47,10 +47,9 @@ pub fn resolve_provider(config: &Config) -> Result<Provider> {
 
 fn tier_provider_from_storage_kind(provider: StorageProviderKind) -> Provider {
     match provider {
-        StorageProviderKind::S3 => Provider::S3,
+        StorageProviderKind::S3 | StorageProviderKind::Local => Provider::S3,
         StorageProviderKind::Gcs => Provider::Gcs,
         StorageProviderKind::Azure => Provider::Azure,
-        StorageProviderKind::Local => Provider::S3,
     }
 }
 
@@ -60,7 +59,7 @@ pub async fn build_lifecycle_provider(
     url: &CrabUrl,
 ) -> Result<Box<dyn LifecycleProvider>> {
     match resolve_provider(config)? {
-        Provider::S3 => build_s3_lifecycle_provider(config, url),
+        Provider::S3 => build_s3_lifecycle_provider(config, url).await,
         Provider::Gcs => build_gcs_lifecycle_provider(url).await,
         Provider::Azure => build_azure_lifecycle_provider(config, url),
     }
@@ -72,9 +71,40 @@ pub async fn build_restore_backend(
     url: &CrabUrl,
 ) -> Result<Arc<dyn RestoreBackend>> {
     match resolve_provider(config)? {
-        Provider::S3 => build_s3_restore_backend(config, url),
+        Provider::S3 => build_s3_restore_backend(config, url).await,
         Provider::Gcs => build_gcs_restore_backend(url).await,
         Provider::Azure => build_azure_restore_backend(config, url),
+    }
+}
+
+/// Build the restore backend for the store that actually owns a read view.
+///
+/// Managed repositories do not expose their physical bucket in the logical
+/// `crab://` URL.  Using the resolved store identity keeps restore requests on
+/// the same provider and bucket as the authenticated v2 read path.
+pub async fn build_restore_backend_for_store(
+    config: &Config,
+    store: &crate::storage::Store,
+    repo_prefix: &str,
+) -> Result<Arc<dyn RestoreBackend>> {
+    let identity = store.bucket_identity();
+    if identity.cloud == StorageProviderKind::Local || identity.container.is_empty() {
+        return Err(CrabError::TierProviderUnsupported {
+            provider: "local storage has no archive restore backend".into(),
+        });
+    }
+
+    let url = CrabUrl {
+        bucket: identity.container,
+        repo_path: repo_prefix.to_owned(),
+    };
+    match identity.cloud {
+        StorageProviderKind::S3 => build_s3_restore_backend(config, &url).await,
+        StorageProviderKind::Gcs => build_gcs_restore_backend(&url).await,
+        StorageProviderKind::Azure => build_azure_restore_backend(config, &url),
+        StorageProviderKind::Local => Err(CrabError::TierProviderUnsupported {
+            provider: "local storage has no archive restore backend".into(),
+        }),
     }
 }
 
@@ -138,18 +168,18 @@ fn aws_region(config: &Config) -> String {
 }
 
 #[cfg(feature = "tier-s3")]
-fn build_s3_lifecycle_provider(
+async fn build_s3_lifecycle_provider(
     config: &Config,
     url: &CrabUrl,
 ) -> Result<Box<dyn LifecycleProvider>> {
-    Ok(Box::new(super::provider::s3::S3LifecycleProvider::new(
-        url.bucket.clone(),
-        aws_region(config),
-    )))
+    Ok(Box::new(
+        super::provider::s3::S3LifecycleProvider::from_env(url.bucket.clone(), aws_region(config))
+            .await?,
+    ))
 }
 
 #[cfg(not(feature = "tier-s3"))]
-fn build_s3_lifecycle_provider(
+async fn build_s3_lifecycle_provider(
     _config: &Config,
     _url: &CrabUrl,
 ) -> Result<Box<dyn LifecycleProvider>> {
@@ -159,15 +189,21 @@ fn build_s3_lifecycle_provider(
 }
 
 #[cfg(feature = "tier-s3")]
-fn build_s3_restore_backend(config: &Config, url: &CrabUrl) -> Result<Arc<dyn RestoreBackend>> {
-    Ok(Arc::new(super::provider::s3::S3LifecycleProvider::new(
-        url.bucket.clone(),
-        aws_region(config),
-    )))
+async fn build_s3_restore_backend(
+    config: &Config,
+    url: &CrabUrl,
+) -> Result<Arc<dyn RestoreBackend>> {
+    Ok(Arc::new(
+        super::provider::s3::S3LifecycleProvider::from_env(url.bucket.clone(), aws_region(config))
+            .await?,
+    ))
 }
 
 #[cfg(not(feature = "tier-s3"))]
-fn build_s3_restore_backend(_config: &Config, _url: &CrabUrl) -> Result<Arc<dyn RestoreBackend>> {
+async fn build_s3_restore_backend(
+    _config: &Config,
+    _url: &CrabUrl,
+) -> Result<Arc<dyn RestoreBackend>> {
     Err(CrabError::TierProviderUnsupported {
         provider: "s3 restore (crate built without tier-s3 feature)".into(),
     })
@@ -258,7 +294,9 @@ fn azure_storage_account(config: &Config) -> Result<String> {
 async fn probe_s3_bucket(config: &Config, url: &CrabUrl) -> Result<BucketProbe> {
     use aws_sdk_s3::types::BucketVersioningStatus;
 
-    let s3 = super::provider::s3::S3LifecycleProvider::new(url.bucket.clone(), aws_region(config));
+    let s3 =
+        super::provider::s3::S3LifecycleProvider::from_env(url.bucket.clone(), aws_region(config))
+            .await?;
     let versioning = s3
         .client()
         .get_bucket_versioning()

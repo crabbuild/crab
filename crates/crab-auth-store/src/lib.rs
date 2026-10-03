@@ -93,7 +93,8 @@ pub fn build_store_from_transfer_grant(
             let multipart_identity = built.multipart_identity;
             let mut store = Store::new(built.inner)
                 .with_bucket_identity(identity)
-                .with_target_identity(built.target_identity);
+                .with_target_identity(built.target_identity)
+                .with_immutable_write_verification(built.immutable_write_verification);
             if let Some(signer) = built.signer {
                 store = store.with_signer(signer);
             }
@@ -206,7 +207,8 @@ pub fn build_store_from_credentials(bucket: &str, credentials: CloudCredentials)
     let multipart_identity = built.multipart_identity;
     let mut store = Store::new(built.inner)
         .with_bucket_identity(identity)
-        .with_target_identity(built.target_identity);
+        .with_target_identity(built.target_identity)
+        .with_immutable_write_verification(built.immutable_write_verification);
     if let Some(signer) = built.signer {
         store = store.with_signer(signer);
     }
@@ -346,6 +348,26 @@ mod tests {
         assert_eq!(
             store.bucket_identity(),
             crab_storage::BucketIdentity::new(StorageProviderKind::S3, "bucket", "bucket")
+        );
+    }
+
+    #[test]
+    fn build_store_from_credentials_propagates_checksum_qualification() {
+        let store = build_store_from_credentials(
+            "bucket",
+            CloudCredentials::Aws {
+                access_key_id: "access".into(),
+                secret_access_key: "secret".into(),
+                session_token: None,
+                expires_at: SystemTime::UNIX_EPOCH,
+                region: "us-east-1".into(),
+            },
+        )
+        .expect("static S3 builder does not perform network I/O");
+
+        assert_eq!(
+            store.immutable_write_verification(),
+            crab_storage::ImmutableWriteVerification::Sha256Checksum
         );
     }
 

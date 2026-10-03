@@ -40,6 +40,8 @@ pub struct LiveWalkConfig {
     pub top_k_cold: usize,
     /// Provider for storage-class interpretation.
     pub provider: Provider,
+    /// Configured repository prefix to include alongside shared Crab objects.
+    pub repository_prefix: Option<String>,
 }
 
 impl Default for LiveWalkConfig {
@@ -49,6 +51,7 @@ impl Default for LiveWalkConfig {
             sample_ratio: None,
             top_k_cold: 100,
             provider: Provider::S3,
+            repository_prefix: None,
         }
     }
 }
@@ -265,24 +268,26 @@ pub async fn walk_live(
         });
     }
 
+    let prefixes = inventory_prefixes(config.repository_prefix.as_deref());
     let semaphore = Arc::new(Semaphore::new(config.list_concurrency as usize));
     let progress = Arc::new(WalkProgress::new());
     let config = Arc::new(config);
 
     info!(
         concurrency = config.list_concurrency,
-        prefixes = ALL_CRAB_PREFIXES.len(),
+        prefixes = prefixes.len(),
         "starting live inventory walk"
     );
 
     let mut handles = Vec::new();
 
-    for &prefix in ALL_CRAB_PREFIXES {
+    for prefix in prefixes {
         let store = Arc::clone(&store);
         let sem = Arc::clone(&semaphore);
         let prog = Arc::clone(&progress);
         let cfg = Arc::clone(&config);
         let cancel = cancel.clone();
+        let walk_prefix_name = prefix.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = tokio::select! {
@@ -291,10 +296,10 @@ pub async fn walk_live(
                     CrabError::Internal("live inventory semaphore closed unexpectedly".to_string())
                 })?,
             };
-            walk_prefix(store.as_ref(), prefix, &cfg, &prog, &cancel).await
+            walk_prefix(store.as_ref(), &walk_prefix_name, &cfg, &prog, &cancel).await
         });
 
-        handles.push((prefix.to_string(), handle));
+        handles.push((prefix, handle));
     }
 
     let mut total_objects: u64 = 0;
@@ -389,6 +394,20 @@ pub async fn walk_live(
     })
 }
 
+fn inventory_prefixes(repository_prefix: Option<&str>) -> Vec<String> {
+    let mut prefixes = ALL_CRAB_PREFIXES
+        .iter()
+        .map(|prefix| (*prefix).to_owned())
+        .collect::<Vec<_>>();
+    if let Some(repository_prefix) = repository_prefix {
+        let repository_prefix = repository_prefix.trim_matches('/');
+        if !repository_prefix.is_empty() {
+            prefixes.push(format!("{repository_prefix}/"));
+        }
+    }
+    prefixes
+}
+
 fn scale_sample_value(value: u64, ratio: f64) -> Result<u64> {
     let scaled = (value as f64) / ratio;
     if !scaled.is_finite() || scaled > u64::MAX as f64 {
@@ -454,6 +473,7 @@ fn is_leap_year(year: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use object_store::{ObjectStoreExt, PutPayload};
 
     #[test]
     fn insert_top_k_maintains_descending_order() {
@@ -529,6 +549,40 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(CrabError::Configuration { .. })));
+    }
+
+    #[tokio::test]
+    async fn live_walk_includes_only_the_configured_repository_prefix() {
+        let store = Arc::new(object_store::memory::InMemory::new());
+        for (path, body) in [
+            (".crab/xorbs/aa/shared", b"shared".as_slice()),
+            ("org/repo/v2/root", b"root".as_slice()),
+            ("org/repo/v2/refs/main", b"head".as_slice()),
+            ("other/repo/v2/root", b"other".as_slice()),
+        ] {
+            store
+                .put(
+                    &ObjectPath::from(path),
+                    PutPayload::from(bytes::Bytes::copy_from_slice(body)),
+                )
+                .await
+                .unwrap();
+        }
+
+        let inventory = walk_live(
+            store,
+            LiveWalkConfig {
+                repository_prefix: Some("org/repo".to_owned()),
+                ..LiveWalkConfig::default()
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(inventory.total_objects, 3);
+        assert_eq!(inventory.per_prefix["org/repo/"].objects, 2);
+        assert_eq!(inventory.per_prefix[".crab/xorbs/"].objects, 1);
     }
 
     #[test]

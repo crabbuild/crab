@@ -2387,31 +2387,28 @@ mod tests {
             first.release_digest(),
             application.registry().release_digest()
         );
+        assert_eq!(application.name(), "crab-repository");
 
         let descriptor: Value = serde_json::from_slice(first.release_bytes()).unwrap();
-        assert_eq!(descriptor["runtime"], "crab-http-server");
+        assert_eq!(descriptor["runtime"], "cellule");
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "9daa593f43f6bbde8385f16ab92d4fa0c1a48f77ccfb4a165f25b1fb0d493728"
+            "19f3069317479c310ad1ce325cc1ef50abe7f83454eb16c6f19813a7d345d5ee"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 2);
-        assert_eq!(
-            descriptor["modules"][0]["commands"]
+        let operation_ids = |kind| {
+            descriptor["modules"][0][kind]
                 .as_array()
                 .unwrap()
-                .len(),
-            35
-        );
-        assert_eq!(
-            descriptor["modules"][0]["queries"]
-                .as_array()
-                .unwrap()
-                .len(),
-            35
-        );
-        assert_eq!(descriptor["namespaces"][0]["role"], "repository");
+                .iter()
+                .map(|operation| operation["id"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(operation_ids("commands"), (1..=35).collect::<Vec<_>>());
+        assert_eq!(operation_ids("queries"), (1..=36).collect::<Vec<_>>());
+        assert_eq!(descriptor["namespaces"][0]["role"], "application");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);
     }
 
@@ -3359,15 +3356,17 @@ mod tests {
 
         let reads = Arc::new(AtomicUsize::new(0));
         let observed_reads = Arc::clone(&reads);
-        let store = store.with_read_request_observer(Arc::new(move |_| {
-            observed_reads.fetch_add(1, Ordering::Relaxed);
-        }));
+        let store = cellule_store::Store::new(store.inner().clone()).with_read_request_observer(
+            Arc::new(move |_| {
+                observed_reads.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
         let identity = ApplicationIdentity::new(
             TenantId::from_bytes([1; 16]),
             ApplicationId::from_bytes([2; 16]),
         );
         let layout = CellStorageLayout::new(
-            cellule_store::Store::new(store.inner().clone()),
+            store,
             Path::from(prefix),
             *identity.application().as_bytes(),
         );

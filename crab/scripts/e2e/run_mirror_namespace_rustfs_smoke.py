@@ -109,21 +109,24 @@ def run(smoke):
                 and check["pointers"]["state"] == "missing" and json.loads(missing.read_text())["blocked"])
     smoke.run_git(bare, ["update-ref", "-d", name])
 
-    # Fault only captured objects in this disposable prefix; retain and restore
-    # their bytes even if a refusal regression interrupts qualification.
-    for suffix in ("layout", "manifest"):
-        key = prefix + suffix
-        original = smoke.artifacts / (suffix + "-original.json")
-        smoke.run_aws(["get-object", "--bucket", smoke.args.bucket, "--key", key, str(original)], name="capture " + suffix)
-        smoke.run_aws(["delete-object", "--bucket", smoke.args.bucket, "--key", key], name="remove isolated " + suffix)
-        try:
-            before = inventory("inventory after removing " + suffix)
-            refused = smoke.run_cmd("legacy mirror refuses missing " + suffix, mirror + ["--json"], smoke.run_root, check=False)
-            smoke.check("missing " + suffix + " cannot trigger in-place repair", refused["exit_code"] not in (0, -124)
-                        and inventory("inventory after " + suffix + " refusal") == before)
-        finally:
-            smoke.run_aws(["put-object", "--bucket", smoke.args.bucket, "--key", key,
-                           "--body", str(original)], name="restore isolated " + suffix)
+    # Fault only the authenticated v2 authority in this disposable prefix;
+    # retain and restore its bytes even if a refusal regression interrupts qualification.
+    key = prefix + "v2/root"
+    original = smoke.artifacts / "v2-root-original.bin"
+    smoke.run_aws(["get-object", "--bucket", smoke.args.bucket, "--key", key, str(original)],
+                  name="capture v2 root")
+    smoke.run_aws(["delete-object", "--bucket", smoke.args.bucket, "--key", key],
+                  name="remove isolated v2 root")
+    try:
+        before = inventory("inventory after removing v2 root")
+        refused = smoke.run_cmd("mirror refuses missing v2 root", mirror + ["--json"],
+                                smoke.run_root, check=False)
+        smoke.check("missing v2 root cannot trigger in-place repair",
+                    refused["exit_code"] not in (0, -124)
+                    and inventory("inventory after v2 root refusal") == before)
+    finally:
+        smoke.run_aws(["put-object", "--bucket", smoke.args.bucket, "--key", key,
+                       "--body", str(original)], name="restore isolated v2 root")
     result, check = inspect("final recovered integrity")
     smoke.check("restored repository passes integrity", result["exit_code"] == 0 and check["ci_passed"])
     clone = smoke.run_root / "restored.git"

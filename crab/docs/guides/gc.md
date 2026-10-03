@@ -18,15 +18,42 @@ in your cloud bucket.
 Garbage collection operates on the remote store, not the local cache. Use
 `crab prune` for local cache cleanup.
 
+### Protocol-v2 repositories
+
+Repository-scoped v2 GC marks the current checkpoint and ref frontier,
+retained history checkpoints, coordinator-protected sources, and graph/path-state
+objects referenced by a browse-index record for the captured state. It sweeps the
+repository's capsule, checkpoint, pack-layer, history, commit-graph, and
+path-state namespaces, and selects graph/path-state descriptors from the
+repository's `manifests/` listing under the root fence and sweep lease. Shared
+xorbs and shards are outside this sweep. The mutable browse-index pointer is not
+changed by GC; corrupt referenced descriptors fail the sweep closed. Unreachable
+derived-index objects are reported separately from pack objects. This is one
+fenced operation; `--resume` is not supported for v2 repository GC.
+
+V2 retains the immutable-reader grace period even with `--force`. Both the
+initial LIST and final HEAD must establish that a candidate is old enough.
+HEAD also revalidates its ETag/version and size. A changed identity or newly
+fresh object is retained, including a same-content rewrite with an unchanged
+ETag. Real deletion counts and reclaimed bytes exclude retained candidates;
+dry runs report the eligible plan without deleting objects.
+
+The four pack-byte classes below count unique physical capsule-run and
+pack-layer objects, including embedded indexes. Checkpoint and history control
+records are excluded from those byte classes. Current sources take precedence
+over retained-history sources, so shared sources are not counted twice.
+These classes describe the marked/listed snapshot; final HEAD revalidation can
+retain a candidate that was collectible in that snapshot.
+
 ## Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--dry-run` | `false` | List unreachable objects without deleting anything |
-| `--force` | `false` | Bypass the grace period — delete all unreachable objects immediately |
+| `--force` | `false` | Bypass the grace period for v1/bucket GC; v2 repository GC preserves reader grace |
 | `--yes` | `false` | Skip interactive confirmation when `--force` is used |
 | `--grace-period <duration>` | configured value (24h by default) | Override the minimum age, such as `1h` or `7d` |
-| `--resume <run-id>` | — | Resume an interrupted destructive run |
+| `--resume <run-id>` | — | Resume an interrupted durable run; unsupported for v2 repository GC |
 | `--scope <repo\|bucket>` | `repo` | Select repository-local or bucket-global GC |
 | `--list-profile <profile>` | configured value | Override bucket listing with `adaptive`, `cost`, or `latency` |
 
@@ -70,7 +97,7 @@ its planned ETag/version and size; a recreated or newly fresh key is retained.
 After success, candidate batches, outcomes, and mark chunks are retired and
 only the small completed-run state remains.
 
-Repository runs use the same durable plan, but walk current, historical,
+V1 repository runs use the same durable plan, but walk current, historical,
 journal, workflow, and pack roots directly into key-partitioned marks.
 Pack-list segments and delete outcomes are consumed in bounded batches;
 store-only deletion does not build a process-wide deleted-key list. Generated
@@ -89,9 +116,8 @@ commands intentionally retain their collection-oriented behavior.
 ## How It Works
 
 1. Takes a snapshot of all current git refs (branches, tags).
-2. Streams all repository roots (and, for bucket scope, all registered
-   repositories' roots) into durable partitioned marks. Dry runs may build a
-   preview set for reporting.
+2. Marks the repository roots. V1 and bucket runs use durable partitioned marks;
+   v2 repository runs use the fenced current/history snapshot described above.
 3. Lists all objects in the remote store under the repository prefix.
 4. Computes the set of unreachable objects (present in store but not reachable
    from any ref).
@@ -100,8 +126,8 @@ commands intentionally retain their collection-oriented behavior.
    registers its base-plus-candidate shard set before manifest CAS.
 6. Applies a grace period filter: recently-created objects are retained even if
    unreachable, to avoid deleting objects from in-progress pushes.
-7. Deletes unreachable objects that are older than the grace period, or every
-   unreachable object when `--force` is explicitly confirmed.
+7. Deletes eligible unreachable objects after revalidation. V1/bucket GC can
+   bypass age checks with confirmed `--force`; v2 repository GC cannot.
 
 ### Grace Period
 
@@ -111,9 +137,11 @@ conditions where a concurrent push creates objects that have not yet been
 linked to a ref. Non-force runs also clamp the effective value to the one-hour
 minimum.
 
-The `--force` flag bypasses object-age checks after an explicit confirmation.
-It does not bypass writer/sweep fencing, bucket ref-registry completeness,
-active-active coordinator proof, closure coverage, or reachability.
+For v1/bucket GC, `--force` bypasses object-age checks after an explicit
+confirmation. It does not bypass writer/sweep fencing, bucket ref-registry
+completeness, active-active coordinator proof, closure coverage, or reachability.
+V2 repository GC keeps the configured grace period, clamped to at least one
+hour, with or without `--force`.
 
 ### Object Categories
 
@@ -221,6 +249,7 @@ Supports `--json` and `--jsonl`.
   "timestamp": "2026-04-24T18:32:20.400Z",
   "data": {
     "packs_deleted": 0,
+    "derived_index_objects_deleted": 0,
     "xorbs_deleted": 42,
     "shards_deleted": 8,
     "bytes_reclaimed": 1342177280,
@@ -238,7 +267,7 @@ Supports `--json` and `--jsonl`.
 ### crab gc --jsonl
 
 ```
-{"schema":"gc.event","version":"1.0","timestamp":"2026-04-24T18:32:20.400Z","type":"result","data":{"packs_deleted":0,"xorbs_deleted":42,"shards_deleted":8,"bytes_reclaimed":1342177280,"dry_run":false,"cancelled":false,"partial_enumeration":false,"active_pack_bytes":2300000000,"retained_history_pack_bytes":900000000,"grace_period_pack_bytes":12000000,"collectible_pack_bytes":48000000}}
+{"schema":"gc.event","version":"1.0","timestamp":"2026-04-24T18:32:20.400Z","type":"result","data":{"packs_deleted":0,"derived_index_objects_deleted":0,"xorbs_deleted":42,"shards_deleted":8,"bytes_reclaimed":1342177280,"dry_run":false,"cancelled":false,"partial_enumeration":false,"active_pack_bytes":2300000000,"retained_history_pack_bytes":900000000,"grace_period_pack_bytes":12000000,"collectible_pack_bytes":48000000}}
 ```
 
 See [Structured Output](structured-output.md) for envelope details, event types,

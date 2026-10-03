@@ -310,11 +310,10 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
         )
         .await;
         assert!(!blocked.0.is_success(), "{domain}: {}", blocked.1);
-        let snapshot =
-            crab_metadata::manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
-                .await
-                .unwrap();
-        assert_eq!(snapshot.journal.head, "refs/heads/main", "{domain}");
+        let root = crab_metadata::capsule_protocol::load_root(&repo.layout)
+            .await
+            .unwrap();
+        assert_eq!(root.record().root().head(), "refs/heads/main", "{domain}");
         sweep.release().await.unwrap();
     }
 

@@ -69,6 +69,10 @@ pub struct CosmosDbCreateCoordinatorAccount {
 }
 
 /// Minimal Cosmos DB control-plane client needed by Crab-owned coordinator setup.
+#[expect(
+    clippy::double_must_use,
+    reason = "async_trait marks boxed futures must-use; Result is also must-use"
+)]
 #[async_trait]
 pub trait CosmosDbCoordinatorControlPlaneClient {
     async fn describe_account(
@@ -1918,6 +1922,7 @@ mod tests {
             writer: "west".to_owned(),
             region: "westus2".to_owned(),
             manifest_generation: 2,
+            capsule_publication: None,
             refs: vec![CoordinatedRefUpdate {
                 name: "refs/heads/main".to_owned(),
                 expected: expected.map(str::to_owned),

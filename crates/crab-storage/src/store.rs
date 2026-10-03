@@ -27,11 +27,11 @@ use futures_util::Stream;
 use futures_util::StreamExt as _;
 use object_store::path::Path;
 use object_store::{
-    GetOptions, GetRange, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMode,
-    PutOptions,
+    Attributes, GetOptions, GetRange, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt,
+    PutMode, PutOptions,
 };
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter};
 
 use crab_types::storage::StorageScope;
 
@@ -47,16 +47,48 @@ use crate::retry::{RetryPolicy, retry};
 /// the pair together because `PutMode::Update` consumes both.
 pub type ETag = object_store::UpdateVersion;
 
+/// Integrity evidence available after an acknowledged immutable PUT.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ImmutableWriteVerification {
+    /// The provider contract is not sufficient; stream the stored body back.
+    #[default]
+    ReadbackRequired,
+    /// The provider accepted the request's explicit SHA-256 checksum.
+    Sha256Checksum,
+}
+
+/// Result of a create-only immutable write whose occupied key is returned to the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImmutableCreateOutcome {
+    /// This call created and verified the requested bytes.
+    Created,
+    /// The key was already occupied; these bounded bytes remain untrusted.
+    Existing(Bytes),
+}
+
 /// Bounded-memory byte stream returned by object reads.
 pub type StorageByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static>>;
 
 /// Bounded-memory stream of object metadata below one exact prefix.
 pub type StorageObjectStream = Pin<Box<dyn Stream<Item = Result<ObjectMeta>> + Send + 'static>>;
 
+const SIGNED_RANGE_CHUNK_BYTES: u64 = 512 * 1024 * 1024;
+const SIGNED_RANGE_READ_CONCURRENCY: usize = 4;
+const SIGNED_RANGE_WRITE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+const SIGNED_RANGE_GET_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
+
+struct SignedFileTarget<'a> {
+    path: &'a std::path::Path,
+    offset: u64,
+    hash_length: u64,
+}
+
 /// Re-openable bounded source for a retryable multipart upload.
 ///
 /// Each whole-upload retry may read the same ranges again. Implementations must
 /// therefore keep the source immutable until this operation returns.
+// async_trait adds `must_use` to boxed futures; newer Clippy flags that generated duplicate.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait MultipartUploadSource: Send + Sync {
     /// Returns the complete source length.
@@ -106,6 +138,7 @@ pub struct Store {
     /// explicit identity — typically tests and the in-memory store.
     identity: BucketIdentity,
     target_identity: Option<[u8; 32]>,
+    immutable_write_verification: ImmutableWriteVerification,
     /// Optional parallel handle to the same underlying store viewed
     /// as a [`object_store::signer::Signer`]. Populated by storage
     /// provider builders for S3 backends (the only backend that
@@ -114,6 +147,7 @@ pub struct Store {
     /// `inner` because `ObjectStore` does not expose `as_any`, so we
     /// cannot downcast after the fact.
     signer: Option<Arc<dyn object_store::signer::Signer>>,
+    read_wrapped: bool,
     /// Low-level provider handle with stable explicit upload IDs.
     ///
     /// Present for S3 and GCS, including refreshing wrappers. Azure and
@@ -179,7 +213,9 @@ impl Store {
             retry: RetryPolicy::DEFAULT,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
+            immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             signer: None,
+            read_wrapped: false,
             multipart: None,
             multipart_identity: None,
             storage_scope: None,
@@ -188,6 +224,26 @@ impl Store {
             read_byte_observer: None,
             read_request_observer: None,
         }
+    }
+
+    /// Attach provider-qualified immutable-write integrity evidence.
+    ///
+    /// Callers must propagate this only from the provider builder that enabled
+    /// the corresponding request checksum. Endpoint names and ETags are not
+    /// qualification evidence.
+    #[must_use]
+    pub fn with_immutable_write_verification(
+        mut self,
+        verification: ImmutableWriteVerification,
+    ) -> Self {
+        self.immutable_write_verification = verification;
+        self
+    }
+
+    /// Return the proof available after a successful immutable PUT.
+    #[must_use]
+    pub fn immutable_write_verification(&self) -> ImmutableWriteVerification {
+        self.immutable_write_verification
     }
 
     /// Wraps `inner` with a custom retry policy.
@@ -203,7 +259,9 @@ impl Store {
             retry,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
+            immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             signer: None,
+            read_wrapped: false,
             multipart: None,
             multipart_identity: None,
             storage_scope: None,
@@ -327,6 +385,7 @@ impl Store {
     /// Writes retain their original behavior.
     #[must_use]
     pub fn with_read_admission(mut self, admission: Arc<dyn crate::ReadAdmission>) -> Self {
+        self.read_wrapped = true;
         let wrap = |inner: Arc<dyn ObjectStore>| -> Arc<dyn ObjectStore> {
             Arc::new(crate::read_admission::AdmittedStore {
                 inner,
@@ -356,6 +415,7 @@ impl Store {
     /// credentials never cross this boundary.
     #[must_use]
     pub fn with_storage_observer(mut self, observer: Arc<dyn crate::StorageObserver>) -> Self {
+        self.read_wrapped = true;
         let wrap = |inner: Arc<dyn ObjectStore>| -> Arc<dyn ObjectStore> {
             Arc::new(crate::observation::ObservedObjectStore::new(
                 inner,
@@ -574,6 +634,121 @@ impl Store {
             async move { self.put_once(&path, bytes, &expected_hash).await }
         })
         .await
+    }
+
+    /// Writes immutable bytes and proves that the acknowledged object has exact content.
+    ///
+    /// A provider-qualified SHA-256 request checksum proves a newly created
+    /// object's transfer integrity without another request. Other providers
+    /// stream the object back and verify its BLAKE3 digest. An existing object
+    /// was already read and verified by [`Self::put_if_absent`].
+    pub async fn put_if_absent_verified(&self, path: &Path, bytes: Bytes) -> Result<bool> {
+        let expected_hash = *blake3::hash(&bytes).as_bytes();
+        let maximum = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let created = self.put_if_absent(path, bytes).await?;
+        if !created
+            || self.immutable_write_verification == ImmutableWriteVerification::Sha256Checksum
+        {
+            return Ok(created);
+        }
+        let readback_path = self.write_path(path);
+        let (stored, _) = self.get_with_etag_bounded(&readback_path, maximum).await?;
+        let actual_hash = *blake3::hash(&stored).as_bytes();
+        if actual_hash != expected_hash {
+            return Err(StorageError::CorruptObject {
+                path: path.to_string(),
+                reason: format!(
+                    "expected blake3 {}, got {}",
+                    hex_lower(&expected_hash),
+                    hex_lower(&actual_hash)
+                ),
+            });
+        }
+        Ok(created)
+    }
+
+    /// Creates and verifies immutable bytes, or returns the occupied key's bounded body.
+    ///
+    /// This is for logical content-addresses whose valid encodings may differ. Callers
+    /// must authenticate every [`ImmutableCreateOutcome::Existing`] body against their
+    /// logical identity before referencing it. Mutable CAS objects must use
+    /// [`Self::create_strict`] or [`Self::update`].
+    pub async fn create_or_read_immutable(
+        &self,
+        path: &Path,
+        bytes: Bytes,
+        max_existing_bytes: u64,
+    ) -> Result<ImmutableCreateOutcome> {
+        self.create_or_read_immutable_with_attributes(
+            path,
+            bytes,
+            max_existing_bytes,
+            Attributes::default(),
+        )
+        .await
+    }
+
+    /// Creates immutable bytes with object attributes, or returns the occupied key's body.
+    ///
+    /// Attributes apply only when this call creates the object. An existing content address is
+    /// never mutated; the caller must authenticate the returned body before referencing it.
+    pub async fn create_or_read_immutable_with_attributes(
+        &self,
+        path: &Path,
+        bytes: Bytes,
+        max_existing_bytes: u64,
+        attributes: Attributes,
+    ) -> Result<ImmutableCreateOutcome> {
+        if self.staging_writes.is_some() {
+            return Err(StorageError::Internal(
+                "logical immutable create is unavailable for staged writes".to_owned(),
+            ));
+        }
+        let expected_hash = *blake3::hash(&bytes).as_bytes();
+        let created = retry(&self.retry, || {
+            let path = path.clone();
+            let bytes = bytes.clone();
+            let attributes = attributes.clone();
+            async move {
+                let options = PutOptions {
+                    mode: PutMode::Create,
+                    attributes,
+                    ..PutOptions::default()
+                };
+                match self.inner.put_opts(&path, bytes.into(), options).await {
+                    Ok(_) => Ok(true),
+                    Err(error) => {
+                        let mapped = map_object_store_error(error, path.as_ref());
+                        if matches!(mapped, StorageError::StateConflict { .. }) {
+                            Ok(false)
+                        } else {
+                            Err(mapped)
+                        }
+                    }
+                }
+            }
+        })
+        .await?;
+        if !created {
+            let (existing, _) = self.get_with_etag_bounded(path, max_existing_bytes).await?;
+            return Ok(ImmutableCreateOutcome::Existing(existing));
+        }
+        if self.immutable_write_verification == ImmutableWriteVerification::ReadbackRequired {
+            let maximum = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            let (stored, _) = self.get_with_etag_bounded(path, maximum).await?;
+            let actual_hash = *blake3::hash(&stored).as_bytes();
+            if actual_hash != expected_hash {
+                return Err(StorageError::CorruptObject {
+                    path: path.to_string(),
+                    reason: format!(
+                        "expected blake3 {}, got {}",
+                        hex_lower(&expected_hash),
+                        hex_lower(&actual_hash)
+                    ),
+                });
+            }
+        }
+        Ok(ImmutableCreateOutcome::Created)
     }
 
     /// Writes `bytes` at `path` iff nothing exists there yet.
@@ -1284,10 +1459,24 @@ impl Store {
     /// bit-flip on the wire gets one shot at self-healing before the
     /// error is surfaced.
     pub async fn verify(&self, path: &Path, expected_hash: &[u8; 32]) -> Result<Bytes> {
+        self.verify_bounded(path, expected_hash, u64::MAX).await
+    }
+
+    /// Read and hash-verify an object without buffering more than `max_bytes`.
+    ///
+    /// Reject oversized metadata before polling the body; validate streamed
+    /// length and content identity before returning. Integrity failures retain
+    /// the same retry and error contract as [`Self::verify`].
+    pub async fn verify_bounded(
+        &self,
+        path: &Path,
+        expected_hash: &[u8; 32],
+        max_bytes: u64,
+    ) -> Result<Bytes> {
         retry(&self.retry, || {
             let path = path.clone();
             async move {
-                let (bytes, _etag) = self.get_with_etag(&path).await?;
+                let (bytes, _etag) = self.get_with_etag_bounded(&path, max_bytes).await?;
                 let actual = *blake3::hash(&bytes).as_bytes();
                 if actual == *expected_hash {
                     Ok(bytes)
@@ -1415,6 +1604,13 @@ impl Store {
     /// Returns [`StorageError::NotFound`] if `path` does not exist, or
     /// the backend's error if the range is unsatisfiable.
     pub async fn range_get(&self, path: &Path, range: Range<u64>) -> Result<Bytes> {
+        let large_range = range
+            .end
+            .checked_sub(range.start)
+            .is_some_and(|length| length >= SIGNED_RANGE_GET_THRESHOLD_BYTES);
+        if large_range && let Some(bytes) = self.try_signed_range_get(path, range.clone()).await? {
+            return Ok(bytes);
+        }
         retry(&self.retry, || {
             let path = path.clone();
             let range = range.clone();
@@ -1430,6 +1626,30 @@ impl Store {
             }
         })
         .await
+    }
+
+    fn can_read_signed(&self) -> bool {
+        // Direct HTTP skips `inner`. Keep its routing, admission/cancellation,
+        // and lifecycle observers authoritative even when a signer is attached later.
+        self.signer.is_some() && self.read_routes.is_none() && !self.read_wrapped
+    }
+
+    async fn try_signed_range_get(&self, path: &Path, range: Range<u64>) -> Result<Option<Bytes>> {
+        if !self.can_read_signed() {
+            return Ok(None);
+        }
+        let url = self.signed_url(path, Duration::from_secs(300)).await?;
+        let client = reqwest::Client::builder().build().map_err(|error| {
+            StorageError::Internal(format!("signed object client failed: {error}"))
+        })?;
+        match self
+            .download_signed_range(&client, &url, path.as_ref(), range)
+            .await
+        {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(StorageError::NotSupported { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Deletes `path`.
@@ -2686,6 +2906,466 @@ impl Store {
             .await
             .map_err(|e| StorageError::Internal(format!("signed_url failed: {e}")))
     }
+
+    /// Download two authenticated ranges from one immutable S3 object.
+    ///
+    /// The pack range is split into bounded parallel requests and written at
+    /// its exact local offsets; the second range is returned in memory for
+    /// sidecar slicing. The consumed ranges are checked for exact lengths and
+    /// the pack bytes are hashed after reassembly. Bytes outside those ranges
+    /// are deliberately not downloaded: the source path and range commitments
+    /// are already authenticated by the layered checkpoint.
+    ///
+    /// Returns `Ok(None)` when signing is unavailable or reads require routing,
+    /// admission, or lifecycle observation through the object-store wrapper.
+    /// Token cancellation interrupts network waits and retries, then drains all
+    /// file writes before returning. The caller owns the private destination
+    /// and must await completion before removing it; dropping the future is not a drain.
+    pub async fn try_download_signed_ranges_to_path(
+        &self,
+        path: &Path,
+        destination: &std::path::Path,
+        expected_size: u64,
+        expected_hash: &str,
+        write_range: std::ops::Range<u64>,
+        capture_range: std::ops::Range<u64>,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Option<(Bytes, blake3::Hash)>> {
+        if !self.can_read_signed() {
+            return Ok(None);
+        }
+        let _expected_source_hash =
+            blake3::Hash::from_hex(expected_hash).map_err(|error| StorageError::CorruptObject {
+                path: path.to_string(),
+                reason: format!("invalid expected source hash: {error}"),
+            })?;
+        if write_range.start == write_range.end
+            || capture_range.start == capture_range.end
+            || write_range.end > expected_size
+            || write_range.start > write_range.end
+            || capture_range.end > expected_size
+            || capture_range.start > capture_range.end
+        {
+            return Err(StorageError::CorruptObject {
+                path: path.to_string(),
+                reason: "signed source extraction range is outside the source".to_owned(),
+            });
+        }
+        let url = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(StorageError::Cancelled),
+            result = self.signed_url(path, Duration::from_secs(300)) => result?,
+        };
+        let client = reqwest::Client::builder().build().map_err(|error| {
+            StorageError::Internal(format!("signed object client failed: {error}"))
+        })?;
+        let destination = destination.to_owned();
+        let path_text = path.to_string();
+        let pack_length = write_range.end - write_range.start;
+        let coalesce_capture = capture_range.start == write_range.end;
+        let download_end = if coalesce_capture {
+            capture_range.end
+        } else {
+            write_range.end
+        };
+        let download_length = download_end - write_range.start;
+        let mut downloaded_pack_hash = None;
+        let captured = if coalesce_capture {
+            // Pack and sidecar bytes are contiguous in the immutable source.
+            // One sequential read avoids making a local RustFS disk service
+            // several large competing range requests for the same object.
+            let combined_range = write_range.start..download_end;
+            let mut output = tokio::fs::File::create(&destination).await?;
+            output.set_len(download_length).await?;
+            output.flush().await?;
+            drop(output);
+            let target = SignedFileTarget {
+                path: &destination,
+                offset: 0,
+                hash_length: pack_length,
+            };
+            downloaded_pack_hash = Some(
+                self.download_signed_range_to_path_with_hash(
+                    &client,
+                    &url,
+                    &path_text,
+                    target,
+                    combined_range,
+                    cancel,
+                )
+                .await?,
+            );
+            let capture_length = capture_range.end - capture_range.start;
+            let mut input = tokio::fs::File::open(&destination).await?;
+            input
+                .seek(std::io::SeekFrom::Start(
+                    capture_range.start - write_range.start,
+                ))
+                .await?;
+            let mut captured = vec![
+                0_u8;
+                usize::try_from(capture_length).map_err(|_| {
+                    StorageError::CorruptObject {
+                        path: path_text.clone(),
+                        reason: "signed sidecar range is too large to capture".to_owned(),
+                    }
+                })?
+            ];
+            input.read_exact(&mut captured).await?;
+            let mut output = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&destination)
+                .await?;
+            output.set_len(pack_length).await?;
+            output.flush().await?;
+            Bytes::from(captured)
+        } else {
+            let mut pack_ranges = Vec::new();
+            let mut start = write_range.start;
+            while start < write_range.end {
+                let end = start
+                    .saturating_add(SIGNED_RANGE_CHUNK_BYTES)
+                    .min(write_range.end);
+                pack_ranges.push(start..end);
+                start = end;
+            }
+            let mut output = tokio::fs::File::create(&destination).await?;
+            output.set_len(pack_length).await?;
+            output.flush().await?;
+            drop(output);
+            let downloads_cancel = cancel.child_token();
+            let pack_downloads = async {
+                let mut downloads =
+                    futures_util::stream::iter(pack_ranges.into_iter().map(|range| {
+                        let client = client.clone();
+                        let url = url.clone();
+                        let destination = destination.clone();
+                        let path_text = path_text.clone();
+                        let downloads_cancel = downloads_cancel.clone();
+                        async move {
+                            let offset = range.start - write_range.start;
+                            let target = SignedFileTarget {
+                                path: &destination,
+                                offset,
+                                hash_length: 0,
+                            };
+                            self.download_signed_range_to_path_with_hash(
+                                &client,
+                                &url,
+                                &path_text,
+                                target,
+                                range,
+                                &downloads_cancel,
+                            )
+                            .await
+                            .map(|_| ())
+                        }
+                    }))
+                    .buffer_unordered(SIGNED_RANGE_READ_CONCURRENCY);
+                let mut failure = None;
+                while let Some(result) = downloads.next().await {
+                    if let Err(error) = result {
+                        if failure.is_none() {
+                            failure = Some(error);
+                        }
+                        downloads_cancel.cancel();
+                    }
+                }
+                failure.map_or(Ok(()), Err)
+            };
+            let capture = async {
+                let result = tokio::select! {
+                    biased;
+                    () = downloads_cancel.cancelled() => Err(StorageError::Cancelled),
+                    result = self.download_signed_range(&client, &url, &path_text, capture_range.clone()) => result,
+                };
+                if result.is_err() {
+                    downloads_cancel.cancel();
+                }
+                result
+            };
+            // A failed sibling signals cancellation, then all file writers drain.
+            // try_join would drop in-flight writes before their caller removes staging.
+            let (captured, downloaded) = tokio::join!(capture, pack_downloads);
+            if let Err(error) = downloaded {
+                if !matches!(error, StorageError::Cancelled) {
+                    return Err(error);
+                }
+                captured?;
+                return Err(error);
+            }
+            captured?
+        };
+
+        if captured.len() as u64 != capture_range.end - capture_range.start {
+            return Err(StorageError::CorruptObject {
+                path: path_text,
+                reason: "signed range body failed its authenticated lengths".to_owned(),
+            });
+        }
+        let pack_hash = if let Some(hash) = downloaded_pack_hash {
+            hash
+        } else {
+            let mut input = tokio::fs::File::open(&destination).await?;
+            let mut hasher = blake3::Hasher::new();
+            let mut buffer = vec![0_u8; 1024 * 1024];
+            let mut size = 0_u64;
+            loop {
+                let read = input.read(&mut buffer).await?;
+                if read == 0 {
+                    break;
+                }
+                size =
+                    size.checked_add(read as u64)
+                        .ok_or_else(|| StorageError::CorruptObject {
+                            path: path_text.clone(),
+                            reason: "signed pack length overflowed".to_owned(),
+                        })?;
+                hasher.update(&buffer[..read]);
+            }
+            if size != pack_length {
+                return Err(StorageError::CorruptObject {
+                    path: path_text,
+                    reason: "signed pack body length changed after download".to_owned(),
+                });
+            }
+            hasher.finalize()
+        };
+        Ok(Some((captured, pack_hash)))
+    }
+
+    async fn download_signed_range(
+        &self,
+        client: &reqwest::Client,
+        url: &url::Url,
+        path: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Bytes> {
+        retry(&self.retry, || {
+            let client = client.clone();
+            let url = url.clone();
+            let path = path.to_owned();
+            let range = range.clone();
+            async move {
+                let bytes = self
+                    .download_signed_response(&client, &url, &path, range.clone())
+                    .await?;
+                if bytes.len() as u64 != range.end - range.start {
+                    return Err(StorageError::CorruptObject {
+                        path,
+                        reason: "signed range body length does not match its request".to_owned(),
+                    });
+                }
+                self.record_read_bytes(bytes.len() as u64);
+                Ok(bytes)
+            }
+        })
+        .await
+    }
+
+    async fn download_signed_range_to_path_with_hash(
+        &self,
+        client: &reqwest::Client,
+        url: &url::Url,
+        path: &str,
+        target: SignedFileTarget<'_>,
+        range: std::ops::Range<u64>,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<blake3::Hash> {
+        let hash_length = target.hash_length;
+        if hash_length > range.end - range.start {
+            return Err(StorageError::CorruptObject {
+                path: path.to_owned(),
+                reason: "signed hash prefix exceeds its requested range".to_owned(),
+            });
+        }
+        crate::retry::retry_with_cancel(&self.retry, Some(cancel), || {
+            let client = client.clone();
+            let url = url.clone();
+            let path = path.to_owned();
+            let destination = target.path.to_owned();
+            let range = range.clone();
+            async move {
+                let response = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Err(StorageError::Cancelled),
+                    result = self.download_signed_response_stream(&client, &url, &path, range.clone()) => result?,
+                };
+                let output = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&destination)
+                    .await?;
+                let mut output = BufWriter::with_capacity(SIGNED_RANGE_WRITE_BUFFER_BYTES, output);
+                output
+                    .seek(std::io::SeekFrom::Start(target.offset))
+                    .await?;
+                let result = async {
+                    let mut body = response.bytes_stream();
+                    let mut size = 0_u64;
+                    let mut hasher = blake3::Hasher::new();
+                    loop {
+                        let chunk = tokio::select! {
+                            biased;
+                            () = cancel.cancelled() => return Err(StorageError::Cancelled),
+                            chunk = body.next() => chunk,
+                        };
+                        let Some(chunk) = chunk else { break };
+                        let chunk = chunk.map_err(|error| StorageError::NetworkTransient {
+                            source: object_store::Error::Generic {
+                                store: "signed object range read",
+                                source: Box::new(error),
+                            },
+                        })?;
+                        let next_size = size.checked_add(chunk.len() as u64).ok_or_else(|| {
+                            StorageError::CorruptObject {
+                                path: path.clone(),
+                                reason: "signed range length overflowed".to_owned(),
+                            }
+                        })?;
+                        if next_size > range.end - range.start {
+                            return Err(StorageError::CorruptObject {
+                                path: path.clone(),
+                                reason: "signed range body exceeded its request".to_owned(),
+                            });
+                        }
+                        let hash_bytes = hash_length.saturating_sub(size).min(chunk.len() as u64);
+                        if hash_bytes != 0 {
+                            hasher.update(
+                                &chunk[..usize::try_from(hash_bytes).map_err(|_| {
+                                    StorageError::CorruptObject {
+                                        path: path.clone(),
+                                        reason: "signed hash prefix is too large".to_owned(),
+                                    }
+                                })?],
+                            );
+                        }
+                        output.write_all(&chunk).await?;
+                        size = next_size;
+                    }
+                    if size != range.end - range.start {
+                        return Err(StorageError::CorruptObject {
+                            path,
+                            reason: "signed range body ended before its request".to_owned(),
+                        });
+                    }
+                    self.record_read_bytes(size);
+                    Ok(hasher.finalize())
+                }
+                .await;
+                // Tokio file writes may still run after write_all returns.
+                // Drain even on cancellation/error before staging can be removed.
+                let flushed = output.flush().await.map_err(StorageError::from);
+                result.and_then(|hash| flushed.map(|()| hash))
+            }
+        })
+        .await
+    }
+
+    async fn download_signed_response(
+        &self,
+        client: &reqwest::Client,
+        url: &url::Url,
+        path: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Bytes> {
+        self.download_signed_response_stream(client, url, path, range)
+            .await?
+            .bytes()
+            .await
+            .map_err(|error| StorageError::NetworkTransient {
+                source: object_store::Error::Generic {
+                    store: "signed object range read",
+                    source: Box::new(error),
+                },
+            })
+    }
+
+    async fn download_signed_response_stream(
+        &self,
+        client: &reqwest::Client,
+        url: &url::Url,
+        path: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<reqwest::Response> {
+        let range_header = format!("bytes={}-{}", range.start, range.end - 1);
+        self.record_read_request(StorageReadKind::Range);
+        let response = client
+            .get(url.clone())
+            .header(reqwest::header::RANGE, range_header)
+            .send()
+            .await
+            .map_err(|error| StorageError::NetworkTransient {
+                source: object_store::Error::Generic {
+                    store: "signed object range read",
+                    source: Box::new(error),
+                },
+            })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(StorageError::NotFound {
+                path: path.to_owned(),
+            });
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(StorageError::Forbidden {
+                path: path.to_owned(),
+            });
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            return Err(StorageError::NetworkTransient {
+                source: object_store::Error::Generic {
+                    store: "signed object range read",
+                    source: Box::new(std::io::Error::other(format!("HTTP status {status}"))),
+                },
+            });
+        }
+        if status != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(StorageError::NotSupported {
+                source: object_store::Error::NotSupported {
+                    source: Box::new(std::io::Error::other(format!(
+                        "signed object range read returned HTTP status {status}"
+                    ))),
+                },
+            });
+        }
+        // A same-length response can still contain bytes from another offset.
+        // Direct HTTP must retain the range validation of the provider transport.
+        let mut ranges = response
+            .headers()
+            .get_all(reqwest::header::CONTENT_RANGE)
+            .iter();
+        let actual = ranges.next().and_then(|value| {
+            let value = value.to_str().ok()?.trim().strip_prefix("bytes ")?;
+            let (offsets, size) = value.split_once('/')?;
+            let (start, end) = offsets.split_once('-')?;
+            Some((
+                start.parse::<u64>().ok()?,
+                end.parse::<u64>().ok()?.checked_add(1)?,
+                size.parse::<u64>().ok()?,
+            ))
+        });
+        if ranges.next().is_some()
+            || !actual.is_some_and(|(start, end, size)| {
+                start == range.start && end == range.end && size >= end
+            })
+        {
+            return Err(StorageError::CorruptObject {
+                path: path.to_owned(),
+                reason: "signed Content-Range does not match its request".to_owned(),
+            });
+        }
+        if response.content_length() != Some(range.end - range.start) {
+            return Err(StorageError::CorruptObject {
+                path: path.to_owned(),
+                reason: format!(
+                    "signed range length {:?} does not match expected {}",
+                    response.content_length(),
+                    range.end - range.start
+                ),
+            });
+        }
+        Ok(response)
+    }
 }
 
 const MULTIPART_LEASE_DURATION: std::time::Duration = std::time::Duration::from_secs(60);
@@ -2844,12 +3524,13 @@ fn hex_lower(bytes: &[u8; 32]) -> String {
 mod tests {
     use super::*;
     use crate::identity::StorageProviderKind;
-    use futures_util::{TryStreamExt as _, stream::BoxStream};
+    use futures_util::TryStreamExt as _;
+    use futures_util::stream::BoxStream;
     use object_store::memory::InMemory;
     use object_store::multipart::{MultipartStore, PartId};
     use object_store::{
-        CopyOptions, GetOptions, GetResult, ListResult, MultipartId, PutMultipartOptions,
-        PutOptions, PutPayload, PutResult,
+        Attribute, CopyOptions, GetOptions, GetResult, ListResult, MultipartId,
+        PutMultipartOptions, PutOptions, PutPayload, PutResult,
     };
     use std::fmt;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -3487,6 +4168,101 @@ mod tests {
 
         assert!(store.put_if_absent(&path, body.clone()).await.unwrap());
         assert!(!store.put_if_absent(&path, body).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn logical_immutable_create_returns_different_existing_encoding() {
+        let store = memory_store();
+        let path = Path::from("blobs/logical-content-address");
+        let existing = Bytes::from_static(b"existing valid encoding");
+        store.put(&path, existing.clone()).await.unwrap();
+
+        let outcome = store
+            .create_or_read_immutable(&path, Bytes::from_static(b"alternate valid encoding"), 1024)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ImmutableCreateOutcome::Existing(existing));
+    }
+
+    #[tokio::test]
+    async fn logical_immutable_create_rejects_oversized_existing_body() {
+        let store = memory_store();
+        let path = Path::from("blobs/oversized-logical-content-address");
+        store
+            .put(&path, Bytes::from_static(b"too large"))
+            .await
+            .unwrap();
+
+        let error = store
+            .create_or_read_immutable(&path, Bytes::from_static(b"candidate"), 4)
+            .await
+            .expect_err("existing bodies remain bounded");
+
+        assert!(matches!(error, StorageError::CorruptObject { .. }));
+    }
+
+    #[tokio::test]
+    async fn logical_immutable_create_applies_attributes_on_create() {
+        let inner = Arc::new(InMemory::new());
+        let store = Store::new(inner.clone());
+        let path = Path::from("blobs/classed-logical-content-address");
+        let mut attributes = Attributes::new();
+        attributes.insert(Attribute::StorageClass, "STANDARD_IA".to_owned().into());
+
+        let outcome = store
+            .create_or_read_immutable_with_attributes(
+                &path,
+                Bytes::from_static(b"candidate"),
+                1024,
+                attributes,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ImmutableCreateOutcome::Created);
+        let result = inner.get(&path).await.unwrap();
+        assert_eq!(
+            result.attributes.get(&Attribute::StorageClass),
+            Some(&"STANDARD_IA".to_owned().into())
+        );
+    }
+
+    #[tokio::test]
+    async fn logical_immutable_reuse_does_not_mutate_attributes() {
+        let inner = Arc::new(InMemory::new());
+        let store = Store::new(inner.clone());
+        let path = Path::from("blobs/reused-classed-logical-content-address");
+        let mut original = Attributes::new();
+        original.insert(Attribute::StorageClass, "STANDARD_IA".to_owned().into());
+        store
+            .create_or_read_immutable_with_attributes(
+                &path,
+                Bytes::from_static(b"candidate"),
+                1024,
+                original,
+            )
+            .await
+            .unwrap();
+        let mut replacement = Attributes::new();
+        replacement.insert(Attribute::StorageClass, "DEEP_ARCHIVE".to_owned().into());
+
+        let outcome = store
+            .create_or_read_immutable_with_attributes(
+                &path,
+                Bytes::from_static(b"candidate"),
+                1024,
+                replacement,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ImmutableCreateOutcome::Existing(_)));
+        let result = inner.get(&path).await.unwrap();
+        assert_eq!(
+            result.attributes.get(&Attribute::StorageClass),
+            Some(&"STANDARD_IA".to_owned().into())
+        );
     }
 
     #[tokio::test]
@@ -4580,6 +5356,62 @@ mod tests {
         store.put(&path, body.clone()).await.unwrap();
         let got = store.verify(&path, &hash).await.unwrap();
         assert_eq!(got, body);
+    }
+
+    #[tokio::test]
+    async fn bounded_verification_preserves_hash_checks_without_extra_requests() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let counting = Arc::new(crate::test_support::CountingObjectStore::new(inner));
+        let store = memory_store_with_inner(counting.clone());
+        let path = Path::from("blobs/bounded-verified");
+        let body = Bytes::from_static(b"trust but verify");
+        let hash = *blake3::hash(&body).as_bytes();
+        store.put(&path, body.clone()).await.unwrap();
+        counting.reset();
+        let actual = store
+            .verify_bounded(&path, &hash, body.len() as u64)
+            .await
+            .unwrap();
+        assert_eq!(actual, body);
+        assert_eq!(
+            counting.counts(),
+            crate::test_support::ObjectReadCounts {
+                heads: 0,
+                ranges: 0,
+                full: 1,
+            }
+        );
+        assert!(matches!(
+            store
+                .verify_bounded(&path, &[0; 32], body.len() as u64)
+                .await,
+            Err(StorageError::CorruptObject { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn bounded_verification_rejects_oversize_headers_and_misframed_bodies() {
+        let path = Path::from("blobs/bounded-framing");
+        let body = Bytes::from_static(b"0123456789");
+        let hash = *blake3::hash(&body).as_bytes();
+        for (budget, fault) in [
+            // Polling this oversized object's body would return a transport
+            // error, not corruption; metadata admission must happen first.
+            (9, ReadFault::BodyError),
+            (10, ReadFault::Body(vec![Bytes::from_static(b"012")])),
+            (
+                10,
+                ReadFault::Body(vec![Bytes::from_static(b"01234567890")]),
+            ),
+        ] {
+            let inner = Arc::new(InMemory::new());
+            inner.put(&path, body.clone().into()).await.unwrap();
+            let store = memory_store_with_inner(Arc::new(ReadFaultStore { inner, fault }));
+            assert!(matches!(
+                store.verify_bounded(&path, &hash, budget).await,
+                Err(StorageError::CorruptObject { .. })
+            ));
+        }
     }
 
     #[tokio::test]

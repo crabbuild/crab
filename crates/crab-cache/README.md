@@ -46,6 +46,18 @@ flowchart TD
 - Manifest body/ETag publication is not an atomic pair. Logical manifest and
   stage-content validation belongs to the caller.
 
+Native Git packs use file-only `put_git_pack_file` and
+`copy_git_pack_if_present`, keyed by plain BLAKE3 under `git-packs/aa/<hash>`.
+Fills use bounded streaming rather than whole-pack `Bytes`. Hits verify length
+and hash, then materialize an independent copy-on-write clone when the
+filesystem supports it, falling back to a bounded copy; they never hard-link a
+repository pack to mutable cache state. Fills reserve capacity and publish
+privately through the shared catalog. The family participates in stats,
+health, prune, verification, and cleanup. Git structure, sidecars, visible
+object closure, and authorization are reader responsibilities.
+Health and catalog inventory share native-path family classification: Windows
+separators are normalized, while backslashes in Unix filenames remain literal.
+
 ## Usage
 
 Enable local caching in a consuming Crab workspace member. This crate is not

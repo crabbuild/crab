@@ -38,6 +38,17 @@ Explicit `put` and `put_bytes` calls remain fallible. Logical stage/manifest
 content validation remains caller-owned, and separate manifest body/ETag
 publication is not an atomic pair.
 
+Native Git pack files have a separate `git-packs/aa/<plain-blake3>` identity,
+not a Xet hash or a named-manifest key. File-backed fills use bounded buffers
+and validate the exact byte length and hash. Hits verify that identity before
+publishing an independent copy-on-write clone when supported, or a bounded
+copy otherwise; cache and repository files are never hard-linked. A conflicting
+caller length is a miss, not deletion authority; hash corruption invokes
+descriptor-bound repair. Destination failures do not evict a healthy source.
+No entry is installed on a failed fill. Git semantics and visibility remain
+outside this byte cache. Concurrent fills may duplicate work; this path does
+not yet provide per-key single-flight or remote cache-service pack retention.
+
 ## Cleanup and catalog retirement
 
 `clean_cache` is the shared explicit cleanup boundary. It streams recognized
@@ -130,8 +141,9 @@ bodies.
 Object-cache stats, prune, targeted eviction, and verification use that same
 private boundary. The three eviction loops are consolidated, and stats/verify
 stream recognized objects instead of collecting an inventory first. Object
-stats include chunks, shards, xorbs, stages, and manifest counts; decoded
-ranges remain a separate report. Unknown filenames no longer become corrupt
+stats include chunks, shards, xorbs, ref transactions, native Git packs, stages,
+and manifest counts; decoded ranges remain a separate report. Unknown filenames
+no longer become corrupt
 objects merely because they appear beneath a hash-prefix directory. Stages
 and manifests retain their logical-key semantics and are not hash-verified.
 
@@ -259,7 +271,8 @@ inventory still recognizes it as disposable retained state.
 Admission includes the incoming file and other active reservations when making
 space, even below the current-usage high watermark. The final capacity check
 and reservation insertion share a writer transaction. Object, file-backed
-xorb, and decoded-range writers keep the reservation until the completed entry
+xorb, native Git pack, and decoded-range writers keep the reservation until
+the completed entry
 is registered; active owners are not eviction candidates. An entry that cannot
 fit is not cached. SQLite database/side-file access, complete accounting,
 bounded reconciliation, and command/background lifecycle still need hardening;
@@ -290,4 +303,3 @@ closing their file handles. On Unix, a descriptor inherited by a concurrent
 fork must not prolong ownership until that unrelated child executes or exits.
 Callers still must join their own cache workers before dropping the guard;
 explicit unlock does not make a detached writer safe.
-

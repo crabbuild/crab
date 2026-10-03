@@ -71,8 +71,9 @@ after a failure.
 | `--rebase-retry-limit <COUNT>` | `256` | Maximum integration attempts with automatic rebase enabled |
 | `--dry-run` | Disabled | Show what would be pushed without uploading |
 | `-f, --force` | Disabled | Bypass client fast-forward checks; server policy still applies |
+| `--follow-tags` | Disabled | Also push missing annotated tags whose commits are reachable from the refs being pushed |
 | `-v, --verbose` | Disabled | Show per-step timing and per-file progress |
-| `--no-incremental` | Disabled | Force a full graph walk |
+| `--no-incremental` | Disabled | Publish the complete outgoing Git and LFS closure instead of excluding objects reachable from current remote tips |
 | `--no-color` | Disabled | Disable ANSI color |
 | `--json` | Disabled | Emit one terminal JSON envelope |
 | `--jsonl` | Disabled | Stream JSONL progress and a terminal result |

@@ -32,6 +32,22 @@ fresh Crab-backed git repository. The source objects stay in place
 target prefix, and the local `<into>` directory becomes a cloneable
 git repo whose history reflects the bucket.
 
+The first commit includes `crab.toml`. A raw cloud target such as
+`s3://bucket/repo` is persisted there and as `origin` using its canonical
+`crab://bucket/repo` locator, with the storage-provider hint retained. Fresh
+clones therefore route through `git-remote-crab`, not a provider-named Git
+helper.
+
+Attribute synthesis covers every imported pointer. Safe case-sensitive file
+extensions share compact globs; extensionless names and names containing
+attribute-pattern syntax receive escaped literal entries. Clone, checkout,
+hydrate, and dehydrate therefore treat those files exactly like ordinary
+extension-bearing large files.
+
+Repository control paths (`.git`, `.crab`, `.gitattributes`, and `crab.toml`)
+are excluded from imported source objects so raw data cannot replace Crab's
+committed configuration or Git metadata.
+
 For quick imports, the first positional argument can be either a raw
 storage URL or a local filesystem path. `--bucket <bucket> --name
 <repo>` builds the target `crab://<bucket>/<repo>` URL for you.
@@ -94,7 +110,7 @@ crab import \
 ```
 
 Post-import the local `./v2` directory has pointer blobs, a `main`
-branch, and `origin` pointing at the target URL. The source objects
+branch, and `origin` pointing at the canonical Crab URL. The source objects
 at `s3://my-bucket/datasets/v2/` are untouched.
 
 ### Cross-bucket onboarding (raw `--to`)

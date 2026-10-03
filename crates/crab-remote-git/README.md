@@ -25,6 +25,13 @@ and its root tree. Locator publication lag returns `RepositoryIndexing`;
 opening never performs write-side catalog maintenance. Empty repositories can
 open, but selecting a snapshot returns `EmptyRepository`.
 
+Snapshot constructors retain explicitly supplied commit-graph/path-state indexes
+only for their exact materialized Git state. Loading a graph shares the normal
+identity, integrity and admission checks; a journal ref change discards stale
+base indexes even when its generation is unchanged. Snapshots without indexes
+make no additional index requests. Publication of capsule-bound browse indexes
+is a separate maintenance responsibility, not part of opening or pushing.
+
 ## Choose an entry point
 
 | Need | API | Contract |
@@ -32,6 +39,7 @@ open, but selecting a snapshot returns `EmptyRepository`.
 | Shared admission and caches | `RemoteGitRuntime` | Process-wide; shut down after active contexts finish or drop |
 | Open a repository | `RemoteGitRepository::open` | Caller supplies authorized physical placement identity |
 | Open a committed journal view | `RemoteGitRepository::from_snapshot` | Caller supplies a validated snapshot, retention, and freshness policy; no catalog required |
+| Open authenticated capsule sources | `RemoteGitRepository::from_snapshot_with_lookup_sources` | `SnapshotLookupSources` carries validated locators, source ranges, preferred indexes and object-to-member admission; snapshot identity and inventory checks remain mandatory |
 | Accelerate a committed snapshot | `RemoteGitRepository::from_snapshot_with_catalog_tail` | Any available catalog whose immutable pack inventory is a subset of the snapshot combines with the remaining pack tail; unavailable or unproven catalogs fall back to all pinned pack indexes |
 | Reuse a handle | `is_current` | Checks manifest identity; journal freshness can require reopening |
 | Select a revision | `refs`, `resolve`, `snapshot` | Selection stays within pinned visible refs |
@@ -69,6 +77,20 @@ Archive streams own this completion step. Drop cleanup is best effort; explicit
 completion preserves close errors. At service shutdown, stop admission, finish
 or drop live contexts, then await `RemoteGitRuntime::shutdown` while Tokio is
 still running. See [result and close-error precedence](REFERENCE.md#completing-an-operation).
+
+Generated-pack producers may outlive an individual cache waiter. Their runtime
+owner must therefore await shutdown even after a cancelled request has returned.
+Lease cancellation and renewal failure signal a work-owned child token and
+drain that work before releasing its lease; request-bound producer closures
+must observe the supplied token and complete their cleanup before returning.
+
+Pack-inventory downloads cancel only their operation's child token on a source
+failure, drain started body/sidecar writers, and skip queued work. Canonical,
+embedded and inline pack bodies share the same length/hash verifier and flush
+pending file writes before returning, including on cancellation or stream
+failure. Pack generation passes that semantic result to explicit session
+closure. Callers must await cancellation cleanup before deleting destinations;
+abandoning the future is not a synchronous drain guarantee.
 
 ## Choose the content representation
 
@@ -157,6 +179,13 @@ operation while a separate operation scans the pinned catalog concurrently;
 the downloaded pack indexes must still cover that exact OID set before the
 inventory is returned. Partial visibility keeps the normal planned-pack path.
 
+Generated response packs retain Git's sideband packet limits while batching
+wire writes in at most 1 MiB. The same writer serves CLI and HTTP callers;
+the HTTP duplex still applies backpressure. Success explicitly flushes the
+batch before response-end framing. Write/flush errors remain typed and pending
+writes or flushes remain cancellable, so dropping a batch cannot silently
+complete a truncated response.
+
 Operation-owned coalesced ranges and packed-entry metadata reads use the same
 admission boundary: failed headers charge a request but no advertised body,
 and each facade retry reserves its own request and response bytes. An early
@@ -178,3 +207,17 @@ signal cancellation through the same lease, with runtime shutdown retaining the
 join obligation. Departed participants stop accumulating charges; rejoining the
 same operation reserves work performed while it was absent without charging
 previously admitted work twice.
+
+Batch locator reads coalesce nearby lazy pack indexes within one immutable
+source. Windows retain the source-range and overread bounds and at most 256
+indexes; each index still passes its descriptor hash, Git checksum, and inventory
+checks before the batch enters the existing parsed-index cache. Identical windows
+share a budget-participating producer. Standalone, inline, and single-index reads
+retain their existing path. This reduces index requests, not the number of
+physical capsule objects or the payload requests needed to fetch them.
+
+Batch index matching sorts requested OIDs once while retaining caller order and
+duplicates. Each verified index probes the smaller side, avoiding a complete
+request-set scan per small frontier member or an index scan per point read.
+Self-contained matches remain preferred over external deltas. This bounds CPU
+lookup work; it does not change source-range admission or reduce origin requests.

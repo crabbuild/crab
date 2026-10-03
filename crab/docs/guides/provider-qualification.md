@@ -85,6 +85,11 @@ The RustFS job is self-contained and runs on scheduled or manual workflow
 dispatch. Real GCS and Azure jobs are disabled until their repository variables
 are explicitly enabled.
 
+The self-contained job pins the immutable RustFS 1.0.0 GA image index for
+Linux amd64 and arm64, verifies the running binary's version, and retains
+`service-version.txt` beside its provider report. These storage-contract
+checks do not replace the capsule replay, Xet, or product-parity gates.
+
 GCS requires:
 
 - variable `CRAB_PROVIDER_GCS_ENABLED=true`;

@@ -119,8 +119,9 @@ docker compose --file crates/crab-http-server/deploy/compose.yaml run --rm \
 
 Create returns only after the initial repository SQLite/LTX root has been
 published, restored, identity-checked and marked `cell_ready`. Adopted
-repositories follow the same empty-Cell initialization and readiness transition;
-old collaboration application data is not imported.
+repositories first verify their complete capsule-v2 Git and shard/xorb closure,
+then follow the same empty-Cell initialization and readiness transition; old
+collaboration application data is not imported.
 
 Inspect or stop the stack without deleting repositories:
 
@@ -243,11 +244,12 @@ Compose project, and then:
 9. Blocks immutable objects again and commits through the replacement follower.
 10. Sends `SIGKILL` to C, destroys its local SQLite files, and requires B to
     recover both follower-only commits before serving further reads.
-11. Restarts the needed local processes, publishes an object-covered label, and
-    records B's exact follower membership before the fallback fault.
-12. Stops every original member of B's log, keeps a non-member process live,
-    then sends `SIGKILL` to B and requires the non-member to recover the exact
-    RustFS root and all labels.
+11. Restarts the needed local processes, records B's exact inactive log and a
+    live non-member candidate, then stops every original log member and waits
+    for their signed advertisements to expire.
+12. Publishes an object-covered label while B's log remains inactive, sends
+    `SIGKILL` to B, and requires the non-member to recover the exact RustFS
+    root and all labels without a follower witness.
 
 Success prints a JSON receipt containing all three failovers' sessions, epochs
 and complete roots, the original member sets, follower replacement evidence,

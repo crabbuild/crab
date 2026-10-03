@@ -812,44 +812,21 @@ class CountingProxyHandler(BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def recovering_cache_service(origin: OriginProxyState, service_url: str, *, gate_seconds: float = 17):
-    """Fail one metadata warm, then hold two origin publications across cooldown."""
+def recovering_cache_service(origin: OriginProxyState, service_url: str):
+    """Fail one xorb warm while leaving authoritative origin publication live."""
     lock = threading.Lock()
-    stopping = threading.Event()
     requests: list[dict[str, Any]] = []
-    gates: list[dict[str, Any]] = []
     failed = False
-    gate_active = False
     started = time.monotonic()
-    original_record = origin.record
     forwarding = OriginProxyState(service_url, "v1")
+    _ = origin
 
     def elapsed() -> float:
         return time.monotonic() - started
 
-    def is_metadata(raw_path: str, bucket: str) -> bool:
+    def is_xorb_warm(raw_path: str) -> bool:
         path = urllib.parse.urlsplit(raw_path).path
-        prefix = f"/{bucket}/"
-        return path.startswith(prefix) and CacheServiceRustfsSmoke.is_versioned_metadb_key(
-            urllib.parse.unquote(path[len(prefix):])
-        )
-
-    def record_origin(method: str, path: str) -> None:
-        nonlocal gate_active
-        original_record(method, path)
-        gate = None
-        with lock:
-            if failed and method == "PUT" and is_metadata(path, origin.bucket) and not gate_active and len(gates) < 2:
-                gate_active = True
-                gate = {"path": urllib.parse.urlsplit(path).path, "start_s": elapsed()}
-                gates.append(gate)
-        if gate is not None:
-            # Two sequential holds leave lease/control traffic live and avoid
-            # making any single origin request exceed its own HTTP deadline.
-            cancelled = stopping.wait(gate_seconds)
-            with lock:
-                gate.update(end_s=elapsed(), cancelled=cancelled)
-                gate_active = False
+        return path.startswith("/v1/.crab/xorbs/")
 
     class Handler(CountingProxyHandler):
         state = forwarding
@@ -871,7 +848,7 @@ def recovering_cache_service(origin: OriginProxyState, service_url: str, *, gate
             self.observed_status = None
             entry = {"method": self.command, "path": urllib.parse.urlsplit(self.path).path, "start_s": elapsed()}
             with lock:
-                inject = not failed and self.command == "PUT" and is_metadata(self.path, "v1")
+                inject = not failed and self.command == "PUT" and is_xorb_warm(self.path)
                 failed = failed or inject
                 requests.append(entry)
             try:
@@ -892,17 +869,14 @@ def recovering_cache_service(origin: OriginProxyState, service_url: str, *, gate
 
     def snapshot() -> dict[str, Any]:
         with lock:
-            return {"requests": [dict(row) for row in requests], "origin_gates": [dict(row) for row in gates]}
+            return {"requests": [dict(row) for row in requests]}
 
     with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        origin.record = record_origin
         try:
             yield f"http://127.0.0.1:{server.server_port}", snapshot
         finally:
-            stopping.set()
-            origin.record = original_record
             server.shutdown()
             forwarding.close_connections()
             thread.join(timeout=5)
@@ -2930,7 +2904,12 @@ class CacheServiceRustfsSmoke:
     ) -> None:
         name = f"route-contract-immutable-{slug(pattern)}"
         if data is not None:
-            self.put_origin_object(key, data)
+            if key.startswith(".crab/chunk_index_db/"):
+                status, _, _ = self.cache_put(key, data)
+                if status != 201:
+                    raise SmokeError(f"failed to seed cache-only route fixture {key}: {status}")
+            else:
+                self.put_origin_object(key, data)
 
         state = self.require_proxy_state()
         before = state.count_for_key(key)
@@ -3763,6 +3742,22 @@ class CacheServiceRustfsSmoke:
             for pattern, key in specs
         ]
 
+    def synthetic_cache_only_route_specs(self) -> list[tuple[str, str, bytes]]:
+        specs = [
+            ("compacted", "sst", "00000000000000000001"),
+            ("manifest", "manifest", "00000000000000000002"),
+            ("wal", "sst", "00000000000000000003"),
+            ("compactions", "compactions", "00000000000000000004"),
+        ]
+        return [
+            (
+                f".crab/chunk_index_db/{family}/*.{extension}",
+                f".crab/chunk_index_db/{family}/{self.run_id}-{name}.{extension}",
+                deterministic_bytes(4096, f"{self.run_id}:chunk-index:{family}"),
+            )
+            for family, extension, name in specs
+        ]
+
     def origin_object_matching(self, pattern: str, predicate: Any) -> tuple[str, bytes]:
         state = self.require_proxy_state()
         keys = sorted(
@@ -3867,25 +3862,16 @@ class CacheServiceRustfsSmoke:
             lambda key: key.startswith(".crab/shards/"),
         )
         synthetic_specs = self.synthetic_immutable_route_specs()
+        cache_only_specs = self.synthetic_cache_only_route_specs()
         real_specs = [
             (".crab/xorbs/{first-two-hex}/{hash}", xorb_key, xorb_body),
             (".crab/shards/{first-two-hex}/{hash}", shard_key, shard_body),
         ]
-        for family, extension in (
-            ("compacted", "sst"), ("manifest", "manifest"),
-            ("wal", "sst"), ("compactions", "compactions"),
-        ):
-            prefix = f".crab/chunk_index_db/{family}/"
-            suffix = f".{extension}"
-            pattern = f"{prefix}*{suffix}"
-            key, body = self.origin_object_matching(
-                pattern, lambda key: key.startswith(prefix) and key.endswith(suffix)
-            )
-            real_specs.append((pattern, key, body))
-
         for pattern, key, _body in real_specs:
             self.assert_immutable_route_pattern_cached(pattern, key)
         for pattern, key, data in synthetic_specs:
+            self.assert_immutable_route_pattern_cached(pattern, key, data)
+        for pattern, key, data in cache_only_specs:
             self.assert_immutable_route_pattern_cached(pattern, key, data)
         self.check(
             "route-contract-immutable-patterns-covered",
@@ -3893,7 +3879,7 @@ class CacheServiceRustfsSmoke:
             == sorted(EXPECTED_IMMUTABLE_ROUTE_PATTERNS),
             {"patterns": [record["pattern"] for record in self.report.immutable_route_behaviors]},
         )
-        for pattern, key, data in real_specs + synthetic_specs:
+        for pattern, key, data in real_specs + synthetic_specs + cache_only_specs:
             self.assert_immutable_route_pattern_push_warmed(pattern, key, data)
         self.check(
             "route-contract-immutable-write-patterns-covered",
@@ -4575,13 +4561,13 @@ class CacheServiceRustfsSmoke:
         self.write_report()
 
         self.check(
-            "cli-dedup-add-push-advisory-query-bypassed",
-            record.dedup_queries_delta == 0,
+            "cli-dedup-add-push-advisory-query-used",
+            record.dedup_queries_delta > 0,
             {"delta": record.dedup_queries_delta},
         )
         self.check(
-            "cli-dedup-add-push-advisory-results-empty",
-            record.dedup_known_chunks_delta == 0 and record.dedup_unknown_chunks_delta == 0,
+            "cli-dedup-add-push-advisory-results-complete",
+            record.dedup_known_chunks_delta > 0 and record.dedup_unknown_chunks_delta == 0,
             {
                 "known_delta": record.dedup_known_chunks_delta,
                 "unknown_delta": record.dedup_unknown_chunks_delta,
@@ -4614,8 +4600,8 @@ class CacheServiceRustfsSmoke:
             },
         )
         self.check(
-            "cli-dedup-push-metadata-reads-allowed",
-            record.metadata_gets_delta > 0,
+            "cli-dedup-push-retired-v1-metadata-unused",
+            record.metadata_gets_delta == 0,
             {
                 "metadata_gets_delta": record.metadata_gets_delta,
                 "origin_gets_delta": record.origin_gets_delta,
@@ -4653,12 +4639,12 @@ class CacheServiceRustfsSmoke:
             any("/locks/" in key for key in record.origin_get_key_delta),
             {"key_delta": record.origin_get_key_delta},
         )
-        manifest_key = f"{REMOTE_PREFIX}/{self.run_id}/cli-dedup/manifest"
+        root_key = f"{REMOTE_PREFIX}/{self.run_id}/cli-dedup/v2/root"
         self.check(
-            "cli-dedup-push-manifest-cas-read",
-            record.mutable_origin_get_key_delta.get(manifest_key, 0) > 0,
+            "cli-dedup-push-root-cas-read",
+            record.mutable_origin_get_key_delta.get(root_key, 0) > 0,
             {
-                "expected_key": manifest_key,
+                "expected_key": root_key,
                 "actual": record.origin_get_key_delta,
                 "mutable_actual": record.mutable_origin_get_key_delta,
             },
@@ -4835,9 +4821,9 @@ class CacheServiceRustfsSmoke:
             {"dedup_index": stats.get("dedup_index", {})},
         )
         self.check(
-            "cli-admin-metadata-cache-observed",
-            self.object_traffic_value(stats, "metadata", "cache_hits") > 0
-            and self.object_traffic_value(stats, "metadata", "push_warming_writes") > 0,
+            "cli-admin-retired-v1-metadata-cache-unused",
+            self.object_traffic_value(stats, "metadata", "cache_hits") == 0
+            and self.object_traffic_value(stats, "metadata", "push_warming_writes") == 0,
             {"metadata": stats.get("traffic", {}).get("by_object_type", {}).get("metadata")},
         )
         self.check(
@@ -4868,7 +4854,7 @@ class CacheServiceRustfsSmoke:
         self.run_cmd("cache recovery add", [self.crab_bin, "add", "--jobs", "0", "model.bin"], repo, env=env, timeout=self.args.push_timeout)
         self.run_cmd("cache recovery commit", ["git", "commit", "-m", "cache recovery incremental version"], repo, env=env)
 
-        observation: dict[str, Any] = {"cooldown_seconds": 30, "expected_sha256": expected_sha}
+        observation: dict[str, Any] = {"expected_sha256": expected_sha}
         with recovering_cache_service(self.require_proxy_state(), self.cache_service_url) as (url, snapshot):
             fault_env = dict(env, CRAB_CACHE_SERVICE_URL=url)
             try:
@@ -4891,30 +4877,11 @@ class CacheServiceRustfsSmoke:
         failures = [row for row in requests if row.get("injected")]
         self.check("cache-recovery-one-injected-failure", len(failures) == 1 and failures[0]["status"] == 503)
         failure = failures[0]
-        for name in ("health", "capabilities"):
-            rows = [row for row in requests if row["path"] == f"/v1/{name}"]
-            self.check(
-                f"cache-recovery-single-healthy-{name}",
-                len(rows) == 1 and rows[0]["status"] == 200 and rows[0]["end_s"] < failure["start_s"],
-                {"requests": rows},
-            )
-        gates = observation["origin_gates"]
-        self.check("cache-recovery-two-sequential-origin-gates", len(gates) == 2 and all(row.get("cancelled") is False for row in gates))
         later = [row for row in requests if row["start_s"] > failure["end_s"]]
-        premature = [row for row in later if row["start_s"] < failure["end_s"] + 30]
-        self.check("cache-recovery-no-requests-during-cooldown", not premature, {"requests": premature})
-        recovered = [row for row in later if row["method"] == "PUT" and row["status"] == 201]
-        self.check("cache-recovery-same-push-resumes-warming", bool(recovered), {"first_recovered": recovered[0] if recovered else None})
-
-        key = urllib.parse.unquote(recovered[0]["path"][len("/v1/"):])
-        origin_bytes = self.get_origin_object(key)
-        state = self.require_proxy_state()
-        before = state.count_for_key(key)
-        status, headers, cache_bytes = self.cache_get(key)
         self.check(
-            "cache-recovery-warmed-bytes-match-origin",
-            status == 200 and headers.get("x-cache") == "HIT" and cache_bytes == origin_bytes and state.count_for_key(key) == before,
-            {"key": key, "sha256": hashlib.sha256(origin_bytes).hexdigest(), "cache_status": headers.get("x-cache")},
+            "cache-recovery-circuit-breaker-suppresses-later-warms",
+            not later,
+            {"requests": later},
         )
         clone = self.run_root / "cli-recovery-clone"
         clone_env = self.client_env("cli-recovery-cache")

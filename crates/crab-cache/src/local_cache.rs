@@ -2,7 +2,7 @@
 //!
 //! Chunks and shards are stored under `{dir}/{hash[:2]}/{hash}` and
 //! verified via `compute_data_hash` on every read. Ref-journal transactions
-//! use the same layout but retain their native plain-Blake3 identity. A
+//! and file-backed native Git packs retain their native plain-Blake3 identity. A
 //! mismatch evicts the stale entry and refetches via the caller-supplied closure.
 //!
 //! Xorbs also use the two-level layout, but validate their aggregate xorb
@@ -34,6 +34,7 @@ use crab_xet::xorb::builder::FOOTER_SIZE;
 use crab_xet::xorb::format::{ChunkMeta, MAX_XORB_SIZE, MerkleHash};
 use crab_xet::xorb::parser::XorbParser;
 
+mod git_pack_file;
 mod maintenance;
 mod xorb_file;
 use xorb_file::{read_xorb_file_metadata, verify_xorb_file_identity, verify_xorb_file_payload};
@@ -73,6 +74,8 @@ pub struct PruneStats {
     pub xorbs_evicted: u64,
     /// Number of immutable ref-journal transaction files evicted.
     pub ref_transactions_evicted: u64,
+    /// Number of native Git pack files evicted.
+    pub git_packs_evicted: u64,
     /// Total bytes freed across all evictions.
     pub bytes_freed: u64,
     /// Cache objects pruned or selected for pruning.
@@ -95,6 +98,7 @@ pub enum PruneObjectKind {
     Shard,
     Xorb,
     RefTransaction,
+    GitPack,
 }
 
 impl PruneObjectKind {
@@ -105,6 +109,7 @@ impl PruneObjectKind {
             Self::Shard => "shard",
             Self::Xorb => "xorb",
             Self::RefTransaction => "ref-transaction",
+            Self::GitPack => "git-pack",
         }
     }
 }
@@ -125,6 +130,7 @@ impl PruneStats {
             + self.shards_evicted
             + self.xorbs_evicted
             + self.ref_transactions_evicted
+            + self.git_packs_evicted
     }
 }
 
@@ -158,6 +164,10 @@ pub struct CacheStats {
     pub ref_transaction_bytes: u64,
     /// Number of cached immutable ref-journal transactions.
     pub ref_transaction_count: u64,
+    /// Total bytes used by native Git pack files.
+    pub git_pack_bytes: u64,
+    /// Number of cached native Git pack files.
+    pub git_pack_count: u64,
     /// Total bytes used by cached workflow stage entries.
     pub stage_bytes: u64,
     /// Number of cached workflow stage entries.
@@ -181,7 +191,7 @@ pub struct CachedRemoteXorbIndex {
 pub struct LocalCache {
     root: PathBuf,
     catalog: crate::catalog::CacheCatalog,
-    /// Shared byte ceiling for large data objects: chunk fragments and xorbs.
+    /// Shared byte ceiling for large data objects: chunk fragments, xorbs, and Git packs.
     chunk_max_bytes: Option<u64>,
     shard_max_bytes: Option<u64>,
     fill_locks: Box<[tokio::sync::Mutex<()>]>,
@@ -205,7 +215,7 @@ impl LocalCache {
 
     /// Create a cache with explicit byte budgets.
     ///
-    /// `chunk_max` is the shared ceiling for chunk fragments and xorbs; `None` is unlimited.
+    /// `chunk_max` is the shared ceiling for chunks, xorbs, and Git packs; `None` is unlimited.
     #[must_use]
     pub fn with_limits(
         root: PathBuf,
@@ -1227,7 +1237,19 @@ async fn copy_xorb_temp_file_with_blake3(
             reason: format!("xorb is {expected_len} bytes; format limit is {MAX_XORB_SIZE} bytes"),
         });
     }
-    let mut source_file = tokio::fs::File::open(source).await?.take(expected_len + 1);
+    copy_file_with_blake3(source, tmp_file, expected_len)
+        .await
+        .map(|hash| *hash.as_bytes())
+}
+
+async fn copy_file_with_blake3(
+    source: &Path,
+    tmp_file: &mut tokio::fs::File,
+    expected_len: u64,
+) -> Result<blake3::Hash> {
+    let mut source_file = tokio::fs::File::open(source)
+        .await?
+        .take(expected_len.saturating_add(1));
     let mut hasher = blake3::Hasher::new();
     let mut copied = 0u64;
     let mut buffer = vec![0u8; 1024 * 1024];
@@ -1241,7 +1263,7 @@ async fn copy_xorb_temp_file_with_blake3(
             .checked_add(read as u64)
             .ok_or_else(|| CacheError::CorruptObject {
                 path: source.display().to_string(),
-                reason: "copied xorb byte count overflowed".to_owned(),
+                reason: "copied byte count overflowed".to_owned(),
             })?;
         if copied > expected_len {
             return Err(CacheError::CorruptObject {
@@ -1255,7 +1277,7 @@ async fn copy_xorb_temp_file_with_blake3(
     tmp_file.sync_all().await?;
 
     if copied == expected_len {
-        return Ok(*hasher.finalize().as_bytes());
+        return Ok(hasher.finalize());
     }
     Err(CacheError::CorruptObject {
         path: source.display().to_string(),

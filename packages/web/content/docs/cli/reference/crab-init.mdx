@@ -19,8 +19,8 @@ crab init [OPTIONS] [URL]
 
 ## Description
 
-`crab init` creates or validates the canonical v1 remote layout and empty
-generation-0 manifest, then connects a local Git repository to that remote. It
+`crab init` creates or validates the canonical v2 remote root and empty
+generation-0 ref authority, then connects a local Git repository to that remote. It
 creates or updates `.crab/` and `crab.toml`, registers the Crab filter and
 diff drivers, and adds a Git remote. It does not scan the working tree.
 
@@ -56,9 +56,9 @@ For conceptual background, see [Creating a Repository](/docs/cli/getting-started
 2. **Creates `.crab/local.toml`** for machine-specific settings
 3. **Registers the filter and diff drivers** in `.git/config`
 4. **Adds or updates a Git remote** for the canonical `crab://` URL
-5. **Creates or validates the canonical v1 layout descriptor** remotely
-6. **Creates the generation-0 manifest atomically**, or adopts the existing
-   canonical manifest on repeat or concurrent initialization
+5. **Creates or validates the canonical v2 root** remotely
+6. **Creates generation-0 ref authority atomically**, or adopts the existing
+   v2 root on repeat or concurrent initialization
 
 Push and clone do not create repositories. If a remote points to an empty,
 uninitialized prefix, Crab reports `CRAB-E0032` and tells you to run

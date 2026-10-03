@@ -45,17 +45,25 @@ pub enum LfsError {
     /// File I/O or a blocking content-verification worker failed.
     #[error("LFS object I/O error: {source}")]
     Io {
-        #[from]
         #[source]
         source: std::io::Error,
     },
 
     /// Underlying object-store transport failed.
     #[error(transparent)]
-    Storage {
-        #[from]
-        source: StorageError,
-    },
+    Storage { source: StorageError },
+}
+
+impl From<std::io::Error> for LfsError {
+    fn from(source: std::io::Error) -> Self {
+        Self::Io { source }
+    }
+}
+
+impl From<StorageError> for LfsError {
+    fn from(source: StorageError) -> Self {
+        Self::Storage { source }
+    }
 }
 
 /// Minimum part size for streaming multipart uploads. Larger files increase

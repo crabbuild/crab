@@ -453,6 +453,30 @@ class AddCommitPushSmoke:
     def head_key(self, key: str) -> None:
         self.run_aws("head " + key, ["head-object", "--bucket", self.args.bucket, "--key", key])
 
+    def head_repository_state(self, repo_prefix: str) -> None:
+        """Require the authoritative v2 root, with legacy-v1 fallback for old fixtures."""
+        root = self.run_aws(
+            "head " + repo_prefix + "/v2/root",
+            [
+                "head-object",
+                "--bucket",
+                self.args.bucket,
+                "--key",
+                f"{repo_prefix}/v2/root",
+            ],
+            check=False,
+        )
+        if root.exit_code == 0:
+            return
+        root_stderr = Path(root.stderr_log).read_text(
+            encoding="utf-8", errors="replace"
+        )
+        if "404" not in root_stderr and "Not Found" not in root_stderr:
+            raise SmokeError(
+                f"v2 root probe failed for {repo_prefix}; stderr log: {root.stderr_log}"
+            )
+        self.head_key(f"{repo_prefix}/manifest")
+
     def signed_s3_request(
         self,
         method: str,
@@ -1473,11 +1497,17 @@ class AddCommitPushSmoke:
             Path(refused.stdout_log).read_text(encoding="utf-8", errors="replace")
             + Path(refused.stderr_log).read_text(encoding="utf-8", errors="replace")
         )
+        refused_without_mutation = (
+            "canonical v1" in refusal_text and "not supported" in refusal_text
+        ) or (
+            "CRAB-E0020" in refusal_text
+            and "repository prefix contains data but has no capsule-protocol root"
+            in refusal_text
+            and "left it unchanged" in refusal_text
+        )
         self.check(
             "non-v1-layout-fails-closed",
-            refused.exit_code != 0
-            and "canonical v1" in refusal_text
-            and "not supported" in refusal_text,
+            refused.exit_code != 0 and refused_without_mutation,
             {"exit_code": refused.exit_code},
         )
         missing_manifest = self.run_aws(
@@ -1576,7 +1606,7 @@ class AddCommitPushSmoke:
                 name=f"{case_name} git push",
             )
 
-        self.head_key(f"{repo_prefix}/manifest")
+        self.head_repository_state(repo_prefix)
         after_xorbs = self.list_keys(".crab/xorbs/")
         after_shards = self.list_keys(".crab/shards/")
         new_xorbs = len(after_xorbs - before_xorbs)
@@ -1793,7 +1823,7 @@ class AddCommitPushSmoke:
             name=f"{case_name} push",
             timeout=self.args.push_timeout,
         )
-        self.head_key(f"{repo_prefix}/manifest")
+        self.head_repository_state(repo_prefix)
         after_xorbs = self.list_keys(".crab/xorbs/")
         new_xorbs = len(after_xorbs - before_xorbs)
         self.check(
@@ -1835,7 +1865,7 @@ class AddCommitPushSmoke:
             name=f"{case_name} source push",
             timeout=self.args.push_timeout,
         )
-        self.head_key(f"{source_prefix}/manifest")
+        self.head_repository_state(source_prefix)
         source_xorbs = self.list_keys(".crab/xorbs/")
 
         consumer, consumer_url, consumer_prefix = self.prepare_repo(
@@ -1912,7 +1942,7 @@ class AddCommitPushSmoke:
             and '"global_existing":0' in push_stderr,
             {"remote_chunks": remote_chunk_count},
         )
-        self.head_key(f"{consumer_prefix}/manifest")
+        self.head_repository_state(consumer_prefix)
         after_push_xorbs = self.list_keys(".crab/xorbs/")
         self.check(
             f"{case_name}-push-uploads-no-new-xorb",
@@ -1999,7 +2029,7 @@ class AddCommitPushSmoke:
             name=f"{case_name} push both versions",
             timeout=self.args.push_timeout,
         )
-        self.head_key(f"{repo_prefix}/manifest")
+        self.head_repository_state(repo_prefix)
         fsck_record = self.run_crab(
             repo,
             ["fsck", "--json"],
@@ -2058,6 +2088,46 @@ class AddCommitPushSmoke:
 
     def run_gc_fence_upgrade_case(self) -> None:
         repo, remote, domain = self.prepare_git_repo("gc-fence-upgrade")
+
+        # Keep a legacy v1 descriptor beside the v2 root so the rollback
+        # writer reaches the upgraded fence instead of failing admission on a
+        # deliberately absent v1 layout. The v2 root remains authoritative for
+        # the migration command under test.
+        legacy_layout = json.dumps({
+            "schema_version": 1,
+            "layout": "partitioned",
+            "chunk_partition_bits": 8,
+            "file_partition_bits": 8,
+            "receipt_partition_bits": 8,
+            "recipe_page_entries": 512,
+            "recipe_page_max_bytes": 65536,
+            "digest": "67991fbbc08a032d74558b1fbecfa32a04c54cf02f1e36afa10fba14d46078f6",
+        }).encode()
+        layout_status, _, _ = self.signed_s3_request(
+            "PUT", f"{domain}/layout", body=legacy_layout,
+            extra_headers={"if-none-match": "*"},
+        )
+        self.check("legacy-layout-fixture-created-only-if-absent", layout_status == 200)
+        legacy_manifest = json.dumps({
+            "version": 1,
+            "generation": 0,
+            "created_at": "",
+            "pusher": None,
+            "session_id": "",
+            "refs": {},
+            "peeled_refs": {},
+            "head": "refs/heads/main",
+            "shard_index_hash": "",
+            "pack_index_hash": "",
+            "git_validation_digest": "7e9adc65b2225882ef7ae62b6cdfd8b13383f536152b55c47a9f54ce3db37ea8",
+            "commit_graph_hash": None,
+            "ref_registry_hash": None,
+        }).encode()
+        manifest_status, _, _ = self.signed_s3_request(
+            "PUT", f"{domain}/manifest", body=legacy_manifest,
+            extra_headers={"if-none-match": "*"},
+        )
+        self.check("legacy-manifest-fixture-created-only-if-absent", manifest_status == 200)
         key = f"{domain}/locks/internal/gc-fence/state"
         legacy = json.dumps({
             "schema_version": 1, "epoch": 0, "writer_epoch": 0,
@@ -2094,6 +2164,12 @@ class AddCommitPushSmoke:
         self.preflight()
         if self.args.only_gc_fence_upgrade:
             self.run_gc_fence_upgrade_case()
+            self.check_credential_disclosure()
+            self.report.status = "passed"
+            self.write_report()
+            return
+        if self.args.only_xorb:
+            self.run_v1_hard_cutover_reset_case()
             self.check_credential_disclosure()
             self.report.status = "passed"
             self.write_report()
@@ -2224,6 +2300,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=positive_int, default=120)
     parser.add_argument("--push-timeout", type=positive_int, default=240)
     parser.add_argument("--only-cross-repo-duplicate", action="store_true")
+    parser.add_argument("--only-xorb", action="store_true")
     parser.add_argument("--only-partial-overlap", action="store_true")
     parser.add_argument("--only-committed-restage", action="store_true")
     parser.add_argument("--only-gc-fence-upgrade", action="store_true")
@@ -2231,10 +2308,12 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.only_gc_fence_upgrade and not args.rollback_crab_bin:
         parser.error("--only-gc-fence-upgrade requires --rollback-crab-bin")
-    if args.only_gc_fence_upgrade and any((args.source, args.only_cross_repo_duplicate, args.only_partial_overlap, args.only_committed_restage)):
+    if args.only_gc_fence_upgrade and any((args.source, args.only_xorb, args.only_cross_repo_duplicate, args.only_partial_overlap, args.only_committed_restage)):
         parser.error("--only-gc-fence-upgrade cannot be combined with another case selector")
-    if args.source and any((args.only_cross_repo_duplicate, args.only_partial_overlap, args.only_committed_restage)):
+    if args.source and any((args.only_xorb, args.only_cross_repo_duplicate, args.only_partial_overlap, args.only_committed_restage)):
         parser.error("--source cannot be combined with a synthetic-case selector")
+    if args.only_xorb and any((args.only_cross_repo_duplicate, args.only_partial_overlap, args.only_committed_restage)):
+        parser.error("--only-xorb cannot be combined with another synthetic-case selector")
     return args
 
 

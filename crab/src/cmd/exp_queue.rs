@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use clap::Parser;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -579,47 +580,39 @@ pub async fn run_exp_start(args: &StartArgs, repo_root: &Path) -> Result<()> {
     let mut succeeded_ids = Vec::new();
     let mut failed_ids = Vec::new();
 
-    // Process experiments with bounded concurrency using a semaphore.
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(jobs as usize));
-    let mut handles = Vec::new();
-
-    for entry in pending {
-        // Check stop signal before spawning.
-        if stop_flag.load(Ordering::Relaxed) || stop_path.exists() {
-            info!("stop signal detected, not starting new experiments");
-            break;
+    // Process experiments with bounded concurrency. Futures stay on this
+    // task because experiment execution owns task-local workflow values that
+    // are intentionally not `Send`; the stream still makes independent
+    // experiments progress concurrently at every await point.
+    let concurrency = jobs as usize;
+    let mut pending = pending.into_iter();
+    let mut workers = FuturesUnordered::new();
+    loop {
+        while workers.len() < concurrency {
+            if stop_flag.load(Ordering::Relaxed) || stop_path.exists() {
+                info!("stop signal detected, not starting new experiments");
+                break;
+            }
+            let Some(entry) = pending.next() else { break };
+            let repo = repo_root.to_path_buf();
+            let q_dir = queue_dir.clone();
+            let stop_p = stop_path.clone();
+            let stop_f = stop_flag.clone();
+            let entry_id = entry.id.clone();
+            workers.push(async move {
+                let result = run_single_experiment(repo, q_dir, entry, stop_p, stop_f).await;
+                (entry_id, result)
+            });
         }
 
-        let permit = semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| CrabError::Internal(format!("semaphore acquire failed: {e}")))?;
-
-        let repo = repo_root.to_path_buf();
-        let q_dir = queue_dir.clone();
-        let stop_p = stop_path.clone();
-        let stop_f = stop_flag.clone();
-
-        let handle = tokio::spawn(async move {
-            let result = run_single_experiment(&repo, &q_dir, &entry, &stop_p, &stop_f).await;
-            drop(permit);
-            (entry.id.clone(), result)
-        });
-        handles.push(handle);
-    }
-
-    // Collect results.
-    for handle in handles {
-        match handle.await {
-            Ok((id, Ok(()))) => succeeded_ids.push(id),
-            Ok((id, Err(e))) => {
+        let Some((id, result)) = workers.next().await else {
+            break;
+        };
+        match result {
+            Ok(()) => succeeded_ids.push(id),
+            Err(e) => {
                 warn!(exp_id = %id, error = %e, "experiment failed");
                 failed_ids.push(id);
-            }
-            Err(e) => {
-                warn!(error = %e, "experiment task panicked");
-                failed_ids.push("<panicked>".to_owned());
             }
         }
     }
@@ -643,18 +636,18 @@ pub async fn run_exp_start(args: &StartArgs, repo_root: &Path) -> Result<()> {
 /// Run a single queued experiment through the same metadata-producing
 /// path as `crab exp run`.
 async fn run_single_experiment(
-    repo_root: &Path,
-    queue_dir: &Path,
-    entry: &ExpQueueEntry,
-    _stop_path: &Path,
-    _stop_flag: &AtomicBool,
+    repo_root: PathBuf,
+    queue_dir: PathBuf,
+    entry: ExpQueueEntry,
+    _stop_path: PathBuf,
+    _stop_flag: Arc<AtomicBool>,
 ) -> Result<()> {
-    let queue = ExpQueue::new(queue_dir.to_path_buf());
+    let queue = ExpQueue::new(queue_dir);
 
     // A kill request after this point is user intent for this run.
     // Clear stale files first so active marker setup cannot erase a
     // fresh `queue kill` that races with startup.
-    let kill_path = queue_kill_path(repo_root, &entry.id);
+    let kill_path = queue_kill_path(&repo_root, &entry.id);
     match std::fs::remove_file(&kill_path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -663,7 +656,7 @@ async fn run_single_experiment(
 
     queue.update_status(&entry.id, ExpStatus::Running)?;
 
-    let result = run_queued_experiment(repo_root, entry).await;
+    let result = run_queued_experiment(repo_root, entry.clone()).await;
 
     // Update queue status based on result.
     match &result {
@@ -680,15 +673,17 @@ async fn run_single_experiment(
     result
 }
 
-async fn run_queued_experiment(repo_root: &Path, entry: &ExpQueueEntry) -> Result<()> {
+async fn run_queued_experiment(repo_root: PathBuf, entry: ExpQueueEntry) -> Result<()> {
     let exp_id: ExperimentId = entry.id.parse()?;
+    let options = crate::cmd::exp::ExpRunExecutionOptions::from_queue_entry(&entry);
+    let base_commit = entry.base_commit.clone();
     crate::cmd::exp::run_exp_run_with_id(
         repo_root,
         exp_id,
         entry.param_overrides.clone(),
-        crate::cmd::exp::ExpRunExecutionOptions::from_queue_entry(entry),
+        options,
         Some(entry.base_commit.clone()),
-        Some(entry.base_commit.as_str()),
+        Some(base_commit),
         entry.name.clone(),
         vec![
             "crab".to_owned(),

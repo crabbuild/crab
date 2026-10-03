@@ -74,6 +74,10 @@ range-cache path used by hydrate. Reconstructed bytes are hash- and size-checked
 peak memory does not scale with logical file size. `--all` means every local ref,
 so run `git fetch origin` first when remote refs must be current.
 
+Post-fetch chunk-index warming reads the v2 root and authenticated pointer
+catalog when present. It reads the v1 manifest and journal only when no v2 root
+exists; corrupt v2 authority is an error rather than a fallback signal.
+
 ## Related
 
 - [Managed Service Quickstart](/docs/cli/managed-service)

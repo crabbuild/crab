@@ -12,6 +12,10 @@ use crate::static_credentials::StaticProvider;
 /// Implementations may use static environment credentials, local token caches,
 /// OIDC exchanges, or a Crab Auth endpoint. The Interface stays storage-free:
 /// callers receive cloud credential contracts and decide how to build stores.
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait marks boxed futures must-use; Result is also must-use"
+)]
 #[async_trait]
 pub trait CredentialProvider: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;

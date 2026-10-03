@@ -3,11 +3,12 @@
 //! Wraps the real `Store`, ref store, and manifest state to perform
 //! actual storage queries and repairs for `crab fsck`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::Cursor;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -29,10 +30,20 @@ use crab_storage::repo_pack_path;
 use crab_types::pointer::Pointer;
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::ShardReader;
+use crab_xet::xorb::format::MAX_XORB_SIZE;
+use crab_xet::xorb::parser::XorbParser;
 
 const MAX_FSCK_SHARD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FSCK_REF_BYTES: u64 = 64 * 1024;
 const MAX_FSCK_LOCK_BYTES: u64 = 64 * 1024;
+const MAX_FSCK_CAPSULE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_FSCK_FRONTIER_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+pub(super) const CAPSULE_GIT_SCAN_LIMITS: crab_git::walk::PointerScanLimits =
+    crab_git::walk::PointerScanLimits {
+        objects: 2_000_000,
+        lookups: 8_000_000,
+        allocation_bytes: 64 * 1024 * 1024,
+    };
 
 /// Result of proving source-reachable Crab pointer recipes against remote data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +88,13 @@ pub struct StoreChecker {
     prefix: String,
     router: StoreLayout,
     multipart_journal: Option<Arc<MultipartJournal>>,
+    capsule: Option<CapsuleFsckState>,
+}
+
+#[derive(Clone)]
+struct CapsuleFsckState {
+    view: crab_read::capsule_protocol::CapsuleRepositoryView,
+    catalog: crab_metadata::capsule_protocol::PointerCatalog,
 }
 
 impl StoreChecker {
@@ -87,13 +105,248 @@ impl StoreChecker {
             prefix,
             router,
             multipart_journal: None,
+            capsule: None,
         }
+    }
+
+    /// Construct a checker pinned to one already authenticated capsule root.
+    ///
+    /// The root, checkpoint, capsule frontier, and complete pointer catalog are
+    /// validated before any phase can report the repository as clean.
+    pub async fn for_capsule_repository(
+        store: Store,
+        prefix: String,
+        root: crab_metadata::capsule_protocol::RootSnapshot,
+    ) -> Result<Self> {
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let view = crab_read::capsule_protocol::open_view_from_root(
+            &layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_FSCK_CAPSULE_BYTES,
+                max_frontier_bytes: MAX_FSCK_FRONTIER_BYTES,
+            },
+        )
+        .await?;
+        let catalog = view.pointer_catalog()?;
+        verify_capsule_history(&layout, view.root().root()).await?;
+        Ok(Self {
+            store,
+            prefix,
+            router,
+            multipart_journal: None,
+            capsule: Some(CapsuleFsckState { view, catalog }),
+        })
     }
 
     #[must_use]
     pub fn with_multipart_journal(mut self, journal: Option<Arc<MultipartJournal>>) -> Self {
         self.multipart_journal = journal;
         self
+    }
+
+    async fn check_capsule_data_chain(&self, state: &CapsuleFsckState) -> Result<Vec<FsckIssue>> {
+        let mut issues = Vec::new();
+
+        for (hash, entry) in state.catalog.xorbs() {
+            if entry.encoded_size() > MAX_XORB_SIZE as u64 {
+                issues.push(FsckIssue::corrupt_xorb(
+                    hash,
+                    format!(
+                        "catalog size {} exceeds the xorb limit {MAX_XORB_SIZE}",
+                        entry.encoded_size()
+                    ),
+                ));
+                continue;
+            }
+            let xorb_hash = MerkleHash::from_hex(hash).map_err(|error| {
+                CrabError::Internal(format!(
+                    "validated xorb catalog hash became invalid: {error}"
+                ))
+            })?;
+            let path = self.router.xorb_path(&xorb_hash);
+            let body = match self
+                .store
+                .get_with_etag_bounded(&path, entry.encoded_size())
+                .await
+            {
+                Ok((body, _)) => body,
+                Err(CrabError::NotFound { .. }) => {
+                    issues.push(FsckIssue::missing_xorb(hash));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if let Err(detail) = validate_catalog_xorb(hash, entry, body) {
+                issues.push(FsckIssue::corrupt_xorb(hash, detail));
+            }
+        }
+
+        for (hash, entry) in state.catalog.shards() {
+            if entry.encoded_size() > MAX_FSCK_SHARD_BYTES {
+                issues.push(FsckIssue::corrupt_shard(
+                    hash,
+                    format!(
+                        "catalog size {} exceeds the shard limit {MAX_FSCK_SHARD_BYTES}",
+                        entry.encoded_size()
+                    ),
+                ));
+                continue;
+            }
+            let shard_hash = MerkleHash::from_hex(hash).map_err(|error| {
+                CrabError::Internal(format!(
+                    "validated shard catalog hash became invalid: {error}"
+                ))
+            })?;
+            let path = self.router.shard_path(&shard_hash);
+            let body = match self
+                .store
+                .get_with_etag_bounded(&path, entry.encoded_size())
+                .await
+            {
+                Ok((body, _)) => body,
+                Err(CrabError::NotFound { .. }) => {
+                    issues.push(FsckIssue::missing_shard(hash));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if let Err(detail) = validate_catalog_shard(hash, entry, &state.catalog, body) {
+                issues.push(FsckIssue::corrupt_shard(hash, detail));
+            }
+        }
+
+        Ok(issues)
+    }
+
+    async fn check_capsule_root_stability(&self, state: &CapsuleFsckState) -> Result<()> {
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            self.store.as_storage().clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        let current = crab_write::capsule_protocol::open_root(&layout).await?;
+        let current = crab_read::capsule_protocol::open_view_from_root_with_control(
+            &layout,
+            current,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_FSCK_CAPSULE_BYTES,
+                max_frontier_bytes: MAX_FSCK_FRONTIER_BYTES,
+            },
+        )
+        .await?;
+        if current.state_digest() != state.view.state_digest() {
+            return Err(CrabError::Protocol(
+                "repository state changed during fsck; retry against one stable generation"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Prove source pointers against the exact catalog captured by a capsule view.
+    pub async fn verify_capsule_pointer_data(
+        &self,
+        pointers: &[Pointer],
+        cancel: &CancellationToken,
+    ) -> Result<PointerDataVerification> {
+        crate::core::error::check_cancelled(cancel)?;
+        let state = self.capsule.as_ref().ok_or_else(|| {
+            CrabError::Internal("capsule pointer verification requires a capsule view".to_owned())
+        })?;
+        let mut expected = BTreeMap::new();
+        for pointer in pointers {
+            let hash = MerkleHash::from(pointer.file_hash);
+            if expected
+                .insert(hash, pointer.size)
+                .is_some_and(|size| size != pointer.size)
+            {
+                return Err(CrabError::CorruptObject {
+                    path: hash.hex(),
+                    reason: "source pointers declare conflicting sizes for the same file hash"
+                        .to_owned(),
+                });
+            }
+        }
+        let origin_layout = crab_storage::StoreLayout::with_global_prefix(
+            self.store.as_storage().clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        let mut issues = Vec::new();
+        let mut verified = 0u64;
+        let mut recipes = blake3::Hasher::new_derive_key("crab verified pointer recipes v1");
+        for (file_hash, expected_size) in expected {
+            crate::core::error::check_cancelled(cancel)?;
+            let Some(entry) = state.catalog.files().get(&file_hash.hex()) else {
+                issues.push(PointerDataIssue {
+                    file_hash: file_hash.hex(),
+                    expected_size,
+                    kind: PointerDataIssueKind::Missing,
+                    detail: format!(
+                        "pointer {} has no recipe in the captured capsule catalog",
+                        file_hash.hex()
+                    ),
+                });
+                continue;
+            };
+            let shard_hash = MerkleHash::from_hex(entry.shard_hash()).map_err(|error| {
+                CrabError::CorruptObject {
+                    path: entry.shard_hash().to_owned(),
+                    reason: format!("capsule catalog shard identity is invalid: {error}"),
+                }
+            })?;
+            let pointer = Pointer {
+                file_hash: file_hash.into(),
+                size: expected_size,
+                shard_hint: None,
+            };
+            match crab_read::verify_catalog_file_recipe(&origin_layout, &pointer, entry, cancel)
+                .await
+            {
+                Ok(file_info) => {
+                    verified += 1;
+                    recipes.update(&pointer.file_hash);
+                    recipes.update(&pointer.size.to_le_bytes());
+                    recipes.update(shard_hash.as_bytes());
+                    let mut recipe = blake3::Hasher::new_derive_key("crab shard file recipe v1");
+                    file_info.serialize(&mut recipe)?;
+                    recipes.update(recipe.finalize().as_bytes());
+                }
+                Err(crab_read::ReadError::Cancelled) => return Err(CrabError::Cancelled),
+                Err(error) => {
+                    let kind = match &error {
+                        crab_read::ReadError::Xet(_) => PointerDataIssueKind::Corrupt,
+                        _ => PointerDataIssueKind::Unverifiable,
+                    };
+                    let error = CrabError::from(error);
+                    issues.push(PointerDataIssue {
+                        file_hash: file_hash.hex(),
+                        expected_size,
+                        kind: if kind == PointerDataIssueKind::Corrupt {
+                            kind
+                        } else {
+                            PointerDataIssueKind::from_error(&error)
+                        },
+                        detail: error.to_string(),
+                    });
+                }
+            }
+        }
+        self.check_capsule_root_stability(state).await?;
+        let recipe_digest = issues
+            .is_empty()
+            .then(|| recipes.finalize().to_hex().to_string());
+        Ok(PointerDataVerification {
+            verified,
+            issues,
+            recipe_digest,
+        })
     }
 
     /// Prove that every pointer resolves through the captured shard inventory to a
@@ -620,31 +873,366 @@ impl StoreChecker {
     }
 }
 
+async fn verify_capsule_history(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
+) -> Result<()> {
+    let Some(history) = root.history() else {
+        return Ok(());
+    };
+    let segments = crab_metadata::capsule_protocol::load_history_chain(
+        layout,
+        history,
+        crab_metadata::capsule_protocol::MAX_HISTORY_CHAIN_SEGMENTS,
+        crab_metadata::capsule_protocol::MAX_HISTORY_CHAIN_BYTES,
+    )
+    .await?;
+    let mut checkpoints = BTreeMap::new();
+    let mut runs = BTreeMap::new();
+    for segment in segments {
+        insert_history_pointer(
+            &mut checkpoints,
+            segment.checkpoint().hash(),
+            segment.checkpoint().clone(),
+            "checkpoint",
+        )?;
+        for run in segment.capsule_runs() {
+            insert_history_pointer(&mut runs, run.hash(), run.clone(), "capsule run")?;
+        }
+    }
+    let mut sources = BTreeMap::new();
+    let mut checkpoints =
+        futures_util::stream::iter(checkpoints.into_values().map(|pointer| async move {
+            crab_metadata::capsule_protocol::load_layered_checkpoint(layout, &pointer)
+                .await
+                .map(|checkpoint| checkpoint.sources().to_vec())
+                .map_err(CrabError::from)
+        }))
+        .buffer_unordered(16);
+    while let Some(checkpoint_sources) = checkpoints.try_next().await? {
+        for source in checkpoint_sources {
+            let path = match source.kind() {
+                crab_metadata::capsule_protocol::PackSourceKind::CapsuleRun => {
+                    layout.capsule_path(source.object_hash())
+                }
+                crab_metadata::capsule_protocol::PackSourceKind::PackLayer => {
+                    layout.capsule_pack_layer_path(source.object_hash())
+                }
+            };
+            insert_history_pointer(&mut sources, path.as_ref(), source, "pack source")?;
+        }
+    }
+    // Stable sources can appear in many checkpoints and as retained run pointers.
+    // Read each immutable body once, but prove both authenticated descriptions;
+    // skipping the run pointer would lose transaction and base-root validation.
+    futures_util::stream::iter(sources.into_values().map(|source| {
+        let pointer =
+            if source.kind() == crab_metadata::capsule_protocol::PackSourceKind::CapsuleRun {
+                runs.remove(source.object_hash())
+            } else {
+                None
+            };
+        async move {
+            crab_read::capsule_protocol::verify_layered_source(
+                layout,
+                &source,
+                pointer.as_ref(),
+                MAX_FSCK_FRONTIER_BYTES,
+            )
+            .await
+            .map_err(CrabError::from)
+        }
+    }))
+    .buffer_unordered(16)
+    .try_collect::<Vec<_>>()
+    .await?;
+    futures_util::stream::iter(runs.into_values().map(|pointer| async move {
+        crab_metadata::capsule_protocol::load_capsule_run(layout, &pointer)
+            .await
+            .map(|_| ())
+            .map_err(CrabError::from)
+    }))
+    .buffer_unordered(16)
+    .try_collect::<Vec<_>>()
+    .await?;
+    Ok(())
+}
+
+fn insert_history_pointer<T: Clone + PartialEq>(
+    pointers: &mut BTreeMap<String, T>,
+    hash: &str,
+    pointer: T,
+    kind: &str,
+) -> Result<()> {
+    if pointers
+        .insert(hash.to_owned(), pointer.clone())
+        .is_some_and(|existing| existing != pointer)
+    {
+        return Err(CrabError::CorruptObject {
+            path: hash.to_owned(),
+            reason: format!("history assigns conflicting metadata to one {kind} identity"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_catalog_xorb(
+    hash: &str,
+    entry: &crab_metadata::capsule_protocol::XorbCatalogEntry,
+    body: bytes::Bytes,
+) -> std::result::Result<(), String> {
+    if body.len() as u64 != entry.encoded_size() {
+        return Err(format!(
+            "stored size is {}, catalog declares {}",
+            body.len(),
+            entry.encoded_size()
+        ));
+    }
+    let body_digest = blake3::hash(&body).to_hex().to_string();
+    if body_digest != entry.body_digest() {
+        return Err(format!(
+            "stored body digest is {body_digest}, catalog declares {}",
+            entry.body_digest()
+        ));
+    }
+    let parser = XorbParser::parse(body).map_err(|error| error.to_string())?;
+    if parser.hash().hex() != hash {
+        return Err(format!(
+            "stored logical identity is {}, catalog key is {hash}",
+            parser.hash().hex()
+        ));
+    }
+    parser
+        .verify_payload_digest()
+        .and_then(|()| parser.verify_all_chunks())
+        .map_err(|error| error.to_string())?;
+    if parser.num_chunks() as usize != entry.chunks().len() {
+        return Err(format!(
+            "stored chunk count is {}, catalog declares {}",
+            parser.num_chunks(),
+            entry.chunks().len()
+        ));
+    }
+    for (index, expected) in entry.chunks().iter().enumerate() {
+        let index = u32::try_from(index)
+            .map_err(|_| "catalog xorb chunk index cannot be represented".to_owned())?;
+        let actual = parser
+            .chunk_meta(index)
+            .map_err(|error| error.to_string())?;
+        if actual.hash.hex() != expected.hash()
+            || actual.uncompressed_len != expected.uncompressed_size()
+        {
+            return Err(format!(
+                "stored chunk {index} does not match its catalog hash and size"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_catalog_shard(
+    hash: &str,
+    entry: &crab_metadata::capsule_protocol::ShardCatalogEntry,
+    catalog: &crab_metadata::capsule_protocol::PointerCatalog,
+    body: bytes::Bytes,
+) -> std::result::Result<(), String> {
+    if body.len() as u64 != entry.encoded_size() {
+        return Err(format!(
+            "stored size is {}, catalog declares {}",
+            body.len(),
+            entry.encoded_size()
+        ));
+    }
+    let shard_hash = MerkleHash::from_hex(hash).map_err(|error| error.to_string())?;
+    let actual_hash = crab_xet::hash::compute_data_hash(&body);
+    if actual_hash != shard_hash {
+        return Err(format!(
+            "stored content identity is {}, catalog key is {hash}",
+            actual_hash.hex()
+        ));
+    }
+
+    let mut actual_xorbs = BTreeSet::new();
+    let mut cursor = Cursor::new(crab_xet::shard_parse::strip_bloom_trailer(&body));
+    crab_xet::shard_parse::visit_xorb_chunks_from_reader(&mut cursor, |xorb_hash, _, _, _| {
+        actual_xorbs.insert(xorb_hash.hex());
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?;
+    let expected_xorbs = entry.xorb_hashes().iter().cloned().collect::<BTreeSet<_>>();
+    if actual_xorbs != expected_xorbs {
+        return Err("stored xorb closure differs from the authenticated catalog".to_owned());
+    }
+
+    let reader = ShardReader::from_bytes(body, shard_hash);
+    let mut dependencies = Vec::with_capacity(entry.xorb_hashes().len());
+    for xorb_hash in entry.xorb_hashes() {
+        let parsed_hash = MerkleHash::from_hex(xorb_hash).map_err(|error| error.to_string())?;
+        let dependency = reader
+            .get_xorb_info(&parsed_hash)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("stored shard lacks catalogued xorb {xorb_hash}"))?;
+        let expected = catalog
+            .xorbs()
+            .get(xorb_hash)
+            .ok_or_else(|| format!("catalog lacks shard xorb {xorb_hash}"))?;
+        if dependency.chunks.len() != expected.chunks().len()
+            || dependency
+                .chunks
+                .iter()
+                .zip(expected.chunks())
+                .any(|(actual, expected)| {
+                    actual.chunk_hash.hex() != expected.hash()
+                        || actual.unpacked_segment_bytes != expected.uncompressed_size()
+                })
+        {
+            return Err(format!(
+                "stored shard metadata for xorb {xorb_hash} differs from the catalog"
+            ));
+        }
+        dependencies.push(dependency);
+    }
+
+    for (file_hash, expected) in catalog
+        .files()
+        .iter()
+        .filter(|(_, file)| file.shard_hash() == hash)
+    {
+        let parsed_hash = MerkleHash::from_hex(file_hash).map_err(|error| error.to_string())?;
+        let file = reader
+            .get_file_info(&parsed_hash)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("stored shard lacks catalogued file {file_hash}"))?;
+        if file.metadata.file_hash != parsed_hash
+            || file.metadata.num_entries as usize != file.segments.len()
+        {
+            return Err(format!(
+                "stored recipe header for file {file_hash} is inconsistent"
+            ));
+        }
+        let size = file.segments.iter().try_fold(0_u64, |total, segment| {
+            total
+                .checked_add(u64::from(segment.unpacked_segment_bytes))
+                .ok_or_else(|| format!("stored recipe size for file {file_hash} overflowed"))
+        })?;
+        if size != expected.size() {
+            return Err(format!(
+                "stored recipe for file {file_hash} covers {size} bytes, catalog declares {}",
+                expected.size()
+            ));
+        }
+        crab_xet::shard::validate_file_bundle(&file, &dependencies)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+async fn install_capsule_git_packs(
+    view: crab_read::capsule_protocol::CapsuleRepositoryView,
+    layout: crab_storage::StoreLayout<crab_storage::Store>,
+    git_dir: std::path::PathBuf,
+    max_input_bytes: u64,
+) -> crab_read::Result<Vec<std::path::PathBuf>> {
+    if view.layered_checkpoint().is_some() {
+        crab_read::capsule_protocol::install_git_packs_from_store(
+            &view,
+            &layout,
+            &git_dir,
+            max_input_bytes,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .map(|installed| installed.paths)
+    } else {
+        crab_read::capsule_protocol::install_git_packs(&view, &git_dir, max_input_bytes).await
+    }
+}
+
+async fn check_capsule_git_connectivity(
+    store: Store,
+    router: StoreLayout,
+    state: CapsuleFsckState,
+) -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    crab_git::initialize_bare_git_dir(workspace.path())?;
+    let storage = store.as_storage().clone();
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        storage.clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let refs = state
+        .view
+        .refs()
+        .iter()
+        .map(|(name, oid)| (name.clone(), oid.clone()))
+        .collect::<Vec<_>>();
+    install_capsule_git_packs(
+        state.view,
+        layout,
+        workspace.path().to_owned(),
+        MAX_FSCK_FRONTIER_BYTES,
+    )
+    .await?;
+
+    let git_dir = workspace.path().to_owned();
+    let scan = tokio::task::spawn_blocking(move || {
+        crab_git::walk::scan_pointers(&git_dir, &refs, CAPSULE_GIT_SCAN_LIMITS, &|| false)
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("Git connectivity scan failed: {error}")))??;
+    crab_git::batch::verify_git_dir_blobs(workspace.path(), &scan.unchecked_blobs, &|| false)
+        .map_err(CrabError::Io)
+}
+
 impl FsckChecker for StoreChecker {
     fn check_git_objects(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + Send + '_>>
-    {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + '_>> {
+        let store = self.store.clone();
+        let router = self.router.clone();
+        let prefix = self.prefix.clone();
+        let capsule = self.capsule.clone();
         Box::pin(async move {
+            if let Some(state) = capsule {
+                // Pack installation validates every advertised pack. The reachable
+                // walker then proves each ref's commit/tree/blob closure instead of
+                // treating an authenticated ref OID as sufficient evidence.
+                check_capsule_git_connectivity(store, router, state).await?;
+                return Ok(Vec::new());
+            }
             // Git-object connectivity requires a local git repo and gix-fsck.
             // For now, list refs and verify each target commit object exists
             // in the pack storage.
             let mut issues = Vec::new();
 
-            let ref_keys = self.list_keys("refs").await?;
-            for ref_key in &ref_keys {
+            let prefix_path = Path::from(format!("{prefix}/refs"));
+            let ref_keys = store
+                .inner()
+                .list(Some(&prefix_path))
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    CrabError::from(crab_storage::map_object_store_error(
+                        error,
+                        prefix_path.as_ref(),
+                    ))
+                })?
+                .into_iter()
+                .map(|meta| meta.location.to_string())
+                .collect::<Vec<_>>();
+            for ref_key in ref_keys {
                 let path = Path::from(ref_key.as_str());
-                match self
-                    .store
-                    .get_with_etag_bounded(&path, MAX_FSCK_REF_BYTES)
-                    .await
-                {
+                match store.get_with_etag_bounded(&path, MAX_FSCK_REF_BYTES).await {
                     Ok((body, _)) => {
                         let sha = String::from_utf8_lossy(&body).trim().to_string();
                         if sha.is_empty() {
                             let ref_name = ref_key
-                                .strip_prefix(&format!("{}/refs/", self.prefix))
-                                .unwrap_or(ref_key);
+                                .strip_prefix(&format!("{prefix}/refs/"))
+                                .unwrap_or(&ref_key);
                             issues.push(FsckIssue::dangling_ref(ref_name, "<empty>"));
                         }
                     }
@@ -667,6 +1255,9 @@ impl FsckChecker for StoreChecker {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + Send + '_>>
     {
         Box::pin(async move {
+            if let Some(state) = &self.capsule {
+                return self.check_capsule_data_chain(state).await;
+            }
             let mut issues = Vec::new();
 
             let shard_list = self.load_shard_list().await?;
@@ -713,6 +1304,11 @@ impl FsckChecker for StoreChecker {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + Send + '_>>
     {
         Box::pin(async move {
+            if self.capsule.is_some() {
+                // Git pack installation and connectivity are covered by the
+                // first fsck phase; avoid downloading every pack twice.
+                return Ok(Vec::new());
+            }
             let mut issues = Vec::new();
             let pack_list = self.load_pack_list().await?;
 
@@ -822,6 +1418,11 @@ impl FsckChecker for StoreChecker {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + Send + '_>>
     {
         Box::pin(async move {
+            if self.capsule.is_some() {
+                // The capsule data-chain phase validates every authenticated
+                // shard body and its exact xorb closure in one pass.
+                return Ok(Vec::new());
+            }
             let mut issues = Vec::new();
             let shard_list = self.load_shard_list().await?;
 
@@ -841,6 +1442,10 @@ impl FsckChecker for StoreChecker {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + Send + '_>>
     {
         Box::pin(async move {
+            if let Some(state) = &self.capsule {
+                self.check_capsule_root_stability(state).await?;
+                return Ok(Vec::new());
+            }
             // Orphan file-index detection requires scanning all pointer blobs
             // in the git object store to build a referenced set, then
             // comparing against file-index keys. This is expensive and
@@ -1086,6 +1691,9 @@ fn unix_now() -> i64 {
 mod verification_tests;
 
 #[cfg(test)]
+mod capsule_history_tests;
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1100,6 +1708,7 @@ mod tests {
         FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo,
         XorbChunkSequenceEntry, XorbChunkSequenceHeader,
     };
+    use object_store::ObjectStoreExt as _;
     use object_store::memory::InMemory;
     use object_store::multipart::MultipartStore as _;
     use std::sync::Arc;
@@ -1246,6 +1855,134 @@ mod tests {
         create_manifest(store, &router, &manifest).await.unwrap();
     }
 
+    async fn capsule_checker_fixture() -> (
+        Store,
+        String,
+        crab_metadata::capsule_protocol::RootSnapshot,
+        MerkleHash,
+        MerkleHash,
+    ) {
+        use crab_metadata::capsule_protocol::{
+            Capsule, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
+            FileCatalogEntry, PointerCatalog, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
+        };
+
+        let (store, prefix) = test_store();
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let base =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let content = [0x61; 1024];
+        let (xorb_hash, xorb_bytes) = test_xorb(&content);
+        let parser = XorbParser::parse(xorb_bytes.clone()).unwrap();
+        assert_eq!(parser.num_chunks(), 1);
+        let chunk = parser.chunk_meta(0).unwrap();
+        let file_hash = chunk.hash;
+        let placement = crab_xet::xorb::format::ChunkPlacement {
+            chunk_hash: chunk.hash,
+            xorb_hash,
+            chunk_index: 0,
+            uncompressed_size: chunk.uncompressed_len,
+        };
+        let placements = HashMap::from([(chunk.hash, placement.clone())]);
+        let mut shard = crab_xet::shard::ShardWriter::new();
+        shard
+            .add_xorb(Arc::new(
+                crab_xet::shard::xorb_info_from_placements(xorb_hash, &[placement]).unwrap(),
+            ))
+            .unwrap();
+        shard
+            .add_file(
+                crab_xet::shard::file_info_from_placements(file_hash, &[chunk.hash], &placements)
+                    .unwrap(),
+            )
+            .unwrap();
+        let (shard_bytes, shard_hash) = shard.finalize().unwrap();
+        store
+            .put(&router.xorb_path(&xorb_hash), xorb_bytes.clone())
+            .await
+            .unwrap();
+        upload_shard(&store, &router, &shard_hash, shard_bytes.clone()).await;
+
+        let chunks = (0..parser.num_chunks())
+            .map(|index| {
+                let chunk = parser.chunk_meta(index).unwrap();
+                XorbChunkEntry::new(chunk.hash.hex(), chunk.uncompressed_len)
+            })
+            .collect();
+        let mut delta = PointerCatalog::new();
+        delta
+            .insert_xorb(
+                xorb_hash.hex(),
+                XorbCatalogEntry::new(
+                    xorb_bytes.len() as u64,
+                    blake3::hash(&xorb_bytes).to_hex().to_string(),
+                    chunks,
+                ),
+            )
+            .unwrap();
+        delta
+            .insert_shard(
+                shard_hash.hex(),
+                ShardCatalogEntry::new(shard_bytes.len() as u64, vec![xorb_hash.hex()]),
+            )
+            .unwrap();
+        delta
+            .insert_file(
+                file_hash.hex(),
+                FileCatalogEntry::new(content.len() as u64, shard_hash.hex()),
+            )
+            .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::CatalogDelta,
+                delta.encode_delta().unwrap(),
+            )],
+        )
+        .unwrap();
+        let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        let cleanup_transaction = CapsuleTransaction::new(
+            root.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                Some("2".repeat(40)),
+                None,
+                None,
+            )],
+        )
+        .unwrap();
+        let cleanup_capsule = Capsule::build(&cleanup_transaction, Vec::new(), Vec::new()).unwrap();
+        let root = crab_write::capsule_protocol::publish(
+            &layout,
+            root,
+            &cleanup_transaction,
+            &cleanup_capsule,
+        )
+        .await
+        .unwrap();
+        (store, prefix, root, xorb_hash, shard_hash)
+    }
+
     async fn seed_git_locator(
         store: &Store,
         prefix: &str,
@@ -1307,6 +2044,199 @@ mod tests {
 
         let shard_issues = checker.check_shard_list_divergence().await.unwrap();
         assert!(shard_issues.is_empty());
+    }
+
+    #[tokio::test]
+    async fn capsule_checker_validates_repository_without_legacy_layout() {
+        let (store, prefix, root, _, _) = capsule_checker_fixture().await;
+        let legacy_layout =
+            StoreLayout::new(store.clone(), prefix.clone()).layout_descriptor_path();
+        assert!(matches!(
+            store.head(&legacy_layout).await,
+            Err(CrabError::NotFound { .. })
+        ));
+
+        let checker = StoreChecker::for_capsule_repository(store, prefix, root)
+            .await
+            .unwrap();
+        assert!(checker.check_git_objects().await.unwrap().is_empty());
+        let data_issues = checker.check_data_chain().await.unwrap();
+        assert!(data_issues.is_empty(), "{data_issues:?}");
+        assert!(checker.check_pack_list().await.unwrap().is_empty());
+        assert!(
+            checker
+                .check_shard_list_divergence()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(checker.check_orphan_file_index().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn capsule_checker_rejects_ref_to_missing_git_object() {
+        use crab_metadata::capsule_protocol::{
+            Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction,
+        };
+
+        let (store, prefix, base, _, _) = capsule_checker_fixture().await;
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let pack = CapsuleGitPack::new(
+            Bytes::from_static(b"not-a-git-pack"),
+            Bytes::from_static(b"not-an-index"),
+            Bytes::from_static(b"not-a-reverse-index"),
+            Bytes::from_static(b"not-a-locator"),
+            "4".repeat(40),
+            1,
+        )
+        .unwrap();
+        let capsule = Capsule::build(&transaction, vec![pack], Vec::new()).unwrap();
+        let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        let checker = StoreChecker::for_capsule_repository(store, prefix, root)
+            .await
+            .unwrap();
+
+        let error = checker
+            .check_git_objects()
+            .await
+            .expect_err("missing reachable Git object must fail fsck");
+        assert!(error.to_string().contains("Git"));
+    }
+
+    #[tokio::test]
+    async fn capsule_checker_reports_missing_catalogued_xorb() {
+        let (store, prefix, root, xorb_hash, _) = capsule_checker_fixture().await;
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        store.delete(&router.xorb_path(&xorb_hash)).await.unwrap();
+        let checker = StoreChecker::for_capsule_repository(store, prefix, root)
+            .await
+            .unwrap();
+
+        let issues = checker.check_data_chain().await.unwrap();
+
+        assert!(issues.iter().any(|issue| matches!(
+            &issue.kind,
+            crate::cmd::fsck::IssueKind::MissingXorb { xorb_hash: found }
+                if found == &xorb_hash.hex()
+        )));
+    }
+
+    #[tokio::test]
+    async fn capsule_checker_reports_corrupt_catalogued_shard() {
+        let (store, prefix, root, _, shard_hash) = capsule_checker_fixture().await;
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let path = router.shard_path(&shard_hash);
+        let (body, _) = store.get_with_etag(&path).await.unwrap();
+        let mut corrupt = body.to_vec();
+        corrupt[0] ^= 1;
+        store
+            .inner()
+            .put(
+                &path,
+                object_store::PutPayload::from_bytes(bytes::Bytes::from(corrupt)),
+            )
+            .await
+            .unwrap();
+        let checker = StoreChecker::for_capsule_repository(store, prefix, root)
+            .await
+            .unwrap();
+
+        let issues = checker.check_data_chain().await.unwrap();
+
+        assert!(issues.iter().any(|issue| matches!(
+            &issue.kind,
+            crate::cmd::fsck::IssueKind::CorruptShard { shard_hash: found, .. }
+                if found == &shard_hash.hex()
+        )));
+    }
+
+    #[tokio::test]
+    async fn capsule_checker_rejects_missing_retained_history_dependency() {
+        let (store, prefix, root, _, _) = capsule_checker_fixture().await;
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let view = crab_read::capsule_protocol::open_view_from_root(
+            &layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_FSCK_CAPSULE_BYTES,
+                max_frontier_bytes: MAX_FSCK_FRONTIER_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        let historical_run = view.capsule_run_pointers()[0].clone();
+        let layer = crab_metadata::capsule_protocol::PackLayer::build(
+            &crab_metadata::capsule_protocol::CapsuleGitPack::new(
+                Bytes::from_static(b"PACK"),
+                Bytes::from_static(b"index"),
+                Bytes::from_static(b"reverse"),
+                Bytes::from_static(b"locator"),
+                "3".repeat(40),
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        layout
+            .store()
+            .put(
+                &layout.capsule_pack_layer_path(layer.hash()),
+                layer.bytes().clone(),
+            )
+            .await
+            .unwrap();
+        let checkpoint = crab_metadata::capsule_protocol::LayeredCheckpoint::build(
+            view.root().root().generation(),
+            view.root().digest(),
+            vec![layer.source_descriptor().unwrap()],
+            view.pointer_catalog().unwrap(),
+            None,
+        )
+        .unwrap();
+        let root = crab_write::capsule_protocol::publish_ref_layered_checkpoint(
+            &layout,
+            view.root_snapshot().clone(),
+            &checkpoint,
+            view.refs().clone(),
+            view.peeled_refs().clone(),
+            view.visible_ref_transactions().clone(),
+            view.capsule_run_pointers().to_vec(),
+        )
+        .await
+        .unwrap();
+        store
+            .delete(&router.capsule_path(historical_run.hash()))
+            .await
+            .unwrap();
+
+        let error = match StoreChecker::for_capsule_repository(store, prefix, root).await {
+            Ok(_) => panic!("fsck must load every authenticated history dependency"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, CrabError::NotFound { .. }));
     }
 
     #[tokio::test]

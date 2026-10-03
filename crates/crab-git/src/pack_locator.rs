@@ -5,6 +5,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
+use bytes::Bytes;
 use sha1::{Digest, Sha1};
 
 const PACK_HEADER_LEN: u64 = 12;
@@ -35,6 +36,54 @@ pub struct PackObjectLocation {
     pub entry_len: u64,
     /// CRC32 over the complete packed entry.
     pub crc32: u32,
+}
+
+/// Read the sorted object dictionary and pack checksum from one authenticated
+/// in-memory Git index. This is used by capsule metadata builders to create a
+/// source/member admission map without downloading or materializing the pack.
+pub fn sorted_object_ids_from_index_bytes(
+    bytes: &[u8],
+) -> Result<(Vec<gix_hash::ObjectId>, gix_hash::ObjectId), PackLocatorError> {
+    let path = PathBuf::from("<memory>.idx");
+    if bytes.len() < SHA1_LEN {
+        return Err(PackLocatorError::InvalidIndex {
+            path,
+            reason: "pack index is shorter than its checksum".to_owned(),
+        });
+    }
+    let checksum_start = bytes.len() - SHA1_LEN;
+    let actual: [u8; SHA1_LEN] = Sha1::digest(&bytes[..checksum_start]).into();
+    if actual.as_slice() != &bytes[checksum_start..] {
+        return Err(PackLocatorError::InvalidIndex {
+            path,
+            reason: "pack index checksum does not match".to_owned(),
+        });
+    }
+    let index = gix_pack::index::File::from_data(
+        Bytes::copy_from_slice(bytes),
+        PathBuf::from("<memory>.idx"),
+        gix_hash::Kind::Sha1,
+    )
+    .map_err(|source| PackLocatorError::IndexOpen {
+        path: PathBuf::from("<memory>.idx"),
+        source,
+    })?;
+    if index.version() != gix_pack::index::Version::V2 {
+        return Err(PackLocatorError::UnsupportedIndexVersion {
+            path: PathBuf::from("<memory>.idx"),
+            version: index.version(),
+        });
+    }
+    let object_count =
+        usize::try_from(index.num_objects()).map_err(|_| PackLocatorError::InvalidIndex {
+            path: PathBuf::from("<memory>.idx"),
+            reason: "pack index object count cannot be represented".to_owned(),
+        })?;
+    let mut objects = Vec::with_capacity(object_count);
+    for position in 0..index.num_objects() {
+        objects.push(index.oid_at_index(position).to_owned());
+    }
+    Ok((objects, index.pack_checksum()))
 }
 
 #[derive(Debug, Clone, Copy)]

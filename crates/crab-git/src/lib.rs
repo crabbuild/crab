@@ -56,6 +56,6 @@ pub use url::{
     normalize_repository_prefix,
 };
 pub use walk::{
-    PointerBlob, ReachableSet, WalkError, walk_reachable, walk_reachable_bounded,
+    LfsPointerBlob, PointerBlob, ReachableSet, WalkError, walk_reachable, walk_reachable_bounded,
     walk_reachable_by_ref, walk_reachable_by_ref_bounded,
 };

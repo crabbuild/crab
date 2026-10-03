@@ -1441,10 +1441,10 @@ fn is_ancestor_or_equal(a: &str, b: &str) -> bool {
     b.starts_with(a) && b.as_bytes().get(a.len()) == Some(&b'/')
 }
 
-/// Refuse when the target already hosts a published repo —
-/// `manifests/HEAD` is the canonical tell. Any non-`NotFound`
-/// error from the probe surfaces as-is (creds / network issues
-/// that would show up later anyway).
+/// Refuse when the target already hosts a published repository.
+///
+/// The v2 root is authoritative for current repositories. The legacy manifest
+/// probe protects shipped v1 repositories from being overwritten by import.
 async fn ensure_no_existing_remote(
     target: &ResolvedStore,
     target_url: &str,
@@ -1453,20 +1453,25 @@ async fn ensure_no_existing_remote(
     if force {
         return Ok(());
     }
-    let head_path = manifest_head_path(&target.prefix);
-    match target.store.head(&head_path).await {
-        Ok(_) => Err(CrabError::ImportRemoteExists {
-            existing_url: target_url.to_owned(),
-            new_url: target_url.to_owned(),
-        }),
-        Err(CrabError::NotFound { .. }) => Ok(()),
-        Err(other) => Err(other),
+    for path in [
+        capsule_root_path(&target.prefix),
+        manifest_head_path(&target.prefix),
+    ] {
+        match target.store.head(&path).await {
+            Ok(_) => {
+                return Err(CrabError::ImportRemoteExists {
+                    existing_url: target_url.to_owned(),
+                    new_url: target_url.to_owned(),
+                });
+            }
+            Err(CrabError::NotFound { .. }) => {}
+            Err(other) => return Err(other),
+        }
     }
+    Ok(())
 }
 
-/// Detect source-is-Crab via `refs/HEAD` (the canonical marker
-/// for a published Crab repo). `NotFound` is the happy path;
-/// any other error surfaces.
+/// Detect current and shipped legacy Crab layouts before treating a source as raw.
 async fn ensure_source_not_crab_repo(
     source: &ResolvedStore,
     source_url: &str,
@@ -1475,26 +1480,22 @@ async fn ensure_source_not_crab_repo(
     if force {
         return Ok(());
     }
-    let refs_head = refs_head_path(&source.prefix);
-    match source.store.head(&refs_head).await {
-        Ok(_) => {
-            return Err(CrabError::ImportSourceIsCrabRepo {
-                url: source_url.to_owned(),
-            });
+    for path in [
+        capsule_root_path(&source.prefix),
+        refs_head_path(&source.prefix),
+        manifest_head_path(&source.prefix),
+    ] {
+        match source.store.head(&path).await {
+            Ok(_) => {
+                return Err(CrabError::ImportSourceIsCrabRepo {
+                    url: source_url.to_owned(),
+                });
+            }
+            Err(CrabError::NotFound { .. }) => {}
+            Err(other) => return Err(other),
         }
-        Err(CrabError::NotFound { .. }) => {}
-        Err(other) => return Err(other),
     }
-    // Belt-and-suspenders: check manifests/HEAD too — a partially
-    // pushed repo might have manifests but no refs/HEAD yet.
-    let manifests_head = manifest_head_path(&source.prefix);
-    match source.store.head(&manifests_head).await {
-        Ok(_) => Err(CrabError::ImportSourceIsCrabRepo {
-            url: source_url.to_owned(),
-        }),
-        Err(CrabError::NotFound { .. }) => Ok(()),
-        Err(other) => Err(other),
-    }
+    Ok(())
 }
 
 /// Check whether the source is LFS-formatted and apply the selected LFS
@@ -1662,6 +1663,14 @@ fn manifest_head_path(repo_prefix: &str) -> ObjectPath {
         ObjectPath::from("manifests/HEAD")
     } else {
         ObjectPath::from(format!("{repo_prefix}/manifests/HEAD"))
+    }
+}
+
+fn capsule_root_path(repo_prefix: &str) -> ObjectPath {
+    if repo_prefix.is_empty() {
+        ObjectPath::from("v2/root")
+    } else {
+        ObjectPath::from(format!("{repo_prefix}/v2/root"))
     }
 }
 
@@ -3087,8 +3096,14 @@ mod tests {
         assert!(
             target_keys
                 .iter()
-                .any(|k| *k == format!("{target_prefix}/manifest")),
-            "target missing manifest pointer: {target_keys:?}"
+                .any(|k| *k == format!("{target_prefix}/v2/root")),
+            "target missing capsule root: {target_keys:?}"
+        );
+        assert!(
+            target_keys
+                .iter()
+                .any(|k| k.starts_with(&format!("{target_prefix}/v2/capsules/"))),
+            "target missing capsule: {target_keys:?}"
         );
 
         // Journal file was removed on success.
@@ -4144,6 +4159,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preflight_rejects_existing_capsule_remote_without_force() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        store
+            .put(
+                &ObjectPath::from("repo/v2/root"),
+                PutPayload::from(Bytes::from_static(b"capsule-root")),
+            )
+            .await
+            .unwrap();
+        let target = resolved(store, "repo");
+
+        let err = ensure_no_existing_remote(&target, "s3://dst-bucket/repo", false)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, CrabError::ImportRemoteExists { .. }));
+    }
+
+    #[tokio::test]
     async fn preflight_existing_remote_bypassed_by_force() {
         let tmp = TempDir::new().unwrap();
         let into = tmp.path().join("repo");
@@ -4432,6 +4466,25 @@ mod tests {
             cancel: &cancel,
         })
         .await;
+        assert!(matches!(err, CrabError::ImportSourceIsCrabRepo { .. }));
+    }
+
+    #[tokio::test]
+    async fn preflight_rejects_source_with_capsule_root() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        store
+            .put(
+                &ObjectPath::from("source/v2/root"),
+                PutPayload::from(Bytes::from_static(b"capsule-root")),
+            )
+            .await
+            .unwrap();
+        let source = resolved(store, "source");
+
+        let err = ensure_source_not_crab_repo(&source, "s3://src-bucket/source", false)
+            .await
+            .unwrap_err();
+
         assert!(matches!(err, CrabError::ImportSourceIsCrabRepo { .. }));
     }
 

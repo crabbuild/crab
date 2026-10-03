@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::commit_graph::CommitGraphIndex;
 use crate::operation::{TrackedLocatorSession, finish_with_close};
-use crate::reader::{ReaderLimits, RemoteGitReader};
+use crate::reader::{ReaderLimits, RemoteGitReader, SnapshotLookupSources};
 use crate::state::RepositoryState;
 use crate::{
     Error, HeadReference, OperationContext, OperationKind, RemoteGitRuntime, RemoteGitSnapshot,
@@ -340,7 +340,36 @@ impl RemoteGitRepository {
             options,
             cancellation,
             None,
+            SnapshotLookupSources::default(),
         )
+        .await
+    }
+
+    /// Open a snapshot with authenticated lookup data and immutable pack sources.
+    ///
+    /// Capsule readers validate source descriptors, locators, and object-to-member
+    /// admission before calling this. Source and preferred-index identities must
+    /// belong to the pinned inventory; invalid bindings fail repository opening.
+    pub async fn from_snapshot_with_lookup_sources(
+        layout: StoreLayout<Store>,
+        snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+        identity: RepositoryIdentity,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        lookup_sources: SnapshotLookupSources,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        Self::from_snapshot_parts(
+            layout,
+            snapshot,
+            identity,
+            runtime,
+            options,
+            cancellation,
+            None,
+            lookup_sources,
+        )
+        .await
     }
 
     /// Open a snapshot using a proven base catalog plus its complete pack tail.
@@ -359,6 +388,13 @@ impl RemoteGitRepository {
         check_cancelled(cancellation)?;
         check_cancelled(&runtime.background_cancellation())?;
         let catalog_tail = snapshot_catalog_tail(&layout, snapshot, cancellation).await?;
+        let (catalog_identity, lookup_sources) = match catalog_tail {
+            Some((identity, packs)) => (
+                Some(identity),
+                SnapshotLookupSources::default().with_preferred_pack_indexes(packs),
+            ),
+            None => (None, SnapshotLookupSources::default()),
+        };
         Self::from_snapshot_parts(
             layout,
             snapshot,
@@ -366,18 +402,21 @@ impl RemoteGitRepository {
             runtime,
             options,
             cancellation,
-            catalog_tail,
+            catalog_identity,
+            lookup_sources,
         )
+        .await
     }
 
-    fn from_snapshot_parts(
+    async fn from_snapshot_parts(
         layout: StoreLayout<Store>,
         snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
         mut identity: RepositoryIdentity,
         runtime: Arc<RemoteGitRuntime>,
         options: RepositoryOptions,
         cancellation: &CancellationToken,
-        catalog_tail: Option<(GitObjectCatalogIdentity, Vec<GitPackInventoryEntry>)>,
+        lookup_catalog_identity: Option<GitObjectCatalogIdentity>,
+        lookup_sources: SnapshotLookupSources,
     ) -> Result<Self> {
         RepositoryOptions::new(options.object_limits(), options.operation_limits())?;
         check_cancelled(cancellation)?;
@@ -397,23 +436,57 @@ impl RemoteGitRepository {
         // Journal commits can change inventory without incrementing the base
         // generation. In particular, an old cached miss must not hide a new pack.
         identity.snapshot_digest = Some(Arc::from(snapshot.digest()?));
-        let manifest = snapshot.materialized_manifest();
+        let mut manifest = snapshot.materialized_manifest();
+        // A journal overlay can advance refs without changing the base generation.
+        // Its old derived indexes must not attribute paths in the new Git state.
+        if manifest.git_validation_digest != snapshot.manifest.git_validation_digest {
+            manifest.commit_graph_hash = None;
+            manifest.path_state_hash = None;
+        }
         let refs = RepositoryRefs::try_from(&manifest)?;
         let inventory = parse_inventory(&snapshot.journal.packs)?;
-        let (lookup_catalog_identity, preferred_pack_indexes) = match catalog_tail {
-            Some((identity, packs)) => (Some(identity), Some(packs)),
-            None => (None, None),
-        };
         let reader = Arc::new(RemoteGitReader::from_pinned_with_preferred_pack_indexes(
             layout.store().clone(),
             layout.repo_prefix(),
             inventory.values().copied(),
-            preferred_pack_indexes,
+            lookup_sources,
             ReaderLimits::from_options(options),
             Arc::clone(&runtime),
             identity.clone(),
             manifest.generation,
         )?);
+        let commit_graph = if manifest.commit_graph_hash.is_some() {
+            let _task_token = runtime.operation_token();
+            let child = cancellation.child_token();
+            let _cancel_on_drop = child.clone().drop_guard();
+            let budget = crate::budget::OperationBudget::new(options.operation, runtime.clone());
+            let read_store = layout
+                .store()
+                .clone()
+                .with_read_admission(budget.read_admission(child.clone()));
+            let work = load_commit_graph(
+                &read_store,
+                &layout,
+                &manifest,
+                &refs,
+                &runtime,
+                options.object.max_commit_graph_bytes,
+                &child,
+            );
+            tokio::pin!(work);
+            tokio::select! {
+                result = &mut work => result?,
+                () = tokio::time::sleep(options.operation.max_duration) => {
+                    child.cancel();
+                    return match work.await {
+                        Ok(_) => Err(Error::Cancelled.after_interruption(true)),
+                        Err(error) => Err(error.after_interruption(true)),
+                    };
+                }
+            }
+        } else {
+            None
+        };
         Ok(Self {
             state: Arc::new(RepositoryState {
                 store: layout.store().clone(),
@@ -422,6 +495,7 @@ impl RemoteGitRepository {
                 identity,
                 options,
                 generation: manifest.generation,
+                pack_index_hash: Arc::from(manifest.pack_index_hash.as_str()),
                 git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
                 shard_index_hash: Arc::from(manifest.shard_index_hash.as_str()),
                 manifest_etag: snapshot.manifest_etag.clone(),
@@ -430,8 +504,8 @@ impl RemoteGitRepository {
                 inventory,
                 refs,
                 reader: Some(reader),
-                commit_graph: None,
-                path_state_hash: None,
+                commit_graph,
+                path_state_hash: manifest.path_state_hash.as_deref().map(Arc::from),
                 path_state: tokio::sync::OnceCell::new(),
                 shallow_closure: None,
             }),
@@ -563,6 +637,7 @@ impl RemoteGitRepository {
                     identity,
                     options,
                     generation: manifest.generation,
+                    pack_index_hash: Arc::from(manifest.pack_index_hash.as_str()),
                     git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
                     shard_index_hash: Arc::from(manifest.shard_index_hash.as_str()),
                     manifest_etag,
@@ -629,41 +704,16 @@ impl RemoteGitRepository {
                     identity.clone(),
                     manifest.generation,
                 )?;
-                let commit_graph = match CommitGraphIndex::load(
+                let commit_graph = load_commit_graph(
                     &read_store,
                     &layout,
-                    manifest.commit_graph_hash.as_deref(),
-                    manifest.generation,
-                    &manifest.pack_index_hash,
-                    &manifest.git_validation_digest,
-                    &refs
-                        .entries
-                        .iter()
-                        .map(|entry| entry.peeled.unwrap_or(entry.target))
-                        .collect::<Vec<_>>(),
+                    &manifest,
+                    &refs,
+                    &runtime,
                     options.object_limits().max_commit_graph_bytes,
                     cancellation,
-                    &runtime_cancellation,
                 )
-                .await
-                {
-                    Ok(index) => index.map(Arc::new),
-                    Err(error)
-                        if matches!(error, Error::Cancelled) || admission_rejected(&error) =>
-                    {
-                        return Err(error);
-                    }
-                    Err(_) => {
-                        runtime.metrics().record(crate::MetricObservation {
-                            kind: crate::MetricKind::Metadata,
-                            value: 1,
-                            duration: None,
-                            outcome: Some(crate::MetricOutcome::Error),
-                            cache: None,
-                        });
-                        None
-                    }
-                };
+                .await?;
                 let shallow_closure = match tokio::select! {
                     biased;
                     () = cancellation.cancelled() => return Err(Error::Cancelled),
@@ -703,6 +753,7 @@ impl RemoteGitRepository {
                     identity,
                     options,
                     generation: manifest.generation,
+                    pack_index_hash: Arc::from(manifest.pack_index_hash.as_str()),
                     git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
                     shard_index_hash: Arc::from(manifest.shard_index_hash.as_str()),
                     manifest_etag,
@@ -847,11 +898,20 @@ impl RemoteGitRepository {
         self.state.inventory.len()
     }
 
-    pub(crate) fn single_pack_inventory(&self) -> Option<GitPackInventoryEntry> {
-        if self.state.inventory.len() != 1 {
-            return None;
+    pub(crate) fn exact_pack_reuse_inventory(&self) -> Vec<GitPackInventoryEntry> {
+        let layered = self
+            .state
+            .reader
+            .as_ref()
+            .is_some_and(|reader| reader.has_pack_sources());
+        if self.state.inventory.len() > 1 && !layered {
+            return Vec::new();
         }
-        self.state.inventory.values().copied().next()
+        let mut inventory = self.state.inventory.values().copied().collect::<Vec<_>>();
+        inventory.sort_unstable_by(|left, right| {
+            left.pack_id.to_string().cmp(&right.pack_id.to_string())
+        });
+        inventory
     }
 
     /// Check the current catalog-bound visibility proof without loading its object dictionary.
@@ -1077,12 +1137,7 @@ impl RemoteGitRepository {
         &self,
         cancellation: &CancellationToken,
     ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
-        let pack_index_hash = self
-            .state
-            .coverage()
-            .map(|coverage| coverage.pack_index_hash.to_string())
-            .unwrap_or_default();
-        crate::visibility::rebuild(self, pack_index_hash, cancellation).await
+        crate::visibility::rebuild(self, self.state.pack_index_hash.to_string(), cancellation).await
     }
 
     /// Check whether the canonical manifest still names this pinned generation.
@@ -1137,6 +1192,34 @@ impl RemoteGitRepository {
     ) -> Result<OperationContext> {
         validate_operation_limits(limits)?;
         OperationContext::open(Arc::clone(&self.state), kind, cancellation, limits).await
+    }
+
+    /// Resolve the immutable pack identities containing a batch of Git objects.
+    ///
+    /// This is a metadata-only join. Callers must still authenticate the
+    /// selected pack sidecars and object set before installing any returned
+    /// pack body. The operation is closed before this method returns.
+    pub async fn pack_ids_for_objects(
+        &self,
+        object_ids: &[ObjectId],
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<MerkleHash>> {
+        if object_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let operation = self
+            .operation(OperationKind::UploadPack, cancellation)
+            .await?;
+        let result = operation
+            .lookup_packed_entry_locators(object_ids)
+            .await
+            .map(|locators| {
+                locators
+                    .into_iter()
+                    .map(|locator| locator.pack_id)
+                    .collect()
+            });
+        operation.finish(result).await
     }
 
     /// Prove which candidate commits are reachable from any pinned graph root.
@@ -1262,6 +1345,51 @@ impl RemoteGitRepository {
                 .filter(|index| index.parents_match(commit.oid, &commit.parents))
                 .cloned(),
         })
+    }
+}
+
+async fn load_commit_graph(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    manifest: &crab_metadata::manifests::Manifest,
+    refs: &RepositoryRefs,
+    runtime: &RemoteGitRuntime,
+    max_bytes: u64,
+    cancellation: &CancellationToken,
+) -> Result<Option<Arc<CommitGraphIndex>>> {
+    let roots = refs
+        .entries
+        .iter()
+        .map(|entry| entry.peeled.unwrap_or(entry.target))
+        .collect::<Vec<_>>();
+    match CommitGraphIndex::load(
+        store,
+        layout,
+        manifest.commit_graph_hash.as_deref(),
+        manifest.generation,
+        &manifest.pack_index_hash,
+        &manifest.git_validation_digest,
+        &roots,
+        max_bytes,
+        cancellation,
+        &runtime.background_cancellation(),
+    )
+    .await
+    {
+        Ok(index) => Ok(index.map(Arc::new)),
+        Err(error) if matches!(error, Error::Cancelled) || admission_rejected(&error) => Err(error),
+        Err(_) => {
+            // Commit graphs accelerate verified raw traversal. A bad accelerator
+            // is not authority; path attribution still rejects an absent graph.
+            runtime.metrics().record(crate::MetricObservation {
+                kind: crate::MetricKind::Metadata,
+                value: 1,
+                duration: None,
+                outcome: Some(crate::MetricOutcome::Error),
+                cache: None,
+            });
+            Ok(None)
+        }
     }
 }
 
@@ -1944,6 +2072,8 @@ mod tests {
         )
         .await
     }
+
+    mod snapshot_indexes;
 
     #[tokio::test]
     async fn optional_indexes_propagate_admission_rejection() {

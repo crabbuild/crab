@@ -757,12 +757,14 @@ Azure priority/SLA review. Use `--json` to feed the quantities into FinOps tools
 with the organization's approved rate card.
 
 `crab replica verify --deep` is the runbook/CI gate for replica cutover. It
-always bypasses cached readiness, walks the publication boundary from the
-primary manifest to the replica manifest, verifies referenced pack indexes,
-packs, pack metadata, shard indexes, shards, and xorbs, and exits non-zero when
-any selected replica is not ready. `--exhaustive` names this default full-object
-proof explicitly. `--sample-size <objects>` bounds per-replica object HEAD
-probes for large inventories; sampled runs can pass health checks, but their
+always bypasses cached readiness, requires the replica's authenticated v2
+root, per-ref positions, checkpoint, and capsule frontier to match the primary,
+then reads and validates every cataloged shard and xorb body. Embedded Git
+packs and sidecars are authenticated by their capsule or checkpoint container.
+The command exits non-zero when any selected replica is not ready.
+`--exhaustive` names this default full-object proof explicitly.
+`--sample-size <objects>` bounds the number of external object bodies read for
+large inventories; sampled runs can pass health checks, but their
 `summary.cutover_ready` remains false until an exhaustive run succeeds. JSON
 output includes a `summary` with proof mode, sample size, replica counts,
 ready/not-ready counts, read-enabled count, max generation lag, total readiness

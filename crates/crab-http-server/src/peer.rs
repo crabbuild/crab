@@ -677,6 +677,33 @@ impl NodeDurabilityProvider for NodePublisher {
         })
     }
 
+    fn rotation_required(
+        self: Arc<Self>,
+        live_node_limit: usize,
+    ) -> Pin<Box<dyn Future<Output = cellule_host::FacilityResult<bool>> + Send>> {
+        Box::pin(async move {
+            let result: crate::Result<bool> = async {
+                let members = {
+                    let observed = self.observed()?.lock().await;
+                    observed
+                        .advertisement()
+                        .log()
+                        .ok_or(CellError::Node("node session has no enrolled log"))?
+                        .members()
+                        .to_vec()
+                };
+                let now_ms = now_ms()?;
+                let members_live = self
+                    .directory
+                    .members_are_live(&members, now_ms, live_node_limit)
+                    .await?;
+                Ok(!members_live)
+            }
+            .await;
+            result.map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+        })
+    }
+
     fn rotation_event(&self, event: NodeDurabilityRotation) {
         let Some(metrics) = &self.metrics else {
             return;

@@ -1,5 +1,9 @@
 //! Shared remote operation orchestration; callers retain authorization and policy.
 
+#[cfg(feature = "publication")]
+pub mod browse_indexes;
+#[cfg(feature = "publication")]
+pub mod checkpoint;
 #[cfg(feature = "local")]
 pub mod config;
 #[cfg(feature = "local")]

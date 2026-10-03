@@ -36,6 +36,94 @@ and content hashes for larger metadata objects. `seal_git_validation` binds
 the semantically validated Git state to a BLAKE3 digest; readers call
 `validate_manifest_payload` before trusting refs or index pointers.
 
+Capsule protocol v2 uses one compacted root plus independently mutable ref
+heads and immutable capsule runs. Pointer catalogs keep shard/xorb payloads
+external while authenticating their identities and reconstruction closure.
+Readers that already loaded and verified a root use
+`load_pointer_catalog_from_root`; this preserves the same catalog validation
+without issuing a second mutable-root request.
+Catalog readers resolve only ref heads in that root's authority epoch, before
+loading multi-ref activation records. Restore can leave retired heads in storage;
+their checkpoint positions and dependencies must not enter the restored catalog.
+Current-epoch activation and checkpoint-chain errors still fail closed.
+`v2/browse-indexes` is a bounded, mutable derived record, not ref authority.
+It binds complete immutable commit-graph and path-state descriptors to the exact
+capsule state, including visible per-ref transactions. Readers ignore stale
+records; absent indexes remain a readiness state. Rebuilding an immutable index
+verifies the generated content identity and repairs corrupt stored bytes only
+with a conditional update against the observed version, followed by readback.
+This applies to graph/path-state descriptors and layers, not Git/Xet data.
+Graph/path-state loaders admit descriptor bodies against the caller's byte
+budget before buffering, then admit each layer against its authenticated size
+and the remaining aggregate budget. All bodies still require hash and exact
+length verification; malformed provider sizes cannot bypass the encoded-byte
+ceiling. Decoded index structures require separate memory qualification.
+Path-state construction and in-memory validation need no storage feature;
+encoded-layer decoding is private to storage loading and codec tests.
+Current file lookup selects the protocol from the root alone: only an absent
+v2 root permits v1 lookup. A missing v2 dependency remains an error, and failed
+shared-session initialization can retry after that dependency is repaired.
+
+Layered checkpoint visibility decoding is shared by readers and recovery.
+Checkpoint pointers require an explicit format 5 (`CRBCKP05`). Root, history
+and ref-head decoding reject retired or missing formats; there is no embedded
+checkpoint decoder. The separately released v1 manifest protocol is unchanged.
+Ordinal proofs must match the ordered source-catalog digest before becoming a
+Git visibility index; the existing full-object encoding preserves the same
+caller-supplied Git identity. A missing proof remains distinct from an empty
+ref set, so recovery can reject it explicitly.
+Footer-only checkpoints have control offset zero when both optional catalog and
+visibility sections are absent. The storage reader accepts that canonical range
+while retaining footer-hash, pointer identity, source and size validation.
+Full reads, footer-only reads and retained maintenance checkpoints share one
+complete pointer-identity comparison, including counts and covered-root binding.
+
+History segments retain a checkpoint and the transactions folded into it.
+Metadata-only publication may fold zero new transactions: its checkpoint still
+owns the complete pack-source closure. Zero-transaction segments retain exact
+refs and compacted positions and participate in the same authenticated history
+chain; GC must traverse their checkpoint sources even without capsule runs.
+Root, history and per-ref head admission share the same pointer validators.
+They check the stored checkpoint format and capsule count directly, including
+prepared heads and before following history dependencies; rebuilding a pointer
+would hide those malformed fields.
+Run pointers require explicit control offsets, lengths and footer hashes; the
+unshipped offset-discovery shape is rejected. Full and control-only storage
+reads validate descriptors before I/O and bind the loaded run to the same
+control boundary and footer hash. This does not change the v1 manifest reader.
+An already verified complete run can yield the same authenticated control
+view, including detached visibility/catalog sections, from its resident bytes;
+consumers need not reread its control suffix.
+
+Run compaction preserves exact Git object-to-member admission across ref-only
+runs. Their authenticated empty pack directory proves an empty contribution;
+a pack-bearing run without admission still prevents a complete merged proof.
+`CapsuleRun::compact` consumes ordered runs with a bounded total of at most 512
+capsules and encodes/authenticates the final run once. Run level is the
+`ceil(log2(count))` size class; the authenticated capsule count remains exact.
+Mixed-level carries retain canonical capsule bytes and member ordinals without
+encoding discarded intermediate runs; complete capsule verification remains
+mandatory. The v2 cutover uses CRBRUN07 and root/history/ref-head versions
+4/3/5; there is no reader fallback to earlier run or pointer semantics.
+Runs may contain byte-identical packs from different transactions. Their source
+directories retain every physical member and ordinal; identical content is
+deduplicated only by readers. Source validation and readers share the same
+content comparison, rejecting conflicting range lengths/hashes, sidecars, Git
+checksums, object counts or external delta bases without comparing offsets.
+
+`CRBRUN07` compacted runs also concatenate copies of their Git indexes into an
+authenticated lookup pool. Original capsules and canonical member ranges stay
+unchanged for recovery, installation and repack. Control-only readers derive
+pool ranges in member order with the original index hashes; full decoding checks
+the pool and every copied index. Leaves do not duplicate indexes. The run's
+authenticated control suffix covers its exact member-admission bytes together
+with the footer, so control loading needs no second admission request. The
+decoder verifies the entire admission hash and exact suffix boundary before
+exposing placement hints. Payload bytes and the lookup pool remain outside the
+suffix. Detached large visibility/catalog sections retain their separate bounded
+reads. The unshipped `CRBRUN04`/`CRBRUN05`/`CRBRUN06` formats are rejected, not
+read through a compatibility path; readers and writers must cut over together.
+
 Payload modules cover manifests, segmented lists, pack metadata, commit-graph
 summaries, ref registries, chunk/file indexes, receipts, transactions, and
 canonical key/value codecs. Storage-backed helpers are feature-gated:

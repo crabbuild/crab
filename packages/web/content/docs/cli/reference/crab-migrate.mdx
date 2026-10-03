@@ -10,9 +10,10 @@ meta:
 # crab migrate
 
 Inspect large-file history and convert DVC workflow state into Crab metadata.
-The history-rewrite commands are currently dry-run only: non-dry-run requests
-fail explicitly without changing the repository. Use `crab adopt` for the
-supported working-tree cutover path.
+The history-rewrite commands use Git's built-in fast-export/fast-import engine.
+They require a clean working tree and rewrite selected refs after staging and
+verifying the converted content. Back up before rewriting; rewritten refs
+require a force push and a fresh clone for collaborators.
 
 ## Synopsis
 
@@ -25,8 +26,8 @@ crab migrate <SUBCOMMAND> [OPTIONS]
 | Command | Purpose |
 | --- | --- |
 | `crab migrate info` | Report file types above a size threshold that would benefit from tracking |
-| `crab migrate import` | Preview a large-file-to-pointer history migration; applying it is not yet supported |
-| `crab migrate export` | Preview a pointer-to-full-file history migration; applying it is not yet supported |
+| `crab migrate import` | Rewrite selected history, replacing matching regular Git blobs with verified Crab pointers |
+| `crab migrate export` | Rewrite selected history, reconstructing matching Crab pointers as verified regular Git blobs |
 | `crab migrate from-dvc` | Convert a `dvc.yaml` pipeline to `crab.yaml` |
 | `crab migrate gc-fence` | Inspect or explicitly upgrade one quiesced coordination domain to schema 2 |
 
@@ -51,6 +52,10 @@ Preview exporting selected pointer-backed files from history:
 ```bash
 crab migrate export --include '*.bin' --dry-run
 ```
+
+Without `--dry-run`, import uses local `.crab/staging` and export reads the
+configured Crab remote. Both paths fail closed on missing or hash-mismatched
+content; neither requires `git-filter-repo`.
 
 Convert a DVC pipeline:
 

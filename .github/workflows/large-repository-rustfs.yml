@@ -6,6 +6,9 @@ on:
       - ".github/workflows/large-repository-rustfs.yml"
       - "crab/scripts/e2e/run_large_repo_rustfs.py"
       - "crab/scripts/e2e/test_verify_large_repo_rustfs_report.py"
+      - "crab/scripts/e2e/run_capsule_k8s_rustfs.py"
+      - "crab/scripts/e2e/test_run_capsule_k8s_rustfs.py"
+      - "crab/docs/design/capsule-layered-packs.md"
       - "crab/scripts/verify-large-repo-rustfs-report.py"
       - "crab/docs/guides/large-repository-qualification.md"
       - "crates/crab-read/src/upload_pack.rs"
@@ -37,6 +40,9 @@ on:
       - ".github/workflows/large-repository-rustfs.yml"
       - "crab/scripts/e2e/run_large_repo_rustfs.py"
       - "crab/scripts/e2e/test_verify_large_repo_rustfs_report.py"
+      - "crab/scripts/e2e/run_capsule_k8s_rustfs.py"
+      - "crab/scripts/e2e/test_run_capsule_k8s_rustfs.py"
+      - "crab/docs/design/capsule-layered-packs.md"
       - "crab/scripts/verify-large-repo-rustfs-report.py"
       - "crab/docs/guides/large-repository-qualification.md"
       - "crates/crab-read/src/upload_pack.rs"
@@ -85,9 +91,11 @@ jobs:
       - name: Verify report contract tests
         run: |
           python3 -m unittest crab/scripts/e2e/test_verify_large_repo_rustfs_report.py
+          python3 -m unittest crab/scripts/e2e/test_run_capsule_k8s_rustfs.py
           python3 -m py_compile \
             crab/scripts/e2e/run_large_repo_rustfs.py \
-            crab/scripts/verify-large-repo-rustfs-report.py
+            crab/scripts/verify-large-repo-rustfs-report.py \
+            crab/scripts/e2e/run_capsule_k8s_rustfs.py
 
   kubernetes-rustfs:
     name: Kubernetes 1,000-commit RustFS qualification
@@ -104,7 +112,8 @@ jobs:
       CRAB_CACHE_PSK: cache-smoke-psk
       CARGO_TARGET_DIR: /Volumes/Workspace/crabbuild-target/crab-large-repo-qualification-${{ github.run_id }}-${{ github.run_attempt }}
       QUALIFICATION_ROOT: /Volumes/Workspace/CrabBuild/crabbuild-qualification
-      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+      RUSTFS_IMAGE: ghcr.io/rustfs/rustfs@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858
+      RUSTFS_CONTAINER: crab-large-repo-rustfs-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -135,10 +144,10 @@ jobs:
           set -euo pipefail
           data_root="${QUALIFICATION_ROOT}/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$data_root"
+          sudo chown 10001:10001 "$data_root"
           docker pull "$RUSTFS_IMAGE"
-          docker rm -f crab-large-repo-rustfs >/dev/null 2>&1 || true
           docker run -d \
-            --name crab-large-repo-rustfs \
+            --name "$RUSTFS_CONTAINER" \
             -p 9000:9000 \
             -e RUSTFS_ACCESS_KEY=crab \
             -e RUSTFS_SECRET_KEY=crab \
@@ -150,8 +159,15 @@ jobs:
             fi
             sleep 1
           done
-          docker logs crab-large-repo-rustfs >&2 || true
+          docker logs "$RUSTFS_CONTAINER" >&2 || true
           exit 1
+
+      - name: Verify and retain RustFS version
+        run: |
+          set -euo pipefail
+          version_file="${QUALIFICATION_ROOT}/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-version.txt"
+          docker exec "$RUSTFS_CONTAINER" rustfs --version | tee "$version_file"
+          test "$(head -n 1 "$version_file")" = "rustfs 1.0.0"
 
       - name: Start cache service
         run: |
@@ -199,16 +215,17 @@ jobs:
           set -euo pipefail
           first="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-a"
           second="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-b"
+          version_file="${QUALIFICATION_ROOT}/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-version.txt"
+          object_store_version="$(head -n 1 "$version_file")"
           common=(
             --crab-bin "${CARGO_TARGET_DIR}/release/crab"
             --root "$QUALIFICATION_ROOT"
             --source /Volumes/Workspace/Github/kubernetes/kubernetes
-            --object-store-version "$RUSTFS_IMAGE"
+            --object-store-version "$object_store_version"
             --require-cache-service
             --cold-clone-fanout 50
             --warm-clone-fanout 100
             --team-load
-            --cleanup-remote
           )
           python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$first"
           python3 crab/scripts/verify-large-repo-rustfs-report.py \
@@ -248,9 +265,9 @@ jobs:
       - name: Capture RustFS logs
         if: always()
         run: |
-          docker logs crab-large-repo-rustfs \
+          docker logs "$RUSTFS_CONTAINER" \
             > "$QUALIFICATION_ROOT/rustfs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log" 2>&1 || true
-          docker rm -f crab-large-repo-rustfs >/dev/null 2>&1 || true
+          docker rm -f "$RUSTFS_CONTAINER" >/dev/null 2>&1 || true
 
       - name: Upload qualification evidence
         if: always()
@@ -263,5 +280,6 @@ jobs:
             /Volumes/Workspace/CrabBuild/crabbuild-qualification/comparison-${{ github.run_id }}-${{ github.run_attempt }}.json
             /Volumes/Workspace/CrabBuild/crabbuild-qualification/cache-service-${{ github.run_id }}-${{ github.run_attempt }}-captured.log
             /Volumes/Workspace/CrabBuild/crabbuild-qualification/rustfs-${{ github.run_id }}-${{ github.run_attempt }}.log
+            /Volumes/Workspace/CrabBuild/crabbuild-qualification/rustfs-${{ github.run_id }}-${{ github.run_attempt }}-version.txt
           if-no-files-found: warn
           retention-days: 30

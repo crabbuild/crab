@@ -773,22 +773,37 @@ impl MetaDb {
     /// that only issue `get` / `get_batch` against the returned
     /// [`Db`].
     async fn open_file_index_db(&self) -> Result<Arc<Db>> {
+        let store = Arc::clone(&self.store);
+        let path = ObjectPath::from(self.config.file_index_path.as_str());
+        let cache = Arc::clone(&self.db_cache);
+        let config = self.config.file_index;
+        let read_only = self.config.read_only;
+        let metrics = self.metrics.clone();
         let handle = self
             .file_index_db
-            .get_or_init(|| async {
-                let db = open_canonical_metadb(
-                    Arc::clone(&self.store),
-                    ObjectPath::from(self.config.file_index_path.as_str()),
-                    stores::file_index::DB_LABEL,
-                    Arc::clone(&self.db_cache),
-                    &self.config.file_index,
-                    self.config.read_only,
-                )
-                .await?;
-                let db = match self.metrics.as_ref() {
+            .get_or_init(|| async move {
+                // A cold SlateDB builder has a deeply nested future. Poll
+                // it on a Tokio worker stack so filter-process/libtest stacks
+                // stay bounded during the first push to a repository.
+                let db = tokio::spawn(async move {
+                    open_canonical_metadb(
+                        store,
+                        path,
+                        stores::file_index::DB_LABEL,
+                        cache,
+                        &config,
+                        read_only,
+                    )
+                    .await
+                })
+                .await
+                .map_err(|error| {
+                    CrabError::Internal(format!("file-index MetaDb open task failed: {error}"))
+                })??;
+                let db = match metrics {
                     Some(metrics) => {
                         metrics.inc_metadb_open_count();
-                        db.with_metrics(Arc::clone(metrics))
+                        db.with_metrics(Arc::clone(&metrics))
                     }
                     None => db,
                 };
@@ -804,22 +819,34 @@ impl MetaDb {
     /// [`MetaDbConfig::read_only`] session hands back a non-fencing
     /// [`slatedb::DbReader`]-backed handle.
     async fn open_chunk_index_db(&self) -> Result<Arc<Db>> {
+        let store = Arc::clone(&self.store);
+        let path = ObjectPath::from(self.config.chunk_index_path.as_str());
+        let cache = Arc::clone(&self.db_cache);
+        let config = self.config.chunk_index;
+        let read_only = self.config.read_only;
+        let metrics = self.metrics.clone();
         let handle = self
             .chunk_index_db
-            .get_or_init(|| async {
-                let db = open_canonical_metadb(
-                    Arc::clone(&self.store),
-                    ObjectPath::from(self.config.chunk_index_path.as_str()),
-                    stores::chunk_index::DB_LABEL,
-                    Arc::clone(&self.db_cache),
-                    &self.config.chunk_index,
-                    self.config.read_only,
-                )
-                .await?;
-                let db = match self.metrics.as_ref() {
+            .get_or_init(|| async move {
+                let db = tokio::spawn(async move {
+                    open_canonical_metadb(
+                        store,
+                        path,
+                        stores::chunk_index::DB_LABEL,
+                        cache,
+                        &config,
+                        read_only,
+                    )
+                    .await
+                })
+                .await
+                .map_err(|error| {
+                    CrabError::Internal(format!("chunk-index MetaDb open task failed: {error}"))
+                })??;
+                let db = match metrics {
                     Some(metrics) => {
                         metrics.inc_metadb_open_count();
-                        db.with_metrics(Arc::clone(metrics))
+                        db.with_metrics(Arc::clone(&metrics))
                     }
                     None => db,
                 };

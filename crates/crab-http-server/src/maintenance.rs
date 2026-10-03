@@ -2,47 +2,80 @@ use std::{future::Future, sync::Arc, time::Duration};
 
 use crab_remote_git::{RemoteGitRuntime, RepositoryIdentity, RepositoryOptions};
 use crab_storage::{Store, StoreLayout};
-use crab_write::{Result, WriteError};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const LEASE_TTL: Duration = Duration::from_secs(60);
-const CATALOG_PASS_BUDGET: Duration = Duration::from_secs(3 * 60);
+const CAPSULE_THRESHOLD: u32 = 32;
+pub(crate) const FOREGROUND_CAPSULE_THRESHOLD: u32 = 56;
+const PASS_BUDGET: Duration = Duration::from_secs(3 * 60);
+const CHECKPOINT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Error {
+    #[error("repository checkpoint cancelled")]
+    Cancelled,
+    #[error("repository checkpoint failed")]
+    Checkpoint(#[source] crab_remote::checkpoint::CheckpointError),
+    #[error("repository browse indexing failed")]
+    Browse(#[from] crab_remote::browse_indexes::Error),
+}
+
+pub(crate) type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Clone, Copy)]
+pub(crate) enum Pass {
+    ForegroundCheckpoint,
+    BackgroundMaintenance,
+}
 
 async fn publish(
-    store: &Store,
     layout: &StoreLayout<Store>,
-    identity: &RepositoryIdentity,
-    runtime: Arc<RemoteGitRuntime>,
-    options: RepositoryOptions,
+    pass: Pass,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    crab_write::generation::ensure_readable(
-        store, layout, identity, runtime, options, LEASE_TTL, cancel,
-    )
-    .await
+    let result = match pass {
+        Pass::ForegroundCheckpoint => {
+            crab_remote::checkpoint::publish_capsule_checkpoint(
+                layout,
+                CAPSULE_THRESHOLD,
+                CHECKPOINT_BYTES,
+                cancel,
+            )
+            .await
+        }
+        Pass::BackgroundMaintenance => {
+            crab_remote::checkpoint::maintain_capsule_repository(
+                layout,
+                CAPSULE_THRESHOLD,
+                CHECKPOINT_BYTES,
+                cancel,
+            )
+            .await
+        }
+    };
+    match result {
+        Ok(_) => Ok(()),
+        Err(crab_remote::checkpoint::CheckpointError::Cancelled) => Err(Error::Cancelled),
+        Err(error) => Err(Error::Checkpoint(error)),
+    }
 }
 
 pub(crate) struct ProjectionContext {
     pub(crate) repository_id: Uuid,
-    pub(crate) router: crate::cells::RepositoryCellRouter,
+    pub(crate) router: Option<crate::cells::RepositoryCellRouter>,
     pub(crate) metrics: crate::metrics::Metrics,
+    pub(crate) identity: RepositoryIdentity,
+    pub(crate) runtime: Arc<RemoteGitRuntime>,
+    pub(crate) options: RepositoryOptions,
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "maintenance keeps publication, admission, cancellation, and projection ownership explicit"
-)]
-pub(crate) async fn run_with_projection(
-    store: Store,
+pub(crate) async fn run(
     layout: StoreLayout<Store>,
-    identity: RepositoryIdentity,
-    runtime: Arc<RemoteGitRuntime>,
-    options: RepositoryOptions,
     admission: Arc<Semaphore>,
     initial_permit: Option<OwnedSemaphorePermit>,
     parent: CancellationToken,
+    pass: Pass,
     projection: Option<ProjectionContext>,
 ) -> Result<()> {
     let has_projection = projection.is_some();
@@ -52,29 +85,30 @@ pub(crate) async fn run_with_projection(
             Some(permit) => permit,
             None => tokio::select! {
                 biased;
-                () = cancel.cancelled() => return Err(WriteError::Cancelled),
-                permit = admission.acquire_owned() => permit.map_err(|_| WriteError::Cancelled)?,
+                () = cancel.cancelled() => return Err(Error::Cancelled),
+                permit = admission.acquire_owned() => permit.map_err(|_| Error::Cancelled)?,
             },
         };
-        let result = publish(
-            &store,
-            &layout,
-            &identity,
-            Arc::clone(&runtime),
-            options,
-            &cancel,
-        )
-        .await;
+        let result = publish(&layout, pass, &cancel).await;
         if result.is_ok()
             && !cancel.is_cancelled()
             && let Some(projection) = projection
         {
-            let repository_id = projection.repository_id;
-            if let Err(error) = crate::projection::reconcile(
-                &store, &layout, &identity, runtime, options, projection, &cancel,
+            let indexed = crab_remote::browse_indexes::ensure(
+                &layout,
+                &projection.identity,
+                Arc::clone(&projection.runtime),
+                projection.options,
+                CHECKPOINT_BYTES,
+                &cancel,
             )
-            .await
-            {
+            .await;
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            indexed?;
+            let repository_id = projection.repository_id;
+            if let Err(error) = crate::projection::reconcile(&layout, projection, &cancel).await {
                 tracing::warn!(
                     repository_id = %repository_id,
                     error = ?error,
@@ -89,7 +123,8 @@ pub(crate) async fn run_with_projection(
         cancel.clone(),
         &parent,
         has_projection,
-        CATALOG_PASS_BUDGET,
+        PASS_BUDGET,
+        pass,
     )
     .await
 }
@@ -100,6 +135,7 @@ async fn await_pass<F>(
     parent: &CancellationToken,
     has_projection: bool,
     catalog_budget: Duration,
+    pass: Pass,
 ) -> Result<()>
 where
     F: Future<Output = Result<()>>,
@@ -124,15 +160,15 @@ where
             // Cancellation is cooperative; dropping publication here would leak
             // catalog handles or release admission while writes are still running.
             cancel.cancel();
-            finish_budgeted_pass(operation.await, parent.is_cancelled())
+            finish_budgeted_pass(operation.await, parent.is_cancelled(), pass)
         }
     }
 }
 
-fn finish_budgeted_pass(result: Result<()>, parent_cancelled: bool) -> Result<()> {
+fn finish_budgeted_pass(result: Result<()>, parent_cancelled: bool, pass: Pass) -> Result<()> {
     match result {
-        Err(WriteError::Cancelled | WriteError::RemoteGit(crab_remote_git::Error::Cancelled))
-            if !parent_cancelled =>
+        Err(Error::Cancelled)
+            if !parent_cancelled && matches!(pass, Pass::BackgroundMaintenance) =>
         {
             Ok(())
         }
@@ -146,17 +182,16 @@ mod tests {
 
     #[test]
     fn budget_cancellation_is_retryable_but_parent_cancellation_is_terminal() {
-        assert!(finish_budgeted_pass(Err(WriteError::Cancelled), false).is_ok());
         assert!(
-            finish_budgeted_pass(
-                Err(WriteError::RemoteGit(crab_remote_git::Error::Cancelled)),
-                false,
-            )
-            .is_ok()
+            finish_budgeted_pass(Err(Error::Cancelled), false, Pass::BackgroundMaintenance).is_ok()
         );
         assert!(matches!(
-            finish_budgeted_pass(Err(WriteError::Cancelled), true),
-            Err(WriteError::Cancelled)
+            finish_budgeted_pass(Err(Error::Cancelled), true, Pass::BackgroundMaintenance),
+            Err(Error::Cancelled)
+        ));
+        assert!(matches!(
+            finish_budgeted_pass(Err(Error::Cancelled), false, Pass::ForegroundCheckpoint),
+            Err(Error::Cancelled)
         ));
     }
 
@@ -174,6 +209,7 @@ mod tests {
                 &parent,
                 true,
                 Duration::from_millis(1),
+                Pass::BackgroundMaintenance,
             ),
         )
         .await;

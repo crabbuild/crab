@@ -16,6 +16,7 @@ const FAMILIES: &[&str] = &[
     "decoded-range",
     "xorb",
     "shard",
+    "git-pack",
     "manifest",
     "stage",
     "chunk-index",
@@ -332,3 +333,51 @@ fn inspect(
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(test)]
+mod portable_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn inventory_accounts_native_paths_in_their_cache_families() {
+        let cases = [
+            ("chunks/ab/raw", "chunk"),
+            ("chunks/repo/hash/range", "decoded-range"),
+            ("xorbs/ab/data", "xorb"),
+            ("shards/ab/data", "shard"),
+            ("git-packs/ab/data", "git-pack"),
+            ("manifests/repo/data", "manifest"),
+            ("stages/repo/data", "stage"),
+            ("buckets/scope/index", "chunk-index"),
+            ("repos/scope/index", "chunk-index"),
+            ("xorb-index/scope/data", "xorb-index"),
+            ("hints/bloom", "bloom"),
+            ("hints/shard-hint", "shard-hint"),
+            ("locks/writer", "lock"),
+            ("nested/.tmp-pending", "temporary"),
+            ("nested/.sqlite-temp-pending", "temporary"),
+            ("retained/payload", "other"),
+            // A backslash is a filename byte on Unix, not a family separator.
+            #[cfg(unix)]
+            (r"git-packs\ab\data", "other"),
+        ];
+        for (relative, expected) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("cache");
+            crate::private_fs::atomic_write(&root, &root.join(relative), b"payload")
+                .await
+                .unwrap();
+            let report = inspect_cache(&root, None, &CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(report.is_available(), "{relative}: {:?}", report.issues);
+            let file_usage = report
+                .families
+                .iter()
+                .filter(|(_, family)| family.usage.files != 0)
+                .map(|(name, family)| (*name, family.usage.files, family.usage.logical_bytes))
+                .collect::<Vec<_>>();
+            assert_eq!(file_usage, [(expected, 1, 7)], "{relative}");
+        }
+    }
+}

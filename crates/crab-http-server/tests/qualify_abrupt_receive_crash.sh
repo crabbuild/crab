@@ -52,7 +52,7 @@ if ! git -C "${work_dir}/source" rev-parse --verify HEAD >/dev/null 2>&1; then
 fi
 for file_number in $(seq -w 1 16); do
   dd if=/dev/urandom \
-    of="${work_dir}/source/crash-payload-${file_number}.bin" \
+    of="${work_dir}/source/crash-payload-${file_number}.raw" \
     bs=1048576 count=8 status=none
 done
 git -C "${work_dir}/source" add .
@@ -118,7 +118,7 @@ fi
 # Compose does not replace a manually killed container. Recreate the Crab and
 # shared-network proxy containers to model an orchestrator starting a fresh pod.
 "${compose[@]}" up --detach --no-build --force-recreate \
-  --wait --wait-timeout 120 server proxy
+  server proxy
 replacement_server_id="$("${compose[@]}" ps --quiet server)"
 test -n "$replacement_server_id"
 
@@ -167,8 +167,8 @@ if [ -z "$verify_dir" ]; then
 fi
 test "$(git -C "$verify_dir" rev-parse HEAD)" = "$new_oid"
 for file_number in $(seq -w 1 16); do
-  cmp "${work_dir}/source/crash-payload-${file_number}.bin" \
-    "${verify_dir}/crash-payload-${file_number}.bin"
+  cmp "${work_dir}/source/crash-payload-${file_number}.raw" \
+    "${verify_dir}/crash-payload-${file_number}.raw"
 done
 test "$(docker inspect "$replacement_server_id" --format '{{.RestartCount}}')" = 0
 test "$(docker inspect "$replacement_server_id" --format '{{.State.Running}}')" = true

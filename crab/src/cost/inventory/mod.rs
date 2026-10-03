@@ -134,9 +134,6 @@ pub const ALL_CRAB_PREFIXES: &[&str] = &[
     ".crab/ref-registry",
 ];
 
-/// Prefixes that are per-repo (mutable state).
-pub const REPO_PREFIXES: &[&str] = &["refs/", "manifests/", "packs/", "locks/"];
-
 /// Choose the inventory source based on config and report freshness.
 ///
 /// When `source` is `Auto`, checks whether a report exists and is

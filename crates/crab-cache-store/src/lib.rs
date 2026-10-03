@@ -44,6 +44,7 @@ use crab_storage::{ETag, StorageError, Store};
 use crab_xet::hash::MerkleHash;
 use crab_xet::xorb::format::MAX_XORB_SIZE;
 
+pub mod git_pack;
 mod observation;
 mod xorb_read;
 use observation::NoopCacheObserver;

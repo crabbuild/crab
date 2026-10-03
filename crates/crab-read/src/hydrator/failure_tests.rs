@@ -16,7 +16,10 @@ struct Gate {
 
 #[async_trait::async_trait]
 impl XorbAvailability for Gate {
-    async fn ensure_available(&self, _: &object_store::path::Path) -> crate::Result<()> {
+    async fn ensure_available(&self, path: &object_store::path::Path) -> crate::Result<()> {
+        if path.to_string().contains("shards/") {
+            return Ok(());
+        }
         tokio::time::timeout(std::time::Duration::from_secs(5), self.barrier.wait())
             .await
             .expect("all concurrent operations reach the source");

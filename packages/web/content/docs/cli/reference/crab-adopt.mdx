@@ -30,7 +30,7 @@ crab adopt [OPTIONS]
 | `--dry-run` | Show candidates without changing files |
 | `--interactive` | Confirm candidates before conversion |
 | `-j, --jobs <JOBS>` | Maximum concurrent file-processing tasks; default `16` |
-| `--rewrite-history` | Reserved history-rewrite mode; currently not implemented |
+| `--rewrite-history` | Rewrite all selected refs with Crab pointers; requires `--force` and a clean tree |
 | `--force` | Required with `--rewrite-history` |
 | `--json` | Emit structured JSON output |
 
@@ -49,3 +49,8 @@ crab ship . -m "Adopt large files"
 Before committing, [`crab unadopt`](/docs/cli/reference/crab-unadopt) restores
 the staged original bytes and [`crab undo`](/docs/cli/reference/crab-undo)
 reverses the last detected `adopt` or `add` operation.
+
+`--rewrite-history` delegates to the same verified fast-export/fast-import
+engine as `crab migrate import`. It stages every selected file version in
+`.crab/staging`, rewrites all refs, and requires collaborators to re-clone
+after a force push.

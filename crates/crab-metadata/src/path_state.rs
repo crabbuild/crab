@@ -14,7 +14,9 @@ mod codec;
 #[cfg(feature = "storage")]
 mod storage;
 
-use codec::{decode_layer, encode_layer};
+#[cfg(any(feature = "storage", test))]
+use codec::decode_layer;
+use codec::encode_layer;
 #[cfg(feature = "storage")]
 pub use storage::{
     load_path_state, load_path_state_checkpoint, load_path_state_checkpoint_record,
@@ -24,9 +26,6 @@ pub use storage::{
 const LAYER_MAGIC: &[u8; 8] = b"CRABPS02";
 const LAYER_VERSION: u32 = 2;
 const LAYER_HEADER_BYTES: usize = 24;
-const RECORD_FIXED_BYTES: usize = 48;
-const NODE_FIXED_BYTES: usize = 8;
-const CHILD_FIXED_BYTES: usize = 12;
 const MAX_AUTHOR_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_PATH_BYTES: usize = 1024 * 1024;
@@ -830,6 +829,7 @@ fn corrupt<T>(reason: &str) -> Result<T> {
     Err(corruption(reason))
 }
 
+#[cfg(any(feature = "storage", test))]
 fn corrupt_at<T>(path: &str, reason: &str) -> Result<T> {
     Err(MetadataError::CorruptObject {
         path: path.to_owned(),
@@ -843,6 +843,127 @@ mod tests {
     use crate::split_commit_graph::{
         CommitGraphDescriptor, CommitGraphLayer, CommitGraphLayerRef, CommitGraphRecord,
     };
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn path_state_byte_budget_rejects_before_excess_body_reads() {
+        use object_store::ObjectStoreExt;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        };
+
+        let graph = graph();
+        let inputs = (1..=2)
+            .map(|n| PathStateInput {
+                oid: [n; 20],
+                first_parent: (n == 2).then_some([1; 20]),
+                author: b"author".to_vec(),
+                author_seconds: i64::from(n),
+                message: b"change".to_vec(),
+                mutations: vec![PathStateMutation {
+                    path: b"file".to_vec(),
+                    present: true,
+                    reset: false,
+                }],
+            })
+            .collect();
+        let write = append_path_state(None, &graph, inputs).unwrap();
+        let observed = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&observed);
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_read_byte_observer(Arc::new(move |bytes| {
+                counter.fetch_add(bytes, Ordering::Relaxed);
+            }));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "bounded-path".to_owned());
+        upload_path_state(&store, &layout, &write).await.unwrap();
+        let descriptor_bytes = write.descriptor_bytes.len() as u64;
+        let layer = &write.layers[0];
+        let total = descriptor_bytes + layer.bytes.len() as u64;
+        for (budget, oversized_layer, expected_read) in [
+            (descriptor_bytes - 1, false, 0),
+            (total - 1, false, descriptor_bytes),
+            (total, true, descriptor_bytes),
+        ] {
+            if oversized_layer {
+                store
+                    .inner()
+                    .put(
+                        &layout.repo_path(&layer.reference.path),
+                        bytes::Bytes::from(vec![b'!'; layer.bytes.len() + 1]).into(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            observed.store(0, Ordering::Relaxed);
+            assert!(
+                load_path_state(&store, &layout, &write.descriptor_hash, &graph, budget)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                observed.load(Ordering::Relaxed),
+                expected_read,
+                "budget={budget}, oversized_layer={oversized_layer}"
+            );
+        }
+        upload_path_state(&store, &layout, &write).await.unwrap();
+        observed.store(0, Ordering::Relaxed);
+        let actual = load_path_state(&store, &layout, &write.descriptor_hash, &graph, total)
+            .await
+            .unwrap();
+        assert_eq!(actual, write.index);
+        assert_eq!(observed.load(Ordering::Relaxed), total);
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn rebuilding_path_state_repairs_corrupt_immutable_bytes() {
+        use object_store::ObjectStoreExt;
+        let graph = graph();
+        let inputs = (1..=2)
+            .map(|n| PathStateInput {
+                oid: [n; 20],
+                first_parent: (n == 2).then_some([1; 20]),
+                author: b"author".to_vec(),
+                author_seconds: i64::from(n),
+                message: b"change".to_vec(),
+                mutations: vec![PathStateMutation {
+                    path: b"file".to_vec(),
+                    present: true,
+                    reset: false,
+                }],
+            })
+            .collect();
+        let write = append_path_state(None, &graph, inputs).unwrap();
+        let store =
+            crab_storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "repair".to_owned());
+        upload_path_state(&store, &layout, &write).await.unwrap();
+        for path in [
+            layout.bulk_manifest_path("path-state", &write.descriptor_hash),
+            layout.repo_path(&write.layers[0].reference.path),
+        ] {
+            for size in [1, 4096] {
+                store
+                    .inner()
+                    .put(&path, bytes::Bytes::from(vec![b'!'; size]).into())
+                    .await
+                    .unwrap();
+                assert!(
+                    load_path_state(&store, &layout, &write.descriptor_hash, &graph, 1 << 20)
+                        .await
+                        .is_err()
+                );
+                upload_path_state(&store, &layout, &write).await.unwrap();
+                let actual =
+                    load_path_state(&store, &layout, &write.descriptor_hash, &graph, 1 << 20)
+                        .await
+                        .unwrap();
+                assert_eq!(actual, write.index);
+            }
+        }
+    }
 
     fn graph() -> SplitCommitGraph {
         let layer = CommitGraphLayer {

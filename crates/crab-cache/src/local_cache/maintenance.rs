@@ -7,7 +7,7 @@ use super::*;
 use crate::clean::{EntryKind, object_entry_kind};
 use crate::private_fs::{FileStat, PinnedRoot, check_cancelled, with_pinned_root};
 
-const OBJECT_FAMILIES: &[&str] = &["chunks", "xorbs", "shards", "ref-transactions"];
+const OBJECT_FAMILIES: &[&str] = &["chunks", "xorbs", "shards", "ref-transactions", "git-packs"];
 const MAX_CACHE_LRU_ENTRIES: usize = 1_000_000;
 
 impl LocalCache {
@@ -142,7 +142,7 @@ impl LocalCache {
         .await
     }
 
-    /// Verify private chunks, shards, and xorbs, removing only proven corrupt entries.
+    /// Verify private content-addressed files, removing only proven corrupt entries.
     ///
     /// Unknown and busy entries are excluded from checked totals. Operational
     /// failures return errors; they do not authorize deletion. Manifests and
@@ -200,6 +200,7 @@ impl LocalCache {
                     "shards",
                     "xorbs",
                     "ref-transactions",
+                    "git-packs",
                     "stages",
                     "manifests",
                 ],
@@ -213,6 +214,7 @@ impl LocalCache {
                             &mut stats.ref_transaction_bytes,
                             &mut stats.ref_transaction_count,
                         ),
+                        Some("git-packs") => (&mut stats.git_pack_bytes, &mut stats.git_pack_count),
                         Some("stages") => (&mut stats.stage_bytes, &mut stats.stage_count),
                         Some("manifests") => {
                             if path.extension().is_some_and(|ext| ext == "json") {
@@ -307,6 +309,7 @@ fn object_kind(path: &Path) -> Option<PruneObjectKind> {
         Some("shards") => Some(PruneObjectKind::Shard),
         Some("xorbs") => Some(PruneObjectKind::Xorb),
         Some("ref-transactions") => Some(PruneObjectKind::RefTransaction),
+        Some("git-packs") => Some(PruneObjectKind::GitPack),
         _ => None,
     }
 }
@@ -328,13 +331,13 @@ fn object_hash(path: &Path) -> Result<MerkleHash> {
         })
 }
 
-fn ref_transaction_hash(path: &Path) -> Result<blake3::Hash> {
+fn plain_blake3_hash(path: &Path) -> Result<blake3::Hash> {
     path.file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| blake3::Hash::from_hex(name).ok())
         .ok_or_else(|| CacheError::UnsafeRoot {
             path: path.display().to_string(),
-            reason: "ref transaction has no Blake3 filename".into(),
+            reason: "cache object has no Blake3 filename".into(),
         })
 }
 
@@ -385,6 +388,7 @@ fn evict_oldest(
             PruneObjectKind::Shard => stats.shards_evicted += 1,
             PruneObjectKind::Xorb => stats.xorbs_evicted += 1,
             PruneObjectKind::RefTransaction => stats.ref_transactions_evicted += 1,
+            PruneObjectKind::GitPack => stats.git_packs_evicted += 1,
         }
         stats.bytes_freed = stats.bytes_freed.saturating_add(bytes);
         if options.record_entries {
@@ -405,8 +409,11 @@ fn verify_file(
     cancel: &CancellationToken,
 ) -> Result<bool> {
     let bytes = file.metadata()?.len();
-    if kind == PruneObjectKind::RefTransaction {
-        let expected = ref_transaction_hash(path)?;
+    if matches!(
+        kind,
+        PruneObjectKind::RefTransaction | PruneObjectKind::GitPack
+    ) {
+        let expected = plain_blake3_hash(path)?;
         let mut actual = blake3::Hasher::new();
         let mut buffer = vec![0; 64 * 1024];
         let mut remaining = bytes;
@@ -443,9 +450,9 @@ fn verify_file(
     let limit = match kind {
         PruneObjectKind::Chunk => MAX_CACHE_CHUNK_BYTES,
         PruneObjectKind::Shard => MAX_CACHE_SHARD_BYTES,
-        PruneObjectKind::RefTransaction => {
+        PruneObjectKind::RefTransaction | PruneObjectKind::GitPack => {
             return Err(CacheError::Internal(
-                "ref transaction bypassed its native hash verifier".into(),
+                "plain-Blake3 object bypassed its native hash verifier".into(),
             ));
         }
         PruneObjectKind::Xorb => MAX_XORB_SIZE as u64,
@@ -486,6 +493,7 @@ mod tests {
             PruneObjectKind::Shard,
             PruneObjectKind::Xorb,
             PruneObjectKind::RefTransaction,
+            PruneObjectKind::GitPack,
         ] {
             let mut file = File::options().write(true).open(&path)?;
             let result = verify_file(&mut file, &path, kind, &CancellationToken::new());

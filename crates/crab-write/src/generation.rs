@@ -38,6 +38,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{Result, WriteError, catalog::publish_inventory, finish_after_cleanup};
 
+pub mod browse;
+
 const COMMIT_GRAPH_BATCH_SIZE: usize = 512;
 const PATH_STATE_CHECKPOINT_COMMITS: u32 = 32;
 
@@ -120,6 +122,59 @@ async fn ensure_readable_state(
     cancel: &CancellationToken,
     commit_graph: Option<CommitGraphMaintenance<'_>>,
 ) -> Result<()> {
+    with_generation_owner(store, layout, ttl, cancel, async {
+        if commit_graph.is_none() {
+            return make_catalog_readable(store, layout, ttl, cancel).await;
+        }
+        let (manifest, _) = manifest_store::read_manifest(store, layout).await?;
+        let Some(manifest) = make_readable(store, layout, ttl, manifest.pusher, cancel).await?
+        else {
+            return Ok(());
+        };
+        let Some(commit_graph) = commit_graph else {
+            return Ok(());
+        };
+        maintain_commit_graph(
+            store,
+            layout,
+            &manifest,
+            commit_graph.identity,
+            Arc::clone(&commit_graph.runtime),
+            commit_graph.options,
+            cancel,
+        )
+        .await?;
+        let (manifest, _) = manifest_store::read_manifest(store, layout).await?;
+        maintain_path_state(
+            store,
+            layout,
+            &manifest,
+            commit_graph.identity,
+            commit_graph.runtime,
+            commit_graph.options,
+            cancel,
+        )
+        .await
+        .map(drop)
+    })
+    .await
+}
+
+/// Run derived-index maintenance under one renewed owner and both GC writer fences.
+///
+/// Losing owner election is benign. The operation must observe `cancel`; all
+/// acquired leases are released before returning, including after cancellation.
+pub async fn with_generation_owner<F, E>(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    ttl: Duration,
+    cancel: &CancellationToken,
+    operation: F,
+) -> std::result::Result<(), E>
+where
+    F: std::future::Future<Output = std::result::Result<(), E>>,
+    E: From<WriteError> + From<CoordinationError>,
+{
     let mut context = PushLockAcquireContext::new(Arc::clone(store.inner()));
     let mut owner = match context
         .try_acquire_internal(layout.repo_prefix(), GIT_GENERATION_OWNER_RESOURCE, ttl)
@@ -137,47 +192,12 @@ async fn ensure_readable_state(
             Ok(repo) => repo,
             Err(error) => {
                 let _ = global.release().await;
-                return Err(error);
+                return Err(E::from(error));
             }
         };
-        let mut result = async {
-            if commit_graph.is_none() {
-                return make_catalog_readable(store, layout, ttl, cancel).await;
-            }
-            let (manifest, _) = manifest_store::read_manifest(store, layout).await?;
-            let Some(manifest) = make_readable(store, layout, ttl, manifest.pusher, cancel).await?
-            else {
-                return Ok(());
-            };
-            let Some(commit_graph) = commit_graph else {
-                return Ok(());
-            };
-            maintain_commit_graph(
-                store,
-                layout,
-                &manifest,
-                commit_graph.identity,
-                Arc::clone(&commit_graph.runtime),
-                commit_graph.options,
-                cancel,
-            )
-            .await?;
-            let (manifest, _) = manifest_store::read_manifest(store, layout).await?;
-            maintain_path_state(
-                store,
-                layout,
-                &manifest,
-                commit_graph.identity,
-                commit_graph.runtime,
-                commit_graph.options,
-                cancel,
-            )
-            .await
-            .map(drop)
-        }
-        .await;
+        let mut result = operation.await;
         for fence in [repo, global] {
-            result = result.and(fence.release().await);
+            result = result.and(fence.release().await.map_err(E::from));
         }
         result
     });
@@ -310,9 +330,7 @@ pub async fn maintain_commit_graph(
     if repository.generation() != manifest.generation {
         return Ok(false);
     }
-    let operation = repository.operation(OperationKind::History, cancel).await?;
-    let additions = collect_commit_graph_inputs(&operation, base.as_ref(), &roots).await;
-    let additions = operation.finish(additions).await?;
+    let additions = collect_commit_graph_inputs(&repository, base.as_ref(), &roots, cancel).await?;
     if !repository.is_current(cancel).await? {
         return Ok(false);
     }
@@ -812,9 +830,10 @@ fn commit_graph_roots(manifest: &Manifest) -> Result<Vec<[u8; 20]>> {
 }
 
 async fn collect_commit_graph_inputs(
-    operation: &OperationContext,
+    repository: &RemoteGitRepository,
     base: Option<&SplitCommitGraph>,
     roots: &[[u8; 20]],
+    cancel: &CancellationToken,
 ) -> std::result::Result<Vec<CommitGraphInput>, crab_remote_git::Error> {
     let mut pending = VecDeque::new();
     let mut queued = HashSet::new();
@@ -837,7 +856,11 @@ async fn collect_commit_graph_inputs(
         if requested.is_empty() {
             continue;
         }
-        let objects = operation.read_objects(&requested).await?;
+        // Each bounded batch drains its admission and read budget. A complete
+        // history must not exhaust one interactive operation's object limit.
+        let operation = repository.operation(OperationKind::History, cancel).await?;
+        let objects = operation.read_objects(&requested).await;
+        let objects = operation.finish(objects).await?;
         if objects.len() != requested.len() {
             return Err(crab_remote_git::Error::Corrupt {
                 stage: crab_remote_git::CorruptionStage::Commit,

@@ -175,6 +175,9 @@ jobs:
       CRAB_HTTP_CELL_TEST_BUCKET: crab-cell-runtime
       CRAB_HTTP_CELL_TEST_ENDPOINT: http://127.0.0.1:9000
       CRAB_HTTP_CELL_TEST_PREFIX: server-${{ github.run_id }}-${{ github.run_attempt }}
+      CRAB_CELL_TEST_BUCKET: crab-cell-runtime
+      CRAB_CELL_TEST_ENDPOINT: http://127.0.0.1:9000
+      CRAB_CELL_TEST_PREFIX: public-${{ github.run_id }}-${{ github.run_attempt }}
       RUSTFS_IMAGE: ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858
 
     steps:

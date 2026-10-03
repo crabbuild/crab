@@ -63,6 +63,11 @@ supplied object IDs rather than resolving the current branch. Branches,
 tags, and differently named destinations can appear in the same batch;
 deletions do not require LFS uploads.
 
+Before scanning history, direct pre-push reads all published remote tips from
+the v2 root and its transaction-consistent per-ref heads. This refs-only read
+does not download capsule Git payloads. If no v2 root exists, Crab reads the v1
+manifest; a present but corrupt v2 root is an error and never triggers fallback.
+
 The input limit is 16 MiB. Malformed records, duplicate destination refs,
 mixed object-ID formats, invalid UTF-8, and a missing final newline fail the
 command. Empty and deletion-only batches do not require cloud credentials.

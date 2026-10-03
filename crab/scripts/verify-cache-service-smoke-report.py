@@ -1582,10 +1582,10 @@ class Verifier:
 
     def verify_cli_dedup_traffic(self) -> None:
         record = self.record("cli_push_dedup", "cli-dedup-push")
-        self.check("cli-dedup-advisory-queries-bypassed", self.int_value(record, "dedup_queries_delta") == 0, {
+        self.check("cli-dedup-advisory-query-used", self.int_value(record, "dedup_queries_delta") > 0, {
             "dedup_queries_delta": record.get("dedup_queries_delta"),
         })
-        self.check("cli-dedup-advisory-known-chunks-empty", self.int_value(record, "dedup_known_chunks_delta") == 0, {
+        self.check("cli-dedup-advisory-known-chunks-returned", self.int_value(record, "dedup_known_chunks_delta") > 0, {
             "dedup_known_chunks_delta": record.get("dedup_known_chunks_delta"),
         })
         self.check(
@@ -1607,8 +1607,8 @@ class Verifier:
             {"shard_gets_delta": record.get("shard_gets_delta")},
         )
         self.check(
-            "cli-dedup-metadata-read",
-            self.int_value(record, "metadata_gets_delta") > 0,
+            "cli-dedup-retired-v1-metadata-unused",
+            self.int_value(record, "metadata_gets_delta") == 0,
             {"metadata_gets_delta": record.get("metadata_gets_delta")},
         )
         cacheable_keys = record.get("cacheable_origin_get_key_delta", {})
@@ -1645,16 +1645,16 @@ class Verifier:
         )
 
         run_id = self.report.get("run_id")
-        expected_manifest = f"e2e-cache-service/{run_id}/cli-dedup/manifest"
+        expected_root = f"e2e-cache-service/{run_id}/cli-dedup/v2/root"
         mutable_keys = record.get("mutable_origin_get_key_delta", {})
         if not isinstance(mutable_keys, dict):
             mutable_keys = {}
         self.check(
-            "cli-dedup-manifest-cas-origin-read",
-            int(mutable_keys.get(expected_manifest, 0)) > 0
+            "cli-dedup-root-cas-origin-read",
+            int(mutable_keys.get(expected_root, 0)) > 0
             and self.int_value(record, "mutable_origin_gets_delta") > 0,
             {
-                "expected_key": expected_manifest,
+                "expected_key": expected_root,
                 "actual": record.get("origin_get_key_delta"),
                 "mutable_actual": mutable_keys,
                 "origin_gets_delta": record.get("origin_gets_delta"),

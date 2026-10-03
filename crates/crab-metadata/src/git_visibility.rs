@@ -35,9 +35,6 @@ pub struct GitVisibilityEdit {
     /// Schema version of this object.
     pub version: u32,
     /// Ref tip used as the prior closure, if one exists.
-    ///
-    /// For a new destination ref this may be the tip of an existing visible
-    /// ref whose closure can be reused by catalog-bound compaction.
     pub old_oid: Option<String>,
     /// Ref tip made visible by the update.
     pub new_oid: String,
@@ -221,12 +218,27 @@ enum GitVisibilityClosure {
 
 const MAX_VISIBILITY_TRANSITIONS_PER_REF: usize = 64;
 const MAX_VISIBILITY_HISTORY_TRANSITIONS_PER_REF: usize = 1_000_000;
+// A checkpoint footer must bridge the largest scheduled incremental-fetch
+// interval without retaining the unbounded history body. Keep this separate
+// from the small direct-transition cache used by the hot in-memory planner.
+const MAX_CHECKPOINT_FOOTER_TRANSITIONS_PER_REF: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GitVisibilityTransition {
     from_oid: GitVisibilityOid,
     to_oid: GitVisibilityOid,
     objects: GitVisibilityClosure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitVisibilityCheckpointTransition {
+    /// Ref tip before this authenticated fast-forward transition.
+    pub from_oid: String,
+    /// Ref tip after this authenticated fast-forward transition.
+    pub to_oid: String,
+    /// Objects newly admitted by this transition.
+    pub objects: Vec<String>,
 }
 
 impl GitVisibilityClosure {
@@ -336,6 +348,92 @@ impl GitVisibilityClosure {
             Self::Bitmap(bitmap) => bitmap_positions(bitmap),
         }
     }
+
+    fn add_positions(&mut self, additions: &[u32], object_count: usize) -> Result<()> {
+        match self {
+            Self::Sparse(positions) => {
+                let mut merged =
+                    Vec::with_capacity(positions.len().saturating_add(additions.len()));
+                let mut left_index = 0;
+                let mut right_index = 0;
+                while left_index < positions.len() || right_index < additions.len() {
+                    let next = match (
+                        positions.get(left_index).copied(),
+                        additions.get(right_index).copied(),
+                    ) {
+                        (Some(left), Some(right)) if left <= right => {
+                            left_index += 1;
+                            if left == right {
+                                right_index += 1;
+                            }
+                            left
+                        }
+                        (Some(left), Some(right)) => {
+                            right_index += 1;
+                            right.min(left)
+                        }
+                        (Some(left), None) => {
+                            left_index += 1;
+                            left
+                        }
+                        (None, Some(right)) => {
+                            right_index += 1;
+                            right
+                        }
+                        (None, None) => break,
+                    };
+                    if merged.last().copied() != Some(next) {
+                        merged.push(next);
+                    }
+                }
+                *positions = merged;
+            }
+            Self::Bitmap(bitmap) => {
+                bitmap.resize(object_count.div_ceil(8), 0);
+                for position in additions {
+                    let position = usize::try_from(*position).map_err(|_| {
+                        corrupt("visibility closure position cannot be represented")
+                    })?;
+                    let byte = bitmap.get_mut(position / 8).ok_or_else(|| {
+                        corrupt("visibility closure position is outside its dictionary")
+                    })?;
+                    *byte |= 1 << (position % 8);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_positions(&mut self, removals: &[u32]) -> Result<()> {
+        match self {
+            Self::Sparse(positions) => {
+                for position in removals {
+                    let index = positions.binary_search(position).map_err(|_| {
+                        corrupt("visibility edit removes an object outside the prior closure")
+                    })?;
+                    positions.remove(index);
+                }
+            }
+            Self::Bitmap(bitmap) => {
+                for position in removals {
+                    let position = usize::try_from(*position).map_err(|_| {
+                        corrupt("visibility closure position cannot be represented")
+                    })?;
+                    let byte = bitmap.get_mut(position / 8).ok_or_else(|| {
+                        corrupt("visibility edit removes an object outside the prior closure")
+                    })?;
+                    let mask = 1 << (position % 8);
+                    if *byte & mask == 0 {
+                        return Err(corrupt(
+                            "visibility edit removes an object outside the prior closure",
+                        ));
+                    }
+                    *byte &= !mask;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Complete ref-rooted Git object visibility proof for one repository snapshot.
@@ -361,6 +459,26 @@ struct GitCatalogVisibilityTransition {
     from_ordinal: u32,
     to_ordinal: u32,
     objects: GitVisibilityClosure,
+}
+
+/// Ordinal transition fields used by compact capsule visibility proofs.
+///
+/// The capsule protocol owns the wire encoding; this crate only exposes the
+/// validated in-memory representation so the OID dictionary is not expanded
+/// into repeated hexadecimal strings on every ref transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitVisibilityOrdinalTransition {
+    pub(crate) from_ordinal: u32,
+    pub(crate) to_ordinal: u32,
+    pub(crate) objects: Vec<u32>,
+}
+
+pub(crate) struct GitVisibilityOrdinalParts {
+    pub(crate) objects: Vec<GitVisibilityOid>,
+    pub(crate) remap: Vec<u32>,
+    pub(crate) refs: BTreeMap<String, Vec<u32>>,
+    pub(crate) transitions: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
+    pub(crate) incremental_history: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
 }
 
 /// Catalog-bound visibility proof that keeps the large OID dictionary lazy.
@@ -842,6 +960,12 @@ fn validate_catalog_transitions(
 }
 
 impl GitVisibilityIndex {
+    /// Return the complete sorted SHA-1 dictionary for this visibility proof.
+    #[must_use]
+    pub fn objects(&self) -> &[GitVisibilityOid] {
+        &self.objects
+    }
+
     /// Build a normalized proof from ref-rooted object sets.
     pub fn new(
         generation: u64,
@@ -1083,6 +1207,18 @@ impl GitVisibilityIndex {
             .is_some_and(|oid| self.contains_in_ref(name, &oid))
     }
 
+    /// Return whether any ref closure contains a canonical hexadecimal object ID.
+    #[must_use]
+    pub fn contains_hex_in_any_ref(&self, oid: &str) -> bool {
+        decode_oid(oid).ok().is_some_and(|oid| {
+            self.positions.get(&oid).is_some_and(|position| {
+                self.refs
+                    .values()
+                    .any(|closure| closure.contains(*position))
+            })
+        })
+    }
+
     /// Return one ref closure as canonical hexadecimal IDs.
     #[must_use]
     pub fn objects_for_ref(&self, name: &str) -> Option<Vec<String>> {
@@ -1268,8 +1404,194 @@ impl GitVisibilityIndex {
         self.refs.values().map(GitVisibilityClosure::len).sum()
     }
 
-    #[cfg(feature = "storage")]
-    fn remove_ref(&mut self, name: &str) {
+    pub fn checkpoint_history(&self) -> BTreeMap<String, Vec<GitVisibilityCheckpointTransition>> {
+        self.incremental_history
+            .iter()
+            .map(|(name, transitions)| {
+                let transitions = transitions
+                    .iter()
+                    .map(|transition| self.checkpoint_transition(transition))
+                    .collect();
+                (name.clone(), transitions)
+            })
+            .collect()
+    }
+
+    fn checkpoint_transition(
+        &self,
+        transition: &GitVisibilityTransition,
+    ) -> GitVisibilityCheckpointTransition {
+        let mut objects = transition
+            .objects
+            .positions()
+            .into_iter()
+            .filter_map(|position| usize::try_from(position).ok())
+            .filter_map(|position| self.objects.get(position))
+            .map(encode_oid)
+            .collect::<Vec<_>>();
+        objects.sort_unstable();
+        GitVisibilityCheckpointTransition {
+            from_oid: encode_oid(&transition.from_oid),
+            to_oid: encode_oid(&transition.to_oid),
+            objects,
+        }
+    }
+
+    /// Return the bounded recent transition history used by warm fetches.
+    ///
+    /// Checkpoints retain the complete history in their body, but control-only
+    /// readers need only a recent suffix to avoid a visibility walk. Missing
+    /// older links deliberately make the reader fall back to the authenticated
+    /// catalog/traversal path.
+    pub fn recent_checkpoint_history(
+        &self,
+    ) -> BTreeMap<String, Vec<GitVisibilityCheckpointTransition>> {
+        self.incremental_history
+            .iter()
+            .map(|(name, transitions)| {
+                let start = transitions
+                    .len()
+                    .saturating_sub(MAX_CHECKPOINT_FOOTER_TRANSITIONS_PER_REF);
+                (
+                    name.clone(),
+                    transitions[start..]
+                        .iter()
+                        .map(|transition| self.checkpoint_transition(transition))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// Validate transition records before they are used as a control-only hint.
+    pub fn validate_checkpoint_history(
+        history: &BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>,
+    ) -> Result<()> {
+        for (name, transitions) in history {
+            if !name.starts_with("refs/") {
+                return Err(corrupt("checkpoint history contains an invalid ref name"));
+            }
+            if transitions.len() > MAX_CHECKPOINT_FOOTER_TRANSITIONS_PER_REF {
+                return Err(corrupt(
+                    "checkpoint history exceeds its footer transition bound",
+                ));
+            }
+            for transition in transitions {
+                validate_oid(&transition.from_oid)?;
+                validate_oid(&transition.to_oid)?;
+                validate_sorted_oids(&transition.objects, "checkpoint history")?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the dense dictionary and ordinal closures used by a compact
+    /// capsule checkpoint proof.
+    pub(crate) fn ordinal_parts(&self) -> Result<GitVisibilityOrdinalParts> {
+        self.validate()?;
+        // Ref updates append unseen objects to preserve existing ordinals; the wire
+        // snapshot still needs canonical OID order, so remap every ordinal here.
+        let (objects, remap) = canonical_ordinal_dictionary(&self.objects)?;
+        let refs = self
+            .refs
+            .iter()
+            .map(|(name, closure)| {
+                Ok((
+                    name.clone(),
+                    remap_ordinal_positions(closure.positions(), &remap)?,
+                ))
+            })
+            .collect::<Result<_>>()?;
+        let transitions = remap_ordinal_transitions(
+            ordinal_transitions(&self.transitions, &self.positions)?,
+            &remap,
+        )?;
+        let incremental_history = remap_ordinal_transitions(
+            ordinal_transitions(&self.incremental_history, &self.positions)?,
+            &remap,
+        )?;
+        Ok(GitVisibilityOrdinalParts {
+            objects,
+            remap,
+            refs,
+            transitions,
+            incremental_history,
+        })
+    }
+
+    /// Restore a validated visibility index from an ordinal proof.
+    pub(crate) fn from_ordinal_parts(
+        generation: u64,
+        pack_index_hash: impl Into<String>,
+        git_validation_digest: impl Into<String>,
+        objects: Vec<GitVisibilityOid>,
+        refs: BTreeMap<String, Vec<u32>>,
+        transitions: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
+        incremental_history: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
+    ) -> Result<Self> {
+        let positions = build_positions(&objects)?;
+        let object_count = objects.len();
+        let refs = refs
+            .into_iter()
+            .map(|(name, positions_for_ref)| {
+                Ok((
+                    name,
+                    GitVisibilityClosure::from_positions(positions_for_ref, object_count)?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let transitions = restore_ordinal_transitions(transitions, &objects, object_count)?;
+        let incremental_history =
+            restore_ordinal_transitions(incremental_history, &objects, object_count)?;
+        let index = Self {
+            version: GIT_VISIBILITY_INDEX_VERSION,
+            generation,
+            pack_index_hash: pack_index_hash.into(),
+            git_validation_digest: git_validation_digest.into(),
+            objects,
+            positions,
+            refs,
+            transitions,
+            incremental_history,
+        };
+        index.validate()?;
+        Ok(index)
+    }
+
+    pub(crate) fn restore_checkpoint_history(
+        &mut self,
+        history: &BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>,
+    ) -> Result<()> {
+        let mut restored = BTreeMap::new();
+        for (name, transitions) in history {
+            let mut restored_transitions = Vec::with_capacity(transitions.len());
+            for transition in transitions {
+                validate_sorted_oids(&transition.objects, "checkpoint history")?;
+                let positions = transition
+                    .objects
+                    .iter()
+                    .map(|oid| {
+                        let oid = decode_oid(oid)?;
+                        self.positions
+                            .get(&oid)
+                            .copied()
+                            .ok_or_else(|| corrupt("checkpoint history object is absent"))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                restored_transitions.push(GitVisibilityTransition {
+                    from_oid: decode_oid(&transition.from_oid)?,
+                    to_oid: decode_oid(&transition.to_oid)?,
+                    objects: GitVisibilityClosure::from_positions(positions, self.objects.len())?,
+                });
+            }
+            restored.insert(name.clone(), restored_transitions);
+        }
+        self.incremental_history = restored;
+        self.validate()
+    }
+
+    /// Remove one ref and every transition whose authority depends on it.
+    pub fn remove_ref(&mut self, name: &str) {
         self.refs.remove(name);
         self.transitions.remove(name);
         self.incremental_history.remove(name);
@@ -1280,24 +1602,109 @@ impl GitVisibilityIndex {
         self.apply_edit_with_base(name, edit, None)
     }
 
-    #[cfg(any(feature = "storage", test))]
+    /// Apply one authenticated ref visibility edit while retaining incremental history.
+    pub fn apply_ref_edit(&mut self, name: String, edit: &GitVisibilityEdit) -> Result<()> {
+        let base_ref = if self.refs.contains_key(&name) || edit.replaces {
+            None
+        } else {
+            edit.old_oid
+                .as_deref()
+                .map(decode_oid)
+                .transpose()?
+                .and_then(|old_oid| {
+                    self.positions.get(&old_oid).and_then(|position| {
+                        self.refs.iter().find_map(|(name, closure)| {
+                            closure.contains(*position).then(|| name.clone())
+                        })
+                    })
+                })
+        };
+        self.apply_edit_with_base(name, edit, base_ref.as_deref())
+    }
+
     fn apply_edit_with_base(
         &mut self,
         name: String,
         edit: &GitVisibilityEdit,
         base_ref: Option<&str>,
     ) -> Result<()> {
-        let prior = match base_ref {
-            Some(base_ref) => Some(
-                self.objects_for_ref(base_ref)
-                    .ok_or_else(|| corrupt("visibility base ref is absent from its prior proof"))?,
-            ),
-            None => self.objects_for_ref(&name),
+        edit.validate()?;
+
+        let mut closure = match base_ref {
+            Some(base_ref) => self
+                .refs
+                .get(base_ref)
+                .cloned()
+                .ok_or_else(|| corrupt("visibility base ref is absent from its prior proof"))?,
+            None => self
+                .refs
+                .get(&name)
+                .cloned()
+                .unwrap_or(GitVisibilityClosure::Sparse(Vec::new())),
         };
-        let closure = edit.apply(prior.as_deref())?;
-        let mut positions = Vec::with_capacity(closure.len());
-        for oid in closure {
-            let oid = decode_oid(&oid)?;
+        let old_position =
+            edit.old_oid
+                .as_deref()
+                .map(decode_oid)
+                .transpose()?
+                .map(|oid| {
+                    self.positions.get(&oid).copied().ok_or_else(|| {
+                        corrupt("visibility edit old tip is absent from its dictionary")
+                    })
+                })
+                .transpose()?;
+
+        if let Some(old_position) = old_position
+            && !closure.contains(old_position)
+        {
+            return Err(corrupt(
+                "visibility delta prior closure does not contain its old ref tip",
+            ));
+        }
+
+        let to_oid = decode_oid(&edit.new_oid)?;
+        let decoded_added = edit
+            .added
+            .iter()
+            .map(|encoded| decode_oid(encoded))
+            .collect::<Result<Vec<_>>>()?;
+        let removed = edit
+            .removed
+            .iter()
+            .map(|encoded| {
+                let oid = decode_oid(encoded)?;
+                self.positions
+                    .get(&oid)
+                    .copied()
+                    .ok_or_else(|| corrupt("visibility edit removes an unknown object"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if removed.iter().any(|position| !closure.contains(*position)) {
+            return Err(corrupt(
+                "visibility edit removes an object outside the prior closure",
+            ));
+        }
+        if !self.positions.contains_key(&to_oid) && !decoded_added.contains(&to_oid) {
+            return Err(corrupt(
+                "visibility edit new tip is absent from its dictionary and additions",
+            ));
+        }
+        let new_object_count = self
+            .objects
+            .len()
+            .checked_add(
+                decoded_added
+                    .iter()
+                    .filter(|oid| !self.positions.contains_key(*oid))
+                    .count(),
+            )
+            .ok_or_else(|| corrupt("visibility object dictionary size overflows"))?;
+        if new_object_count as u64 > MAX_GIT_VISIBILITY_OBJECTS {
+            return Err(corrupt("visibility object dictionary is too large"));
+        }
+        let mut added = Vec::with_capacity(decoded_added.len());
+        let previous_object_count = self.objects.len();
+        for oid in decoded_added {
             let position = match self.positions.get(&oid).copied() {
                 Some(position) => position,
                 None => {
@@ -1308,35 +1715,51 @@ impl GitVisibilityIndex {
                     position
                 }
             };
-            positions.push(position);
+            added.push(position);
         }
-        positions.sort_unstable();
-        let bitmap_len = self.objects.len().div_ceil(8);
-        for closure in self.refs.values_mut() {
-            if let GitVisibilityClosure::Bitmap(bitmap) = closure {
-                bitmap.resize(bitmap_len, 0);
-            }
-        }
-        for transitions in self.incremental_history.values_mut() {
-            for transition in transitions {
-                if let GitVisibilityClosure::Bitmap(bitmap) = &mut transition.objects {
+        added.sort_unstable();
+        added.dedup();
+
+        if self.objects.len() != previous_object_count {
+            let bitmap_len = self.objects.len().div_ceil(8);
+            for closure in self.refs.values_mut() {
+                if let GitVisibilityClosure::Bitmap(bitmap) = closure {
                     bitmap.resize(bitmap_len, 0);
                 }
             }
-        }
-        for transitions in self.transitions.values_mut() {
-            for transition in transitions {
-                if let GitVisibilityClosure::Bitmap(bitmap) = &mut transition.objects {
-                    bitmap.resize(bitmap_len, 0);
+            for transitions in self.incremental_history.values_mut() {
+                for transition in transitions {
+                    if let GitVisibilityClosure::Bitmap(bitmap) = &mut transition.objects {
+                        bitmap.resize(bitmap_len, 0);
+                    }
+                }
+            }
+            for transitions in self.transitions.values_mut() {
+                for transition in transitions {
+                    if let GitVisibilityClosure::Bitmap(bitmap) = &mut transition.objects {
+                        bitmap.resize(bitmap_len, 0);
+                    }
                 }
             }
         }
-        self.refs.insert(
-            name.clone(),
-            GitVisibilityClosure::from_positions(positions, self.objects.len())?,
-        );
+
+        if edit.replaces {
+            closure = GitVisibilityClosure::Sparse(Vec::new());
+        }
+        closure.remove_positions(&removed)?;
+        closure.add_positions(&added, self.objects.len())?;
+        let to_position = self
+            .positions
+            .get(&to_oid)
+            .copied()
+            .ok_or_else(|| corrupt("visibility edit new tip is absent from its dictionary"))?;
+        if !closure.contains(to_position) {
+            return Err(corrupt(
+                "visibility edit result does not contain its new ref tip",
+            ));
+        }
+        self.refs.insert(name.clone(), closure);
         let from_oid = edit.old_oid.as_deref().map(decode_oid).transpose()?;
-        let to_oid = decode_oid(&edit.new_oid)?;
         if edit.replaces || !edit.removed.is_empty() {
             self.transitions.remove(&name);
             self.incremental_history.remove(&name);
@@ -1347,29 +1770,12 @@ impl GitVisibilityIndex {
             self.incremental_history.remove(&name);
             return Ok(());
         };
-        let added = edit
-            .added
-            .iter()
-            .map(|oid| {
-                let oid = decode_oid(oid)?;
-                self.positions
-                    .get(&oid)
-                    .copied()
-                    .ok_or_else(|| corrupt("visibility transition object is absent"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let mut added = added;
-        added.sort_unstable();
-        added.dedup();
         let transitions = self.transitions.entry(name.clone()).or_default();
         for transition in transitions.iter_mut() {
-            let mut positions = transition.objects.positions();
-            positions.extend(added.iter().copied());
-            positions.sort_unstable();
-            positions.dedup();
             transition.to_oid = to_oid;
-            transition.objects =
-                GitVisibilityClosure::from_positions(positions, self.objects.len())?;
+            transition
+                .objects
+                .add_positions(&added, self.objects.len())?;
         }
         transitions.retain(|transition| transition.from_oid != from_oid);
         transitions.push(GitVisibilityTransition {
@@ -1392,8 +1798,8 @@ impl GitVisibilityIndex {
         Ok(())
     }
 
-    #[cfg(any(feature = "storage", test))]
-    fn bind_identity(
+    /// Bind a materialized proof to its exact immutable repository identity.
+    pub fn bind_identity(
         &mut self,
         generation: u64,
         pack_index_hash: &str,
@@ -1416,6 +1822,152 @@ impl GitVisibilityIndex {
         }
         union
     }
+}
+
+fn ordinal_transitions(
+    source: &BTreeMap<String, Vec<GitVisibilityTransition>>,
+    positions: &HashMap<GitVisibilityOid, u32>,
+) -> Result<BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>> {
+    source
+        .iter()
+        .map(|(name, transitions)| {
+            let transitions = transitions
+                .iter()
+                .map(|transition| {
+                    let from_ordinal = positions
+                        .get(&transition.from_oid)
+                        .copied()
+                        .ok_or_else(|| corrupt("visibility transition source is absent"))?;
+                    let to_ordinal = positions
+                        .get(&transition.to_oid)
+                        .copied()
+                        .ok_or_else(|| corrupt("visibility transition target is absent"))?;
+                    Ok(GitVisibilityOrdinalTransition {
+                        from_ordinal,
+                        to_ordinal,
+                        objects: transition.objects.positions(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok((name.clone(), transitions))
+        })
+        .collect()
+}
+
+fn canonical_ordinal_dictionary(
+    objects: &[GitVisibilityOid],
+) -> Result<(Vec<GitVisibilityOid>, Vec<u32>)> {
+    if objects.windows(2).all(|window| window[0] < window[1]) {
+        let remap = (0..objects.len())
+            .map(|position| {
+                u32::try_from(position)
+                    .map_err(|_| corrupt("visibility object dictionary is too large"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        return Ok((objects.to_vec(), remap));
+    }
+    let mut order = (0..objects.len()).collect::<Vec<_>>();
+    order.sort_unstable_by_key(|position| objects[*position]);
+    let mut remap = vec![0_u32; objects.len()];
+    let mut canonical = Vec::with_capacity(objects.len());
+    for (canonical_position, original_position) in order.into_iter().enumerate() {
+        let canonical_position = u32::try_from(canonical_position)
+            .map_err(|_| corrupt("visibility object dictionary is too large"))?;
+        remap[original_position] = canonical_position;
+        canonical.push(objects[original_position]);
+    }
+    Ok((canonical, remap))
+}
+
+fn remap_ordinal_positions(positions: Vec<u32>, remap: &[u32]) -> Result<Vec<u32>> {
+    let mut remapped = positions
+        .into_iter()
+        .map(|position| {
+            let position = usize::try_from(position)
+                .map_err(|_| corrupt("visibility ordinal cannot be represented"))?;
+            remap
+                .get(position)
+                .copied()
+                .ok_or_else(|| corrupt("visibility ordinal is outside its dictionary"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    remapped.sort_unstable();
+    remapped.dedup();
+    Ok(remapped)
+}
+
+fn remap_ordinal_transitions(
+    source: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
+    remap: &[u32],
+) -> Result<BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>> {
+    source
+        .into_iter()
+        .map(|(name, transitions)| {
+            let transitions = transitions
+                .into_iter()
+                .map(|mut transition| {
+                    transition.from_ordinal = remap_ordinal(
+                        transition.from_ordinal,
+                        remap,
+                        "visibility transition source ordinal",
+                    )?;
+                    transition.to_ordinal = remap_ordinal(
+                        transition.to_ordinal,
+                        remap,
+                        "visibility transition target ordinal",
+                    )?;
+                    transition.objects = remap_ordinal_positions(transition.objects, remap)?;
+                    Ok(transition)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok((name, transitions))
+        })
+        .collect()
+}
+
+fn remap_ordinal(position: u32, remap: &[u32], field: &str) -> Result<u32> {
+    let position =
+        usize::try_from(position).map_err(|_| corrupt(format!("{field} cannot be represented")))?;
+    remap
+        .get(position)
+        .copied()
+        .ok_or_else(|| corrupt(format!("{field} is outside its dictionary")))
+}
+
+fn restore_ordinal_transitions(
+    source: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
+    objects: &[GitVisibilityOid],
+    object_count: usize,
+) -> Result<BTreeMap<String, Vec<GitVisibilityTransition>>> {
+    source
+        .into_iter()
+        .map(|(name, transitions)| {
+            let transitions = transitions
+                .into_iter()
+                .map(|transition| {
+                    let from_oid = *objects
+                        .get(usize::try_from(transition.from_ordinal).map_err(|_| {
+                            corrupt("visibility transition source ordinal overflows")
+                        })?)
+                        .ok_or_else(|| corrupt("visibility transition source is out of range"))?;
+                    let to_oid = *objects
+                        .get(usize::try_from(transition.to_ordinal).map_err(|_| {
+                            corrupt("visibility transition target ordinal overflows")
+                        })?)
+                        .ok_or_else(|| corrupt("visibility transition target is out of range"))?;
+                    Ok(GitVisibilityTransition {
+                        from_oid,
+                        to_oid,
+                        objects: GitVisibilityClosure::from_positions(
+                            transition.objects,
+                            object_count,
+                        )?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok((name, transitions))
+        })
+        .collect()
 }
 
 fn build_positions(objects: &[GitVisibilityOid]) -> Result<HashMap<GitVisibilityOid, u32>> {
@@ -3938,11 +4490,65 @@ mod tests {
 
         assert!(index.validate().is_ok());
         assert!(index.contains_hex_in_ref("refs/heads/main", &"a".repeat(40)));
+        assert!(index.contains_hex_in_any_ref(&"a".repeat(40)));
+        assert!(!index.contains_hex_in_any_ref(&"c".repeat(40)));
         assert_eq!(index.objects_for_refs(["refs/heads/main"]).len(), 2);
         assert_eq!(
             index.object_count_for_refs(["refs/heads/main", "refs/heads/main"]),
             2
         );
+    }
+
+    #[test]
+    fn ordinal_parts_canonicalize_unsorted_dictionary_and_remap_closures() {
+        let objects = vec![
+            decode_oid(&"b".repeat(40)).expect("valid object"),
+            decode_oid(&"a".repeat(40)).expect("valid object"),
+            decode_oid(&"c".repeat(40)).expect("valid object"),
+        ];
+        let refs = BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            GitVisibilityClosure::from_positions(vec![0, 1, 2], objects.len())
+                .expect("valid closure"),
+        )]);
+        let transitions = BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            vec![GitVisibilityTransition {
+                from_oid: objects[0],
+                to_oid: objects[2],
+                objects: GitVisibilityClosure::from_positions(vec![1], objects.len())
+                    .expect("valid closure"),
+            }],
+        )]);
+        let index = GitVisibilityIndex::from_parts(
+            GIT_VISIBILITY_INDEX_VERSION,
+            4,
+            "a".repeat(64),
+            "c".repeat(64),
+            objects,
+            refs,
+            transitions,
+        )
+        .expect("unsorted in-memory dictionary is valid");
+
+        let parts = index
+            .ordinal_parts()
+            .expect("ordinal projection canonicalizes the dictionary");
+        assert_eq!(
+            parts.objects,
+            vec![
+                decode_oid(&"a".repeat(40)).expect("valid object"),
+                decode_oid(&"b".repeat(40)).expect("valid object"),
+                decode_oid(&"c".repeat(40)).expect("valid object"),
+            ]
+        );
+        assert_eq!(parts.remap, vec![1, 0, 2]);
+        assert_eq!(parts.refs["refs/heads/main"], vec![0, 1, 2]);
+        let transition = &parts.transitions["refs/heads/main"][0];
+        assert_eq!(transition.from_ordinal, 1);
+        assert_eq!(transition.to_ordinal, 2);
+        assert_eq!(transition.objects, vec![0]);
+        assert!(parts.incremental_history.is_empty());
     }
 
     #[test]
@@ -4264,6 +4870,44 @@ mod tests {
         index
             .validate()
             .expect("long visibility history remains valid");
+    }
+
+    #[test]
+    fn checkpoint_history_retains_one_fetch_interval() {
+        let oid = |value: usize| format!("{value:040x}");
+        let mut index = GitVisibilityIndex::new(
+            4,
+            "a".repeat(64),
+            "b".repeat(64),
+            BTreeMap::from([("refs/heads/main".to_owned(), vec![oid(0)])]),
+        )
+        .expect("valid initial visibility index");
+        let mut prior = BTreeSet::from([oid(0)]);
+
+        for value in 1..=520 {
+            let new_oid = oid(value);
+            let mut next = prior.clone();
+            next.insert(new_oid.clone());
+            let edit = GitVisibilityEdit::delta(Some(oid(value - 1)), new_oid, &prior, &next);
+            index
+                .apply_edit("refs/heads/main".to_owned(), &edit)
+                .expect("fast-forward visibility edit");
+            prior = next;
+        }
+
+        let mut histories = index.recent_checkpoint_history();
+        let history = histories
+            .remove("refs/heads/main")
+            .expect("main checkpoint history");
+        assert_eq!(history.len(), MAX_CHECKPOINT_FOOTER_TRANSITIONS_PER_REF);
+        assert_eq!(
+            history.first().map(|entry| entry.from_oid.as_str()),
+            Some("0000000000000000000000000000000000000008")
+        );
+        assert_eq!(
+            history.last().map(|entry| entry.to_oid.as_str()),
+            Some("0000000000000000000000000000000000000208")
+        );
     }
 
     #[test]

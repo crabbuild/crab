@@ -304,11 +304,12 @@ impl PushLockAcquireContext {
         loop {
             let known_existing = !self.known_paths.insert(path.clone());
             let result: Result<ContendedAcquire> = if known_existing {
-                try_acquire_contended(
+                acquire_contended(
                     &self.store,
                     &Path::from(path.as_str()),
                     target,
                     body.clone(),
+                    ContentionCheck::NonBlocking,
                     &mut self.backend_clock,
                 )
                 .await
@@ -317,11 +318,12 @@ impl PushLockAcquireContext {
                     Ok(etag) => Ok(ContendedAcquire::Acquired(etag)),
                     Err(object_store::Error::AlreadyExists { .. })
                     | Err(object_store::Error::Precondition { .. }) => {
-                        try_acquire_contended(
+                        acquire_contended(
                             &self.store,
                             &Path::from(path.as_str()),
                             target,
                             body.clone(),
+                            ContentionCheck::NonBlocking,
                             &mut self.backend_clock,
                         )
                         .await
@@ -664,7 +666,16 @@ async fn acquire_one(
     };
     let etag = match created {
         Some(etag) => etag,
-        None => match acquire_contended(store, &object_path, target, body, backend_clock).await? {
+        None => match acquire_contended(
+            store,
+            &object_path,
+            target,
+            body,
+            ContentionCheck::Authoritative,
+            backend_clock,
+        )
+        .await?
+        {
             ContendedAcquire::Acquired(etag) => etag,
             ContendedAcquire::Held {
                 holder,
@@ -776,6 +787,11 @@ enum ContendedAcquire {
     },
 }
 
+enum ContentionCheck {
+    Authoritative,
+    NonBlocking,
+}
+
 fn authoritative_expiry(payload: &PushLockPayload, last_modified: i64) -> Option<u64> {
     if payload.is_released() {
         return None;
@@ -817,6 +833,7 @@ async fn acquire_contended(
     object_path: &Path,
     ref_name: &str,
     body: Bytes,
+    check: ContentionCheck,
     backend_clock: &mut BackendClock,
 ) -> Result<ContendedAcquire> {
     let (existing_body, reclaim_etag, last_modified) =
@@ -850,6 +867,16 @@ async fn acquire_contended(
         }
     };
     if !existing.is_released() {
+        // A nonblocking contender may conservatively decline a diagnostic
+        // live lease. Reclamation still uses backend age and the version from
+        // this same read, so a successor cannot be overwritten after inspection.
+        if matches!(check, ContentionCheck::NonBlocking) && !existing.is_expired_at(unix_now()) {
+            let expires_at_unix = authoritative_expiry(&existing, last_modified);
+            return Ok(ContendedAcquire::Held {
+                holder: existing.holder,
+                expires_at_unix,
+            });
+        }
         let now = backend_clock.now(store, object_path).await?;
         if !lease_expired(&existing, last_modified, now) {
             let expires_at_unix = authoritative_expiry(&existing, last_modified);
@@ -875,44 +902,6 @@ async fn acquire_contended(
         }
         Err(source) => Err(store_error(object_path.as_ref(), source)),
     }
-}
-
-async fn try_acquire_contended(
-    store: &Arc<dyn ObjectStore>,
-    object_path: &Path,
-    ref_name: &str,
-    body: Bytes,
-    backend_clock: &mut BackendClock,
-) -> Result<ContendedAcquire> {
-    let (existing_body, _, last_modified) =
-        match get_with_version_and_modified(store, object_path).await {
-            Ok(existing) => existing,
-            Err(object_store::Error::NotFound { .. }) => {
-                return acquire_contended(store, object_path, ref_name, body, backend_clock).await;
-            }
-            Err(source) => return Err(store_error(object_path.as_ref(), source)),
-        };
-
-    let existing = match serde_json::from_slice::<PushLockPayload>(&existing_body) {
-        Ok(existing) => existing,
-        Err(_) => {
-            return Ok(ContendedAcquire::Held {
-                holder: String::new(),
-                expires_at_unix: None,
-            });
-        }
-    };
-    if !existing.is_released() && !existing.is_expired_at(unix_now()) {
-        let expires_at_unix = authoritative_expiry(&existing, last_modified);
-        return Ok(ContendedAcquire::Held {
-            holder: existing.holder,
-            expires_at_unix,
-        });
-    }
-
-    // A diagnostic expiry is only a hint. Reuse the normal acquisition path so
-    // reclaim still requires an authoritative backend clock and CAS.
-    acquire_contended(store, object_path, ref_name, body, backend_clock).await
 }
 
 fn has_cas_token(etag: &UpdateVersion) -> bool {
@@ -1288,6 +1277,7 @@ mod tests {
         fail_next_create: AtomicBool,
         fail_next_get: AtomicBool,
         fail_next_update: AtomicBool,
+        claim_before_update: AtomicBool,
     }
 
     impl RequestCountingStore {
@@ -1334,6 +1324,18 @@ mod tests {
                     store: "test",
                     source: "service unavailable: slow down".into(),
                 });
+            }
+            if matches!(&options.mode, PutMode::Update(_))
+                && self.claim_before_update.swap(false, Ordering::AcqRel)
+            {
+                let successor = serialize_payload(
+                    location.as_ref(),
+                    &PushLockPayload::new("successor", unix_now() + 60, 60),
+                )
+                .unwrap();
+                self.inner
+                    .put_opts(location, successor.into(), options.clone())
+                    .await?;
             }
             self.inner.put_opts(location, payload, options).await
         }
@@ -1439,6 +1441,7 @@ mod tests {
             fail_next_create: AtomicBool::new(false),
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
+            claim_before_update: AtomicBool::new(false),
         });
         let mut context = PushLockAcquireContext::new(Arc::clone(&store));
         for operation in 0..3 {
@@ -1482,6 +1485,7 @@ mod tests {
             fail_next_create: AtomicBool::new(false),
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
+            claim_before_update: AtomicBool::new(false),
         });
         let store: Arc<dyn ObjectStore> = metered.clone();
         let lock = PushLock::acquire_internal(
@@ -1513,6 +1517,7 @@ mod tests {
             fail_next_create: AtomicBool::new(false),
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
+            claim_before_update: AtomicBool::new(false),
         });
         let store: Arc<dyn ObjectStore> = metered.clone();
         let mut lock = PushLock::acquire_internal(
@@ -1541,6 +1546,7 @@ mod tests {
             fail_next_create: AtomicBool::new(false),
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
+            claim_before_update: AtomicBool::new(false),
         });
         let store: Arc<dyn ObjectStore> = metered.clone();
         let mut lock = PushLock::acquire_internal(
@@ -1789,6 +1795,7 @@ mod tests {
             fail_next_create: AtomicBool::new(false),
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
+            claim_before_update: AtomicBool::new(false),
         });
         let mut context = PushLockAcquireContext::new(metered_store);
 
@@ -1810,6 +1817,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn try_internal_reuses_released_tombstone_read_for_cas() {
+        let inner = Arc::new(InMemory::new());
+        let setup_store: Arc<dyn ObjectStore> = inner.clone();
+        PushLock::acquire_internal(
+            &setup_store,
+            "org/repo",
+            GIT_MANIFEST_RESOURCE,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap()
+        .release()
+        .await
+        .unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let metered_store: Arc<dyn ObjectStore> = Arc::new(RequestCountingStore {
+            inner,
+            requests: Arc::clone(&requests),
+            fail_next_create: AtomicBool::new(false),
+            fail_next_get: AtomicBool::new(false),
+            fail_next_update: AtomicBool::new(false),
+            claim_before_update: AtomicBool::new(false),
+        });
+        let mut context = PushLockAcquireContext::new(metered_store);
+
+        for expected_requests in [3, 2] {
+            requests.store(0, Ordering::Relaxed);
+            let lease = context
+                .try_acquire_internal("org/repo", GIT_MANIFEST_RESOURCE, Duration::from_secs(60))
+                .await
+                .unwrap();
+            let acquisition_requests = requests.load(Ordering::Relaxed);
+            lease.release().await.unwrap();
+            assert_eq!(acquisition_requests, expected_requests);
+        }
+    }
+
+    #[tokio::test]
+    async fn try_internal_reclaim_preserves_a_successor_that_wins_the_cas() {
+        let inner = Arc::new(InMemory::new());
+        let path = internal_lock_path("org/repo", GIT_MANIFEST_RESOURCE).unwrap();
+        inner
+            .put(
+                &Path::from(path.as_str()),
+                serialize_payload(&path, &PushLockPayload::released("previous"))
+                    .unwrap()
+                    .into(),
+            )
+            .await
+            .unwrap();
+        let metered = Arc::new(RequestCountingStore {
+            inner: inner.clone(),
+            requests: Arc::new(AtomicUsize::new(0)),
+            fail_next_create: AtomicBool::new(false),
+            fail_next_get: AtomicBool::new(false),
+            fail_next_update: AtomicBool::new(false),
+            claim_before_update: AtomicBool::new(true),
+        });
+        let mut context = PushLockAcquireContext::new(metered);
+        let result = context
+            .try_acquire_internal("org/repo", GIT_MANIFEST_RESOURCE, Duration::from_secs(60))
+            .await;
+        assert!(matches!(
+            result,
+            Err(CoordinationError::PushLockHeld { holder, .. }) if holder == "successor"
+        ));
+        let body = inner
+            .get(&Path::from(path.as_str()))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let payload = deserialize_payload(&path, &body).unwrap();
+        assert_eq!(payload.holder, "successor");
+        assert!(!payload.is_released());
+    }
+
+    #[tokio::test]
+    async fn try_internal_diagnostic_expiry_cannot_reclaim_a_backend_live_lease() {
+        let store = memory_store();
+        let path = internal_lock_path("org/repo", GIT_MANIFEST_RESOURCE).unwrap();
+        let body = serialize_payload(&path, &PushLockPayload::new("live-holder", 1, 60)).unwrap();
+        create_strict(&store, &Path::from(path), body)
+            .await
+            .unwrap();
+        let mut context = PushLockAcquireContext::new(store);
+
+        assert!(matches!(
+            context
+                .try_acquire_internal("org/repo", GIT_MANIFEST_RESOURCE, Duration::from_secs(60))
+                .await,
+            Err(CoordinationError::PushLockHeld { holder, .. }) if holder == "live-holder"
+        ));
+    }
+
+    #[tokio::test]
     async fn try_internal_contention_retries_transient_probe() {
         let inner = Arc::new(InMemory::new());
         let setup_store: Arc<dyn ObjectStore> = inner.clone();
@@ -1828,6 +1932,7 @@ mod tests {
             fail_next_create: AtomicBool::new(false),
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
+            claim_before_update: AtomicBool::new(false),
         });
         let metered_store: Arc<dyn ObjectStore> = metered.clone();
         let mut context = PushLockAcquireContext::new(metered_store);
@@ -1864,6 +1969,7 @@ mod tests {
             fail_next_create: AtomicBool::new(false),
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
+            claim_before_update: AtomicBool::new(false),
         });
         let metered_store: Arc<dyn ObjectStore> = metered.clone();
         let mut context = PushLockAcquireContext::new(metered_store);
@@ -1963,6 +2069,7 @@ mod tests {
             fail_next_create: AtomicBool::new(false),
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
+            claim_before_update: AtomicBool::new(false),
         });
         let mut context = PushLockAcquireContext::new(metered_store);
 

@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 SCHEMA = "crab.large-repository-rustfs"
-VERSION = "1.3"
+VERSION = "1.4"
 WORKSPACE_ROOT = Path.home() / "Workspace"
 DEFAULT_SOURCE = WORKSPACE_ROOT / "Github" / "kubernetes" / "kubernetes"
 DEFAULT_ROOT = WORKSPACE_ROOT / "CrabBuild" / "crabbuild-qualification"
@@ -131,6 +131,43 @@ def completed_replay_ordinal(pushes: list[dict[str, Any]]) -> int:
     if ordinals != expected:
         raise QualificationError("recorded push ordinals are not contiguous from the seed")
     return ordinals[-1]
+
+
+def capsule_owner_is_current(snapshots: list[dict[str, Any]]) -> bool:
+    if not snapshots:
+        return False
+    final = snapshots[-1]
+    generation = final.get("generation")
+    return (
+        all(snapshot.get("protocol") == "capsule-v2" for snapshot in snapshots)
+        and isinstance(generation, int)
+        and not isinstance(generation, bool)
+        and generation >= 0
+        and final.get("action") == "none"
+        and final.get("visibility") == "embedded"
+        and final.get("superseded") is False
+    )
+
+
+def normalize_capsule_acceleration_evidence(stages: dict[str, Any]) -> None:
+    for name, acceleration in stages.items():
+        if (
+            not name.startswith("acceleration_")
+            or not isinstance(acceleration, dict)
+            or acceleration.get("protocol") != "capsule-v2"
+            or "duration_ms" in acceleration
+        ):
+            continue
+        owner = stages.get(name.replace("acceleration_", "visibility_owner_", 1))
+        if not isinstance(owner, dict):
+            continue
+        duration_ms = owner.get("duration_ms")
+        if (
+            isinstance(duration_ms, int)
+            and not isinstance(duration_ms, bool)
+            and duration_ms >= 0
+        ):
+            acceleration["duration_ms"] = duration_ms
 
 
 def redact_text(value: str, secrets: Iterable[str]) -> str:
@@ -672,6 +709,7 @@ class LargeRepositoryQualification:
         ]
         self.command_index = max(log_indexes, default=len(report.get("commands", [])))
         self.report = report
+        normalize_capsule_acceleration_evidence(self.report.get("stages", {}))
         prior_error = self.report.get("error")
         self.report["status"] = "running"
         self.report["error"] = None
@@ -1250,17 +1288,6 @@ class LargeRepositoryQualification:
                     )
                 sweep[counter] = value
             locator_sweeps.append(sweep)
-        doctor = self.run_crab(
-            self.replay_repo,
-            ["doctor", "--metadb", "--json"],
-            f"acceleration diagnosis {stage}",
-            timeout=self.args.clone_timeout,
-        )
-        payload = json.loads(self.stdout(doctor))
-        data = payload.get("data", payload)
-        acceleration = data.get("acceleration")
-        if not isinstance(acceleration, dict):
-            raise QualificationError("doctor --metadb JSON is missing acceleration state")
         self.report["stages"][f"visibility_owner_{stage}"] = {
             "duration_ms": sum(run["duration_ms"] for run in owner_runs),
             "passes": len(owner_runs),
@@ -1294,6 +1321,36 @@ class LargeRepositoryQualification:
             ),
             "locator_sweep": locator_sweeps,
         }
+        if owner_snapshots[-1].get("protocol") == "capsule-v2":
+            final = owner_snapshots[-1]
+            state = {
+                "duration_ms": sum(run["duration_ms"] for run in owner_runs),
+                "protocol": "capsule-v2",
+                "generation": final.get("generation"),
+                "action": final.get("action"),
+                "visibility": final.get("visibility"),
+                "superseded": final.get("superseded"),
+                "owner_actions": actions,
+            }
+            self.report["stages"][f"acceleration_{stage}"] = state
+            self.check(
+                f"acceleration-current-{stage}",
+                capsule_owner_is_current(owner_snapshots),
+                state,
+            )
+            self.write_report()
+            return
+        doctor = self.run_crab(
+            self.replay_repo,
+            ["doctor", "--metadb", "--json"],
+            f"acceleration diagnosis {stage}",
+            timeout=self.args.clone_timeout,
+        )
+        payload = json.loads(self.stdout(doctor))
+        data = payload.get("data", payload)
+        acceleration = data.get("acceleration")
+        if not isinstance(acceleration, dict):
+            raise QualificationError("doctor --metadb JSON is missing acceleration state")
         self.report["stages"][f"acceleration_{stage}"] = {
             "duration_ms": doctor["duration_ms"],
             "manifest_generation": acceleration.get("manifest_generation"),
@@ -1927,6 +1984,30 @@ class LargeRepositoryQualification:
                 fsck=False,
             )
             completed = 0
+        if self.resume and completed == 0:
+            acceleration = self.report["stages"].get("acceleration_seed")
+            if not (
+                isinstance(acceleration, dict)
+                and acceleration.get("protocol") == "capsule-v2"
+                and acceleration.get("action") == "none"
+                and acceleration.get("visibility") == "embedded"
+                and acceleration.get("superseded") is False
+            ):
+                self.acceleration_snapshot("seed")
+            if "pack_inventory_seed" not in self.report["stages"]:
+                self.active_pack_snapshot("seed")
+            if not any(
+                snapshot.get("stage") == "seed"
+                for snapshot in self.report["store_snapshots"]
+            ):
+                self.store_snapshot("seed")
+            if not self.incremental_clone.is_dir():
+                self.clone(
+                    "incremental_seed_clone",
+                    self.incremental_clone,
+                    ["--single-branch", "--branch", "main"],
+                    fsck=False,
+                )
         checkpoints = replay_checkpoints(
             self.args.replay_count,
             self.args.incremental_fetch_interval,
@@ -1963,7 +2044,7 @@ class LargeRepositoryQualification:
                 # are, correctly, waiting on that same owner run.
                 self.prepare_fetch_fanout(ordinal, commit)
 
-    def final_clones(self) -> Path:
+    def final_clones(self) -> tuple[Path, Path]:
         cold = self.clone_root / "full-cold"
         warm = self.clone_root / "full-warm"
         filtered = self.clone_root / "blob-none"
@@ -1984,17 +2065,6 @@ class LargeRepositoryQualification:
             filtered,
             ["--filter=blob:none", "--no-checkout", "--single-branch", "--branch", "main"],
             fsck=False,
-            remove_after=True,
-        )
-        blob_none_telemetry = blob_none["telemetry"]
-        metadata_lookup_events = sum(
-            int(blob_none_telemetry.get(field, 0))
-            for field in ("locator_ordinal_metadata", "locator_ordinal_metadata_scan")
-        )
-        self.check(
-            "blob-none-ordinal-metadata-lookup",
-            metadata_lookup_events > 0,
-            {"metadata_lookup_events": metadata_lookup_events},
         )
         self.clone(
             "depth_1_clone",
@@ -2032,7 +2102,132 @@ class LargeRepositoryQualification:
             "incremental clone final fsck",
             timeout=2 * 60 * 60,
         )
-        return cold
+        return cold, filtered
+
+    def verify_blobless_clone(
+        self, clone: Path, source: Path, source_head: str, sampled_blob_oids: list[str]
+    ) -> dict[str, Any]:
+        tip = self.git_value(clone, ["rev-parse", "HEAD"], "blobless clone HEAD")
+        promisor_record = self.run_git(
+            clone,
+            ["config", "--bool", "--get", "remote.origin.promisor"],
+            "blobless clone promisor configuration",
+            check=False,
+        )
+        filter_record = self.run_git(
+            clone,
+            ["config", "--get", "remote.origin.partialclonefilter"],
+            "blobless clone filter configuration",
+            check=False,
+        )
+        promisor = self.stdout(promisor_record).strip()
+        filter_spec = self.stdout(filter_record).strip()
+        self.check(
+            "blob-none-promisor-config",
+            tip == source_head
+            and promisor_record["exit_code"] == 0
+            and filter_record["exit_code"] == 0
+            and promisor == "true"
+            and filter_spec == "blob:none",
+            {
+                "source_tip": source_head,
+                "clone_tip": tip,
+                "promisor": promisor,
+                "filter": filter_spec,
+            },
+        )
+
+        pack_dir = clone / ".git" / "objects" / "pack"
+        promisor_packs = sorted(path.name for path in pack_dir.glob("*.promisor"))
+        self.check(
+            "blob-none-pack-promisor-marker",
+            bool(promisor_packs),
+            {"promisor_packs": promisor_packs},
+        )
+
+        if not sampled_blob_oids:
+            raise QualificationError("partial-clone proof requires sampled source blobs")
+        source_rows = self.batch_check(
+            source, sampled_blob_oids, "source blobs for blobless-clone proof"
+        )
+        if any(row.split(" ", 2)[1] != "blob" for row in source_rows):
+            raise QualificationError("partial-clone proof sample contains a non-blob object")
+        omitted = self.run_git(
+            clone,
+            ["--no-replace-objects", "cat-file",
+             "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+            "confirm sampled promised blobs are absent before hydration",
+            input_data=("\n".join(sampled_blob_oids) + "\n").encode(),
+            extra_env={"GIT_NO_LAZY_FETCH": "1"},
+        )
+        missing_rows = self.stdout(omitted).splitlines()
+        expected_missing_rows = [f"{oid} missing" for oid in sampled_blob_oids]
+        self.check(
+            "blob-none-sampled-blobs-missing-before-hydration",
+            missing_rows == expected_missing_rows,
+            {
+                "sampled_blob_count": len(sampled_blob_oids),
+                "omitted_sampled_blob_count": sum(
+                    row.endswith(" missing") for row in missing_rows
+                ),
+                "unexpected_local_rows": [
+                    row for row in missing_rows if not row.endswith(" missing")
+                ],
+            },
+        )
+
+        blob_oid = sampled_blob_oids[0]
+        source_rows = [source_rows[0]]
+        source_body = self.run_git(
+            source,
+            ["--no-replace-objects", "cat-file", "blob", blob_oid],
+            "read source blob for lazy-fetch comparison",
+            timeout=self.args.clone_timeout,
+            extra_env={"GIT_NO_LAZY_FETCH": "1"},
+            hash_stdout=True,
+        )
+        hydrated_body = self.run_git(
+            clone,
+            ["--no-replace-objects", "cat-file", "blob", blob_oid],
+            "lazily hydrate promised blob",
+            timeout=self.args.clone_timeout,
+            hash_stdout=True,
+        )
+        source_digest = json.loads(self.stdout(source_body))
+        hydrated_digest = json.loads(self.stdout(hydrated_body))
+        self.check(
+            "blob-none-lazy-hydration-byte-identical",
+            hydrated_digest == source_digest,
+            {
+                "blob_oid": blob_oid,
+                "source": source_digest,
+                "hydrated": hydrated_digest,
+            },
+        )
+        hydrated_rows = self.batch_check(
+            clone, [blob_oid], "hydrated promised blob metadata"
+        )
+        self.check(
+            "blob-none-hydrated-blob-is-present",
+            hydrated_rows == source_rows,
+            {"source": source_rows, "hydrated": hydrated_rows},
+        )
+        self.run_git(
+            clone,
+            ["fsck", "--full"],
+            "blobless clone fsck after lazy hydration",
+            timeout=self.args.clone_timeout,
+        )
+        return {
+            "tip": tip,
+            "filter": filter_spec,
+            "sampled_blob_count": len(sampled_blob_oids),
+            "omitted_sampled_blob_count": len(missing_rows),
+            "blob_oid": blob_oid,
+            "hydrated_blob_sha256": hydrated_digest["sha256"],
+            "hydrated_blob_bytes": hydrated_digest["bytes"],
+            "promisor_packs": promisor_packs,
+        }
 
     def remote_refs(self) -> dict[str, str]:
         record = self.run_git(
@@ -2158,7 +2353,9 @@ class LargeRepositoryQualification:
             for name in advertised
         }
 
-    def verify_correctness(self, source_head: str, full_clone: Path) -> None:
+    def verify_correctness(
+        self, source_head: str, full_clone: Path, blobless_clone: Path
+    ) -> None:
         refs = self.remote_refs()
         main = refs.get("refs/heads/main")
         head = refs.get("HEAD")
@@ -2200,6 +2397,15 @@ class LargeRepositoryQualification:
         )
         sample = self.deterministic_object_sample(source_head)
         source_rows = self.batch_check(self.source, sample, "source object sample")
+        sampled_blob_oids = [
+            oid for oid, row in zip(sample, source_rows)
+            if row.split(" ", 2)[1] == "blob"
+        ]
+        if not sampled_blob_oids:
+            raise QualificationError("source object sample contains no blob for partial-clone proof")
+        blobless = self.verify_blobless_clone(
+            blobless_clone, self.source, source_head, sampled_blob_oids
+        )
         clone_rows = self.batch_check(full_clone, sample, "clone object sample")
         source_bytes = self.batch_contents_digest(self.source, sample, "source object bytes")
         clone_bytes = self.batch_contents_digest(full_clone, sample, "clone object bytes")
@@ -2241,6 +2447,7 @@ class LargeRepositoryQualification:
             "fingerprint": fingerprint,
             "full_fsck": True,
             "incremental_fsck": True,
+            "blobless_clone": blobless,
         }
         self.write_report()
 
@@ -2348,8 +2555,8 @@ class LargeRepositoryQualification:
             else:
                 self.setup_replay(base)
             self.replay(base, commits)
-            full_clone = self.final_clones()
-            self.verify_correctness(source_head, full_clone)
+            full_clone, blobless_clone = self.final_clones()
+            self.verify_correctness(source_head, full_clone, blobless_clone)
             self.verify_source_unchanged()
             if self.args.team_load:
                 self.run_team_load(source_head)

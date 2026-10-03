@@ -1728,6 +1728,22 @@ async fn thin_subset_pack_uses_only_client_proven_delta_bases() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn external_thin_subset_pack_keeps_the_proven_base_outside_the_pack() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let base = fixture_ref_delta_base(&fixture);
+
+    let generated = fixture
+        .repository
+        .generate_pack_with_external_bases(&[fixture.target], &[base], &CancellationToken::new())
+        .await
+        .expect("generate external-base thin subset pack");
+
+    assert_eq!(generated.object_count(), 1);
+    strict_thin_pack(generated.path(), &fixture.source_git_dir);
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn incoming_thin_pack_resolves_bases_through_bounded_remote_reads() {
     use crab_git::incoming_pack::{BaseObject, ReceiveLimits, quarantine};
 
@@ -2084,12 +2100,15 @@ async fn request_bound_generated_pack_cache_plans_once_across_runtimes() {
         first_repository
             .generate_pack_request_cached(
                 key,
-                async move {
+                |cancellation| async move {
                     first_polls.fetch_add(1, Ordering::SeqCst);
                     first_started.notify_one();
-                    first_release.notified().await;
+                    tokio::select! {
+                        () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled),
+                        () = first_release.notified() => {}
+                    }
                     first_producer_repository
-                        .generate_pack(&first_objects, &CancellationToken::new())
+                        .generate_pack(&first_objects, &cancellation)
                         .await
                 },
                 &CancellationToken::new(),
@@ -2105,10 +2124,10 @@ async fn request_bound_generated_pack_cache_plans_once_across_runtimes() {
         second_repository
             .generate_pack_request_cached(
                 key,
-                async move {
+                |cancellation| async move {
                     second_polls.fetch_add(1, Ordering::SeqCst);
                     second_producer_repository
-                        .generate_pack(&second_objects, &CancellationToken::new())
+                        .generate_pack(&second_objects, &cancellation)
                         .await
                 },
                 &CancellationToken::new(),
@@ -2143,7 +2162,7 @@ async fn request_bound_generated_pack_cache_plans_once_across_runtimes() {
     let warm_pack = warm_repository
         .generate_pack_request_cached(
             key,
-            async {
+            |_| async {
                 Err::<crab_remote_git::GeneratedPack, _>("warm cache hit polled its producer")
             },
             &CancellationToken::new(),

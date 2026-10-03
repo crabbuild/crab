@@ -61,6 +61,10 @@ pub struct FetchRequest {
     pub haves: Vec<ObjectId>,
     pub shallow: Vec<ObjectId>,
     pub deepen: Option<u32>,
+    /// Include commits newer than this committer timestamp.
+    pub deepen_since: Option<i64>,
+    /// Exclude commits reachable from these visible references.
+    pub deepen_not: Vec<String>,
     pub deepen_relative: bool,
     pub include_tags: bool,
     pub no_progress: bool,
@@ -237,6 +241,29 @@ pub fn parse_fetch(args: &[String]) -> Result<FetchRequest> {
                 }
                 request.deepen_relative = true;
             }
+            "deepen-since" => {
+                let raw = value.ok_or_else(|| protocol("deepen-since is missing its timestamp"))?;
+                let timestamp = raw
+                    .parse::<i64>()
+                    .map_err(|_| protocol("invalid deepen-since timestamp"))?;
+                if request.deepen_since.replace(timestamp).is_some() {
+                    return Err(protocol("duplicate deepen-since argument"));
+                }
+            }
+            "deepen-not" => {
+                let reference = value
+                    .filter(|value| {
+                        !value.is_empty() && !value.bytes().any(|byte| byte.is_ascii_whitespace())
+                    })
+                    .ok_or_else(|| protocol("deepen-not is missing its reference"))?;
+                if !request
+                    .deepen_not
+                    .iter()
+                    .any(|existing| existing == reference)
+                {
+                    request.deepen_not.push(reference.to_owned());
+                }
+            }
             "thin-pack" => {
                 if value.is_some() || !seen_single.insert(key.to_owned()) {
                     return Err(protocol("duplicate thin-pack argument"));
@@ -284,8 +311,7 @@ pub fn parse_fetch(args: &[String]) -> Result<FetchRequest> {
                         .collect(),
                 );
             }
-            "deepen-since" | "deepen-not" | "want-ref" | "packfile-uris" | "wait-for-done"
-            | "server-option" => {
+            "want-ref" | "packfile-uris" | "wait-for-done" | "server-option" => {
                 return Err(protocol(format!("unsupported fetch argument: {key}")));
             }
             _ => return Err(protocol(format!("unsupported fetch argument: {arg}"))),
@@ -296,6 +322,19 @@ pub fn parse_fetch(args: &[String]) -> Result<FetchRequest> {
     }
     if request.deepen_relative && request.deepen.is_none() {
         return Err(protocol("deepen-relative requires deepen"));
+    }
+    if request.deepen.is_some()
+        && (request.deepen_since.is_some() || !request.deepen_not.is_empty())
+    {
+        return Err(protocol(
+            "deepen cannot be combined with deepen-since or deepen-not",
+        ));
+    }
+    if request.deepen_relative && (request.deepen_since.is_some() || !request.deepen_not.is_empty())
+    {
+        return Err(protocol(
+            "deepen-relative cannot be combined with deepen-since or deepen-not",
+        ));
     }
     Ok(request)
 }
@@ -611,6 +650,47 @@ mod tests {
         ])
         .expect_err("relative deepen without depth must be rejected");
         assert!(error.to_string().contains("requires deepen"));
+    }
+
+    #[test]
+    fn parses_timestamp_and_excluded_ref_shallow_selectors() {
+        let request = parse_fetch(&[
+            format!("want {}", "a".repeat(40)),
+            "deepen-since 1700000000".to_owned(),
+            "deepen-not refs/heads/archive".to_owned(),
+            "deepen-not refs/heads/archive".to_owned(),
+        ])
+        .expect("supported shallow selectors should parse");
+        assert_eq!(request.deepen_since, Some(1_700_000_000));
+        assert_eq!(request.deepen_not, ["refs/heads/archive"]);
+    }
+
+    #[test]
+    fn rejects_conflicting_shallow_selectors() {
+        let error = parse_fetch(&[
+            format!("want {}", "a".repeat(40)),
+            "deepen 2".to_owned(),
+            "deepen-since 1700000000".to_owned(),
+        ])
+        .expect_err("depth and timestamp selectors must not be combined");
+        assert!(error.to_string().contains("cannot be combined"));
+    }
+
+    #[test]
+    fn rejects_duplicate_or_malformed_timestamp_selector() {
+        for args in [
+            vec![
+                format!("want {}", "a".repeat(40)),
+                "deepen-since nope".to_owned(),
+            ],
+            vec![
+                format!("want {}", "a".repeat(40)),
+                "deepen-since 1".to_owned(),
+                "deepen-since 2".to_owned(),
+            ],
+        ] {
+            assert!(parse_fetch(&args).is_err());
+        }
     }
     #[test]
     fn parses_object_id_strictly() {

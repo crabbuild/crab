@@ -62,6 +62,7 @@ crab doctor
 | Remote URL not configured | Run `crab init <url>` |
 | Bucket not found | Create the configured bucket or correct the remote URL |
 | Repository not initialized | Run `crab configure <REMOTE>` to create it |
+| Corrupt repository authority | Run `crab fsck`; `crab doctor` does not fall back from a corrupt capsule-v2 root |
 | Access denied | Grant the active identity the required bucket and repository-prefix permissions, then rerun `crab doctor` |
 | Large staging area warning | Run `git push` to upload, then `crab staging clean` |
 

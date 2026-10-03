@@ -9,8 +9,11 @@ pub const CHUNK_INDEX_DB_PATH: &str = ".crab/chunk_index_db/";
 
 #[cfg(feature = "storage")]
 pub mod bloom_prefilter;
+pub mod capsule_protocol;
 pub mod chunk_index;
 pub mod commit_graph;
+#[cfg(feature = "storage")]
+mod derived_index;
 pub mod error;
 #[cfg(feature = "file-index-reader")]
 pub mod file_index_lookup;

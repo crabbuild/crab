@@ -39,8 +39,39 @@ by a full SHA-1.
 One session binds refs, peeled refs, pack inventory, locator coverage, commit
 graph data, and the all-object visibility proof to one manifest generation and
 pack-index hash. Every want, traversal child, and lazy raw OID is admitted
-before its bytes are read. The standard Git process owns promisor pack
-installation and configuration on the local repository.
+before its bytes are read. On the terminal wire path, standard Git owns
+promisor pack installation and configuration on the local repository.
+
+The layered cold-clone optimization uses classic helper fetch to
+reuse authenticated pack bodies and indexes. Git sends capabilities before filter
+options, so that optimization cannot assume an unfiltered request. Classic
+capsule fetch retains the same parsed filter AST and invokes the canonical
+upload-pack planner for filtered, shallow, and hidden-ref-constrained requests. The helper installs
+filtered packs with `.promisor` markers; Git still owns partial-clone remote
+configuration. An unsupported filter fails closed instead of returning a
+complete pack. Footer-only discovery must load visibility before planning and
+reject changed captured ref positions rather than mixing generations.
+
+Direct installation stages every member before exposing any pack, verifies
+the downloaded index union against the authenticated visible-object proof,
+and checks captured ref and peeled tips. Repeated objects and identical packs
+are deduplicated for proof and installation, respectively. A checkpoint-only
+candidate is ineligible when newer ref transactions exist. Native connectivity
+remains required when physical packs retain extra unreachable objects. Git's
+[single keep-file contract](https://github.com/git/git/blob/v2.50.1/connected.c)
+selects an installed pack containing every requested
+tip; tips spanning packs require only a small tip pack, never a full repack.
+
+Classic fetch dispatch owns one renewable shared-reader ticket across full,
+constrained and raw-object reads, with release on success and failure. The
+direct installer cannot bypass admission or acquire separate tickets per layer.
+
+The helper session owns one Git runtime across wire and classic fetch. On EOF,
+protocol error, or cancellation it finishes or drops active operation contexts,
+then awaits runtime shutdown before exiting Tokio. Shared response-pack
+producers may outlive a cancelled waiter, but not their helper process. A lost
+producer or cache-reader lease cancels its child work and drains cleanup before
+holder-checked release; lease release must not race an unfinished writer.
 
 An unfiltered fresh fetch of exact visible ref targets may plan directly from
 the proof's complete per-ref closure. Negotiated, shallow, filtered, tag-expanded,

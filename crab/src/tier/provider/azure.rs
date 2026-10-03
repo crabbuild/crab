@@ -40,6 +40,7 @@
 //! All code in this module is gated behind `#[cfg(feature = "tier-azure")]`
 //! at the module level (see `provider/mod.rs`).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -98,7 +99,6 @@ fn build_azure_rule(rule: &TierRule, transition: &Transition) -> AzureRule {
 
     let mut base_blob = AzureBaseBlob::default();
     match action_key {
-        "tierToCool" => base_blob.tier_to_cool = Some(action),
         "tierToCold" => base_blob.tier_to_cold = Some(action),
         "tierToArchive" => base_blob.tier_to_archive = Some(action),
         _ => base_blob.tier_to_cool = Some(action),
@@ -199,6 +199,10 @@ struct AzureActions {
 /// tier action is populated per rule.
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[expect(
+    clippy::struct_field_names,
+    reason = "Azure's management schema requires the tierTo* field names"
+)]
 struct AzureBaseBlob {
     #[serde(skip_serializing_if = "Option::is_none")]
     tier_to_cool: Option<AzureBlobAction>,
@@ -234,8 +238,8 @@ static NO_TIERS: &[RestoreTier] = &[];
 
 // ── AzureLifecycleProvider ──────────────────────────────────────────
 
-/// Azure Blob lifecycle provider backed by `azure_mgmt_storage` and
-/// `azure_storage_blobs`.
+/// Azure Blob lifecycle provider backed by the Azure management and blob
+/// REST APIs through the Azure SDK credential contract.
 ///
 /// Implements both [`LifecycleProvider`] (lifecycle rule CRUD via ETag
 /// CAS) and [`RestoreBackend`] (Azure Archive rehydration with `High`
@@ -249,26 +253,18 @@ static NO_TIERS: &[RestoreTier] = &[];
 /// therefore carries all four, with `container` retained for
 /// blob-level operations in [`RestoreBackend::restore`].
 ///
-/// # Credential adapter
-///
-/// The real integration with `auth::CredentialProvider` is not yet
-/// wired — the `azure_core::Client` that `azure_mgmt_storage` needs
-/// requires a bearer-token provider that is currently only available
-/// once `auth::build_azure_credential` lands.
-///
-/// Until then, [`get`], [`put`], and [`cas_guard`] return a
-/// [`CrabError::Internal`] that names the missing integration, so
-/// a misconfigured deployment fails loudly rather than silently
-/// degrading to the previous "stub returns Ok(None)" shape. The
-/// provider's rendering path ([`render`]) works without an
-/// authenticated client; callers can produce the lifecycle JSON and
-/// apply it out-of-band via `az storage account management-policy
-/// create`.
+/// The runtime constructor obtains a credential from `azure_identity`.
+/// The infallible constructor remains useful for rendering and tests; any
+/// remote operation on such a value fails closed with a configuration error.
 pub struct AzureLifecycleProvider {
     storage_account: String,
     container: String,
     subscription_id: String,
     resource_group_name: String,
+    credential: Option<Arc<dyn azure_core::auth::TokenCredential>>,
+    http: reqwest::Client,
+    management_endpoint: String,
+    storage_endpoint: String,
 }
 
 impl AzureLifecycleProvider {
@@ -283,10 +279,14 @@ impl AzureLifecycleProvider {
         resource_group_name: String,
     ) -> Self {
         Self {
+            storage_endpoint: format!("https://{storage_account}.blob.core.windows.net"),
             storage_account,
             container,
             subscription_id,
             resource_group_name,
+            credential: None,
+            http: reqwest::Client::new(),
+            management_endpoint: "https://management.azure.com".to_owned(),
         }
     }
 
@@ -307,12 +307,51 @@ impl AzureLifecycleProvider {
                 key: "AZURE_RESOURCE_GROUP".into(),
                 origin: "environment".into(),
             })?;
-        Ok(Self::new(
+        let credential =
+            azure_identity::create_credential().map_err(|error| CrabError::Configuration {
+                key: "azure.credentials".to_owned(),
+                origin: format!("Azure authentication failed: {error}"),
+            })?;
+        let mut provider = Self::with_credential(
             storage_account,
             container,
             subscription_id,
             resource_group_name,
-        ))
+            credential,
+        );
+        if let Ok(endpoint) = std::env::var("AZURE_STORAGE_ENDPOINT")
+            && !endpoint.trim().is_empty()
+        {
+            provider.storage_endpoint = endpoint;
+        }
+        if let Ok(endpoint) = std::env::var("AZURE_MANAGEMENT_ENDPOINT")
+            && !endpoint.trim().is_empty()
+        {
+            provider.management_endpoint = endpoint;
+        }
+        Ok(provider)
+    }
+
+    /// Build an authenticated provider with an already configured Azure
+    /// credential. This is the injection point for Crab's auth resolver and
+    /// for provider integration tests.
+    pub fn with_credential(
+        storage_account: String,
+        container: String,
+        subscription_id: String,
+        resource_group_name: String,
+        credential: Arc<dyn azure_core::auth::TokenCredential>,
+    ) -> Self {
+        Self {
+            storage_endpoint: format!("https://{storage_account}.blob.core.windows.net"),
+            storage_account,
+            container,
+            subscription_id,
+            resource_group_name,
+            credential: Some(credential),
+            http: reqwest::Client::new(),
+            management_endpoint: "https://management.azure.com".to_owned(),
+        }
     }
 
     /// Return the storage account name.
@@ -341,25 +380,115 @@ impl AzureLifecycleProvider {
     #[cfg(test)]
     fn new_for_tests(storage_account: String, container: String) -> Self {
         Self {
+            storage_endpoint: format!("https://{storage_account}.blob.core.windows.net"),
             storage_account,
             container,
             subscription_id: "00000000-0000-0000-0000-000000000000".into(),
             resource_group_name: "test-rg".into(),
+            credential: None,
+            http: reqwest::Client::new(),
+            management_endpoint: "https://management.azure.com".to_owned(),
         }
     }
 }
 
-/// Error returned by the Azure SDK-facing paths until the
-/// `auth::build_azure_credential` shim lands. Keeps the message
-/// uniform across `get`, `put`, and `cas_guard` so operators see the
-/// same diagnostic regardless of which call they hit first.
-fn azure_auth_not_wired(op: &str) -> CrabError {
+/// Return a structured error for an unauthenticated provider.
+fn azure_missing_credential(op: &str) -> CrabError {
     CrabError::Internal(format!(
-        "Azure {op}: `auth::CredentialProvider` → `azure_core::TokenCredential` \
-         adapter is not yet wired. Apply the lifecycle JSON out-of-band via \
-         `az storage account management-policy create` or wait for the auth \
-         shim to land. See tier/provider/azure.rs for the SDK wiring plan."
+        "Azure {op}: no Azure TokenCredential is configured; construct the \
+         provider with AzureLifecycleProvider::from_env or \
+         AzureLifecycleProvider::with_credential"
     ))
+}
+
+impl AzureLifecycleProvider {
+    fn credential(&self, operation: &str) -> Result<Arc<dyn azure_core::auth::TokenCredential>> {
+        self.credential
+            .clone()
+            .ok_or_else(|| azure_missing_credential(operation))
+    }
+
+    fn management_url(&self) -> String {
+        format!(
+            "{}/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Storage/storageAccounts/{}/managementPolicies/default?api-version=2023-05-01",
+            self.management_endpoint.trim_end_matches('/'),
+            urlencoding::encode(&self.subscription_id),
+            urlencoding::encode(&self.resource_group_name),
+            urlencoding::encode(&self.storage_account),
+        )
+    }
+
+    fn blob_url(&self, path: &ObjectPath) -> String {
+        let mut url = self.storage_endpoint.trim_end_matches('/').to_owned();
+        url.push('/');
+        url.push_str(&urlencoding::encode(&self.container));
+        for segment in path.trim_matches('/').split('/') {
+            if segment.is_empty() {
+                continue;
+            }
+            url.push('/');
+            url.push_str(&urlencoding::encode(segment));
+        }
+        url
+    }
+
+    async fn management_token(&self, operation: &str) -> Result<String> {
+        let credential = self.credential(operation)?;
+        let token = credential
+            .get_token(&["https://management.azure.com/.default"])
+            .await
+            .map_err(|error| {
+                CrabError::Internal(format!("Azure {operation} authentication failed: {error}"))
+            })?;
+        Ok(format!("Bearer {}", token.token.secret()))
+    }
+
+    async fn storage_token(&self, operation: &str) -> Result<String> {
+        let credential = self.credential(operation)?;
+        let token = credential
+            .get_token(&["https://storage.azure.com/.default"])
+            .await
+            .map_err(|error| {
+                CrabError::Internal(format!("Azure {operation} authentication failed: {error}"))
+            })?;
+        Ok(format!("Bearer {}", token.token.secret()))
+    }
+}
+
+fn azure_rest_status_error(operation: &str, status: reqwest::StatusCode, body: &[u8]) -> CrabError {
+    let detail = String::from_utf8_lossy(body);
+    CrabError::Internal(format!(
+        "Azure {operation} failed with HTTP {status}: {detail}"
+    ))
+}
+
+fn is_azure_not_found(error: &azure_core::Error) -> bool {
+    matches!(
+        error.kind(),
+        azure_core::error::ErrorKind::HttpResponse { status, .. }
+            if *status == azure_core::StatusCode::NotFound
+    )
+}
+
+fn azure_blob_error(operation: &str, path: &ObjectPath, error: azure_core::Error) -> CrabError {
+    if is_azure_not_found(&error) {
+        CrabError::NotFound { path: path.clone() }
+    } else {
+        CrabError::Internal(format!("Azure {operation} for {path} failed: {error}"))
+    }
+}
+
+fn azure_timestamp(value: Option<&str>, path: &ObjectPath) -> Result<String> {
+    let Some(value) = value else {
+        return Ok(String::new());
+    };
+    let parsed = azure_core::date::parse_rfc1123(value)
+        .or_else(|_| azure_core::date::parse_rfc3339(value))
+        .map_err(|error| CrabError::CorruptObject {
+            path: path.clone(),
+            reason: format!("Azure access-tier-change-time is invalid: {error}"),
+        })?;
+    Ok(azure_core::date::to_rfc3339(&parsed))
 }
 
 #[async_trait]
@@ -373,45 +502,268 @@ impl LifecycleProvider for AzureLifecycleProvider {
     }
 
     async fn get(&self) -> Result<Option<RenderedLifecycle>> {
-        // The read path requires an authenticated `azure_core::Client`
-        // with a `TokenCredential`. That shim is tracked under
-        // `crab-storage-economy` and blocks on `auth::build_store`
-        // growing an Azure adapter. Until then we surface a structured
-        // error that names the missing piece — silently returning
-        // `Ok(None)` (the previous stub shape) made operators believe
-        // no policy was configured, which misleads the CAS loop in
-        // `tier::apply` into performing an unconditional PUT.
-        debug!(
-            account = %self.storage_account,
-            container = %self.container,
-            subscription_id = %self.subscription_id,
-            resource_group = %self.resource_group_name,
-            "Azure get lifecycle: auth shim not wired"
-        );
-        Err(azure_auth_not_wired("get lifecycle"))
+        let response = self
+            .http
+            .get(self.management_url())
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.management_token("get lifecycle").await?,
+            )
+            .send()
+            .await
+            .map_err(|error| {
+                CrabError::Internal(format!("Azure get lifecycle request failed: {error}"))
+            })?;
+        let status = response.status();
+        let body = response.bytes().await.map_err(|error| {
+            CrabError::Internal(format!("Azure get lifecycle response failed: {error}"))
+        })?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(azure_rest_status_error("get lifecycle", status, &body));
+        }
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|error| CrabError::CorruptObject {
+                path: format!("az://{}/lifecycle", self.storage_account),
+                reason: format!("Azure lifecycle response is not valid JSON: {error}"),
+            })?;
+        let rules = value
+            .get("properties")
+            .and_then(|properties| properties.get("policy"))
+            .and_then(|policy| policy.get("rules"))
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: format!("az://{}/lifecycle", self.storage_account),
+                reason: "Azure lifecycle response has no properties.policy.rules array".to_owned(),
+            })?;
+        if rules.is_empty() {
+            return Ok(None);
+        }
+        let mut rule_ids = Vec::with_capacity(rules.len());
+        for rule in rules {
+            let name = rule
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: format!("az://{}/lifecycle", self.storage_account),
+                    reason: "Azure lifecycle rule has no non-empty name".to_owned(),
+                })?;
+            rule_ids.push(name.to_owned());
+        }
+        let body =
+            serde_json::to_vec_pretty(&serde_json::json!({ "rules": rules })).map_err(|error| {
+                CrabError::Internal(format!(
+                    "Azure lifecycle response serialize failed: {error}"
+                ))
+            })?;
+        Ok(Some(RenderedLifecycle {
+            format: Format::Json,
+            body,
+            rule_ids,
+        }))
     }
 
-    async fn put(&self, doc: &RenderedLifecycle, _guard: Option<Guard>) -> Result<PutOutcome> {
+    async fn put(&self, doc: &RenderedLifecycle, guard: Option<Guard>) -> Result<PutOutcome> {
+        if doc.format != Format::Json {
+            return Err(CrabError::IncompatibleFormat {
+                required: "Azure lifecycle JSON".to_owned(),
+                found: format!("{:?}", doc.format),
+            });
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&doc.body).map_err(|error| CrabError::Configuration {
+                key: "tier.azure.lifecycle".to_owned(),
+                origin: format!("rendered lifecycle is not valid JSON: {error}"),
+            })?;
+        let rules = value
+            .get("rules")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| CrabError::Configuration {
+                key: "tier.azure.lifecycle".to_owned(),
+                origin: "rendered lifecycle is missing the rules array".to_owned(),
+            })?;
+        let payload = serde_json::json!({
+            "properties": {
+                "policy": {
+                    "rules": rules,
+                }
+            }
+        });
+        let expected_etag = match guard {
+            None => None,
+            Some(Guard::Etag(etag)) => Some(etag),
+            Some(Guard::Generation(_) | Guard::None) => {
+                return Err(CrabError::Configuration {
+                    key: "tier.azure.lifecycle.guard".to_owned(),
+                    origin: "Azure lifecycle writes require an ETag guard".to_owned(),
+                });
+            }
+        };
+        let mut request = self
+            .http
+            .put(self.management_url())
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.management_token("put lifecycle").await?,
+            )
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .json(&payload);
+        if let Some(etag) = expected_etag.as_deref() {
+            request = request.header(reqwest::header::IF_MATCH, etag);
+        } else {
+            request = request.header(reqwest::header::IF_NONE_MATCH, "*");
+        }
+        let response = request.send().await.map_err(|error| {
+            CrabError::Internal(format!("Azure put lifecycle request failed: {error}"))
+        })?;
+        let status = response.status();
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .map(|value| {
+                value.to_str().map(str::to_owned).map_err(|error| {
+                    CrabError::Internal(format!(
+                        "Azure put lifecycle returned invalid ETag: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let body = response.bytes().await.map_err(|error| {
+            CrabError::Internal(format!("Azure put lifecycle response failed: {error}"))
+        })?;
+        if status == reqwest::StatusCode::PRECONDITION_FAILED {
+            return Err(CrabError::CasConflict {
+                path: format!("az://{}/lifecycle", self.storage_account),
+                expected_etag,
+            });
+        }
+        if !status.is_success() {
+            return Err(azure_rest_status_error("put lifecycle", status, &body));
+        }
+        let etag = etag.ok_or_else(|| CrabError::CorruptObject {
+            path: format!("az://{}/lifecycle", self.storage_account),
+            reason: "Azure lifecycle PUT response has no ETag".to_owned(),
+        })?;
         debug!(
             account = %self.storage_account,
-            container = %self.container,
-            subscription_id = %self.subscription_id,
-            resource_group = %self.resource_group_name,
             rules = ?doc.rule_ids,
-            "Azure put lifecycle: auth shim not wired"
+            "Azure lifecycle applied"
         );
-        Err(azure_auth_not_wired("put lifecycle"))
+        Ok(PutOutcome {
+            new_guard: Guard::Etag(etag),
+            applied_at: now_rfc3339()?,
+        })
+    }
+
+    async fn delete(&self, guard: Option<Guard>) -> Result<PutOutcome> {
+        let etag = match guard {
+            Some(Guard::Etag(etag)) => etag,
+            None => {
+                return Err(CrabError::TierProviderUnsupported {
+                    provider: "Azure lifecycle deletion requires an ETag guard".to_owned(),
+                });
+            }
+            Some(Guard::Generation(_) | Guard::None) => {
+                return Err(CrabError::Configuration {
+                    key: "tier.azure.lifecycle.guard".to_owned(),
+                    origin: "Azure lifecycle deletion requires an ETag guard".to_owned(),
+                });
+            }
+        };
+        let response = self
+            .http
+            .delete(self.management_url())
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.management_token("delete lifecycle").await?,
+            )
+            .header(reqwest::header::IF_MATCH, etag.clone())
+            .send()
+            .await
+            .map_err(|error| {
+                CrabError::Internal(format!("Azure delete lifecycle request failed: {error}"))
+            })?;
+        let status = response.status();
+        let body = response.bytes().await.map_err(|error| {
+            CrabError::Internal(format!("Azure delete lifecycle response failed: {error}"))
+        })?;
+        if status == reqwest::StatusCode::PRECONDITION_FAILED {
+            return Err(CrabError::CasConflict {
+                path: format!("az://{}/lifecycle", self.storage_account),
+                expected_etag: Some(etag),
+            });
+        }
+        if status != reqwest::StatusCode::NOT_FOUND && !status.is_success() {
+            return Err(azure_rest_status_error("delete lifecycle", status, &body));
+        }
+        Ok(PutOutcome {
+            new_guard: Guard::None,
+            applied_at: now_rfc3339()?,
+        })
+    }
+
+    fn equivalent(
+        &self,
+        current: &RenderedLifecycle,
+        intended: &RenderedLifecycle,
+    ) -> Result<bool> {
+        if current.format != Format::Json || intended.format != Format::Json {
+            return Ok(false);
+        }
+        let current: serde_json::Value =
+            serde_json::from_slice(&current.body).map_err(|error| CrabError::CorruptObject {
+                path: format!("az://{}/lifecycle", self.storage_account),
+                reason: format!("current lifecycle is not valid JSON: {error}"),
+            })?;
+        let intended: serde_json::Value =
+            serde_json::from_slice(&intended.body).map_err(|error| CrabError::Configuration {
+                key: "tier.azure.lifecycle".to_owned(),
+                origin: format!("intended lifecycle is not valid JSON: {error}"),
+            })?;
+        Ok(current == intended)
     }
 
     async fn cas_guard(&self) -> Result<Option<Guard>> {
-        debug!(
-            account = %self.storage_account,
-            container = %self.container,
-            subscription_id = %self.subscription_id,
-            resource_group = %self.resource_group_name,
-            "Azure cas_guard: auth shim not wired"
-        );
-        Err(azure_auth_not_wired("cas_guard"))
+        let response = self
+            .http
+            .get(self.management_url())
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.management_token("cas_guard").await?,
+            )
+            .send()
+            .await
+            .map_err(|error| {
+                CrabError::Internal(format!("Azure cas_guard request failed: {error}"))
+            })?;
+        let status = response.status();
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .map(|value| {
+                value.to_str().map(str::to_owned).map_err(|error| {
+                    CrabError::Internal(format!("Azure cas_guard returned invalid ETag: {error}"))
+                })
+            })
+            .transpose()?;
+        let body = response.bytes().await.map_err(|error| {
+            CrabError::Internal(format!("Azure cas_guard response failed: {error}"))
+        })?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(azure_rest_status_error("cas_guard", status, &body));
+        }
+        let etag = etag.ok_or_else(|| CrabError::CorruptObject {
+            path: format!("az://{}/lifecycle", self.storage_account),
+            reason: "Azure lifecycle GET response has no ETag".to_owned(),
+        })?;
+        Ok(Some(Guard::Etag(etag)))
     }
 }
 
@@ -421,42 +773,149 @@ impl RestoreBackend for AzureLifecycleProvider {
         &self,
         path: &ObjectPath,
         tier: RestoreTier,
-        _duration: Duration,
+        duration: Duration,
     ) -> Result<RestoreHandle> {
-        // The Azure rehydration path uses `azure_storage_blobs`'
-        // `BlobClient::set_blob_tier` with a `RehydratePriority` header.
-        // That client needs an authenticated `StorageCredentials` which
-        // is blocked on the same auth-shim integration as the management
-        // policy path above. Mapping the intended tier is kept here so
-        // when the shim lands only the client construction need change.
+        // Azure rehydration is a Set Blob Tier request with an explicit
+        // priority. The SDK obtains and refreshes the storage bearer token
+        // through the same credential used by the management API.
         let priority = match tier {
-            RestoreTier::High => "High",
-            _ => "Standard",
+            RestoreTier::High => azure_storage_blobs::prelude::RehydratePriority::High,
+            RestoreTier::Standard => azure_storage_blobs::prelude::RehydratePriority::Standard,
+            RestoreTier::Bulk | RestoreTier::Expedited => {
+                return Err(CrabError::TierProviderUnsupported {
+                    provider: format!("Azure restore tier {tier:?}"),
+                });
+            }
         };
+        let credential = self.credential("restore")?;
+        let credentials = azure_storage::StorageCredentials::token_credential(credential);
+        let client = azure_storage_blobs::prelude::ClientBuilder::with_location(
+            azure_storage::CloudLocation::Custom {
+                account: self.storage_account.clone(),
+                uri: self.storage_endpoint.clone(),
+            },
+            credentials,
+        )
+        .blob_client(self.container.clone(), path.clone());
+        client
+            .set_blob_tier(azure_storage_blobs::prelude::AccessTier::Hot)
+            .rehydrate_priority(priority)
+            .await
+            .map_err(|error| azure_blob_error("restore", path, error))?;
         debug!(
             account = %self.storage_account,
             container = %self.container,
             key = %path,
-            priority = %priority,
-            "Azure restore: auth shim not wired"
+            priority = ?tier,
+            duration_secs = duration.as_secs(),
+            "Azure restore request submitted"
         );
-        Err(azure_auth_not_wired("restore"))
+        Ok(RestoreHandle {
+            id: format!("azure-restore-{path}"),
+        })
     }
 
     async fn state(&self, path: &ObjectPath) -> Result<RestoreState> {
-        // Same story as `restore` — this needs an authenticated
-        // `BlobClient::get_properties` call to read `AccessTier` and
-        // `AccessTierChangeTime`. Until the auth shim lands we fail
-        // loud rather than claim `NotRequested` on every archived blob
-        // (which would trick the hydrate pipeline into skipping the
-        // restore wait entirely).
-        debug!(
-            account = %self.storage_account,
-            container = %self.container,
-            key = %path,
-            "Azure restore state: auth shim not wired"
-        );
-        Err(azure_auth_not_wired("restore state"))
+        // Use a raw HEAD here because the pinned Blob SDK does not expose
+        // rehydrate-priority or access-tier-change-time response headers.
+        // Treat malformed tier metadata as corruption rather than skipping
+        // a required restore.
+        let response = self
+            .http
+            .head(self.blob_url(path))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                self.storage_token("restore state").await?,
+            )
+            .header("x-ms-version", "2023-11-03")
+            .send()
+            .await
+            .map_err(|error| {
+                CrabError::Internal(format!(
+                    "Azure restore state request failed for {path}: {error}"
+                ))
+            })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(CrabError::NotFound { path: path.clone() });
+        }
+        if !status.is_success() {
+            let body = response.bytes().await.map_err(|error| {
+                CrabError::Internal(format!(
+                    "Azure restore state response failed for {path}: {error}"
+                ))
+            })?;
+            return Err(azure_rest_status_error("restore state", status, &body));
+        }
+
+        let access_tier = response
+            .headers()
+            .get("x-ms-access-tier")
+            .map(|value| {
+                value
+                    .to_str()
+                    .map(str::to_owned)
+                    .map_err(|error| CrabError::CorruptObject {
+                        path: path.clone(),
+                        reason: format!("Azure access tier header is invalid: {error}"),
+                    })
+            })
+            .transpose()?;
+        let Some(access_tier) = access_tier else {
+            // The service can omit this header for an account's implicit
+            // default tier; those blobs are readable without rehydration.
+            return Ok(RestoreState::Ready);
+        };
+        if access_tier != "Archive" {
+            if !matches!(access_tier.as_str(), "Hot" | "Cool" | "Cold") {
+                return Err(CrabError::CorruptObject {
+                    path: path.clone(),
+                    reason: format!("Azure returned unknown access tier {access_tier}"),
+                });
+            }
+            return Ok(RestoreState::Ready);
+        }
+
+        let priority = response
+            .headers()
+            .get("x-ms-rehydrate-priority")
+            .map(|value| {
+                value
+                    .to_str()
+                    .map(str::to_owned)
+                    .map_err(|error| CrabError::CorruptObject {
+                        path: path.clone(),
+                        reason: format!("Azure rehydrate-priority header is invalid: {error}"),
+                    })
+            })
+            .transpose()?;
+        if priority.is_none() {
+            return Ok(RestoreState::NotRequested);
+        }
+        if !matches!(priority.as_deref(), Some("High" | "Standard")) {
+            return Err(CrabError::CorruptObject {
+                path: path.clone(),
+                reason: format!("Azure returned unknown rehydrate priority {priority:?}"),
+            });
+        }
+        let change_time = response
+            .headers()
+            .get("x-ms-access-tier-change-time")
+            .map(|value| {
+                value
+                    .to_str()
+                    .map(str::to_owned)
+                    .map_err(|error| CrabError::CorruptObject {
+                        path: path.clone(),
+                        reason: format!("Azure access-tier-change-time header is invalid: {error}"),
+                    })
+            })
+            .transpose()?;
+        let started_at = azure_timestamp(change_time.as_deref(), path)?;
+        Ok(RestoreState::InProgress {
+            started_at,
+            expected_ready_at: String::new(),
+        })
     }
 
     fn supported_tiers(&self, class: &StorageClass) -> &'static [RestoreTier] {
@@ -472,23 +931,126 @@ impl RestoreBackend for AzureLifecycleProvider {
 // ── Helper functions ────────────────────────────────────────────────
 
 /// Return the current time as an RFC 3339 string.
-///
-/// Currently unused — `put` errors before constructing an outcome.
-/// Retained so the eventual real PUT path reuses it without
-/// re-introducing the helper.
-#[allow(dead_code, reason = "reused when put() is wired against the auth shim")]
-fn now_rfc3339() -> String {
-    let now = std::time::SystemTime::now();
-    let duration = now
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}Z", duration.as_secs())
+fn now_rfc3339() -> Result<String> {
+    crab_types::time::now_rfc3339_millis()
+        .map_err(|error| CrabError::Internal(format!("Azure lifecycle timestamp failed: {error}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tier::provider::{Provider, TierPlan, TierRule, Transition};
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::extract::State;
+    use axum::http::{Request, StatusCode};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug)]
+    struct TestCredential;
+
+    #[async_trait::async_trait]
+    impl azure_core::auth::TokenCredential for TestCredential {
+        async fn get_token(
+            &self,
+            _scopes: &[&str],
+        ) -> azure_core::Result<azure_core::auth::AccessToken> {
+            let expires_on =
+                azure_core::date::parse_rfc3339("2099-01-01T00:00:00Z").map_err(|error| {
+                    azure_core::Error::with_message(
+                        azure_core::error::ErrorKind::DataConversion,
+                        || format!("test token timestamp: {error}"),
+                    )
+                })?;
+            Ok(azure_core::auth::AccessToken::new("test-token", expires_on))
+        }
+
+        async fn clear_cache(&self) -> azure_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct ArmRequests(Arc<Mutex<Vec<(String, String, String, String, Vec<u8>)>>>);
+
+    async fn arm_handler(
+        State(requests): State<ArmRequests>,
+        request: Request<Body>,
+    ) -> (StatusCode, [(String, String); 1], Body) {
+        let method = request.method().to_string();
+        let uri = request.uri().to_string();
+        let authorization = request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let if_match = request
+            .headers()
+            .get(reqwest::header::IF_MATCH)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let body = to_bytes(request.into_body(), 2 * 1024 * 1024)
+            .await
+            .unwrap_or_default()
+            .to_vec();
+        requests
+            .0
+            .lock()
+            .unwrap()
+            .push((method.clone(), uri, authorization, if_match, body));
+
+        match method.as_str() {
+            "GET" => (
+                StatusCode::OK,
+                [("etag".to_owned(), "\"v1\"".to_owned())],
+                Body::from(
+                    r#"{"properties":{"policy":{"rules":[{"enabled":true,"name":"user-cleanup","type":"Lifecycle","definition":{}}]}}}"#,
+                ),
+            ),
+            "PUT" => (
+                StatusCode::OK,
+                [("etag".to_owned(), "\"v2\"".to_owned())],
+                Body::from("{}"),
+            ),
+            "DELETE" => (
+                StatusCode::NO_CONTENT,
+                [("etag".to_owned(), "\"v3\"".to_owned())],
+                Body::empty(),
+            ),
+            _ => (
+                StatusCode::METHOD_NOT_ALLOWED,
+                [("etag".to_owned(), "\"v1\"".to_owned())],
+                Body::empty(),
+            ),
+        }
+    }
+
+    async fn test_arm_server() -> (String, ArmRequests, tokio::task::JoinHandle<()>) {
+        let requests = ArmRequests::default();
+        let app = Router::new()
+            .fallback(arm_handler)
+            .with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{address}"), requests, task)
+    }
+
+    fn authenticated_test_provider(endpoint: &str) -> AzureLifecycleProvider {
+        let mut provider = AzureLifecycleProvider::with_credential(
+            "account/name".into(),
+            "container".into(),
+            "subscription/id".into(),
+            "resource group".into(),
+            Arc::new(TestCredential),
+        );
+        provider.management_endpoint = endpoint.to_owned();
+        provider
+    }
 
     /// Helper to render a plan and return the JSON as a string.
     fn render_json(plan: &TierPlan) -> String {
@@ -739,16 +1301,71 @@ mod tests {
         assert_eq!(rendered.rule_ids, vec!["crab-test"]);
     }
 
-    // ── AzureLifecycleProvider: get surfaces auth-not-wired error ───
+    #[tokio::test]
+    async fn authenticated_lifecycle_reads_arm_policy_and_etag() {
+        let (endpoint, requests, server) = test_arm_server().await;
+        let provider = authenticated_test_provider(&endpoint);
+
+        let current = provider.get().await.unwrap().unwrap();
+        assert_eq!(current.rule_ids, vec!["user-cleanup"]);
+        assert_eq!(
+            provider.cas_guard().await.unwrap(),
+            Some(Guard::Etag("\"v1\"".into()))
+        );
+
+        let recorded = requests.0.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert!(recorded[0].0 == "GET" && recorded[0].2 == "Bearer test-token");
+        assert!(recorded[0].1.contains("managementPolicies/default"));
+        assert!(recorded[0].1.contains("subscription%2Fid"));
+        drop(recorded);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn authenticated_lifecycle_put_uses_if_match_and_arm_payload() {
+        let (endpoint, requests, server) = test_arm_server().await;
+        let provider = authenticated_test_provider(&endpoint);
+        let plan = TierPlan {
+            provider: Provider::Azure,
+            rules: vec![TierRule {
+                id: "crab-xorbs".into(),
+                prefix: ".crab/xorbs/".into(),
+                transitions: vec![cool_transition(30)],
+                noncurrent_expiration_days: None,
+                min_object_size_bytes: None,
+            }],
+            versioning_enabled: false,
+            object_lock_enabled: false,
+        };
+        let rendered = provider.render(&plan).unwrap();
+
+        let outcome = provider
+            .put(&rendered, Some(Guard::Etag("\"v1\"".into())))
+            .await
+            .unwrap();
+        assert_eq!(outcome.new_guard, Guard::Etag("\"v2\"".into()));
+
+        let recorded = requests.0.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        let payload: serde_json::Value = serde_json::from_slice(&recorded[0].4).unwrap();
+        assert_eq!(payload["properties"]["policy"]["rules"][0]["enabled"], true);
+        assert_eq!(recorded[0].2, "Bearer test-token");
+        assert_eq!(recorded[0].3, "\"v1\"");
+        drop(recorded);
+        server.abort();
+    }
+
+    // ── AzureLifecycleProvider: get requires a credential ───────────
     //
     // Previously this test asserted `get` returned `Ok(None)` because
     // the stub pretended no policy existed. That behavior was a foot-
     // gun: the `tier::apply` CAS loop would then perform an
     // unconditional PUT. The new implementation fails loud with a
-    // structured `Internal` error naming the missing adapter, so
+    // structured `Internal` error naming the missing credential, so
     // deployments surface the configuration gap immediately.
     #[tokio::test]
-    async fn provider_get_surfaces_auth_not_wired() {
+    async fn provider_get_requires_credential() {
         let provider =
             AzureLifecycleProvider::new_for_tests("testaccount".into(), "testcontainer".into());
         let err = provider.get().await.expect_err("get must fail loud");
@@ -756,17 +1373,17 @@ mod tests {
             CrabError::Internal(msg) => {
                 assert!(msg.contains("Azure"), "message names Azure: {msg}");
                 assert!(
-                    msg.contains("auth::CredentialProvider"),
-                    "message names the missing shim: {msg}"
+                    msg.contains("TokenCredential"),
+                    "message names the missing credential: {msg}"
                 );
             }
             other => panic!("expected Internal, got {other:?}"),
         }
     }
 
-    // ── AzureLifecycleProvider: put surfaces auth-not-wired error ───
+    // ── AzureLifecycleProvider: put requires a credential ───────────
     #[tokio::test]
-    async fn provider_put_surfaces_auth_not_wired() {
+    async fn provider_put_requires_credential() {
         let provider =
             AzureLifecycleProvider::new_for_tests("testaccount".into(), "testcontainer".into());
 
@@ -791,9 +1408,9 @@ mod tests {
         assert!(matches!(err, CrabError::Internal(_)));
     }
 
-    // ── AzureLifecycleProvider: cas_guard surfaces auth-not-wired ───
+    // ── AzureLifecycleProvider: cas_guard requires a credential ─────
     #[tokio::test]
-    async fn provider_cas_guard_surfaces_auth_not_wired() {
+    async fn provider_cas_guard_requires_credential() {
         let provider =
             AzureLifecycleProvider::new_for_tests("testaccount".into(), "testcontainer".into());
         let err = provider
@@ -835,9 +1452,9 @@ mod tests {
         );
     }
 
-    // ── RestoreBackend: restore surfaces auth-not-wired error ───────
+    // ── RestoreBackend: restore requires a credential ───────────────
     #[tokio::test]
-    async fn restore_surfaces_auth_not_wired() {
+    async fn restore_requires_credential() {
         let provider =
             AzureLifecycleProvider::new_for_tests("testaccount".into(), "testcontainer".into());
         let err = provider
@@ -851,9 +1468,9 @@ mod tests {
         assert!(matches!(err, CrabError::Internal(_)));
     }
 
-    // ── RestoreBackend: state surfaces auth-not-wired error ─────────
+    // ── RestoreBackend: state requires a credential ─────────────────
     #[tokio::test]
-    async fn restore_state_surfaces_auth_not_wired() {
+    async fn restore_state_requires_credential() {
         let provider =
             AzureLifecycleProvider::new_for_tests("testaccount".into(), "testcontainer".into());
         let err = provider

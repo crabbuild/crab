@@ -2,18 +2,21 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use crab_metadata::capsule_protocol::{
+    FileCatalogEntry, PointerCatalog, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
+};
 use crab_metadata::receipts::{
     CommittedChunkReceipt, OriginReceipt, RECEIPT_SCHEMA_VERSION, generation_file_index_digest,
 };
 use crab_metadata::remote_index::{RemoteIndexConfig, RemoteIndexWriter};
 use crab_metadata::value_codec::CommittedFileRecord;
 use crab_staging::shard_replay::{REPLAY_BATCH_ENTRIES, ShardReplaySpool};
-use crab_storage::{Store, StoreLayout};
+use crab_storage::{Store, StoreLayout, content_hash_from_path};
 use crab_xet::hash::MerkleHash;
 use crab_xet::reconstruction::{ChunkPlacementMap, build_file_terms};
 use crab_xet::shard::{
     FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo, PushShardSession,
-    XorbChunkSequenceEntry, XorbChunkSequenceHeader,
+    ShardReader, XorbChunkSequenceEntry, XorbChunkSequenceHeader,
 };
 use crab_xet::xorb::builder::XorbResult;
 use crab_xet::xorb::format::ChunkPlacement;
@@ -30,6 +33,13 @@ pub(super) struct UploadedViewCrabObjects {
     shards: Vec<(Vec<u8>, MerkleHash)>,
     placement: ChunkPlacementMap,
     payload_digests: HashMap<MerkleHash, [u8; 32]>,
+    catalog: PointerCatalog,
+}
+
+impl UploadedViewCrabObjects {
+    pub(super) fn catalog(&self) -> &PointerCatalog {
+        &self.catalog
+    }
 }
 
 pub(super) async fn upload_view_crab_objects(
@@ -39,6 +49,7 @@ pub(super) async fn upload_view_crab_objects(
 ) -> Result<UploadedViewCrabObjects> {
     let placement = placement_map(&objects.xorbs);
     let plan = build_view_shards(&objects.files, &objects.xorbs, &placement)?;
+    let catalog = build_pointer_catalog(&objects, &plan)?;
 
     for xorb in &objects.xorbs {
         store
@@ -60,7 +71,73 @@ pub(super) async fn upload_view_crab_objects(
             .iter()
             .map(|xorb| (xorb.hash, xorb.payload_digest))
             .collect(),
+        catalog,
     })
+}
+
+fn build_pointer_catalog(
+    objects: &ViewCrabObjects,
+    plan: &ViewShardPlan,
+) -> Result<PointerCatalog> {
+    let mut catalog = PointerCatalog::new();
+    for xorb in &objects.xorbs {
+        let mut placements = xorb.placements.iter().collect::<Vec<_>>();
+        placements.sort_by_key(|placement| placement.chunk_index);
+        catalog.insert_xorb(
+            xorb.hash.hex(),
+            XorbCatalogEntry::new(
+                xorb.bytes.len() as u64,
+                blake3::hash(&xorb.bytes).to_hex().to_string(),
+                placements
+                    .into_iter()
+                    .map(|placement| {
+                        XorbChunkEntry::new(placement.chunk_hash.hex(), placement.uncompressed_size)
+                    })
+                    .collect(),
+            ),
+        )?;
+    }
+    for (bytes, shard_hash) in &plan.shards {
+        let mut xorb_hashes = crate::receive::strict_xorb_references_from_shard(bytes)?
+            .keys()
+            .map(|key| {
+                content_hash_from_path(key, "xorbs")
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| {
+                        AuthServerError::Internal(
+                            "filtered view shard contains an invalid xorb key".to_owned(),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        xorb_hashes.sort_unstable();
+        catalog.insert_shard(
+            shard_hash.hex(),
+            ShardCatalogEntry::new(bytes.len() as u64, xorb_hashes),
+        )?;
+    }
+    for file in &objects.files {
+        let mut file_shard = None;
+        for (bytes, shard_hash) in &plan.shards {
+            let reader = ShardReader::from_bytes(Bytes::from(bytes.clone()), *shard_hash);
+            if reader.get_file_info(&file.file_hash)?.is_some() {
+                file_shard = Some(*shard_hash);
+                break;
+            }
+        }
+        let shard_hash = file_shard.ok_or_else(|| {
+            AuthServerError::Internal(format!(
+                "filtered view shard set omitted file {}",
+                file.file_hash.hex()
+            ))
+        })?;
+        catalog.insert_file(
+            file.file_hash.hex(),
+            FileCatalogEntry::new(file.size, shard_hash.hex()),
+        )?;
+    }
+    catalog.encode()?;
+    Ok(catalog)
 }
 
 fn placement_map(xorbs: &[XorbResult]) -> ChunkPlacementMap {
@@ -377,6 +454,7 @@ mod tests {
             shards: Vec::new(),
             placement: ChunkPlacementMap::new(),
             payload_digests: HashMap::new(),
+            catalog: PointerCatalog::new(),
         };
         let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
         manifest.shard_index_hash = "a".repeat(64);
@@ -427,6 +505,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(uploaded.shard_hashes.len(), 1);
+        assert_eq!(uploaded.catalog().files().len(), 1);
+        assert_eq!(uploaded.catalog().shards().len(), 1);
+        assert_eq!(uploaded.catalog().xorbs().len(), 1);
         assert!(
             store
                 .head(&ObjectPath::from(format!(
@@ -541,6 +622,7 @@ mod tests {
                 .iter()
                 .map(|xorb| (xorb.hash, xorb.payload_digest))
                 .collect(),
+            catalog: PointerCatalog::new(),
         };
         let (shard_index_hash, _, shard_index) =
             crab_metadata::manifests::compact_shard_index(1, &uploaded.shard_hashes).unwrap();

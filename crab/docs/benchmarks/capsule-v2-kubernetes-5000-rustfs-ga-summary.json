@@ -1,0 +1,1141 @@
+{
+  "bounded_frontier_full_replay": {
+    "run_id": "crab-capsule-ga-r3-20260928",
+    "started_at": "2026-09-28T05:54:29+00:00",
+    "finished_at": "2026-09-28T06:43:01+00:00",
+    "status": "failed",
+    "failure_scope": "Unchanged incremental-fetch request-count gate; all correctness and latency gates passed",
+    "backend": "RustFS 1.0.0 GA on Colima",
+    "source_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+    "provenance": {
+      "binary_sha256": "9e12ab8cde084c9ca2831b3b2ab8727ccd425e9a010409e0fcca05445a40b027",
+      "binary_unchanged": true,
+      "harness_sha256": "77501e88310cc44a606a8847a66643487a495663c42ded49349e8ac4f8f1d5f1",
+      "request_proxy_sha256": "bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879",
+      "report_sha256": "a351bdc6aab8b8147838448ba4f85c59326691517fe0b35653290b5f693e452c",
+      "requests_sha256": "97a0980ea68c5b75974e70e2e5691b6c73f309bef62ddfe1aff57b08b36aa11b",
+      "artifact_state": "Complete raw report and request log retained in the sibling r3 run directory and copied after completion"
+    },
+    "correctness": {
+      "incremental_pushes": 5000,
+      "incremental_fetches_before_repack": 10,
+      "one_new_local_pack_per_fetch": true,
+      "git_fetch_repack_events": 0,
+      "exact_tips_and_connectivity": "passed",
+      "seed_and_final_remote_crab_fsck": "passed",
+      "cold_and_warm_strict_full_git_fsck": "passed",
+      "sampled_blob_bytes_per_final_clone": 32,
+      "raw_log_matches_all_5001_pushes_and_ten_fetches": true,
+      "raw_log_5xx_responses": 0
+    },
+    "metrics": {
+      "seed_push_ms": 460544,
+      "push_latency_ms": {"mean": 255.56, "p50": 211, "p95": 516, "p99": 867, "max": 3464},
+      "push_requests": {"mean": 7.012, "p50": 6, "p95": 6, "p99": 40, "max": 42, "total": 35060},
+      "push_500_window_mean_ms_min": 226.11,
+      "push_500_window_mean_ms_max": 304.94,
+      "fetch_latency_ms": {"mean": 4810.3, "p50": 4274, "p95": 8655, "max": 8655},
+      "fetch_requests": {"mean": 32.8, "p50": 32, "p95": 34, "max": 34},
+      "cold_clone_ms": 48372,
+      "cold_clone_requests": 17,
+      "warm_clone_ms": 28589,
+      "warm_clone_requests": 15
+    },
+    "first_fetch_request_breakdown": {
+      "root_get": 1,
+      "ref_head_get": 1,
+      "checkpoint_control_range_get": 1,
+      "distinct_capsule_get": 24,
+      "ref_list": 2,
+      "read_admission_put": 2,
+      "replica_discovery_get": 1
+    },
+    "performance_gates": {
+      "push_mean_under_one_second": true,
+      "push_mean_under_ten_requests": true,
+      "fetch_p95_at_most_ten_seconds": true,
+      "fetch_p95_at_most_ten_requests": false
+    },
+    "scope_limits": [
+      "Shared-host timings are not an isolated matched-v1 comparison",
+      "Full 100 GiB Xet, fault/concurrency, product/provider parity and green CI remain open",
+      "v1 retirement is not qualified"
+    ]
+  },
+  "authenticated_cutpoint_full_replay": {
+    "run_id": "k8s-5000-ready-20260927-r3",
+    "status": "failed",
+    "error": "unchanged incremental-fetch performance gates failed; correctness passed",
+    "source_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+    "provenance": {
+      "candidate": "b56625cc0e3587f3ca02e73b6b56ea80634fd9c5",
+      "binary_sha256": "c0a36f2f86a3dd2ec62fb696ad738b1dcb8ad5ca6dcefa897c70afb18fa1e117",
+      "report_sha256": "3bb4edf66068781e0f4422a54d3e9bd24834a4f7039888904235b6183ca96cb2",
+      "requests_sha256": "d025d69f7492fda99c382d56c83fed16974500a88832a46baed6dfcbcb2e8440",
+      "harness_sha256": "6129b5902f28b900b39a4bfc22f366db34298f404c402b534b8930de53098fd7"
+    },
+    "correctness": {
+      "incremental_pushes": 5000,
+      "incremental_fetches_before_repack": 10,
+      "one_new_local_pack_per_fetch": true,
+      "exact_tips_and_connectivity": "passed",
+      "seed_and_final_remote_crab_fsck": "passed",
+      "cold_and_warm_strict_full_git_fsck": "passed",
+      "sampled_blob_bytes_per_final_clone": 32
+    },
+    "metrics": {
+      "seed_push_ms": 220635,
+      "push_mean_ms": 289.65,
+      "push_p95_ms": 634,
+      "push_last_500_mean_ms": 598.0,
+      "push_mean_origin_requests": 7.012,
+      "push_total_origin_requests": 35060,
+      "fetch_mean_ms": 6298.0,
+      "fetch_p95_ms": 16503,
+      "fetch_mean_origin_requests": 82.6,
+      "fetch_p95_origin_requests": 87,
+      "cold_clone_ms": 56024,
+      "warm_clone_ms": 56277,
+      "final_clone_origin_requests_each": 15
+    },
+    "performance_gates": {
+      "push_mean_under_one_second": true,
+      "push_mean_under_ten_requests": true,
+      "fetch_p95_under_ten_seconds": false,
+      "fetch_p95_at_most_ten_requests": false
+    },
+    "scope_limits": [
+      "Shared-host timings do not prove matched-v1 performance superiority",
+      "Full 100 GiB Xet, fault/concurrency, product/provider parity and green CI remain open",
+      "v1 retirement is not qualified"
+    ]
+  },
+  "fetch_read_window_negative_diagnostic": {
+    "run_id": "k8s-fetch-gap-500-20260928-r1",
+    "status": "failed",
+    "failure_scope": "Unchanged fetch latency and request-count performance gates; all correctness checks passed",
+    "candidate_change": "Unmerged direct-installer 256 KiB read-gap allowance; reverted after proving ordinary fetch uses protocol-v2 upload-pack",
+    "provenance": {
+      "binary_sha256": "96e70d2c391773319716225f88099bd0c52aac5ac32af79ab0bdad3cbb8aaea7",
+      "report_sha256": "f3abf0de32bf914b7a2b2c076bd5d9843e34a350b3c3b7af50600028b1a4b336",
+      "requests_sha256": "7a9fd1ca69bc3ca6077b4c1937982eb2de06bdbd8eccd4d4731a3006df90efbf"
+    },
+    "correctness": {
+      "individual_pushes": 500,
+      "incremental_fetch_before_repack": "passed",
+      "one_new_local_pack": true,
+      "exact_tips_and_connectivity": "passed",
+      "seed_and_final_remote_crab_fsck": "passed",
+      "cold_and_warm_strict_full_git_fsck": "passed",
+      "sampled_blob_bytes_per_final_clone": 32
+    },
+    "metrics": {
+      "push_mean_ms": 578.97,
+      "push_p95_ms": 2135,
+      "push_mean_origin_requests": 7.012,
+      "fetch_ms": 16805,
+      "fetch_origin_requests": 80,
+      "physical_capsule_sources": 24,
+      "range_gets_per_capsule_source": 3,
+      "non_capsule_requests": 8,
+      "git_fetch_remote_helper_ms": 4792.934,
+      "git_fetch_index_pack_ms": 3171.322,
+      "git_fetch_connectivity_ms": 11882.653
+    },
+    "scope_limits": "Shared host; no task-owned compilation during replay; candidate was not on the ordinary fetch path and is not retained in this PR"
+  },
+  "main_integration_follow_up": {
+    "run_id": "capsule-main-integration-ga-20260927-r1",
+    "started_at": "2026-09-27T18:58:36+00:00",
+    "finished_at": "2026-09-27T19:52:21+00:00",
+    "status": "failed",
+    "error": "qualification performance gates failed; see report metrics",
+    "correctness": {
+      "cold_clone_sampled_blob_bytes": "matched source",
+      "cold_clone_strict_full_git_fsck": "passed",
+      "expected_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+      "final_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+      "incremental_fetches": 10,
+      "remote_crab_fsck": "passed",
+      "sampled_blob_count": 32,
+      "seed_remote_crab_fsck": "passed",
+      "seed_strict_full_git_fsck": "passed",
+      "seed_tip": "76f1c595bafaa8db583d511c95b7e54790fd5ca5",
+      "warm_clone_sampled_blob_bytes": "matched source",
+      "warm_clone_strict_full_git_fsck": "passed",
+      "warm_clone_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1"
+    },
+    "metrics": {
+      "push_count": 5000,
+      "push_latency_ms": {
+        "max": 8291,
+        "mean": 300.11,
+        "p50": 220,
+        "p95": 655,
+        "p99": 1263
+      },
+      "push_object_store_requests": {
+        "max": 42,
+        "mean": 7.012,
+        "p50": 6,
+        "p95": 6,
+        "p99": 40,
+        "total": 35060,
+        "under_10_average": true
+      },
+      "fetch": {
+        "count": 10,
+        "latency_ms": {
+          "max": 15511,
+          "mean": 6829.6,
+          "p50": 5664,
+          "p95": 15511,
+          "p99": 15511
+        },
+        "max_new_local_packs": 1,
+        "new_local_pack_count": 10,
+        "object_store_requests": {
+          "max": 87,
+          "mean": 82.5,
+          "p50": 82,
+          "p95": 87,
+          "p99": 87
+        },
+        "request_body_bytes": 1928,
+        "response_body_bytes": 597377323
+      },
+      "performance_gates": {
+        "500_commit_fetch": {
+          "latency_p95_ms_lte_10000": false,
+          "requests_p95_lte_10": false,
+          "required_interval": 500,
+          "status": "failed"
+        },
+        "push_mean_latency_ms_under_1000": true,
+        "push_mean_requests_under_10": true,
+        "status": "failed"
+      }
+    },
+    "clones": [
+      {
+        "operation": "cold-final-clone",
+        "elapsed_ms": 32382,
+        "requests": 17,
+        "response_body_bytes": 1313413256
+      },
+      {
+        "operation": "warm-final-clone",
+        "elapsed_ms": 58661,
+        "requests": 17,
+        "response_body_bytes": 1313413257
+      }
+    ],
+    "provenance": {
+      "candidate": "7d31c33adc2a5431fde1f95f3fdf5ab1ce41656f",
+      "base": "219afe03d0616f37714b872a1f4b0e090812fb93",
+      "binary_sha256": "423518e95a1539aeeb85e881c86503f4c1e001e6fc814f5397a0ae223d2841e2",
+      "source_sha256": "c2b7758ff7f12f64da5442b8fbda6a7bf18be54a8fb5251bc619614ac3cfd60b",
+      "report_sha256": "98243f6eea55ea27c5eba23b3f2c648dfc96031ead9dc12efada0870883841f7",
+      "requests_sha256": "65d45ded9e07a4bbbb9363320b345276047f40917f80170b031f4b0fde1e733b",
+      "harness_sha256": "1a31f2c94d771d4090e81fc660a0832f51e37679fcbab1c89dbe170d6a6a02a7",
+      "meter_sha256": "bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879",
+      "retained_root": "/Volumes/Workspace/Github/kubernetes/crab-capsule-qualification/capsule-main-integration-ga-20260927-r1"
+    },
+    "request_audit": {
+      "incremental_fetch_requests": 825,
+      "seed_capsule_reads": 0,
+      "stable_layer_reads": 0,
+      "server_errors": 0,
+      "warm_clone_pack_body_reads": 3
+    },
+    "scope_limits": [
+      "Shared host, OS and backend caches not flushed",
+      "No task compilation or second bulk qualification during replay; read-only diagnostics overlapped",
+      "Warm cache unavailable: harness pre-created a 0755 root rejected by private-cache policy; native installer confirmed by Trace2, earlier wire-bypass attribution withdrawn",
+      "Not an isolated matched v1 comparison",
+      "Full Xet100GiB, fault/concurrency, product/provider parity and green CI remain open"
+    ]
+  },
+  "native_cache_harness_diagnostic": {
+    "run_id": "native-cache-fixed-20260927-r1",
+    "scope": "Same frozen binary and retained remote; actual qualification clone method with product-owned cache creation; separate from full replay",
+    "retained_root": "/Volumes/Workspace/Github/kubernetes/crab-capsule-qualification/native-cache-fixed-20260927-r1",
+    "binary_sha256": "423518e95a1539aeeb85e881c86503f4c1e001e6fc814f5397a0ae223d2841e2",
+    "report_sha256": "943f1fc703a31c2a8079381626986c4c5830c49e7e0c8883f9e64cb5e1361bb6",
+    "requests_sha256": "1a19ba23c92032480a4a2b0b93734eacf69f7544a097c1315fafcb085b5db4c5",
+    "probe_sha256": "514cf2419e3d063553a0da8ba71f128529570fc943de52f1a86cff5af3d93820",
+    "harness_sha256": "4446ca04cc7aac3a31c793046010479ae7e8fa3719624dff4f83c90bbd742c08",
+    "cold_ms": 40474,
+    "warm_ms": 50258,
+    "cold_requests": 17,
+    "warm_requests": 15,
+    "cold_origin_bytes": 1313413256,
+    "warm_origin_bytes": 55855815,
+    "cached_packs": 3,
+    "cached_bytes": 1257557204,
+    "cache_mode": "0700",
+    "exact_tips": true,
+    "cold_and_warm_strict_full_git_fsck": "passed",
+    "cache_reuse": "passed",
+    "latency_improvement_proved": false,
+    "scope_limits": "Shared host with other workloads; no task compilation during probe; does not replace replay, matched v1, Xet or other qualification gates"
+  },
+  "schema": "crab.capsule-protocol-ga-qualification-summary",
+  "version": 1,
+  "run_id": "capsule-v2-ga-2721-20260927-r1",
+  "status": "failed",
+  "error": "qualification performance gates failed; see report metrics",
+  "started_at": "2026-09-27T07:35:54+00:00",
+  "finished_at": "2026-09-27T08:20:26+00:00",
+  "environment": {
+    "host": "Apple M2 Max",
+    "logical_cpus": 12,
+    "memory_bytes": 34359738368,
+    "os": "macOS 26.5.2",
+    "architecture": "arm64",
+    "runtime": "Colima",
+    "rustfs_version": "1.0.0",
+    "rustfs_image": "rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858",
+    "container_cpus": 4,
+    "container_memory_bytes": 4294967296,
+    "container_restarts": 0,
+    "container_oom_killed": false
+  },
+  "provenance": {
+    "binary_unchanged": true,
+    "crab_sha256": "62ee1929ede2154d3d54e36f7d7975b49d4aab1ac7eaf1716b8f470c876932f6",
+    "crab_version": "crab 1.2.4",
+    "git_version": "git version 2.50.1 (Apple Git-155)",
+    "harness_sha256": "1a31f2c94d771d4090e81fc660a0832f51e37679fcbab1c89dbe170d6a6a02a7",
+    "request_proxy_sha256": "bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879",
+    "source_checkout_head": "c76c1c8ffc9901c38d3eb1e62be9c91b19ef6de2",
+    "uncommitted_candidate": true,
+    "report_sha256": "d32b06633379fa6ceb39ffddf27c35419b80062fdf196a9df8f7068bba4fd88f",
+    "requests_sha256": "aa1b808ccb42e01a882c74f0c4c9cc9c80260c778beb2929e5b73c4a10e05dc7"
+  },
+  "source": {
+    "repository": "kubernetes/kubernetes",
+    "head": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+    "base": "76f1c595bafaa8db583d511c95b7e54790fd5ca5",
+    "clean_after_run": true,
+    "shallow": false
+  },
+  "workload": {
+    "commits": 5000,
+    "fetch_interval": 500,
+    "repack_interval": 500,
+    "push_command": "crab push --json origin main:refs/heads/main",
+    "fetch_command": "git fetch origin",
+    "clone_command": "crab clone --lazy",
+    "fetch_before_repack": true
+  },
+  "correctness": {
+    "cold_clone_sampled_blob_bytes": "matched source",
+    "cold_clone_strict_full_git_fsck": "passed",
+    "expected_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+    "final_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1",
+    "incremental_fetches": 10,
+    "remote_crab_fsck": "passed",
+    "sampled_blob_count": 32,
+    "seed_remote_crab_fsck": "passed",
+    "seed_strict_full_git_fsck": "passed",
+    "seed_tip": "76f1c595bafaa8db583d511c95b7e54790fd5ca5",
+    "warm_clone_sampled_blob_bytes": "matched source",
+    "warm_clone_strict_full_git_fsck": "passed",
+    "warm_clone_tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1"
+  },
+  "metrics": {
+    "fetch": {
+      "count": 10,
+      "latency_ms": {
+        "max": 15948,
+        "mean": 7606.2,
+        "p50": 5427,
+        "p95": 15948,
+        "p99": 15948
+      },
+      "max_new_local_packs": 1,
+      "new_local_pack_count": 10,
+      "object_store_requests": {
+        "max": 90,
+        "mean": 82.7,
+        "p50": 82,
+        "p95": 90,
+        "p99": 90
+      },
+      "request_body_bytes": 1930,
+      "response_body_bytes": 597444243
+    },
+    "git_fetch_repack_events": [],
+    "incremental_push_count": 5000,
+    "performance_gates": {
+      "500_commit_fetch": {
+        "latency_p95_ms_lte_10000": false,
+        "requests_p95_lte_10": false,
+        "required_interval": 500,
+        "status": "failed"
+      },
+      "push_mean_latency_ms_under_1000": true,
+      "push_mean_requests_under_10": true,
+      "status": "failed"
+    },
+    "push_latency_ms": {
+      "max": 4663,
+      "mean": 258.1,
+      "p50": 208,
+      "p95": 531,
+      "p99": 967
+    },
+    "push_object_store_requests": {
+      "max": 42,
+      "mean": 7.012,
+      "p50": 6,
+      "p95": 6,
+      "p99": 40,
+      "total": 35060,
+      "under_10_average": true
+    },
+    "push_windows": [
+      {
+        "children_max_rss": 104595456,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 500,
+        "latency_ms": {
+          "max": 1913,
+          "mean": 296.06,
+          "p50": 215,
+          "p95": 680,
+          "p99": 1182
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 215593164,
+        "resource_sample_count": 1,
+        "response_body_bytes": 353407017,
+        "start_ordinal": 1,
+        "system_cpu_ms": 90,
+        "user_cpu_ms": 30
+      },
+      {
+        "children_max_rss": 103399424,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 1000,
+        "latency_ms": {
+          "max": 1738,
+          "mean": 262.65,
+          "p50": 207,
+          "p95": 519,
+          "p99": 842
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 122025498,
+        "resource_sample_count": 1,
+        "response_body_bytes": 195217701,
+        "start_ordinal": 501,
+        "system_cpu_ms": 100,
+        "user_cpu_ms": 30
+      },
+      {
+        "children_max_rss": 35946496,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 1500,
+        "latency_ms": {
+          "max": 1072,
+          "mean": 241.36,
+          "p50": 206,
+          "p95": 490,
+          "p99": 746
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 182802336,
+        "resource_sample_count": 1,
+        "response_body_bytes": 298030413,
+        "start_ordinal": 1001,
+        "system_cpu_ms": 10,
+        "user_cpu_ms": 10
+      },
+      {
+        "children_max_rss": 100171776,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 2000,
+        "latency_ms": {
+          "max": 1202,
+          "mean": 238.44,
+          "p50": 206,
+          "p95": 433,
+          "p99": 701
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 143633003,
+        "resource_sample_count": 1,
+        "response_body_bytes": 231300053,
+        "start_ordinal": 1501,
+        "system_cpu_ms": 70,
+        "user_cpu_ms": 30
+      },
+      {
+        "children_max_rss": 107069440,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 2500,
+        "latency_ms": {
+          "max": 2954,
+          "mean": 266.75,
+          "p50": 206,
+          "p95": 605,
+          "p99": 1092
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 188146681,
+        "resource_sample_count": 1,
+        "response_body_bytes": 307955812,
+        "start_ordinal": 2001,
+        "system_cpu_ms": 70,
+        "user_cpu_ms": 30
+      },
+      {
+        "children_max_rss": 49889280,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 3000,
+        "latency_ms": {
+          "max": 958,
+          "mean": 222.57,
+          "p50": 201,
+          "p95": 408,
+          "p99": 571
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 167345627,
+        "resource_sample_count": 1,
+        "response_body_bytes": 267934550,
+        "start_ordinal": 2501,
+        "system_cpu_ms": 20,
+        "user_cpu_ms": 20
+      },
+      {
+        "children_max_rss": 106266624,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 3500,
+        "latency_ms": {
+          "max": 1552,
+          "mean": 244.45,
+          "p50": 205,
+          "p95": 519,
+          "p99": 812
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 206209686,
+        "resource_sample_count": 1,
+        "response_body_bytes": 338923425,
+        "start_ordinal": 3001,
+        "system_cpu_ms": 70,
+        "user_cpu_ms": 30
+      },
+      {
+        "children_max_rss": 82526208,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 4000,
+        "latency_ms": {
+          "max": 4663,
+          "mean": 252.32,
+          "p50": 209,
+          "p95": 472,
+          "p99": 660
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 163936049,
+        "resource_sample_count": 1,
+        "response_body_bytes": 265476213,
+        "start_ordinal": 3501,
+        "system_cpu_ms": 20,
+        "user_cpu_ms": 20
+      },
+      {
+        "children_max_rss": 115359744,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 4500,
+        "latency_ms": {
+          "max": 3175,
+          "mean": 276.34,
+          "p50": 214,
+          "p95": 540,
+          "p99": 943
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 245458093,
+        "resource_sample_count": 1,
+        "response_body_bytes": 391000946,
+        "start_ordinal": 4001,
+        "system_cpu_ms": 100,
+        "user_cpu_ms": 50
+      },
+      {
+        "children_max_rss": 96862208,
+        "children_max_rss_unit": "bytes",
+        "end_ordinal": 5000,
+        "latency_ms": {
+          "max": 2020,
+          "mean": 280.03,
+          "p50": 212,
+          "p95": 629,
+          "p99": 1093
+        },
+        "object_store_requests": {
+          "max": 42,
+          "mean": 7.012,
+          "p50": 6,
+          "p95": 6,
+          "p99": 40,
+          "total": 3506
+        },
+        "push_count": 500,
+        "request_body_bytes": 253222956,
+        "resource_sample_count": 1,
+        "response_body_bytes": 417658014,
+        "start_ordinal": 4501,
+        "system_cpu_ms": 70,
+        "user_cpu_ms": 30
+      }
+    ],
+    "seed": {
+      "elapsed_ms": 199946,
+      "object_store_requests": 9
+    },
+    "git_auto_maintenance_event_count": 10
+  },
+  "operations": [
+    {
+      "operation": "repack-seed",
+      "ordinal": 0,
+      "elapsed_ms": 4787,
+      "requests": 11,
+      "request_body_bytes": 35408488,
+      "response_body_bytes": 139608109,
+      "repack": {
+        "bytes_after": 1099723385,
+        "bytes_before": 1099723385,
+        "bytes_read": 0,
+        "bytes_written": 0,
+        "elapsed_ms": 4644,
+        "packs_after": 1,
+        "packs_before": 1
+      }
+    },
+    {
+      "operation": "incremental-clone",
+      "ordinal": 0,
+      "elapsed_ms": 13845,
+      "requests": 13,
+      "request_body_bytes": 157,
+      "response_body_bytes": 1148161746
+    },
+    {
+      "operation": "remote-crab-fsck-seed",
+      "ordinal": 0,
+      "elapsed_ms": 151301,
+      "requests": 17,
+      "request_body_bytes": 0,
+      "response_body_bytes": 2506734300
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 500,
+      "elapsed_ms": 15948,
+      "requests": 80,
+      "request_body_bytes": 159,
+      "response_body_bytes": 65998456,
+      "new_local_packs": [
+        "6ad8928f6fdbdf561564e95dd62406e9dfa3deff"
+      ],
+      "local_pack_count": 2,
+      "tip": "595516a14968ece55edfdc4945cd2e6a58183978"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 500,
+      "elapsed_ms": 17377,
+      "requests": 63,
+      "request_body_bytes": 95249170,
+      "response_body_bytes": 195627464,
+      "repack": {
+        "bytes_after": 1120031979,
+        "bytes_before": 1157151391,
+        "bytes_read": 57428006,
+        "bytes_written": 20308594,
+        "elapsed_ms": 17328,
+        "packs_after": 2,
+        "packs_before": 501
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 1000,
+      "elapsed_ms": 3889,
+      "requests": 90,
+      "request_body_bytes": 244,
+      "response_body_bytes": 38698182,
+      "new_local_packs": [
+        "6b72ce595372582eea751ab19395c9f696bcbb77"
+      ],
+      "local_pack_count": 3,
+      "tip": "d3296eac97e4f39ca39926555677b8d098fcf96d"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 1000,
+      "elapsed_ms": 12312,
+      "requests": 64,
+      "request_body_bytes": 107553018,
+      "response_body_bytes": 202421247,
+      "repack": {
+        "bytes_after": 1130586656,
+        "bytes_before": 1149954004,
+        "bytes_read": 50230619,
+        "bytes_written": 30863271,
+        "elapsed_ms": 12270,
+        "packs_after": 2,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 1500,
+      "elapsed_ms": 4186,
+      "requests": 80,
+      "request_body_bytes": 159,
+      "response_body_bytes": 55858242,
+      "new_local_packs": [
+        "6a6cc5a33d6fee2b46138f0041e5e4595de33e8e"
+      ],
+      "local_pack_count": 4,
+      "tip": "63337a8b413b9b5db63b2d201de07557fc6189da"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 1500,
+      "elapsed_ms": 14807,
+      "requests": 64,
+      "request_body_bytes": 123414964,
+      "response_body_bytes": 247133577,
+      "repack": {
+        "bytes_after": 1145110642,
+        "bytes_before": 1177533435,
+        "bytes_read": 77810050,
+        "bytes_written": 45387257,
+        "elapsed_ms": 14760,
+        "packs_after": 2,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 2000,
+      "elapsed_ms": 13777,
+      "requests": 82,
+      "request_body_bytes": 159,
+      "response_body_bytes": 43346156,
+      "new_local_packs": [
+        "7d8728cdf3e7bc68ccdb9492c985084f2e701f32"
+      ],
+      "local_pack_count": 5,
+      "tip": "82e2a3e1176c90cac050e915e568928539bfc1c5"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 2000,
+      "elapsed_ms": 15168,
+      "requests": 64,
+      "request_body_bytes": 136566600,
+      "response_body_bytes": 263336656,
+      "repack": {
+        "bytes_after": 1156300677,
+        "bytes_before": 1179230083,
+        "bytes_read": 79506698,
+        "bytes_written": 56577292,
+        "elapsed_ms": 14403,
+        "packs_after": 2,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 2500,
+      "elapsed_ms": 4826,
+      "requests": 83,
+      "request_body_bytes": 159,
+      "response_body_bytes": 58239975,
+      "new_local_packs": [
+        "0f9e2093f4265cf124612ddcadc9d4098e3279af"
+      ],
+      "local_pack_count": 6,
+      "tip": "31cdb5de610508094507ef84b66068b2717ef26c"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 2500,
+      "elapsed_ms": 15567,
+      "requests": 64,
+      "request_body_bytes": 153389067,
+      "response_body_bytes": 307290875,
+      "repack": {
+        "bytes_after": 1171499042,
+        "bytes_before": 1205128244,
+        "bytes_read": 105404859,
+        "bytes_written": 71775657,
+        "elapsed_ms": 15516,
+        "packs_after": 2,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 3000,
+      "elapsed_ms": 4820,
+      "requests": 80,
+      "request_body_bytes": 159,
+      "response_body_bytes": 54410265,
+      "new_local_packs": [
+        "2a124f16b93866a3dcdb501e403703131e46bcbb"
+      ],
+      "local_pack_count": 7,
+      "tip": "cfc79e6d64395ddd6d3a7999b438eda0a75e1813"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 3000,
+      "elapsed_ms": 17997,
+      "requests": 64,
+      "request_body_bytes": 166648033,
+      "response_body_bytes": 333094952,
+      "repack": {
+        "bytes_after": 1183242384,
+        "bytes_before": 1216743140,
+        "bytes_read": 117019755,
+        "bytes_written": 83518999,
+        "elapsed_ms": 17911,
+        "packs_after": 2,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 3500,
+      "elapsed_ms": 5427,
+      "requests": 84,
+      "request_body_bytes": 244,
+      "response_body_bytes": 63198622,
+      "new_local_packs": [
+        "c7dcd854a234f88fd3c2975051916b56622b7bdc"
+      ],
+      "local_pack_count": 8,
+      "tip": "6a72fbc01bca6f667561c8062a11ca2cb1021c71"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 3500,
+      "elapsed_ms": 17604,
+      "requests": 64,
+      "request_body_bytes": 187619661,
+      "response_body_bytes": 375571471,
+      "repack": {
+        "bytes_after": 1200778922,
+        "bytes_before": 1236282337,
+        "bytes_read": 136558952,
+        "bytes_written": 101055537,
+        "elapsed_ms": 17553,
+        "packs_after": 2,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 4000,
+      "elapsed_ms": 10278,
+      "requests": 85,
+      "request_body_bytes": 244,
+      "response_body_bytes": 52210612,
+      "new_local_packs": [
+        "f0b1d98834bfdd981f98c93766deead29baacab6"
+      ],
+      "local_pack_count": 9,
+      "tip": "1a7b207665b037ec5c5d79f50d23b0b920df4e34"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 4000,
+      "elapsed_ms": 16695,
+      "requests": 63,
+      "request_body_bytes": 101231717,
+      "response_body_bytes": 192432466,
+      "repack": {
+        "bytes_after": 1219419045,
+        "bytes_before": 1243493121,
+        "bytes_read": 42714199,
+        "bytes_written": 18640123,
+        "elapsed_ms": 16132,
+        "packs_after": 3,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 4500,
+      "elapsed_ms": 6898,
+      "requests": 83,
+      "request_body_bytes": 244,
+      "response_body_bytes": 88889977,
+      "new_local_packs": [
+        "ff1fd195a3fb0072586bab309b8652e26d45041c"
+      ],
+      "local_pack_count": 10,
+      "tip": "3b58e6f95d2656770ac0c0a2036163fcce113b59"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 4500,
+      "elapsed_ms": 23687,
+      "requests": 65,
+      "request_body_bytes": 226703609,
+      "response_body_bytes": 479084458,
+      "repack": {
+        "bytes_after": 1236053679,
+        "bytes_before": 1297402693,
+        "bytes_read": 197679308,
+        "bytes_written": 136330294,
+        "elapsed_ms": 23634,
+        "packs_after": 2,
+        "packs_before": 503
+      }
+    },
+    {
+      "operation": "incremental-fetch",
+      "ordinal": 5000,
+      "elapsed_ms": 6013,
+      "requests": 80,
+      "request_body_bytes": 159,
+      "response_body_bytes": 76593756,
+      "new_local_packs": [
+        "a55755ecd0ebb7e6055da90b68c97055dd9577ea"
+      ],
+      "local_pack_count": 11,
+      "tip": "6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1"
+    },
+    {
+      "operation": "repack-interval",
+      "ordinal": 5000,
+      "elapsed_ms": 12902,
+      "requests": 63,
+      "request_body_bytes": 107070231,
+      "response_body_bytes": 223623743,
+      "repack": {
+        "bytes_after": 1257920667,
+        "bytes_before": 1302866776,
+        "bytes_read": 66813097,
+        "bytes_written": 21866988,
+        "elapsed_ms": 12846,
+        "packs_after": 3,
+        "packs_before": 502
+      }
+    },
+    {
+      "operation": "cold-final-clone",
+      "ordinal": 5000,
+      "elapsed_ms": 28847,
+      "requests": 17,
+      "request_body_bytes": 244,
+      "response_body_bytes": 1313776600
+    },
+    {
+      "operation": "warm-final-clone",
+      "ordinal": 5000,
+      "elapsed_ms": 29181,
+      "requests": 15,
+      "request_body_bytes": 159,
+      "response_body_bytes": 1313776362
+    },
+    {
+      "operation": "remote-crab-fsck-final",
+      "ordinal": 5000,
+      "elapsed_ms": 176510,
+      "requests": 295,
+      "request_body_bytes": 0,
+      "response_body_bytes": 4262015837
+    }
+  ],
+  "independent_checks": {
+    "push_ordinals_contiguous": true,
+    "push_oids_match_frozen_sequence": true,
+    "all_5001_push_request_counts_match_raw_log": true,
+    "capsule_sources_per_incremental_fetch": 24,
+    "repeated_successful_exact_capsule_gets_across_incremental_fetches": 0,
+    "seed_source_requests_during_incremental_fetch_and_interval_repack": 0
+  },
+  "v1_baseline_follow_up": {
+    "run_id": "capsule-v1-ga-2721-20260927-r1",
+    "release": "v1.2.4",
+    "release_commit": "76977b2af1970aa0bf88dee50c5f12a2006c626c",
+    "started_at": "2026-09-27T09:05:22+00:00",
+    "finished_at": "2026-09-27T12:13:35+00:00",
+    "status": "failed",
+    "failure_scope": "Original performance gates; complete correctness workload passed",
+    "binary_sha256": "dcc490af030e9b9dfba94310db210eccd7c4562b103dfdc09f4452270791af07",
+    "binary_unchanged": true,
+    "report_sha256": "a08e19321d7d3f43e27c652f0d68fe619ac75dd8266d3536db6ad5173d032d87",
+    "requests_sha256": "0acaa62db743b44f1252ebb149749365393a15a096812665aa4ac19ae0e05e2a",
+    "incremental_pushes": 5000,
+    "incremental_fetches": 10,
+    "push_latency_ms": {"mean": 446.55, "p50": 373, "p95": 822, "p99": 1262, "max": 8791},
+    "push_requests": {"mean": 32.9998, "p50": 33, "p95": 33, "total": 164999},
+    "fetch_latency_ms": {"mean": 661428.5, "p95": 846473},
+    "fetch_requests": {"mean": 251652.2, "p95": 370771},
+    "fetch_response_body_bytes": 1662446231070,
+    "cold_clone": {"elapsed_ms": 34426, "requests": 86, "response_body_bytes": 1413787132},
+    "warm_clone": {"elapsed_ms": 42397, "requests": 86, "response_body_bytes": 1413787132},
+    "correctness": "Exact seed/final tips, ten pre-maintenance fetches, one new pack per fetch, strict seed/final Git and Crab fsck, 32 sampled cold/warm blob digests match",
+    "controlled_latency_comparison": false,
+    "all_5001_push_request_counts_match_raw_log": true,
+    "push_ordinals_contiguous": true,
+    "proxy_errors": {"RemoteDisconnected": 8, "operation": "incremental-fetch-04000", "retained_in_totals": true},
+    "caveat": "Unrelated host load and task-owned low-priority single-job builds overlapped from 09:58 UTC; no controlled speedup claim"
+  },
+  "october_1_full_replay_537cf": {
+    "run_id": "capsule-537cf-k8s-5000-ga-r2",
+    "started_at": "2026-10-01T13:01:03+00:00",
+    "finished_at": "2026-10-01T13:51:25+00:00",
+    "status": "passed",
+    "candidate_commit": "537cf161b929b17f8ccdc72075544fa2102fd6a6",
+    "scope": "Full 5,000-commit correctness and local RustFS latency qualification; not exact current PR head",
+    "environment": {
+      "provider": "RustFS 1.0.0 GA on Colima",
+      "image": "ghcr.io/rustfs/rustfs@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858",
+      "bucket": "crab-v2-pr208-537cf-k8s-5000-20261001-r2"
+    },
+    "source": {
+      "repository": "Kubernetes",
+      "base": "0125bc12bc227cef2444fac719a3200feb52bc85",
+      "head": "44da53440764e494a06f2259f3629b4dd4294b21"
+    },
+    "provenance": {
+      "binary_sha256": "d0085f9758f24535ee12c2b3154ee8b68a497ce9bd4be9dda2eabafb0df1d301",
+      "binary_unchanged": true,
+      "harness_sha256": "3c515510dd54f4bce15efa761e6849f254674eb39c26f58312517957a09312ea",
+      "request_proxy_sha256": "bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879",
+      "report_sha256": "e5c82112fa8c37fe7a57c78a2b02bcbfab11b1ae57c478c3777e30db9a1dc3df",
+      "requests_sha256": "e00b69695231869c7ae5f449a69b78e28f234b762e22096c362a77a59c530fe1"
+    },
+    "correctness": {
+      "incremental_pushes": 5000,
+      "incremental_fetches_before_repack": 10,
+      "one_new_local_pack_per_fetch": true,
+      "exact_seed_and_final_tips": true,
+      "seed_and_final_remote_crab_fsck": "passed",
+      "seed_cold_and_warm_strict_full_git_fsck": "passed",
+      "sampled_blob_bytes_per_final_clone": 32,
+      "cold_and_warm_sampled_blob_bytes": "matched source"
+    },
+    "metrics": {
+      "seed_push_ms": 213280,
+      "push_latency_ms": {"mean": 335.27, "p50": 300, "p95": 579, "p99": 932, "max": 3592},
+      "push_requests": {"mean": 7.062, "p50": 6, "p95": 6, "p99": 40, "max": 42},
+      "push_500_window_p95_ms_min": 465,
+      "push_500_window_p95_ms_max": 766,
+      "fetch_latency_ms": {"mean": 4486.5, "p50": 4228, "p95": 6257, "p99": 6257},
+      "fetch_requests": {"mean": 9.6, "p95": 11, "pass_fail": "diagnostic only"},
+      "fetch_response_body_bytes": 598647595,
+      "cold_clone": {"elapsed_ms": 68149, "requests": 17, "response_body_bytes": 1319883247, "local_pack_count": 3},
+      "warm_clone": {"elapsed_ms": 25703, "requests": 15, "response_body_bytes": 55967981, "local_pack_count": 3},
+      "interval_repack_ms_min": 10475,
+      "interval_repack_ms_max": 28074
+    },
+    "posthoc_performance_gates": {
+      "push_mean_under_one_second": true,
+      "push_mean_under_ten_requests": true,
+      "every_500_push_window_p95_at_most_one_second": true,
+      "max_observed_window_p95_ms": 766,
+      "fetch_p95_at_most_ten_seconds": true,
+      "fetch_request_count_gate": "informational"
+    },
+    "scope_limits": [
+      "This report predates the cached-pack copy-on-write clone change and is not exact current PR-head evidence",
+      "Current-head 5,000-commit replay and clone timing remain open",
+      "Full 100 GiB Xet, matched v1 performance, hosted-provider/product parity, and v1 retirement remain open"
+    ]
+  },
+  "scope_limits": [
+    "No matched v1 performance result yet",
+    "No full 100 GiB Xet qualification",
+    "No complete failure/concurrency/product/provider matrix or green CI",
+    "Warm clone reuses CRAB_CACHE_DIR but redownloads all three physical pack ranges",
+    "v1 retirement not qualified"
+  ]
+}

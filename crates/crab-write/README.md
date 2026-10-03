@@ -21,7 +21,46 @@ Some(manifest): ready        None: capture fresh state and try another pass
 A commit error may be uncertain; resolve that outcome before proceeding or
 reporting rejection. Read readiness is a separate result from ref durability.
 
+Protocol v2 uses `capsule_protocol::publish` instead of the v1 journal. A
+single-ref push commits by conditionally replacing only that ref head. A
+multi-ref push creates a unique preparing transaction record, conditionally
+prepares each edited head, wins a commit-vs-abort CAS on that record, and
+creates an immutable committed marker. A competing writer may abort a still
+preparing attempt, but cannot abort a committed one; a committed record with a
+missing marker is repaired before its prepared state is used. The repository
+root changes only for checkpoint and maintenance work, so distinct existing
+refs share no foreground mutable object.
+
+After a failed per-ref conditional write, v2 reads back the exact candidate.
+Matching bytes confirm commit even if a lost create reply retried into an
+already-exists error. A different readable head confirms a competing writer;
+an unreadable result remains uncertain rather than being reported as stale.
+
+Ref-frontier compaction gathers the selected leaf batch and older carries, then
+performs one final `CapsuleRun::compact` on a blocking worker. Ordinary push and
+coordinated repair share this path. The 32-run batching policy bounds interim
+frontiers; every 500 capsules the writer rolls up only that newest window into
+one CRBRUN07 run, leaving prior rollup identities unchanged. Source
+authentication, immutable upload verification and conditional publication are
+preserved. The worker owns immutable data and cannot publish if its caller is
+cancelled.
+
+Historical restore publishes a layered checkpoint against the exact fenced
+root. Visibility must authenticate every restored ref and peeled tip. Source
+validation and protection remain caller responsibilities; the writer retains
+the ref-authority epoch, conditional publication and uncertain-outcome checks.
+It does not rewrite source packs or publish an embedded checkpoint.
+
 ## Initialization
+
+`generation::browse::build` consumes a pinned, origin-backed capsule Git reader
+and exact snapshot. It reuses verified graph/path prefixes and persists path
+progress every 32 commits. Graph discovery drains a separate bounded operation
+per batch. `generation::with_generation_owner` shares renewed owner election and
+global/repository GC fences between v1 maintenance and the v2 orchestrator;
+all acquired leases are released on returned failure or cancellation. The
+orchestrator rechecks capsule activity and conditionally publishes the small
+derived record. None of this is a foreground ref-publication prerequisite.
 
 `initialize::initialize_repository` owns canonical empty-repository creation for
 the CLI and HTTP server. It creates the layout only for an empty repository prefix,

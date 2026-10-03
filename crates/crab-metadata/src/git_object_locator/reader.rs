@@ -587,6 +587,11 @@ impl GitObjectLocatorSession {
             return Ok(metadata.into_iter().collect());
         }
 
+        tracing::debug!(
+            locator_lookup_mode = "ordinal_metadata",
+            requested_objects = ordinals.len(),
+            "compact Git ordinal metadata lookup selected"
+        );
         let fetched = stream::iter(
             ordinals
                 .iter()

@@ -1307,7 +1307,7 @@ pub async fn run_exp_run(args: &RunArgs, repo_root: &Path) -> Result<()> {
 
     let exp_id = ExperimentId::new_v7();
     let payload = run_exp_run_with_id(
-        repo_root,
+        repo_root.to_path_buf(),
         exp_id,
         overrides,
         ExpRunExecutionOptions::from_run_args(args),
@@ -1322,15 +1322,16 @@ pub async fn run_exp_run(args: &RunArgs, repo_root: &Path) -> Result<()> {
 }
 
 pub(crate) async fn run_exp_run_with_id(
-    repo_root: &Path,
+    repo_root: PathBuf,
     exp_id: ExperimentId,
     overrides: BTreeMap<String, String>,
     options: ExpRunExecutionOptions,
     queue_commit: Option<String>,
-    base_commit: Option<&str>,
+    base_commit: Option<String>,
     name: Option<String>,
     cli_args: Vec<String>,
 ) -> Result<ExpRunPayload> {
+    let repo_root = repo_root.as_path();
     let started_at = crab_types::time::now_rfc3339_millis()?;
     let started_instant = Instant::now();
     let is_queued_run = queue_commit.is_some();
@@ -1343,7 +1344,7 @@ pub(crate) async fn run_exp_run_with_id(
 
     // Materialize the tmpdir and overlay overrides onto declared
     // params files so they participate in stage hashing.
-    let worktree = match base_commit {
+    let worktree = match base_commit.as_deref() {
         Some(commit) => {
             ExperimentWorktree::create_at_commit(repo_root, exp_id, commit, &overrides)?
         }
@@ -1465,9 +1466,9 @@ pub(crate) async fn run_exp_run_with_id(
         checkpoint_stop_rx,
     ));
 
-    let mut dag_result = crate::cmd::run::run_in_with_options(
-        &run_args,
-        &tmpdir_path,
+    let mut dag_result = crate::cmd::run::run_in_with_options_owned(
+        run_args,
+        tmpdir_path.clone(),
         OutputMode::Text,
         crate::cmd::run::RunInvocationOptions {
             mirror_child_output: options.mirror_child_output && !is_queued_run,

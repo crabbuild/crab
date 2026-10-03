@@ -1462,6 +1462,66 @@ pub(crate) async fn create_connectivity_proof_pack(
     })?
 }
 
+/// Keep an already verified pack containing every requested tip.
+///
+/// The pack was authenticated before this marker is created. Git uses the
+/// marker to associate its connectivity proof with the installed pack, then
+/// removes the marker when the fetch transaction completes.
+pub(crate) async fn create_existing_pack_connectivity_lock(
+    pack_paths: &[PathBuf],
+    ref_tips: &[String],
+) -> Result<Option<PathBuf>> {
+    let pack_paths = pack_paths.to_vec();
+    let ref_tips = ref_tips
+        .iter()
+        .map(|tip| {
+            gix_hash::ObjectId::from_hex(tip.as_bytes()).map_err(|error| {
+                CrabError::Internal(format!("invalid connectivity proof ref tip {tip}: {error}"))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    tokio::task::spawn_blocking(move || {
+        for pack_path in pack_paths {
+            if pack_path.extension().and_then(std::ffi::OsStr::to_str) != Some("pack") {
+                continue;
+            }
+            if pack_path
+                .to_str()
+                .is_none_or(|path| path.contains(['\r', '\n']))
+            {
+                continue;
+            }
+            // Git skips its walk only for tips in the one kept index. The caller
+            // has already proved closure across all installed packs; index lookup
+            // here selects the marker, it does not establish that closure itself.
+            let index_path = pack_path.with_extension("idx");
+            let index =
+                gix_pack::index::File::at(&index_path, gix_hash::Kind::Sha1).map_err(|source| {
+                    crab_git::pack_locator::PackLocatorError::IndexOpen {
+                        path: index_path,
+                        source,
+                    }
+                })?;
+            if !ref_tips.iter().all(|tip| index.lookup(tip).is_some()) {
+                continue;
+            }
+            let keep_path = pack_path.with_extension("keep");
+            let mut keep = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&keep_path)?;
+            std::io::Write::write_all(
+                &mut keep,
+                b"Crab remote-helper connectivity proof; Git removes this file.\n",
+            )?;
+            return Ok(Some(keep_path));
+        }
+        Ok(None)
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("Git pack lock join error: {error}")))?
+}
+
 fn create_connectivity_proof_pack_blocking(
     git_dir: &Path,
     ref_tips: &[String],
@@ -1875,7 +1935,55 @@ pub async fn install_pack_file_locally_with_timeout(
     }
 }
 
-/// Delete the `.pack`, `.idx`, and (if present) `.rev` files for
+/// Repair and install a generated thin fetch pack whose bases are already in
+/// the local Git object database.
+pub async fn install_thin_pack_file_locally_with_timeout(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    fsck_objects: bool,
+) -> Result<InstalledPack> {
+    let pack_dir = pack_dir.to_owned();
+    let pack_tmp_path = pack_tmp_path.to_owned();
+    let canonical_name = canonical_name.to_owned();
+    let error_pack_id = canonical_name.clone();
+    match tokio::time::timeout(
+        INDEX_PACK_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            crab_git::pack::install_thin_pack_file_from_path(
+                &pack_dir,
+                &pack_tmp_path,
+                &canonical_name,
+                max_input_size,
+                fsck_objects,
+            )
+        }),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result.map_err(|error| match error {
+            crab_git::pack::PackError::ObjectFsckFailed { git_sha1, stderr } => {
+                CrabError::FetchMalformedObject {
+                    pack_id: error_pack_id,
+                    oid: git_sha1,
+                    kind: "pack".to_owned(),
+                    detail: stderr,
+                }
+            }
+            error => CrabError::from(error),
+        }),
+        Ok(Err(error)) => Err(CrabError::Internal(format!(
+            "install_thin_pack_file join: {error}"
+        ))),
+        Err(_) => Err(CrabError::Internal(format!(
+            "git index-pack --fix-thin exceeded timeout of {}s",
+            INDEX_PACK_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
+/// Delete the `.pack`, `.idx`, and optional `.rev` and `.promisor` files for
 /// the given pack id from the pack directory.
 ///
 /// Idempotent — `NotFound` errors are treated as success so a
@@ -1894,10 +2002,12 @@ fn rollback_installed_pack_blocking(pack_dir: &Path, pack_id: &str) -> Result<()
     let pack_path = pack_dir.join(format!("pack-{pack_id}.pack"));
     let idx_path = pack_dir.join(format!("pack-{pack_id}.idx"));
     let rev_path = pack_dir.join(format!("pack-{pack_id}.rev"));
+    let promisor_path = pack_dir.join(format!("pack-{pack_id}.promisor"));
 
     remove_if_exists(&pack_path)?;
     remove_if_exists(&idx_path)?;
     remove_if_exists(&rev_path)?;
+    remove_if_exists(&promisor_path)?;
 
     warn!(
         pack_id = %pack_id,
@@ -1922,6 +2032,39 @@ fn remove_if_exists(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::test::git_repo::{CleanGitEnvGuard, GitDirGuard, TEST_GIT_REPO};
+
+    #[tokio::test]
+    async fn rollback_removes_promisor_marker_without_touching_another_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["rejected", "retained"] {
+            for extension in ["pack", "idx", "rev", "promisor"] {
+                std::fs::write(
+                    dir.path().join(format!("pack-{name}.{extension}")),
+                    b"fixture",
+                )
+                .unwrap();
+            }
+        }
+        for _ in 0..2 {
+            rollback_installed_pack(dir.path(), "rejected")
+                .await
+                .unwrap();
+        }
+        let mut files = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        files.sort();
+        assert_eq!(
+            files,
+            [
+                "pack-retained.idx",
+                "pack-retained.pack",
+                "pack-retained.promisor",
+                "pack-retained.rev"
+            ]
+        );
+    }
 
     fn sha1_bytes(val: u8) -> [u8; 20] {
         [val; 20]
@@ -1981,6 +2124,59 @@ mod tests {
         .await
         .expect_err("a stale proof pack must not be acknowledged");
         assert!(error.to_string().contains("requested ref tips"));
+    }
+
+    #[tokio::test]
+    async fn existing_pack_connectivity_lock_is_exclusive() {
+        let directory = tempfile::tempdir().unwrap();
+        let pack = directory.path().join("pack-verified.pack");
+        std::fs::write(&pack, b"verified pack placeholder").unwrap();
+        write_fake_idx(directory.path(), "verified", &[sha1_bytes(1)]);
+        let paths = vec![pack];
+        let tips = vec!["01".repeat(20)];
+
+        let keep = create_existing_pack_connectivity_lock(&paths, &tips)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(keep, directory.path().join("pack-verified.keep"));
+        assert!(keep.is_file());
+        assert!(
+            create_existing_pack_connectivity_lock(&paths, &tips)
+                .await
+                .is_err()
+        );
+
+        std::fs::remove_file(keep).unwrap();
+    }
+
+    #[tokio::test]
+    async fn connectivity_lock_selects_the_pack_covering_all_requested_tips() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, objects) in [
+            ("stable", vec![sha1_bytes(1)]),
+            ("tail", vec![sha1_bytes(1), sha1_bytes(2)]),
+        ] {
+            write_fake_idx(directory.path(), name, &objects);
+        }
+        let paths = [
+            directory.path().join("pack-stable.pack"),
+            directory.path().join("pack-tail.pack"),
+        ];
+        let tips = ["01".repeat(20), "02".repeat(20)];
+        assert_eq!(
+            create_existing_pack_connectivity_lock(&paths, &tips)
+                .await
+                .unwrap(),
+            Some(directory.path().join("pack-tail.keep")),
+        );
+        assert!(!directory.path().join("pack-stable.keep").exists());
+        assert!(
+            create_existing_pack_connectivity_lock(&paths[..1], &tips)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// Build a minimal valid pack index v2 file containing the given OIDs.

@@ -20362,11 +20362,13 @@ mod tests {
             actions: vec![crate::replication::ActiveActiveRepairAction {
                 operation_id: "op-1".into(),
                 manifest_generation: 12,
+                commit_sequence: 1,
                 region: "us-east-1".into(),
                 writer,
                 source_region: "us-west-2".into(),
                 refs: Vec::new(),
                 uploaded_objects: vec!["xorbs/aa/object".into()],
+                capsule_publication: None,
             }],
         };
 

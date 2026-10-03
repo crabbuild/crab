@@ -7,7 +7,8 @@ two AI-agent push cases:
 
 * branch fanout: many agents push independent branches at the same time; all
   pushes must succeed, then fresh protocol-v2 clients must clone and fsck every
-  branch with byte-identical content.
+  branch with byte-identical content. Optional update rounds then push every
+  existing branch concurrently and verify each long-lived client can pull it.
 * same-branch contention: many agents push divergent commits to ``main`` at the
   same time; exactly one push may land, and all losers must fail with structured
   push statuses rather than corrupting remote state. With
@@ -32,6 +33,7 @@ import http.server
 import json
 import math
 import os
+import selectors
 import signal
 import shutil
 import subprocess
@@ -50,13 +52,19 @@ DEFAULT_ROOT = Path.home() / "Workspace" / "CrabRepos"
 DEFAULT_BUCKET = "crab"
 DEFAULT_ENDPOINT = "http://127.0.0.1:9000"
 REMOTE_PREFIX = "e2e-concurrent-push"
-REF_JOURNAL_GATE_PATHS = {
-    "prepared-head": "/refs/journal/heads/",
-    "active-marker": "/refs/journal/active/",
+PUBLICATION_GATE_PATHS = {
+    # V2 uploads the immutable capsule before publishing the per-ref head.
+    # Keep the v1 journal paths as aliases so the proxy unit tests continue to
+    # exercise the generic gate and older qualification fixtures remain usable.
+    "prepared-head": ("/v2/capsules/", "/refs/journal/heads/"),
+    "active-marker": ("/v2/refs/", "/refs/journal/active/"),
 }
 REF_JOURNAL_FAULT_PHASES = {"before-upstream", "after-upstream"}
 SECRET_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
 BAD_PUSH_STATUSES = {"internal", "unpack-failed", "missing-object", "malformed-object"}
+PROXY_STREAM_CHUNK_BYTES = 4 * 1024 * 1024
+PROXY_BUFFER_LIMIT_BYTES = 8 * 1024 * 1024
+PROXY_REQUEST_BUFFER_LIMIT_BYTES = 64 * 1024 * 1024
 
 
 class SmokeError(RuntimeError):
@@ -81,6 +89,9 @@ class RequestCountingProxy:
         self.categories: dict[str, int] = {}
         self.classes: dict[str, int] = {}
         self.statuses: dict[str, int] = {}
+        self.proxy_errors: dict[str, int] = {}
+        self.trace_paths = os.environ.get("CRAB_E2E_TRACE_REQUEST_PATHS") == "1"
+        self.paths: list[dict[str, Any]] = []
         self.server: http.server.ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
         self.ref_journal_gate: str | None = None
@@ -99,8 +110,31 @@ class RequestCountingProxy:
     def start(self) -> None:
         proxy = self
 
+        class MeterServer(http.server.ThreadingHTTPServer):
+            request_queue_size = 256
+
         class Handler(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+
+            def setup(self) -> None:
+                super().setup()
+                connection_class = (
+                    http.client.HTTPSConnection
+                    if proxy.upstream.scheme == "https"
+                    else http.client.HTTPConnection
+                )
+                # One upstream connection belongs to each sequential client session.
+                # Closing both links per request exhausts ephemeral ports during
+                # catalog-heavy reads and makes the meter manufacture retries.
+                self.upstream_connection = connection_class(
+                    proxy.upstream.hostname, proxy.upstream.port, timeout=60
+                )
+
+            def finish(self) -> None:
+                try:
+                    self.upstream_connection.close()
+                finally:
+                    super().finish()
 
             def do_GET(self) -> None:
                 self.forward()
@@ -124,24 +158,20 @@ class RequestCountingProxy:
                 return
 
             def forward(self) -> None:
+                request_started = time.perf_counter_ns()
                 length = int(self.headers.get("Content-Length", "0"))
-                body = self.rfile.read(length) if length else None
+                body = (
+                    self.rfile.read(length)
+                    if length <= PROXY_REQUEST_BUFFER_LIMIT_BYTES
+                    else None
+                )
                 headers = {
                     key: value
                     for key, value in self.headers.items()
                     if key.lower() not in {"connection", "proxy-connection"}
                 }
                 upstream_path = proxy.upstream.path.rstrip("/") + self.path
-                connection_class = (
-                    http.client.HTTPSConnection
-                    if proxy.upstream.scheme == "https"
-                    else http.client.HTTPConnection
-                )
-                connection = connection_class(
-                    proxy.upstream.hostname,
-                    proxy.upstream.port,
-                    timeout=60,
-                )
+                connection = self.upstream_connection
                 recorded = False
                 try:
                     if proxy.consume_ref_journal_fault(
@@ -155,24 +185,111 @@ class RequestCountingProxy:
                             length,
                             len(message),
                             503,
+                            elapsed_ms=round(
+                                (time.perf_counter_ns() - request_started) / 1_000_000
+                            ),
                         )
                         recorded = True
                         self.send_error_response(503, message)
                         return
-                    connection.request(self.command, upstream_path, body=body, headers=headers)
-                    response = connection.getresponse()
-                    response_body = response.read()
+                    remaining = 0 if body is not None else length
+                    try:
+                        # Prior responses are fully drained. Readability while
+                        # idle means EOF or unexpected data, not a reusable link;
+                        # reconnect before forwarding rather than inventing a retry.
+                        if connection.sock is not None:
+                            # select() rejects descriptors above FD_SETSIZE and
+                            # makes concurrent clients see synthetic 502s.
+                            with selectors.DefaultSelector() as readiness:
+                                readiness.register(connection.sock, selectors.EVENT_READ)
+                                if readiness.select(timeout=0):
+                                    connection.close()
+                        if body is not None:
+                            connection.request(
+                                self.command,
+                                upstream_path,
+                                body=body,
+                                headers=headers,
+                            )
+                        else:
+                            connection.putrequest(
+                                self.command,
+                                upstream_path,
+                                skip_host=True,
+                                skip_accept_encoding=True,
+                            )
+                            for key, value in headers.items():
+                                connection.putheader(key, value)
+                            connection.endheaders()
+                            while remaining:
+                                chunk = self.rfile.read(
+                                    min(PROXY_STREAM_CHUNK_BYTES, remaining)
+                                )
+                                if not chunk:
+                                    raise ConnectionError(
+                                        "request body ended before Content-Length"
+                                    )
+                                # Track unread client bytes, not bytes accepted
+                                # upstream: a failed send has already consumed
+                                # this chunk and the rejection path must not reread it.
+                                remaining -= len(chunk)
+                                connection.send(chunk)
+                    except (BrokenPipeError, ConnectionResetError) as send_error:
+                        # S3 implementations may reject create-only writes as
+                        # soon as they parse the headers. Preserve that real
+                        # response even when it arrives before a large request
+                        # body has finished crossing the proxy.
+                        while remaining:
+                            chunk = self.rfile.read(
+                                min(PROXY_STREAM_CHUNK_BYTES, remaining)
+                            )
+                            if not chunk:
+                                break
+                            remaining -= len(chunk)
+                        try:
+                            response = connection.getresponse()
+                        except Exception:
+                            raise send_error
+                    else:
+                        response = connection.getresponse()
                     response_headers = response.getheaders()
                     status = response.status
-                    proxy.record(
-                        self.command,
-                        self.path,
-                        self.headers,
-                        length,
-                        len(response_body),
-                        status,
+                    original_content_length = next(
+                        (
+                            value
+                            for key, value in response_headers
+                            if key.lower() == "content-length"
+                        ),
+                        None,
                     )
-                    recorded = True
+                    response_length = (
+                        int(original_content_length)
+                        if original_content_length is not None
+                        else None
+                    )
+                    if (
+                        self.command == "HEAD"
+                        or response_length is None
+                        or response_length <= PROXY_BUFFER_LIMIT_BYTES
+                    ):
+                        response_body = response.read()
+                        response_bytes = len(response_body)
+                    else:
+                        response_body = None
+                        response_bytes = response_length
+                    if response_body is not None or self.command == "HEAD":
+                        proxy.record(
+                            self.command,
+                            self.path,
+                            self.headers,
+                            length,
+                            response_bytes,
+                            status,
+                            elapsed_ms=round(
+                                (time.perf_counter_ns() - request_started) / 1_000_000
+                            ),
+                        )
+                        recorded = True
                     if proxy.consume_ref_journal_fault(
                         self.command, self.path, "after-upstream", status=status
                     ):
@@ -182,7 +299,6 @@ class RequestCountingProxy:
                         return
                     proxy.gate_ref_journal_response(self.command, self.path, status)
                     self.send_response_only(status, response.reason)
-                    original_content_length = None
                     for key, value in response_headers:
                         lower = key.lower()
                         if lower == "content-length":
@@ -203,14 +319,40 @@ class RequestCountingProxy:
                     content_length = (
                         original_content_length
                         if self.command == "HEAD" and original_content_length is not None
-                        else str(len(response_body))
+                        else str(response_bytes)
                     )
                     self.send_header("Content-Length", content_length)
-                    self.send_header("Connection", "close")
+                    if self.close_connection:
+                        self.send_header("Connection", "close")
                     self.end_headers()
-                    if self.command != "HEAD" and response_body:
-                        self.wfile.write(response_body)
+                    if self.command != "HEAD":
+                        if response_body is not None:
+                            if response_body:
+                                self.wfile.write(response_body)
+                        else:
+                            while True:
+                                chunk = response.read(PROXY_STREAM_CHUNK_BYTES)
+                                if not chunk:
+                                    break
+                                self.wfile.write(chunk)
+                    if not recorded:
+                        proxy.record(
+                            self.command,
+                            self.path,
+                            self.headers,
+                            length,
+                            response_bytes,
+                            status,
+                            elapsed_ms=round(
+                                (time.perf_counter_ns() - request_started) / 1_000_000
+                            ),
+                        )
+                        recorded = True
                 except Exception as exc:
+                    connection.close()
+                    proxy_error = type(exc).__name__
+                    if isinstance(exc, OSError) and exc.errno is not None:
+                        proxy_error += f":{exc.errno}"
                     message = f"request meter upstream failure: {exc}".encode()
                     if not recorded:
                         proxy.record(
@@ -220,6 +362,10 @@ class RequestCountingProxy:
                             length,
                             len(message),
                             502,
+                            elapsed_ms=round(
+                                (time.perf_counter_ns() - request_started) / 1_000_000
+                            ),
+                            proxy_error=proxy_error,
                         )
                     try:
                         self.send_response(502)
@@ -231,10 +377,6 @@ class RequestCountingProxy:
                             self.wfile.write(message)
                     except (BrokenPipeError, ConnectionResetError):
                         pass
-                finally:
-                    connection.close()
-                    self.close_connection = True
-
             def send_error_response(self, status: int, message: bytes) -> None:
                 self.send_response(status)
                 self.send_header("Content-Type", "text/plain")
@@ -244,7 +386,7 @@ class RequestCountingProxy:
                 if self.command != "HEAD":
                     self.wfile.write(message)
 
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = MeterServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         self.thread = threading.Thread(
             target=self.server.serve_forever,
@@ -263,7 +405,7 @@ class RequestCountingProxy:
             self.thread.join(timeout=5)
 
     def arm_ref_journal_gate(self, boundary: str) -> None:
-        if boundary not in REF_JOURNAL_GATE_PATHS:
+        if boundary not in PUBLICATION_GATE_PATHS:
             raise SmokeError(f"unsupported ref-journal gate: {boundary}")
         with self.lock:
             if self.ref_journal_gate is not None:
@@ -280,7 +422,9 @@ class RequestCountingProxy:
                 gate is not None
                 and method == "PUT"
                 and 200 <= status < 300
-                and REF_JOURNAL_GATE_PATHS[gate] in decoded_path
+                and any(
+                    marker in decoded_path for marker in PUBLICATION_GATE_PATHS[gate]
+                )
             )
             if matches:
                 self.ref_journal_gate = None
@@ -302,7 +446,7 @@ class RequestCountingProxy:
         *,
         attempts: int | None,
     ) -> None:
-        if boundary not in REF_JOURNAL_GATE_PATHS:
+        if boundary not in PUBLICATION_GATE_PATHS:
             raise SmokeError(f"unsupported ref-journal fault boundary: {boundary}")
         if phase not in REF_JOURNAL_FAULT_PHASES:
             raise SmokeError(f"unsupported ref-journal fault phase: {phase}")
@@ -335,7 +479,10 @@ class RequestCountingProxy:
                     phase == "after-upstream"
                     and (status is None or not 200 <= status < 300)
                 )
-                or REF_JOURNAL_GATE_PATHS[boundary] not in decoded_path
+                or not any(
+                    marker in decoded_path
+                    for marker in PUBLICATION_GATE_PATHS[boundary]
+                )
             ):
                 return False
             if remaining is not None:
@@ -361,6 +508,9 @@ class RequestCountingProxy:
         request_bytes: int,
         response_bytes: int,
         status: int,
+        *,
+        elapsed_ms: int | None = None,
+        proxy_error: str | None = None,
     ) -> None:
         operation = self.operation(method, path, headers)
         key = self.request_key(path, operation)
@@ -381,6 +531,22 @@ class RequestCountingProxy:
             self.categories[category] = self.categories.get(category, 0) + 1
             self.classes[request_class] = self.classes.get(request_class, 0) + 1
             self.statuses[status_class] = self.statuses.get(status_class, 0) + 1
+            if proxy_error is not None:
+                self.proxy_errors[proxy_error] = self.proxy_errors.get(proxy_error, 0) + 1
+            if self.trace_paths:
+                request = {
+                    "method": method,
+                    "operation": operation,
+                    "category": category,
+                    "status": status,
+                    "key": relative_key,
+                    "range": headers.get("Range"),
+                }
+                if elapsed_ms is not None:
+                    request["elapsed_ms"] = elapsed_ms
+                if proxy_error is not None:
+                    request["proxy_error"] = proxy_error
+                self.paths.append(request)
 
     @staticmethod
     def request_key(path: str, operation: str) -> str:
@@ -420,9 +586,9 @@ class RequestCountingProxy:
             return "multipart_abort" if "uploadId" in query else "delete"
         return method.lower()
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, *, include_paths: bool = True) -> dict[str, Any]:
         with self.lock:
-            return {
+            snapshot = {
                 "requests": self.requests,
                 "request_body_bytes": self.request_bytes,
                 "response_body_bytes": self.response_bytes,
@@ -431,14 +597,24 @@ class RequestCountingProxy:
                 "categories": dict(sorted(self.categories.items())),
                 "classes": dict(sorted(self.classes.items())),
                 "statuses": dict(sorted(self.statuses.items())),
+                "proxy_errors": dict(sorted(self.proxy_errors.items())),
             }
+            if self.trace_paths:
+                snapshot["path_count"] = len(self.paths)
+                if include_paths:
+                    snapshot["paths"] = list(self.paths)
+            return snapshot
+
+    def paths_since(self, cursor: int) -> list[dict[str, Any]]:
+        with self.lock:
+            return list(self.paths[cursor:])
 
     @staticmethod
     def delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key in {"requests", "request_body_bytes", "response_body_bytes"}:
             result[key] = int(after.get(key, 0)) - int(before.get(key, 0))
-        for key in {"methods", "operations", "categories", "classes", "statuses"}:
+        for key in {"methods", "operations", "categories", "classes", "statuses", "proxy_errors"}:
             earlier = before.get(key, {})
             later = after.get(key, {})
             result[key] = {
@@ -446,6 +622,8 @@ class RequestCountingProxy:
                 for name in sorted(set(earlier) | set(later))
                 if int(later.get(name, 0)) != int(earlier.get(name, 0))
             }
+        if "paths" in after:
+            result["paths"] = list(after["paths"][len(before.get("paths", [])) :])
         return result
 
 
@@ -488,6 +666,8 @@ class SmokeReport:
     checks: list[dict[str, Any]] = field(default_factory=list)
     branch_fanout: list[dict[str, Any]] = field(default_factory=list)
     branch_reads: list[dict[str, Any]] = field(default_factory=list)
+    branch_updates: list[dict[str, Any]] = field(default_factory=list)
+    branch_update_reads: list[dict[str, Any]] = field(default_factory=list)
     same_branch: list[dict[str, Any]] = field(default_factory=list)
     same_branch_read: dict[str, Any] = field(default_factory=dict)
     pre_marker_crash: dict[str, Any] = field(default_factory=dict)
@@ -631,7 +811,7 @@ class ConcurrentPushSmoke:
         self.store_inventory: dict[str, int] = {}
         self.report = SmokeReport(
             schema="crab.concurrent-push-smoke",
-            version="1.8",
+            version="1.9",
             run_id=self.run_id,
             status="running",
             remote_url=self.remote_url,
@@ -1105,7 +1285,7 @@ class ConcurrentPushSmoke:
         }
 
     def read_branch_tip(self, index: int) -> dict[str, Any]:
-        branch = f"agents/agent-{index:03d}"
+        branch = f"agent-{index:03d}"
         target = self.branch_readers / f"reader-{index:03d}"
         result = self.protocol_v2_clone(branch, target, f"protocol v2 clone {branch}")
         path = target / "agents" / f"agent-{index:03d}.txt"
@@ -1121,7 +1301,7 @@ class ConcurrentPushSmoke:
 
     def verify_branch_tip_reads(self) -> None:
         self.branch_readers.mkdir(parents=True, exist_ok=True)
-        max_workers = max(1, min(self.args.agents, self.args.max_parallel_pushes))
+        max_workers = max(1, min(self.args.agents, self.args.max_parallel_readers))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(self.read_branch_tip, index) for index in range(self.args.agents)]
             results = [future.result() for future in concurrent.futures.as_completed(futures)]
@@ -1347,7 +1527,7 @@ class ConcurrentPushSmoke:
         if self.request_proxy is None:
             raise SmokeError("--crash-boundary requires HTTP request capture")
         self.prepare_boundary_agent(self.post_marker_agent, "post-marker-agent")
-        branch = "post-marker-crash"
+        branch = "post-marker-crash/original"
         remote_ref = f"refs/heads/{branch}"
         refspec = f"HEAD:{remote_ref}"
         self.run_git(self.post_marker_agent, ["checkout", "-b", branch])
@@ -1448,6 +1628,54 @@ class ConcurrentPushSmoke:
             clone["protocol_v2"] and actual == expected,
             {"protocol_v2": clone["protocol_v2"], "content_visible": actual == expected},
         )
+        # Updating the existing ref recovers its holder, but does not acquire the
+        # independent namespace lease abandoned by SIGKILL. Exercise ordinary
+        # namespace reclamation instead of concealing that claim with fsck repair.
+        sibling = "post-marker-crash/recovered"
+        sibling_ref = f"refs/heads/{sibling}"
+        namespace_recovery = self.run_push_job(
+            "post-marker-namespace-recovery",
+            sibling_ref,
+            self.post_marker_agent,
+            f"HEAD:{sibling_ref}",
+            lock_wait_secs=self.args.crash_lock_ttl_secs + 30,
+            rebase_on_non_fast_forward=False,
+        )
+        namespace_recovery_ms = int((time.monotonic() - killed_at) * 1000)
+        self.check(
+            "post-marker-namespace-recovers-after-expiry",
+            namespace_recovery.status == "ok"
+            and namespace_recovery.command.exit_code == 0
+            and (self.args.crash_lock_ttl_secs - 2) * 1000
+            <= namespace_recovery_ms
+            < (self.args.crash_lock_ttl_secs + 30) * 1000,
+            {"recovery_ms": namespace_recovery_ms, "status": namespace_recovery.status},
+        )
+        recovered_tip = self.run_git(
+            self.post_marker_reader, ["rev-parse", "HEAD"], name="resolve recovered tip"
+        )
+        recovered_tip = Path(recovered_tip.stdout_log).read_text(encoding="utf-8").strip()
+        advertised = self.run_git(
+            self.seed,
+            ["ls-remote", self.remote_url, remote_ref, sibling_ref],
+            name="git ls-remote after namespace recovery",
+        )
+        actual_refs = set(Path(advertised.stdout_log).read_text(encoding="utf-8").splitlines())
+        self.check(
+            "post-marker-namespace-preserves-both-exact-refs",
+            actual_refs == {f"{recovered_tip}\t{remote_ref}", f"{recovered_tip}\t{sibling_ref}"},
+            {"refs": sorted(actual_refs)},
+        )
+        sibling_reader = self.run_root / "post-marker-namespace-reader"
+        sibling_clone = self.protocol_v2_clone(
+            sibling, sibling_reader, "protocol v2 clone after namespace recovery"
+        )
+        sibling_content = (sibling_reader / payload.name).read_text(encoding="utf-8")
+        self.check(
+            "post-marker-namespace-restores-v2-and-content",
+            sibling_clone["protocol_v2"] and sibling_content == expected,
+            {"protocol_v2": sibling_clone["protocol_v2"], "content_visible": sibling_content == expected},
+        )
         with self.report_lock:
             self.report.post_marker_crash = {
                 "killed_command": asdict(killed),
@@ -1457,18 +1685,21 @@ class ConcurrentPushSmoke:
                 "recovery_ms": recovery_ms,
                 "attempts": [asdict(attempt) for attempt in attempts],
                 "clone": clone,
+                "namespace_recovery": asdict(namespace_recovery),
+                "namespace_recovery_ms": namespace_recovery_ms,
+                "namespace_clone": sibling_clone,
             }
             self.write_report()
         self.request_snapshot(
             "post-marker-crash",
             request_before,
-            attempted_pushes=1 + len(attempts),
-            successful_pushes=1,
+            attempted_pushes=2 + len(attempts),
+            successful_pushes=2,
         )
         self.store_snapshot(
             "post-marker-crash",
-            attempted_pushes=1 + len(attempts),
-            successful_pushes=1,
+            attempted_pushes=2 + len(attempts),
+            successful_pushes=2,
         )
 
     def prepare_marker_fault_commit(
@@ -1721,7 +1952,7 @@ class ConcurrentPushSmoke:
 
     def prepare_branch_agent(self, index: int) -> tuple[str, str, Path]:
         repo = self.clone_agent(self.branch_agents, index, "branch-agent")
-        branch = f"agents/agent-{index:03d}"
+        branch = f"agent-{index:03d}"
         dst = f"refs/heads/{branch}"
         self.run_git(repo, ["checkout", "-b", branch])
         path = repo / "agents" / f"agent-{index:03d}.txt"
@@ -1875,13 +2106,13 @@ class ConcurrentPushSmoke:
         )
         refs = self.run_git(
             self.seed,
-            ["ls-remote", self.remote_url, "refs/heads/agents/*"],
+            ["ls-remote", self.remote_url, "refs/heads/agent-*"],
             name="git ls-remote branch fanout refs",
         )
         visible = [
             line
             for line in Path(refs.stdout_log).read_text(encoding="utf-8").splitlines()
-            if "refs/heads/agents/" in line
+            if "refs/heads/agent-" in line
         ]
         self.check(
             "branch-fanout-refs-visible",
@@ -1893,6 +2124,116 @@ class ConcurrentPushSmoke:
             "branch-fanout",
             attempted_pushes=len(results),
             successful_pushes=len(results),
+        )
+
+    def run_branch_updates(self) -> None:
+        request_before = self.request_proxy.snapshot() if self.request_proxy else None
+        updates: list[dict[str, Any]] = []
+        for round_index in range(1, self.args.branch_update_rounds + 1):
+            jobs = []
+            for index in range(self.args.agents):
+                repo = self.branch_agents / f"branch-agent-{index:03d}"
+                branch = f"refs/heads/agent-{index:03d}"
+                path = repo / "agents" / f"agent-{index:03d}.txt"
+                with path.open("a", encoding="utf-8") as payload:
+                    payload.write(f"update round {round_index}\n")
+                self.run_git(repo, ["add", str(path.relative_to(repo))])
+                self.run_git(
+                    repo,
+                    ["commit", "-m", f"agent {index:03d} update {round_index}"],
+                )
+                jobs.append(
+                    (
+                        f"branch-agent-{index:03d}-update-{round_index}",
+                        branch,
+                        repo,
+                        f"HEAD:{branch}",
+                    )
+                )
+            results = self.push_concurrently(jobs)
+            updates.extend(
+                {"round": round_index, **asdict(result)} for result in results
+            )
+            statuses = {result.status for result in results}
+            self.check(
+                f"branch-update-round-{round_index}-all-pushed",
+                statuses == {"ok"},
+                {"statuses": sorted(statuses), "count": len(results)},
+            )
+
+        self.request_snapshot(
+            "branch-updates",
+            request_before,
+            attempted_pushes=len(updates),
+            successful_pushes=sum(update["status"] == "ok" for update in updates),
+        )
+        with self.report_lock:
+            self.report.branch_updates = updates
+            self.write_report()
+        self.verify_branch_update_reads()
+        self.store_snapshot(
+            "branch-updates",
+            attempted_pushes=len(updates),
+            successful_pushes=len(updates),
+        )
+
+    def pull_branch_update(self, index: int) -> dict[str, Any]:
+        branch = f"agent-{index:03d}"
+        target = self.branch_readers / f"reader-{index:03d}"
+        pulled = self.run_git(
+            target,
+            ["pull", "--ff-only"],
+            name=f"protocol v2 pull {branch}",
+            extra_env={"GIT_TRACE_PACKET": "1"},
+        )
+        trace = Path(pulled.stderr_log).read_text(encoding="utf-8", errors="replace")
+        self.run_git(target, ["fsck", "--strict"], name=f"post-update fsck {branch}")
+        path = target / "agents" / f"agent-{index:03d}.txt"
+        expected = (
+            f"branch fanout agent {index}\nrun_id {self.run_id}\n"
+            + "".join(
+                f"update round {round_index}\n"
+                for round_index in range(1, self.args.branch_update_rounds + 1)
+            )
+        )
+        actual = path.read_text(encoding="utf-8") if path.is_file() else None
+        return {
+            "agent": f"branch-agent-{index:03d}",
+            "branch": branch,
+            "pull_duration_ms": pulled.duration_ms,
+            "protocol_v2": "version 2" in trace and "command=fetch" in trace,
+            "content_visible": actual == expected,
+            "pull_stdout_log": pulled.stdout_log,
+            "pull_stderr_log": pulled.stderr_log,
+        }
+
+    def verify_branch_update_reads(self) -> None:
+        max_workers = max(1, min(self.args.agents, self.args.max_parallel_readers))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(self.pull_branch_update, index)
+                for index in range(self.args.agents)
+            ]
+            results = [
+                future.result() for future in concurrent.futures.as_completed(futures)
+            ]
+        results.sort(key=lambda result: str(result["branch"]))
+        with self.report_lock:
+            self.report.branch_update_reads = results
+            self.write_report()
+        failed = [
+            result
+            for result in results
+            if not result["protocol_v2"] or not result["content_visible"]
+        ]
+        self.check(
+            "branch-updates-protocol-v2-pulled",
+            not failed and len(results) == self.args.agents,
+            {
+                "readers": len(results),
+                "expected": self.args.agents,
+                "failed": failed,
+            },
         )
 
     def run_same_branch_contention(self) -> None:
@@ -2024,12 +2365,19 @@ class ConcurrentPushSmoke:
     def run_fsck(self) -> None:
         if self.args.skip_fsck:
             return
+        # Qualification must prove the state left by the concurrent operations.
+        # Repairing first would hide publication or crash-recovery damage.
         record = self.run_crab(self.seed, ["fsck", "--json"], name="crab fsck")
         payload = first_json_object(Path(record.stdout_log).read_text(encoding="utf-8"), "fsck")
-        errors = None
-        if payload and payload.get("data"):
-            errors = payload["data"].get("errors")
-        self.check("fsck-clean-or-no-errors", errors in (None, 0), {"errors": errors})
+        data = payload.get("data", {}) if payload else {}
+        self.check(
+            "fsck-clean-without-repair",
+            data.get("passed") is True
+            and data.get("errors") == 0
+            and data.get("repaired") == 0
+            and data.get("repair_failures") == 0,
+            data,
+        )
 
     def run(self) -> int:
         try:
@@ -2043,6 +2391,8 @@ class ConcurrentPushSmoke:
                 self.run_marker_response_loss()
             if not self.args.skip_branch_fanout:
                 self.run_branch_fanout()
+                if self.args.branch_update_rounds:
+                    self.run_branch_updates()
             if not self.args.skip_same_branch:
                 self.run_same_branch_contention()
             self.run_fsck()
@@ -2087,8 +2437,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crab-bin", default=shutil.which("crab") or "crab")
     parser.add_argument("--git-bin", default=shutil.which("git") or "git")
     parser.add_argument("--agents", type=int, default=8)
+    parser.add_argument("--branch-update-rounds", type=int, default=0)
     parser.add_argument("--same-branch-agents", type=int, default=8)
     parser.add_argument("--max-parallel-pushes", type=int, default=32)
+    parser.add_argument("--max-parallel-readers", type=int, default=2)
     parser.add_argument("--upload-concurrency", type=int, default=4)
     parser.add_argument("--lock-wait-secs", type=int, default=30)
     parser.add_argument("--omit-lock-wait-secs", action="store_true")
@@ -2108,6 +2460,12 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if (args.crash_boundary or args.marker_faults) and args.no_request_capture:
         parser.error("--crash-boundary and --marker-faults require request capture")
+    if args.branch_update_rounds < 0:
+        parser.error("--branch-update-rounds cannot be negative")
+    if args.max_parallel_readers <= 0:
+        parser.error("--max-parallel-readers must be greater than zero")
+    if args.branch_update_rounds and args.skip_branch_fanout:
+        parser.error("--branch-update-rounds requires branch fanout")
     if args.crash_lock_ttl_secs <= 20:
         parser.error("--crash-lock-ttl-secs must be greater than 20")
     if (

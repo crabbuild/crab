@@ -1,3 +1,5 @@
+mod index_batch;
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ use crab_storage::{
 use crab_xet::hash::MerkleHash;
 use futures_util::stream::{self, StreamExt};
 use gix_pack::data::entry::Header;
+use object_store::path::Path as ObjectPath;
 use sha1::{Digest, Sha1};
 use tokio_util::sync::CancellationToken;
 
@@ -96,6 +99,11 @@ pub(crate) type GitObject = RemoteGitObject;
 const MAX_COALESCED_RANGE_BYTES: u64 = 8 * 1024 * 1024;
 // Include small gaps to avoid a separate object-store request for each entry.
 const MAX_COALESCED_GAP_BYTES: u64 = 32 * 1024;
+// Capsule-run members share immutable objects with larger, authenticated gaps
+// than standalone packs. Bound each source-backed request and its overread.
+const MAX_COALESCED_SOURCE_RANGE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_COALESCED_SOURCE_GAP_BYTES: u64 = 64 * 1024;
+const MAX_COALESCED_SOURCE_EXTRA_BYTES: u64 = 4 * 1024 * 1024;
 const DELTA_PREFETCH_BATCH_SIZE: usize = 50_000;
 const MATERIALIZE_CHUNK_SIZE: usize = 256;
 // Large object batches are cheaper to resolve from the immutable pack indexes
@@ -104,11 +112,24 @@ const MATERIALIZE_CHUNK_SIZE: usize = 256;
 const PACK_INDEX_LOOKUP_MIN_OBJECTS: usize = 256;
 const PACK_INDEX_LOAD_CONCURRENCY: usize = 4;
 
+#[derive(Clone)]
+struct CoalescedRangeEntry {
+    oid: gix_hash::ObjectId,
+    locator: GitObjectLocator,
+    source_start: u64,
+}
+
+enum CoalescedRangeSource {
+    Pack(MerkleHash),
+    Object(ObjectPath),
+}
+
 struct CoalescedRange {
-    pack_id: MerkleHash,
+    source: CoalescedRangeSource,
     start: u64,
     end: u64,
-    entries: Vec<(gix_hash::ObjectId, GitObjectLocator)>,
+    extra_bytes: u64,
+    entries: Vec<CoalescedRangeEntry>,
 }
 
 struct DeltaReadState {
@@ -138,12 +159,283 @@ pub(crate) struct RemoteGitPackedEntry {
     pub(crate) bytes: Bytes,
 }
 
+/// Authenticated lookup data and immutable pack sources for a pinned snapshot.
+///
+/// Callers must validate these against the snapshot before opening a repository.
+/// Inline locators precede preferred indexes; remaining lookups use the complete
+/// pinned inventory. An empty preferred set is distinct from an unspecified set.
+#[derive(Default)]
+pub struct SnapshotLookupSources {
+    preferred_pack_indexes: Option<Vec<GitPackInventoryEntry>>,
+    preferred_object_admission: Option<Arc<HashMap<[u8; 20], Vec<MerkleHash>>>>,
+    inline_locators: Option<Arc<HashMap<[u8; 20], GitObjectLocator>>>,
+    pack_sources: Option<HashMap<MerkleHash, RemoteGitPackSource>>,
+}
+
+impl SnapshotLookupSources {
+    /// Use verified in-memory locators before reading pack indexes.
+    pub fn with_inline_locators(mut self, locators: HashMap<[u8; 20], GitObjectLocator>) -> Self {
+        self.inline_locators = Some(Arc::new(locators));
+        self
+    }
+
+    /// Bind inventory members to authenticated non-canonical pack sources.
+    pub fn with_pack_sources(
+        mut self,
+        pack_sources: HashMap<MerkleHash, RemoteGitPackSource>,
+    ) -> Self {
+        self.pack_sources = Some(pack_sources);
+        self
+    }
+
+    /// Search these snapshot members before the complete pinned inventory.
+    pub fn with_preferred_pack_indexes(
+        mut self,
+        preferred_pack_indexes: impl IntoIterator<Item = GitPackInventoryEntry>,
+    ) -> Self {
+        self.preferred_pack_indexes = Some(preferred_pack_indexes.into_iter().collect());
+        self
+    }
+
+    /// Restrict frontier index probes to the authenticated object-to-member join.
+    pub fn with_preferred_object_admission(
+        mut self,
+        admission: HashMap<[u8; 20], Vec<MerkleHash>>,
+    ) -> Self {
+        self.preferred_object_admission = Some(Arc::new(admission));
+        self
+    }
+}
+
+/// One authenticated sidecar range in a lazy layered pack source.
+#[derive(Debug, Clone)]
+pub struct RemoteGitSidecarRange {
+    /// Absolute byte offset in the immutable source object.
+    pub offset: u64,
+    /// Number of bytes in this sidecar.
+    pub length: u64,
+    /// BLAKE3 identity committed by the source descriptor.
+    pub blake3: String,
+}
+
+/// Authenticated source for one Git pack that is not stored at the canonical
+/// `repo/packs` object key.
+#[derive(Debug, Clone)]
+pub struct RemoteGitPackSource {
+    path: Option<ObjectPath>,
+    object_offset: u64,
+    pack_size: u64,
+    pack: Option<Bytes>,
+    index: Option<Bytes>,
+    reverse_index: Option<Bytes>,
+    kind_metadata: Option<Bytes>,
+    lazy_sidecars: Option<LazyPackSidecars>,
+    lazy_index: Option<LazyPackIndex>,
+}
+
+#[derive(Debug, Clone)]
+struct LazyPackSidecars {
+    window: std::ops::Range<u64>,
+    index: RemoteGitSidecarRange,
+    reverse_index: RemoteGitSidecarRange,
+    kind_metadata: RemoteGitSidecarRange,
+}
+
+#[derive(Debug, Clone)]
+struct LazyPackIndex {
+    index: RemoteGitSidecarRange,
+    reverse_index: RemoteGitSidecarRange,
+}
+
+impl RemoteGitPackSource {
+    /// Bind a pack to a byte range in an immutable object-store object.
+    pub fn embedded(
+        path: ObjectPath,
+        object_offset: u64,
+        pack_size: u64,
+        index: Bytes,
+        reverse_index: Bytes,
+        kind_metadata: Option<Bytes>,
+    ) -> Result<Self> {
+        if pack_size == 0 || index.is_empty() || reverse_index.is_empty() {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            });
+        }
+        object_offset
+            .checked_add(pack_size)
+            .ok_or(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            })?;
+        Ok(Self {
+            path: Some(path),
+            object_offset,
+            pack_size,
+            pack: None,
+            index: Some(index),
+            reverse_index: Some(reverse_index),
+            kind_metadata,
+            lazy_sidecars: None,
+            lazy_index: None,
+        })
+    }
+
+    /// Bind a pack to authenticated sidecar ranges in an immutable source.
+    pub fn embedded_lazy(
+        path: ObjectPath,
+        object_offset: u64,
+        pack_size: u64,
+        source_size: u64,
+        index: RemoteGitSidecarRange,
+        reverse_index: RemoteGitSidecarRange,
+        kind_metadata: RemoteGitSidecarRange,
+    ) -> Result<Self> {
+        if pack_size == 0 || source_size == 0 {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            });
+        }
+        object_offset
+            .checked_add(pack_size)
+            .filter(|end| *end <= source_size)
+            .ok_or(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            })?;
+        let ranges = [&index, &reverse_index, &kind_metadata];
+        if ranges.iter().any(|range| {
+            range.length == 0
+                || range
+                    .offset
+                    .checked_add(range.length)
+                    .is_none_or(|end| end > source_size)
+                || blake3::Hash::from_hex(&range.blake3).is_err()
+        }) {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            });
+        }
+        let window_start =
+            ranges
+                .iter()
+                .map(|range| range.offset)
+                .min()
+                .ok_or(Error::RepositoryState {
+                    reason: RepositoryStateError::InconsistentGeneration,
+                })?;
+        let window_end = ranges
+            .iter()
+            .filter_map(|range| range.offset.checked_add(range.length))
+            .max()
+            .ok_or(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            })?;
+        Ok(Self {
+            path: Some(path),
+            object_offset,
+            pack_size,
+            pack: None,
+            index: None,
+            reverse_index: None,
+            kind_metadata: None,
+            lazy_sidecars: Some(LazyPackSidecars {
+                window: window_start..window_end,
+                index,
+                reverse_index,
+                kind_metadata,
+            }),
+            lazy_index: None,
+        })
+    }
+
+    /// Bind a pack to lazy authenticated index and reverse-index ranges.
+    ///
+    /// The normal read path needs only the pack index to locate requested
+    /// objects. Reverse indexes remain authenticated and are fetched by
+    /// explicit pack-install/repack callers, avoiding an eager sidecar wave
+    /// for incremental fetches.
+    pub fn embedded_lazy_index(
+        path: ObjectPath,
+        object_offset: u64,
+        pack_size: u64,
+        source_size: u64,
+        index: RemoteGitSidecarRange,
+        reverse_index: RemoteGitSidecarRange,
+    ) -> Result<Self> {
+        if pack_size == 0 || source_size == 0 {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            });
+        }
+        object_offset
+            .checked_add(pack_size)
+            .filter(|end| *end <= source_size)
+            .ok_or(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            })?;
+        for range in [&index, &reverse_index] {
+            if range.length == 0
+                || range
+                    .offset
+                    .checked_add(range.length)
+                    .is_none_or(|end| end > source_size)
+                || blake3::Hash::from_hex(&range.blake3).is_err()
+            {
+                return Err(Error::RepositoryState {
+                    reason: RepositoryStateError::InconsistentGeneration,
+                });
+            }
+        }
+        Ok(Self {
+            path: Some(path),
+            object_offset,
+            pack_size,
+            pack: None,
+            index: None,
+            reverse_index: None,
+            kind_metadata: None,
+            lazy_sidecars: None,
+            lazy_index: Some(LazyPackIndex {
+                index,
+                reverse_index,
+            }),
+        })
+    }
+
+    /// Bind a pack and its index to in-memory bytes.
+    pub fn inline(
+        pack: Bytes,
+        index: Bytes,
+        reverse_index: Bytes,
+        kind_metadata: Option<Bytes>,
+    ) -> Result<Self> {
+        if pack.is_empty() || index.is_empty() || reverse_index.is_empty() {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            });
+        }
+        Ok(Self {
+            path: None,
+            object_offset: 0,
+            pack_size: pack.len() as u64,
+            pack: Some(pack),
+            index: Some(index),
+            reverse_index: Some(reverse_index),
+            kind_metadata,
+            lazy_sidecars: None,
+            lazy_index: None,
+        })
+    }
+}
+
 /// Reads Git objects directly from immutable Crab packs in object storage.
 pub(crate) struct RemoteGitReader {
     store: Store,
     repo_prefix: String,
     inventory: HashMap<MerkleHash, GitPackInventoryEntry>,
     preferred_pack_indexes: Option<HashMap<MerkleHash, GitPackInventoryEntry>>,
+    preferred_object_admission: Option<Arc<HashMap<[u8; 20], Vec<MerkleHash>>>>,
+    inline_locators: Option<Arc<HashMap<[u8; 20], GitObjectLocator>>>,
+    pack_sources: HashMap<MerkleHash, RemoteGitPackSource>,
     limits: ReaderLimits,
     runtime: Arc<RemoteGitRuntime>,
     identity: RepositoryIdentity,
@@ -164,7 +456,7 @@ impl RemoteGitReader {
             store,
             repo_prefix,
             inventory,
-            None::<[GitPackInventoryEntry; 0]>,
+            SnapshotLookupSources::default(),
             limits,
             runtime,
             identity,
@@ -176,7 +468,7 @@ impl RemoteGitReader {
         store: Store,
         repo_prefix: impl Into<String>,
         inventory: impl IntoIterator<Item = GitPackInventoryEntry>,
-        preferred_pack_indexes: Option<impl IntoIterator<Item = GitPackInventoryEntry>>,
+        lookup_sources: SnapshotLookupSources,
         limits: ReaderLimits,
         runtime: Arc<RemoteGitRuntime>,
         identity: RepositoryIdentity,
@@ -191,7 +483,7 @@ impl RemoteGitReader {
                 });
             }
         }
-        let preferred_pack_indexes = if let Some(packs) = preferred_pack_indexes {
+        let preferred_pack_indexes = if let Some(packs) = lookup_sources.preferred_pack_indexes {
             let mut preferred = HashMap::new();
             for pack in packs {
                 if canonical.get(&pack.pack_id) != Some(&pack)
@@ -206,16 +498,147 @@ impl RemoteGitReader {
         } else {
             None
         };
+        let pack_sources = lookup_sources.pack_sources.unwrap_or_default();
+        for (pack_id, source) in &pack_sources {
+            let Some(inventory_entry) = canonical.get(pack_id) else {
+                return Err(Error::RepositoryState {
+                    reason: RepositoryStateError::InconsistentGeneration,
+                });
+            };
+            if inventory_entry.pack_size != source.pack_size {
+                return Err(Error::RepositoryState {
+                    reason: RepositoryStateError::InconsistentGeneration,
+                });
+            }
+        }
         Ok(Self {
             store,
             repo_prefix: repo_prefix.into(),
             inventory: canonical,
             preferred_pack_indexes,
+            preferred_object_admission: lookup_sources.preferred_object_admission,
+            inline_locators: lookup_sources.inline_locators,
+            pack_sources,
             limits,
             runtime,
             identity,
             generation,
         })
+    }
+
+    fn pack_source(&self, pack_id: &MerkleHash) -> Option<&RemoteGitPackSource> {
+        self.pack_sources.get(pack_id)
+    }
+
+    pub(crate) fn has_pack_sources(&self) -> bool {
+        !self.pack_sources.is_empty()
+    }
+
+    fn pack_path_range(
+        &self,
+        pack_id: &MerkleHash,
+        start: u64,
+        end: u64,
+    ) -> Result<Option<(ObjectPath, std::ops::Range<u64>)>> {
+        let Some(source) = self.pack_source(pack_id) else {
+            return Ok(None);
+        };
+        if start > end || end > source.pack_size {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        let path = source.path.clone().ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackEntry,
+        })?;
+        let range = source
+            .object_offset
+            .checked_add(start)
+            .and_then(|offset| source.object_offset.checked_add(end).map(|end| offset..end))
+            .ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            })?;
+        Ok(Some((path, range)))
+    }
+
+    async fn read_pack_range(
+        &self,
+        pack_id: &MerkleHash,
+        start: u64,
+        end: u64,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Bytes> {
+        let length = end.checked_sub(start).ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackEntry,
+        })?;
+        check_limit(
+            "fetched bytes",
+            length,
+            budget.remaining(BudgetDimension::FetchedBytes).await,
+        )?;
+        self.read_pack_range_admitted(
+            pack_id,
+            start,
+            end,
+            budget.read_admission(cancellation.clone()),
+            cancellation,
+        )
+        .await
+    }
+
+    async fn read_pack_range_admitted(
+        &self,
+        pack_id: &MerkleHash,
+        start: u64,
+        end: u64,
+        admission: Arc<dyn crab_storage::ReadAdmission>,
+        cancellation: &CancellationToken,
+    ) -> Result<Bytes> {
+        let length = end.checked_sub(start).ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackEntry,
+        })?;
+        if let Some(source) = self.pack_source(pack_id) {
+            if end > source.pack_size {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                });
+            }
+            if let Some(pack) = &source.pack {
+                let start = usize::try_from(start).map_err(|_| Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                })?;
+                let end = usize::try_from(end).map_err(|_| Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                })?;
+                let bytes = pack.get(start..end).ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                })?;
+                admission.bytes(length).await.map_err(|source| {
+                    Error::Storage(crab_storage::StorageError::ReadRejected { source })
+                })?;
+                return Ok(Bytes::copy_from_slice(bytes));
+            }
+        }
+        let (path, range) = self
+            .pack_path_range(pack_id, start, end)?
+            .unwrap_or_else(|| (repo_pack_path(&self.repo_prefix, pack_id), start..end));
+        let store = self.store.clone().with_read_admission(admission);
+        let origin_permit = self.runtime.origin_permit(cancellation).await?;
+        let bytes = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            bytes = store.range_get(&path, range) => bytes?,
+        };
+        observe_storage_read("range_get", bytes.len() as u64);
+        drop(origin_permit);
+        check_cancelled(cancellation)?;
+        if bytes.len() as u64 != length {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        Ok(bytes)
     }
 
     pub(crate) async fn read_with_session(
@@ -374,6 +797,86 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Vec<GitObjectLookup>> {
+        if let Some(locators) = &self.inline_locators {
+            tracing::debug!(object_count = requested.len(), "remote Git locator lookup");
+            let mut lookups = requested
+                .iter()
+                .map(|oid| {
+                    locators
+                        .get(oid)
+                        .copied()
+                        .map(GitObjectLookup::Hit)
+                        .unwrap_or(GitObjectLookup::Miss)
+                })
+                .collect::<Vec<_>>();
+            if lookups
+                .iter()
+                .any(|lookup| matches!(lookup, GitObjectLookup::Miss))
+            {
+                let mut admitted = HashMap::new();
+                let mut all_missing_admitted = true;
+                if let Some(admission) = &self.preferred_object_admission {
+                    for (lookup, oid) in lookups.iter().zip(requested) {
+                        if !matches!(lookup, GitObjectLookup::Miss) {
+                            continue;
+                        }
+                        let Some(pack_ids) = admission.get(oid) else {
+                            all_missing_admitted = false;
+                            continue;
+                        };
+                        for pack_id in pack_ids {
+                            let Some(pack) = self.inventory.get(pack_id).copied() else {
+                                return Err(Error::RepositoryState {
+                                    reason: RepositoryStateError::InconsistentGeneration,
+                                });
+                            };
+                            admitted.insert(*pack_id, pack);
+                        }
+                    }
+                    if !admitted.is_empty() {
+                        self.fill_pack_index_misses(
+                            &mut lookups,
+                            requested,
+                            &admitted,
+                            budget,
+                            cancellation,
+                        )
+                        .await?;
+                    }
+                    if all_missing_admitted
+                        && !lookups
+                            .iter()
+                            .any(|lookup| matches!(lookup, GitObjectLookup::Miss))
+                    {
+                        return Ok(lookups);
+                    }
+                }
+                if let Some(preferred) = &self.preferred_pack_indexes {
+                    self.fill_pack_index_misses(
+                        &mut lookups,
+                        requested,
+                        preferred,
+                        budget,
+                        cancellation,
+                    )
+                    .await?;
+                }
+                if lookups
+                    .iter()
+                    .any(|lookup| matches!(lookup, GitObjectLookup::Miss))
+                {
+                    self.fill_pack_index_misses(
+                        &mut lookups,
+                        requested,
+                        &self.inventory,
+                        budget,
+                        cancellation,
+                    )
+                    .await?;
+                }
+            }
+            return Ok(lookups);
+        }
         if !session.is_available() {
             // Canonical snapshot inspection must not open or repair mutable
             // acceleration state, including for a single requested object.
@@ -566,36 +1069,79 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Vec<GitObjectLookup>> {
-        let mut pack_ids = inventory.keys().copied().collect::<Vec<_>>();
-        pack_ids.sort_unstable();
-        let pack_count = pack_ids.len();
-        // Do not retain every index for a repository-wide batch: pack count is
-        // unbounded, while the stream keeps only the configured in-flight set.
-        let mut indexes = stream::iter(pack_ids.into_iter().map(|pack_id| async move {
-            let index = self.load_pack_index(pack_id, budget, cancellation).await?;
-            Ok::<_, Error>((pack_id, index))
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+        check_cancelled(cancellation)?;
+        let pack_count = inventory.len();
+        let mut sorted = Vec::new();
+        sorted
+            .try_reserve_exact(requested.len())
+            .map_err(|source| Error::Allocation {
+                requested: requested
+                    .len()
+                    .saturating_mul(std::mem::size_of::<(gix_hash::ObjectId, usize)>()),
+                source,
+            })?;
+        sorted.extend(
+            requested
+                .iter()
+                .enumerate()
+                .map(|(position, oid)| (gix_hash::ObjectId::from(*oid), position)),
+        );
+        sorted.sort_unstable();
+        let reads = self.plan_pack_index_reads(inventory, cancellation).await?;
+        // Keep only a bounded number of source windows alive. Each embedded
+        // index retains its own integrity check and per-index admission limit.
+        let mut indexes = stream::iter(reads.into_iter().map(|read| async move {
+            match self.load_pack_index_read(read, budget, cancellation).await {
+                Ok(indexes) => indexes.into_iter().map(Ok).collect::<Vec<_>>(),
+                Err(error) => vec![Err(error)],
+            }
         }))
-        .buffer_unordered(PACK_INDEX_LOAD_CONCURRENCY.min(pack_count).max(1));
+        .buffer_unordered(PACK_INDEX_LOAD_CONCURRENCY.min(pack_count).max(1))
+        .flat_map(stream::iter);
 
         let mut lookups = vec![GitObjectLookup::Miss; requested.len()];
         let mut remaining = requested.len();
         while let Some(result) = indexes.next().await {
             let (pack_id, index) = result?;
-            for (position, oid) in requested.iter().enumerate() {
-                if matches!(
-                    lookups[position],
-                    GitObjectLookup::Hit(GitObjectLocator {
-                        metadata: crab_metadata::git_object_locator::GitObjectMetadata {
-                            delta_base_oid: None,
+            // A large index after small frontier members should probe only
+            // unresolved requests. Compact lazily so small members do not each
+            // rescan the complete batch just to discard resolved positions.
+            if remaining < sorted.len() && index.object_ids.len() >= remaining {
+                sorted.retain(|(_, position)| {
+                    !matches!(
+                        lookups[*position],
+                        GitObjectLookup::Hit(GitObjectLocator {
+                            metadata: crab_metadata::git_object_locator::GitObjectMetadata {
+                                delta_base_oid: None,
+                                ..
+                            },
                             ..
-                        },
-                        ..
-                    })
-                ) {
-                    continue;
-                }
-                let object_id = gix_hash::ObjectId::from(*oid);
-                if let Some(location) = index.location_for(&object_id)? {
+                        })
+                    )
+                });
+            }
+            index_batch::visit_index_matches(
+                &sorted,
+                &index.object_ids,
+                cancellation,
+                |position, index_position| {
+                    if matches!(
+                        lookups[position],
+                        GitObjectLookup::Hit(GitObjectLocator {
+                            metadata: crab_metadata::git_object_locator::GitObjectMetadata {
+                                delta_base_oid: None,
+                                ..
+                            },
+                            ..
+                        })
+                    ) {
+                        return Ok(());
+                    }
+                    let object_id = index.object_ids[index_position];
+                    let location = index.location_at(index_position)?;
                     let delta_base_oid = index
                         .external_delta_bases
                         .get(&object_id)
@@ -630,8 +1176,9 @@ impl RemoteGitReader {
                         }
                         lookups[position] = GitObjectLookup::Hit(candidate);
                     }
-                }
-            }
+                    Ok(())
+                },
+            )?;
             if remaining == 0 {
                 break;
             }
@@ -786,34 +1333,44 @@ impl RemoteGitReader {
                     .saturating_mul(std::mem::size_of::<(gix_hash::ObjectId, GitObjectLocator)>()),
                 source,
             })?;
+        let mut selected_base_oids = HashMap::with_capacity(requested.len());
         for (oid, locator) in requested.iter().copied().zip(locators.iter().copied()) {
             check_limit(
                 "packed entry bytes",
                 locator.location.entry_len,
                 self.limits.max_packed_entry_bytes,
             )?;
+            if selected_base_oids
+                .insert((locator.pack_id, locator.location.pack_offset), oid)
+                .is_some_and(|previous| previous != oid)
+            {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::Locator,
+                });
+            }
             ready.push((oid, locator));
         }
-        let ranges = coalesce_ranges(ready)?;
+        let ranges = self.coalesce_reader_ranges(ready)?;
         let caller_cancellation = cancellation.clone();
         let results = stream::iter(ranges.into_iter().map(|range| {
             let reader = Arc::clone(self);
             let caller_cancellation = caller_cancellation.clone();
+            let selected_base_oids = &selected_base_oids;
             async move {
                 let bytes = reader
                     .read_coalesced_range(&range, budget, &caller_cancellation)
                     .await?;
                 let mut entries = Vec::with_capacity(range.entries.len());
-                for (oid, locator) in range.entries {
-                    let relative_start = locator
-                        .location
-                        .pack_offset
-                        .checked_sub(range.start)
-                        .ok_or(Error::Corrupt {
-                            stage: CorruptionStage::PackEntry,
-                        })?;
+                for entry in range.entries {
+                    let relative_start =
+                        entry
+                            .source_start
+                            .checked_sub(range.start)
+                            .ok_or(Error::Corrupt {
+                                stage: CorruptionStage::PackEntry,
+                            })?;
                     let relative_end = relative_start
-                        .checked_add(locator.location.entry_len)
+                        .checked_add(entry.locator.location.entry_len)
                         .ok_or(Error::Corrupt {
                             stage: CorruptionStage::PackEntry,
                         })?;
@@ -826,15 +1383,18 @@ impl RemoteGitReader {
                     let entry_bytes = bytes.get(start..end).ok_or(Error::Corrupt {
                         stage: CorruptionStage::PackEntry,
                     })?;
-                    if gix_features::hash::crc32(entry_bytes) != locator.location.crc32 {
-                        return Err(Error::PackedEntryCrcMismatch { oid });
+                    if gix_features::hash::crc32(entry_bytes) != entry.locator.location.crc32 {
+                        return Err(Error::PackedEntryCrcMismatch { oid: entry.oid });
                     }
                     let parsed = gix_pack::data::Entry::from_bytes(
                         entry_bytes,
-                        locator.location.pack_offset,
+                        entry.locator.location.pack_offset,
                         20,
                     )
-                    .map_err(|source| Error::PackEntry { oid, source })?;
+                    .map_err(|source| Error::PackEntry {
+                        oid: entry.oid,
+                        source,
+                    })?;
                     let maximum = if parsed.header.as_kind().is_some() {
                         reader
                             .limits
@@ -858,28 +1418,37 @@ impl RemoteGitReader {
                         Header::RefDelta { base_id } => Some(base_id),
                         Header::OfsDelta { base_distance } => {
                             let base_offset = Header::verified_base_pack_offset(
-                                locator.location.pack_offset,
+                                entry.locator.location.pack_offset,
                                 base_distance,
                             )
                             .ok_or(Error::Corrupt {
                                 stage: CorruptionStage::Delta,
                             })?;
+                            // Batch locators already authenticate selected base
+                            // offsets. Reopening their indexes after LRU eviction
+                            // adds reads without adding integrity evidence.
                             Some(
-                                reader
-                                    .oid_at_pack_offset(
-                                        locator.pack_id,
-                                        base_offset,
-                                        budget,
-                                        &caller_cancellation,
-                                    )
-                                    .await?,
+                                match selected_base_oids.get(&(entry.locator.pack_id, base_offset))
+                                {
+                                    Some(oid) => *oid,
+                                    None => {
+                                        reader
+                                            .oid_at_pack_offset(
+                                                entry.locator.pack_id,
+                                                base_offset,
+                                                budget,
+                                                &caller_cancellation,
+                                            )
+                                            .await?
+                                    }
+                                },
                             )
                         }
                         Header::Commit | Header::Tree | Header::Blob | Header::Tag => None,
                     };
                     entries.push(RemoteGitPackedEntry {
-                        oid,
-                        pack_offset: locator.location.pack_offset,
+                        oid: entry.oid,
+                        pack_offset: entry.locator.location.pack_offset,
                         header: parsed.header,
                         decompressed_size: parsed.decompressed_size,
                         header_size,
@@ -1160,24 +1729,68 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Bytes> {
-        let length = range.end.checked_sub(range.start).ok_or(Error::Corrupt {
+        match &range.source {
+            CoalescedRangeSource::Pack(pack_id) => {
+                self.read_pack_range(pack_id, range.start, range.end, budget, cancellation)
+                    .await
+            }
+            CoalescedRangeSource::Object(path) => {
+                self.read_object_range(path, range.start, range.end, budget, cancellation)
+                    .await
+            }
+        }
+    }
+
+    async fn read_object_range(
+        &self,
+        path: &ObjectPath,
+        start: u64,
+        end: u64,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Bytes> {
+        let length = end.checked_sub(start).ok_or(Error::Corrupt {
             stage: CorruptionStage::PackEntry,
         })?;
-        let path = repo_pack_path(&self.repo_prefix, &range.pack_id);
         check_limit(
             "fetched bytes",
             length,
             budget.remaining(BudgetDimension::FetchedBytes).await,
         )?;
-        let store = self
-            .store
-            .clone()
-            .with_read_admission(budget.read_admission(cancellation.clone()));
+        let bytes = self
+            .read_object_range_admitted(
+                path,
+                start,
+                end,
+                budget.read_admission(cancellation.clone()),
+                cancellation,
+            )
+            .await?;
+        if bytes.len() as u64 != length {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        Ok(bytes)
+    }
+
+    async fn read_object_range_admitted(
+        &self,
+        path: &ObjectPath,
+        start: u64,
+        end: u64,
+        admission: Arc<dyn crab_storage::ReadAdmission>,
+        cancellation: &CancellationToken,
+    ) -> Result<Bytes> {
+        let length = end.checked_sub(start).ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackEntry,
+        })?;
+        let store = self.store.clone().with_read_admission(admission);
         let origin_permit = self.runtime.origin_permit(cancellation).await?;
         let bytes = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(Error::Cancelled),
-            bytes = store.range_get(&path, range.start..range.end) => bytes?,
+            bytes = store.range_get(path, start..end) => bytes?,
         };
         observe_storage_read("range_get", bytes.len() as u64);
         drop(origin_permit);
@@ -1264,8 +1877,6 @@ impl RemoteGitReader {
             .ok_or(Error::Corrupt {
                 stage: CorruptionStage::PackEntry,
             })?;
-        let path = repo_pack_path(&self.repo_prefix, &locator.pack_id);
-        let store = self.store.clone();
         let runtime = Arc::clone(&self.runtime);
         let work_runtime = Arc::clone(&self.runtime);
         let cache_key = crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, oid);
@@ -1303,16 +1914,15 @@ impl RemoteGitReader {
                             inflated: object.data.clone(),
                         });
                     }
-                    let store = store.with_read_admission(shared_budget.clone());
-                    let origin_permit = work_runtime.origin_permit(&shared_cancellation).await?;
-                    let bytes = tokio::select! {
-                        biased;
-                        () = shared_cancellation.cancelled() => return Err(Error::Cancelled),
-                        bytes = store.range_get(&path, pack_offset..end) => bytes?,
-                    };
-                    observe_storage_read("range_get", bytes.len() as u64);
-                    drop(origin_permit);
-                    check_cancelled(&shared_cancellation)?;
+                    let bytes = reader
+                        .read_pack_range_admitted(
+                            &locator.pack_id,
+                            pack_offset,
+                            end,
+                            shared_budget.clone(),
+                            &shared_cancellation,
+                        )
+                        .await?;
                     if bytes.len() as u64 != entry_len {
                         return Err(Error::Corrupt {
                             stage: CorruptionStage::PackEntry,
@@ -1428,10 +2038,6 @@ impl RemoteGitReader {
             locator.location.entry_len,
             budget.remaining(BudgetDimension::FetchedBytes).await,
         )?;
-        let store = self
-            .store
-            .clone()
-            .with_read_admission(budget.read_admission(cancellation.clone()));
         let end = locator
             .location
             .pack_offset
@@ -1439,16 +2045,15 @@ impl RemoteGitReader {
             .ok_or(Error::Corrupt {
                 stage: CorruptionStage::PackEntry,
             })?;
-        let path = repo_pack_path(&self.repo_prefix, &locator.pack_id);
-        let origin_permit = self.runtime.origin_permit(cancellation).await?;
-        let bytes = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(Error::Cancelled),
-            bytes = store.range_get(&path, locator.location.pack_offset..end) => bytes?,
-        };
-        observe_storage_read("range_get", bytes.len() as u64);
-        drop(origin_permit);
-        check_cancelled(cancellation)?;
+        let bytes = self
+            .read_pack_range(
+                &locator.pack_id,
+                locator.location.pack_offset,
+                end,
+                budget,
+                cancellation,
+            )
+            .await?;
         if bytes.len() as u64 != locator.location.entry_len {
             return Err(Error::Corrupt {
                 stage: CorruptionStage::PackEntry,
@@ -1497,6 +2102,115 @@ impl RemoteGitReader {
             .ok_or(Error::Corrupt {
                 stage: CorruptionStage::Inventory,
             })?;
+        if let Some(source) = self.pack_source(&pack_id).cloned() {
+            let source_size = source.index.as_ref().map_or_else(
+                || {
+                    source.lazy_index.as_ref().map_or_else(
+                        || {
+                            source
+                                .lazy_sidecars
+                                .as_ref()
+                                .map_or(0, |lazy| lazy.index.length)
+                        },
+                        |lazy| lazy.index.length,
+                    )
+                },
+                |index| index.len() as u64,
+            );
+            check_limit(
+                "pack index bytes",
+                source_size,
+                self.limits.max_pack_index_bytes,
+            )?;
+            let runtime = Arc::clone(&self.runtime);
+            let store = self.store.clone();
+            let source_for_work = source.clone();
+            let index = runtime
+                .clone()
+                .load_pack_index_singleflight(
+                    cache_key,
+                    self.limits.max_pack_index_bytes,
+                    cancellation,
+                    budget,
+                    move |shared_cancellation, shared_budget| async move {
+                        check_cancelled(&shared_cancellation)?;
+                        let (index_bytes, kind_metadata) =
+                            if let Some(index) = source_for_work.index.clone() {
+                                shared_budget
+                                    .charge(BudgetDimension::FetchedBytes, index.len() as u64)
+                                    .await?;
+                                (index, source_for_work.kind_metadata.clone())
+                            } else if let Some(lazy) = source_for_work.lazy_index.clone() {
+                                let path = source_for_work.path.clone().ok_or(Error::Corrupt {
+                                    stage: CorruptionStage::PackIndex,
+                                })?;
+                                let admission: Arc<dyn crab_storage::ReadAdmission> =
+                                    shared_budget.clone();
+                                let index = read_lazy_range_from_store(
+                                    &store,
+                                    &runtime,
+                                    &path,
+                                    &lazy.index,
+                                    admission,
+                                    &shared_cancellation,
+                                )
+                                .await?;
+                                (index, None)
+                            } else if let Some(lazy) = source_for_work.lazy_sidecars.clone() {
+                                let path = source_for_work.path.clone().ok_or(Error::Corrupt {
+                                    stage: CorruptionStage::PackIndex,
+                                })?;
+                                let admission: Arc<dyn crab_storage::ReadAdmission> =
+                                    shared_budget.clone();
+                                let (index, _reverse_index, kind_metadata) =
+                                    read_lazy_sidecars_from_store(
+                                        &store,
+                                        &runtime,
+                                        &path,
+                                        lazy,
+                                        admission,
+                                        &shared_cancellation,
+                                    )
+                                    .await?;
+                                (index, Some(kind_metadata))
+                            } else {
+                                return Err(Error::Corrupt {
+                                    stage: CorruptionStage::PackIndex,
+                                });
+                            };
+                        if let Some(kind_metadata) = &kind_metadata {
+                            let maximum =
+                                crab_git::max_pack_kind_metadata_size(inventory.object_count)
+                                    .ok_or(Error::Corrupt {
+                                        stage: CorruptionStage::PackIndex,
+                                    })?;
+                            if kind_metadata.len() as u64 > maximum {
+                                return Err(Error::Corrupt {
+                                    stage: CorruptionStage::PackIndex,
+                                });
+                            }
+                        }
+                        let decode_permit = runtime.decode_permit(&shared_cancellation).await?;
+                        let token = shared_cancellation.clone();
+                        let index = runtime
+                            .spawn_blocking(move || {
+                                parse_pack_index(
+                                    pack_id,
+                                    inventory,
+                                    index_bytes,
+                                    kind_metadata,
+                                    &token,
+                                )
+                            })
+                            .await
+                            .map_err(|source| Error::DecodeTask { source })??;
+                        drop(decode_permit);
+                        Ok(index)
+                    },
+                )
+                .await?;
+            return Ok(index);
+        }
         let path = repo_pack_index_path(&self.repo_prefix, &pack_id);
         let source_size = if let Some(source_size) =
             self.runtime.cached_pack_index_source_size(&cache_key).await
@@ -1612,6 +2326,7 @@ impl RemoteGitReader {
         &self,
         pack_id: MerkleHash,
         object_ids: &[gix_hash::ObjectId],
+        allowed_external_bases: &[gix_hash::ObjectId],
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Option<[u8; 20]>> {
@@ -1622,7 +2337,16 @@ impl RemoteGitReader {
         let matches = object_ids
             .iter()
             .all(|oid| index.object_ids.binary_search(oid).is_ok());
-        Ok(matches.then_some(index.pack_checksum))
+        if !matches {
+            return Ok(None);
+        }
+        if index.external_delta_bases.values().any(|base| {
+            !object_ids.iter().any(|oid| oid == base)
+                && !allowed_external_bases.iter().any(|oid| oid == base)
+        }) {
+            return Ok(None);
+        }
+        Ok(Some(index.pack_checksum))
     }
 
     pub(crate) async fn download_pack_to_path(
@@ -1634,20 +2358,31 @@ impl RemoteGitReader {
         cancellation: &CancellationToken,
         progress: Option<&(dyn Fn(u64) + Send + Sync)>,
     ) -> Result<VerifiedPackIdentity> {
-        use tokio::io::AsyncWriteExt as _;
-
         check_limit(
             "fetched bytes",
             expected_size,
             budget.remaining(BudgetDimension::FetchedBytes).await,
         )?;
+        if let Some(source) = self.pack_source(&pack_id).cloned() {
+            return self
+                .download_pack_source_to_path(
+                    pack_id,
+                    expected_size,
+                    destination,
+                    budget,
+                    cancellation,
+                    progress,
+                    source,
+                )
+                .await;
+        }
         let store = self
             .store
             .clone()
             .with_read_admission(budget.read_admission(cancellation.clone()));
         let path = repo_pack_path(&self.repo_prefix, &pack_id);
         let origin_permit = self.runtime.origin_permit(cancellation).await?;
-        let (metadata, range, mut stream) = tokio::select! {
+        let (metadata, range, stream) = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(Error::Cancelled),
             result = store.get_stream(&path, None) => result?,
@@ -1670,45 +2405,87 @@ impl RemoteGitReader {
             .map_err(|source| {
                 Error::Metadata(crab_metadata::error::MetadataError::Io { source })
             })?;
-        let mut verifier = PackStreamVerifier::default();
-        let mut written = 0u64;
-        while let Some(chunk) = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(Error::Cancelled),
-            chunk = stream.next() => chunk,
-        } {
-            let chunk = chunk?;
-            verifier.update(&chunk);
-            file.write_all(&chunk).await.map_err(|source| {
+        let result = write_verified_pack_stream(
+            &mut file,
+            stream,
+            pack_id,
+            expected_size,
+            cancellation,
+            progress,
+        )
+        .await;
+        drop(origin_permit);
+        if result.is_ok() {
+            observe_storage_read("pack_stream", expected_size);
+        }
+        result
+    }
+
+    async fn download_pack_source_to_path(
+        &self,
+        pack_id: MerkleHash,
+        expected_size: u64,
+        destination: &std::path::Path,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+        progress: Option<&(dyn Fn(u64) + Send + Sync)>,
+        source: RemoteGitPackSource,
+    ) -> Result<VerifiedPackIdentity> {
+        if source.pack_size != expected_size {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::Inventory,
+            });
+        }
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(destination)
+            .await
+            .map_err(|source| {
                 Error::Metadata(crab_metadata::error::MetadataError::Io { source })
             })?;
-            written = written
-                .checked_add(chunk.len() as u64)
-                .ok_or(Error::Corrupt {
-                    stage: CorruptionStage::PackEntry,
-                })?;
-            if let Some(progress) = progress {
-                progress(chunk.len() as u64);
+        let (stream, origin_permit) = if let Some(pack) = source.pack {
+            budget
+                .charge(BudgetDimension::FetchedBytes, expected_size)
+                .await?;
+            (stream::once(async move { Ok(pack) }).boxed(), None)
+        } else {
+            let (path, range) =
+                self.pack_path_range(&pack_id, 0, expected_size)?
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+            let store = self
+                .store
+                .clone()
+                .with_read_admission(budget.read_admission(cancellation.clone()));
+            let origin_permit = self.runtime.origin_permit(cancellation).await?;
+            let (metadata, returned_range, stream) = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(Error::Cancelled),
+                result = store.get_stream(&path, Some(range.clone())) => result?,
+            };
+            if returned_range != range || metadata.size < range.end || metadata.size == 0 {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::Inventory,
+                });
             }
-        }
-        file.flush().await.map_err(|source| {
-            Error::Metadata(crab_metadata::error::MetadataError::Io { source })
-        })?;
+            (stream, Some(origin_permit))
+        };
+        let result = write_verified_pack_stream(
+            &mut file,
+            stream,
+            pack_id,
+            expected_size,
+            cancellation,
+            progress,
+        )
+        .await;
         drop(origin_permit);
-        if written != expected_size {
-            return Err(Error::Corrupt {
-                stage: CorruptionStage::PackEntry,
-            });
+        if result.is_ok() {
+            observe_storage_read("pack_source_stream", expected_size);
         }
-        observe_storage_read("pack_stream", written);
-        let identity = verifier.finish()?;
-        let actual_content_hash = blake3::Hash::from_bytes(identity.content_hash).to_hex();
-        if actual_content_hash.as_str() != pack_id.to_string() {
-            return Err(Error::Corrupt {
-                stage: CorruptionStage::PackEntry,
-            });
-        }
-        Ok(identity)
+        result
     }
 
     pub(crate) async fn download_pack_index_to_path(
@@ -1719,6 +2496,82 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<()> {
+        if let Some(source) = self.pack_source(&pack_id) {
+            if let Some(bytes) = source.index.clone() {
+                return self
+                    .write_inline_artifact(
+                        bytes,
+                        maximum_size,
+                        destination,
+                        budget,
+                        cancellation,
+                        "pack index bytes",
+                        "pack_index_source",
+                    )
+                    .await;
+            }
+            if let Some(lazy) = source.lazy_index.clone() {
+                let path = source.path.clone().ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PackIndex,
+                })?;
+                let bytes = read_lazy_range_from_store(
+                    &self.store,
+                    &self.runtime,
+                    &path,
+                    &lazy.index,
+                    budget.read_admission(cancellation.clone()),
+                    cancellation,
+                )
+                .await?;
+                return self
+                    .write_fetched_artifact(
+                        bytes,
+                        maximum_size,
+                        destination,
+                        cancellation,
+                        "pack index bytes",
+                        "pack_index_source",
+                    )
+                    .await;
+            }
+            let lazy = source.lazy_sidecars.clone().ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })?;
+            let window_size =
+                lazy.window
+                    .end
+                    .checked_sub(lazy.window.start)
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackIndex,
+                    })?;
+            check_limit(
+                "fetched bytes",
+                window_size,
+                budget.remaining(BudgetDimension::FetchedBytes).await,
+            )?;
+            let path = source.path.clone().ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })?;
+            let (index, _, _) = read_lazy_sidecars_from_store(
+                &self.store,
+                &self.runtime,
+                &path,
+                lazy,
+                budget.read_admission(cancellation.clone()),
+                cancellation,
+            )
+            .await?;
+            return self
+                .write_fetched_artifact(
+                    index,
+                    maximum_size,
+                    destination,
+                    cancellation,
+                    "pack index bytes",
+                    "pack_index_source",
+                )
+                .await;
+        }
         self.download_pack_artifact_to_path(
             repo_pack_index_path(&self.repo_prefix, &pack_id),
             maximum_size,
@@ -1739,6 +2592,82 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<()> {
+        if let Some(source) = self.pack_source(&pack_id) {
+            if let Some(bytes) = source.reverse_index.clone() {
+                return self
+                    .write_inline_artifact(
+                        bytes,
+                        maximum_size,
+                        destination,
+                        budget,
+                        cancellation,
+                        "pack reverse-index bytes",
+                        "pack_reverse_index_source",
+                    )
+                    .await;
+            }
+            if let Some(lazy) = source.lazy_index.clone() {
+                let path = source.path.clone().ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PackIndex,
+                })?;
+                let bytes = read_lazy_range_from_store(
+                    &self.store,
+                    &self.runtime,
+                    &path,
+                    &lazy.reverse_index,
+                    budget.read_admission(cancellation.clone()),
+                    cancellation,
+                )
+                .await?;
+                return self
+                    .write_fetched_artifact(
+                        bytes,
+                        maximum_size,
+                        destination,
+                        cancellation,
+                        "pack reverse-index bytes",
+                        "pack_reverse_index_source",
+                    )
+                    .await;
+            }
+            let lazy = source.lazy_sidecars.clone().ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })?;
+            let window_size =
+                lazy.window
+                    .end
+                    .checked_sub(lazy.window.start)
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackIndex,
+                    })?;
+            check_limit(
+                "fetched bytes",
+                window_size,
+                budget.remaining(BudgetDimension::FetchedBytes).await,
+            )?;
+            let path = source.path.clone().ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })?;
+            let (_, reverse_index, _) = read_lazy_sidecars_from_store(
+                &self.store,
+                &self.runtime,
+                &path,
+                lazy,
+                budget.read_admission(cancellation.clone()),
+                cancellation,
+            )
+            .await?;
+            return self
+                .write_fetched_artifact(
+                    reverse_index,
+                    maximum_size,
+                    destination,
+                    cancellation,
+                    "pack reverse-index bytes",
+                    "pack_reverse_index_source",
+                )
+                .await;
+        }
         self.download_pack_artifact_to_path(
             repo_pack_reverse_index_path(&self.repo_prefix, &pack_id),
             maximum_size,
@@ -1749,6 +2678,78 @@ impl RemoteGitReader {
             "pack reverse-index bytes",
         )
         .await
+    }
+
+    async fn write_inline_artifact(
+        &self,
+        bytes: Bytes,
+        maximum_size: u64,
+        destination: &std::path::Path,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+        limit: &'static str,
+        storage_request: &'static str,
+    ) -> Result<()> {
+        check_cancelled(cancellation)?;
+        let size = bytes.len() as u64;
+        check_limit(limit, size, maximum_size)?;
+        check_limit(
+            "fetched bytes",
+            size,
+            budget.remaining(BudgetDimension::FetchedBytes).await,
+        )?;
+        budget.charge(BudgetDimension::FetchedBytes, size).await?;
+        self.write_fetched_artifact(
+            bytes,
+            maximum_size,
+            destination,
+            cancellation,
+            limit,
+            storage_request,
+        )
+        .await
+    }
+
+    async fn write_fetched_artifact(
+        &self,
+        bytes: Bytes,
+        maximum_size: u64,
+        destination: &std::path::Path,
+        cancellation: &CancellationToken,
+        limit: &'static str,
+        storage_request: &'static str,
+    ) -> Result<()> {
+        use tokio::io::AsyncWriteExt as _;
+
+        check_cancelled(cancellation)?;
+        let size = bytes.len() as u64;
+        check_limit(limit, size, maximum_size)?;
+        let result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(destination)
+                .await
+                .map_err(|source| {
+                    Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+                })?;
+            let written = file.write_all(&bytes).await.map_err(|source| {
+                Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+            });
+            let flushed = file.flush().await.map_err(|source| {
+                Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+            });
+            written.and(flushed)?;
+            check_cancelled(cancellation)?;
+            observe_storage_read(storage_request, size);
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(destination).await;
+        }
+        result
     }
 
     async fn download_pack_artifact_to_path(
@@ -1790,37 +2791,44 @@ impl RemoteGitReader {
                     Error::Metadata(crab_metadata::error::MetadataError::Io { source })
                 })?;
             let mut written = 0_u64;
-            while let Some(chunk) = tokio::select! {
-                biased;
-                () = cancellation.cancelled() => return Err(Error::Cancelled),
-                chunk = stream.next() => chunk,
-            } {
-                let chunk = chunk?;
-                let next = written
-                    .checked_add(chunk.len() as u64)
-                    .ok_or(Error::Corrupt {
-                        stage: CorruptionStage::PackIndex,
+            let copied = async {
+                while let Some(chunk) = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return Err(Error::Cancelled),
+                    chunk = stream.next() => chunk,
+                } {
+                    let chunk = chunk?;
+                    let next = written
+                        .checked_add(chunk.len() as u64)
+                        .ok_or(Error::Corrupt {
+                            stage: CorruptionStage::PackIndex,
+                        })?;
+                    if next > metadata.size {
+                        return Err(Error::Corrupt {
+                            stage: CorruptionStage::PackIndex,
+                        });
+                    }
+                    if next > maximum_size {
+                        return Err(Error::LimitExceeded {
+                            limit,
+                            actual: next,
+                            maximum: maximum_size,
+                        });
+                    }
+                    file.write_all(&chunk).await.map_err(|source| {
+                        Error::Metadata(crab_metadata::error::MetadataError::Io { source })
                     })?;
-                if next > metadata.size {
-                    return Err(Error::Corrupt {
-                        stage: CorruptionStage::PackIndex,
-                    });
+                    written = next;
                 }
-                if next > maximum_size {
-                    return Err(Error::LimitExceeded {
-                        limit,
-                        actual: next,
-                        maximum: maximum_size,
-                    });
-                }
-                file.write_all(&chunk).await.map_err(|source| {
-                    Error::Metadata(crab_metadata::error::MetadataError::Io { source })
-                })?;
-                written = next;
+                Ok(())
             }
-            file.flush().await.map_err(|source| {
+            .await;
+            // Sidecar streams have the same pending-write lifetime as pack bodies.
+            let flushed = file.flush().await.map_err(|source| {
                 Error::Metadata(crab_metadata::error::MetadataError::Io { source })
-            })?;
+            });
+            copied.and(flushed)?;
+            check_cancelled(cancellation)?;
             observe_storage_read(storage_request, written);
             if written != metadata.size {
                 return Err(Error::Corrupt {
@@ -1847,6 +2855,191 @@ fn observe_storage_read(storage_request: &'static str, storage_bytes: u64) {
         storage_bytes,
         "remote Git object-store read completed"
     );
+}
+
+async fn write_verified_pack_stream<W: tokio::io::AsyncWrite + Unpin>(
+    file: &mut W,
+    mut stream: crab_storage::store::StorageByteStream,
+    pack_id: MerkleHash,
+    expected_size: u64,
+    cancellation: &CancellationToken,
+    progress: Option<&(dyn Fn(u64) + Send + Sync)>,
+) -> Result<VerifiedPackIdentity> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut verifier = PackStreamVerifier::default();
+    let mut written = 0_u64;
+    let result = async {
+        while let Some(chunk) = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            chunk = stream.next() => chunk,
+        } {
+            let chunk = chunk?;
+            written = written
+                .checked_add(chunk.len() as u64)
+                .ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                })?;
+            if written > expected_size {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                });
+            }
+            verifier.update(&chunk);
+            file.write_all(&chunk).await.map_err(|source| {
+                Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+            })?;
+            if let Some(progress) = progress {
+                progress(chunk.len() as u64);
+            }
+        }
+        Ok(())
+    }
+    .await;
+    // Tokio may acknowledge a write before its blocking filesystem work ends.
+    // Drain on every exit before callers delete the private destination.
+    let flushed = file
+        .flush()
+        .await
+        .map_err(|source| Error::Metadata(crab_metadata::error::MetadataError::Io { source }));
+    result.and(flushed)?;
+    check_cancelled(cancellation)?;
+    if written != expected_size {
+        return Err(Error::Corrupt {
+            stage: CorruptionStage::PackEntry,
+        });
+    }
+    let identity = verifier.finish()?;
+    if blake3::Hash::from_bytes(identity.content_hash)
+        .to_hex()
+        .as_str()
+        != pack_id.to_string()
+    {
+        return Err(Error::Corrupt {
+            stage: CorruptionStage::PackEntry,
+        });
+    }
+    Ok(identity)
+}
+
+async fn read_lazy_sidecars_from_store(
+    store: &Store,
+    runtime: &Arc<RemoteGitRuntime>,
+    path: &ObjectPath,
+    lazy: LazyPackSidecars,
+    admission: Arc<dyn crab_storage::ReadAdmission>,
+    cancellation: &CancellationToken,
+) -> Result<(Bytes, Bytes, Bytes)> {
+    let bytes = read_index_window_from_store(
+        store,
+        runtime,
+        path,
+        lazy.window.clone(),
+        admission,
+        cancellation,
+    )
+    .await?;
+    let index = copy_lazy_sidecar(&bytes, lazy.window.start, &lazy.index)?;
+    let reverse_index = copy_lazy_sidecar(&bytes, lazy.window.start, &lazy.reverse_index)?;
+    let kind_metadata = copy_lazy_sidecar(&bytes, lazy.window.start, &lazy.kind_metadata)?;
+    Ok((index, reverse_index, kind_metadata))
+}
+
+async fn read_lazy_range_from_store(
+    store: &Store,
+    runtime: &Arc<RemoteGitRuntime>,
+    path: &ObjectPath,
+    range: &RemoteGitSidecarRange,
+    admission: Arc<dyn crab_storage::ReadAdmission>,
+    cancellation: &CancellationToken,
+) -> Result<Bytes> {
+    let end = range
+        .offset
+        .checked_add(range.length)
+        .ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        })?;
+    let bytes = read_index_window_from_store(
+        store,
+        runtime,
+        path,
+        range.offset..end,
+        admission,
+        cancellation,
+    )
+    .await?;
+    let expected = blake3::Hash::from_hex(&range.blake3).map_err(|_| Error::Corrupt {
+        stage: CorruptionStage::PackIndex,
+    })?;
+    if blake3::hash(&bytes) != expected {
+        return Err(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        });
+    }
+    Ok(bytes)
+}
+
+async fn read_index_window_from_store(
+    store: &Store,
+    runtime: &Arc<RemoteGitRuntime>,
+    path: &ObjectPath,
+    range: std::ops::Range<u64>,
+    admission: Arc<dyn crab_storage::ReadAdmission>,
+    cancellation: &CancellationToken,
+) -> Result<Bytes> {
+    let expected = range.end.checked_sub(range.start).ok_or(Error::Corrupt {
+        stage: CorruptionStage::PackIndex,
+    })?;
+    let store = store.clone().with_read_admission(admission);
+    let origin_permit = runtime.origin_permit(cancellation).await?;
+    let bytes = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(Error::Cancelled),
+        bytes = store.range_get(path, range) => bytes?,
+    };
+    drop(origin_permit);
+    observe_storage_read("range_get", bytes.len() as u64);
+    if bytes.len() as u64 != expected {
+        return Err(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        });
+    }
+    Ok(bytes)
+}
+
+fn copy_lazy_sidecar(
+    window: &Bytes,
+    window_start: u64,
+    range: &RemoteGitSidecarRange,
+) -> Result<Bytes> {
+    let relative = range
+        .offset
+        .checked_sub(window_start)
+        .ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        })?;
+    let end = relative.checked_add(range.length).ok_or(Error::Corrupt {
+        stage: CorruptionStage::PackIndex,
+    })?;
+    let start = usize::try_from(relative).map_err(|_| Error::Corrupt {
+        stage: CorruptionStage::PackIndex,
+    })?;
+    let end = usize::try_from(end).map_err(|_| Error::Corrupt {
+        stage: CorruptionStage::PackIndex,
+    })?;
+    let bytes = window.get(start..end).ok_or(Error::Corrupt {
+        stage: CorruptionStage::PackIndex,
+    })?;
+    let expected = blake3::Hash::from_hex(&range.blake3).map_err(|_| Error::Corrupt {
+        stage: CorruptionStage::PackIndex,
+    })?;
+    if blake3::hash(bytes) != expected {
+        return Err(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        });
+    }
+    Ok(Bytes::copy_from_slice(bytes))
 }
 
 fn coalesce_ranges(
@@ -1880,7 +3073,7 @@ fn coalesce_ranges(
                     stage: CorruptionStage::PackEntry,
                 })?;
             let can_extend = current.as_ref().is_some_and(|range| {
-                range.pack_id == locator.pack_id
+                matches!(&range.source, CoalescedRangeSource::Pack(pack_id) if *pack_id == locator.pack_id)
                     && start <= range.end.saturating_add(MAX_COALESCED_GAP_BYTES)
                     && end.saturating_sub(range.start) <= MAX_COALESCED_RANGE_BYTES
             });
@@ -1888,18 +3081,30 @@ fn coalesce_ranges(
                 let range = current.as_mut().ok_or(Error::InternalInvariant {
                     invariant: "coalesced range disappeared while extending",
                 })?;
+                range.extra_bytes = range
+                    .extra_bytes
+                    .saturating_add(start.saturating_sub(range.end));
                 range.end = range.end.max(end);
-                range.entries.push((oid, locator));
+                range.entries.push(CoalescedRangeEntry {
+                    oid,
+                    locator,
+                    source_start: start,
+                });
                 continue;
             }
             if let Some(range) = current.take() {
                 ranges.push(range);
             }
             current = Some(CoalescedRange {
-                pack_id: locator.pack_id,
+                source: CoalescedRangeSource::Pack(locator.pack_id),
                 start,
                 end,
-                entries: vec![(oid, locator)],
+                extra_bytes: 0,
+                entries: vec![CoalescedRangeEntry {
+                    oid,
+                    locator,
+                    source_start: start,
+                }],
             });
         }
         if let Some(range) = current {
@@ -1907,6 +3112,109 @@ fn coalesce_ranges(
         }
     }
     Ok(ranges)
+}
+
+impl RemoteGitReader {
+    fn coalesce_reader_ranges(
+        &self,
+        entries: Vec<(gix_hash::ObjectId, GitObjectLocator)>,
+    ) -> Result<Vec<CoalescedRange>> {
+        let mut source_entries: HashMap<ObjectPath, Vec<CoalescedRangeEntry>> = HashMap::new();
+        let mut local_entries = Vec::new();
+        for (oid, locator) in entries {
+            let Some(source) = self.pack_source(&locator.pack_id) else {
+                local_entries.push((oid, locator));
+                continue;
+            };
+            if source.pack.is_some() {
+                local_entries.push((oid, locator));
+                continue;
+            }
+            let path = source.path.clone().ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            })?;
+            let source_start = source
+                .object_offset
+                .checked_add(locator.location.pack_offset)
+                .ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                })?;
+            let source_end =
+                source_start
+                    .checked_add(locator.location.entry_len)
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+            let pack_end =
+                source
+                    .object_offset
+                    .checked_add(source.pack_size)
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+            if source_end > pack_end {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                });
+            }
+            source_entries
+                .entry(path)
+                .or_default()
+                .push(CoalescedRangeEntry {
+                    oid,
+                    locator,
+                    source_start,
+                });
+        }
+
+        let mut ranges = coalesce_ranges(local_entries)?;
+        for (path, mut entries) in source_entries {
+            entries.sort_unstable_by_key(|entry| entry.source_start);
+            let mut current: Option<CoalescedRange> = None;
+            for entry in entries {
+                let start = entry.source_start;
+                let end =
+                    start
+                        .checked_add(entry.locator.location.entry_len)
+                        .ok_or(Error::Corrupt {
+                            stage: CorruptionStage::PackEntry,
+                        })?;
+                let can_extend = current.as_ref().is_some_and(|range| {
+                    let extra_bytes = range
+                        .extra_bytes
+                        .saturating_add(start.saturating_sub(range.end));
+                    start <= range.end.saturating_add(MAX_COALESCED_SOURCE_GAP_BYTES)
+                        && end.saturating_sub(range.start) <= MAX_COALESCED_SOURCE_RANGE_BYTES
+                        && extra_bytes <= MAX_COALESCED_SOURCE_EXTRA_BYTES
+                });
+                if can_extend {
+                    let range = current.as_mut().ok_or(Error::InternalInvariant {
+                        invariant: "source coalesced range disappeared while extending",
+                    })?;
+                    range.extra_bytes = range
+                        .extra_bytes
+                        .saturating_add(start.saturating_sub(range.end));
+                    range.end = range.end.max(end);
+                    range.entries.push(entry);
+                } else {
+                    if let Some(range) = current.take() {
+                        ranges.push(range);
+                    }
+                    current = Some(CoalescedRange {
+                        source: CoalescedRangeSource::Object(path.clone()),
+                        start,
+                        end,
+                        extra_bytes: 0,
+                        entries: vec![entry],
+                    });
+                }
+            }
+            if let Some(range) = current {
+                ranges.push(range);
+            }
+        }
+        Ok(ranges)
+    }
 }
 
 fn collect_missing_delta_bases(
@@ -2180,10 +3488,7 @@ pub(crate) struct PackIndex {
 }
 
 impl PackIndex {
-    fn location_for(&self, oid: &gix_hash::ObjectId) -> Result<Option<GitObjectLocation>> {
-        let Some(position) = self.object_ids.binary_search(oid).ok() else {
-            return Ok(None);
-        };
+    fn location_at(&self, position: usize) -> Result<GitObjectLocation> {
         let pack_offset = *self.pack_offsets.get(position).ok_or(Error::Corrupt {
             stage: CorruptionStage::PackIndex,
         })?;
@@ -2210,11 +3515,11 @@ impl PackIndex {
         let crc32 = *self.crc32.get(position).ok_or(Error::Corrupt {
             stage: CorruptionStage::PackIndex,
         })?;
-        Ok(Some(GitObjectLocation {
+        Ok(GitObjectLocation {
             pack_offset,
             entry_len,
             crc32,
-        }))
+        })
     }
 
     fn oid_at_offset(&self, pack_offset: u64) -> Option<gix_hash::ObjectId> {
@@ -2718,9 +4023,10 @@ mod tests {
         .unwrap();
         let budget = OperationBudget::new(crate::OperationLimits::default(), runtime);
         let range = CoalescedRange {
-            pack_id: MerkleHash::from_hex(&"11".repeat(32)).unwrap(),
+            source: CoalescedRangeSource::Pack(MerkleHash::from_hex(&"11".repeat(32)).unwrap()),
             start: 0,
             end: 64,
+            extra_bytes: 0,
             entries: Vec::new(),
         };
         assert!(
@@ -2804,6 +4110,183 @@ mod tests {
                 content_hash: *blake3::hash(&pack).as_bytes(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn pack_download_sources_share_verified_bytes_and_cancellation_drain() {
+        let mut pack = b"PACK".to_vec();
+        pack.extend_from_slice(&2_u32.to_be_bytes());
+        pack.extend_from_slice(&0_u32.to_be_bytes());
+        let checksum: [u8; 20] = Sha1::digest(&pack).into();
+        pack.extend_from_slice(&checksum);
+        let pack = Bytes::from(pack);
+        let pack_id = MerkleHash::from_hex(blake3::hash(&pack).to_hex().as_str()).unwrap();
+        let embedded_path = ObjectPath::from("embedded");
+        let sidecar = Bytes::from_static(b"unused by body-only transfer");
+        let inline =
+            RemoteGitPackSource::inline(pack.clone(), sidecar.clone(), sidecar.clone(), None)
+                .unwrap();
+        let embedded = RemoteGitPackSource::embedded(
+            embedded_path.clone(),
+            6,
+            pack.len() as u64,
+            sidecar.clone(),
+            sidecar,
+            None,
+        )
+        .unwrap();
+        for source in [None, Some(inline), Some(embedded)] {
+            for cancel_after_write in [false, true] {
+                let runtime = Arc::new(RemoteGitRuntime::default());
+                let store = Store::new(Arc::new(InMemory::new()));
+                store
+                    .put(&repo_pack_path("repository", &pack_id), pack.clone())
+                    .await
+                    .unwrap();
+                let mut body = b"prefix".to_vec();
+                body.extend_from_slice(&pack);
+                body.extend_from_slice(b"suffix");
+                store.put(&embedded_path, Bytes::from(body)).await.unwrap();
+                let sources = source
+                    .clone()
+                    .map(|source| (pack_id, source))
+                    .into_iter()
+                    .collect();
+                let reader = RemoteGitReader::from_pinned_with_preferred_pack_indexes(
+                    store,
+                    "repository",
+                    [GitPackInventoryEntry {
+                        pack_id,
+                        pack_size: pack.len() as u64,
+                        object_count: 0,
+                    }],
+                    SnapshotLookupSources::default().with_pack_sources(sources),
+                    ReaderLimits::default(),
+                    runtime.clone(),
+                    RepositoryIdentity::new("memory", "repository", 1).unwrap(),
+                    1,
+                )
+                .unwrap();
+                let budget =
+                    OperationBudget::new(crate::OperationLimits::default(), runtime.clone());
+                let destination = tempfile::NamedTempFile::new().unwrap();
+                let cancellation = CancellationToken::new();
+                let progress = |_| {
+                    if cancel_after_write {
+                        cancellation.cancel();
+                    }
+                };
+                let result = reader
+                    .download_pack_to_path(
+                        pack_id,
+                        pack.len() as u64,
+                        destination.path(),
+                        &budget,
+                        &cancellation,
+                        Some(&progress),
+                    )
+                    .await;
+                runtime.shutdown().await;
+                assert_eq!(std::fs::read(destination.path()).unwrap(), pack);
+                if cancel_after_write {
+                    assert!(matches!(result, Err(Error::Cancelled)));
+                } else {
+                    assert_eq!(
+                        result.unwrap(),
+                        VerifiedPackIdentity {
+                            git_sha1: checksum,
+                            content_hash: *blake3::hash(&pack).as_bytes(),
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_pack_stream_drains_queued_writes_and_preserves_source_error() {
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+        use tokio::io::AsyncWrite;
+
+        #[derive(Default)]
+        struct DeferredWriter {
+            pending: usize,
+            flushed: usize,
+            fail_flush: bool,
+            cancel: Option<CancellationToken>,
+        }
+
+        impl AsyncWrite for DeferredWriter {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                self.pending += bytes.len();
+                if let Some(cancel) = &self.cancel {
+                    cancel.cancel();
+                }
+                Poll::Ready(Ok(bytes.len()))
+            }
+
+            fn poll_flush(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                self.flushed += self.pending;
+                self.pending = 0;
+                if self.fail_flush {
+                    Poll::Ready(Err(std::io::Error::other("destination flush failed")))
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }
+
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                self.poll_flush(cx)
+            }
+        }
+
+        for cancel_after_write in [false, true] {
+            for fail_flush in [false, true] {
+                let cancel = CancellationToken::new();
+                let mut writer = DeferredWriter {
+                    fail_flush,
+                    cancel: cancel_after_write.then(|| cancel.clone()),
+                    ..DeferredWriter::default()
+                };
+                let chunks = stream::iter([
+                    Ok(Bytes::from_static(b"queued pack bytes")),
+                    Err(crab_storage::StorageError::Io {
+                        source: std::io::Error::other("origin stream failed"),
+                    }),
+                ])
+                .boxed();
+                let result = write_verified_pack_stream(
+                    &mut writer,
+                    chunks,
+                    MerkleHash::from_hex(&"11".repeat(32)).unwrap(),
+                    64,
+                    &cancel,
+                    None,
+                )
+                .await;
+                assert_eq!(writer.pending, 0);
+                assert_eq!(writer.flushed, b"queued pack bytes".len());
+                if cancel_after_write {
+                    assert!(matches!(result, Err(Error::Cancelled)));
+                } else {
+                    assert!(
+                        matches!(result, Err(Error::Storage(crab_storage::StorageError::Io { source }))
+                        if source.to_string() == "origin stream failed")
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -3034,6 +4517,182 @@ mod tests {
         );
     }
 
+    fn reader_with_embedded_pack_sources(
+        sources: &[(MerkleHash, u64, u64, u64)],
+    ) -> RemoteGitReader {
+        let path = ObjectPath::from("v2/capsules/run");
+        let sidecar = |offset| RemoteGitSidecarRange {
+            offset,
+            length: 1,
+            blake3: blake3::hash(b"x").to_hex().to_string(),
+        };
+        let mut pack_sources = HashMap::new();
+        let mut inventory = Vec::with_capacity(sources.len());
+        for (pack_id, object_count, object_offset, pack_size) in sources.iter().copied() {
+            inventory.push(GitPackInventoryEntry {
+                pack_id,
+                object_count,
+                pack_size,
+            });
+            pack_sources.insert(
+                pack_id,
+                RemoteGitPackSource::embedded_lazy(
+                    path.clone(),
+                    object_offset,
+                    pack_size,
+                    object_offset + pack_size + 3,
+                    sidecar(object_offset + pack_size),
+                    sidecar(object_offset + pack_size + 1),
+                    sidecar(object_offset + pack_size + 2),
+                )
+                .expect("valid lazy source"),
+            );
+        }
+        RemoteGitReader::from_pinned_with_preferred_pack_indexes(
+            Store::new(Arc::new(InMemory::new())),
+            "repository",
+            inventory,
+            SnapshotLookupSources::default().with_pack_sources(pack_sources),
+            ReaderLimits::default(),
+            Arc::new(RemoteGitRuntime::default()),
+            RepositoryIdentity::new("provider", "repository", 1).expect("identity"),
+            1,
+        )
+        .expect("reader")
+    }
+
+    fn source_locator(
+        pack_id: MerkleHash,
+        ordinal: u32,
+        pack_offset: u64,
+        entry_len: u64,
+    ) -> GitObjectLocator {
+        GitObjectLocator {
+            ordinal,
+            pack_id,
+            location: GitObjectLocation {
+                pack_offset,
+                entry_len,
+                crc32: 0,
+            },
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn coalesces_entries_from_pack_members_sharing_one_source() {
+        let first_pack = MerkleHash::from_hex(&"11".repeat(32)).expect("first pack hash");
+        let second_pack = MerkleHash::from_hex(&"22".repeat(32)).expect("second pack hash");
+        let reader = reader_with_embedded_pack_sources(&[
+            (first_pack, 1, 0, 100),
+            (second_pack, 1, 50_000, 100),
+        ]);
+        let path = ObjectPath::from("v2/capsules/run");
+        let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let ranges = reader
+            .coalesce_reader_ranges(vec![
+                (oid, source_locator(first_pack, 0, 10, 5)),
+                (oid, source_locator(second_pack, 0, 10, 5)),
+            ])
+            .expect("coalesced ranges");
+        assert_eq!(ranges.len(), 1);
+        assert!(matches!(
+            &ranges[0].source,
+            CoalescedRangeSource::Object(actual) if actual == &path
+        ));
+        assert_eq!(ranges[0].start, 10);
+        assert_eq!(ranges[0].end, 50_015);
+        assert_eq!(ranges[0].entries.len(), 2);
+    }
+
+    #[test]
+    fn source_coalescing_keeps_gaps_over_the_bound_in_separate_ranges() {
+        let first_pack = MerkleHash::from_hex(&"11".repeat(32)).expect("first pack hash");
+        let second_pack = MerkleHash::from_hex(&"22".repeat(32)).expect("second pack hash");
+        let reader = reader_with_embedded_pack_sources(&[
+            (first_pack, 1, 0, 100),
+            (second_pack, 1, 70_000, 100),
+        ]);
+        let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let ranges = reader
+            .coalesce_reader_ranges(vec![
+                (oid, source_locator(first_pack, 0, 10, 5)),
+                (oid, source_locator(second_pack, 0, 10, 5)),
+            ])
+            .expect("coalesced ranges");
+
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| range.entries.len())
+                .sum::<usize>(),
+            2
+        );
+    }
+
+    #[test]
+    fn source_coalescing_bounds_extra_bytes_and_preserves_large_entries() {
+        let pack_id = MerkleHash::from_hex(&"11".repeat(32)).expect("pack hash");
+        let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let gap = 60 * 1024;
+        let entry_count = 70_u64;
+        let pack_size = (entry_count - 1) * (gap + 5) + 15;
+        let reader = reader_with_embedded_pack_sources(&[(pack_id, entry_count, 0, pack_size)]);
+        let entries = (0..entry_count)
+            .map(|ordinal| {
+                (
+                    oid,
+                    source_locator(
+                        pack_id,
+                        u32::try_from(ordinal).expect("ordinal fits u32"),
+                        10 + ordinal * (gap + 5),
+                        5,
+                    ),
+                )
+            })
+            .collect();
+        let ranges = reader
+            .coalesce_reader_ranges(entries)
+            .expect("coalesced ranges");
+
+        assert_eq!(ranges.len(), 2);
+        assert!(
+            ranges
+                .iter()
+                .all(|range| range.extra_bytes <= MAX_COALESCED_SOURCE_EXTRA_BYTES)
+        );
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| range.entries.len())
+                .sum::<usize>(),
+            70
+        );
+
+        let large_entry_len = MAX_COALESCED_SOURCE_RANGE_BYTES + 1;
+        let pack_size = large_entry_len + 15;
+        let reader = reader_with_embedded_pack_sources(&[(pack_id, 2, 0, pack_size)]);
+        let first_start = 10;
+        let second_start = first_start + large_entry_len;
+        let ranges = reader
+            .coalesce_reader_ranges(vec![
+                (
+                    oid,
+                    source_locator(pack_id, 0, first_start, large_entry_len),
+                ),
+                (oid, source_locator(pack_id, 1, second_start, 5)),
+            ])
+            .expect("large entries remain admitted");
+
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].start, first_start);
+        assert_eq!(ranges[0].end, second_start);
+        assert_eq!(ranges[0].entries.len(), 1);
+        assert_eq!(ranges[1].start, second_start);
+        assert_eq!(ranges[1].end, second_start + 5);
+    }
+
     #[test]
     fn coalescing_preserves_entries_at_admission_boundaries() {
         let pack_id = MerkleHash::from_hex(&"11".repeat(32)).expect("pack hash");
@@ -3102,7 +4761,12 @@ mod tests {
             let mut retained: Vec<_> = ranges
                 .into_iter()
                 .flat_map(|range| range.entries)
-                .map(|(_, locator)| (locator.location.pack_offset, locator.location.entry_len))
+                .map(|entry| {
+                    (
+                        entry.locator.location.pack_offset,
+                        entry.locator.location.entry_len,
+                    )
+                })
                 .collect();
             retained.sort_unstable();
             assert_eq!(
@@ -3142,17 +4806,382 @@ mod tests {
             source_bytes: 1,
         };
 
+        let mut locations = [None, None];
+        index_batch::visit_index_matches(
+            &[(oid(1), 0), (oid(9), 1)],
+            &index.object_ids,
+            &CancellationToken::new(),
+            |position, index_position| {
+                locations[position] = Some(index.location_at(index_position)?);
+                Ok(())
+            },
+        )
+        .expect("locations");
         assert_eq!(
-            index.location_for(&oid(1)).expect("location"),
-            Some(GitObjectLocation {
-                pack_offset: 100,
-                entry_len: 100,
-                crc32: 11,
-            })
+            locations,
+            [
+                Some(GitObjectLocation {
+                    pack_offset: 100,
+                    entry_len: 100,
+                    crc32: 11,
+                }),
+                None
+            ]
         );
         assert_eq!(index.oid_at_offset(200), Some(oid(3)));
         assert_eq!(index.oid_at_offset(250), None);
-        assert_eq!(index.location_for(&oid(9)).expect("missing lookup"), None);
+    }
+
+    #[tokio::test]
+    async fn packed_batch_rejects_conflicting_offset_identities() {
+        let pack_id = MerkleHash::from_hex(&"11".repeat(32)).unwrap();
+        let reader = Arc::new(reader_with_embedded_pack_sources(&[(pack_id, 2, 100, 64)]));
+        let locator = source_locator(pack_id, 0, 12, 10);
+        let budget =
+            OperationBudget::new(crate::OperationLimits::default(), reader.runtime.clone());
+        let result = reader
+            .read_packed_many_with_session_and_locators(
+                &[
+                    gix_hash::ObjectId::from([1; 20]),
+                    gix_hash::ObjectId::from([2; 20]),
+                ],
+                &[locator, locator],
+                1,
+                &budget,
+                &CancellationToken::new(),
+            )
+            .await;
+        reader.runtime.shutdown().await;
+        assert!(matches!(
+            result,
+            Err(Error::Corrupt {
+                stage: CorruptionStage::Locator
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn packed_batch_resolves_selected_ofs_base_without_reloading_index() {
+        use std::io::Write as _;
+
+        use sha1::Digest as _;
+
+        let encode = |header: Header, data: &[u8]| {
+            let mut bytes = Vec::new();
+            header.write_to(data.len() as u64, &mut bytes).unwrap();
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(data).unwrap();
+            bytes.extend(encoder.finish().unwrap());
+            bytes
+        };
+        let blob_oid = |data: &[u8]| {
+            gix_object::compute_hash(gix_hash::Kind::Sha1, gix_object::Kind::Blob, data).unwrap()
+        };
+        let base_oid = blob_oid(b"hello world");
+        let target_oid = blob_oid(b"hello world!");
+        let base = encode(Header::Blob, b"hello world");
+        let delta = encode(
+            Header::OfsDelta {
+                base_distance: base.len() as u64,
+            },
+            &[0x0b, 0x0c, 0x90, 0x0b, 0x01, b'!'],
+        );
+        let mut pack = b"PACK\0\0\0\x02\0\0\0\x02".to_vec();
+        pack.extend_from_slice(&base);
+        pack.extend_from_slice(&delta);
+        let checksum = sha1::Sha1::digest(&pack);
+        pack.extend_from_slice(&checksum);
+        let pack_id = MerkleHash::from_hex(blake3::hash(&pack).to_hex().as_str()).unwrap();
+        let store = Store::new(Arc::new(InMemory::new()));
+        let pack_size = pack.len() as u64;
+        store
+            .put(&repo_pack_path("repository", &pack_id), Bytes::from(pack))
+            .await
+            .unwrap();
+        // The batch owns authenticated locations even when its source index
+        // has been evicted. A selected OFS base needs no second index request.
+        let locators = [(&base, 12), (&delta, 12 + base.len() as u64)].map(|(bytes, offset)| {
+            GitObjectLocator {
+                ordinal: 0,
+                pack_id,
+                location: GitObjectLocation {
+                    pack_offset: offset,
+                    entry_len: bytes.len() as u64,
+                    crc32: gix_features::hash::crc32(bytes),
+                },
+                metadata: Default::default(),
+            }
+        });
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let reader = Arc::new(
+            RemoteGitReader::from_pinned(
+                store,
+                "repository",
+                [GitPackInventoryEntry {
+                    pack_id,
+                    object_count: 2,
+                    pack_size,
+                }],
+                ReaderLimits::default(),
+                runtime.clone(),
+                RepositoryIdentity::new("provider", "repository", 1).unwrap(),
+                1,
+            )
+            .unwrap(),
+        );
+        let budget = OperationBudget::new(
+            crate::OperationLimits {
+                max_storage_requests: 1,
+                ..Default::default()
+            },
+            runtime.clone(),
+        );
+        let result = reader
+            .read_packed_many_with_session_and_locators(
+                &[target_oid, base_oid],
+                &[locators[1], locators[0]],
+                1,
+                &budget,
+                &CancellationToken::new(),
+            )
+            .await;
+        runtime.shutdown().await;
+        let entries = result.expect("one body read resolves the selected delta base");
+        assert_eq!(entries[0].base_oid, Some(base_oid));
+    }
+
+    async fn lazy_index_fixture(gap: usize) -> (RemoteGitReader, u64) {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let store = Store::new(Arc::new(InMemory::new()));
+        let path = ObjectPath::from("v2/capsules/index-batch");
+        let mut body = vec![0; 100];
+        let mut sources = HashMap::new();
+        let mut inventory = Vec::new();
+        for value in [1_u8, 2] {
+            if value == 2 {
+                body.resize(body.len() + gap, 0);
+            }
+            let pack_id = MerkleHash::from([value; 32]);
+            let mut index = b"\xfftOc".to_vec();
+            index.extend_from_slice(&2_u32.to_be_bytes());
+            for bucket in 0..256 {
+                index.extend_from_slice(&u32::from(bucket >= usize::from(value)).to_be_bytes());
+            }
+            index.extend_from_slice(&[value; 20]);
+            index.extend_from_slice(&0_u32.to_be_bytes());
+            index.extend_from_slice(&12_u32.to_be_bytes());
+            index.extend_from_slice(&[value; 20]);
+            index.extend_from_slice(&Sha1::digest(&index));
+            let range = RemoteGitSidecarRange {
+                offset: body.len() as u64,
+                length: index.len() as u64,
+                blake3: blake3::hash(&index).to_hex().to_string(),
+            };
+            body.extend_from_slice(&index);
+            sources.insert(
+                pack_id,
+                RemoteGitPackSource::embedded_lazy_index(
+                    path.clone(),
+                    0,
+                    100,
+                    body.len() as u64,
+                    range.clone(),
+                    range,
+                )
+                .unwrap(),
+            );
+            inventory.push(GitPackInventoryEntry {
+                pack_id,
+                object_count: 1,
+                pack_size: 100,
+            });
+        }
+        let window_size = (body.len() - 100) as u64;
+        store.put(&path, Bytes::from(body)).await.unwrap();
+        let reader = RemoteGitReader::from_pinned_with_preferred_pack_indexes(
+            store,
+            "repository",
+            inventory,
+            SnapshotLookupSources::default().with_pack_sources(sources),
+            ReaderLimits::default(),
+            runtime.clone(),
+            RepositoryIdentity::new("provider", "repository", 1).unwrap(),
+            1,
+        )
+        .unwrap();
+        (reader, window_size)
+    }
+
+    #[tokio::test]
+    async fn nearby_embedded_indexes_share_one_bounded_origin_read() {
+        let (reader, window_size) = lazy_index_fixture(64).await;
+        let runtime = reader.runtime.clone();
+        let budget = OperationBudget::new(
+            crate::OperationLimits {
+                max_storage_requests: 1,
+                ..Default::default()
+            },
+            runtime.clone(),
+        );
+        let result = reader
+            .lookup_batch_from_pack_indexes(&[[1; 20], [2; 20]], &budget, &CancellationToken::new())
+            .await;
+        runtime.shutdown().await;
+        let lookups = result.expect("one source window must cover both verified indexes");
+        assert!(
+            lookups
+                .iter()
+                .all(|lookup| matches!(lookup, GitObjectLookup::Hit(_)))
+        );
+        assert_eq!(
+            budget
+                .usage()
+                .await
+                .amount(BudgetDimension::StorageRequests),
+            1
+        );
+        assert_eq!(
+            budget.usage().await.amount(BudgetDimension::FetchedBytes),
+            window_size
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_index_batch_preserves_unsorted_requests_duplicates_and_misses() {
+        let (reader, _) = lazy_index_fixture(64).await;
+        let budget = OperationBudget::new(
+            crate::OperationLimits {
+                max_storage_requests: 1,
+                ..Default::default()
+            },
+            reader.runtime.clone(),
+        );
+        let result = reader
+            .lookup_batch_from_pack_indexes(
+                &[[2; 20], [9; 20], [1; 20], [2; 20]],
+                &budget,
+                &CancellationToken::new(),
+            )
+            .await;
+        reader.runtime.shutdown().await;
+        let actual = result
+            .unwrap()
+            .into_iter()
+            .map(|lookup| match lookup {
+                GitObjectLookup::Hit(locator) => Some(locator.pack_id),
+                GitObjectLookup::Miss => None,
+                GitObjectLookup::Corrupt => panic!("verified fixture must not be corrupt"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                Some(MerkleHash::from([2; 32])),
+                None,
+                Some(MerkleHash::from([1; 32])),
+                Some(MerkleHash::from([2; 32]))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn distant_embedded_indexes_do_not_overread_the_source() {
+        let gap = MAX_COALESCED_SOURCE_GAP_BYTES as usize + 1;
+        let (reader, window_size) = lazy_index_fixture(gap).await;
+        let budget =
+            OperationBudget::new(crate::OperationLimits::default(), reader.runtime.clone());
+        reader
+            .lookup_batch_from_pack_indexes(&[[1; 20], [2; 20]], &budget, &CancellationToken::new())
+            .await
+            .unwrap();
+        reader.runtime.shutdown().await;
+        assert_eq!(
+            budget.usage().await.amount(BudgetDimension::FetchedBytes),
+            window_size - gap as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_index_window_rejects_corrupt_sibling_before_caching() {
+        let (mut reader, _) = lazy_index_fixture(0).await;
+        let source = reader
+            .pack_sources
+            .get_mut(&MerkleHash::from([2; 32]))
+            .unwrap();
+        source.lazy_index.as_mut().unwrap().index.blake3 =
+            blake3::hash(b"wrong").to_hex().to_string();
+        let budget =
+            OperationBudget::new(crate::OperationLimits::default(), reader.runtime.clone());
+        let error = reader
+            .lookup_batch_from_pack_indexes(&[[1; 20], [2; 20]], &budget, &CancellationToken::new())
+            .await
+            .expect_err("one corrupt index invalidates the whole window");
+        reader.runtime.shutdown().await;
+        assert!(matches!(
+            error,
+            Error::Corrupt {
+                stage: CorruptionStage::PackIndex
+            }
+        ));
+        assert_eq!(reader.runtime.snapshot().await.pack_index_entries, 0);
+    }
+
+    #[tokio::test]
+    async fn embedded_index_window_charges_gaps_to_the_byte_budget() {
+        let (reader, window_size) = lazy_index_fixture(64).await;
+        let budget = OperationBudget::new(
+            crate::OperationLimits {
+                max_fetched_bytes: window_size - 1,
+                ..Default::default()
+            },
+            reader.runtime.clone(),
+        );
+        let result = reader
+            .lookup_batch_from_pack_indexes(&[[1; 20], [2; 20]], &budget, &CancellationToken::new())
+            .await;
+        reader.runtime.shutdown().await;
+        assert!(
+            result.is_err(),
+            "coalescing must not hide overread from admission"
+        );
+        assert_eq!(reader.runtime.snapshot().await.pack_index_entries, 0);
+    }
+
+    #[tokio::test]
+    async fn embedded_index_windows_keep_participant_budgets_independent() {
+        let (reader, window_size) = lazy_index_fixture(64).await;
+        let tight = OperationBudget::new(
+            crate::OperationLimits {
+                max_fetched_bytes: window_size - 1,
+                ..Default::default()
+            },
+            reader.runtime.clone(),
+        );
+        let generous =
+            OperationBudget::new(crate::OperationLimits::default(), reader.runtime.clone());
+        let cancel = CancellationToken::new();
+        // Plan before either producer runs so both callers name the same cold window.
+        let mut first = reader
+            .plan_pack_index_reads(&reader.inventory, &cancel)
+            .await
+            .unwrap();
+        let mut second = reader
+            .plan_pack_index_reads(&reader.inventory, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let (limited, accepted) = tokio::join!(
+            reader.load_pack_index_read(first.remove(0), &tight, &cancel),
+            reader.load_pack_index_read(second.remove(0), &generous, &cancel),
+        );
+        reader.runtime.shutdown().await;
+        assert!(limited.is_err());
+        assert_eq!(accepted.unwrap().len(), 2);
+        assert_eq!(
+            generous.usage().await.amount(BudgetDimension::FetchedBytes),
+            window_size
+        );
     }
 
     #[tokio::test]
@@ -3209,6 +5238,66 @@ mod tests {
                 ..
             })] if *actual_pack == pack_id
         ));
+    }
+
+    #[tokio::test]
+    async fn frontier_admission_limits_index_probe_to_admitted_sources() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
+        let admitted_pack = MerkleHash::from_hex(&"11".repeat(32)).expect("admitted pack");
+        let unadmitted_pack = MerkleHash::from_hex(&"22".repeat(32)).expect("unadmitted pack");
+        let oid = [1; 20];
+        runtime
+            .insert_pack_index(
+                crate::runtime::PackIndexCacheKey::new(&identity, admitted_pack),
+                Arc::new(PackIndex {
+                    object_ids: vec![gix_hash::ObjectId::from(oid)],
+                    pack_offsets: vec![100],
+                    crc32: vec![11],
+                    offset_order: vec![0],
+                    pack_data_end: 200,
+                    pack_checksum: [0; 20],
+                    external_delta_bases: HashMap::new(),
+                    source_bytes: 1,
+                }),
+            )
+            .await;
+        let admission = HashMap::from([(oid, vec![admitted_pack])]);
+        let sources = SnapshotLookupSources::default()
+            .with_inline_locators(HashMap::new())
+            .with_preferred_object_admission(admission);
+        let reader = RemoteGitReader::from_pinned_with_preferred_pack_indexes(
+            Store::new(Arc::new(InMemory::new())),
+            "repository",
+            [admitted_pack, unadmitted_pack].map(|pack_id| GitPackInventoryEntry {
+                pack_id,
+                object_count: 1,
+                pack_size: 220,
+            }),
+            sources,
+            ReaderLimits::default(),
+            Arc::clone(&runtime),
+            identity,
+            1,
+        )
+        .expect("reader");
+        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime.clone());
+        let lookups = reader
+            .lookup_batch_for_read(
+                &GitObjectLocatorSession::without_catalog(),
+                &[oid],
+                &budget,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("admitted lookup");
+
+        assert!(matches!(
+            lookups.as_slice(),
+            [GitObjectLookup::Hit(GitObjectLocator { pack_id, .. })]
+                if *pack_id == admitted_pack
+        ));
+        runtime.shutdown().await;
     }
 
     #[tokio::test]
@@ -3273,6 +5362,68 @@ mod tests {
                 ..
             })] if *pack_id == full_pack
         ));
+    }
+
+    #[tokio::test]
+    async fn exact_pack_reuse_rejects_unproven_external_delta_bases() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
+        let pack_id = MerkleHash::from_hex(&"33".repeat(32)).expect("pack hash");
+        let object = gix_hash::ObjectId::from([1; 20]);
+        let base = gix_hash::ObjectId::from([2; 20]);
+        runtime
+            .insert_pack_index(
+                crate::runtime::PackIndexCacheKey::new(&identity, pack_id),
+                Arc::new(PackIndex {
+                    object_ids: vec![object],
+                    pack_offsets: vec![100],
+                    crc32: vec![11],
+                    offset_order: vec![0],
+                    pack_data_end: 200,
+                    pack_checksum: [7; 20],
+                    external_delta_bases: HashMap::from([(object, base)]),
+                    source_bytes: 1,
+                }),
+            )
+            .await;
+        let reader = RemoteGitReader::from_pinned(
+            Store::new(Arc::new(InMemory::new())),
+            "repository",
+            [GitPackInventoryEntry {
+                pack_id,
+                object_count: 1,
+                pack_size: 220,
+            }],
+            ReaderLimits::default(),
+            Arc::clone(&runtime),
+            identity,
+            1,
+        )
+        .expect("reader");
+        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime.clone());
+        let cancellation = CancellationToken::new();
+
+        assert_eq!(
+            reader
+                .pack_checksum_for_exact_objects(pack_id, &[object], &[], &budget, &cancellation)
+                .await
+                .expect("unproven base check"),
+            None
+        );
+        assert_eq!(
+            reader
+                .pack_checksum_for_exact_objects(
+                    pack_id,
+                    &[object],
+                    &[base],
+                    &budget,
+                    &cancellation,
+                )
+                .await
+                .expect("proven base check"),
+            Some([7; 20])
+        );
+        runtime.shutdown().await;
     }
 
     #[tokio::test]
@@ -3472,7 +5623,7 @@ mod tests {
             Store::new(Arc::clone(&store)),
             "org/repo",
             [base_inventory, tail_inventory],
-            Some([tail_inventory]),
+            SnapshotLookupSources::default().with_preferred_pack_indexes([tail_inventory]),
             ReaderLimits::default(),
             Arc::clone(&runtime),
             identity.clone(),
@@ -3499,7 +5650,7 @@ mod tests {
             Store::new(Arc::clone(&store)),
             "org/repo",
             [base_inventory],
-            Some([]),
+            SnapshotLookupSources::default().with_preferred_pack_indexes([]),
             ReaderLimits::default(),
             Arc::clone(&runtime),
             identity,

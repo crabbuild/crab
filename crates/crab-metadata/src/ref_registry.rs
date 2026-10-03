@@ -100,7 +100,7 @@ pub struct RepoShardRootStatus {
 pub struct RefRegistry {
     /// Registry schema.
     pub schema_version: u32,
-    /// True only after a bucket-wide repair has enumerated every repo manifest.
+    /// True only after a bucket-wide repair has enumerated every repository root.
     pub coverage_complete: bool,
     /// Repos whose entry is known to contain their complete current shard set.
     pub complete_repos: HashSet<String>,
@@ -185,7 +185,7 @@ impl RefRegistry {
         self.complete_repos.insert(repo_prefix.to_owned());
     }
 
-    /// Mark bucket-wide repo discovery complete after a manifest repair scan.
+    /// Mark bucket-wide repo discovery complete after a repository-root scan.
     pub fn mark_coverage_complete(&mut self) {
         self.schema_version = REF_REGISTRY_SCHEMA_VERSION;
         self.coverage_complete = true;
@@ -955,12 +955,12 @@ pub async fn union_register_workflow_roots(
     .map(|record| record.generation)
 }
 
-/// Exactly rebuilds repo shard records and publishes complete bucket coverage.
+/// Exactly replace repo shard records and publish complete bucket coverage.
 ///
-/// The caller must hold the exclusive bucket GC fence for the entire manifest
+/// The caller must hold the exclusive bucket GC fence for the entire root
 /// scan and this commit. That boundary makes removal of stale roots safe.
 #[cfg(feature = "storage")]
-pub async fn repair_ref_registry_from_manifests(
+pub async fn replace_ref_registry_from_repository_roots(
     store: &Store,
     router: &StoreLayout<Store>,
     repos: HashMap<String, Vec<String>>,
@@ -1542,7 +1542,7 @@ mod tests {
 
     #[cfg(feature = "storage")]
     #[tokio::test]
-    async fn manifest_repair_replaces_stale_roots_exactly() {
+    async fn repository_root_repair_replaces_stale_roots_exactly() {
         use std::sync::Arc;
 
         use object_store::ObjectStore;
@@ -1555,7 +1555,7 @@ mod tests {
             .await
             .unwrap();
 
-        repair_ref_registry_from_manifests(
+        replace_ref_registry_from_repository_roots(
             &store,
             &router,
             HashMap::from([("org/models".to_owned(), vec!["base".to_owned()])]),

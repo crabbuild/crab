@@ -2,14 +2,17 @@
 //! `crab stat perf` — prints persisted performance counters.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::core::error::Result;
 use crate::core::metrics::{MetricsSummary, load_metrics_summary};
 use crate::core::output::{OutputMode, emit_json};
+use crate::core::project_config::ProjectConfig;
 use crab_staging::push_plan::{PushPlanStats, PushPlanSummaryOptions, empty_push_plan_stats};
 use crab_staging::stats::StagingStats;
 use crab_staging::{StagingAreaReadOnly, StagingError};
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 /// Payload emitted by `crab stat --json`.
 #[derive(Serialize, schemars::JsonSchema)]
@@ -207,24 +210,30 @@ pub struct ClassEntry {
 
 /// Run `crab stat classes` — per-storage-class bytes and object counts.
 ///
-/// Reuses the inventory subsystem. Currently outputs a placeholder
-/// since connecting to a live bucket requires store configuration.
-///
 /// # Errors
 ///
 /// Returns [`crate::core::error::CrabError`] on failure.
-pub async fn run_classes(mode: OutputMode) -> Result<()> {
-    // In a full implementation, this would:
-    // 1. Resolve the store from config
-    // 2. Run a live inventory walk (or read a report)
-    // 3. Aggregate per-class stats
-    // For now, emit a placeholder indicating the feature is available.
-
-    let payload = StatClassesPayload {
-        classes: Vec::new(),
-        total_bytes: 0,
-        total_objects: 0,
-    };
+pub async fn run_classes(mode: OutputMode, cancel: &CancellationToken) -> Result<()> {
+    let config = crate::core::config::Config::resolve_local()?;
+    let cwd = std::env::current_dir()?;
+    let remote_url = ProjectConfig::remote_url(&cwd)?;
+    let remote = crate::git::url::CrabUrl::parse(&remote_url)?;
+    let store =
+        crate::auth::build_repository_url_store(&config, &remote, "stat.classes", cancel).await?;
+    let provider = crate::tier::runtime::resolve_provider(&config)?;
+    let inventory = crate::cost::inventory::live::walk_live(
+        Arc::clone(store.inner()),
+        crate::cost::inventory::live::LiveWalkConfig {
+            list_concurrency: config.cost.list_concurrency,
+            sample_ratio: None,
+            top_k_cold: 0,
+            provider,
+            repository_prefix: Some(remote.repo_path),
+        },
+        cancel,
+    )
+    .await?;
+    let payload = classes_payload(&inventory);
 
     if mode == OutputMode::Json {
         emit_json("stat.classes", "1.0", &payload)?;
@@ -232,10 +241,42 @@ pub async fn run_classes(mode: OutputMode) -> Result<()> {
     }
 
     println!("crab stat classes\n");
-    println!("  No inventory data available.");
-    println!("  Run from a crab-initialized repo with a connected bucket.");
+    println!("  Total objects: {}", payload.total_objects);
+    println!("  Total bytes:   {}", format_size(payload.total_bytes));
+    for class in &payload.classes {
+        println!(
+            "  {:<16} {:>12} bytes  {:>10} objects  {:>6.2}%",
+            class.class,
+            class.bytes,
+            class.objects,
+            class.share * 100.0
+        );
+    }
 
     Ok(())
+}
+
+fn classes_payload(inventory: &crate::cost::inventory::Inventory) -> StatClassesPayload {
+    let total_bytes = inventory.total_bytes;
+    let classes = inventory
+        .per_class
+        .iter()
+        .map(|(class, stats)| ClassEntry {
+            class: class.clone(),
+            bytes: stats.bytes,
+            objects: stats.objects,
+            share: if total_bytes == 0 {
+                0.0
+            } else {
+                stats.bytes as f64 / total_bytes as f64
+            },
+        })
+        .collect();
+    StatClassesPayload {
+        classes,
+        total_bytes,
+        total_objects: inventory.total_objects,
+    }
 }
 
 fn format_size(bytes: u64) -> String {
@@ -314,6 +355,57 @@ mod tests {
 
         let loaded = load_perf_summary(&path).expect("load");
         assert_eq!(loaded, original);
+    }
+
+    #[test]
+    fn classes_payload_preserves_inventory_totals_and_shares() {
+        let inventory = crate::cost::inventory::Inventory {
+            source: crate::cost::inventory::InventorySourceInfo::Live {
+                list_concurrency: 1,
+                sample_ratio: None,
+            },
+            scanned_at: "2026-01-01T00:00:00Z".to_owned(),
+            total_objects: 3,
+            total_bytes: 100,
+            per_class: std::collections::BTreeMap::from([
+                (
+                    "s3-standard".to_owned(),
+                    crate::cost::inventory::ClassStats {
+                        objects: 2,
+                        bytes: 75,
+                    },
+                ),
+                (
+                    "s3-glacier".to_owned(),
+                    crate::cost::inventory::ClassStats {
+                        objects: 1,
+                        bytes: 25,
+                    },
+                ),
+            ]),
+            per_prefix: std::collections::BTreeMap::new(),
+            heaviest_cold: Vec::new(),
+        };
+
+        let payload = classes_payload(&inventory);
+        assert_eq!(payload.total_objects, 3);
+        assert_eq!(payload.total_bytes, 100);
+        assert_eq!(
+            payload
+                .classes
+                .iter()
+                .find(|class| class.class == "s3-standard")
+                .map(|class| class.share),
+            Some(0.75)
+        );
+        assert_eq!(
+            payload
+                .classes
+                .iter()
+                .find(|class| class.class == "s3-glacier")
+                .map(|class| class.share),
+            Some(0.25)
+        );
     }
 
     #[test]

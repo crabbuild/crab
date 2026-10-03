@@ -69,6 +69,20 @@ impl PayloadRead {
         })
     }
 
+    #[cfg(unix)]
+    pub(crate) async fn copy_on_write_to(
+        &self,
+        mut destination: crate::private_fs::PendingFile,
+    ) -> Result<Option<crate::private_fs::PendingFile>> {
+        let source = self.original.try_clone()?;
+        tokio::task::spawn_blocking(move || {
+            let cloned = destination.copy_on_write_from(&source)?;
+            Ok(if cloned { Some(destination) } else { None })
+        })
+        .await
+        .map_err(|error| CacheError::Io(std::io::Error::other(error)))?
+    }
+
     pub(crate) async fn finish<T, E: std::fmt::Display>(
         self,
         result: std::result::Result<T, E>,

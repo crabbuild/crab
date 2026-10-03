@@ -730,7 +730,7 @@ fn evidence_doctor_classifies_dedup_origin_regression() {
     assert_doctor_category(
         &report,
         "cache_dedup_traffic",
-        "cli-dedup-manifest-cas-origin-read",
+        "cli-dedup-root-cas-origin-read",
     );
 }
 
@@ -1157,7 +1157,7 @@ fn evidence_verify_accepts_manifest_bundle_without_config() {
     );
     assert_check_ok(&report, "retained-cache_server_config-secret-free", true);
     assert_check_ok(&report, "cli-dedup-cacheable-origin-proof", true);
-    assert_check_ok(&report, "cli-dedup-manifest-cas-origin-read", true);
+    assert_check_ok(&report, "cli-dedup-root-cas-origin-read", true);
 }
 
 #[test]
@@ -1238,7 +1238,7 @@ fn evidence_verify_rejects_extra_dedup_origin_read_even_when_hash_matches() {
     let report: Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(report["status"], "failed");
     assert_check_ok(&report, "evidence-manifest-report-sha256", true);
-    assert_check_ok(&report, "cli-dedup-manifest-cas-origin-read", false);
+    assert_check_ok(&report, "cli-dedup-root-cas-origin-read", false);
 }
 
 #[test]
@@ -1902,14 +1902,14 @@ impl EvidenceFixture {
         fs::write(&smoke_script_path, b"print('smoke')\n").unwrap();
         fs::write(&verifier_script_path, b"print('verify')\n").unwrap();
 
-        let manifest_key = format!("e2e-cache-service/{}/cli-dedup/manifest", Self::RUN_ID);
-        let mut manifest_delta = serde_json::Map::new();
-        manifest_delta.insert(manifest_key.clone(), Value::from(1));
+        let root_key = format!("e2e-cache-service/{}/cli-dedup/v2/root", Self::RUN_ID);
+        let mut root_delta = serde_json::Map::new();
+        root_delta.insert(root_key.clone(), Value::from(1));
         let xorb_key =
             ".crab/xorbs/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let shard_key =
             ".crab/shards/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let mut origin_delta = manifest_delta.clone();
+        let mut origin_delta = root_delta.clone();
         origin_delta.insert(xorb_key.to_owned(), Value::from(1));
         origin_delta.insert(shard_key.to_owned(), Value::from(1));
         let cacheable_origin_delta = serde_json::Map::from_iter([
@@ -1958,18 +1958,18 @@ impl EvidenceFixture {
             "cli_push_dedup": [
                 {
                     "name": "cli-dedup-push",
-                    "dedup_queries_delta": 0,
-                    "dedup_known_chunks_delta": 0,
+                    "dedup_queries_delta": 1,
+                    "dedup_known_chunks_delta": 8,
                     "dedup_unknown_chunks_delta": 0,
                     "xorb_puts_delta": 0,
                     "xorb_gets_delta": 1,
                     "shard_gets_delta": 1,
-                    "metadata_gets_delta": 1,
+                    "metadata_gets_delta": 0,
                     "cacheable_origin_gets_delta": 2,
                     "cacheable_origin_get_key_delta": cacheable_origin_delta,
                     "origin_get_key_delta": origin_delta,
                     "origin_gets_delta": 3,
-                    "mutable_origin_get_key_delta": manifest_delta,
+                    "mutable_origin_get_key_delta": root_delta,
                     "mutable_origin_gets_delta": 1,
                     "mutable_read_rejections_delta": 0,
                     "mutable_write_rejections_delta": 0

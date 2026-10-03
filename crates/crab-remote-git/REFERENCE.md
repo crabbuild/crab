@@ -136,6 +136,14 @@ be proven as a subset or the derived catalog cannot open, the canonical complete
 pack-index path remains; a miss in both the proven catalog and complete tail is
 definitive.
 
+Capsule readers use `from_snapshot_with_lookup_sources` with one owned
+`SnapshotLookupSources`. Inline locators, preferred frontier indexes,
+authenticated object-to-member admission, and non-canonical pack ranges share
+this path. The caller authenticates them against its snapshot; opening validates
+preferred inventory membership and source pack sizes. An explicitly empty
+preferred index set remains distinct from an unspecified set. The canonical
+snapshot and catalog-tail constructors retain their existing behavior.
+
 ### Generated response packs
 
 Response packs can be persisted beneath the repository's immutable
@@ -152,10 +160,23 @@ verified on every read. Runtime single-flight and the renewable internal-lock
 contract coalesce concurrent producers; cancelling one waiter does not cancel
 work still needed by another process.
 
+The runtime owner must still await shutdown before process exit: returning from
+a cancelled waiter does not imply its shared producer has stopped. Lease-bound
+work receives a child cancellation token. Renewal failure cancels that token,
+awaits cleanup, then releases the lease and returns the lease error. Caller
+cancellation also drains the work before release without cancelling the parent
+token or replacing a real producer failure. Request-bound producer closures
+must use the supplied token, not a separately captured caller token.
+
 Catalog-exact dense filters (`blob:none` and `object:type`) can assemble a
 large selected response directly from verified packed entries, preserving
 delta payloads and materializing only bases omitted from the selection. The
-assembler uses OID-based REF_DELTA links across read batches; shallow,
+assembler resolves locators once and orders proven selections by pack identity
+and offset before bounded read batches. This prevents OID-ordered batches from
+repeatedly fetching overlapping coalesced ranges. OID-based REF_DELTA links
+preserve bases across batch boundaries; per-entry CRCs and aggregate byte limits
+remain mandatory. Negotiated thin selections share this ordering; conservative
+responses without a proven selected-base set retain dependency ordering. Shallow,
 path-context, and other filters retain the conservative selected-repack path
 until their reachability proofs can bound the same optimization. Repository
 GC treats these objects as a soft acceleration cache: recent descriptors
@@ -175,6 +196,13 @@ the CPU and I/O cost of rebuilding a source index. Shallow selection also keeps
 the source installation bounded by skipping an OID enumeration that the
 selection planner does not consume; exact response-set validation remains in
 place.
+
+Complete-inventory response generation compares the unique source OID union
+with the authorized selection. Small overlap between self-contained packs
+uses the shared structural assembler instead of native delta recompression;
+unproven closure or a different selected set retains exact selected-object
+generation. Duplicate removal does not authorize extra objects or bypass pack,
+index, entry-CRC, response-size, or receiver integrity checks.
 
 ### Trees and history
 
@@ -201,6 +229,16 @@ acceleration falls back to raw parent order and can never hide a reachable
 commit. First-parent path cursors carry the next verified raw parent, so later
 pages do not replay newer commits. A matching complete graph groups bounded raw
 commit and tree reads for range coalescing without becoming the history authority.
+
+All snapshot constructors use this same graph validation when their supplied
+metadata names an index. They retain path-state metadata for exact attribution;
+a corrupt declared path index, or a missing graph needed to interpret it,
+returns `Corrupt(PathState)` instead of fabricating attribution. A journal
+overlay that changes the Git validation digest discards the base index pointers.
+Absent or superseded indexes cause no index-origin reads. Graph opening obeys
+request/byte budgets, the operation deadline, caller cancellation and runtime
+shutdown. This reader contract does not publish or discover capsule browse
+indexes; the maintenance owner must first bind them to the captured v2 state.
 
 ### Diagnostics and deployment
 

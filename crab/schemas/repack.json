@@ -16,14 +16,14 @@
     },
     "bytes_read": {
       "default": 0,
-      "description": "Pack body bytes read from object storage.",
+      "description": "Selected pack body bytes processed, excluding sidecars and transport overhead.",
       "format": "uint64",
       "minimum": 0.0,
       "type": "integer"
     },
     "bytes_written": {
       "default": 0,
-      "description": "New pack body bytes written to object storage.",
+      "description": "Replacement body bytes submitted, including verified identical-object reuse.",
       "format": "uint64",
       "minimum": 0.0,
       "type": "integer"

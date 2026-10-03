@@ -251,7 +251,7 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         .is_empty()
     );
     let replay = publish_release(&h, &alice, csrf, &first).await;
-    assert_eq!(replay.0, created.0);
+    assert_eq!(replay.0, created.0, "{}", replay.1);
     assert_eq!(replay.1["number"], created.1["number"]);
     assert_eq!(replay.1["version"], 3);
     assert!(replay.1["assets"].as_array().unwrap().is_empty());

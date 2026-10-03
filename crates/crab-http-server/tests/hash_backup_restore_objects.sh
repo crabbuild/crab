@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-bucket="${1:?usage: hash_backup_restore_objects.sh bucket source-prefix restored-prefix keys-file}"
-source_prefix="${2:?source prefix is required}"
-restored_prefix="${3:?restored prefix is required}"
-keys_file="${4:?keys file is required}"
+source_root="${1:?usage: hash_backup_restore_objects.sh source-s3-root restored-s3-root keys-file}"
+restored_root="${2:?restored S3 root is required}"
+keys_file="${3:?keys file is required}"
 endpoint="${AWS_ENDPOINT_URL_S3:?AWS_ENDPOINT_URL_S3 is required}"
 if [ ! -s "$keys_file" ]; then
   echo "Object key manifest is missing or empty: ${keys_file}" >&2
@@ -36,8 +35,8 @@ verify_object() {
     echo "Backup manifest contains an empty object key." >&2
     return 1
   fi
-  source_digest="$(hash_object "s3://${bucket}/${source_prefix}/${key}")"
-  restored_digest="$(hash_object "s3://${bucket}/${restored_prefix}/${key}")"
+  source_digest="$(hash_object "${source_root%/}/${key}")"
+  restored_digest="$(hash_object "${restored_root%/}/${key}")"
   if [ "$source_digest" != "$restored_digest" ]; then
     echo "Restored object differs from source: ${key}" >&2
     return 1
@@ -45,7 +44,7 @@ verify_object() {
   printf 'verified\n'
 }
 
-export bucket source_prefix restored_prefix endpoint
+export source_root restored_root endpoint
 export -f hash_object verify_object
 verified="$(
   # The child shell expands the positional key bound by xargs.

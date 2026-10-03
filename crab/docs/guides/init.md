@@ -10,9 +10,9 @@ crab init [OPTIONS] <url>
 
 ## Description
 
-`crab init` atomically creates the canonical v1 layout descriptor and empty
-generation-0 manifest in object storage, then connects the local directory to
-that repository. It creates the `.crab/` configuration directory, writes the
+`crab init` atomically creates the canonical v2 repository root and empty
+generation-0 ref authority in object storage, then connects the local directory
+to that repository. It creates the `.crab/` configuration directory, writes the
 remote URL, installs the git filter and diff drivers, and prepares the repo for
 `crab setup`.
 
@@ -105,9 +105,9 @@ Azure credentials, user config, or environment variables.
    - `filter.crab.smudge` — the smudge filter fallback.
    - `filter.crab.required = true` — ensures git fails if the filter is unavailable.
    - `diff.crab.command` — the external diff driver for `diff=crab` files.
-7. Creates or validates the canonical v1 remote layout descriptor.
-8. Atomically creates the empty generation-0 manifest, or adopts an existing
-   canonical manifest after validating the descriptor.
+7. Creates or validates the canonical v2 remote root.
+8. Atomically creates generation-0 ref authority, or adopts an existing v2 root
+   after authenticating it.
 9. Prints the next `crab setup` and `crab ship` steps.
 
 Push, clone, and `git ls-remote` never create repositories. If the configured

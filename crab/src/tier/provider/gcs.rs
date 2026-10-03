@@ -29,9 +29,12 @@
 //! All code in this module is gated behind `#[cfg(feature = "tier-gcs")]`
 //! at the module level (see `provider/mod.rs`).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use google_cloud_storage::http::buckets::get::GetBucketRequest;
+use google_cloud_token::TokenSource;
 use serde::Serialize;
 use tracing::debug;
 
@@ -167,31 +170,236 @@ static NO_TIERS: &[RestoreTier] = &[];
 
 // ── GcsLifecycleProvider ────────────────────────────────────────────
 
-/// GCS lifecycle provider backed by `google-cloud-storage`.
+/// GCS lifecycle provider backed by the GCS JSON API and
+/// `google-cloud-storage` object client.
 ///
 /// Implements both [`LifecycleProvider`] (lifecycle rule CRUD with
 /// generation-number CAS) and [`RestoreBackend`] (GCS Archive returns
 /// `Ready` unconditionally — per-GB retrieval fee modeled in
 /// `cost::pricing`).
 ///
-/// # Credential adapter
-///
-/// The real integration with `auth::CredentialProvider` will be wired
-/// when the auth adapter shim is available. For now the client is built
-/// from the default GCP credential chain.
+/// Lifecycle calls use the default GCP credential chain and send the
+/// rendered JSON unchanged. This is intentional: the pinned object SDK
+/// cannot represent `matchesPrefix` or a conditional bucket patch.
 pub struct GcsLifecycleProvider {
     client: google_cloud_storage::client::Client,
     bucket: String,
+    rest: Option<GcsRestClient>,
+}
+
+/// Small REST adapter for the two GCS bucket operations that the pinned SDK
+/// cannot represent without losing `matchesPrefix` or an If-Match guard.
+/// Keeping this adapter next to the provider makes the wire contract explicit
+/// and lets the SDK continue to own authenticated object operations.
+struct GcsRestClient {
+    http: reqwest::Client,
+    endpoint: String,
+    token_source: Arc<dyn TokenSource>,
+}
+
+impl GcsRestClient {
+    fn bucket_url(&self, bucket: &str) -> String {
+        format!(
+            "{}/storage/v1/b/{}",
+            self.endpoint.trim_end_matches('/'),
+            urlencoding::encode(bucket)
+        )
+    }
+
+    async fn authorization(&self) -> Result<String> {
+        self.token_source.token().await.map_err(|error| {
+            CrabError::Internal(format!("GCS lifecycle authentication failed: {error}"))
+        })
+    }
+
+    async fn get(&self, bucket: &str) -> Result<Option<RenderedLifecycle>> {
+        let response = self
+            .http
+            .get(self.bucket_url(bucket))
+            .query(&[("fields", "lifecycle,metageneration")])
+            .header(reqwest::header::AUTHORIZATION, self.authorization().await?)
+            .send()
+            .await
+            .map_err(|error| CrabError::Internal(format!("GCS lifecycle GET failed: {error}")))?;
+        let status = response.status();
+        let body = response.bytes().await.map_err(|error| {
+            CrabError::Internal(format!("GCS lifecycle GET response failed: {error}"))
+        })?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(gcs_rest_status_error("GET lifecycle", status, &body));
+        }
+
+        let value: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
+            CrabError::Internal(format!("GCS lifecycle GET returned invalid JSON: {error}"))
+        })?;
+        let Some(lifecycle) = value.get("lifecycle") else {
+            return Ok(None);
+        };
+        if lifecycle.is_null() {
+            return Ok(None);
+        }
+        let rules = lifecycle
+            .get("rule")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: format!("gcs://{bucket}/lifecycle"),
+                reason: "lifecycle response has no rule array".to_owned(),
+            })?;
+        if rules.is_empty() {
+            return Ok(None);
+        }
+        let body = serde_json::to_vec_pretty(&serde_json::json!({
+            "lifecycle": { "rule": rules },
+        }))
+        .map_err(|error| {
+            CrabError::Internal(format!("GCS lifecycle response serialize failed: {error}"))
+        })?;
+        Ok(Some(RenderedLifecycle {
+            format: Format::Json,
+            body,
+            rule_ids: gcs_rule_ids(rules),
+        }))
+    }
+
+    async fn patch(
+        &self,
+        bucket: &str,
+        lifecycle: serde_json::Value,
+        guard: Option<u64>,
+    ) -> Result<PutOutcome> {
+        let mut request = self
+            .http
+            .patch(self.bucket_url(bucket))
+            .query(&[("fields", "lifecycle,metageneration")])
+            .header(reqwest::header::AUTHORIZATION, self.authorization().await?)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .json(&serde_json::json!({ "lifecycle": lifecycle }));
+        if let Some(generation) = guard {
+            request = request.query(&[("ifMetagenerationMatch", generation.to_string())]);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| CrabError::Internal(format!("GCS lifecycle PATCH failed: {error}")))?;
+        let status = response.status();
+        let body = response.bytes().await.map_err(|error| {
+            CrabError::Internal(format!("GCS lifecycle PATCH response failed: {error}"))
+        })?;
+        if status == reqwest::StatusCode::PRECONDITION_FAILED {
+            return Err(CrabError::CasConflict {
+                path: format!("gcs://{bucket}/lifecycle"),
+                expected_etag: guard.map(|generation| format!("generation:{generation}")),
+            });
+        }
+        if !status.is_success() {
+            return Err(gcs_rest_status_error("PATCH lifecycle", status, &body));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
+            CrabError::Internal(format!(
+                "GCS lifecycle PATCH returned invalid JSON: {error}"
+            ))
+        })?;
+        let metageneration = parse_metageneration(
+            value.get("metageneration"),
+            &format!("gcs://{bucket}/lifecycle"),
+        )?;
+        Ok(PutOutcome {
+            new_guard: Guard::Generation(metageneration),
+            applied_at: now_rfc3339(),
+        })
+    }
+
+    async fn generation(&self, bucket: &str) -> Result<Option<Guard>> {
+        let response = self
+            .http
+            .get(self.bucket_url(bucket))
+            .query(&[("fields", "metageneration")])
+            .header(reqwest::header::AUTHORIZATION, self.authorization().await?)
+            .send()
+            .await
+            .map_err(|error| CrabError::Internal(format!("GCS bucket GET failed: {error}")))?;
+        let status = response.status();
+        let body = response.bytes().await.map_err(|error| {
+            CrabError::Internal(format!("GCS bucket GET response failed: {error}"))
+        })?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(gcs_rest_status_error("GET bucket", status, &body));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
+            CrabError::Internal(format!("GCS bucket GET returned invalid JSON: {error}"))
+        })?;
+        let metageneration =
+            parse_metageneration(value.get("metageneration"), &format!("gcs://{bucket}"))?;
+        Ok(Some(Guard::Generation(metageneration)))
+    }
+}
+
+fn gcs_rest_status_error(operation: &str, status: reqwest::StatusCode, body: &[u8]) -> CrabError {
+    let detail = String::from_utf8_lossy(body);
+    CrabError::Internal(format!("GCS {operation} returned HTTP {status}: {detail}"))
+}
+
+/// Decode the JSON API's int64 metageneration, which is serialized as a
+/// decimal string by GCS but may be a JSON number in compatible emulators.
+fn parse_metageneration(value: Option<&serde_json::Value>, path: &str) -> Result<u64> {
+    let value = value.ok_or_else(|| CrabError::CorruptObject {
+        path: path.to_owned(),
+        reason: "GCS response omitted metageneration".to_owned(),
+    })?;
+    let generation = value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|raw| raw.parse::<u64>().ok()))
+        .ok_or_else(|| CrabError::CorruptObject {
+            path: path.to_owned(),
+            reason: "GCS response has an invalid metageneration".to_owned(),
+        })?;
+    if generation == 0 {
+        return Err(CrabError::CorruptObject {
+            path: path.to_owned(),
+            reason: "GCS response has a zero metageneration".to_owned(),
+        });
+    }
+    Ok(generation)
+}
+
+/// GCS lifecycle rules have no wire-level IDs. Use stable synthetic IDs for
+/// conflict handling, treating only Crab's exact xorb prefix as managed. A
+/// user rule is therefore never silently discarded by a non-merge apply.
+fn gcs_rule_ids(rules: &[serde_json::Value]) -> Vec<String> {
+    rules
+        .iter()
+        .map(|rule| {
+            let digest = blake3::hash(&serde_json::to_vec(rule).unwrap_or_default());
+            let managed = rule
+                .get("condition")
+                .and_then(|condition| condition.get("matchesPrefix"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|prefixes| {
+                    !prefixes.is_empty()
+                        && prefixes
+                            .iter()
+                            .all(|prefix| prefix.as_str() == Some(".crab/xorbs/"))
+                });
+            if managed {
+                format!("crab-gcs-{}", digest.to_hex())
+            } else {
+                format!("gcs-user-{}", digest.to_hex())
+            }
+        })
+        .collect()
 }
 
 impl GcsLifecycleProvider {
     /// Build a GCS lifecycle provider for the given bucket.
     ///
-    /// Uses the default GCP credential chain. The credential adapter
-    /// from `auth::CredentialProvider` will be wired in a follow-up.
-    // TODO(crab-storage-economy): wire `auth::CredentialProvider` via
-    // a `google_cloud_token::TokenSourceProvider` adapter when the auth
-    // shim is available.
+    /// Uses the default GCP credential chain for both object and lifecycle
+    /// requests.
     pub async fn new(bucket: String) -> Result<Self> {
         let config = google_cloud_storage::client::ClientConfig::default()
             .with_auth()
@@ -199,8 +407,25 @@ impl GcsLifecycleProvider {
             .map_err(|e| {
                 CrabError::Internal(format!("GCS client auth initialization failed: {e}"))
             })?;
+        let endpoint = config.storage_endpoint.clone();
+        let token_source = config
+            .token_source_provider
+            .as_ref()
+            .map(|provider| provider.token_source())
+            .ok_or_else(|| CrabError::Configuration {
+                key: "tier.gcs.credentials".to_owned(),
+                origin: "GCS authentication did not provide a token source".to_owned(),
+            })?;
         let client = google_cloud_storage::client::Client::new(config);
-        Ok(Self { client, bucket })
+        Ok(Self {
+            client,
+            bucket,
+            rest: Some(GcsRestClient {
+                http: reqwest::Client::new(),
+                endpoint,
+                token_source,
+            }),
+        })
     }
 
     /// Build a GCS lifecycle provider from an existing client.
@@ -208,7 +433,11 @@ impl GcsLifecycleProvider {
     /// Useful for testing with a client configured to point at
     /// `fake-gcs-server` or other test doubles.
     pub fn from_client(client: google_cloud_storage::client::Client, bucket: String) -> Self {
-        Self { client, bucket }
+        Self {
+            client,
+            bucket,
+            rest: None,
+        }
     }
 
     /// Return a reference to the underlying GCS client.
@@ -233,12 +462,14 @@ impl LifecycleProvider for GcsLifecycleProvider {
     }
 
     async fn get(&self) -> Result<Option<RenderedLifecycle>> {
+        if let Some(rest) = &self.rest {
+            return rest.get(&self.bucket).await;
+        }
+
         // Fetch the bucket metadata via `storage.buckets.get`. We reach
         // for the full bucket rather than a projected subset because the
         // metageneration (needed for CAS) lives on the top-level Bucket
         // object alongside the optional lifecycle config.
-        use google_cloud_storage::http::buckets::get::GetBucketRequest;
-
         let req = GetBucketRequest {
             bucket: self.bucket.clone(),
             ..Default::default()
@@ -263,46 +494,15 @@ impl LifecycleProvider for GcsLifecycleProvider {
                     return Ok(None);
                 }
 
-                // Serialize the SDK-returned lifecycle back to our
-                // canonical JSON shape so the caller receives a
-                // `RenderedLifecycle` identical in format to what
-                // `render()` produces. We cannot round-trip back to
-                // `TierPlan` through the SDK's typed `Condition`: the
-                // pinned crate version (0.24) omits `matches_prefix`
-                // from its `Condition` struct, so a typed round-trip
-                // would silently drop the prefix filter. Serializing
-                // the SDK's `Vec<Rule>` through serde_json preserves
-                // whatever the server returned for fields the SDK
-                // doesn't model, because the `#[serde(flatten)]`-like
-                // behavior is a no-op here — unknown fields are
-                // already lost at deserialization. Callers that need
-                // prefix-aware read-back should compare rule IDs
-                // rather than body bytes.
-                let body = serde_json::to_vec_pretty(&serde_json::json!({
-                    "lifecycle": { "rule": lifecycle.rule },
-                }))
-                .map_err(|e| {
-                    CrabError::Internal(format!("GCS lifecycle response serialize: {e}"))
-                })?;
-
-                // Extract rule IDs as a best effort. This SDK version
-                // does not expose rule IDs on `Rule`, so we fall back
-                // to an empty list and rely on callers to match by
-                // content.
-                let rule_ids: Vec<String> = Vec::new();
-
-                debug!(
-                    bucket = %self.bucket,
-                    metageneration = bucket.metageneration,
-                    rules = lifecycle.rule.len(),
-                    "GCS get lifecycle: parsed SDK response"
-                );
-
-                Ok(Some(RenderedLifecycle {
-                    format: Format::Json,
-                    body,
-                    rule_ids,
-                }))
+                // The SDK's typed `Condition` omits `matchesPrefix`, so a
+                // configured lifecycle cannot be safely represented through
+                // this constructor. Real providers use the REST adapter above;
+                // fail closed for SDK-only test clients rather than widening a
+                // rule's scope on the next apply.
+                Err(CrabError::Configuration {
+                    key: "tier.gcs.lifecycle_client".to_owned(),
+                    origin: "configured lifecycle requires the authenticated REST adapter; construct the provider with GcsLifecycleProvider::new".to_owned(),
+                })
             }
             Err(err) => {
                 // The SDK surfaces `NotFound` via the response-code
@@ -324,56 +524,101 @@ impl LifecycleProvider for GcsLifecycleProvider {
     }
 
     async fn put(&self, doc: &RenderedLifecycle, guard: Option<Guard>) -> Result<PutOutcome> {
-        // The pinned `google-cloud-storage 0.24` crate's typed
-        // `buckets::lifecycle::rule::Condition` does not carry a
-        // `matches_prefix` field, which is the entire reason crab
-        // lifecycle rules exist (per-prefix transitions for
-        // `.crab/xorbs/`, `.crab/shards/`, etc). Calling
-        // `patch_bucket` with the SDK's typed `Lifecycle` would serialize
-        // a rule without `matchesPrefix`, making it apply to every object
-        // in the bucket — a silent and potentially destructive semantic
-        // change (xorbs in every project prefix would transition).
-        //
-        // Rather than ship a silently-regressing PUT, this path returns
-        // a structured error that tells the operator exactly what to do:
-        // upgrade the crate or stick with the S3 path for now. The
-        // `render()` method still produces valid JSON that can be
-        // uploaded via `gcloud storage buckets update --lifecycle-file`
-        // out-of-band.
-        //
-        // See also: the accompanying doc comment on
-        // `GcsLifecycleProvider`. Fix plan:
-        //
-        //   1. Bump `google-cloud-storage` to a version whose
-        //      `Condition` exposes `matches_prefix` (tracked upstream).
-        //   2. Or route `put` through a hand-rolled HTTP PATCH that
-        //      sends our rendered JSON body verbatim, preserving the
-        //      prefix filter end-to-end.
-        //
-        // Until then `put` refuses rather than silently widening the
-        // lifecycle rule's scope.
-        let _ = (doc, guard);
-        Err(CrabError::Internal(
-            "GCS lifecycle put is not yet wired: the pinned \
-             `google-cloud-storage` crate omits `matches_prefix` from \
-             its typed `Condition`, so a typed PATCH would drop the \
-             per-prefix filter and widen every rule to the whole \
-             bucket. Upload the rendered JSON out-of-band via \
-             `gcloud storage buckets update --lifecycle-file` or \
-             upgrade the crate."
-                .into(),
-        ))
+        let Some(rest) = &self.rest else {
+            return Err(CrabError::Configuration {
+                key: "tier.gcs.lifecycle_client".to_owned(),
+                origin: "lifecycle writes require the authenticated REST adapter; construct the provider with GcsLifecycleProvider::new".to_owned(),
+            });
+        };
+        if doc.format != Format::Json {
+            return Err(CrabError::IncompatibleFormat {
+                required: "GCS lifecycle JSON".to_owned(),
+                found: format!("{:?}", doc.format),
+            });
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&doc.body).map_err(|error| CrabError::Configuration {
+                key: "tier.gcs.lifecycle".to_owned(),
+                origin: format!("rendered lifecycle is not valid JSON: {error}"),
+            })?;
+        let lifecycle =
+            value
+                .get("lifecycle")
+                .cloned()
+                .ok_or_else(|| CrabError::Configuration {
+                    key: "tier.gcs.lifecycle".to_owned(),
+                    origin: "rendered lifecycle is missing the lifecycle object".to_owned(),
+                })?;
+        let generation = match guard {
+            None => None,
+            Some(Guard::Generation(generation)) => Some(generation),
+            Some(Guard::Etag(_) | Guard::None) => {
+                return Err(CrabError::Configuration {
+                    key: "tier.gcs.lifecycle.guard".to_owned(),
+                    origin: "GCS lifecycle writes require a generation guard".to_owned(),
+                });
+            }
+        };
+        rest.patch(&self.bucket, lifecycle, generation).await
+    }
+
+    async fn delete(&self, guard: Option<Guard>) -> Result<PutOutcome> {
+        let Some(rest) = &self.rest else {
+            return Err(CrabError::Configuration {
+                key: "tier.gcs.lifecycle_client".to_owned(),
+                origin: "lifecycle deletion requires the authenticated REST adapter; construct the provider with GcsLifecycleProvider::new".to_owned(),
+            });
+        };
+        let generation = match guard {
+            Some(Guard::Generation(generation)) => Some(generation),
+            None => {
+                return Err(CrabError::TierProviderUnsupported {
+                    provider: "GCS lifecycle deletion requires a generation guard".to_owned(),
+                });
+            }
+            Some(Guard::Etag(_) | Guard::None) => {
+                return Err(CrabError::Configuration {
+                    key: "tier.gcs.lifecycle.guard".to_owned(),
+                    origin: "GCS lifecycle deletion requires a generation guard".to_owned(),
+                });
+            }
+        };
+        rest.patch(&self.bucket, serde_json::Value::Null, generation)
+            .await
+    }
+
+    fn equivalent(
+        &self,
+        current: &RenderedLifecycle,
+        intended: &RenderedLifecycle,
+    ) -> Result<bool> {
+        if current.format != Format::Json || intended.format != Format::Json {
+            return Ok(false);
+        }
+        let current: serde_json::Value =
+            serde_json::from_slice(&current.body).map_err(|error| CrabError::CorruptObject {
+                path: format!("gcs://{}/lifecycle", self.bucket),
+                reason: format!("current lifecycle is not valid JSON: {error}"),
+            })?;
+        let intended: serde_json::Value =
+            serde_json::from_slice(&intended.body).map_err(|error| CrabError::Configuration {
+                key: "tier.gcs.lifecycle".to_owned(),
+                origin: format!("intended lifecycle is not valid JSON: {error}"),
+            })?;
+        Ok(current == intended)
     }
 
     async fn cas_guard(&self) -> Result<Option<Guard>> {
+        if let Some(rest) = &self.rest {
+            return rest.generation(&self.bucket).await;
+        }
+
         // CAS on GCS lifecycle uses the bucket's metageneration as the
         // guard. `get_bucket` is the cheapest call that returns it —
         // projected fields aren't available in the pinned crate — so we
         // pay one full-bucket GET per push. Metageneration is an `i64`
         // but always non-negative in practice; we widen to `u64` via a
         // clamped cast so the `Guard::Generation` variant stays unsigned.
-        use google_cloud_storage::http::buckets::get::GetBucketRequest;
-
         let req = GetBucketRequest {
             bucket: self.bucket.clone(),
             ..Default::default()
@@ -443,15 +688,6 @@ impl RestoreBackend for GcsLifecycleProvider {
 // ── Helper functions ────────────────────────────────────────────────
 
 /// Return the current time as an RFC 3339 string.
-///
-/// Currently unused — `put` errors out before reaching the outcome
-/// construction. Kept in place so the eventual real-PUT path can use
-/// it without reintroducing the helper. See the block comment on the
-/// `put` implementation for why PUT is intentionally gated.
-#[allow(
-    dead_code,
-    reason = "reused when put() is wired against an updated SDK"
-)]
 fn now_rfc3339() -> String {
     let now = std::time::SystemTime::now();
     let duration = now
@@ -654,6 +890,41 @@ mod tests {
         assert_eq!(gcs_class_str(StorageClass::S3Standard), "STANDARD");
         assert_eq!(gcs_class_str(StorageClass::AzureHot), "STANDARD");
         assert_eq!(gcs_class_str(StorageClass::Unknown), "STANDARD");
+    }
+
+    #[test]
+    fn metageneration_accepts_gcs_string_encoding() {
+        let value = serde_json::json!("17");
+        assert_eq!(
+            parse_metageneration(Some(&value), "gcs://bucket").unwrap(),
+            17
+        );
+    }
+
+    #[test]
+    fn metageneration_rejects_zero_or_malformed_values() {
+        for value in [serde_json::json!(0), serde_json::json!("nope")] {
+            assert!(parse_metageneration(Some(&value), "gcs://bucket").is_err());
+        }
+    }
+
+    #[test]
+    fn synthetic_rule_ids_keep_user_rules_managed() {
+        let rules = vec![
+            serde_json::json!({
+                "action": {"type": "SetStorageClass", "storageClass": "NEARLINE"},
+                "condition": {"age": 30, "matchesPrefix": [".crab/xorbs/"]}
+            }),
+            serde_json::json!({
+                "action": {"type": "Delete"},
+                "condition": {"age": 365, "matchesPrefix": ["backups/"]}
+            }),
+        ];
+
+        let ids = gcs_rule_ids(&rules);
+
+        assert!(ids[0].starts_with("crab-gcs-"));
+        assert!(ids[1].starts_with("gcs-user-"));
     }
 
     // ── GcsLifecycleProvider: kind ──────────────────────────────────

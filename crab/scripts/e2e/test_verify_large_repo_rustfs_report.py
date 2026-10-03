@@ -60,7 +60,7 @@ class QualificationHarnessTests(unittest.TestCase):
             QUALIFICATION.LargeRepositoryQualification
         )
         qualification.args = SimpleNamespace(
-            timeout=5, sample_interval=0.01,
+            timeout=5, clone_timeout=30, sample_interval=0.01,
             access_key="", secret_key="test-secret", session_token="",
         )
         qualification.logs = root / "logs"
@@ -73,7 +73,7 @@ class QualificationHarnessTests(unittest.TestCase):
             **os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
         }
         qualification.git_bin = Path(shutil.which("git") or "git")
-        qualification.report = {"commands": [], "artifacts": {}}
+        qualification.report = {"commands": [], "checks": [], "artifacts": {}}
         return qualification
 
     def test_binary_stdout_is_hashed_without_retaining_or_decoding_payload(self) -> None:
@@ -135,6 +135,110 @@ class QualificationHarnessTests(unittest.TestCase):
                 (True, False, {"sha256": hashlib.sha256(expected_stream).hexdigest(),
                                "bytes": len(expected_stream)}),
             )
+
+    def test_blobless_clone_verifies_omission_and_lazy_hydration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            qualification = self.harness(root)
+            remote = root / "remote.git"
+            source = root / "source"
+            qualification.run_git(
+                root, ["init", "--bare", "--initial-branch=main", str(remote)], "init remote"
+            )
+            qualification.run_git(
+                remote, ["config", "uploadpack.allowFilter", "true"], "enable partial clone"
+            )
+            qualification.run_git(
+                root, ["init", "--initial-branch=main", str(source)], "init source"
+            )
+            qualification.run_git(source, ["config", "user.name", "qualification"], "set author")
+            qualification.run_git(
+                source,
+                ["config", "user.email", "qualification@example.invalid"],
+                "set author email",
+            )
+            payload = bytes(range(256)) * 8
+            second_payload = b"second sampled blob" * 23
+            (source / "payload.bin").write_bytes(payload)
+            (source / "second.bin").write_bytes(second_payload)
+            qualification.run_git(source, ["add", "payload.bin", "second.bin"], "stage source blobs")
+            qualification.run_git(
+                source, ["commit", "-m", "seed"], "commit source blob"
+            )
+            qualification.run_git(
+                source, ["remote", "add", "origin", str(remote)], "add source remote"
+            )
+            qualification.run_git(source, ["push", "origin", "main"], "publish source")
+            revision = qualification.git_value(source, ["rev-parse", "HEAD"], "source tip")
+            blob_oid = qualification.git_value(
+                source, ["rev-parse", f"{revision}:payload.bin"], "source blob OID"
+            )
+            second_blob_oid = qualification.git_value(
+                source, ["rev-parse", f"{revision}:second.bin"], "second source blob OID"
+            )
+            partial = root / "partial"
+            qualification.run_git(
+                root,
+                [
+                    "-c", "protocol.version=2", "clone", "--filter=blob:none",
+                    "--no-checkout", "--single-branch", "--branch", "main",
+                    remote.as_uri(), str(partial),
+                ],
+                "clone partial source",
+            )
+
+            result = qualification.verify_blobless_clone(
+                partial, source, revision, [blob_oid, second_blob_oid]
+            )
+
+            self.assertEqual(
+                (result["tip"], result["sampled_blob_count"],
+                 result["omitted_sampled_blob_count"], result["hydrated_blob_sha256"],
+                 result["hydrated_blob_bytes"]),
+                (revision, 2, 2, hashlib.sha256(payload).hexdigest(), len(payload)),
+            )
+
+    def test_blobless_clone_verifier_rejects_unfiltered_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            qualification = self.harness(root)
+            remote = root / "remote.git"
+            source = root / "source"
+            qualification.run_git(
+                root, ["init", "--bare", "--initial-branch=main", str(remote)], "init remote"
+            )
+            qualification.run_git(
+                root, ["init", "--initial-branch=main", str(source)], "init source"
+            )
+            qualification.run_git(source, ["config", "user.name", "qualification"], "set author")
+            qualification.run_git(
+                source,
+                ["config", "user.email", "qualification@example.invalid"],
+                "set author email",
+            )
+            (source / "payload.bin").write_bytes(b"not omitted")
+            qualification.run_git(source, ["add", "payload.bin"], "stage source blob")
+            qualification.run_git(source, ["commit", "-m", "seed"], "commit source blob")
+            qualification.run_git(
+                source, ["remote", "add", "origin", str(remote)], "add source remote"
+            )
+            qualification.run_git(source, ["push", "origin", "main"], "publish source")
+            revision = qualification.git_value(source, ["rev-parse", "HEAD"], "source tip")
+            blob_oid = qualification.git_value(
+                source, ["rev-parse", f"{revision}:payload.bin"], "source blob OID"
+            )
+            full = root / "full"
+            qualification.run_git(
+                root,
+                ["clone", "--no-checkout", "--single-branch", "--branch", "main",
+                 remote.as_uri(), str(full)],
+                "clone full source",
+            )
+
+            with self.assertRaisesRegex(
+                QUALIFICATION.QualificationError, "blob-none-promisor-config"
+            ):
+                qualification.verify_blobless_clone(full, source, revision, [blob_oid])
 
     def test_snapshot_executable_is_immune_to_source_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -241,6 +345,62 @@ class ReplayCheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(QUALIFICATION.QualificationError, "not contiguous"):
             QUALIFICATION.completed_replay_ordinal([{"ordinal": 0}, {"ordinal": 2}])
 
+    def test_capsule_owner_accepts_checkpoint_convergence(self) -> None:
+        snapshots = [
+            {
+                "protocol": "capsule-v2",
+                "generation": 0,
+                "action": "capsule_checkpoint",
+                "visibility": "embedded",
+                "superseded": True,
+            },
+            {
+                "protocol": "capsule-v2",
+                "generation": 1,
+                "action": "none",
+                "visibility": "embedded",
+                "superseded": False,
+            },
+        ]
+
+        self.assertTrue(QUALIFICATION.capsule_owner_is_current(snapshots))
+
+    def test_capsule_owner_rejects_checkpoint_without_convergence(self) -> None:
+        snapshots = [
+            {
+                "protocol": "capsule-v2",
+                "generation": 0,
+                "action": "capsule_checkpoint",
+                "visibility": "embedded",
+                "superseded": True,
+            }
+        ]
+
+        self.assertFalse(QUALIFICATION.capsule_owner_is_current(snapshots))
+
+    def test_capsule_owner_rejects_external_visibility(self) -> None:
+        snapshots = [
+            {
+                "protocol": "capsule-v2",
+                "generation": 1,
+                "action": "none",
+                "visibility": "published",
+                "superseded": False,
+            }
+        ]
+
+        self.assertFalse(QUALIFICATION.capsule_owner_is_current(snapshots))
+
+    def test_resume_preserves_recorded_capsule_acceleration_duration(self) -> None:
+        stages = {
+            "visibility_owner_seed": {"duration_ms": 42},
+            "acceleration_seed": {"protocol": "capsule-v2", "action": "none"},
+        }
+
+        QUALIFICATION.normalize_capsule_acceleration_evidence(stages)
+
+        self.assertEqual(stages["acceleration_seed"]["duration_ms"], 42)
+
 
 def valid_report() -> dict[str, Any]:
     replay_count = 3
@@ -253,6 +413,11 @@ def valid_report() -> dict[str, Any]:
         "isolated-remote-prefix",
         "advertised-refs-match-source",
         "clone-tips-match-source",
+        "blob-none-promisor-config",
+        "blob-none-pack-promisor-marker",
+        "blob-none-sampled-blobs-missing-before-hydration",
+        "blob-none-lazy-hydration-byte-identical",
+        "blob-none-hydrated-blob-is-present",
         "deterministic-object-sample-size",
         "sampled-objects-byte-identical",
         "source-checkout-unchanged",
@@ -316,7 +481,7 @@ def valid_report() -> dict[str, Any]:
     }
     return {
         "schema": "crab.large-repository-rustfs",
-        "version": "1.3",
+        "version": "1.4",
         "profile": "smoke",
         "run_id": "test-run",
         "status": "ok",
@@ -413,6 +578,16 @@ def valid_report() -> dict[str, Any]:
             "full_fsck": True,
             "incremental_fsck": True,
             "sample_size": 3,
+            "blobless_clone": {
+                "tip": OID,
+                "filter": "blob:none",
+                "sampled_blob_count": 2,
+                "omitted_sampled_blob_count": 2,
+                "blob_oid": BASE,
+                "hydrated_blob_sha256": DIGEST,
+                "hydrated_blob_bytes": 100,
+                "promisor_packs": ["pack-example.promisor"],
+            },
             "advertised_refs": {"refs/heads/main": OID},
             "clone_refs": {"refs/heads/main": OID},
         },
@@ -560,6 +735,26 @@ class ReportVerificationTests(unittest.TestCase):
         path = self.root / name
         path.write_text(json.dumps(report), encoding="utf-8")
         return path
+
+    def test_capsule_acceleration_evidence_is_accepted(self) -> None:
+        report = valid_report()
+        for checkpoint in ("seed", "1", "3"):
+            report["stages"][f"acceleration_{checkpoint}"] = {
+                "duration_ms": 1,
+                "protocol": "capsule-v2",
+                "generation": 1,
+                "action": "none",
+                "visibility": "embedded",
+                "superseded": False,
+                "owner_actions": ["capsule_checkpoint", "none"],
+            }
+
+        result = VERIFY.verify_report(
+            self.write("capsule-acceleration.json", report),
+            allow_smoke=True,
+        )
+
+        self.assertEqual(result.replay_count, 3)
 
     def test_telemetry_parser_accepts_debug_enum_cache_events(self) -> None:
         path = self.root / "stderr.log"
@@ -851,11 +1046,16 @@ class ReportVerificationTests(unittest.TestCase):
             }
         )
 
-    def test_blobless_catalog_filter_requires_ordinal_metadata_telemetry(self) -> None:
+    def test_blobless_clone_requires_behavioral_omission_and_hydration_evidence(self) -> None:
         report = valid_report()
-        report["stages"]["blob_none_clone"]["telemetry"]["locator_ordinal_metadata"] = 0
-        with self.assertRaisesRegex(VERIFY.VerificationError, "ordinal metadata"):
-            VERIFY.verify_catalog_filter_telemetry(report["stages"])
+        del report["correctness"]["blobless_clone"]
+        with self.assertRaisesRegex(VERIFY.VerificationError, "blobless clone evidence"):
+            VERIFY.verify_report(self.write("missing-blobless-proof.json", report), allow_smoke=True)
+
+        report = valid_report()
+        report["correctness"]["blobless_clone"]["omitted_sampled_blob_count"] = 1
+        with self.assertRaisesRegex(VERIFY.VerificationError, "did not omit all sampled blobs"):
+            VERIFY.verify_report(self.write("incomplete-blobless-proof.json", report), allow_smoke=True)
 
     def test_full_owner_report_requires_locator_sweep_telemetry(self) -> None:
         stages = {

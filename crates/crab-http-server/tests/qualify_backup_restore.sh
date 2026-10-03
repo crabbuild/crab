@@ -15,10 +15,12 @@ proxy_id="$("${compose[@]}" ps --quiet proxy)"
 rustfs_id="$("${compose[@]}" ps --quiet rustfs)"
 source_stopped=false
 suffix="${work_dir##*.}"
-restore_prefix="restore-${suffix}"
+source_bucket="crab-http-server"
+restore_bucket="crab-http-server-restore-${suffix,,}"
 restore_server="crab-http-server-restore-${suffix}"
 restore_proxy="crab-http-server-restore-proxy-${suffix}"
 restore_network="${restore_server}-network"
+global_probe="repositories/.crab/http-server/v1/backup-probe/${suffix}"
 
 if [ -z "$server_id" ] || [ -z "$proxy_id" ] || [ -z "$rustfs_id" ]; then
   echo "The Compose server, proxy, and RustFS services must be running." >&2
@@ -28,6 +30,14 @@ fi
 cleanup() {
   result=$?
   docker rm --force "$restore_proxy" "$restore_server" "$restore_network" >/dev/null 2>&1 || true
+  if declare -p aws_cli >/dev/null 2>&1; then
+    "${aws_cli[@]}" s3 rm "s3://${source_bucket}/${global_probe}" \
+      --only-show-errors >/dev/null 2>&1 || true
+    "${aws_cli[@]}" s3 rm "s3://${restore_bucket}/" --recursive \
+      --only-show-errors >/dev/null 2>&1 || true
+    "${aws_cli[@]}" s3api delete-bucket --bucket "$restore_bucket" \
+      >/dev/null 2>&1 || true
+  fi
   if $source_stopped; then
     "${compose[@]}" up --detach --no-build --wait --wait-timeout 120 \
       server proxy >/dev/null 2>&1 || true
@@ -46,7 +56,17 @@ if ! git -C "$source_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
   git -C "$source_dir" commit -m "seed restore qualification"
   GIT_TERMINAL_PROMPT=0 git -C "$source_dir" push --set-upstream origin main
 fi
+qualification_tag="backup-restore-${suffix,,}"
+printf 'v2 authority and activation records must survive restore.\n' \
+  > "${source_dir}/${qualification_tag}.txt"
+git -C "$source_dir" add "${qualification_tag}.txt"
+git -C "$source_dir" commit -m "qualify complete v2 restore"
+git -C "$source_dir" tag --annotate "$qualification_tag" \
+  --message "Complete v2 restore qualification"
+GIT_TERMINAL_PROMPT=0 git -C "$source_dir" push --atomic origin \
+  main "refs/tags/${qualification_tag}"
 source_oid="$(git -C "$source_dir" rev-parse HEAD)"
+source_tag_oid="$(git -C "$source_dir" rev-parse "refs/tags/${qualification_tag}")"
 
 issue_request='01931b9e-4b3c-7b2a-b9f0-0123456789ab'
 issue_title='Restore qualification'
@@ -65,6 +85,7 @@ printf 'LFS bytes must survive a complete-root restore.\n' > "${work_dir}/lfs-so
 lfs_oid="$(shasum -a 256 "${work_dir}/lfs-source" | awk '{print $1}')"
 lfs_size="$(wc -c < "${work_dir}/lfs-source" | tr -d '[:space:]')"
 lfs_path="/git/demo/hello.git/info/lfs/objects/${lfs_oid}?size=${lfs_size}"
+lfs_key="repositories/demo/hello/lfs/objects/${lfs_oid:0:2}/${lfs_oid:2:2}/${lfs_oid}"
 curl --fail --silent --show-error --request PUT \
   --data-binary "@${work_dir}/lfs-source" \
   --output /dev/null \
@@ -83,32 +104,49 @@ aws_cli=(
   --entrypoint aws bucket-init
   --endpoint-url http://rustfs:9000
 )
-"${aws_cli[@]}" s3 cp s3://crab-http-server/repositories/ \
-  "s3://crab-http-server/${restore_prefix}/" --recursive --only-show-errors
-"${aws_cli[@]}" s3api list-objects-v2 --bucket crab-http-server \
+printf 'The root-scoped shared namespace must survive restore.\n' \
+  | "${aws_cli[@]}" s3 cp - "s3://${source_bucket}/${global_probe}" \
+    --only-show-errors
+"${aws_cli[@]}" s3api create-bucket --bucket "$restore_bucket" >/dev/null
+"${aws_cli[@]}" s3 cp "s3://${source_bucket}/repositories/" \
+  "s3://${restore_bucket}/repositories/" --recursive --only-show-errors
+"${aws_cli[@]}" s3api list-objects-v2 --bucket "$source_bucket" \
   --prefix repositories/ --output json > "${work_dir}/source-objects.json"
-"${aws_cli[@]}" s3api list-objects-v2 --bucket crab-http-server \
-  --prefix "${restore_prefix}/" --output json > "${work_dir}/restored-objects.json"
-printf 'Copied complete storage root into isolated prefix %s\n' "$restore_prefix"
+"${aws_cli[@]}" s3api list-objects-v2 --bucket "$restore_bucket" \
+  --prefix repositories/ --output json > "${work_dir}/restored-objects.json"
+printf 'Copied complete configured storage root into isolated bucket %s\n' \
+  "$restore_bucket"
 
 jq --exit-status '(.IsTruncated // false) == false' \
   "${work_dir}/source-objects.json" "${work_dir}/restored-objects.json" >/dev/null
-jq --arg prefix 'repositories/' \
-  '[.Contents[]? | {key: (.Key | ltrimstr($prefix)), size: .Size}] | sort_by(.key)' \
+jq \
+  '[.Contents[]? | {key: .Key, size: .Size}] | sort_by(.key)' \
   "${work_dir}/source-objects.json" > "${work_dir}/source-manifest.json"
-jq --arg prefix "${restore_prefix}/" \
-  '[.Contents[]? | {key: (.Key | ltrimstr($prefix)), size: .Size}] | sort_by(.key)' \
+jq \
+  '[.Contents[]? | {key: .Key, size: .Size}] | sort_by(.key)' \
   "${work_dir}/restored-objects.json" > "${work_dir}/restored-manifest.json"
 cmp "${work_dir}/source-manifest.json" "${work_dir}/restored-manifest.json"
 
 jq --exit-status \
-  'any(.[]; .key == ".crab/http-server/v1/catalog.json")' \
+  'any(.[]; .key == "repositories/.crab/http-server/v1/catalog.json")' \
+  "${work_dir}/source-manifest.json" >/dev/null
+jq --exit-status --arg lfs_key "$lfs_key" \
+  'any(.[]; .key == "repositories/demo/hello/v2/root") and
+   ([.[] | select(.key | startswith("repositories/demo/hello/v2/refs/heads/"))] | length) >= 2 and
+   any(.[]; .key | startswith("repositories/demo/hello/v2/capsules/")) and
+   any(.[]; .key | startswith("repositories/demo/hello/v2/transactions/records/")) and
+   any(.[]; .key | startswith("repositories/demo/hello/v2/transactions/committed/")) and
+   any(.[]; .key == $lfs_key) and
+   all(.[]; .key != "repositories/demo/hello/manifest" and
+            .key != "repositories/demo/hello/layout")' \
   "${work_dir}/source-manifest.json" >/dev/null
 jq --exit-status \
-  'any(.[]; .key == "cells/v1/identity.json") and
-   any(.[]; (.key | startswith("cells/v1/apps/")) and (.key | endswith("/control.json"))) and
-   any(.[]; (.key | startswith("cells/v1/apps/")) and (.key | contains("/objects/")) and (.key | endswith(".root")))' \
+  'any(.[]; .key == "repositories/cells/v1/identity.json") and
+   any(.[]; (.key | startswith("repositories/cells/v1/apps/")) and (.key | endswith("/control.json"))) and
+   any(.[]; (.key | startswith("repositories/cells/v1/apps/")) and (.key | contains("/objects/")) and (.key | endswith(".root")))' \
   "${work_dir}/source-manifest.json" >/dev/null
+jq --exit-status --arg probe "$global_probe" \
+  'any(.[]; .key == $probe)' "${work_dir}/source-manifest.json" >/dev/null
 object_count="$(jq 'length' "${work_dir}/source-manifest.json")"
 test "$object_count" -gt 0
 jq --exit-status \
@@ -123,7 +161,7 @@ verified_objects="$(
     --volume "${hash_script}:/qualification/hash-objects.sh:ro" \
     --volume "${work_dir}:/evidence:ro" \
     bucket-init /qualification/hash-objects.sh \
-      crab-http-server repositories "$restore_prefix" /evidence/object-keys.txt
+      "s3://${source_bucket}" "s3://${restore_bucket}" /evidence/object-keys.txt
 )"
 test "$verified_objects" -eq "$object_count"
 printf 'Verified %s restored object bodies byte-for-byte\n' "$verified_objects"
@@ -141,7 +179,7 @@ peer_private_key = "/run/secrets/crab-peer/peer.key"
 peer_ca = "/run/secrets/crab-peer/ca.crt"
 
 [storage]
-url = "s3://crab-http-server/${restore_prefix}"
+url = "s3://${restore_bucket}/repositories"
 EOF
 chmod 0644 "${work_dir}/restore.server.toml"
 restore_caddyfile="${work_dir}/restore.Caddyfile"
@@ -272,6 +310,9 @@ if [ -z "$restored_repository" ]; then
   exit 1
 fi
 test "$(git -C "$restored_repository" rev-parse HEAD)" = "$source_oid"
+test "$(git -C "$restored_repository" rev-parse "refs/tags/${qualification_tag}")" \
+  = "$source_tag_oid"
+git -C "$restored_repository" fsck --strict
 curl --fail --silent --show-error \
   --output "${work_dir}/restored-issue.json" \
   "${restore_origin}/api/repos/demo/hello/issues/1"
@@ -283,10 +324,13 @@ curl --fail --silent --show-error --output "${work_dir}/lfs-restored" \
   "${restore_origin}${lfs_path}"
 cmp "${work_dir}/lfs-source" "${work_dir}/lfs-restored"
 
-docker rm --force "$restore_proxy" "$restore_server" >/dev/null
+docker rm --force "$restore_proxy" "$restore_server" "$restore_network" >/dev/null
+"${aws_cli[@]}" s3 rm "s3://${source_bucket}/${global_probe}" --only-show-errors
+"${aws_cli[@]}" s3 rm "s3://${restore_bucket}/" --recursive --only-show-errors
+"${aws_cli[@]}" s3api delete-bucket --bucket "$restore_bucket" >/dev/null
 "${compose[@]}" up --detach --no-build --wait --wait-timeout 120 server proxy
 source_stopped=false
 trap - EXIT
 
-printf 'Complete-root restore qualified objects=%s git=%s issue=1 lfs=%s\n' \
-  "$object_count" "$source_oid" "$lfs_oid"
+printf 'Complete-root v2 restore qualified objects=%s git=%s tag=%s issue=1 lfs=%s\n' \
+  "$object_count" "$source_oid" "$source_tag_oid" "$lfs_oid"

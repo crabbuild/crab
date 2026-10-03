@@ -161,6 +161,11 @@ impl IntoResponse for ApiError {
                     "Repository data could not be read. Check storage and repository health",
                 ),
             },
+            Self::Service(crate::Error::BrowseIndexes(_)) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "path_state_corrupt",
+                "Repository attribution metadata is being rebuilt. Retry shortly",
+            ),
             Self::Service(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "indexing_failed",
@@ -347,6 +352,7 @@ pub(crate) async fn read(
         Err(ApiError::Remote(Error::Corrupt {
             stage: CorruptionStage::PathState,
         })) | Err(ApiError::Remote(Error::PathStateIndexing { .. }))
+            | Err(ApiError::Service(crate::Error::BrowseIndexes(_)))
     ) && let Err(error) = entry.schedule_maintenance(&server).await
     {
         tracing::warn!(error = %error, "failed to schedule path-state repair");

@@ -271,6 +271,7 @@ pub async fn run_cost_report(
     let report = crate::cost::engine::build_report(
         config,
         &store,
+        &remote.repo_path,
         &crate::cost::engine::ReportOptions {
             pricing_file,
             inventory_source,
@@ -786,15 +787,39 @@ async fn check_remote_access(root: &Path) -> CheckResult {
     }
 
     let layout = crate::storage::StoreLayout::new(store.clone(), parsed.repo_path.clone());
-    match store.head(&layout.layout_descriptor_path()).await {
-        Ok(_) => CheckResult::ok(
+    match remote_repository_authority(&store, &layout).await {
+        Ok(authority) => CheckResult::ok(
             "remote access",
             format!(
-                "bucket '{}' and repository '{}' reachable",
-                parsed.bucket, parsed.repo_path
+                "bucket '{}' and repository '{}' reachable ({authority})",
+                parsed.bucket, parsed.repo_path,
             ),
         ),
         Err(error) => remote_access_failure(&parsed.bucket, Some(&parsed.repo_path), &error),
+    }
+}
+
+async fn remote_repository_authority(
+    store: &crate::storage::Store,
+    router: &crate::storage::StoreLayout,
+) -> Result<String> {
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    match crab_metadata::capsule_protocol::load_root(&layout).await {
+        Ok(root) => Ok(format!(
+            "capsule v2 generation {}",
+            root.record().root().generation()
+        )),
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        }) => {
+            crate::core::remote_layout::open(store, router).await?;
+            Ok("canonical v1 layout".to_owned())
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -828,6 +853,10 @@ fn remote_access_failure(bucket: &str, repo: Option<&str>, error: &CrabError) ->
         CrabError::Configuration { .. } => CheckResult::fail(
             "remote access",
             format!("storage configuration is invalid: {error}; run `crab configure`"),
+        ),
+        CrabError::CorruptObject { .. } => CheckResult::fail(
+            "remote access",
+            format!("{scope} has corrupt repository authority: {error}; run `crab fsck`"),
         ),
         _ => CheckResult::warn(
             "remote access",
@@ -2705,6 +2734,78 @@ mod tests {
         assert_eq!(result.status, CheckStatus::Fail);
         assert!(result.detail.contains("repository 'models'"));
         assert!(result.detail.contains("active identity"));
+    }
+
+    #[tokio::test]
+    async fn remote_repository_authority_accepts_v2_without_v1_layout() {
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let store = crate::storage::Store::new(Arc::new(InMemory::new()));
+        let router = crate::storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+
+        let authority = remote_repository_authority(&store, &router).await.unwrap();
+
+        assert_eq!(authority, "capsule v2 generation 0");
+        assert!(store.head(&router.layout_descriptor_path()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_repository_authority_falls_back_to_validated_v1_layout() {
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let store = crate::storage::Store::new(Arc::new(InMemory::new()));
+        let router = crate::storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
+
+        let authority = remote_repository_authority(&store, &router).await.unwrap();
+
+        assert_eq!(authority, "canonical v1 layout");
+    }
+
+    #[tokio::test]
+    async fn remote_repository_authority_does_not_hide_corrupt_v2_with_v1_layout() {
+        use bytes::Bytes;
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let store = crate::storage::Store::new(Arc::new(InMemory::new()));
+        let router = crate::storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
+        store
+            .put_overwrite(
+                &router.capsule_root_path(),
+                Bytes::from_static(b"corrupt v2 root"),
+            )
+            .await
+            .unwrap();
+
+        let error = remote_repository_authority(&store, &router)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CrabError::CorruptObject { .. }));
+        let result = remote_access_failure("bucket", Some("org/repo"), &error);
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.detail.contains("run `crab fsck`"));
     }
 
     #[tokio::test]

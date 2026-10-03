@@ -39,8 +39,8 @@ use tracing::{debug, info};
 
 use crate::core::error::{CrabError, Result};
 
-/// Current on-disk schema version.
-pub const SCHEMA_VERSION: u32 = 1;
+/// Current journal version, requiring atomic completion of shared source pages.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Status values for source xorb entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +108,14 @@ pub struct SourceRow {
 pub struct OptimizeXorbsJournal {
     conn: Connection,
     path: PathBuf,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("failed to write xorb optimization journal at {}: {source}", path.display())]
+struct JournalWriteError {
+    path: PathBuf,
+    #[source]
+    source: rusqlite::Error,
 }
 
 impl OptimizeXorbsJournal {
@@ -339,8 +347,84 @@ impl OptimizeXorbsJournal {
                  WHERE run_id = ?4 AND src_xorb = ?5",
                 params![status.as_str(), dest_xorbs, now, run_id, src_xorb],
             )
-            .map_err(|e| CrabError::Internal(format!("failed to update source status: {e}")))?;
+            .map_err(|source| self.write_error(source))?;
         Ok(())
+    }
+
+    pub(super) fn complete_sources(
+        &self,
+        run_id: &str,
+        sources: &[(String, String)],
+    ) -> Result<()> {
+        if sources.is_empty() {
+            return Ok(());
+        }
+        // Sources can share a destination. A partial page commit would strand
+        // that destination's coverage when pending sources are packed on resume.
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|source| self.write_error(source))?;
+        for (source, destinations) in sources {
+            self.update_source_status(run_id, source, SourceStatus::Done, Some(destinations))?;
+        }
+        transaction
+            .commit()
+            .map_err(|source| self.write_error(source))?;
+        Ok(())
+    }
+
+    pub(super) fn upgrade_legacy_run(&self, run_id: &str, requeue: &[String]) -> Result<()> {
+        // Version and affected mappings move together. A failed update or
+        // interrupted transaction must leave the old journal resumable.
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|source| self.write_error(source))?;
+        let updated = transaction
+            .execute(
+                "UPDATE runs SET schema_ver = ?1
+                 WHERE run_id = ?2 AND schema_ver = 1 AND completed_at IS NULL AND aborted = 0
+                   AND NOT EXISTS (
+                       SELECT 1 FROM sources WHERE run_id = ?2
+                       AND status NOT IN ('pending', 'done', 'skipped', 'corrupt'))",
+                params![SCHEMA_VERSION, run_id],
+            )
+            .map_err(|source| self.write_error(source))?;
+        if updated != 1 {
+            return Err(CrabError::Configuration {
+                key: "xorb optimization journal migration".to_owned(),
+                origin: "the legacy run is no longer eligible for migration".to_owned(),
+            });
+        }
+        for source in requeue {
+            let updated = transaction
+                .execute(
+                    "UPDATE sources
+                     SET status = 'pending', dest_xorbs = NULL, started_at = NULL,
+                         completed_at = NULL, err_kind = NULL, err_msg = NULL
+                     WHERE run_id = ?1 AND src_xorb = ?2 AND status = 'done'",
+                    params![run_id, source],
+                )
+                .map_err(|source| self.write_error(source))?;
+            if updated != 1 {
+                return Err(CrabError::Configuration {
+                    key: "xorb optimization journal migration".to_owned(),
+                    origin: format!("completed source {source} changed before migration"),
+                });
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|source| self.write_error(source))?;
+        Ok(())
+    }
+
+    fn write_error(&self, source: rusqlite::Error) -> CrabError {
+        CrabError::Io(std::io::Error::other(JournalWriteError {
+            path: self.path.clone(),
+            source,
+        }))
     }
 
     /// Mark a source as corrupt with an error message.
@@ -672,6 +756,67 @@ mod tests {
         journal.start_run("run-005", "{}").unwrap();
         let run = journal.active_run().unwrap().unwrap();
         assert_eq!(run.schema_ver, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_migration_row_failure_rolls_back_version_and_all_source_updates() {
+        let (directory, journal) = temp_journal();
+        let path = directory.path().join("journal.db");
+        journal.start_run("migration", "{}").unwrap();
+        for source in ["source-a", "source-b", "unrelated"] {
+            journal.insert_source("migration", source).unwrap();
+            journal
+                .update_source_status("migration", source, SourceStatus::Done, Some("[]"))
+                .unwrap();
+        }
+        journal
+            .conn
+            .execute_batch(
+                "UPDATE runs SET schema_ver = 1;
+                 CREATE TRIGGER fail_migration BEFORE UPDATE OF status ON sources
+                 WHEN NEW.status = 'pending' AND NEW.src_xorb = 'source-b'
+                 BEGIN SELECT RAISE(ABORT, 'injected migration failure'); END;",
+            )
+            .unwrap();
+        let error = journal
+            .upgrade_legacy_run("migration", &["source-a".to_owned(), "source-b".to_owned()])
+            .unwrap_err();
+        let CrabError::Io(error) = error else {
+            panic!("migration must preserve the SQLite source error");
+        };
+        assert!(
+            std::error::Error::source(error.get_ref().unwrap())
+                .unwrap()
+                .is::<rusqlite::Error>()
+        );
+        drop(journal);
+        let journal = OptimizeXorbsJournal::open(&path).unwrap();
+        assert_eq!(journal.active_run().unwrap().unwrap().schema_ver, 1);
+        let counts = journal.count_by_status("migration").unwrap();
+        assert_eq!((counts.done, counts.pending), (3, 0));
+        journal
+            .conn
+            .execute_batch("DROP TRIGGER fail_migration;")
+            .unwrap();
+        journal
+            .upgrade_legacy_run("migration", &["source-a".to_owned(), "source-b".to_owned()])
+            .unwrap();
+        drop(journal);
+        let journal = OptimizeXorbsJournal::open(&path).unwrap();
+        assert_eq!(
+            journal.active_run().unwrap().unwrap().schema_ver,
+            SCHEMA_VERSION
+        );
+        let remaining = journal
+            .sources_by_status("migration", SourceStatus::Done)
+            .unwrap();
+        assert_eq!(
+            remaining
+                .iter()
+                .map(|row| row.src_xorb.as_str())
+                .collect::<Vec<_>>(),
+            vec!["unrelated"]
+        );
     }
 
     #[test]

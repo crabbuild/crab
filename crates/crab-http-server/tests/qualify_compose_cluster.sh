@@ -9,6 +9,8 @@ repo_root="$(cd "${crate_dir}/../.." && pwd)"
 compose_file="${crate_dir}/deploy/compose.yaml"
 cluster_file="${crate_dir}/deploy/compose.cluster.yaml"
 project="${CRAB_HTTP_CLUSTER_PROJECT:-crab-http-cluster-qualification-$$}"
+replacement_config_dir=""
+replacement_instance=""
 
 if [[ ! "$project" =~ ^crab-http-cluster-qualification-[A-Za-z0-9_-]+$ ]]; then
   echo "CRAB_HTTP_CLUSTER_PROJECT must be a unique crab-http-cluster-qualification-* name." >&2
@@ -86,6 +88,9 @@ cleanup() {
     "${compose[@]}" logs --no-color >&2 || true
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  if [ -n "$replacement_config_dir" ]; then
+    rm -rf -- "$replacement_config_dir"
+  fi
   if $failed; then
     echo "Compose cluster qualification failed." >&2
   fi
@@ -104,17 +109,18 @@ stop_service() {
 
 node_session() {
   local service="$1"
+  local data_dir="${2:-/var/lib/crab/cells}"
   # The single-quoted script must expand path inside the container, not locally.
   # shellcheck disable=SC2016
   "${compose[@]}" exec -T "$service" sh -ec '
-    for path in /var/lib/crab/cells/sessions/*; do
+    for path in "$1"/sessions/*; do
       if [ -d "$path" ]; then
         printf "%s\n" "${path##*/}"
         exit 0
       fi
     done
     exit 1
-  '
+  ' sh "$data_dir"
 }
 
 resume_service() {
@@ -203,6 +209,23 @@ compose_container_id() {
     return 1
   fi
   printf '%s\n' "$containers"
+}
+
+remove_project_service_containers() {
+  local service="$1" container_ids container
+  container_ids="$(docker container ls --all \
+    --filter "label=com.docker.compose.project=${project}" \
+    --filter "label=com.docker.compose.service=${service}" \
+    --format '{{.ID}}')" || return 1
+  while IFS= read -r container; do
+    [ -n "$container" ] || continue
+    docker rm --force "$container" >/dev/null || return 1
+    if docker container inspect "$container" >/dev/null 2>&1; then
+      echo "${service} container ${container} remained after forced removal." >&2
+      return 1
+    fi
+    printf '%s\n' "$container"
+  done <<< "$container_ids"
 }
 
 remove_stopped_service() {
@@ -554,6 +577,45 @@ for origin in "${read_origins[@]}"; do
     "${origin} did not expose the initial owner write."
 done
 
+wait_for_object_coverage() {
+  local phase="$1" covered=false previous_sequence="" observed_sequence=""
+  local uncovered="" control="" metrics=""
+  for _ in $(seq 1 60); do
+    control="$("${compose[@]}" exec -T "$b_service" crab-http-server \
+      --config /etc/crab/server.toml cells status --owner demo --name hello)"
+    metrics="$("${compose[@]}" exec -T "$b_service" crab-http-server \
+      --config /etc/crab/server.toml cells metrics)"
+    uncovered="$(awk \
+      '$1 == "crab_cell_node_log_uncovered_bytes" { print $2 }' \
+      <<<"$metrics")"
+    observed_sequence="$(jq --raw-output '.root.commit_sequence' \
+      <<<"$control")"
+    if awk -v value="${uncovered:-1}" \
+        'BEGIN { exit !(value + 0 == 0) }' &&
+      [ "$observed_sequence" = "$previous_sequence" ]; then
+      covered=true
+      covered_sequence="$observed_sequence"
+      fleet_only_control="$control"
+      break
+    fi
+    previous_sequence="$observed_sequence"
+    sleep 1
+  done
+  if ! $covered; then
+    echo "The owner did not finish publishing ${phase}." >&2
+    printf '%s\n' "${control:-<unreadable>}" >&2
+    printf '%s\n' "${metrics:-<unreadable>}" \
+      | grep -E 'crab_cell_node_log_uncovered_bytes|crab_cell_follower_retained_bytes' >&2 || true
+    return 1
+  fi
+}
+
+# A follower-visible write may still be waiting for object publication. Drain
+# that exact write before denying its required immutable uploads; otherwise the
+# injected policy can fence the pending publication instead of testing the
+# subsequent fleet-only mutation.
+wait_for_object_coverage "before immutable object writes are denied"
+
 deny_cell_objects='{"Version":"2012-10-17","Statement":[{"Sid":"DenyCellImmutableObjectWrites","Effect":"Deny","Principal":"*","Action":"s3:PutObject","Resource":"arn:aws:s3:::crab-http-server/repositories/cells/v1/apps/*/cells/*/inc/*/objects/*"}]}'
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api put-bucket-policy \
@@ -583,39 +645,7 @@ if ! $immutable_object_put_rejected; then
   echo "The Cell immutable object deny policy does not reject writes." >&2
   exit 1
 fi
-# The deny stops new immutable uploads, but a publication that started before
-# the policy can still publish its root, and that advance would look like a
-# fleet-only violation. Object coverage is asynchronous here for the same
-# reason the fallback phase waits for it, so wait for the owner to cover every
-# retained byte with a stable root before recording the baseline the
-# fleet-only label is compared against.
-covered=false
-covered_sequence=""
-previous_sequence=""
-for _ in $(seq 1 60); do
-  fleet_only_control="$("${compose[@]}" exec -T "$b_service" crab-http-server \
-    --config /etc/crab/server.toml cells status --owner demo --name hello)"
-  fleet_only_metrics="$("${compose[@]}" exec -T "$b_service" crab-http-server \
-    --config /etc/crab/server.toml cells metrics)"
-  uncovered_before_fleet_only="$(awk \
-    '$1 == "crab_cell_node_log_uncovered_bytes" { print $2 }' \
-    <<<"$fleet_only_metrics")"
-  observed_sequence="$(jq --raw-output '.root.commit_sequence' <<<"$fleet_only_control")"
-  if awk -v value="${uncovered_before_fleet_only:-1}" \
-      'BEGIN { exit !(value + 0 == 0) }' &&
-    [ "$observed_sequence" = "$previous_sequence" ]; then
-    covered=true
-    covered_sequence="$observed_sequence"
-    break
-  fi
-  previous_sequence="$observed_sequence"
-  sleep 1
-done
-if ! $covered; then
-  echo "The owner did not finish publishing before the fleet-only phase." >&2
-  printf '%s\n' "${fleet_only_control:-<unreadable>}" >&2
-  exit 1
-fi
+wait_for_object_coverage "after immutable object writes are denied"
 control_before="$fleet_only_control"
 if ! jq --exit-status --arg session "$session_before" --argjson epoch "$epoch_before" \
   '.state == "serving" and .owner.session == $session and .epoch == $epoch' \
@@ -1211,14 +1241,26 @@ service_origin() {
 }
 
 service_session() {
-  node_session "$1"
+  node_session "$1" "${2:-/var/lib/crab/cells}"
+}
+
+fallback_data_dir() {
+  printf '/var/lib/crab/cells/replacement-%s-%s\n' "$replacement_instance" "$1"
 }
 
 fallback_session() {
   local service="$1"
+  local data_dir="/var/lib/crab/cells"
   local session=""
+  local candidate
+  for candidate in "${fallback_services[@]}"; do
+    if [ "$candidate" = "$service" ]; then
+      data_dir="$(fallback_data_dir "$service")"
+      break
+    fi
+  done
   for _ in $(seq 1 45); do
-    if session="$(service_session "$service" 2>/dev/null)" &&
+    if session="$(service_session "$service" "$data_dir" 2>/dev/null)" &&
       [[ "$session" =~ ^[0-9a-f]{32}$ ]]; then
       printf '%s\n' "$session"
       return 0
@@ -1267,27 +1309,99 @@ stop_fallback_member() {
   esac
 }
 
-# A fourth process is kept outside the current log when possible. The owner
-# first publishes an object-covered mutation, then every original member is
-# stopped before the owner is killed. Recovery must therefore use the bounded
-# any-node path and still restore exact data from RustFS.
-# A stale process fences itself once its lease is renewed after the freeze.
-# Remove the stopped node and its namespace proxy explicitly so the next start
-# models an orchestrator replacement rather than reusing the fenced process.
+# Replace every non-owner process so its prior session and follower state
+# cannot satisfy the previous epoch. Give each replacement a fresh data dir:
+# node-id is stable within cells.data_dir, so reusing that path can resurrect
+# an expired member identity and prevent the membership-rotation check.
+# Earlier owner-loss rounds may already have removed some non-owner peers.
 fallback_services=()
 for candidate in server server-b server-c server-d; do
   if [ "$candidate" != "$b_service" ]; then
     fallback_services+=("$candidate")
   fi
 done
-for service in proxy "${fallback_services[@]}"; do
-  kill_service "$service" >/dev/null 2>&1 || true
-  remove_stopped_service "$service" >/dev/null 2>&1 || true
+# Snapshot the old cohort before replacements start; the owner may rotate and
+# enroll fresh node IDs while replacement services boot.
+node_b_before_fallback=""
+for _ in $(seq 1 45); do
+  node_b_before_fallback="$(service_cli "$b_service" cells node \
+    --session "$session_after_second_loss" --json 2>/dev/null || true)"
+  if jq --exit-status \
+    --arg session "$session_after_second_loss" \
+    '.session == $session and .live == true and
+     .advertisement.log.state == "open" and
+     (.advertisement.log.member_nodes | length > 0)' \
+    <<<"$node_b_before_fallback" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+if ! jq --exit-status \
+  --arg session "$session_after_second_loss" \
+  '.session == $session and .live == true and
+   .advertisement.log.state == "open" and
+   (.advertisement.log.member_nodes | length > 0)' \
+  <<<"$node_b_before_fallback" >/dev/null 2>&1; then
+  echo "Fallback owner B did not expose an open durability log before replacement." >&2
+  jq . <<<"$node_b_before_fallback" >&2 || true
+  exit 1
+fi
+fallback_initial_log_epoch="$(jq --raw-output '.advertisement.log.epoch' \
+  <<<"$node_b_before_fallback")"
+fallback_initial_members="$(jq -c '.advertisement.log.member_nodes' \
+  <<<"$node_b_before_fallback")"
+replacement_services=(proxy "${fallback_services[@]}")
+replacement_config_dir="$(mktemp -d "${TMPDIR:-/tmp}/crab-cluster-replacement.XXXXXX")"
+replacement_instance="${replacement_config_dir##*/}"
+replacement_compose_file="${replacement_config_dir}/compose.yaml"
+printf 'services:\n' > "$replacement_compose_file"
+for service in "${fallback_services[@]}"; do
+  case "$service" in
+    server) config_source="${crate_dir}/deploy/compose.server.toml" ;;
+    server-b) config_source="${crate_dir}/deploy/compose.node-b.toml" ;;
+    server-c) config_source="${crate_dir}/deploy/compose.node-c.toml" ;;
+    server-d) config_source="${crate_dir}/deploy/compose.node-d.toml" ;;
+  esac
+  replacement_config="${replacement_config_dir}/${service}.toml"
+  replacement_data_dir="$(fallback_data_dir "$service")"
+  sed -E \
+    "s#^data_dir = \"[^\"]+\"\$#data_dir = \"${replacement_data_dir}\"#" \
+    "$config_source" > "$replacement_config"
+  if ! grep -F -x \
+    "data_dir = \"${replacement_data_dir}\"" \
+    "$replacement_config" >/dev/null; then
+    echo "${service} replacement config did not isolate its local cell state." >&2
+    exit 1
+  fi
+  printf '  %s:\n    volumes:\n      - type: bind\n        source: %s\n        target: /etc/crab/server.toml\n        read_only: true\n      - type: volume\n        source: peer-identity\n        target: /run/secrets/crab-peer\n        read_only: true\n' \
+    "$service" "$(jq --null-input --arg path "$replacement_config" '$path')" \
+    >> "$replacement_compose_file"
+done
+compose+=(--file "$replacement_compose_file")
+"${compose[@]}" config --quiet
+replaced_container_ids=()
+for service in "${replacement_services[@]}"; do
+  container_ids="$(remove_project_service_containers "$service")"
+  if [ -n "$container_ids" ]; then
+    while IFS= read -r container; do
+      [ -z "$container" ] || replaced_container_ids+=("$container")
+    done <<< "$container_ids"
+  fi
 done
 "${compose[@]}" up --detach --no-build "${fallback_services[@]}" >/dev/null
 "${compose[@]}" up --detach --no-build proxy >/dev/null
 for service in "${fallback_services[@]}"; do
   wait_for_healthy "$service"
+done
+for index in "${!fallback_services[@]}"; do
+  service="${fallback_services[$index]}"
+  current_container_id="$(compose_container_id "$service")"
+  for container in "${replaced_container_ids[@]}"; do
+    if [ "$current_container_id" = "$container" ]; then
+      echo "${service} reused its old container; the node-replacement fixture is invalid." >&2
+      exit 1
+    fi
+  done
 done
 session_server_fallback="$(fallback_session server)"
 session_server_b_fallback="$(fallback_session server-b)"
@@ -1318,22 +1432,108 @@ fallback_session_for_service() {
   esac
 }
 
-node_b_before_fallback="$(fallback_node_for_service "$b_service")"
-fallback_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
-# A replacement owner may have an enrolled but inactive log: no fleet proof
-# has escaped that epoch yet, so the first fallback mutation must use object
-# coverage and remain recoverable without a follower witness.
-if ! jq --exit-status \
-  '.live == true and .advertisement.log.state == "open" and
-   (.advertisement.log.member_nodes | length > 0)' \
-  <<<"$node_b_before_fallback" >/dev/null; then
-  echo "Fallback owner B did not expose an open live durability log." >&2
+# The current epoch may remain active until its signed members expire. The
+# rotation below must publish a fresh inactive epoch before testing fallback.
+for service in "${fallback_services[@]}"; do
+  candidate_node="$(jq --raw-output '.advertisement.node' \
+    <<<"$(fallback_node_for_service "$service")")"
+  if jq --exit-status --arg node "$candidate_node" \
+    'any(.[]; . == $node)' <<<"$fallback_initial_members" >/dev/null; then
+    echo "${service} reused a node identity from the pre-replacement membership." >&2
+    echo "Replacement node=${candidate_node}; old members=${fallback_initial_members}" >&2
+    exit 1
+  fi
+done
+
+# Member loss rotates the log membership and epoch, even while the owner's
+# session stays live. Root-only fallback is safe only while the new log remains
+# open and inactive; preserving the old membership snapshot would reject that
+# required expiry transition.
+# The five-second host controller closes the old log before recruiting the
+# replacement epoch, during which object-store proof remains the safe path.
+# Observe the published rotation instead of sampling that no-log interval.
+fallback_log_rotated=false
+for _ in $(seq 1 30); do
+  node_b_before_fallback="$(service_cli "$b_service" cells node \
+    --session "$session_after_second_loss" --json 2>/dev/null || true)"
+  if jq --exit-status \
+    --arg session "$session_after_second_loss" \
+    --argjson epoch "$fallback_initial_log_epoch" \
+    --argjson members "$fallback_initial_members" \
+    '.session == $session and .live == true and
+     .advertisement.log.state == "open" and
+     .advertisement.log.epoch > $epoch and
+     .advertisement.log.active == false and
+     (.advertisement.log.member_nodes | type) == "array" and
+     (.advertisement.log.member_nodes | length) > 0 and
+     (.advertisement.log.member_nodes - $members) == .advertisement.log.member_nodes' \
+    <<<"$node_b_before_fallback" >/dev/null 2>&1; then
+    fallback_log_rotated=true
+    break
+  fi
+  sleep 1
+done
+if ! $fallback_log_rotated; then
+  echo "The fallback owner's inactive log did not rotate after its original members expired." >&2
+  echo "Expected live session=${session_after_second_loss}, epoch>${fallback_initial_log_epoch}, and no expired members=${fallback_initial_members}" >&2
+  echo "Node-log rotation counters:" >&2
+  service_cli "$b_service" cells metrics | awk \
+    '$1 ~ /^crab_cell_node_log_rotations_total\{/ { print }' >&2 || true
+  echo "Restarted peer identities:" >&2
+  for service in "${fallback_services[@]}"; do
+    candidate_json="$(fallback_node_for_service "$service")"
+    jq -c '{session, node: .advertisement.node, expires_at_ms: .advertisement.expires_at_ms}' \
+      <<<"$candidate_json" >&2 || true
+  done
   jq . <<<"$node_b_before_fallback" >&2 || true
   exit 1
 fi
 
-# Capture the pre-mutation root so recovery proves that this object-covered
-# write advanced the successor's root after the owner disappears.
+fallback_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
+fallback_candidate_service=""
+fallback_candidate_session=""
+fallback_candidate_node=""
+fallback_candidate_record=""
+for candidate in "${fallback_services[@]}"; do
+  candidate_json="$(fallback_node_for_service "$candidate")"
+  candidate_node="$(jq -r '.advertisement.node' <<<"$candidate_json")"
+  if jq --exit-status --arg node "$candidate_node" \
+    'any(.[]; . == $node)' <<<"$fallback_initial_members" >/dev/null ||
+    jq --exit-status --arg node "$candidate_node" \
+      'any(.[]; . == $node)' <<<"$fallback_members" >/dev/null; then
+    continue
+  fi
+  fallback_candidate_service="$candidate"
+  fallback_candidate_session="$(jq -r '.session' <<<"$candidate_json")"
+  fallback_candidate_node="$candidate_node"
+  fallback_candidate_record="$candidate_json"
+  break
+done
+if [ -z "$fallback_candidate_service" ]; then
+  echo "The rotated log left no live non-member fallback candidate." >&2
+  echo "Members=${fallback_members}" >&2
+  exit 1
+fi
+if ! jq --exit-status \
+  --arg session "$fallback_candidate_session" \
+  --arg node "$fallback_candidate_node" \
+  '.session == $session and .live == true and .advertisement.node == $node' \
+  <<<"$fallback_candidate_record" >/dev/null; then
+  echo "The non-member fallback candidate changed identity or expired during log rotation." >&2
+  jq . <<<"$fallback_candidate_record" >&2 || true
+  exit 1
+fi
+if jq --exit-status --arg node "$fallback_candidate_node" \
+  'any(.[]; . == $node)' <<<"$fallback_members" >/dev/null; then
+  echo "The preserved fallback candidate became a member of the rotated log." >&2
+  echo "Candidate=${fallback_candidate_node} members=${fallback_members}" >&2
+  exit 1
+fi
+
+fallback_metrics_before="$(recovery_metrics "$fallback_candidate_service")"
+
+# Capture the pre-mutation root so recovery proves this object-covered write
+# advanced the successor's root after the owner disappears.
 control_before_fallback="$(service_cli "$b_service" cells status --owner demo --name hello)"
 root_before_fallback="$(jq --compact-output '.root' <<<"$control_before_fallback")"
 fallback_response="$(post_json_eventually \
@@ -1355,62 +1555,19 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 if ! $fallback_object_covered; then
-  echo "The fallback mutation did not reach object coverage before member loss." >&2
+  echo "The fallback mutation did not reach object coverage before owner loss." >&2
   exit 1
 fi
 
-fallback_candidate_service=""
-fallback_candidate_session=""
-fallback_candidate_node=""
-fallback_candidate_record=""
-
-for candidate in "${fallback_services[@]}"; do
-  candidate_json="$(fallback_node_for_service "$candidate")"
-  candidate_node="$(jq -r '.advertisement.node' <<<"$candidate_json")"
-  if ! jq --exit-status --arg node "$candidate_node" \
-    'any(.[]; . == $node)' <<<"$fallback_members" >/dev/null; then
-    fallback_candidate_service="$candidate"
-    fallback_candidate_session="$(jq -r '.session' <<<"$candidate_json")"
-    fallback_candidate_node="$candidate_node"
-    fallback_candidate_record="$candidate_json"
-    break
-  fi
-done
-if [ -z "$fallback_candidate_service" ]; then
-  echo "No live non-member fallback candidate remained." >&2
+fallback_node_after_coverage="$(service_cli "$b_service" cells node \
+  --session "$session_after_second_loss" --json)"
+if ! jq --exit-status \
+  '.live == true and .advertisement.log.active == false' \
+  <<<"$fallback_node_after_coverage" >/dev/null; then
+  echo "The object-covered fallback mutation unexpectedly activated fleet durability." >&2
+  jq . <<<"$fallback_node_after_coverage" >&2 || true
   exit 1
 fi
-fallback_metrics_before="$(recovery_metrics "$fallback_candidate_service")"
-
-# Remove every live node except the owner and the recorded candidate, so the
-# bounded any-node recovery can only elect the candidate the receipt names, and
-# wait until only the candidate still advertises.
-for member_service in "${fallback_services[@]}"; do
-  if [ "$member_service" = "$fallback_candidate_service" ]; then
-    continue
-  fi
-  stop_fallback_member "$member_service"
-done
-for member_service in "${fallback_services[@]}"; do
-  if [ "$member_service" = "$fallback_candidate_service" ]; then
-    continue
-  fi
-  member_session="$(fallback_session_for_service "$member_service")"
-  member_expired=false
-  for _ in $(seq 1 45); do
-    member_status="$(service_cli "$fallback_candidate_service" cells node \
-      --session "$member_session" --json 2>/dev/null || true)"
-    if jq --exit-status '.live == false' <<<"$member_status" >/dev/null 2>&1; then
-      member_expired=true
-      break
-    fi
-    sleep 1
-  done
-  if ! $member_expired; then
-    echo "${member_service} did not leave the live advertisement set." >&2
-    exit 1
-  fi
-done
 
 fallback_origin="$(service_origin "$fallback_candidate_service")"
 owner_advertisement="$(service_cli "$fallback_candidate_service" cells node \
@@ -1418,9 +1575,23 @@ owner_advertisement="$(service_cli "$fallback_candidate_service" cells node \
 fallback_advertisement_expired_ms="$(jq --exit-status --raw-output \
   'select(.live == true) | .advertisement.expires_at_ms | select(type == "number" and . > 0)' \
   <<<"$owner_advertisement")"
+# Stop the owner before its new members expire, so it cannot rotate again and
+# enroll the fallback candidate into the log during this recovery scenario.
 fallback_owner_killed_ms="$(unix_millis)"
 kill_service "$b_service"
 remove_stopped_service "$b_service"
+for member_service in "${fallback_services[@]}"; do
+  member_node="$(jq -r '.advertisement.node' \
+    <<<"$(fallback_node_for_service "$member_service")")"
+  if jq --exit-status --arg node "$member_node" \
+    'any(.[]; . == $node)' <<<"$fallback_members" >/dev/null; then
+    if [ "$member_service" = "$fallback_candidate_service" ]; then
+      echo "The fallback candidate is still a member of the rotated log." >&2
+      exit 1
+    fi
+    stop_fallback_member "$member_service"
+  fi
+done
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
   --bucket crab-http-server >/dev/null
@@ -1443,6 +1614,30 @@ if ! $fallback_advertisement_expired; then
   echo "The fallback owner's signed advertisement did not expire." >&2
   exit 1
 fi
+
+for member_service in "${fallback_services[@]}"; do
+  member_node="$(jq -r '.advertisement.node' \
+    <<<"$(fallback_node_for_service "$member_service")")"
+  if ! jq --exit-status --arg node "$member_node" \
+    'any(.[]; . == $node)' <<<"$fallback_members" >/dev/null; then
+    continue
+  fi
+  member_session="$(fallback_session_for_service "$member_service")"
+  member_expired=false
+  for _ in $(seq 1 45); do
+    member_status="$(service_cli "$fallback_candidate_service" cells node \
+      --session "$member_session" --json 2>/dev/null || true)"
+    if jq --exit-status '.live == false' <<<"$member_status" >/dev/null 2>&1; then
+      member_expired=true
+      break
+    fi
+    sleep 1
+  done
+  if ! $member_expired; then
+    echo "Rotated log member ${member_service} remained live during fallback." >&2
+    exit 1
+  fi
+done
 
 fallback_restored_labels=""
 for _ in $(seq 1 75); do

@@ -1443,19 +1443,39 @@ fn build_azure_container_client(
     account: &str,
     container: &str,
 ) -> Result<azure_storage_blobs::prelude::ContainerClient> {
-    use azure_storage::StorageCredentials;
+    use azure_storage::{CloudLocation, StorageCredentials};
     use azure_storage_blobs::prelude::ClientBuilder;
 
-    let key = std::env::var("AZURE_STORAGE_ACCESS_KEY")
-        .or_else(|_| std::env::var("AZURE_STORAGE_KEY"))
-        .map_err(|_| CrabError::Configuration {
-            key: "AZURE_STORAGE_ACCESS_KEY".into(),
-            origin: "environment".into(),
-        })?;
+    let endpoint = std::env::var("AZURE_STORAGE_ENDPOINT")
+        .ok()
+        .filter(|endpoint| !endpoint.trim().is_empty())
+        .unwrap_or_else(|| format!("https://{account}.blob.core.windows.net"));
+    let location = CloudLocation::Custom {
+        account: account.to_owned(),
+        uri: endpoint,
+    };
 
-    let credentials = StorageCredentials::access_key(account.to_owned(), key);
-    let service_client = ClientBuilder::new(account.to_owned(), credentials);
-    Ok(service_client.container_client(container.to_owned()))
+    let access_key = std::env::var("AZURE_STORAGE_ACCESS_KEY")
+        .or_else(|_| std::env::var("AZURE_STORAGE_KEY"))
+        .ok()
+        .filter(|key| !key.trim().is_empty());
+    if let Some(key) = access_key {
+        return Ok(ClientBuilder::with_location(
+            location,
+            StorageCredentials::access_key(account.to_owned(), key),
+        )
+        .container_client(container.to_owned()));
+    }
+
+    let credential =
+        azure_identity::create_credential().map_err(|error| CrabError::Configuration {
+            key: "import.azure.version_listing.credentials".into(),
+            origin: format!("Azure credential initialization failed: {error}"),
+        })?;
+    Ok(
+        ClientBuilder::with_location(location, StorageCredentials::token_credential(credential))
+            .container_client(container.to_owned()),
+    )
 }
 
 #[cfg(feature = "tier-azure")]

@@ -29,6 +29,10 @@ pub(crate) struct SharedLease {
 }
 
 impl SharedLease {
+    #[allow(
+        deprecated,
+        reason = "the workspace MSRV predates the replacement atomic update API"
+    )]
     pub(crate) fn release(&mut self) -> bool {
         let Some(budget) = self.budget.take() else {
             return false;
@@ -73,6 +77,10 @@ impl SharedBudget {
         self.cancellation.clone()
     }
 
+    #[allow(
+        deprecated,
+        reason = "the workspace MSRV predates the replacement atomic update API"
+    )]
     pub(crate) async fn register(
         self: &Arc<Self>,
         budget: &OperationBudget,

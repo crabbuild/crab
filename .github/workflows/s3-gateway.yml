@@ -295,9 +295,11 @@ jobs:
       - name: Build minimal Crab fixture publisher
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-s3-gateway-publisher-target
-        run: >-
-          cargo build --release --locked -p crab --bin crab
-          --no-default-features --features simd-accel,gix-pathmatch
+        run: |
+          cargo build --release --locked -p crab --bin crab \
+            --no-default-features --features simd-accel,gix-pathmatch
+          cargo build --release --locked -p crab-sdk \
+            --example s3_gateway_fixture --features content,write
 
       - name: Build locked gateway image
         id: build
@@ -485,11 +487,6 @@ jobs:
               for _ in range(64):
                   stream.write(source.randbytes(1024 * 1024))
           PY
-          cp "${source_root}/qualification/xet-large.bin" \
-            "${source_root}/qualification/xet-duplicate.bin"
-          git -C "${source_root}" init -q -b main
-          git -C "${source_root}" config user.name 'S3 Xet qualification'
-          git -C "${source_root}" config user.email 'qualification@example.invalid'
           export AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}"
           export AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}"
           export AWS_DEFAULT_REGION=us-east-1
@@ -500,55 +497,28 @@ jobs:
           export AWS_EC2_METADATA_DISABLED=true
           export AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false
           export CRAB_CACHE_DIR="${xet_root}/publisher-cache"
-          crab_bin="${RUNNER_TEMP}/crab-s3-gateway-publisher-target/release/crab"
-          (
-            cd "${source_root}"
-            "${crab_bin}" init --storage-provider s3 \
-              crab://crab-s3-gateway-qualification/repositories/qualification
-            "${crab_bin}" track '*.bin'
-            "${crab_bin}" add qualification/xet-large.bin \
-              qualification/xet-duplicate.bin
-            git show :qualification/xet-large.bin > "${xet_root}/xet-pointer-staged"
-            LISTING_ROOT="${source_root}/qualification/listing" \
-            XET_POINTER="${xet_root}/xet-pointer-staged" python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          root = Path(os.environ["LISTING_ROOT"])
-          pointer = Path(os.environ["XET_POINTER"]).read_bytes()
-          root.mkdir(parents=True)
-          for index in range(10_000):
-              (root / f"flat-{index:05}.pointer").write_bytes(pointer)
-          for group in ("group-a", "group-b"):
-              directory = root / group
-              directory.mkdir()
-              for index in range(16):
-                  (directory / f"item-{index:02}.pointer").write_bytes(pointer)
-          PY
-            aws s3api create-bucket \
-              --bucket crab-s3-gateway-listing-baseline >/dev/null
-            aws s3 cp qualification/listing \
-              s3://crab-s3-gateway-listing-baseline/main/qualification/listing/ \
-              --recursive --only-show-errors --no-progress
-            git add crab.toml .gitattributes qualification/listing
-            git commit -q -m 'add Xet range qualification fixture'
-            "${crab_bin}" push --upload-concurrency 0 \
-              origin HEAD:refs/heads/main
-            git show HEAD:qualification/xet-large.bin > "${xet_root}/xet-pointer"
-            git show HEAD:qualification/xet-duplicate.bin \
-              > "${xet_root}/xet-duplicate-pointer"
-          )
+          "${RUNNER_TEMP}/crab-s3-gateway-publisher-target/release/examples/s3_gateway_fixture" \
+            crab-s3-gateway-qualification repositories/qualification \
+            "${xet_root}/publisher-cache" \
+            "${source_root}/qualification/xet-large.bin" \
+            "${xet_root}/xet-pointer" \
+            "${source_root}/qualification/listing"
+          cp "${xet_root}/xet-pointer" "${xet_root}/xet-duplicate-pointer"
+          aws s3api create-bucket \
+            --bucket crab-s3-gateway-listing-baseline >/dev/null
+          aws s3 cp "${source_root}/qualification/listing" \
+            s3://crab-s3-gateway-listing-baseline/main/qualification/listing/ \
+            --recursive --only-show-errors --no-progress
           grep -Eq '^version https://crab.build/spec/v1$' \
             "${xet_root}/xet-pointer"
           grep -Fx 'size 67108864' "${xet_root}/xet-pointer"
           test "$(sed -n 's/^file-hash //p' "${xet_root}/xet-pointer")" = \
             "$(sed -n 's/^file-hash //p' "${xet_root}/xet-duplicate-pointer")"
-          git -C "${source_root}" ls-tree -r --name-only HEAD \
-            qualification/listing | wc -l | tr -d ' ' \
+          find "${source_root}/qualification/listing" -type f | wc -l | tr -d ' ' \
             > "${xet_root}/listing-object-count"
           test "$(cat "${xet_root}/listing-object-count")" = 10032
-          git -C "${source_root}" ls-tree -r HEAD qualification/listing | \
-            awk '{print $3}' | sort -u | wc -l | tr -d ' ' \
+          find "${source_root}/qualification/listing" -type f -print0 | \
+            xargs -0 sha256sum | awk '{print $1}' | sort -u | wc -l | tr -d ' ' \
             > "${xet_root}/listing-blob-count"
           test "$(cat "${xet_root}/listing-blob-count")" = 1
           aws --endpoint-url http://127.0.0.1:19000 s3api list-objects-v2 \

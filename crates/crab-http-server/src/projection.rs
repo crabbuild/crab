@@ -8,12 +8,11 @@ use cellule_runtime::cell::executor::MutationIdentity;
 use cellule_runtime::client::{CellClient, Committed, InvocationError};
 use cellule_runtime::identity::CellTarget;
 use cellule_runtime::identity::RequestId;
-use crab_metadata::manifest_store::{RepositorySnapshot, read_repository_snapshot};
+use crab_metadata::manifest_store::RepositorySnapshot;
 use crab_metadata::path_state::{PathStateIndex, load_path_state};
 use crab_metadata::split_commit_graph::{SplitCommitGraph, load_split_commit_graph};
 use crab_remote_git::{
-    Commit, EntryKind, OperationKind, RemoteGitRepository, RepositoryIdentity, RepositoryOptions,
-    Revision, TreeEntry,
+    Commit, EntryKind, OperationKind, RemoteGitRepository, RepositoryOptions, Revision, TreeEntry,
 };
 use crab_storage::{Store, StoreLayout};
 use tokio_util::sync::CancellationToken;
@@ -33,14 +32,15 @@ const REF_BATCH: usize = 128;
 
 /// Rebuild one immutable projection epoch after Git generation maintenance.
 pub(crate) async fn reconcile(
-    store: &Store,
     layout: &StoreLayout<Store>,
-    identity: &RepositoryIdentity,
-    runtime: Arc<crab_remote_git::RemoteGitRuntime>,
-    options: RepositoryOptions,
     context: crate::maintenance::ProjectionContext,
     cancellation: &CancellationToken,
 ) -> crate::Result<()> {
+    let Some(router) = context.router else {
+        return Ok(());
+    };
+    let store = layout.store();
+    let options = context.options;
     if cancellation.is_cancelled() {
         return Ok(());
     }
@@ -48,24 +48,20 @@ pub(crate) async fn reconcile(
     context
         .metrics
         .record_projection_origin_read(crate::metrics::ProjectionOriginReadKind::Snapshot);
-    let snapshot = read_snapshot(store, layout).await?;
-    if !snapshot.journal.transactions.is_empty() {
-        return Ok(());
-    }
+    let view = open_view(layout).await?;
+    let snapshot = view.git_snapshot()?;
     let source = source_identity(&snapshot)?;
-    let repository = RemoteGitRepository::open(
-        store.clone(),
-        layout.clone(),
-        identity.clone(),
-        runtime,
-        options,
-        cancellation,
-    )
-    .await?;
-    let scheduled = context
-        .router
-        .route_projection(context.repository_id)
+    let repository = view
+        .git_repository_from_store(
+            layout.clone(),
+            context.identity.clone(),
+            Arc::clone(&context.runtime),
+            options,
+            2 * 1024 * 1024 * 1024,
+            cancellation,
+        )
         .await?;
+    let scheduled = router.route_projection(context.repository_id).await?;
     let target = scheduled.cell.target.clone();
     let client = scheduled.cell.client.clone();
     let release_after = scheduled.should_release();
@@ -77,6 +73,7 @@ pub(crate) async fn reconcile(
         &client,
         &target,
         &source,
+        &snapshot,
         &context.metrics,
         cancellation,
     )
@@ -99,7 +96,7 @@ pub(crate) async fn reconcile(
     );
     drop(scheduled.cell);
     let drained = if release_after {
-        context.router.drain_local_target(&target).await
+        router.drain_local_target(&target).await
     } else {
         Ok(())
     };
@@ -304,6 +301,7 @@ async fn build_epoch(
     client: &CellClient,
     target: &CellTarget,
     source: &projection::SourceIdentity,
+    snapshot: &RepositorySnapshot,
     metrics: &crate::metrics::Metrics,
     cancellation: &CancellationToken,
 ) -> crate::Result<()> {
@@ -330,6 +328,7 @@ async fn build_epoch(
         client,
         target,
         source,
+        snapshot,
         epoch,
         metrics,
         cancellation,
@@ -390,13 +389,12 @@ async fn build_epoch_contents(
     client: &CellClient,
     target: &CellTarget,
     source: &projection::SourceIdentity,
+    snapshot: &RepositorySnapshot,
     epoch: u64,
     metrics: &crate::metrics::Metrics,
     cancellation: &CancellationToken,
 ) -> crate::Result<()> {
-    metrics.record_projection_origin_read(crate::metrics::ProjectionOriginReadKind::Snapshot);
-    let snapshot = read_snapshot(store, layout).await?;
-    let refs = reference_rows(&snapshot)?;
+    let refs = reference_rows(snapshot)?;
     for batch in refs.chunks(REF_BATCH) {
         send_json_batch(
             client,
@@ -974,12 +972,38 @@ fn node_hash(source: &projection::SourceIdentity, layer: u32, index: u32) -> Vec
 }
 
 async fn read_snapshot(
-    store: &Store,
+    _store: &Store,
     layout: &StoreLayout<Store>,
 ) -> crate::Result<RepositorySnapshot> {
-    read_repository_snapshot(store, layout)
+    open_view(layout).await?.git_snapshot().map_err(Into::into)
+}
+
+pub(crate) async fn open_view(
+    layout: &StoreLayout<Store>,
+) -> crate::Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
+    let root = crab_metadata::capsule_protocol::load_root(layout)
         .await
-        .map_err(metadata_error)
+        .map_err(metadata_error)?;
+    let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+        layout,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+            max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+        },
+    )
+    .await?;
+    let indexes = crab_metadata::capsule_protocol::load_browse_indexes(layout)
+        .await
+        .map_err(|error| match &error {
+            crab_metadata::error::MetadataError::CorruptObject { .. }
+            | crab_metadata::error::MetadataError::BrowseIndexRecord { .. }
+            | crab_metadata::error::MetadataError::Storage {
+                source: crab_storage::StorageError::CorruptObject { .. },
+            } => crate::Error::BrowseIndexes(Box::new(error)),
+            _ => metadata_error(error),
+        })?;
+    Ok(view.with_browse_indexes(indexes))
 }
 
 fn metadata_error(error: crab_metadata::error::MetadataError) -> crate::Error {

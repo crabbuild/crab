@@ -14,6 +14,8 @@ pub mod provider_store;
 mod read_admission;
 pub use read_admission::ReadAdmission;
 pub mod retry;
+#[cfg(test)]
+mod signed_read_tests;
 pub mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -59,5 +61,6 @@ pub use provider_store::{
 };
 pub use retry::{RetryClass, RetryPolicy, retry, retry_class};
 pub use store::{
-    ETag, MultipartUploadSource, StagedWrite, StorageObjectStream, StorageReadKind, Store,
+    ETag, ImmutableCreateOutcome, ImmutableWriteVerification, MultipartUploadSource, StagedWrite,
+    StorageObjectStream, StorageReadKind, Store,
 };
