@@ -205,6 +205,23 @@ compose_container_id() {
   printf '%s\n' "$containers"
 }
 
+remove_project_service_containers() {
+  local service="$1" container_ids container
+  container_ids="$(docker container ls --all \
+    --filter "label=com.docker.compose.project=${project}" \
+    --filter "label=com.docker.compose.service=${service}" \
+    --format '{{.ID}}')"
+  while IFS= read -r container; do
+    [ -n "$container" ] || continue
+    docker rm --force "$container" >/dev/null
+    if docker container inspect "$container" >/dev/null 2>&1; then
+      echo "${service} container ${container} remained after forced removal." >&2
+      return 1
+    fi
+    printf '%s\n' "$container"
+  done <<< "$container_ids"
+}
+
 remove_stopped_service() {
   local service="$1"
   local container
@@ -1278,30 +1295,22 @@ stop_fallback_member() {
 # cannot satisfy the previous epoch. Keep all three fresh peers through log
 # rotation so the two-member selector leaves a live non-member candidate.
 # This models node replacement, not process restart: node-id is stable within
-# cells.data_dir, so the old container and its tmpfs must actually be removed.
+# cells.data_dir, so every existing peer container must actually be removed.
+# Earlier owner-loss rounds may already have removed some non-owner peers.
 fallback_services=()
 for candidate in server server-b server-c server-d; do
   if [ "$candidate" != "$b_service" ]; then
     fallback_services+=("$candidate")
   fi
 done
-fallback_container_ids=()
-for service in "${fallback_services[@]}"; do
-  fallback_container_ids+=("$(compose_container_id "$service")")
-done
-proxy_container_id="$(compose_container_id proxy)"
 replacement_services=(proxy "${fallback_services[@]}")
-replacement_container_ids=("$proxy_container_id" "${fallback_container_ids[@]}")
-for index in "${!replacement_services[@]}"; do
-  service="${replacement_services[$index]}"
-  container="${replacement_container_ids[$index]}"
-  if [ "$(docker inspect --format '{{.State.Running}}' "$container")" = true ]; then
-    docker kill --signal KILL "$container" >/dev/null
-  fi
-  docker rm --force "$container" >/dev/null
-  if docker container inspect "$container" >/dev/null 2>&1; then
-    echo "${service} container ${container} remained after forced removal." >&2
-    exit 1
+replaced_container_ids=()
+for service in "${replacement_services[@]}"; do
+  container_ids="$(remove_project_service_containers "$service")"
+  if [ -n "$container_ids" ]; then
+    while IFS= read -r container; do
+      [ -z "$container" ] || replaced_container_ids+=("$container")
+    done <<< "$container_ids"
   fi
 done
 "${compose[@]}" up --detach --no-build "${fallback_services[@]}" >/dev/null
@@ -1312,10 +1321,12 @@ done
 for index in "${!fallback_services[@]}"; do
   service="${fallback_services[$index]}"
   current_container_id="$(compose_container_id "$service")"
-  if [ "$current_container_id" = "${fallback_container_ids[$index]}" ]; then
-    echo "${service} reused its old container; the node-replacement fixture is invalid." >&2
-    exit 1
-  fi
+  for container in "${replaced_container_ids[@]}"; do
+    if [ "$current_container_id" = "$container" ]; then
+      echo "${service} reused its old container; the node-replacement fixture is invalid." >&2
+      exit 1
+    fi
+  done
 done
 session_server_fallback="$(fallback_session server)"
 session_server_b_fallback="$(fallback_session server-b)"
