@@ -1377,6 +1377,15 @@ done
 if ! $fallback_log_rotated; then
   echo "The fallback owner's inactive log did not rotate after its original members expired." >&2
   echo "Expected live session=${session_after_second_loss}, epoch>${fallback_initial_log_epoch}, and no expired members=${fallback_initial_members}" >&2
+  echo "Node-log rotation counters:" >&2
+  service_cli "$b_service" cells metrics | awk \
+    '$1 ~ /^crab_cell_node_log_rotations_total\{/ { print }' >&2 || true
+  echo "Restarted peer identities:" >&2
+  for service in "${fallback_services[@]}"; do
+    candidate_json="$(fallback_node_for_service "$service")"
+    jq -c '{session, node: .advertisement.node, expires_at_ms: .advertisement.expires_at_ms}' \
+      <<<"$candidate_json" >&2 || true
+  done
   jq . <<<"$node_b_before_fallback" >&2 || true
   exit 1
 fi

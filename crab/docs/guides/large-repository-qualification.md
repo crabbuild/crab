@@ -190,7 +190,7 @@ non-zero; it is never accepted as performance evidence.
 ## Report contract
 
 The versioned JSON report uses schema `crab.large-repository-rustfs`, version
-`1.3`. Its main sections are:
+`1.4`. Its main sections are:
 
 | Field | Evidence |
 |---|---|
@@ -202,7 +202,7 @@ The versioned JSON report uses schema `crab.large-repository-rustfs`, version
 | `team_load` | Optional controlled concurrent fetch and push outcomes, including distinct seed/final checkpoints and tips, per-client failures, and cold-fanout pack producer, cache-event, and origin-request proof; `--require-team-load` makes it mandatory for a full gate and requires one or two generated-pack producers |
 | `cache_service` | Optional service health/capability proof and aggregate Git-pack cache traffic; `--require-cache-service` makes the service and observed pack traffic mandatory |
 | `store_snapshots` | Physical object, byte, and pack growth at seed/checkpoints/final state |
-| `correctness` | Advertised refs, clone tips, full/incremental fsck evidence, deterministic object sample, and fingerprint |
+| `correctness` | Advertised refs, clone tips, full/incremental fsck evidence, deterministic object sample, byte-identical lazy blob hydration, and fingerprint |
 | `metrics` | Count and min/median/p95/p99/max duration summaries by operation family |
 
 The verifier fails closed on missing stages or checks, failed commands,
@@ -218,9 +218,11 @@ Remote-operation telemetry is emitted once per bounded operation. It records
 only numeric counts and durations, including the source-pack download portion
 of response-pack generation, plus bounded counts for locator lookup modes;
 per-object debug logging is disabled because its volume would distort both
-timing and storage evidence on large histories. The blobless catalog-filter
-stage must record ordinal-metadata lookup activity, proving that the optimized
-ordinal path was exercised.
+timing and storage evidence on large histories. The blobless-clone proof checks
+that every sampled source blob is absent before hydration, that the clone has a
+promisor pack and `blob:none` configuration, and that lazy hydration returns
+byte-identical content. It uses the deterministic correctness sample instead of
+walking the clone's entire object database.
 Cache hit/miss parsing is case-insensitive because generated-pack cache events
 are emitted from a Rust debug enum (`Hit`/`Miss`) while object-cache events use
 lowercase strings. This keeps warm-fanout measurements faithful to the logs.

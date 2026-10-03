@@ -14,7 +14,7 @@ from typing import Any
 
 
 SCHEMA = "crab.large-repository-rustfs"
-VERSION = "1.3"
+VERSION = "1.4"
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 SECRET_KEYS = {
@@ -33,6 +33,11 @@ BASE_REQUIRED_CHECKS = {
     "isolated-remote-prefix",
     "advertised-refs-match-source",
     "clone-tips-match-source",
+    "blob-none-promisor-config",
+    "blob-none-pack-promisor-marker",
+    "blob-none-sampled-blobs-missing-before-hydration",
+    "blob-none-lazy-hydration-byte-identical",
+    "blob-none-hydrated-blob-is-present",
     "deterministic-object-sample-size",
     "sampled-objects-byte-identical",
     "source-checkout-unchanged",
@@ -221,13 +226,38 @@ def verify_full_visibility_telemetry(stages: dict[str, Any]) -> None:
     )
 
 
-def verify_catalog_filter_telemetry(stages: dict[str, Any]) -> None:
-    filtered = stages["blob_none_clone"]
-    telemetry = filtered.get("telemetry", {})
+def verify_blobless_clone_evidence(correctness: dict[str, Any], source_revision: str) -> None:
+    proof = correctness.get("blobless_clone")
+    require(isinstance(proof, dict), "blobless clone evidence is missing")
+    require(proof.get("tip") == source_revision, "blobless clone tip does not match source")
+    require(proof.get("filter") == "blob:none", "blobless clone filter is not blob:none")
+    sampled = require_nonnegative_int(
+        proof.get("sampled_blob_count"), "correctness.blobless_clone.sampled_blob_count"
+    )
+    omitted = require_nonnegative_int(
+        proof.get("omitted_sampled_blob_count"),
+        "correctness.blobless_clone.omitted_sampled_blob_count",
+    )
+    require(sampled > 0, "blobless clone evidence has no sampled blobs")
+    require(omitted == sampled, "blobless clone did not omit all sampled blobs")
     require(
-        telemetry.get("locator_ordinal_metadata", 0) > 0
-        or telemetry.get("locator_ordinal_metadata_scan", 0) > 0,
-        "full report did not exercise ordinal metadata for the blobless catalog filter",
+        isinstance(proof.get("blob_oid"), str) and OID_RE.fullmatch(proof["blob_oid"]),
+        "blobless clone hydrated blob OID is invalid",
+    )
+    digest = proof.get("hydrated_blob_sha256")
+    require(
+        isinstance(digest, str) and DIGEST_RE.fullmatch(digest),
+        "blobless clone hydrated blob digest is invalid",
+    )
+    require_nonnegative_int(
+        proof.get("hydrated_blob_bytes"), "correctness.blobless_clone.hydrated_blob_bytes"
+    )
+    promisor_packs = proof.get("promisor_packs")
+    require(
+        isinstance(promisor_packs, list)
+        and bool(promisor_packs)
+        and all(isinstance(name, str) and name.endswith(".promisor") for name in promisor_packs),
+        "blobless clone promisor-pack evidence is missing",
     )
 
 
@@ -781,7 +811,6 @@ def verify_report(
             require(isinstance(stage.get("notes"), list), f"stages.{name}.notes must be an array")
     if profile == "full":
         verify_full_visibility_telemetry(stages)
-        verify_catalog_filter_telemetry(stages)
         verify_locator_sweep_telemetry(stages)
         clone_telemetry = stages["full_clone_cold"].get("telemetry", {})
         for field in (
@@ -853,6 +882,7 @@ def verify_report(
     require(sample_size >= 1, "correctness sample must not be empty")
     if profile == "full":
         require(sample_size >= 1_000, "full report must verify at least 1,000 objects")
+    verify_blobless_clone_evidence(correctness, source_revision)
     refs = correctness.get("advertised_refs")
     require(isinstance(refs, dict), "advertised_refs must be an object")
     require(refs.get("refs/heads/main") == source_revision, "advertised main ref mismatch")
