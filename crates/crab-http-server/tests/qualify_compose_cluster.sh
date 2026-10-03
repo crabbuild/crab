@@ -1245,9 +1245,17 @@ service_session() {
 
 fallback_session() {
   local service="$1"
+  local data_dir="/var/lib/crab/cells"
   local session=""
+  local candidate
+  for candidate in "${fallback_services[@]}"; do
+    if [ "$candidate" = "$service" ]; then
+      data_dir="/var/lib/crab/cells/replacement-${service}"
+      break
+    fi
+  done
   for _ in $(seq 1 45); do
-    if session="$(service_session "$service" "/var/lib/crab/cells/replacement-${service}" 2>/dev/null)" &&
+    if session="$(service_session "$service" "$data_dir" 2>/dev/null)" &&
       [[ "$session" =~ ^[0-9a-f]{32}$ ]]; then
       printf '%s\n' "$session"
       return 0
