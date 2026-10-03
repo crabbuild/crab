@@ -1409,17 +1409,15 @@ node_b_before_fallback="$(service_cli "$b_service" cells node \
 fallback_initial_log_epoch="$(jq --raw-output '.advertisement.log.epoch' \
   <<<"$node_b_before_fallback")"
 fallback_initial_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
-# No fleet proof may have escaped the replacement owner's log. Active logs
-# require a complete follower witness during recovery, even after object
-# coverage, so this fallback specifically exercises an inactive log.
+# The current epoch may remain active until its signed members expire. The
+# rotation below must publish a fresh inactive epoch before testing fallback.
 if ! jq --exit-status \
   --arg session "$session_after_second_loss" \
   '.session == $session and .live == true and
    .advertisement.log.state == "open" and
-   .advertisement.log.active == false and
    (.advertisement.log.member_nodes | length > 0)' \
   <<<"$node_b_before_fallback" >/dev/null; then
-  echo "Fallback owner B did not expose an open inactive durability log." >&2
+  echo "Fallback owner B did not expose an open durability log." >&2
   jq . <<<"$node_b_before_fallback" >&2 || true
   exit 1
 fi
