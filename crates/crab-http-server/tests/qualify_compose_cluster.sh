@@ -10,6 +10,7 @@ compose_file="${crate_dir}/deploy/compose.yaml"
 cluster_file="${crate_dir}/deploy/compose.cluster.yaml"
 project="${CRAB_HTTP_CLUSTER_PROJECT:-crab-http-cluster-qualification-$$}"
 replacement_config_dir=""
+replacement_instance=""
 
 if [[ ! "$project" =~ ^crab-http-cluster-qualification-[A-Za-z0-9_-]+$ ]]; then
   echo "CRAB_HTTP_CLUSTER_PROJECT must be a unique crab-http-cluster-qualification-* name." >&2
@@ -1243,6 +1244,10 @@ service_session() {
   node_session "$1" "${2:-/var/lib/crab/cells}"
 }
 
+fallback_data_dir() {
+  printf '/var/lib/crab/cells/replacement-%s-%s\n' "$replacement_instance" "$1"
+}
+
 fallback_session() {
   local service="$1"
   local data_dir="/var/lib/crab/cells"
@@ -1250,7 +1255,7 @@ fallback_session() {
   local candidate
   for candidate in "${fallback_services[@]}"; do
     if [ "$candidate" = "$service" ]; then
-      data_dir="/var/lib/crab/cells/replacement-${service}"
+      data_dir="$(fallback_data_dir "$service")"
       break
     fi
   done
@@ -1317,6 +1322,7 @@ for candidate in server server-b server-c server-d; do
 done
 replacement_services=(proxy "${fallback_services[@]}")
 replacement_config_dir="$(mktemp -d "${TMPDIR:-/tmp}/crab-cluster-replacement.XXXXXX")"
+replacement_instance="${replacement_config_dir##*/}"
 replacement_compose_file="${replacement_config_dir}/compose.yaml"
 printf 'services:\n' > "$replacement_compose_file"
 for service in "${fallback_services[@]}"; do
@@ -1327,11 +1333,12 @@ for service in "${fallback_services[@]}"; do
     server-d) config_source="${crate_dir}/deploy/compose.node-d.toml" ;;
   esac
   replacement_config="${replacement_config_dir}/${service}.toml"
+  replacement_data_dir="$(fallback_data_dir "$service")"
   sed -E \
-    "s#^data_dir = \"[^\"]+\"\$#data_dir = \"/var/lib/crab/cells/replacement-${service}\"#" \
+    "s#^data_dir = \"[^\"]+\"\$#data_dir = \"${replacement_data_dir}\"#" \
     "$config_source" > "$replacement_config"
   if ! grep -F -x \
-    "data_dir = \"/var/lib/crab/cells/replacement-${service}\"" \
+    "data_dir = \"${replacement_data_dir}\"" \
     "$replacement_config" >/dev/null; then
     echo "${service} replacement config did not isolate its local cell state." >&2
     exit 1
