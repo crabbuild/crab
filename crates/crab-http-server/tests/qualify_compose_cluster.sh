@@ -1274,10 +1274,9 @@ stop_fallback_member() {
   esac
 }
 
-# A fourth process is kept outside the current log when possible. The owner
-# first publishes an object-covered mutation, then every original member is
-# stopped before the owner is killed. Recovery must therefore use the bounded
-# any-node path and still restore exact data from RustFS.
+# Replace every non-owner process so its prior session and follower state
+# cannot satisfy the previous epoch. Keep all three fresh peers through log
+# rotation so the two-member selector leaves a live non-member candidate.
 # A stale process fences itself once its lease is renewed after the freeze.
 # Remove the stopped node and its namespace proxy explicitly so the next start
 # models an orchestrator replacement rather than reusing the fenced process.
@@ -1347,57 +1346,6 @@ if ! jq --exit-status \
   exit 1
 fi
 
-fallback_candidate_service=""
-fallback_candidate_session=""
-fallback_candidate_node=""
-fallback_candidate_record=""
-
-for candidate in "${fallback_services[@]}"; do
-  candidate_json="$(fallback_node_for_service "$candidate")"
-  candidate_node="$(jq -r '.advertisement.node' <<<"$candidate_json")"
-  if ! jq --exit-status --arg node "$candidate_node" \
-    'any(.[]; . == $node)' <<<"$fallback_initial_members" >/dev/null; then
-    fallback_candidate_service="$candidate"
-    fallback_candidate_session="$(jq -r '.session' <<<"$candidate_json")"
-    fallback_candidate_node="$candidate_node"
-    fallback_candidate_record="$candidate_json"
-    break
-  fi
-done
-if [ -z "$fallback_candidate_service" ]; then
-  echo "No live non-member fallback candidate remained." >&2
-  exit 1
-fi
-# Remove every original member while preserving the non-member candidate.
-# Object coverage can then acknowledge the fallback write without activating
-# fleet durability, whose recovery would require a follower witness.
-for member_service in "${fallback_services[@]}"; do
-  if [ "$member_service" = "$fallback_candidate_service" ]; then
-    continue
-  fi
-  stop_fallback_member "$member_service"
-done
-for member_service in "${fallback_services[@]}"; do
-  if [ "$member_service" = "$fallback_candidate_service" ]; then
-    continue
-  fi
-  member_session="$(fallback_session_for_service "$member_service")"
-  member_expired=false
-  for _ in $(seq 1 45); do
-    member_status="$(service_cli "$fallback_candidate_service" cells node \
-      --session "$member_session" --json 2>/dev/null || true)"
-    if jq --exit-status '.live == false' <<<"$member_status" >/dev/null 2>&1; then
-      member_expired=true
-      break
-    fi
-    sleep 1
-  done
-  if ! $member_expired; then
-    echo "${member_service} did not leave the live advertisement set." >&2
-    exit 1
-  fi
-done
-
 # Member loss rotates the log membership and epoch, even while the owner's
 # session stays live. Root-only fallback is safe only while the new log remains
 # open and inactive; preserving the old membership snapshot would reject that
@@ -1434,8 +1382,30 @@ if ! $fallback_log_rotated; then
 fi
 
 fallback_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
-fallback_candidate_record="$(service_cli "$fallback_candidate_service" cells node \
-  --session "$fallback_candidate_session" --json)"
+fallback_candidate_service=""
+fallback_candidate_session=""
+fallback_candidate_node=""
+fallback_candidate_record=""
+for candidate in "${fallback_services[@]}"; do
+  candidate_json="$(fallback_node_for_service "$candidate")"
+  candidate_node="$(jq -r '.advertisement.node' <<<"$candidate_json")"
+  if jq --exit-status --arg node "$candidate_node" \
+    'any(.[]; . == $node)' <<<"$fallback_initial_members" >/dev/null ||
+    jq --exit-status --arg node "$candidate_node" \
+      'any(.[]; . == $node)' <<<"$fallback_members" >/dev/null; then
+    continue
+  fi
+  fallback_candidate_service="$candidate"
+  fallback_candidate_session="$(jq -r '.session' <<<"$candidate_json")"
+  fallback_candidate_node="$candidate_node"
+  fallback_candidate_record="$candidate_json"
+  break
+done
+if [ -z "$fallback_candidate_service" ]; then
+  echo "The rotated log left no live non-member fallback candidate." >&2
+  echo "Members=${fallback_members}" >&2
+  exit 1
+fi
 if ! jq --exit-status \
   --arg session "$fallback_candidate_session" \
   --arg node "$fallback_candidate_node" \
@@ -1497,9 +1467,23 @@ owner_advertisement="$(service_cli "$fallback_candidate_service" cells node \
 fallback_advertisement_expired_ms="$(jq --exit-status --raw-output \
   'select(.live == true) | .advertisement.expires_at_ms | select(type == "number" and . > 0)' \
   <<<"$owner_advertisement")"
+# Stop the owner before its new members expire, so it cannot rotate again and
+# enroll the fallback candidate into the log during this recovery scenario.
 fallback_owner_killed_ms="$(unix_millis)"
 kill_service "$b_service"
 remove_stopped_service "$b_service"
+for member_service in "${fallback_services[@]}"; do
+  member_node="$(jq -r '.advertisement.node' \
+    <<<"$(fallback_node_for_service "$member_service")")"
+  if jq --exit-status --arg node "$member_node" \
+    'any(.[]; . == $node)' <<<"$fallback_members" >/dev/null; then
+    if [ "$member_service" = "$fallback_candidate_service" ]; then
+      echo "The fallback candidate is still a member of the rotated log." >&2
+      exit 1
+    fi
+    stop_fallback_member "$member_service"
+  fi
+done
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
   --bucket crab-http-server >/dev/null
@@ -1522,6 +1506,30 @@ if ! $fallback_advertisement_expired; then
   echo "The fallback owner's signed advertisement did not expire." >&2
   exit 1
 fi
+
+for member_service in "${fallback_services[@]}"; do
+  member_node="$(jq -r '.advertisement.node' \
+    <<<"$(fallback_node_for_service "$member_service")")"
+  if ! jq --exit-status --arg node "$member_node" \
+    'any(.[]; . == $node)' <<<"$fallback_members" >/dev/null; then
+    continue
+  fi
+  member_session="$(fallback_session_for_service "$member_service")"
+  member_expired=false
+  for _ in $(seq 1 45); do
+    member_status="$(service_cli "$fallback_candidate_service" cells node \
+      --session "$member_session" --json 2>/dev/null || true)"
+    if jq --exit-status '.live == false' <<<"$member_status" >/dev/null 2>&1; then
+      member_expired=true
+      break
+    fi
+    sleep 1
+  done
+  if ! $member_expired; then
+    echo "Rotated log member ${member_service} remained live during fallback." >&2
+    exit 1
+  fi
+done
 
 fallback_restored_labels=""
 for _ in $(seq 1 75); do
