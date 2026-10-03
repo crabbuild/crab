@@ -397,6 +397,9 @@ impl GeneratedPack {
     }
 
     /// Stream the pack through protocol-v2 sideband channel 1.
+    ///
+    /// Success includes flushing bounded wire batches; cancellation or I/O failure
+    /// leaves an incomplete response that the caller must not report as complete.
     pub async fn write_sideband<W: AsyncWrite + Unpin>(
         &self,
         writer: &mut W,
@@ -405,6 +408,9 @@ impl GeneratedPack {
         let mut file = tokio::fs::File::open(self.file.path())
             .await
             .map_err(io_error)?;
+        // Batch packet prefixes and payloads for unbuffered CLI output while
+        // bounding queued HTTP bytes. Flush before callers append response framing.
+        let mut writer = tokio::io::BufWriter::with_capacity(1024 * 1024, writer);
         let mut chunk = vec![0u8; SIDEBAND_PAYLOAD];
         loop {
             if cancellation.is_cancelled() {
@@ -416,9 +422,13 @@ impl GeneratedPack {
             if read == 0 {
                 break;
             }
-            write_packet(writer, &chunk[..read], Some(1), cancellation).await?;
+            write_packet(&mut writer, &chunk[..read], Some(1), cancellation).await?;
         }
-        Ok(())
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(Error::Cancelled),
+            result = writer.flush() => result.map_err(io_error),
+        }
     }
 }
 
@@ -4472,6 +4482,173 @@ mod tests {
         let checksum: [u8; 20] = Sha1::digest(&bytes[..bytes.len() - 20]).into();
         assert_eq!(generated.checksum, checksum);
         assert_eq!(generated.content_hash, *blake3::hash(&bytes).as_bytes());
+    }
+
+    #[tokio::test]
+    async fn generated_pack_sideband_preserves_framing_with_short_writes() {
+        let pack = sideband_test_pack();
+        let bytes = std::fs::read(pack.path()).expect("read generated pack");
+        for maximum_write in [usize::MAX, 2_047] {
+            let mut output = SidebandTestWriter::new(maximum_write);
+            pack.write_sideband(&mut output, &CancellationToken::new())
+                .await
+                .expect("stream sideband pack");
+            let mut wire = output.bytes.as_slice();
+            let mut decoded = Vec::new();
+            while !wire.is_empty() {
+                let length = usize::from_str_radix(
+                    std::str::from_utf8(&wire[..4]).expect("hex packet length"),
+                    16,
+                )
+                .expect("valid packet length");
+                assert!((6..=SIDEBAND_PAYLOAD + 5).contains(&length));
+                assert_eq!(wire[4], 1, "only pack channel expected");
+                decoded.extend_from_slice(&wire[5..length]);
+                wire = &wire[length..];
+            }
+            assert_eq!(decoded, bytes, "maximum write {maximum_write}");
+        }
+    }
+
+    #[tokio::test]
+    async fn generated_pack_sideband_batches_small_wire_writes() {
+        let pack = sideband_test_pack();
+        let mut output = SidebandTestWriter::new(usize::MAX);
+        pack.write_sideband(&mut output, &CancellationToken::new())
+            .await
+            .expect("stream sideband pack");
+
+        assert!(
+            output.writes.len() <= 3 && output.writes.iter().all(|size| *size <= 1024 * 1024),
+            "bounded transfer batches expected, got {:?}",
+            output.writes
+        );
+    }
+
+    #[tokio::test]
+    async fn generated_pack_sideband_propagates_write_and_flush_errors() {
+        let pack = sideband_test_pack();
+        for fault in [SidebandFault::WriteError, SidebandFault::FlushError] {
+            let mut output = SidebandTestWriter::new(usize::MAX);
+            output.fault = fault;
+            let result = pack
+                .write_sideband(&mut output, &CancellationToken::new())
+                .await;
+
+            assert!(matches!(
+                result,
+                Err(Error::Metadata(crab_metadata::error::MetadataError::Io { source }))
+                    if source.kind() == io::ErrorKind::BrokenPipe
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn generated_pack_sideband_cancels_pending_write_and_flush() {
+        let pack = sideband_test_pack();
+        for fault in [SidebandFault::CancelWrite, SidebandFault::CancelFlush] {
+            let cancellation = CancellationToken::new();
+            let mut output = SidebandTestWriter::new(usize::MAX);
+            output.fault = fault;
+            output.cancellation = cancellation.clone();
+            let result = pack.write_sideband(&mut output, &cancellation).await;
+
+            assert!(matches!(result, Err(Error::Cancelled)));
+        }
+    }
+
+    fn sideband_test_pack() -> GeneratedPack {
+        let mut state = 0x9e37_79b9_u32;
+        let data: Vec<u8> = (0..1024 * 1024 + SIDEBAND_PAYLOAD + 1)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+        let entry = valid_packed_entry(blob_oid(&data), Header::Blob, &data, None);
+        let cancellation = CancellationToken::new();
+        let (writer, _) = PackWriter::new(1, data.len() as u64 + 1024)
+            .expect("pack fits response bound")
+            .write_entries(vec![entry], HashMap::new(), &cancellation)
+            .expect("write generated pack");
+        writer.finish(&cancellation).expect("finish generated pack")
+    }
+
+    #[derive(Clone, Copy)]
+    enum SidebandFault {
+        None,
+        WriteError,
+        FlushError,
+        CancelWrite,
+        CancelFlush,
+    }
+
+    struct SidebandTestWriter {
+        bytes: Vec<u8>,
+        writes: Vec<usize>,
+        maximum_write: usize,
+        fault: SidebandFault,
+        cancellation: CancellationToken,
+    }
+
+    impl SidebandTestWriter {
+        fn new(maximum_write: usize) -> Self {
+            Self {
+                bytes: Vec::new(),
+                writes: Vec::new(),
+                maximum_write,
+                fault: SidebandFault::None,
+                cancellation: CancellationToken::new(),
+            }
+        }
+    }
+
+    impl AsyncWrite for SidebandTestWriter {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            match self.fault {
+                SidebandFault::WriteError => {
+                    return std::task::Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+                }
+                SidebandFault::CancelWrite => {
+                    self.cancellation.cancel();
+                    return std::task::Poll::Pending;
+                }
+                _ => {}
+            }
+            let size = bytes.len().min(self.maximum_write);
+            self.bytes.extend_from_slice(&bytes[..size]);
+            self.writes.push(size);
+            std::task::Poll::Ready(Ok(size))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            match self.fault {
+                SidebandFault::FlushError => {
+                    std::task::Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
+                }
+                SidebandFault::CancelFlush => {
+                    self.cancellation.cancel();
+                    std::task::Poll::Pending
+                }
+                _ => std::task::Poll::Ready(Ok(())),
+            }
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            self.poll_flush(cx)
+        }
     }
 
     fn assert_strict_pack(pack: &GeneratedPack) {

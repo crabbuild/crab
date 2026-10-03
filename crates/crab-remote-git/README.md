@@ -179,6 +179,13 @@ operation while a separate operation scans the pinned catalog concurrently;
 the downloaded pack indexes must still cover that exact OID set before the
 inventory is returned. Partial visibility keeps the normal planned-pack path.
 
+Generated response packs retain Git's sideband packet limits while batching
+wire writes in at most 1 MiB. The same writer serves CLI and HTTP callers;
+the HTTP duplex still applies backpressure. Success explicitly flushes the
+batch before response-end framing. Write/flush errors remain typed and pending
+writes or flushes remain cancellable, so dropping a batch cannot silently
+complete a truncated response.
+
 Operation-owned coalesced ranges and packed-entry metadata reads use the same
 admission boundary: failed headers charge a request but no advertised body,
 and each facade retry reserves its own request and response bytes. An early
