@@ -64,12 +64,25 @@ corrupt-body rejection and the version-2 fast path. The pre-fix build
 was interrupted at about 4 GiB free; capacity recovered without deletion.
 See the [bounded recovery record](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-bounded-legacy-journal-recovery).
 
+A separate actual SIGKILL probe now verifies durable destination upload,
+unchanged root and atomic pending-page state, followed by successful resume,
+cold exact hydration, strict fsck and retained-checkpoint verification. Its full
+driver still fails historical restore, as expected under the existing crashed
+writer quarantine: a five-minute lease expiry does not bypass the following
+24-hour exclusion from exclusive maintenance. A separate 14-check live probe
+confirms retryable rejection after natural expiry and byte-identical root/fence
+preservation. Successful restore and republishing after the backend quarantine
+deadline remain unverified. This closes one bounded kill/resume seam, not full
+crash/GC/recovery qualification; see the [actual-kill record](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-actual-optimizer-kill-and-quarantine).
+
 Final-runtime CI also fails the Compose fixture's preserved non-member
 assumption under the pinned Cellule recruitment contract. Fixing that setup
 must preserve genuine non-member takeover, exact data/root, expiry, fencing,
 and the receipt contract; approval remains pending. Documentation head
 `1147e51abe4` also ends with 25 successful checks, one failure for the same
-Compose condition, and ten skipped checks; it is not green. Zero-error 100 GiB Xet
+Compose condition, and ten skipped checks; it is not green. Source head
+`534ab60` reproduces the same Compose condition. Its remaining checks must be
+evaluated independently, not inherited from an older head. Zero-error 100 GiB Xet
 needs capacity beyond the unchanged 220 GiB preflight and current 40 GB
 backend. Complete provider/product and fault/concurrency/GC qualification,
 matched v1 performance, and clone-throughput proof remain open. These are

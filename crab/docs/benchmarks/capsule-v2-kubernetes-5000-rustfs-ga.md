@@ -282,6 +282,59 @@ correction. Workspace formatting and diff checks pass; no dependency or gate cha
 Actual process-kill, archived-class, downgrade and concurrent-maintenance/GC
 proof, 100 GiB Xet, final-head CI and the complete parity gates remain open.
 
+## October 3 actual optimizer kill and quarantine
+
+A fresh, initially absent and empty RustFS GA bucket now covers an actual
+process kill, not a manufactured journal. The private proxy drains one successful
+destination-Xorb PUT response from RustFS, holds its acknowledgement, and kills
+only the still-running optimizer process with SIGKILL. No production fault hook,
+journal mutation, lease shortening, cache cleanup or remote deletion is involved.
+The frozen CLI is the `b9f2dacd` binary above: its production source is equivalent
+to `534ab60`, with only the later test-fixture correction excluded.
+
+At the kill boundary the destination is durable, the root is byte-identical,
+and all three source rows remain pending in the actual version-2 journal.
+Normal CLI resume completes the atomic page and strict reconciliation, publishes
+a new checkpoint, and preserves every ref. Independent cold hydration matches
+both 12 MiB files exactly; strict Git and Crab fsck and both retained-checkpoint
+verifications pass. This proves this single destination-ack/page-completion
+boundary, not every capsule/ref publication or crash boundary.
+
+The original full driver records **failed** after 47 successful checks: historical
+restore returns retryable `CRAB-E0012` for the killed writer. The failure report
+remains unchanged. Source inspection and a separate 14-check live diagnostic
+prove the expected availability constraint: the five-minute writer lease expires
+naturally, but exclusive sweep admission still quarantines an ungraceful writer
+for 24 hours after expiry. The actual backend-clock probe is past the lease
+deadline and before quarantine ends; a second restore is rejected with the same
+holder while root and fence bytes remain unchanged. Both retained checkpoints
+still verify. No lease was removed or forcibly expired.
+
+This is the existing coordination policy, also present on current `main`, not a
+new capsule timeout. `GcWriterLeases` owns the renewable writer claims;
+`history_recovery_v2::restore_history` requires `GcSweepLease`; shared
+`GcFenceState::prune_expired` and `blocking_holder` enforce quarantine.
+Backend time comes from the stored clock object's `last_modified`, not the
+client wall clock. For this holder the stored expiry plus the unchanged
+quarantine policy gives **October 4, 04:54:20 UTC**. Successful restore, cold
+hydration and republishing after that backend deadline are still required.
+The 14-check report proves safe rejection, not successful eventual recovery.
+
+| Evidence | SHA-256 |
+| --- | --- |
+| Failed actual-kill report | `c4c86bc53697711ad1271272c5e0a26dbc16720e3b8320d41cba4dec099fdce2` |
+| Actual killed-journal snapshot | `8f1603031a52186b4c898b55df8dde369850354d7fc3a93ea16579f0b212dcd3` |
+| Request trace through resume | `cd6061a70e46f296c805f7b08d12d4b918711dcbdbdd95ce3c11ce7cb2cb55d9` |
+| Successful post-expiry rejection report | `22eadb0a4c86e7799ddb1893a2667c18440abf8afef7cc938f559b0666acc47d` |
+| Actual-kill driver | `795ec4924796e5f661096ceff2df9949327cf3afd35762fd9420210db5e57086` |
+| Post-expiry diagnostic driver | `9ff5c4f8c6fa677b24f0ec602f84705efe917758574e22479b5f88142cba4d0b` |
+
+The preserved actual-kill run is `xorb-livekill-pr208-20261003-r1`; its separate
+diagnostic is `xorb-livekill-lease-pr208-20261003-r1`. Intentional client aborts
+at the kill boundary are not zero-error transport qualification. All original
+failure evidence, journals and remote bodies are retained. Scale, archived-class,
+downgrade, concurrent maintenance/GC and full eventual-recovery gates remain open.
+
 ## October 2 current-runtime replay: correctness passed, performance failed
 
 Run `k8s-5000-head0747011-r4` completed from 18:06:10 to 20:21:20 UTC.

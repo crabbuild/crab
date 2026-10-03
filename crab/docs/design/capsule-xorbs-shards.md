@@ -973,6 +973,14 @@ These are manufactured crash snapshots, not process kills. Archived-class,
 downgrade, live crash/concurrency/GC and scale recovery parity remain open;
 see the [bounded recovery record](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-bounded-legacy-journal-recovery).
 
+An actual destination-ack SIGKILL now passes resume, cold exact hydration, fsck
+and retained-checkpoint verification. Historical restore remains safely blocked
+after lease expiry by the existing 24-hour crashed-writer quarantine; a separate
+14-check live probe preserves root and fence bytes while verifying that rejection.
+Eventual restore after the backend deadline and the broader failure matrix remain
+open. The [actual-kill record](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-actual-optimizer-kill-and-quarantine)
+retains the failed full driver separately from successful bounded proofs.
+
 | Surface | Current v2 state | Work required for parity | Acceptance proof |
 | --- | --- | --- | --- |
 | Repository initialization and ordinary single-/multi-ref push | Per-ref transactional publication and bounded batched compaction are implemented. Final-runtime GA replay completes all 5,000 individual pushes with exact content and flat 7.062 mean requests in every window. Five windows fail push-p95 latency; correctness is not complete performance/provider qualification | Resolve push tails and qualify the resulting final runtime; measure upload amplification, conditional writes, and uncertain-response behavior on each provider | Flat request/latency distributions through 5,000 same-ref pushes with periodic fetch/checkpoint, plus concurrent same-ref and disjoint-ref pushes on S3, GCS, and Azure; fresh clone and fsck after every run |
