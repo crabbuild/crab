@@ -961,6 +961,14 @@ passes cold exact hydration, retained-checkpoint verification, restore, and
 republishing. Neither run qualifies old partial-page journal recovery,
 100 GiB Xet, the complete provider/product matrix, or v1 retirement.
 
+The fresh October 3 real-CLI diagnostic confirms old partial-page resume
+still fails strict coverage validation while preserving the exact published
+root. Its 32 checks use a manufactured crash snapshot, not a process kill.
+A reopened-WAL regression through the actual executor reproduces the same
+failure. The selective migration candidate remains local and unverified;
+capacity stopped the pre-fix Cargo build and prevents candidate verification,
+so recovery parity is still open.
+
 | Surface | Current v2 state | Work required for parity | Acceptance proof |
 | --- | --- | --- | --- |
 | Repository initialization and ordinary single-/multi-ref push | Per-ref transactional publication and bounded batched compaction are implemented. Final-runtime GA replay completes all 5,000 individual pushes with exact content and flat 7.062 mean requests in every window. Five windows fail push-p95 latency; correctness is not complete performance/provider qualification | Resolve push tails and qualify the resulting final runtime; measure upload amplification, conditional writes, and uncertain-response behavior on each provider | Flat request/latency distributions through 5,000 same-ref pushes with periodic fetch/checkpoint, plus concurrent same-ref and disjoint-ref pushes on S3, GCS, and Azure; fresh clone and fsck after every run |

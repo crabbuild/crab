@@ -48,10 +48,23 @@ reconciliation correctly rejects that closure before publication. Recovery
 must preserve unrelated completed work and all placement/integrity checks;
 the new rollback/reopen test does not qualify this historical shape.
 
+The fresh October 3 diagnostic reproduces this historical shape through the
+actual CLI on RustFS GA, using real old-writer destinations and a manufactured
+partial journal rather than an actual process kill. All 32 diagnostic checks
+pass; resume exits with the expected incomplete-coverage error and leaves the
+published root byte-identical. The separate reopened-WAL/actual-executor test
+also fails at strict coverage validation. A selective versioned migration is
+being implemented locally, but is not verified or part of the published runtime.
+Its verification requires safe mounted capacity: the pre-fix Cargo invocation
+was interrupted at about 4 GiB free. No cache, target, or remote data was deleted.
+This evidence confirms the gap; it does not close recovery qualification.
+
 Final-runtime CI also fails the Compose fixture's preserved non-member
 assumption under the pinned Cellule recruitment contract. Fixing that setup
 must preserve genuine non-member takeover, exact data/root, expiry, fencing,
-and the receipt contract; approval remains pending. Zero-error 100 GiB Xet
+and the receipt contract; approval remains pending. Documentation head
+`bb304fe53b9` also ends with 25 successful checks, one failure for the same
+Compose condition, and ten skipped checks; it is not green. Zero-error 100 GiB Xet
 needs capacity beyond the unchanged 220 GiB preflight and current 40 GB
 backend. Complete provider/product and fault/concurrency/GC qualification,
 matched v1 performance, and clone-throughput proof remain open. These are
