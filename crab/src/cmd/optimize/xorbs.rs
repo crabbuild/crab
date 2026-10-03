@@ -596,6 +596,7 @@ async fn run_apply(
         } else {
             profile_label(&recorded_profile)
         };
+        reconcile::prepare_resume(&journal, &run, &store, &router, cancel).await?;
         info!(run_id = %run.run_id, profile = %profile_name, "resuming xorb optimization run");
         (run.run_id, profile_name, recorded_profile)
     } else {

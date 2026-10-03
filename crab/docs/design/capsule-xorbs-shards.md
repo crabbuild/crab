@@ -961,13 +961,17 @@ passes cold exact hydration, retained-checkpoint verification, restore, and
 republishing. Neither run qualifies old partial-page journal recovery,
 100 GiB Xet, the complete provider/product matrix, or v1 retirement.
 
-The fresh October 3 real-CLI diagnostic confirms old partial-page resume
-still fails strict coverage validation while preserving the exact published
-root. Its 32 checks use a manufactured crash snapshot, not a process kill.
-A reopened-WAL regression through the actual executor reproduces the same
-failure. The selective migration candidate remains local and unverified;
-capacity stopped the pre-fix Cargo build and prevents candidate verification,
-so recovery parity is still open.
+The October 3 baseline real-CLI diagnostic reproduces old partial-page resume
+failure while preserving the exact root. The bounded migration candidate then
+passes 54 partial-page and 56 already-resumed checks through cold exact hydration,
+fsck, history restore and republishing. Foreign-source rejection preserves the
+exact root and logical journal in 33 checks. Migration verifies same-run originals,
+requeues only affected connected mappings, and atomically upgrades the journal;
+strict publication validation remains unchanged. All 70 focused Xorb tests pass,
+including selective recovery, rollback/reopen and corrupt-body rejection.
+These are manufactured crash snapshots, not process kills. Archived-class,
+downgrade, live crash/concurrency/GC and scale recovery parity remain open;
+see the [bounded recovery record](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-bounded-legacy-journal-recovery).
 
 | Surface | Current v2 state | Work required for parity | Acceptance proof |
 | --- | --- | --- | --- |

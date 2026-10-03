@@ -38,32 +38,37 @@ build or second timing workload overlaps this run, but the shared host and
 unmatched v1 workload preclude a causal speedup or parity claim. The benchmark
 record above binds the complete report, request log and runtime provenance.
 
-Atomic Xorb source-page completion prevents new partial journals; it does not
-repair journals produced by the released per-row writer. `--resume` accepts
-schema version 1 and executes only pending sources, without a migration or
-recovery guard. A previously completed source can still point to a shared
-destination whose other source is pending; repacking that pending source into
-a different destination leaves the old mapping incomplete. Strict
-reconciliation correctly rejects that closure before publication. Recovery
-must preserve unrelated completed work and all placement/integrity checks;
-the new rollback/reopen test does not qualify this historical shape.
+Atomic Xorb source-page completion prevents new partial journals but does not
+alone repair journals from the released per-row writer. The pre-migration
+runtime accepts schema version 1 and executes only pending sources. Repacking
+a pending source can strand an earlier completed source's shared destination;
+strict reconciliation correctly rejects the incomplete closure before publication.
 
-The fresh October 3 diagnostic reproduces this historical shape through the
-actual CLI on RustFS GA, using real old-writer destinations and a manufactured
-partial journal rather than an actual process kill. All 32 diagnostic checks
-pass; resume exits with the expected incomplete-coverage error and leaves the
-published root byte-identical. The separate reopened-WAL/actual-executor test
-also fails at strict coverage validation. A selective versioned migration is
-being implemented locally, but is not verified or part of the published runtime.
-Its verification requires safe mounted capacity: the pre-fix Cargo invocation
-was interrupted at about 4 GiB free. No cache, target, or remote data was deleted.
-This evidence confirms the gap; it does not close recovery qualification.
+The October 3 baseline diagnostic reproduces that failure through the actual
+CLI on RustFS GA: 32 diagnostic checks pass, resume rejects incomplete coverage,
+and the published root remains byte-identical. A reopened-WAL/actual-executor
+regression fails at the same boundary. The bounded migration candidate upgrades
+the local journal to version 2 before resume. It verifies destination bodies
+and same-run originals, requeues only the affected connected component,
+preserves unrelated completed work, and atomically commits the version and
+requeued rows. Strict v1/v2 publication validation remains unchanged.
+
+Fresh candidate CLI cases pass 54 checks for a partial page and 56 for an
+already-resumed all-done journal, including cold exact hydration, fsck, history
+restore and republishing. A foreign-source case passes 33 rejection checks
+while preserving the exact root and logical journal. These cases manufacture
+crash snapshots from real old-writer bodies; they do not prove actual process-kill,
+archived-class, downgrade, concurrent-GC or 100 GiB behavior. All 70 focused
+Xorb tests pass, including selective recovery, typed SQL rollback/reopen,
+corrupt-body rejection and the version-2 fast path. The pre-fix build
+was interrupted at about 4 GiB free; capacity recovered without deletion.
+See the [bounded recovery record](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-bounded-legacy-journal-recovery).
 
 Final-runtime CI also fails the Compose fixture's preserved non-member
 assumption under the pinned Cellule recruitment contract. Fixing that setup
 must preserve genuine non-member takeover, exact data/root, expiry, fencing,
 and the receipt contract; approval remains pending. Documentation head
-`bb304fe53b9` also ends with 25 successful checks, one failure for the same
+`1147e51abe4` also ends with 25 successful checks, one failure for the same
 Compose condition, and ten skipped checks; it is not green. Zero-error 100 GiB Xet
 needs capacity beyond the unchanged 220 GiB preflight and current 40 GB
 backend. Complete provider/product and fault/concurrency/GC qualification,

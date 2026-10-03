@@ -33,6 +33,9 @@ use crab_xet::shard_parse::extract_file_recipes;
 use crab_xet::xorb::format::{MAX_XORB_SIZE, MerkleHash, XorbRef};
 use crab_xet::xorb::parser::XorbParser;
 
+mod resume;
+pub(crate) use resume::prepare_resume;
+
 const MAX_CAS_ATTEMPTS: u32 = 8;
 const MAX_RECONCILIATION_MAPPING_ENTRIES: u64 = 1_000_000;
 const MAX_DESTINATIONS_PER_SOURCE: usize = 1_000_000;
@@ -78,6 +81,7 @@ fn build_mapping(
 
     let mut src_to_dest = HashMap::new();
     let mut entries_updated: u64 = 0;
+    let mut destination_links = 0usize;
 
     let mut after = String::new();
     loop {
@@ -118,6 +122,20 @@ fn build_mapping(
                         "journal source {} references {} destination xorbs; bounded reconciliation supports at most {MAX_DESTINATIONS_PER_SOURCE}",
                         source.src_xorb,
                         dests.len()
+                    ),
+                });
+            }
+            destination_links = destination_links.checked_add(dests.len()).ok_or_else(|| {
+                CrabError::Configuration {
+                    key: "xorb optimization reconciliation destination links".to_owned(),
+                    origin: "journal destination link count overflows usize".to_owned(),
+                }
+            })?;
+            if destination_links > MAX_RECONCILIATION_LOADED_CHUNK_ENTRIES {
+                return Err(CrabError::Configuration {
+                    key: "xorb optimization reconciliation destination links".to_owned(),
+                    origin: format!(
+                        "journal destination links exceed {MAX_RECONCILIATION_LOADED_CHUNK_ENTRIES} entries"
                     ),
                 });
             }
@@ -279,6 +297,30 @@ async fn load_mapping(
     mapping: &HashMap<String, Vec<String>>,
     cancel: &CancellationToken,
 ) -> Result<LoadedMapping> {
+    let (loaded, destination_coverage) = inspect_mapping(store, router, mapping, cancel).await?;
+    for (destination_hash, coverage) in destination_coverage {
+        check_cancelled(cancel)?;
+        if let Some(index) = coverage.iter().position(|covered| !covered) {
+            return Err(CrabError::CorruptObject {
+                path: router.xorb_path(&destination_hash).to_string(),
+                reason: format!(
+                    "destination chunk at index {index} is not covered by its mapped source xorbs"
+                ),
+            });
+        }
+    }
+    Ok(loaded)
+}
+
+// Migration needs the same verified bodies and placements as publication,
+// but must identify incomplete old destinations before repairing the journal.
+// Only load_mapping can admit a mapping for shard publication.
+async fn inspect_mapping(
+    store: &Store,
+    router: &StoreLayout,
+    mapping: &HashMap<String, Vec<String>>,
+    cancel: &CancellationToken,
+) -> Result<(LoadedMapping, HashMap<MerkleHash, Vec<bool>>)> {
     let mut loaded = LoadedMapping::default();
     let mut loaded_chunk_entries = 0usize;
     let mut destination_coverage = HashMap::<MerkleHash, Vec<bool>>::new();
@@ -407,19 +449,7 @@ async fn load_mapping(
         }
     }
 
-    for (destination_hash, coverage) in destination_coverage {
-        check_cancelled(cancel)?;
-        if let Some(index) = coverage.iter().position(|covered| !covered) {
-            return Err(CrabError::CorruptObject {
-                path: router.xorb_path(&destination_hash).to_string(),
-                reason: format!(
-                    "destination chunk at index {index} is not covered by its mapped source xorbs"
-                ),
-            });
-        }
-    }
-
-    Ok(loaded)
+    Ok((loaded, destination_coverage))
 }
 
 // ---------------------------------------------------------------------------
@@ -1610,6 +1640,145 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.sources.len(), 2);
         assert_eq!(loaded.destination_infos.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_partial_page_resume_preserves_unrelated_completed_mapping() {
+        use crate::optimize::xorbs::executor::{ExecutorConfig, execute};
+        use crate::optimize::xorbs::profile::Profile;
+        use crab_xet::xorb::format::Chunk;
+
+        for prior_state in ["partial", "already-resumed", "complete"] {
+            let store = Store::new(Arc::new(InMemory::new()));
+            let router = StoreLayout::new(store.clone(), "org/legacy-resume".to_owned());
+            let a = Chunk::new(Bytes::from(vec![21_u8; 1024]));
+            let shared = Chunk::new(Bytes::from(vec![22_u8; 1024]));
+            let b = Chunk::new(Bytes::from(vec![23_u8; 1024]));
+            let c = Chunk::new(Bytes::from(vec![24_u8; 1024]));
+            let d = Chunk::new(Bytes::from(vec![25_u8; 1024]));
+            let sources = [
+                put_xorb(&store, &router, &[a.clone(), shared.clone()]).await,
+                put_xorb(&store, &router, &[shared.clone(), b.clone()]).await,
+                put_xorb(&store, &router, &[c.clone(), d.clone()]).await,
+            ];
+            let shared_destination = put_xorb(&store, &router, &[a, shared, b]).await;
+            let unrelated_destination = put_xorb(&store, &router, &[d, c]).await;
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("journal.db");
+            let profile = Profile::code();
+            let unrelated_mapping =
+                serde_json::to_string(&[unrelated_destination.hash.hex()]).unwrap();
+            {
+                let journal = OptimizeXorbsJournal::open(&path).unwrap();
+                journal
+                    .start_run("legacy-resume", &profile.to_json())
+                    .unwrap();
+                for source in &sources {
+                    journal
+                        .insert_source("legacy-resume", &source.hash.hex())
+                        .unwrap();
+                }
+                // The released writer committed these rows individually. Its last
+                // page can be partial even though the shared body is fully uploaded.
+                journal
+                    .update_source_status(
+                        "legacy-resume",
+                        &sources[0].hash.hex(),
+                        SourceStatus::Done,
+                        Some(&serde_json::to_string(&[shared_destination.hash.hex()]).unwrap()),
+                    )
+                    .unwrap();
+                journal
+                    .update_source_status(
+                        "legacy-resume",
+                        &sources[2].hash.hex(),
+                        SourceStatus::Done,
+                        Some(&unrelated_mapping),
+                    )
+                    .unwrap();
+            }
+            {
+                let connection = rusqlite::Connection::open(&path).unwrap();
+                connection
+                    .execute(
+                        "UPDATE runs SET schema_ver = 1 WHERE run_id = 'legacy-resume'",
+                        [],
+                    )
+                    .unwrap();
+            }
+            let journal = OptimizeXorbsJournal::open(&path).unwrap();
+            let cancel = CancellationToken::new();
+            if prior_state == "already-resumed" {
+                execute(
+                    &journal,
+                    "legacy-resume",
+                    &profile,
+                    &ExecutorConfig::default(),
+                    &cancel,
+                    Some(&store),
+                    Some(&router),
+                    None,
+                )
+                .await
+                .unwrap();
+            } else if prior_state == "complete" {
+                journal
+                    .update_source_status(
+                        "legacy-resume",
+                        &sources[1].hash.hex(),
+                        SourceStatus::Done,
+                        Some(&serde_json::to_string(&[shared_destination.hash.hex()]).unwrap()),
+                    )
+                    .unwrap();
+            }
+            let run = journal.active_run().unwrap().unwrap();
+            prepare_resume(&journal, &run, &store, &router, &cancel)
+                .await
+                .unwrap();
+            drop(journal);
+            let journal = OptimizeXorbsJournal::open(&path).unwrap();
+            let run = journal.active_run().unwrap().unwrap();
+            assert_eq!(
+                run.schema_ver,
+                crate::optimize::xorbs::journal::SCHEMA_VERSION
+            );
+            // Reopening after migration must not replay already repaired work.
+            prepare_resume(&journal, &run, &store, &router, &cancel)
+                .await
+                .unwrap();
+            execute(
+                &journal,
+                "legacy-resume",
+                &profile,
+                &ExecutorConfig::default(),
+                &cancel,
+                Some(&store),
+                Some(&router),
+                None,
+            )
+            .await
+            .unwrap();
+            let (mapping, _, _) = build_mapping(&journal, "legacy-resume").unwrap();
+            let loaded = load_mapping(&store, &router, &mapping, &cancel)
+                .await
+                .unwrap();
+            assert_eq!(
+                mapping[&sources[2].hash.hex()],
+                vec![unrelated_destination.hash.hex()]
+            );
+            for source in sources {
+                let original = XorbParser::parse(Bytes::from(source.bytes)).unwrap();
+                for (index, chunk) in loaded.sources[&source.hash].chunks.iter().enumerate() {
+                    let target = loaded.sources[&source.hash].refs[&chunk.hash];
+                    let (destination, _) =
+                        load_xorb(&store, &router, target.xorb_hash).await.unwrap();
+                    assert_eq!(
+                        destination.get_chunk(target.chunk_index).unwrap().data,
+                        original.get_chunk(index as u32).unwrap().data
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

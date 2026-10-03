@@ -221,6 +221,67 @@ qualify 100 GiB performance, real process-kill/concurrent-maintenance/GC, or
 recovery of journals with partial pages produced by an older version. Those
 gates, final-head CI, and the full product/provider matrix remain open.
 
+## October 3 bounded legacy journal recovery
+
+Atomic page completion alone cannot repair a partial page written by released
+`v1.2.4`. The baseline real-CLI diagnostic reproduced strict reconciliation
+failure with one done source and remaining pending sources pointing into a
+shared destination. Its 32 checks prove byte-identical root preservation, not
+successful recovery. A separate actual-executor/reopened-WAL regression also
+failed before the migration at uncovered destination chunk index 2.
+
+The candidate adds a one-time local-journal migration under the existing
+exclusive journal lock and GC writer fences. Version 2 requires atomic source
+page completion. For version 1, canonical inspection verifies body, payload,
+chunk identity, size and source placements, then proves uncovered destination
+chunks belong to verified originals recorded in that same run. Only the
+connected component of affected completed mappings is requeued; unrelated
+completed work is preserved. A single SQLite transaction upgrades the version
+and resets selected rows. The strict shared loader remains the only publication
+admission for both v1 manifests and v2 checkpoints. Normal version-2 resume
+does not add migration body reads. Remote formats and dependencies are unchanged.
+
+All three private locked `make install` stages completed. The frozen candidate
+CLI SHA-256 is
+`b9f2dacd4638df28d20bbca219824c97e453bc56ebd5342eefa8fa98d7aab1b5`.
+Its four-file source overlay over `1147e51abe4` has SHA-256
+`f2c59632d706e4a2ad274528f889c4ff24077e496af53c91710f1971c790c398`.
+Fresh prefixes on the same RustFS 1.0.0 GA endpoint give these bounded results:
+
+| Fixture state | Result |
+| --- | --- |
+| Partial page | 54 checks pass; resumed version-2 run completes |
+| All sources done after a failed baseline resume | 56 checks pass; stranded mappings are repaired |
+| Valid original bodies without same-run source ownership | 33 rejection checks pass; `CRAB-E0020`, exact root and logical journal unchanged |
+
+Both positive cases include checkpoint/all-ref preservation, independent cold
+byte-identical hydration, full native Git and remote Crab fsck, retained
+checkpoint verification, historical restore and republishing. The negative
+report deliberately records an expected terminal failure, not a passing release
+qualification. These are manufactured journal snapshots using actual
+old-writer destination bodies, not actual process kills. The two 12 MiB files
+and two versions do not replace the zero-error 100 GiB gate.
+
+Partial, already-resumed and negative report SHA-256 values are respectively
+`47cec0c1f979b5608d0c5273b80d63b2d72207f0be3f93acb584d20a9a7315bc`,
+`30821601df5a0ccaf3c5633d2d16aae9d145316ccbfaf2d6bcd10cf1aeacdb4c`
+and `92720da07aaacf9eef94fe3e4448bef4597dd5f7ad60cf64365be7703cd00470`.
+Recovery-driver SHA-256 is
+`60627de40c5faf9b8637ece090fea65444f449a20739e0ce94b4b07dfc1a462f`.
+Sources, logs, snapshots, original failed runs and all remote objects are retained.
+All 70 focused Xorb tests pass: selective recovery through the actual executor,
+unrelated-work preservation, connected-component requeue, typed SQL second-row
+rollback/reopen, foreign/corrupt-body rejection, cancellation/unknown-version
+rejection and the zero-extra-read version-2 fast path. Test-binary SHA-256 is
+`aa056d741fcc99c4bdd584399f4824bf77f5fb00653a1f3d1f7b02e3297c2585`.
+The first candidate run had 69 passes and one new fixture setup failure: immutable
+`put` refused its attempted corrupt-body overwrite before migration was called.
+Only that new fixture changed to the existing explicit overwrite API; production
+code and assertions are unchanged. The CLI overlay above predates this test-only
+correction. Workspace formatting and diff checks pass; no dependency or gate changed.
+Actual process-kill, archived-class, downgrade and concurrent-maintenance/GC
+proof, 100 GiB Xet, final-head CI and the complete parity gates remain open.
+
 ## October 2 current-runtime replay: correctness passed, performance failed
 
 Run `k8s-5000-head0747011-r4` completed from 18:06:10 to 20:21:20 UTC.
