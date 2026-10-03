@@ -322,7 +322,12 @@ async fn run_inner(
         config.force_full_graph,
     )
     .await?;
-    let visibility_delta = prepare_visibility_delta(&common_git_dir, &edits, &fast_forward_refs)?;
+    let visibility_delta = prepare_visibility_delta(
+        &common_git_dir,
+        &edits,
+        &fast_forward_refs,
+        prepared.visibility_objects.as_deref(),
+    )?;
     tracing::debug!(
         git_packs = prepared.packs.len(),
         pointers = prepared.pointers.len(),
@@ -666,6 +671,7 @@ fn prepare_visibility_delta(
     git_dir: &Path,
     edits: &[crab_metadata::capsule_protocol::CapsuleRefEdit],
     fast_forward_refs: &BTreeSet<String>,
+    fast_forward_pack_objects: Option<&[gix_hash::ObjectId]>,
 ) -> Result<Option<crab_metadata::capsule_protocol::CapsuleVisibilityDelta>> {
     let maximum = usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
         .map_err(|_| CrabError::Internal("Git visibility limit does not fit usize".to_owned()))?;
@@ -674,7 +680,22 @@ fn prepare_visibility_delta(
         let Some(new_oid) = edit.new_oid() else {
             continue;
         };
-        let evidence = if let Some(old_oid) = edit.expected_old() {
+        let evidence = if let Some(pack_objects) = fast_forward_pack_objects
+            && edits.len() == 1
+            && fast_forward_refs.contains(edit.ref_name())
+            && let Some(old_oid) = edit.expected_old()
+            && let Ok(new_object_id) = gix_hash::ObjectId::from_hex(new_oid.as_bytes())
+            && pack_objects.contains(&new_object_id)
+        {
+            // The pack excludes only this ref's old tip, so its members are the
+            // complete visibility delta; another excluded tip could hide new objects.
+            crab_metadata::git_visibility::GitVisibilityEdit::from_delta_objects(
+                Some(old_oid.to_owned()),
+                new_oid.to_owned(),
+                pack_objects.iter().map(ToString::to_string).collect(),
+                Vec::new(),
+            )
+        } else if let Some(old_oid) = edit.expected_old() {
             let added = super::push::enumerate_visibility_difference(
                 git_dir,
                 new_oid,
@@ -857,6 +878,18 @@ async fn prepare_git_packs(
     } else {
         Some(locally_available_remote_tips(git_dir, remote_refs)?)
     };
+    let pack_is_exact_visibility_delta = if !force_full_graph
+        && let [update] = updates
+        && !update.force
+        && let Some(old_sha) = update.old_sha.as_ref()
+        && remote_refs.get(&update.ref_name) == Some(old_sha)
+    {
+        excluded_tips
+            .as_ref()
+            .is_some_and(|tips| tips.contains(old_sha) && tips.iter().all(|tip| tip == old_sha))
+    } else {
+        false
+    };
     let exclusions = excluded_tips.as_deref().map(RemotePackExclusions::RefTips);
     let generated = generate_push_pack_files_with_exclusions(
         updates,
@@ -868,25 +901,37 @@ async fn prepare_git_packs(
         },
     )
     .await?;
-    prepare_generated_git_packs(git_dir, generated, max_input_size).await
+    prepare_generated_git_packs(
+        git_dir,
+        generated,
+        max_input_size,
+        pack_is_exact_visibility_delta,
+    )
+    .await
 }
 
 #[derive(Default)]
 struct PreparedGitPush {
     packs: Vec<crab_metadata::capsule_protocol::CapsuleGitPack>,
     pointers: Vec<crab_types::pointer::Pointer>,
+    /// Exact new-ref object set only when pack exclusions equal its prior tip.
+    visibility_objects: Option<Vec<gix_hash::ObjectId>>,
 }
 
 async fn prepare_generated_git_packs(
     git_dir: &Path,
     generated: Vec<crate::git::pack::PackedFileData>,
     max_input_size: u64,
+    retain_visibility_objects: bool,
 ) -> Result<PreparedGitPush> {
     let evidence_dir = tempfile::Builder::new()
         .prefix(".crab-v2-push-evidence-")
         .tempdir_in(git_dir.join("objects"))?;
     let mut packs = Vec::with_capacity(generated.len());
     let mut pointers = Vec::new();
+    let mut visibility_objects = retain_visibility_objects.then(Vec::new);
+    let max_visibility_objects =
+        crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS as usize;
     for generated in generated {
         if generated.object_count == 0 {
             continue;
@@ -919,6 +964,14 @@ async fn prepare_generated_git_packs(
             .map(|location| location.map(|location| location.oid))
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(crab_git::pack::PackError::from)?;
+        if visibility_objects.as_ref().is_some_and(|objects| {
+            objects.len().saturating_add(object_ids.len()) > max_visibility_objects
+        }) {
+            visibility_objects = None;
+        }
+        if let Some(objects) = &mut visibility_objects {
+            objects.extend(object_ids.iter().copied());
+        }
         let kinds = crab_git::object_kinds_from_git_dir(git_dir, &object_ids)?;
         pointers.extend(collect_pointers(git_dir, &object_ids, &kinds)?);
         let ordered_kinds = object_ids
@@ -952,7 +1005,11 @@ async fn prepare_generated_git_packs(
     }
     pointers.sort_by_key(|pointer| (pointer.file_hash, pointer.size));
     pointers.dedup_by_key(|pointer| (pointer.file_hash, pointer.size));
-    Ok(PreparedGitPush { packs, pointers })
+    Ok(PreparedGitPush {
+        packs,
+        pointers,
+        visibility_objects,
+    })
 }
 
 fn locally_available_remote_tips(
@@ -1101,7 +1158,7 @@ mod tests {
         let root = crab_write::capsule_protocol::open_root(layout)
             .await
             .expect("open root");
-        let visibility = prepare_visibility_delta(git_dir, &edits, &BTreeSet::new())
+        let visibility = prepare_visibility_delta(git_dir, &edits, &BTreeSet::new(), None)
             .expect("prepare Git visibility");
         let transaction =
             crab_metadata::capsule_protocol::CapsuleTransaction::new(root.record().digest(), edits)
@@ -1393,7 +1450,7 @@ mod tests {
         )];
 
         let visibility =
-            prepare_visibility_delta(&source.path().join(".git"), &edits, &BTreeSet::new())
+            prepare_visibility_delta(&source.path().join(".git"), &edits, &BTreeSet::new(), None)
                 .expect("prepare Git visibility")
                 .expect("new ref has visibility evidence");
         let evidence = visibility
@@ -1406,8 +1463,8 @@ mod tests {
         assert!(evidence.added.binary_search(&tip).is_ok());
     }
 
-    #[test]
-    fn fast_forward_visibility_reuses_proven_ancestry_for_empty_removals() {
+    #[tokio::test]
+    async fn fast_forward_visibility_reuses_proven_ancestry_for_empty_removals() {
         let source = tempfile::tempdir().expect("source repository");
         git(source.path(), &["init", "--initial-branch=main"]);
         git(source.path(), &["config", "user.name", "Crab Test"]);
@@ -1426,9 +1483,24 @@ mod tests {
             None,
         )];
         let fast_forward_refs = BTreeSet::from([ref_name.to_owned()]);
-        let visibility = prepare_visibility_delta(&git_dir, &edits, &fast_forward_refs)
-            .expect("prepare fast-forward visibility")
-            .expect("existing ref has visibility evidence");
+        let remote_refs = BTreeMap::from([(ref_name.to_owned(), old_oid.clone())]);
+        let updates = [RefUpdate {
+            ref_name: ref_name.to_owned(),
+            old_sha: Some(old_oid.clone()),
+            new_sha: new_oid.clone(),
+            force: false,
+        }];
+        let prepared = prepare_git_packs(&git_dir, &remote_refs, &updates, 16 * 1024 * 1024, false)
+            .await
+            .expect("prepare incremental Git pack");
+        let pack_objects = prepared
+            .visibility_objects
+            .as_deref()
+            .expect("single-ref pack is an exact visibility delta");
+        let visibility =
+            prepare_visibility_delta(&git_dir, &edits, &fast_forward_refs, Some(pack_objects))
+                .expect("prepare fast-forward visibility")
+                .expect("existing ref has visibility evidence");
         let evidence = visibility
             .edits()
             .get(ref_name)
@@ -1451,8 +1523,71 @@ mod tests {
             evidence.added.iter().cloned().collect::<BTreeSet<_>>(),
             expected_added
         );
+        assert_eq!(
+            pack_objects
+                .iter()
+                .map(ToString::to_string)
+                .collect::<BTreeSet<_>>(),
+            expected_added
+        );
         assert!(evidence.removed.is_empty());
         evidence.validate().expect("visibility edit remains valid");
+    }
+
+    #[tokio::test]
+    async fn sibling_ref_objects_are_not_used_as_a_fast_forward_visibility_delta() {
+        let source = tempfile::tempdir().expect("source repository");
+        git(source.path(), &["init", "--initial-branch=main"]);
+        git(source.path(), &["config", "user.name", "Crab Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "crab@example.invalid"],
+        );
+        let old_oid = commit(source.path(), "root");
+        git(source.path(), &["branch", "side"]);
+        git(source.path(), &["checkout", "side"]);
+        git(source.path(), &["commit", "--allow-empty", "-m", "side"]);
+        let side_oid = git(source.path(), &["rev-parse", "HEAD"]);
+        git(source.path(), &["checkout", "main"]);
+        commit(source.path(), "main");
+        git(source.path(), &["merge", "--no-ff", "--no-edit", "side"]);
+        let new_oid = git(source.path(), &["rev-parse", "HEAD"]);
+        let git_dir = source.path().join(".git");
+        let ref_name = "refs/heads/main";
+        let remote_refs = BTreeMap::from([
+            (ref_name.to_owned(), old_oid.clone()),
+            ("refs/heads/side".to_owned(), side_oid.clone()),
+        ]);
+        let updates = [RefUpdate {
+            ref_name: ref_name.to_owned(),
+            old_sha: Some(old_oid.clone()),
+            new_sha: new_oid.clone(),
+            force: false,
+        }];
+
+        let prepared = prepare_git_packs(&git_dir, &remote_refs, &updates, 16 * 1024 * 1024, false)
+            .await
+            .expect("prepare incremental Git pack");
+        assert!(prepared.visibility_objects.is_none());
+
+        let edits = [crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+            ref_name,
+            Some(old_oid),
+            Some(new_oid.clone()),
+            None,
+        )];
+        let fast_forward_refs = BTreeSet::from([ref_name.to_owned()]);
+        let visibility = prepare_visibility_delta(&git_dir, &edits, &fast_forward_refs, None)
+            .expect("prepare full fast-forward visibility")
+            .expect("existing ref has visibility evidence");
+        let evidence = visibility
+            .edits()
+            .get(ref_name)
+            .expect("main visibility evidence");
+
+        assert!(evidence.added.binary_search(&side_oid).is_ok());
+        assert_eq!(evidence.new_oid, new_oid);
+        assert!(evidence.removed.is_empty());
     }
 
     #[test]
@@ -1474,7 +1609,7 @@ mod tests {
             Some(new_oid.clone()),
             None,
         )];
-        let visibility = prepare_visibility_delta(&git_dir, &edits, &BTreeSet::new())
+        let visibility = prepare_visibility_delta(&git_dir, &edits, &BTreeSet::new(), None)
             .expect("prepare non-fast-forward visibility")
             .expect("existing ref has visibility evidence");
         let evidence = visibility
