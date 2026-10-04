@@ -229,6 +229,14 @@ index bytes. Larger frontiers retain bounded suffix and range reads; stable
 checkpoint pack bodies stay cold in either case. This is a read strategy, not
 a new format or an authorization shortcut.
 
+Upload-pack graph selection defers content reads for non-root blob leaves only
+after visibility admission and pinned locator proof of their resolved kind.
+Size-independent filters already admit these leaves without inspecting bytes;
+they still consume the operation's logical-object budget. Explicit blob roots,
+missing kind proof, and size-dependent filters retain bounded reads. Deferral
+changes selection work only: packed-entry verification, response limits, and
+native Git installation checks remain mandatory.
+
 `CapsuleRepositoryView::git_snapshot` captures the same canonical pack inventory
 and Git identity used by both capsule Git readers. It performs no storage I/O
 and does not publish a v1 manifest. Its synthetic ETag covers the root and every
