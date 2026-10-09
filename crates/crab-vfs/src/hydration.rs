@@ -1742,7 +1742,8 @@ mod tests {
                 service.read_range(&stored.pointer, 0, 1).await.unwrap(),
                 content.slice(..1)
             );
-            assert_eq!(stored.xorb_body_requests(), 1);
+            // Footer and metadata plan reads, then one complete xorb body.
+            assert_eq!(stored.xorb_body_requests(), 3);
             stored.origin.block_body_reads_for(&stored.xorb_path);
 
             for (offset, size) in [
@@ -1758,7 +1759,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(bytes, content.slice(offset as usize..end as usize));
             }
-            assert_eq!(stored.xorb_body_requests(), 1);
+            assert_eq!(stored.xorb_body_requests(), 3);
             assert_eq!(std::fs::read(&unavailable).unwrap(), b"preserve me");
         }
     }

@@ -176,14 +176,16 @@ async fn lookup_committed_record(
     anchor: Option<&CommittedShardAnchor>,
 ) -> Result<Option<CommittedFileRecord>> {
     let prefix = encode_committed_content_prefix(&file_hash);
-    let mut rows =
-        reader
-            .scan_prefix(&prefix, ..)
-            .await
-            .map_err(|source| MetadataError::SlateDbRead {
-                db: DB_LABEL.to_owned(),
-                source,
-            })?;
+    // One session serves a whole batch, and nearby hashes share data blocks.
+    // SlateDB's default scan leaves blocks uncached, refetching them per file.
+    let options = slatedb::config::ScanOptions::default().with_cache_blocks(true);
+    let mut rows = reader
+        .scan_prefix_with_options(&prefix, .., &options)
+        .await
+        .map_err(|source| MetadataError::SlateDbRead {
+            db: DB_LABEL.to_owned(),
+            source,
+        })?;
     let mut selected = None;
     while let Some(row) = rows
         .next()

@@ -3935,21 +3935,79 @@ mod tests {
             !cache.contains(&CacheKey::Xorb(hash)).await,
             "hydrate reads must not write a second full copy before output"
         );
+        // The bounded plan (HEAD, footer, metadata) decides range versus
+        // complete reads; full coverage then takes one complete GET.
         assert_eq!(
             counting_origin.counts(),
             ObjectReadCounts {
-                heads: 0,
-                ranges: 0,
+                heads: 1,
+                ranges: 2,
                 full: 1,
             }
         );
         assert_eq!(
-            counting_origin.requests(),
-            vec![crab_storage::test_support::ObjectReadRequest {
+            counting_origin.requests().last(),
+            Some(&crab_storage::test_support::ObjectReadRequest {
                 location: path.to_string(),
                 kind: ObjectReadKind::Full,
-            }]
+            })
         );
+    }
+
+    #[tokio::test]
+    async fn noninstalling_small_read_fetches_ranges_and_reuses_plan() {
+        let payloads = [
+            Bytes::from(vec![0x11; 32 * 1024]),
+            Bytes::from(vec![0x22; 32 * 1024]),
+            Bytes::from(vec![0x33; 32 * 1024]),
+            Bytes::from(vec![0x44; 32 * 1024]),
+        ];
+        let (xorb, hash) = test_raw_xorb(&payloads);
+        let path = content_path("xorbs", &hash.hex());
+        let inner = Arc::new(InMemory::new());
+        inner
+            .put(&path, PutPayload::from_bytes(xorb))
+            .await
+            .unwrap();
+        let counting_origin = Arc::new(CountingObjectStore::new(inner));
+        let origin = Store::new(Arc::clone(&counting_origin) as Arc<dyn ObjectStore>);
+        let tempdir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
+        let store =
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
+                .unwrap();
+
+        let (data, _) = store
+            .get_xorb_chunks_without_install(&path, &hash, &[(1, 2)])
+            .await
+            .unwrap();
+        assert_eq!(data, payloads[1]);
+        assert_eq!(
+            counting_origin.counts(),
+            ObjectReadCounts {
+                heads: 1,
+                ranges: 3,
+                full: 0,
+            },
+            "a small file must not download its whole xorb"
+        );
+
+        counting_origin.reset();
+        let (data, _) = store
+            .get_xorb_chunks_without_install(&path, &hash, &[(2, 3)])
+            .await
+            .unwrap();
+        assert_eq!(data, payloads[2]);
+        assert_eq!(
+            counting_origin.counts(),
+            ObjectReadCounts {
+                heads: 0,
+                ranges: 1,
+                full: 0,
+            },
+            "a second file in the same xorb reuses the verified plan"
+        );
+        assert!(!cache.contains(&CacheKey::Xorb(hash)).await);
     }
 
     #[cfg(feature = "remote-client")]
@@ -4074,24 +4132,20 @@ mod tests {
                 );
                 assert!(error.source().unwrap().is::<CacheError>());
                 assert!(!cache.contains(&CacheKey::Xorb(hash)).await);
-                let expected = if mode == "noninstalling" {
-                    ObjectReadCounts {
-                        heads: 0,
-                        ranges: 0,
-                        full: 1,
-                    }
-                } else {
-                    ObjectReadCounts {
-                        heads: 1,
-                        ranges: if matches!(corruption, "footer" | "truncated") {
-                            1
-                        } else if mode == "selective" && corruption == "payload" {
-                            3
-                        } else {
-                            2
-                        },
-                        full: usize::from(mode == "full" && corruption == "payload"),
-                    }
+                // Install policy does not change the read plan: full coverage
+                // with or without install fetches the same bounded requests.
+                let expected = ObjectReadCounts {
+                    heads: 1,
+                    ranges: if matches!(corruption, "footer" | "truncated") {
+                        1
+                    } else if mode == "selective" && corruption == "payload" {
+                        3
+                    } else {
+                        2
+                    },
+                    full: usize::from(
+                        matches!(mode, "full" | "noninstalling") && corruption == "payload",
+                    ),
                 };
                 assert_eq!(
                     counting.counts(),
@@ -4175,12 +4229,7 @@ mod tests {
                 std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).unwrap();
                 assert!(result.unwrap(), "{mode}: repaired bytes/metadata");
                 let expected_reads = match mode {
-                    "noninstalling" => ObjectReadCounts {
-                        heads: 0,
-                        ranges: 0,
-                        full: 1,
-                    },
-                    "full" => ObjectReadCounts {
+                    "noninstalling" | "full" => ObjectReadCounts {
                         heads: 1,
                         ranges: 2,
                         full: 1,
@@ -4290,14 +4339,22 @@ mod tests {
             } else {
                 assert_eq!(result.unwrap().0, payload);
             }
-            assert_eq!(
-                counting.counts(),
+            // Origin is read through its bounded plan; a body shorter than a
+            // footer fails at the HEAD size check before any payload read.
+            let expected = if corrupt_origin {
                 ObjectReadCounts {
-                    heads: 0,
+                    heads: 1,
                     ranges: 0,
-                    full: 1
+                    full: 0,
                 }
-            );
+            } else {
+                ObjectReadCounts {
+                    heads: 1,
+                    ranges: 2,
+                    full: 1,
+                }
+            };
+            assert_eq!(counting.counts(), expected);
             assert!(!cache.contains(&CacheKey::Xorb(hash)).await);
         }
     }

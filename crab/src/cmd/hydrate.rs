@@ -597,8 +597,6 @@ pub struct HydrationRuntime {
     router: HydrateStoreLayout,
     /// Optional perf counters. When set, shard-hint hit/miss events are recorded.
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
-    /// Maximum number of files reconstructed concurrently in one batch.
-    file_concurrency: usize,
 }
 
 struct RestoreAvailability {
@@ -621,15 +619,12 @@ impl crab_read::XorbAvailability for RestoreAvailability {
     }
 }
 
-/// Tag for the hydrate-path concurrency controller. `'static` because
-/// `AdaptiveConcurrencyController` stores the tag for logging.
-const MAX_HYDRATE_FILE_CONCURRENCY: usize = 4;
+/// Files reconstructed concurrently in one batch. Xorb fetches stay bounded by
+/// the download controller and buffered bytes by the prefetch budget, so this
+/// only bounds per-file metadata work; small files are latency-bound.
+const HYDRATE_FILE_CONCURRENCY: usize = 32;
 const MAX_PREFETCH_CANDIDATES: usize = 1_000_000;
 const MAX_GIT_INVENTORY_BYTES: usize = 512 * 1024 * 1024;
-
-fn hydrate_file_concurrency(download_concurrency: usize) -> usize {
-    download_concurrency.clamp(1, MAX_HYDRATE_FILE_CONCURRENCY)
-}
 
 /// Storage-domain path router used by the hydrator Implementation.
 pub type HydrateStoreLayout = crab_storage::StoreLayout<crab_storage::Store>;
@@ -671,7 +666,6 @@ impl HydrationRuntime {
             store,
             router,
             metrics: None,
-            file_concurrency: hydrate_file_concurrency(config.hydrate.download_concurrency),
         })
     }
 
@@ -740,7 +734,7 @@ impl HydrationRuntime {
                         (path, result)
                     }
                 })
-                .buffer_unordered(self.file_concurrency);
+                .buffer_unordered(HYDRATE_FILE_CONCURRENCY);
             while let Some((path, result)) = results.next().await {
                 match result {
                     Ok(bytes) => {
@@ -1128,7 +1122,7 @@ impl Hydrator for HydrationRuntime {
                 let mut summary = HydrateSummary::default();
                 let mut remaining = items.iter();
                 let mut results = FuturesUnordered::new();
-                for (path, ptr) in remaining.by_ref().take(self.file_concurrency) {
+                for (path, ptr) in remaining.by_ref().take(HYDRATE_FILE_CONCURRENCY) {
                     results.push(self.hydrate_one(path, ptr, cancel, progress, &file_index_lookup));
                 }
 
@@ -4173,13 +4167,6 @@ mod tests {
             size,
             shard_hint: None,
         }
-    }
-
-    #[test]
-    fn hydrate_file_concurrency_tracks_download_bound_with_internal_cap() {
-        assert_eq!(hydrate_file_concurrency(0), 1);
-        assert_eq!(hydrate_file_concurrency(3), 3);
-        assert_eq!(hydrate_file_concurrency(32), MAX_HYDRATE_FILE_CONCURRENCY);
     }
 
     #[cfg(unix)]

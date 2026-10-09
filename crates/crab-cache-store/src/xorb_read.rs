@@ -2,6 +2,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use crab_cache::CacheError;
@@ -18,6 +19,7 @@ use crate::{CacheReadOutcome, CacheSource, CacheStoreError, CachingStore, Result
 const XORB_READ_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const XORB_READ_CACHE_MAX_ENTRIES: usize = 4096;
 const XORB_READ_LOCK_STRIPES: usize = 256;
+const XORB_PLAN_CACHE_MAX_ENTRIES: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum XorbSource {
@@ -58,7 +60,7 @@ impl CachingStore {
             match self.xorb_read_plan(path, xorb_hash, source).await {
                 Ok(Some(plan)) => {
                     self.observe_xorb_source(source, CacheReadOutcome::Hit, 0);
-                    return Ok(plan.chunks);
+                    return Ok(plan.chunks.clone());
                 }
                 Ok(None) => self.observe_xorb_source(source, CacheReadOutcome::Miss, 0),
                 Err(error) => {
@@ -89,11 +91,18 @@ impl CachingStore {
             self.observe_cache_read(CacheSource::Memory, CacheReadOutcome::Hit, result.0.len());
             return Ok(result);
         }
-        let _fill_guard = self.xorb_reads.lock(xorb_hash).await;
-        if let Some(result) = key.as_ref().and_then(|key| self.xorb_reads.get(key)) {
-            self.observe_cache_read(CacheSource::Memory, CacheReadOutcome::Hit, result.0.len());
-            return Ok(result);
-        }
+        // The fill lock deduplicates full-xorb installs. Reads that never install
+        // run concurrently: files sharing one xorb must not queue behind each other.
+        let _fill_guard = if install_full_xorb {
+            let guard = self.xorb_reads.lock(xorb_hash).await;
+            if let Some(result) = key.as_ref().and_then(|key| self.xorb_reads.get(key)) {
+                self.observe_cache_read(CacheSource::Memory, CacheReadOutcome::Hit, result.0.len());
+                return Ok(result);
+            }
+            Some(guard)
+        } else {
+            None
+        };
         if key.is_some() {
             self.observe_cache_read(CacheSource::Memory, CacheReadOutcome::Miss, 0);
         }
@@ -183,11 +192,9 @@ impl CachingStore {
         source: XorbSource,
         install_full_xorb: bool,
     ) -> Result<Option<(Bytes, Vec<u32>)>> {
-        if !install_full_xorb {
-            return self
-                .complete_xorb_ranges(path, xorb_hash, ranges, source, false)
-                .await;
-        }
+        // Install policy only decides whether a complete body is kept. Small
+        // requests read their ranges either way: a whole-xorb GET per small
+        // file costs one full xorb download per file.
         let Some(plan) = self.xorb_read_plan(path, xorb_hash, source).await? else {
             return Ok(None);
         };
@@ -196,7 +203,7 @@ impl CachingStore {
             || requested_bytes.saturating_mul(2) >= plan.payload_len
         {
             return self
-                .complete_xorb_ranges(path, xorb_hash, ranges, source, true)
+                .complete_xorb_ranges(path, xorb_hash, ranges, source, install_full_xorb)
                 .await;
         }
 
@@ -290,16 +297,26 @@ impl CachingStore {
         path: &Path,
         xorb_hash: &MerkleHash,
         source: XorbSource,
-    ) -> Result<Option<XorbReadPlan>> {
+    ) -> Result<Option<Arc<XorbReadPlan>>> {
+        // Xorbs are content-addressed and the plan is hash-verified below, so an
+        // origin plan stays valid for the process. Each small file would otherwise
+        // repeat the HEAD, footer, and metadata reads of a shared xorb.
+        if source == XorbSource::Origin
+            && let Some(plan) = self.xorb_reads.plan(xorb_hash)
+        {
+            return Ok(Some(plan));
+        }
         let object_len = match source {
             XorbSource::Local => {
                 return Ok(self
                     .local_cache
                     .get_xorb_metadata_if_present(xorb_hash)
                     .await?
-                    .map(|(chunks, payload_len)| XorbReadPlan {
-                        chunks,
-                        payload_len,
+                    .map(|(chunks, payload_len)| {
+                        Arc::new(XorbReadPlan {
+                            chunks,
+                            payload_len,
+                        })
                     }));
             }
             XorbSource::Service => {
@@ -342,10 +359,14 @@ impl CachingStore {
             }
             .into());
         }
-        Ok(Some(XorbReadPlan {
+        let plan = Arc::new(XorbReadPlan {
             chunks,
             payload_len: region.offset as u64,
-        }))
+        });
+        if source == XorbSource::Origin {
+            self.xorb_reads.insert_plan(*xorb_hash, Arc::clone(&plan));
+        }
+        Ok(Some(plan))
     }
 
     async fn xorb_range(
@@ -437,8 +458,15 @@ impl XorbReadCache {
     }
 }
 
+#[derive(Default)]
+struct XorbPlanCache {
+    entries: HashMap<MerkleHash, Arc<XorbReadPlan>>,
+    insertion_order: VecDeque<MerkleHash>,
+}
+
 pub(super) struct XorbReadState {
     cache: std::sync::Mutex<XorbReadCache>,
+    plans: std::sync::Mutex<XorbPlanCache>,
     fill_locks: Box<[tokio::sync::Mutex<()>]>,
 }
 
@@ -450,10 +478,30 @@ impl XorbReadState {
                 insertion_order: VecDeque::new(),
                 charged_bytes: 0,
             }),
+            plans: std::sync::Mutex::new(XorbPlanCache::default()),
             fill_locks: std::iter::repeat_with(|| tokio::sync::Mutex::new(()))
                 .take(XORB_READ_LOCK_STRIPES)
                 .collect(),
         }
+    }
+
+    fn plan(&self, xorb_hash: &MerkleHash) -> Option<Arc<XorbReadPlan>> {
+        self.plans_guard().entries.get(xorb_hash).cloned()
+    }
+
+    fn insert_plan(&self, xorb_hash: MerkleHash, plan: Arc<XorbReadPlan>) {
+        let mut plans = self.plans_guard();
+        if plans.entries.contains_key(&xorb_hash) {
+            return;
+        }
+        while plans.entries.len() >= XORB_PLAN_CACHE_MAX_ENTRIES {
+            let Some(oldest) = plans.insertion_order.pop_front() else {
+                break;
+            };
+            plans.entries.remove(&oldest);
+        }
+        plans.insertion_order.push_back(xorb_hash);
+        plans.entries.insert(xorb_hash, plan);
     }
 
     fn get(&self, key: &XorbReadKey) -> Option<(Bytes, Vec<u32>)> {
@@ -527,6 +575,13 @@ impl XorbReadState {
 
     fn cache_guard(&self) -> std::sync::MutexGuard<'_, XorbReadCache> {
         match self.cache.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn plans_guard(&self) -> std::sync::MutexGuard<'_, XorbPlanCache> {
+        match self.plans.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
