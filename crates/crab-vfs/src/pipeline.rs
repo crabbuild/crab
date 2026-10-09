@@ -854,7 +854,8 @@ mod tests {
             service.read_range(&stored.pointer, 0, 1024).await.unwrap(),
             content
         );
-        assert_eq!(stored.xorb_body_requests(), 1);
+        // Footer and metadata plan reads, then one complete xorb body.
+        assert_eq!(stored.xorb_body_requests(), 3);
         cancel.cancel();
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())
             .await
