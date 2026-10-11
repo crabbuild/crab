@@ -7,9 +7,9 @@ use bstr::ByteSlice;
 use crab_metadata::git_object_locator::{GitObjectMetadata, GitObjectOrdinal};
 use crab_metadata::git_visibility::GitVisibilityIndex;
 use crab_remote_git::{
-    CorruptionStage, Error as RemoteGitError, GitCatalogVisibilityIndex, ObjectLimits,
-    OperationContext, OperationKind, OperationLimits, RemoteGitObject, RemoteGitRepository,
-    RepositoryOptions, RepositoryRef, RepositoryStateError, Revision,
+    BudgetDimension, CorruptionStage, Error as RemoteGitError, GitCatalogVisibilityIndex,
+    ObjectLimits, OperationContext, OperationKind, OperationLimits, RemoteGitObject,
+    RemoteGitRepository, RepositoryOptions, RepositoryRef, RepositoryStateError, Revision,
 };
 use gix_hash::ObjectId;
 use tokio_util::sync::CancellationToken;
@@ -1158,23 +1158,65 @@ async fn plan_with_operation(
             continue;
         }
 
-        let batch_oids =
+        let mut batch_oids =
             admit_batch_source(operation, visibility, visible_ref_names, &batch).await?;
 
         let needs_blob_metadata = filter_requires_blob_size(&request.filter);
+        let mut deferred_blobs = HashSet::new();
+        if !needs_blob_metadata {
+            let known_blobs = batch
+                .iter()
+                .filter(|item| {
+                    item.known_kind == Some(gix_object::Kind::Blob) && !roots.contains(&item.oid)
+                })
+                .map(|item| item.oid)
+                .collect::<Vec<_>>();
+            let metadata = operation.pinned_object_metadata(&known_blobs).await?;
+            if metadata.len() != known_blobs.len() {
+                return Err(RemoteGitError::InternalInvariant {
+                    invariant: "pinned blob metadata changed request cardinality",
+                });
+            }
+            // Authorized, proven blobs are leaves; size-independent filters already admitted
+            // them above. Reconstructing their bodies here duplicates the response producer's
+            // work. Missing proof and explicit roots retain bounded content reads.
+            deferred_blobs.extend(known_blobs.into_iter().zip(metadata).filter_map(
+                |(oid, metadata)| {
+                    (metadata.kind.map(gix_kind) == Some(gix_object::Kind::Blob)).then_some(oid)
+                },
+            ));
+            let deferred_count = batch
+                .iter()
+                .filter(|item| deferred_blobs.contains(&item.oid))
+                .count();
+            operation
+                .charge(BudgetDimension::LogicalObjects, deferred_count as u64)
+                .await?;
+            batch_oids.retain(|oid| !deferred_blobs.contains(oid));
+        }
         let batch_objects = if needs_blob_metadata {
             Vec::new()
         } else {
             let objects = operation.read_objects(&batch_oids).await?;
-            if objects.len() != batch.len() {
+            if objects.len() != batch_oids.len() {
                 return Err(RemoteGitError::InternalInvariant {
                     invariant: "batched upload-pack reads changed request order or cardinality",
                 });
             }
             objects
         };
+        let mut batch_objects = batch_objects.into_iter();
 
-        for (index, item) in batch.into_iter().enumerate() {
+        for item in batch {
+            if deferred_blobs.contains(&item.oid) {
+                if !excluded_commits.contains(&item.oid)
+                    && !common_haves.contains(&item.oid)
+                    && selected.insert(item.oid)
+                {
+                    object_ids.push(item.oid);
+                }
+                continue;
+            }
             let object = if needs_blob_metadata
                 && item.known_kind == Some(gix_object::Kind::Blob)
                 && !roots.contains(&item.oid)
@@ -1194,8 +1236,7 @@ async fn plan_with_operation(
                 operation.read_object(item.oid).await?
             } else {
                 batch_objects
-                    .get(index)
-                    .cloned()
+                    .next()
                     .ok_or(RemoteGitError::InternalInvariant {
                         invariant: "batched upload-pack read is missing an object",
                     })?

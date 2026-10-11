@@ -5325,6 +5325,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capsule_shallow_planning_does_not_inflate_proven_blob_leaves() {
+        let (source, store, router, _, _) = capsule_history_fixture().await;
+        let content = vec![b'x'; 2 * 1024 * 1024];
+        std::fs::write(source.path().join("large.txt"), &content).expect("write large blob");
+        run_git(source.path(), &["add", "large.txt"]);
+        run_git(source.path(), &["commit", "-q", "-m", "large blob"]);
+        let tip = gix_hash::ObjectId::from_hex(
+            run_git(source.path(), &["rev-parse", "HEAD"]).trim_ascii(),
+        )
+        .expect("tip oid");
+        let blob = gix_hash::ObjectId::from_hex(
+            run_git(source.path(), &["rev-parse", "HEAD:large.txt"]).trim_ascii(),
+        )
+        .expect("blob oid");
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        {
+            let git_dir = source.path().join(".git");
+            let _guard = GitEnvCwdGuard::set(source.path(), &git_dir, source.path());
+            let (result, _) = crate::git::capsule_push::run(
+                &PushConfig {
+                    git_dir: Some(git_dir),
+                    ..Default::default()
+                },
+                &[PushSpec {
+                    force: false,
+                    src: "refs/heads/main".to_owned(),
+                    dst: "refs/heads/main".to_owned(),
+                }],
+                &store,
+                &router,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                &cancellation,
+            )
+            .await
+            .expect("publish large blob");
+            assert!(result.all_ok());
+        }
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 32 * 1024 * 1024,
+                max_frontier_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("open capsule view");
+        let options = crab_remote_git::RepositoryOptions::new(
+            crab_remote_git::ObjectLimits::default(),
+            crab_remote_git::OperationLimits {
+                max_inflated_bytes: 64 * 1024,
+                ..Default::default()
+            },
+        )
+        .expect("bounded options");
+        let repository = view
+            .git_repository_from_store(
+                layout,
+                crab_remote_git::RepositoryIdentity::new("memory", router.repo_prefix(), 1)
+                    .expect("repository identity"),
+                Arc::new(crab_remote_git::RemoteGitRuntime::default()),
+                options,
+                64 * 1024 * 1024,
+                &cancellation,
+            )
+            .await
+            .expect("open bounded capsule reader");
+        let visibility = view.git_visibility_index().expect("visibility proof");
+        let refs = ["refs/heads/main".to_owned()];
+        let plan = crab_read::plan_upload_pack(
+            &repository,
+            &visibility,
+            &refs,
+            &crab_read::UploadPackRequest {
+                wants: vec![tip],
+                deepen: Some(1),
+                ..Default::default()
+            },
+            &cancellation,
+        )
+        .await
+        .expect("shallow planning must fit without reconstructing blob leaves");
+        assert!(plan.object_ids.contains(&blob));
+        assert_eq!(plan.shallow, vec![tip]);
+        let pack = repository
+            .generate_pack(&plan.object_ids, &cancellation)
+            .await
+            .expect("generate bounded compressed response");
+        let target = tempfile::tempdir().expect("target repository");
+        run_git(target.path(), &["init", "-q"]);
+        let pack_dir = target.path().join(".git/objects/pack");
+        std::fs::copy(pack.path(), pack_dir.join("pack-response.pack"))
+            .expect("retain response pack");
+        run_git(
+            target.path(),
+            &["index-pack", ".git/objects/pack/pack-response.pack"],
+        );
+        assert_eq!(
+            run_git(target.path(), &["cat-file", "blob", &blob.to_string()]),
+            content
+        );
+        let error = crab_read::plan_upload_pack(
+            &repository,
+            &visibility,
+            &refs,
+            &crab_read::UploadPackRequest {
+                wants: vec![blob],
+                deepen: Some(1),
+                ..Default::default()
+            },
+            &cancellation,
+        )
+        .await
+        .expect_err("explicit blob roots must still enforce the inflation budget");
+        assert!(matches!(
+            error,
+            crab_read::ReadError::RemoteGit(crab_remote_git::Error::LimitExceeded {
+                limit: "inflated bytes",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
     async fn classic_capsule_fetch_releases_one_reader_slot_on_success_and_failure() {
         for rejected in [false, true] {
             let (store, router, _) = capsule_promisor_fixture().await;

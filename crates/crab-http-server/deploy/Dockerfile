@@ -24,7 +24,7 @@ FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe6
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         git \
-        libpcre2-8-0=10.42-1+deb12u1 \
+        libpcre2-8-0=10.42-1+deb12u2 \
     && rm -rf /var/lib/apt/lists/* \
     && printf 'crab:x:10001:\n' >> /etc/group \
     && printf 'crab:x:10001:10001:Crab server:/var/lib/crab:/bin/false\n' >> /etc/passwd \
