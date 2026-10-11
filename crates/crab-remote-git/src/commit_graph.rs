@@ -5,12 +5,13 @@ use crab_storage::{Store, StoreLayout};
 use gix_hash::ObjectId;
 use tokio_util::sync::CancellationToken;
 
-use crate::{CorruptionStage, Error, Result};
+use crate::{BudgetDimension, CorruptionStage, Error, RemoteGitRuntime, Result};
 
 /// Validated, generation-bound acceleration data for raw commit traversal.
 #[derive(Debug)]
 pub(crate) struct CommitGraphIndex {
     graph: SplitCommitGraph,
+    pinned_reachable: Vec<bool>,
 }
 
 impl CommitGraphIndex {
@@ -25,18 +26,17 @@ impl CommitGraphIndex {
     pub(crate) async fn load(
         store: &Store,
         layout: &StoreLayout<Store>,
-        content_hash: Option<&str>,
+        content_hash: &str,
         expected_generation: u64,
         expected_pack_index_hash: &str,
         expected_validation_digest: &str,
         expected_roots: &[ObjectId],
         max_bytes: u64,
         cancellation: &CancellationToken,
-        runtime_cancellation: &CancellationToken,
-    ) -> Result<Option<Self>> {
-        let Some(content_hash) = content_hash else {
-            return Ok(None);
-        };
+        runtime: &RemoteGitRuntime,
+        budget: &crate::budget::OperationBudget,
+    ) -> Result<Self> {
+        let runtime_cancellation = runtime.background_cancellation();
         let graph = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(Error::Cancelled),
@@ -54,7 +54,42 @@ impl CommitGraphIndex {
                 stage: CorruptionStage::CommitGraph,
             });
         }
-        Ok(Some(Self { graph }))
+        // One byte per ordinal is bounded by the verified graph byte limit.
+        // Charge before allocation; reuse this proof only for this pinned ref set.
+        budget
+            .charge(
+                BudgetDimension::InflatedBytes,
+                u64::from(graph.descriptor.commit_count),
+            )
+            .await?;
+        let permit = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
+            permit = runtime.decode_permit(cancellation) => permit?,
+        };
+        let roots = expected_roots.to_vec();
+        let cancellation = cancellation.clone();
+        runtime
+            .spawn_blocking(move || {
+                let _permit = permit;
+                let pinned_reachable =
+                    pinned_reachability(&graph, &roots, &cancellation, &runtime_cancellation)?;
+                Ok(Self {
+                    graph,
+                    pinned_reachable,
+                })
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })?
+    }
+
+    pub(crate) fn is_reachable(&self, oid: ObjectId) -> bool {
+        sha1_bytes(oid)
+            .and_then(|oid| self.graph.ordinal(&oid))
+            .and_then(|ordinal| self.pinned_reachable.get(ordinal as usize))
+            .copied()
+            .unwrap_or(false)
     }
 
     pub(crate) fn parents_match(&self, oid: ObjectId, raw_parents: &[ObjectId]) -> bool {
@@ -148,6 +183,56 @@ impl CommitGraphIndex {
     }
 }
 
+fn pinned_reachability(
+    graph: &SplitCommitGraph,
+    roots: &[ObjectId],
+    cancellation: &CancellationToken,
+    runtime_cancellation: &CancellationToken,
+) -> Result<Vec<bool>> {
+    if cancellation.is_cancelled() || runtime_cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let count = graph.descriptor.commit_count as usize;
+    let mut reachable = Vec::new();
+    reachable
+        .try_reserve_exact(count)
+        .map_err(|source| Error::Allocation {
+            requested: count,
+            source,
+        })?;
+    reachable.resize(count, false);
+    for root in roots {
+        let ordinal = sha1_bytes(*root)
+            .and_then(|oid| graph.ordinal(&oid))
+            .ok_or(Error::Corrupt {
+                stage: CorruptionStage::CommitGraph,
+            })?;
+        reachable[ordinal as usize] = true;
+    }
+    // The metadata codec proves every parent ordinal precedes its child.
+    // A descending pass visits each edge once, without a per-query history walk.
+    for ordinal in (0..graph.descriptor.commit_count).rev() {
+        if ordinal.is_multiple_of(1024)
+            && (cancellation.is_cancelled() || runtime_cancellation.is_cancelled())
+        {
+            return Err(Error::Cancelled);
+        }
+        if !reachable[ordinal as usize] {
+            continue;
+        }
+        let record = graph.record(ordinal).ok_or(Error::Corrupt {
+            stage: CorruptionStage::CommitGraph,
+        })?;
+        for parent in &record.parents {
+            reachable[*parent as usize] = true;
+        }
+    }
+    if cancellation.is_cancelled() || runtime_cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    Ok(reachable)
+}
+
 fn sha1_bytes(oid: ObjectId) -> Option<[u8; 20]> {
     match oid {
         ObjectId::Sha1(bytes) => Some(bytes),
@@ -172,6 +257,83 @@ mod tests {
         format!("{value:02x}").repeat(32)
     }
 
+    #[test]
+    fn pinned_membership_covers_both_merge_parents_but_excludes_retained_history() {
+        let graph = graph(vec![
+            CommitGraphRecord {
+                oid: oid(1),
+                tree_oid: oid(101),
+                commit_time: 10,
+                corrected_generation: 10,
+                parents: vec![],
+            },
+            CommitGraphRecord {
+                oid: oid(2),
+                tree_oid: oid(102),
+                commit_time: 20,
+                corrected_generation: 20,
+                parents: vec![0],
+            },
+            CommitGraphRecord {
+                oid: oid(3),
+                tree_oid: oid(103),
+                commit_time: 20,
+                corrected_generation: 20,
+                parents: vec![0],
+            },
+            CommitGraphRecord {
+                oid: oid(4),
+                tree_oid: oid(104),
+                commit_time: 30,
+                corrected_generation: 30,
+                parents: vec![1, 2],
+            },
+            CommitGraphRecord {
+                oid: oid(5),
+                tree_oid: oid(105),
+                commit_time: 20,
+                corrected_generation: 20,
+                parents: vec![0],
+            },
+        ]);
+        let cancellation = CancellationToken::new();
+        let runtime_cancellation = CancellationToken::new();
+        let pinned_reachable = pinned_reachability(
+            &graph,
+            &[ObjectId::Sha1(oid(4))],
+            &cancellation,
+            &runtime_cancellation,
+        )
+        .unwrap();
+        let index = CommitGraphIndex {
+            graph,
+            pinned_reachable,
+        };
+        assert_eq!(
+            (1..=6)
+                .map(|value| index.is_reachable(ObjectId::Sha1(oid(value))))
+                .collect::<Vec<_>>(),
+            vec![true, true, true, true, false, false]
+        );
+    }
+
+    #[test]
+    fn pinned_membership_honors_caller_and_runtime_cancellation_even_for_empty_graph() {
+        for runtime_cancelled in [false, true] {
+            let cancellation = CancellationToken::new();
+            let runtime_cancellation = CancellationToken::new();
+            if runtime_cancelled {
+                runtime_cancellation.cancel();
+            } else {
+                cancellation.cancel();
+            }
+            assert!(matches!(
+                pinned_reachability(&graph(vec![]), &[], &cancellation, &runtime_cancellation),
+                Err(Error::Cancelled)
+            ));
+        }
+    }
+
     fn graph(records: Vec<CommitGraphRecord>) -> SplitCommitGraph {
         let bytes = 24
             + records
@@ -194,14 +356,25 @@ mod tests {
                 base_ordinal: 0,
                 commit_count: layer.records.len() as u32,
                 bytes: bytes as u64,
-            }],
+            }]
+            .into_iter()
+            .filter(|layer| layer.commit_count > 0)
+            .collect(),
         };
-        SplitCommitGraph::new(descriptor, vec![layer]).unwrap()
+        SplitCommitGraph::new(
+            descriptor,
+            vec![layer]
+                .into_iter()
+                .filter(|layer| !layer.records.is_empty())
+                .collect(),
+        )
+        .unwrap()
     }
 
     #[test]
     fn positional_parents_match_raw_commit_order() {
         let index = CommitGraphIndex {
+            pinned_reachable: Vec::new(),
             graph: graph(vec![
                 CommitGraphRecord {
                     oid: oid(1),
@@ -226,6 +399,7 @@ mod tests {
     #[test]
     fn missing_commit_cannot_validate_raw_parents() {
         let index = CommitGraphIndex {
+            pinned_reachable: Vec::new(),
             graph: graph(vec![CommitGraphRecord {
                 oid: oid(1),
                 tree_oid: oid(101),
@@ -240,6 +414,7 @@ mod tests {
     #[test]
     fn first_parent_chain_is_bounded_and_positional() {
         let index = CommitGraphIndex {
+            pinned_reachable: Vec::new(),
             graph: graph(vec![
                 CommitGraphRecord {
                     oid: oid(1),
@@ -283,6 +458,7 @@ mod tests {
     #[test]
     fn reachable_from_roots_preserves_duplicates_and_rejects_other_history() {
         let index = CommitGraphIndex {
+            pinned_reachable: Vec::new(),
             graph: graph(vec![
                 CommitGraphRecord {
                     oid: oid(1),
@@ -337,6 +513,7 @@ mod tests {
     #[test]
     fn reachable_from_roots_honors_cancellation_before_work() {
         let index = CommitGraphIndex {
+            pinned_reachable: Vec::new(),
             graph: graph(vec![CommitGraphRecord {
                 oid: oid(1),
                 tree_oid: oid(101),

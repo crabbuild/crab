@@ -192,7 +192,21 @@ impl OperationContext {
         cancellation: &CancellationToken,
         limits: OperationLimits,
     ) -> Result<Self> {
-        Self::open_inner(state, kind, cancellation, limits, true).await
+        Self::open_inner(state, kind, cancellation, limits, true, None).await
+    }
+
+    pub(crate) async fn open_with_budget(
+        state: Arc<RepositoryState>,
+        kind: OperationKind,
+        cancellation: &CancellationToken,
+        limits: OperationLimits,
+        budget: OperationBudget,
+    ) -> Result<Self> {
+        Self::open_inner(state, kind, cancellation, limits, true, Some(budget)).await
+    }
+
+    pub(crate) fn budget(&self) -> &OperationBudget {
+        &self.budget
     }
 
     pub(crate) async fn open_pack_transfer(
@@ -206,6 +220,7 @@ impl OperationContext {
             cancellation,
             limits,
             false,
+            None,
         )
         .await
     }
@@ -216,6 +231,7 @@ impl OperationContext {
         cancellation: &CancellationToken,
         limits: OperationLimits,
         open_catalog: bool,
+        budget: Option<OperationBudget>,
     ) -> Result<Self> {
         let task_token = state.runtime.operation_token();
         let runtime_cancellation = state.runtime.background_cancellation();
@@ -226,7 +242,8 @@ impl OperationContext {
             .ok_or(Error::InvalidLimit {
                 name: "operation duration",
             })?;
-        let budget = OperationBudget::new(limits, Arc::clone(&state.runtime));
+        let budget =
+            budget.unwrap_or_else(|| OperationBudget::new(limits, Arc::clone(&state.runtime)));
         let operation_cancellation = cancellation.child_token();
         let cancel_failed_open = operation_cancellation.clone().drop_guard();
         let correlation_id = budget.id();
