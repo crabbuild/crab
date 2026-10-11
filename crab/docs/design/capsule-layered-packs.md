@@ -11,6 +11,13 @@
 | Replaces | Whole-repository Git-pack replacement during every v2 checkpoint |
 | Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Kubernetes 4,500-commit RustFS benchmark](../benchmarks/kubernetes-4500-rustfs.md) |
 
+The current outer capsule-run format is `CRBRUN01` with footer version 1.
+This hard cutover resets the development version number while retaining the
+latest bounded-size classes, pooled indexes and exact admission. Readers reject
+retired formats, including `CRBRUN07`; existing runs must be republished into a
+fresh repository prefix. Historical entries below retain the formats they
+measured and do not qualify the reset format.
+
 An earlier bounded-frontier replay stopped after 1,112 of 5,000 incremental
 pushes because the shared qualification volume ran low. Its two 500-commit
 fetches preserved the exact tips and installed one new pack each, but took
@@ -3109,7 +3116,7 @@ eligible capsule-run source descriptors into the candidate pack set. It then:
 No stable pack body is copied, downloaded, or uploaded merely to make a
 checkpoint. The checkpoint keeps source runs and their capsules reachable after
 clearing their transaction frontier entries. The current maintenance reader
-uses the authenticated `CRBRUN07` control suffix, its embedded control bundle,
+uses the authenticated `CRBRUN01` control suffix, its embedded control bundle,
 and its exact admission sidecar; it does not load frontier Git/file payload sections. Complete run
 decoding remains reserved for strict fsck, history, and recovery paths.
 
