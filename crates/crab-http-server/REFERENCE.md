@@ -928,7 +928,7 @@ Release asset uploads stream to immutable digest paths. The record stores asset 
 The repository cache checks the authoritative root, transaction-consistent ref
 positions, and derived-index record after two seconds. An unchanged state
 reuses its authenticated immutable reader; changed refs or indexes reopen it.
-Git fetch always opens a fresh snapshot. Interactive reads have a two-minute
+Git fetch always opens a fresh snapshot. Interactive reads have a five-minute
 operation budget, an 8 MiB response limit, and process-wide admission for 16
 concurrent requests.
 
@@ -946,6 +946,8 @@ Adoption and integrity scrubbing admit up to 8 GiB of complete Git source
 bodies and, separately, 8 GiB of installed pack input, matching the native
 receive/import intake budget. Capsule control metadata and the uncheckpointed
 frontier retain their separate 2 GiB limits.
+These are independent phase limits; source framing counts toward the complete
+source-body budget.
 Each successful proof records the exact v2 state digest and counts for
 Git-reachable Crab pointers, LFS objects, catalog files, shards, and xorbs.
 Missing or corrupt dependencies return `503` from this endpoint while
@@ -1746,6 +1748,11 @@ The output directory must not already exist. Supply credentials through the
 environment, and keep logs and raw JSON evidence outside the repository.
 
 Run repeatable concurrent HTTP qualification with the Rust load generator:
+
+The [October 11 Next.js/RustFS receipt](../../crab/docs/benchmarks/http-capsule-nextjs-rustfs-20261011.md)
+records current-format correctness, startup/restart proof, endpoint latency,
+origin accounting, and the remaining historical-read, indexing, and bulk-receive
+performance gaps. Its higher-rate runs did not pass the capacity gate.
 
 For durable command throughput, create a JSON template containing a top-level
 `"request_id":"{{request_id}}"`. Run mutations only against a disposable
