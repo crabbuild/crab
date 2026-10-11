@@ -14,6 +14,7 @@ each subsystem, and how the components fit together.
 | [Rust SDK Design and Delivery Plan](crab-sdk.md) | Public remote/local API, publication recovery, Git compatibility, executable phases and acceptance criteria |
 | [Crab SDK API](crab-sdk-api.md) | Unified repository facade, remote/local interfaces, task namespaces, feature boundaries, and qualification gates |
 | [S3 Gateway Design and Delivery Plan](crab-s3-gateway.md) | Logical crabfs URIs, S3 protocol, durable multipart design, phased implementation and acceptance gates |
+| [HTTP Server Enhancement Delivery Plan](http-server-enhancement-plan.md) | Ordered capsule read/index and native receive improvements, regression proof, resource limits and Next.js/RustFS acceptance gates |
 | [Storage Layer](storage-layer.md) | Object store abstraction, S3 layout, xorb format, retry/multipart |
 | [Engine: Chunking & Dedup](engine-chunking-dedup.md) | CDC algorithm, dedup tiers, xorb packing, staging area |
 | [Metadata Subsystem](metadata-subsystem.md) | Shards, file-index, chunk-index, bloom filters, pack metadata |
