@@ -1,6 +1,6 @@
 # Crab HTTP server enhancement delivery plan
 
-Status: plan prepared; implementation slices below are not completed. Baseline:
+Status: execution in progress; implementation slices below require their proof. Baseline:
 `crab-v2` at `8e9b9b0bc7821458c80aadb58e211098f3291199`, which includes
 [PR #508](https://github.com/crabbuild/crab/pull/508). Each slice ends with a
 reviewable PR and its own proof. No production-readiness claim follows from this
@@ -49,7 +49,7 @@ environment. Keep failed receipts as evidence.
 
 | Slice | Deliverable | Dependency | Status |
 | --- | --- | --- | --- |
-| D0 | Green lifecycle baseline and reproducible qualification inputs | None | Not started |
+| D0 | Green lifecycle baseline and reproducible qualification inputs | None | In progress |
 | D1 | Graph reuse in index construction | D0 | Not started |
 | D2 | Graph available before complete path attribution | D1 | Not started |
 | D3 | Bounded background probing and foreground isolation | D2 | Not started |
@@ -63,6 +63,20 @@ failed in the Compose startup/restore/crash/restart step. Architecture and Git
 protocol checks passed. Logs include node fencing and an invalid advertisement;
 those lines alone do not identify the causal failure or distinguish intentional
 fault injection from a regression.
+
+Execution finding: the first failure was `Fallback owner B did not expose an
+open durability log before replacement`. The preceding second-owner-loss phase
+left B as the only live peer. Pinned Cellule's `select_log_members` returns an
+empty set with one live node; `try_recruit_log` then returns `None`. Restore
+eligible peers before capturing the cohort to expire. Preserve all subsequent
+epoch, membership, durability and owner-loss assertions. The corrected full
+Compose rerun remains required.
+
+The tracked native-Git oracle now supports a seeded historical sample and
+reports its percentiles separately. The first retained-store baseline verified
+100 historical commits exactly: p50 10.618 ms, p95 199.343 ms, p99 250.435 ms,
+maximum 251.843 ms at concurrency 8. Caches were not flushed; this is neither
+an improvement claim nor a passing latency gate.
 
 - [ ] Identify the first failing command and preserve a bounded failure trace.
   Reproduce it using the exact image/Cellule revision and disposable Compose
@@ -334,7 +348,7 @@ instead of running subsequent commands against an invalid deployment.
 
 For live proof, create a fresh run directory and disposable storage prefix,
 populate the same source revision, and start the current-format RustFS/server
-using the tracked D0 runner. Confirm `/readyz` and index readiness independently.
+using the tracked D0 runner. Confirm `/readyz` through the mTLS management listener and index readiness independently.
 Use the CLI/checkpoint/adopt route to seed read benchmarks; use a separate empty
 repository for native bulk receive so seeding cannot substitute for receive proof.
 
@@ -350,6 +364,7 @@ python3 crates/crab-http-server/tests/verify_live.py \
   --source "$HOME/Workspace/Github/vercel/next.js.git" \
   --revision d8c1c1b0002db8ccb63b58095f338e8bf423fa99 \
   --directory packages/next/src --file package.json \
+  --historical-commits 100 --history-window 5000 --seed 20261011 --concurrency 8 \
   > "$CRAB_HTTP_RUN_DIR/native-git-oracle.json"
 
 for offered_rate in 100 500 1000; do
@@ -363,7 +378,7 @@ for offered_rate in 100 500 1000; do
     --target "tree=3@/api/repos/$CRAB_HTTP_TEST_REPOSITORY/tree?rev=main&path=packages/next/src&limit=100" \
     --target "blob=3@/api/repos/$CRAB_HTTP_TEST_REPOSITORY/blob?rev=main&path=package.json" \
     --aggregate-requests-per-second "$offered_rate" \
-    --warmup-seconds 5 --duration-seconds 60 --health-path /readyz \
+    --warmup-seconds 5 --duration-seconds 60 --health-path /livez \
     > "$CRAB_HTTP_RUN_DIR/load-$offered_rate.json" || exit 1
 done
 ```

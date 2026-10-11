@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Compare a running Crab HTTP server with a read-only native Git oracle."""
 import argparse
+import concurrent.futures
 import hashlib
 from http.cookiejar import MozillaCookieJar
 import json
+import random
 import statistics
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -22,23 +25,34 @@ def main():
     parser.add_argument('--file', action='append')
     parser.add_argument('--blame', help='Optional ordinary text path for first-parent blame comparison')
     parser.add_argument('--cookies', help='Private Netscape cookie file from an authenticated session')
+    parser.add_argument('--historical-commits', type=int, default=0, help='Seeded historical commit sample size')
+    parser.add_argument('--history-window', type=int, default=5000, help='First-parent ancestors available to sample')
+    parser.add_argument('--seed', type=int, default=20261011)
+    parser.add_argument('--concurrency', type=int, default=8)
     args = parser.parse_args()
+    if not 0 <= args.historical_commits <= 10000 or not 1 <= args.history_window <= 100000:
+        parser.error('historical sample/window exceeds its bound')
+    if not 1 <= args.concurrency <= 64:
+        parser.error('concurrency must be between 1 and 64')
     jar = MozillaCookieJar(args.cookies)
     if args.cookies:
         jar.load(ignore_discard=True)
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    workers = threading.local()
     samples = {}
+    samples_lock = threading.Lock()
     checks = {'tree_entries': 0, 'commits': 0, 'blobs': 0, 'diffs': 0, 'errors': 0}
     api = '/api/repos/' + '/'.join(urllib.parse.quote(part, safe='') for part in args.repository.split('/'))
 
     def git(*command):
         return subprocess.check_output(['git', '-C', args.source, *command])
 
-    def http(path, status=200, method='GET', headers=None):
+    def http(path, status=200, method='GET', headers=None, sample_class=None):
+        if not hasattr(workers, 'opener'):
+            workers.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
         request = urllib.request.Request(args.url.rstrip('/') + path, method=method, headers=headers or {})
         started = time.perf_counter()
         try:
-            response = opener.open(request, timeout=40)
+            response = workers.opener.open(request, timeout=40)
         except urllib.error.HTTPError as error:
             response = error
         with response:
@@ -48,8 +62,10 @@ def main():
                 assert response.headers['Server-Timing'], path
                 assert response.headers['X-Crab-Generation'], path
                 assert response.headers['Cache-Control'] == 'no-store', path
-                action = path.split('?', 1)[0].rsplit('/', 1)[-1]
-                samples.setdefault(action, []).append((time.perf_counter() - started) * 1000)
+                action = sample_class or path.split('?', 1)[0].rsplit('/', 1)[-1]
+                elapsed = (time.perf_counter() - started) * 1000
+                with samples_lock:
+                    samples.setdefault(action, []).append(elapsed)
             return body, response.headers
 
     def read(action, **params):
@@ -128,7 +144,34 @@ def main():
     assert b'id="root"' in shell and "frame-ancestors 'none'" in headers['Content-Security-Policy']
     head, headers = http('/' + args.repository, method='HEAD')
     assert not head and int(headers['Content-Length']) == len(shell)
-    print(json.dumps({'revision': args.revision, 'checks': checks, 'roundtrip_median_ms': {action: round(statistics.median(values), 3) for action, values in samples.items()}, 'timing_note': 'Mixed first/repeated requests; local process/transport/storage caches were not flushed.'}, indent=2))
+    historical = None
+    if args.historical_commits:
+        ancestors = git('rev-list', '--first-parent', f'--max-count={args.history_window + 1}', args.revision).decode().splitlines()[1:]
+        if args.historical_commits > len(ancestors):
+            parser.error('source has fewer historical commits than requested')
+        selected = random.Random(args.seed).sample(ancestors, args.historical_commits)
+
+        def verify_historical(oid):
+            raw = git('cat-file', 'commit', oid)
+            path = api + '/commit?' + urllib.parse.urlencode({'rev': oid})
+            observed = json.loads(http(path, sample_class='historical_commit')[0])
+            assert observed['oid'] == oid, oid
+            assert observed['tree'].encode() == raw.splitlines()[0].split()[1], oid
+            assert bytes.fromhex(observed['message_hex']) == raw.split(b'\n\n', 1)[1], oid
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+            list(pool.map(verify_historical, selected))
+        values = sorted(samples['historical_commit'])
+        historical = {
+            'seed': args.seed, 'window': args.history_window,
+            'concurrency': args.concurrency, 'oids': selected,
+            'p50_ms': round(statistics.median(values), 3),
+            'p95_ms': round(values[(len(values) * 95 + 99) // 100 - 1], 3),
+            'p99_ms': round(values[(len(values) * 99 + 99) // 100 - 1], 3),
+            'max_ms': round(max(values), 3), 'samples_ms': values,
+        }
+        checks['historical_commits'] = len(selected)
+    print(json.dumps({'revision': args.revision, 'checks': checks, 'historical': historical, 'roundtrip_median_ms': {action: round(statistics.median(values), 3) for action, values in samples.items()}, 'timing_note': 'Mixed first/repeated requests; historical samples are reported separately; local process/transport/storage caches were not flushed.'}, indent=2))
 
 
 if __name__ == '__main__':
