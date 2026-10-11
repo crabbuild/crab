@@ -925,7 +925,12 @@ Release asset uploads stream to immutable digest paths. The record stores asset 
 
 ### Understand read caching and readiness
 
-The repository cache reopens authoritative state after two seconds. Git fetch always opens a fresh snapshot. Interactive reads have a two-minute operation budget, an 8 MiB response limit, and process-wide admission for 16 concurrent requests.
+The repository cache checks the authoritative root, transaction-consistent ref
+positions, and derived-index record after two seconds. An unchanged state
+reuses its authenticated immutable reader; changed refs or indexes reopen it.
+Git fetch always opens a fresh snapshot. Interactive reads have a two-minute
+operation budget, an 8 MiB response limit, and process-wide admission for 16
+concurrent requests.
 
 When a readable generation lacks its split commit graph, the server builds that derived index from bounded remote commit reads and attaches it before retrying deep blame. This process downloads no full packs and creates no checkout.
 
@@ -936,7 +941,11 @@ server replica acquires a renewable deployment-wide storage lease, runs the
 background pass without blocking readiness, and publishes one bounded
 CAS-protected aggregate report. Other replicas reuse that report instead of
 redownloading every dependency. The pass repeats hourly, with at most two
-repositories active and a three-minute cooperative budget per repository.
+repositories active and a twelve-minute cooperative budget per repository.
+Adoption and integrity scrubbing admit up to 8 GiB of complete Git source
+bodies and, separately, 8 GiB of installed pack input, matching the native
+receive/import intake budget. Capsule control metadata and the uncheckpointed
+frontier retain their separate 2 GiB limits.
 Each successful proof records the exact v2 state digest and counts for
 Git-reachable Crab pointers, LFS objects, catalog files, shards, and xorbs.
 Missing or corrupt dependencies return `503` from this endpoint while
@@ -1676,7 +1685,7 @@ This table collects process and transport limits that otherwise span several rou
 | Collaboration handlers | 8 concurrent, 30s | `app.rs` and route middleware |
 | Git fetch, push, LFS, archives, and release assets | 4 concurrent across the deployment | Process-local fast-path semaphore plus renewable object-store CAS slots under `.crab/http-server/v1/admission` |
 | Read-readiness publication | 2 repositories concurrently, 3-minute cooperative budget | `maintenance.rs` |
-| Deep dependency integrity scrub | One renewable owner per deployment; 2 repositories concurrently, 3-minute cooperative budget each, hourly after an immediate first pass | `integrity.rs`; one CAS-protected aggregate report serves `/integrityz`, which remains excluded from `/readyz` |
+| Deep dependency integrity scrub | One renewable owner per deployment; 2 repositories concurrently, 12-minute cooperative budget each, hourly after an immediate first pass | `integrity.rs`; one CAS-protected aggregate report serves `/integrityz`, which remains excluded from `/readyz` |
 | OIDC callbacks | 8 concurrent, 10s per provider request | `auth.rs` |
 | Archive transfer | 10 minutes, 3 GiB encoded response | `archive.rs` |
 | Git receive | 30-minute cooperative budget, 8 GiB body | `receive.rs` |
@@ -1720,6 +1729,21 @@ python3 crates/crab-http-server/tests/verify_live.py \
 ```
 
 For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a private Netscape-format cookie file. Never commit that file.
+
+To also exercise the actual process startup, graceful drain, and persisted
+repository reads after restart, use a stopped, bootstrapped deployment:
+
+```sh
+python3 crates/crab-http-server/tests/verify_process.py \
+  --server-binary "$CARGO_TARGET_DIR/release/crab-http-server" \
+  --config /path/to/server.toml --url http://127.0.0.1:8788 \
+  --output "$HOME/Workspace/http-process-proof" -- \
+  --repository your_team/your_project --source /path/to/read_only_source \
+  --revision 0123456789012345678901234567890123456789
+```
+
+The output directory must not already exist. Supply credentials through the
+environment, and keep logs and raw JSON evidence outside the repository.
 
 Run repeatable concurrent HTTP qualification with the Rust load generator:
 

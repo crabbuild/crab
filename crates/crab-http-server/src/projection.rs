@@ -993,7 +993,14 @@ pub(crate) async fn open_view(
         },
     )
     .await?;
-    let indexes = crab_metadata::capsule_protocol::load_browse_indexes(layout)
+    let indexes = load_browse_indexes(layout).await?;
+    Ok(view.with_browse_indexes(indexes))
+}
+
+pub(crate) async fn load_browse_indexes(
+    layout: &StoreLayout<Store>,
+) -> crate::Result<Option<crab_metadata::capsule_protocol::BrowseIndexes>> {
+    crab_metadata::capsule_protocol::load_browse_indexes(layout)
         .await
         .map_err(|error| match &error {
             crab_metadata::error::MetadataError::CorruptObject { .. }
@@ -1002,8 +1009,7 @@ pub(crate) async fn open_view(
                 source: crab_storage::StorageError::CorruptObject { .. },
             } => crate::Error::BrowseIndexes(Box::new(error)),
             _ => metadata_error(error),
-        })?;
-    Ok(view.with_browse_indexes(indexes))
+        })
 }
 
 fn metadata_error(error: crab_metadata::error::MetadataError) -> crate::Error {

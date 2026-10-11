@@ -466,9 +466,16 @@ pub(crate) struct Repository {
     pub store: Store,
     pub layout: StoreLayout<Store>,
     pub identity: RepositoryIdentity,
-    pinned: Mutex<Option<(Instant, RemoteGitRepository)>>,
+    pinned: Mutex<Option<PinnedRepository>>,
     maintenance: Mutex<Option<tokio::task::JoinHandle<crate::maintenance::Result<()>>>>,
     pub(crate) integrity: crate::integrity::Status,
+}
+
+struct PinnedRepository {
+    checked: Instant,
+    state_digest: String,
+    browse_indexes: Option<crab_metadata::capsule_protocol::BrowseIndexes>,
+    repository: RemoteGitRepository,
 }
 
 pub(crate) struct RepositorySet {
@@ -763,17 +770,41 @@ impl Repository {
             _ = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
             pinned = self.pinned.lock() => pinned,
         };
-        if let Some((checked, repository)) = pinned.as_ref()
-            && checked.elapsed() < Duration::from_secs(2)
-        {
-            return Ok(repository.clone());
+        if let Some(cached) = pinned.as_mut() {
+            if cached.checked.elapsed() < Duration::from_secs(2) {
+                return Ok(cached.repository.clone());
+            }
+            // Ref CAS can advance without a root ETag change; derived indexes
+            // can arrive without a ref change. Check both before reusing the
+            // immutable reader instead of rebuilding it on every cache expiry.
+            let refresh = async {
+                let root = crab_metadata::capsule_protocol::load_root(&self.layout)
+                    .await
+                    .map_err(|source| crate::Error::Settings {
+                        source: Box::new(source),
+                    })?;
+                let activity =
+                    crab_read::capsule_protocol::read_activity_from_root(&self.layout, &root)
+                        .await?;
+                let indexes = crate::projection::load_browse_indexes(&self.layout)
+                    .await?
+                    .filter(|value| value.state_digest() == activity.state_digest());
+                Ok::<_, crate::Error>((activity, indexes))
+            };
+            let (activity, indexes) = tokio::select! {
+                () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
+                result = refresh => result?,
+            };
+            if activity.state_digest() == cached.state_digest && indexes == cached.browse_indexes {
+                cached.checked = Instant::now();
+                return Ok(cached.repository.clone());
+            }
         }
-        // Per-ref publication can change refs without changing the root ETag.
-        // Reopen after the cache window so pending publication becomes visible.
-        let repository = self
+        let cached = self
             .open_browse(server, server.options, cancellation)
             .await?;
-        *pinned = Some((Instant::now(), repository.clone()));
+        let repository = cached.repository.clone();
+        *pinned = Some(cached);
         Ok(repository)
     }
 
@@ -795,9 +826,11 @@ impl Repository {
         server: &Server,
         options: RepositoryOptions,
         cancellation: &CancellationToken,
-    ) -> Result<RemoteGitRepository> {
-        crate::projection::open_view(&self.layout)
-            .await?
+    ) -> Result<PinnedRepository> {
+        let view = crate::projection::open_view(&self.layout).await?;
+        let state_digest = view.state_digest();
+        let browse_indexes = view.browse_indexes().cloned();
+        let repository = view
             .git_repository_from_store(
                 self.layout.clone(),
                 self.identity.clone(),
@@ -806,8 +839,13 @@ impl Repository {
                 2 * 1024 * 1024 * 1024,
                 cancellation,
             )
-            .await
-            .map_err(Into::into)
+            .await?;
+        Ok(PinnedRepository {
+            checked: Instant::now(),
+            state_digest,
+            browse_indexes,
+            repository,
+        })
     }
 }
 
@@ -1357,12 +1395,6 @@ pub async fn serve(config: Config) -> Result<()> {
     )?
     .with_recovery_artifacts(Arc::clone(&recovery_artifacts))
     .with_read_replicas(read_replicas.clone());
-    if read_replicas.is_some() {
-        cell_node.install_read_replica_recruitment(
-            startup.identity,
-            repository_cells.read_replica_peer(),
-        )?;
-    }
     let cell_scheduler = crate::cells::RepositoryCellScheduler::new(
         startup.identity,
         startup.layout,
@@ -1478,6 +1510,15 @@ pub async fn serve(config: Config) -> Result<()> {
             node_publisher.publish_initial().await?;
             let node_lease = node_publisher.lease_guard()?;
             cell_node.install_node_lease_for_startup(node_lease.clone())?;
+            // Recruitment scans the runtime immediately, which is fenced until
+            // its node lease exists. Starting it earlier kills its owned task
+            // during storage preflight and prevents the node becoming ready.
+            if read_replicas.is_some() {
+                cell_node.install_read_replica_recruitment(
+                    startup.identity,
+                    repository_cells.read_replica_peer(),
+                )?;
+            }
             Ok::<_, crate::Error>(node_lease)
         };
         tokio::pin!(startup);

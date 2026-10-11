@@ -588,6 +588,12 @@ impl CapsuleRepositoryView {
         state_digest(self.root.record(), &self.visible_ref_transactions)
     }
 
+    /// Return derived indexes bound to this view's exact visible state.
+    #[must_use]
+    pub fn browse_indexes(&self) -> Option<&crab_metadata::capsule_protocol::BrowseIndexes> {
+        self.browse_indexes.as_ref()
+    }
+
     /// Attach derived indexes only when they name this exact captured state.
     ///
     /// Stale records are ignored. Open the result with `git_repository_from_store`;

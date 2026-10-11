@@ -5,6 +5,7 @@ use crab_metadata::capsule_protocol::{
     CapsuleTransaction, CapsuleVisibilityDelta,
 };
 use crab_metadata::git_visibility::GitVisibilityEdit;
+use std::sync::atomic::AtomicUsize;
 use tower::ServiceExt;
 
 use crate::test_git::history as git_history;
@@ -195,6 +196,153 @@ fn repository(server: &Server) -> Arc<Repository> {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap()
+}
+
+#[tokio::test]
+async fn unchanged_browse_refresh_reads_only_mutable_control_metadata() {
+    let server = fixture_without_cells().await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    {
+        let mut current = server.repositories.current.write().unwrap();
+        let repo = Arc::get_mut(current.by_name.values_mut().next().unwrap()).unwrap();
+        let observed = Arc::clone(&reads);
+        repo.store = repo
+            .store
+            .clone()
+            .with_read_request_observer(Arc::new(move |kind| {
+                if kind == crab_storage::StorageReadKind::Get {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        repo.layout = StoreLayout::new(repo.store.clone(), "maintenance".into());
+    }
+    let repo = repository(&server);
+    let history = git_history(1);
+    let root = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    publish_next(
+        &repo,
+        root,
+        None,
+        history.oids[0].clone(),
+        Some(history.pack),
+    )
+    .await;
+    repo.open(&server, &CancellationToken::new()).await.unwrap();
+    repo.pinned.lock().await.as_mut().unwrap().checked = Instant::now() - Duration::from_secs(3);
+    reads.store(0, Ordering::Relaxed);
+
+    repo.open(&server, &CancellationToken::new()).await.unwrap();
+
+    // One root, one ref head, and the bounded derived-index pointer; immutable
+    // capsule/pack bodies must not be read again for an unchanged state.
+    assert_eq!(reads.load(Ordering::Relaxed), 3);
+    close(&server).await;
+}
+
+#[tokio::test]
+async fn browse_refresh_observes_ref_publication_without_a_root_change() {
+    let server = fixture_without_cells().await;
+    let repo = repository(&server);
+    let history = git_history(2);
+    let root = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    let (root, old) = publish_next(
+        &repo,
+        root,
+        None,
+        history.oids[0].clone(),
+        Some(history.pack),
+    )
+    .await;
+    repo.open(&server, &CancellationToken::new()).await.unwrap();
+    let root_etag = root.etag().clone();
+    publish_next(&repo, root, Some(old), history.oids[1].clone(), None).await;
+    assert_eq!(
+        crab_write::capsule_protocol::open_root(&repo.layout)
+            .await
+            .unwrap()
+            .etag(),
+        &root_etag
+    );
+    repo.pinned.lock().await.as_mut().unwrap().checked = Instant::now() - Duration::from_secs(3);
+
+    let current = repo.open(&server, &CancellationToken::new()).await.unwrap();
+
+    assert_eq!(
+        current.refs().head.as_ref().unwrap().target.to_string(),
+        history.oids[1]
+    );
+    close(&server).await;
+}
+
+#[tokio::test]
+async fn browse_refresh_does_not_hide_new_invalid_indexes_behind_cached_state() {
+    let server = fixture_without_cells().await;
+    let repo = repository(&server);
+    let history = git_history(1);
+    let root = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    publish_next(
+        &repo,
+        root,
+        None,
+        history.oids[0].clone(),
+        Some(history.pack),
+    )
+    .await;
+    repo.open(&server, &CancellationToken::new()).await.unwrap();
+    repo.store
+        .put_overwrite(
+            &repo.layout.capsule_browse_indexes_path(),
+            Bytes::from_static(b"invalid"),
+        )
+        .await
+        .unwrap();
+    repo.pinned.lock().await.as_mut().unwrap().checked = Instant::now() - Duration::from_secs(3);
+
+    let result = repo.open(&server, &CancellationToken::new()).await;
+
+    assert!(matches!(result, Err(crate::Error::BrowseIndexes(_))));
+    close(&server).await;
+}
+
+#[tokio::test]
+async fn browse_refresh_attaches_new_indexes_without_a_ref_change() {
+    let server = fixture_without_cells().await;
+    let repo = repository(&server);
+    let history = git_history(1);
+    let root = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    publish_next(
+        &repo,
+        root,
+        None,
+        history.oids[0].clone(),
+        Some(history.pack),
+    )
+    .await;
+    repo.open(&server, &CancellationToken::new()).await.unwrap();
+    crab_remote::browse_indexes::ensure(
+        &repo.layout,
+        &repo.identity,
+        Arc::clone(&server.runtime),
+        server.options,
+        2 * 1024 * 1024 * 1024,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    repo.pinned.lock().await.as_mut().unwrap().checked = Instant::now() - Duration::from_secs(3);
+
+    let current = repo.open(&server, &CancellationToken::new()).await.unwrap();
+
+    assert!(current.commit_graph_available());
+    close(&server).await;
 }
 
 pub(crate) async fn close(server: &Server) {
