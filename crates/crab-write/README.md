@@ -40,7 +40,7 @@ Ref-frontier compaction gathers the selected leaf batch and older carries, then
 performs one final `CapsuleRun::compact` on a blocking worker. Ordinary push and
 coordinated repair share this path. The 32-run batching policy bounds interim
 frontiers; every 500 capsules the writer rolls up only that newest window into
-one CRBRUN07 run, leaving prior rollup identities unchanged. Source
+one CRBRUN01 run, leaving prior rollup identities unchanged. Source
 authentication, immutable upload verification and conditional publication are
 preserved. The worker owns immutable data and cannot publish if its caller is
 cancelled.

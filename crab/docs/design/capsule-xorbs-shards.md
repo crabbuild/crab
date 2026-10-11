@@ -15,6 +15,12 @@
 Protocol v2 retains xorbs and shards as independent, content-addressed object
 store objects. It does not embed their payload bytes in publication capsules.
 
+The outer capsule-run format is `CRBRUN01` with footer version 1. This hard
+cutover resets the development format number while retaining the latest layout.
+Readers reject retired run formats, including `CRBRUN07`; old repositories need
+republishing into a fresh prefix. Historical qualification records retain their
+original format and do not qualify the reset format.
+
 The design combines the strongest responsibilities of both protocols:
 
 - v2 owns foreground transaction publication through independently mutable
@@ -228,7 +234,7 @@ and a bounded frontier of immutable capsule runs. The foreground writer
 publishes the coordinator-bound leaf and folds each 32-run equal-level suffix
 through one concurrent predecessor-read wave and one immutable support-run
 write. Once the newest per-ref suffix reaches 500 capsules, it coalesces that
-bounded suffix into one CRBRUN07 run; prior 500-capsule runs remain immutable.
+bounded suffix into one CRBRUN01 run; prior 500-capsule runs remain immutable.
 Checkpoints may split a support run; readers authenticate the run and skip
 through the exact compacted transaction before replaying its suffix, so a
 concurrent checkpoint cannot invalidate compaction. Background checkpoint
@@ -311,7 +317,7 @@ A `CRBCKP05` layered checkpoint compacts metadata, not payloads. It contains:
 - visibility state;
 - covered root generation and digest.
 
-Git pack bodies remain in `CRBRUN07` capsule runs or standalone `CRBPKL01`
+Git pack bodies remain in `CRBRUN01` capsule runs or standalone `CRBPKL01`
 layers; canonical xorbs and shards remain external and are not rewritten by
 checkpoint publication. Clearing a capsule from a transaction frontier does
 not make its source collectible: the new checkpoint may still name its Git
@@ -856,7 +862,7 @@ Implemented:
 9. Foreground ref publication appends one immutable leaf capsule. Every 32
    equal-level suffix runs fold through one parallel predecessor-read wave and
    one support-run write; higher-level carries join that same wave. At 500
-   capsules, the newest bounded per-ref suffix is coalesced into one CRBRUN07
+   capsules, the newest bounded per-ref suffix is coalesced into one CRBRUN01
    run without rewriting prior rollups. Server maintenance checkpoints at 32
    visible capsules. A foreground checkpoint is forced at 56 capsules if
    maintenance falls behind; runs cap at 512 capsules and per-ref frontiers
@@ -992,7 +998,7 @@ retains the failed full driver separately from successful bounded proofs.
 | Surface | Current v2 state | Work required for parity | Acceptance proof |
 | --- | --- | --- | --- |
 | Repository initialization and ordinary single-/multi-ref push | Per-ref transactional publication and bounded batched compaction are implemented. Final-runtime GA replay completes all 5,000 individual pushes with exact content and flat 7.062 mean requests in every window. Five windows fail push-p95 latency; correctness is not complete performance/provider qualification | Resolve push tails and qualify the resulting final runtime; measure upload amplification, conditional writes, and uncertain-response behavior on each provider | Flat request/latency distributions through 5,000 same-ref pushes with periodic fetch/checkpoint, plus concurrent same-ref and disjoint-ref pushes on S3, GCS, and Azure; fresh clone and fsck after every run |
-| Full clone, fetch, pull, and ref advertisement | `CRBCKP05` remains metadata-only and names stable Git pack bodies in CRBRUN07 capsule runs or `CRBPKL01` layers. Readers authenticate checkpoint/source controls, select required members or ranges, and preserve checksum, entry CRC/delta, visibility and object-identity validation. Final-runtime GA fetch p95 is 8.581 seconds, with one new run/pack and no stable-body rereads or fetch-triggered repack. Independent cold/warm clones pass integrity in 53.724/20.008 seconds; fetch request counts are diagnostic | Complete clone-throughput, corruption, warm-cache, many-ref and hosted-provider qualification; retain the fetch latency and correctness gates | Repositories with thousands of refs; exact refs, byte-identical checkout, strict fsck, bounded requests and memory; metadata-only open transfers zero source-pack bytes; incremental fetch reads only its selected delta and no already-installed stable body |
+| Full clone, fetch, pull, and ref advertisement | `CRBCKP05` remains metadata-only and names stable Git pack bodies in CRBRUN01 capsule runs or `CRBPKL01` layers. Readers authenticate checkpoint/source controls, select required members or ranges, and preserve checksum, entry CRC/delta, visibility and object-identity validation. Final-runtime GA fetch p95 is 8.581 seconds, with one new run/pack and no stable-body rereads or fetch-triggered repack. Independent cold/warm clones pass integrity in 53.724/20.008 seconds; fetch request counts are diagnostic | Complete clone-throughput, corruption, warm-cache, many-ref and hosted-provider qualification; retain the fetch latency and correctness gates | Repositories with thousands of refs; exact refs, byte-identical checkout, strict fsck, bounded requests and memory; metadata-only open transfers zero source-pack bytes; incremental fetch reads only its selected delta and no already-installed stable body |
 | Shallow, deepen, unshallow, filtered/partial, and raw-object/promisor fetch | Terminal Git protocol-v2 and classic capsule fetch use the same canonical filter/shallow planner. Classic fetch retains filters negotiated after capabilities, serializes pack installation, records promisor markers for filtered packs, and transactionally updates `.git/shallow`. Relative deepening, follow-tags, filtered full/shallow histories, and byte-identical promised-blob recovery are covered at the helper boundary. Timestamp and excluded-ref selectors use verified ancestry, with hidden refs rejected and optimized full-closure paths disabled. Raw-OID recovery uses the same pinned view and authorization proof. See `capsule-layered-packs.md` §2.5.60 for the one-pack routing regression and current qualification evidence | Complete released-shape, older-Git, hosted-provider, interrupted-resume, hidden-ref, cancellation, and adversarial transport qualification, including the new timestamp/exclusion selectors | Git compatibility matrix for every fetch mode, including lazy recovery after process restart, interrupted installation, hidden-only objects, and adversarial missing objects |
 | Explicit tag push | Uses the ordinary ref transaction; `crab push --follow-tags` adds only missing reachable annotated tags, and `--no-incremental` publishes the full outgoing Git/LFS closure | Complete hosted-provider and adversarial multi-ref qualification | Annotated/lightweight tag creation, replacement, deletion, atomic branch-plus-tag push, follow-tags missing-only behavior, and full-closure clone/fsck |
 | Managed/protected push and active-active publication | Direct and protected active-active pushes bind the exact v2 base root, transaction, activation, capsule run, ref edits, and verified dependency closure in coordinator truth, materialize per-ref heads after consensus, preserve coordinator metadata in the client result, and retain ordered regional repair records. Active-active mirror plans replicate their immutable intent and repair terminal receipts after a replacement regional activation. Protected admission selects v2 authority before any v1 compatibility read, double-reads only the destination ref heads, resolves transaction-consistent per-ref state without repository-wide LIST or capsule payload downloads, fails closed on corrupt v2 metadata, and persists the exact root digest plus authorized old OIDs. The client stages the thin capsule and its Xet/LFS dependencies under the authorization grant without mutating GC or ref state; protected capsule pushes now retain the mirror plan identity in the authenticated transaction so the same capsule plan receipt closes the protected path. Direct-source verification binds the staged run, Git closure and visibility, changed paths, Crab shard/xorb closure, LFS bodies, and complete staged-object inventory. Finalize revalidates its evidence, promotes immutable dependencies, registers verified shard roots, and recognizes the exact already-visible transaction on retry. Path-scoped v2 views publish native capsules with authenticated Git visibility, external xorb/shard catalog entries, LFS dependencies, GC roots, and a fail-closed readiness record. Protected filtered pushes deterministically synthesize source commits, preserve hidden paths, carry required view-local shard/xorb bodies into source storage, and retry against the same source transaction. The integration path proves pointer identity, byte-identical Xet reconstruction through the published source catalog, and LFS body equality | Complete RustFS, Crab Auth, and managed-provider active-active qualification | Deny/allow/stale-policy races, pointer and LFS view pushes, lost responses, regional failover, ordered repair, receipt recovery, and all-old/all-new multi-ref visibility |

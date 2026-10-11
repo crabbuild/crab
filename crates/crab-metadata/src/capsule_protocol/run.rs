@@ -10,8 +10,8 @@ use crate::capsule_protocol::{
 use crate::error::{MetadataError, Result};
 use crate::validation::validate_content_hash;
 
-const RUN_MAGIC: &[u8; 8] = b"CRBRUN07";
-const RUN_VERSION: u32 = 7;
+const RUN_MAGIC: &[u8; 8] = b"CRBRUN01";
+const RUN_VERSION: u32 = 1;
 const RUN_TRAILER_BYTES: usize = 8 + 32 + RUN_MAGIC.len();
 const MAX_RUN_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INLINE_RUN_CONTROL_SECTION_BYTES: usize = 512 * 1024;
@@ -1751,9 +1751,18 @@ mod tests {
     }
 
     #[test]
+    fn run_serializes_format_one() {
+        let run = CapsuleRun::leaf(capsule('1', '2')).unwrap();
+        assert_eq!(
+            (&run.bytes()[run.bytes().len() - 8..], run.footer.version),
+            (&b"CRBRUN01"[..], 1)
+        );
+    }
+
+    #[test]
     fn retired_run_magic_is_rejected() {
         let run = CapsuleRun::leaf(capsule('1', '2')).unwrap();
-        for magic in [b"CRBRUN04", b"CRBRUN05", b"CRBRUN06"] {
+        for magic in [b"CRBRUN04", b"CRBRUN05", b"CRBRUN06", b"CRBRUN07"] {
             let mut bytes = run.bytes().to_vec();
             let start = bytes.len() - RUN_MAGIC.len();
             bytes[start..].copy_from_slice(magic);
@@ -1769,6 +1778,35 @@ mod tests {
                     run.newest_base_root_digest(),
                 )
                 .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_run_footer_versions_are_rejected() {
+        let run = CapsuleRun::leaf(capsule('1', '2')).unwrap();
+        for version in [0, 2, 3, 4, 5, 6, 7] {
+            let mut footer = run.footer.clone();
+            footer.version = version;
+            let footer = serde_json::to_vec(&footer).unwrap();
+            let mut bytes = run.bytes()[..run.control_offset() as usize].to_vec();
+            bytes.extend_from_slice(&footer);
+            bytes.extend_from_slice(&(footer.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(blake3::hash(&footer).as_bytes());
+            bytes.extend_from_slice(b"CRBRUN01");
+            let bytes = Bytes::from(bytes);
+            assert!(CapsuleRun::decode(bytes.clone()).is_err(), "{version}");
+            assert!(
+                CapsuleRunControl::decode_suffix(
+                    bytes.slice(run.control_offset() as usize..),
+                    bytes.len() as u64,
+                    run.hash(),
+                    run.level(),
+                    &run.transaction_ids(),
+                    run.newest_base_root_digest(),
+                )
+                .is_err(),
+                "{version}"
             );
         }
     }

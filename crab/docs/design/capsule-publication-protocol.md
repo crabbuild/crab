@@ -14,11 +14,18 @@
 ### Implementation status
 
 The implemented checkpoint is metadata-only `CRBCKP05`. Its ordered source
-directory binds immutable `CRBRUN07` capsule runs and `CRBPKL01` pack layers;
+directory binds immutable `CRBRUN01` capsule runs and `CRBPKL01` pack layers;
 canonical xorbs and shards remain external. The [stable layered-pack
 design](capsule-layered-packs.md) is the detailed read, maintenance, and
 qualification contract. It supersedes the measured `CRBCKP03` complete-pack
 design, not the durable-before-visible, authorization, CAS, or GC invariants.
+
+The outer run format has been reset to `CRBRUN01` with footer version 1,
+retaining the latest layout and 500-capsule rollup behavior. Full and suffix
+readers reject retired formats, including `CRBRUN07`; readers and writers must
+deploy together, and old runs require republishing into a fresh repository
+prefix. There is no compatibility reader or automatic migration. Historical
+qualification records below retain the format measured before this reset.
 
 Do not close the design or retire v1 yet. The latest complete
 [5,000-commit Kubernetes replay](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md#october-3-final-runtime-replay)
@@ -74,7 +81,7 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   uses embedded locator metadata for exact filtered-object selection;
 - foreground per-ref publication appends one leaf capsule and folds 32-run
   equal-level suffixes in a bounded read wave. At 500 capsules it rolls only
-  that newest window into one CRBRUN07 run, preserving prior run identities;
+  that newest window into one CRBRUN01 run, preserving prior run identities;
   server maintenance checkpoints after 32 visible capsules and writers discard
   the exact checkpointed prefix;
 - CLI and remote-helper push admission use a payload-free ref view; checkpoint
@@ -464,7 +471,7 @@ suffix runs accumulate, the writer reads the older 31 runs concurrently,
 folds them with the in-memory leaf, consumes any higher-level carries already
 named by the head in the same read wave, and writes one immutable support run.
 At 500 capsules, it separately coalesces only the newest bounded window into
-one CRBRUN07 run; earlier rollup identities remain stable. The published ref
+one CRBRUN01 run; earlier rollup identities remain stable. The published ref
 head replaces only the selected suffix. The 500-boundary write amplification
 and tail latency remain qualification gates; no amortized performance claim is
 made from the focused in-memory tests.
@@ -1059,11 +1066,11 @@ production wiring and format freeze require these decisions to be closed:
 - the maximum capsule size before multipart and the multipart part policy;
 - **Decided for foreground publication:** per-ref heads append leaf capsules,
   fold 32 equal-level suffix runs in one bounded parallel wave, and roll each
-  newest 500-capsule window into CRBRUN07. Maintenance starts at 32 visible
+  newest 500-capsule window into CRBRUN01. Maintenance starts at 32 visible
   capsules, receive forces a checkpoint at 56, runs cap at 512 capsules, and
   the hard frontier limit is 64 run segments. Checkpoint positions may split a
-  run and readers replay only its authenticated suffix. V7 tail latency and
-  byte amplification remain qualification gates.
+  run and readers replay only its authenticated suffix. Current-format tail
+  latency and byte amplification remain qualification gates.
   This keeps pointer-free request means history-flat without depending on a
   hot repository root. Metadata-only checkpoints retain stable sources;
   geometric maintenance rewrites only selected suffixes. Current push/fetch
