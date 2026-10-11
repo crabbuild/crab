@@ -443,7 +443,7 @@ impl CatalogStore {
             &layout,
             &view,
             crab_read::capsule_protocol::CapsuleDependencyLimits {
-                max_git_bytes: 2 * 1024 * 1024 * 1024,
+                max_git_bytes: crate::integrity::MAX_DEPENDENCY_GIT_BYTES,
                 pointer_scan: crab_git::walk::PointerScanLimits {
                     objects: 2_000_000,
                     lookups: 8_000_000,

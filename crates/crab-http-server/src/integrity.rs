@@ -14,8 +14,11 @@ use crate::server::{Repository, Server};
 
 const SCRUB_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const REPORT_RETRY_INTERVAL: Duration = Duration::from_secs(30);
-const SCRUB_BUDGET: Duration = Duration::from_secs(3 * 60);
-const MAX_GIT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const SCRUB_BUDGET: Duration = Duration::from_secs(12 * 60);
+const MAX_CONTROL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+// Adoption and scrubbing must accept the same Git intake as native receive and
+// import. Metadata/frontier admission stays separate from complete-source proof.
+pub(crate) const MAX_DEPENDENCY_GIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const CONCURRENT_REPOSITORIES: usize = 2;
 const REPORT_SCHEMA_VERSION: u32 = 1;
 const MAX_REPORT_BYTES: u64 = 8 * 1024 * 1024;
@@ -29,7 +32,7 @@ const REPORT_RELATIVE_PATH: &str = ".crab/http-server/v1/integrity.json";
 pub(crate) enum Error {
     #[error("repository integrity scrub cancelled")]
     Cancelled,
-    #[error("repository integrity scrub exceeded its three-minute budget")]
+    #[error("repository integrity scrub exceeded its twelve-minute budget")]
     Timeout,
     #[error("repository integrity scrub failed: {0}")]
     Read(#[from] crab_read::ReadError),
@@ -365,8 +368,8 @@ async fn prove(
         result = crab_read::capsule_protocol::open_view(
             layout,
             crab_read::capsule_protocol::CapsuleReadLimits {
-                max_capsule_bytes: MAX_GIT_BYTES,
-                max_frontier_bytes: MAX_GIT_BYTES,
+                max_capsule_bytes: MAX_CONTROL_BYTES,
+                max_frontier_bytes: MAX_CONTROL_BYTES,
             },
         ) => result?,
     };
@@ -375,7 +378,7 @@ async fn prove(
         layout,
         &view,
         crab_read::capsule_protocol::CapsuleDependencyLimits {
-            max_git_bytes: MAX_GIT_BYTES,
+            max_git_bytes: MAX_DEPENDENCY_GIT_BYTES,
             pointer_scan: crab_git::walk::PointerScanLimits {
                 objects: 2_000_000,
                 lookups: 8_000_000,
