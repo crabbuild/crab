@@ -94,6 +94,10 @@ that provider-validated integrity evidence through `Store`. Custom S3
 endpoints, GCS, Azure, URL-parsed stores, and raw `Store::new` wrappers remain
 readback-required; endpoint names and ETags never qualify an immutable write.
 
+Uploads divide existing byte buffers into zero-copy 8 MiB HTTP frames so
+multi-GiB objects do not exceed macOS's vectored-write limit. Conditional PUTs
+still use one request; multipart part sizes and integrity checks are unchanged.
+
 Non-resumable multipart uploads use one bounded part queue with or without a
 progress callback. Part and completion failures attempt abort before returning;
 an abort failure does not replace the original error used for retry decisions.

@@ -1,0 +1,893 @@
+{
+  "schema": "crab.capsule-protocol-nextjs-rustfs-qualification",
+  "version": "1.0",
+  "status": "passed_with_uncommitted_transport_fix",
+  "date": "2026-10-11",
+  "conclusion": {
+    "unmodified_crab_v2": "Failed the multi-GiB seed PUT on macOS before publication.",
+    "patched_candidate": "Passed all 5000 incremental pushes, ten native fetches, independent clones, remote integrity checks, unchanged performance gates, and 92 protocol smoke checks.",
+    "latency": "Low incremental latency in this local RustFS run; full seed import, cold clone, and maintenance have substantially higher costs.",
+    "object_store_requests": "Bounded: ordinary pushes use six requests, every 500-push window averages 7.062, and fetches use 9 or 11 requests.",
+    "qualification_scope": "This workload and protocol profile on local macOS/RustFS, not full provider/product parity or v1 retirement."
+  },
+  "runtime": {
+    "crab_base_commit": "b620f0aa173dc24ed43d4fc2ea9c11b1a1db4768",
+    "candidate_binary_sha256": "46c35dc4f6fc5dfd5e671807618e3f3b7a5cea384aa1c5ea3d02d4d237ccc0b0",
+    "baseline_binary_sha256": "a99505d8ac4a2fe6ae1690709da7909bbecee8f2cb021a0e2317f20b7d94589b",
+    "candidate_overlay_patch_sha256": "18ea97b3cc80c4fa5cadf0877f4eaf0a25e0bfe73a9f405b8e3b79bc624dfe17",
+    "candidate_source_sha256": "990f5093d2543b36fe0380dfb4ddedb917bc7ae7ab87e87b1a098b081f4ddacf",
+    "candidate_regression_sha256": "b4c116ee5055177cae326880d2af5bdaa890e45b8ab67a21ee8c2b46b24e8c75",
+    "features": [
+      "simd-accel",
+      "gix-pathmatch"
+    ],
+    "rustfs_version": "1.0.1",
+    "rustfs_binary_sha256": "6a37dbb79bd5da3d6fec1cf2c50171face2cf8288d7337885c9b12fa414da73b",
+    "git_version": "git version 2.50.1 (Apple Git-155)",
+    "operating_system": "macos",
+    "macos_version": "26.5.2",
+    "architecture": "arm64",
+    "transport": "loopback HTTP S3 API through request-counting proxy",
+    "storage": "mounted Workspace volume",
+    "resource_isolation": "shared host; no task-owned build or second bulk workload overlapped the replay; protocol smoke ran afterward",
+    "frozen_binary_and_source_unchanged": true
+  },
+  "source": {
+    "repository": "https://github.com/vercel/next.js",
+    "branch": "canary",
+    "head": "d8c1c1b0002db8ccb63b58095f338e8bf423fa99",
+    "base": "36357eba00b8dcc42c5eca8e6f2c39fbcab29f7d",
+    "first_parent_commits": 32431,
+    "replayed_first_parent_commits": 5000,
+    "head_date": "2026-10-10T23:24:31Z",
+    "base_date": "2025-10-09T16:43:37-07:00",
+    "source_pack_bytes": 2450435678,
+    "tracked_files_at_tip": 33998,
+    "alternates_present": false,
+    "promisor_pack_count": 0
+  },
+  "source_pack_hashes": [
+    {
+      "file": "pack-f6298ca1e08b816776386c95d429e73d42f7e2ff.pack",
+      "bytes": 2450435678,
+      "sha256": "08bd169b58156b117e0a214f4207c3f53ddb78c039f204255c436845d225bc49"
+    }
+  ],
+  "workload": {
+    "run_id": "nextjs-5000-b620-framed-20261011-r2",
+    "seed": "Full reachable history at HEAD~5000; no shallow or promisor source",
+    "incremental_commits": 5000,
+    "order": "first-parent chronological",
+    "fetch_interval": 500,
+    "fetch_before_repack": true,
+    "repack_interval": 500,
+    "clone_mode": "crab clone --lazy, including checkout; cold/warm refer to fresh/reused Crab cache, not OS cache",
+    "bucket": "crab-nextjs-capsule-b620-20261011-r1",
+    "prefix": "e2e-capsule-protocol/nextjs-5000-b620-framed-20261011-r2",
+    "harness": "crab/scripts/e2e/run_capsule_k8s_rustfs.py",
+    "harness_sha256": "c613499c3c0427753af2a8ad3cbe006badeb7a384c0132129e299f61ae026da7",
+    "request_proxy_sha256": "bae33311ea8d27ad00829d546ec1b086f95bc9d742150be2a92dc17ee9391879"
+  },
+  "baseline_failure": {
+    "run_id": "nextjs-5000-b620-20261011-r1",
+    "status": "failed",
+    "phase": "seed push before ref publication",
+    "incremental_commits_completed": 0,
+    "error_codes": [
+      "CRAB-E0088",
+      "CRAB-E0001"
+    ],
+    "root_cause": "A contiguous multi-GiB request frame reaches Darwin writev above its byte limit and fails with EINVAL before sending bytes.",
+    "failed_seed_inventory": "Only the initialization root and released namespace lease remained; no capsule or published ref.",
+    "evidence": [
+      "large-frame-socket-probe.json",
+      "large-upload-before.log",
+      "full-pack-meter-probe.json"
+    ],
+    "full_pack_streaming_proxy_put": "The unchanged proxy and RustFS accepted the 2450435678-byte source pack via streaming curl in 16767 ms; failure was in the Rust transport."
+  },
+  "fix": {
+    "owner": "crates/crab-storage/src/store.rs:81",
+    "behavior": "Split existing buffers into zero-copy 8 MiB PutPayload frames for six single-PUT paths and three multipart part paths.",
+    "unchanged_contracts": [
+      "one conditional PUT request",
+      "ordered bytes and content length",
+      "request signing and content digests",
+      "multipart part boundaries",
+      "CAS create/update conditions",
+      "immutable readback verification"
+    ],
+    "dependency_contract": {
+      "object_store": "0.14.1: PutPayload preserves an ordered Bytes sequence; content_length sums the buffers; HttpRequestBody wraps each buffer as a stream frame.",
+      "hyper": "1.11.1: HTTP/1 buffers at most 16 vectored body buffers.",
+      "rust_std": "Unix FileDesc::write_vectored calls libc::writev without capping total byte count.",
+      "proof": "The real 2 GiB native S3 HTTP test fails before the fix with BodyWrite/os error 22, then passes with one PUT and matching BLAKE3.",
+      "current_main_reference": "cc2e4e25f46eeaee3cfd30025d257397c17a6049 also constructs contiguous PUT payloads; this is a shared storage boundary, not a capsule format change."
+    },
+    "regression": "crates/crab-storage/tests/large_upload.rs:14",
+    "loc_reason": "One shared framing boundary covers nine upload paths; no new mode, config option, multipart conversion, or fallback.",
+    "production_rust_non_test_loc_delta": 12
+  },
+  "correctness": {
+    "cold_clone_sampled_blob_bytes": "matched source",
+    "cold_clone_strict_full_git_fsck": "passed",
+    "expected_tip": "d8c1c1b0002db8ccb63b58095f338e8bf423fa99",
+    "final_tip": "d8c1c1b0002db8ccb63b58095f338e8bf423fa99",
+    "incremental_fetches": 10,
+    "remote_crab_fsck": "passed",
+    "sampled_blob_count": 32,
+    "seed_remote_crab_fsck": "passed",
+    "seed_strict_full_git_fsck": "passed",
+    "seed_tip": "36357eba00b8dcc42c5eca8e6f2c39fbcab29f7d",
+    "warm_clone_sampled_blob_bytes": "matched source",
+    "warm_clone_strict_full_git_fsck": "passed",
+    "warm_clone_tip": "d8c1c1b0002db8ccb63b58095f338e8bf423fa99"
+  },
+  "independent_audit": {
+    "source_config_refs_head_unchanged": true,
+    "clones": [
+      {
+        "name": "incremental-clone",
+        "tip": "d8c1c1b0002db8ccb63b58095f338e8bf423fa99",
+        "alternates_present": false,
+        "promisor_pack_count": 0
+      },
+      {
+        "name": "final-clone",
+        "tip": "d8c1c1b0002db8ccb63b58095f338e8bf423fa99",
+        "alternates_present": false,
+        "promisor_pack_count": 0
+      },
+      {
+        "name": "warm-clone",
+        "tip": "d8c1c1b0002db8ccb63b58095f338e8bf423fa99",
+        "alternates_present": false,
+        "promisor_pack_count": 0
+      }
+    ],
+    "released_leases": 8,
+    "lease_contract": "PushLockPayload::is_released checks expires_at == 0; tombstones retain the prior holder for diagnostics."
+  },
+  "performance": {
+    "seed": {
+      "elapsed_ms": 211088,
+      "object_store_requests": 9
+    },
+    "push_latency_ms": {
+      "max": 2144,
+      "mean": 321.73,
+      "p50": 292,
+      "p95": 519,
+      "p99": 854
+    },
+    "push_object_store_requests": {
+      "max": 42,
+      "mean": 7.062,
+      "p50": 6,
+      "p95": 6,
+      "p99": 40,
+      "total": 35310,
+      "under_10_average": true
+    },
+    "push_upload_bytes": 3176995452,
+    "push_download_bytes": 5470860066,
+    "push_windows": [
+      {
+        "first_commit": 1,
+        "last_commit": 500,
+        "mean_ms": 253.14,
+        "p95_ms": 413,
+        "mean_requests": 7.062,
+        "upload_bytes": 324034472,
+        "download_bytes": 558359219
+      },
+      {
+        "first_commit": 501,
+        "last_commit": 1000,
+        "mean_ms": 321.99,
+        "p95_ms": 523,
+        "mean_requests": 7.062,
+        "upload_bytes": 362438244,
+        "download_bytes": 623799193
+      },
+      {
+        "first_commit": 1001,
+        "last_commit": 1500,
+        "mean_ms": 325.87,
+        "p95_ms": 501,
+        "mean_requests": 7.062,
+        "upload_bytes": 318980098,
+        "download_bytes": 547994441
+      },
+      {
+        "first_commit": 1501,
+        "last_commit": 2000,
+        "mean_ms": 321.95,
+        "p95_ms": 518,
+        "mean_requests": 7.062,
+        "upload_bytes": 306117341,
+        "download_bytes": 525744177
+      },
+      {
+        "first_commit": 2001,
+        "last_commit": 2500,
+        "mean_ms": 329.41,
+        "p95_ms": 483,
+        "mean_requests": 7.062,
+        "upload_bytes": 296275760,
+        "download_bytes": 509049531
+      },
+      {
+        "first_commit": 2501,
+        "last_commit": 3000,
+        "mean_ms": 329.87,
+        "p95_ms": 508,
+        "mean_requests": 7.062,
+        "upload_bytes": 310044424,
+        "download_bytes": 535997993
+      },
+      {
+        "first_commit": 3001,
+        "last_commit": 3500,
+        "mean_ms": 344.91,
+        "p95_ms": 584,
+        "mean_requests": 7.062,
+        "upload_bytes": 331122057,
+        "download_bytes": 571619143
+      },
+      {
+        "first_commit": 3501,
+        "last_commit": 4000,
+        "mean_ms": 334.85,
+        "p95_ms": 554,
+        "mean_requests": 7.062,
+        "upload_bytes": 322029421,
+        "download_bytes": 554821958
+      },
+      {
+        "first_commit": 4001,
+        "last_commit": 4500,
+        "mean_ms": 330.51,
+        "p95_ms": 526,
+        "mean_requests": 7.062,
+        "upload_bytes": 316667864,
+        "download_bytes": 545050389
+      },
+      {
+        "first_commit": 4501,
+        "last_commit": 5000,
+        "mean_ms": 324.82,
+        "p95_ms": 523,
+        "mean_requests": 7.062,
+        "upload_bytes": 289285771,
+        "download_bytes": 498424022
+      }
+    ],
+    "fetch": {
+      "count": 10,
+      "latency_ms": {
+        "max": 5419,
+        "mean": 2827.1,
+        "p50": 2451,
+        "p95": 5419,
+        "p99": 5419
+      },
+      "max_new_local_packs": 1,
+      "new_local_pack_count": 10,
+      "object_store_requests": {
+        "max": 11,
+        "mean": 10.0,
+        "p50": 9,
+        "p95": 11,
+        "p99": 11
+      },
+      "request_body_bytes": 2013,
+      "response_body_bytes": 764802901
+    },
+    "fetch_intervals": [
+      {
+        "ordinal": 500,
+        "elapsed_ms": 2451,
+        "requests": 9,
+        "response_body_bytes": 76507986,
+        "new_local_packs": 1,
+        "new_capsule_body_gets": 1,
+        "checkpoint_control_range_gets": 1,
+        "seed_body_gets": 0,
+        "stable_pack_layer_body_gets": 0,
+        "native_git_repack_starts": 0,
+        "tip": "cdf8f7959b0313799d64237e0d9d590e328f1028"
+      },
+      {
+        "ordinal": 1000,
+        "elapsed_ms": 5419,
+        "requests": 9,
+        "response_body_bytes": 87001025,
+        "new_local_packs": 1,
+        "new_capsule_body_gets": 1,
+        "checkpoint_control_range_gets": 1,
+        "seed_body_gets": 0,
+        "stable_pack_layer_body_gets": 0,
+        "native_git_repack_starts": 0,
+        "tip": "8cf1d1f1fa6fe6110a3b4aa5d275374a3299dd18"
+      },
+      {
+        "ordinal": 1500,
+        "elapsed_ms": 2176,
+        "requests": 11,
+        "response_body_bytes": 78733146,
+        "new_local_packs": 1,
+        "new_capsule_body_gets": 1,
+        "checkpoint_control_range_gets": 1,
+        "seed_body_gets": 0,
+        "stable_pack_layer_body_gets": 0,
+        "native_git_repack_starts": 0,
+        "tip": "be56ce3ae8d2bf3b7cdbbbadaaacb1a998e25569"
+      },
+      {
+        "ordinal": 2000,
+        "elapsed_ms": 2065,
+        "requests": 11,
+        "response_body_bytes": 75334313,
+        "new_local_packs": 1,
+        "new_capsule_body_gets": 1,
+        "checkpoint_control_range_gets": 1,
+        "seed_body_gets": 0,
+        "stable_pack_layer_body_gets": 0,
+        "native_git_repack_starts": 0,
+        "tip": "7fc7f1aed693d21449a63a98c344321f60e287e0"
+      },
+      {
+        "ordinal": 2500,
+        "elapsed_ms": 3338,
+        "requests": 9,
+        "response_body_bytes": 71937148,
+        "new_local_packs": 1,
+        "new_capsule_body_gets": 1,
+        "checkpoint_control_range_gets": 1,
+        "seed_body_gets": 0,
+        "stable_pack_layer_body_gets": 0,
+        "native_git_repack_starts": 0,
+        "tip": "f765823edda520806fb459177886ba8386ee94b1"
+      },
+      {
+        "ordinal": 3000,
+        "elapsed_ms": 2177,
+        "requests": 9,
+        "response_body_bytes": 73529720,
+        "new_local_packs": 1,
+        "new_capsule_body_gets": 1,
+        "checkpoint_control_range_gets": 1,
+        "seed_body_gets": 0,
+        "stable_pack_layer_body_gets": 0,
+        "native_git_repack_starts": 0,
+        "tip": "f4086d562759c338d6559d7b725f76acd485f090"
+      },
+      {
+        "ordinal": 3500,
+        "elapsed_ms": 3344,
+        "requests": 11,
+        "response_body_bytes": 79799780,
+        "new_local_packs": 1,
+        "new_capsule_body_gets": 1,
+        "checkpoint_control_range_gets": 1,
+        "seed_body_gets": 0,
+        "stable_pack_layer_body_gets": 0,
+        "native_git_repack_starts": 0,
+        "tip": "affd86f0bfcf934cb7e6891abbc67731e60982cc"
+      },
+      {
+        "ordinal": 4000,
+        "elapsed_ms": 2766,
+        "requests": 11,
+        "response_body_bytes": 77333140,
+        "new_local_packs": 1,
+        "new_capsule_body_gets": 1,
+        "checkpoint_control_range_gets": 1,
+        "seed_body_gets": 0,
+        "stable_pack_layer_body_gets": 0,
+        "native_git_repack_starts": 0,
+        "tip": "cb36e1d5946eb3bf6473b535e9537a54f257ba27"
+      },
+      {
+        "ordinal": 4500,
+        "elapsed_ms": 2615,
+        "requests": 11,
+        "response_body_bytes": 75927597,
+        "new_local_packs": 1,
+        "new_capsule_body_gets": 1,
+        "checkpoint_control_range_gets": 1,
+        "seed_body_gets": 0,
+        "stable_pack_layer_body_gets": 0,
+        "native_git_repack_starts": 0,
+        "tip": "6cfca45f1d0d86a35eba359703bebf6a3b3e0663"
+      },
+      {
+        "ordinal": 5000,
+        "elapsed_ms": 1920,
+        "requests": 9,
+        "response_body_bytes": 68699046,
+        "new_local_packs": 1,
+        "new_capsule_body_gets": 1,
+        "checkpoint_control_range_gets": 1,
+        "seed_body_gets": 0,
+        "stable_pack_layer_body_gets": 0,
+        "native_git_repack_starts": 0,
+        "tip": "d8c1c1b0002db8ccb63b58095f338e8bf423fa99"
+      }
+    ],
+    "clones": [
+      {
+        "operation": "incremental-clone",
+        "elapsed_ms": 15543,
+        "object_store": {
+          "categories": {
+            "locks/internal/git-read-admission-15": 2,
+            "metadata/replica-discovery.json": 1,
+            "v2": 11
+          },
+          "classes": {
+            "locks/internal/git-read-admission-15:put": 2,
+            "metadata/replica-discovery.json:get": 1,
+            "v2:get": 7,
+            "v2:list": 4
+          },
+          "methods": {
+            "GET": 12,
+            "PUT": 2
+          },
+          "operations": {
+            "get": 8,
+            "list": 4,
+            "put": 2
+          },
+          "proxy_errors": {},
+          "request_body_bytes": 159,
+          "request_latency_ms": {
+            "count": 14,
+            "max": 4214,
+            "p50": 1,
+            "p95": 4214,
+            "p99": 4214,
+            "slowest": {
+              "category": "v2",
+              "elapsed_ms": 4214,
+              "key": "v2/capsules/83/837387b09b47c3dac6014b4b61636c78797c668f1a775b22b933ed0d8c6b4df6",
+              "method": "GET",
+              "operation": "get",
+              "status": 206
+            }
+          },
+          "requests": 14,
+          "response_body_bytes": 2368130345,
+          "statuses": {
+            "2xx": 13,
+            "4xx": 1
+          }
+        }
+      },
+      {
+        "operation": "cold-final-clone",
+        "elapsed_ms": 88967,
+        "object_store": {
+          "categories": {
+            "locks/internal/git-read-admission-4": 2,
+            "metadata/replica-discovery.json": 1,
+            "v2": 12
+          },
+          "classes": {
+            "locks/internal/git-read-admission-4:put": 2,
+            "metadata/replica-discovery.json:get": 1,
+            "v2:get": 8,
+            "v2:list": 4
+          },
+          "methods": {
+            "GET": 13,
+            "PUT": 2
+          },
+          "operations": {
+            "get": 9,
+            "list": 4,
+            "put": 2
+          },
+          "proxy_errors": {},
+          "request_body_bytes": 159,
+          "request_latency_ms": {
+            "count": 15,
+            "max": 30628,
+            "p50": 1,
+            "p95": 30628,
+            "p99": 30628,
+            "slowest": {
+              "category": "v2",
+              "elapsed_ms": 30628,
+              "key": "v2/capsules/83/837387b09b47c3dac6014b4b61636c78797c668f1a775b22b933ed0d8c6b4df6",
+              "method": "GET",
+              "operation": "get",
+              "status": 206
+            }
+          },
+          "requests": 15,
+          "response_body_bytes": 2504511398,
+          "statuses": {
+            "2xx": 14,
+            "4xx": 1
+          }
+        }
+      },
+      {
+        "operation": "warm-final-clone",
+        "elapsed_ms": 15110,
+        "object_store": {
+          "categories": {
+            "locks/internal/git-read-admission-1": 4,
+            "metadata/replica-discovery.json": 1,
+            "v2": 12
+          },
+          "classes": {
+            "locks/internal/git-read-admission-1:get": 1,
+            "locks/internal/git-read-admission-1:put": 3,
+            "metadata/replica-discovery.json:get": 1,
+            "v2:get": 8,
+            "v2:list": 4
+          },
+          "methods": {
+            "GET": 14,
+            "PUT": 3
+          },
+          "operations": {
+            "get": 10,
+            "list": 4,
+            "put": 3
+          },
+          "proxy_errors": {},
+          "request_body_bytes": 241,
+          "request_latency_ms": {
+            "count": 17,
+            "max": 63,
+            "p50": 3,
+            "p95": 63,
+            "p99": 63,
+            "slowest": {
+              "category": "locks/internal/git-read-admission-1",
+              "elapsed_ms": 63,
+              "key": "locks/internal/git-read-admission-1/lock",
+              "method": "PUT",
+              "operation": "put",
+              "status": 200
+            }
+          },
+          "requests": 17,
+          "response_body_bytes": 24517691,
+          "statuses": {
+            "2xx": 15,
+            "4xx": 2
+          }
+        }
+      }
+    ],
+    "interval_repack_ms": {
+      "min": 5152,
+      "max": 19275
+    },
+    "final_remote_fsck_ms": 127203,
+    "existing_performance_gates": {
+      "500_commit_fetch": {
+        "latency_p95_ms_lte_10000": true,
+        "object_store_requests_p95_observed": 11,
+        "required_interval": 500,
+        "status": "passed"
+      },
+      "push_mean_latency_ms_under_1000": true,
+      "push_mean_requests_under_10": true,
+      "push_window_p95_ms_under_1000": {
+        "max_window_p95_ms": 584,
+        "p95_limit_ms": 1000,
+        "status": "passed"
+      },
+      "status": "passed"
+    },
+    "native_git_fetch_repack_starts": 0
+  },
+  "object_store": {
+    "preflight": {
+      "version": "1.0.1",
+      "bucket": "crab-nextjs-capsule-b620-20261011-r1",
+      "empty_bucket_verified": true,
+      "cases": [
+        {
+          "case": "create",
+          "http_status": 200,
+          "expected": 200,
+          "passed": true
+        },
+        {
+          "case": "duplicate_create",
+          "http_status": 412,
+          "expected": 412,
+          "passed": true
+        },
+        {
+          "case": "update",
+          "http_status": 200,
+          "expected": 200,
+          "passed": true
+        },
+        {
+          "case": "stale_update",
+          "http_status": 412,
+          "expected": 412,
+          "passed": true
+        },
+        {
+          "case": "range",
+          "http_status": 206,
+          "expected": 206,
+          "passed": true
+        },
+        {
+          "case": "range_bytes",
+          "passed": true
+        },
+        {
+          "case": "final",
+          "http_status": 200,
+          "expected": 200,
+          "passed": true
+        },
+        {
+          "case": "rejected_write_preserves_bytes",
+          "passed": true
+        },
+        {
+          "case": "cleanup",
+          "http_status": 204,
+          "expected": 204,
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    "replay_request_count": 35719,
+    "replay_http_statuses": {
+      "200": 35633,
+      "206": 65,
+      "404": 15,
+      "412": 6
+    },
+    "proxy_errors": 0,
+    "http_5xx": 0,
+    "http_404_note": "Missing optional replica discovery and initial absent roots/refs.",
+    "http_412_note": "Six read-admission create conflicts followed by GET and successful conditional lease reclamation; all eight retained leases were released.",
+    "final_inventory": {
+      "locks/internal": {
+        "objects": 8,
+        "bytes": 591
+      },
+      "v2/capsules": {
+        "objects": 5161,
+        "bytes": 5469747658
+      },
+      "v2/checkpoints": {
+        "objects": 11,
+        "bytes": 183750625
+      },
+      "v2/history": {
+        "objects": 11,
+        "bytes": 349477
+      },
+      "v2/pack-layers": {
+        "objects": 10,
+        "bytes": 749549072
+      },
+      "v2/refs": {
+        "objects": 1,
+        "bytes": 34259
+      },
+      "v2/root": {
+        "objects": 1,
+        "bytes": 1391
+      }
+    },
+    "final_stored_objects": 5203,
+    "final_stored_bytes": 6403433073,
+    "gc": "Not run; retained immutable history and superseded objects remain for evidence."
+  },
+  "protocol_smoke": {
+    "run_id": "protocol-v2-b620-framed-20261011-r1",
+    "status": "passed",
+    "checks_passed": 92,
+    "commands": 323,
+    "harness_sha256": "c7426533ccdb4f635387bb64556818126017347aaf73c0d7c47fac19deadc2b7",
+    "passed_checks": [
+      "object-store-health",
+      "crab-binary-matches-source-revision",
+      "empty-clone-and-unborn-discovery",
+      "dry-run-creation-preserves-bucket",
+      "sha-looking-ref-fetch",
+      "ref-lifecycle-strict-fsck",
+      "atomic-multi-ref-update",
+      "dry-run-mixed-batch-preserves-bucket",
+      "dry-run-stale-lease-refuses-whole-batch",
+      "atomic-stale-lease-retains-all-refs",
+      "leased-force-and-branch-deletion",
+      "complete-clone-strict-fsck",
+      "legacy-protocol-v0-path",
+      "legacy-complete-pack-path",
+      "performance-normal-blobs-filtered-odb-smaller",
+      "performance-deep-history-filtered-odb-smaller",
+      "performance-many-small-files-filtered-odb-smaller",
+      "performance-pointer-heavy-filtered-odb-smaller",
+      "performance-fixtures-have-distinct-tips",
+      "performance-resource-metrics",
+      "pointer-fixtures-remain-byte-identified",
+      "shallow-clone-boundary",
+      "shallow-clone-deepen",
+      "shallow-clone-unshallow",
+      "promisor-configuration",
+      "initial-promisor-sidecar",
+      "filtered-annotated-tags",
+      "initial-ordinary-blobs-absent",
+      "concurrent-lazy-fetch-is-byte-identical",
+      "batched-lazy-oid-fetch",
+      "offline-present-object-access",
+      "offline-promised-object-error",
+      "filtered-incremental-fetch",
+      "protocol-v2-packet-trace",
+      "post-push-read-admission",
+      "lazy-blob-byte-identity",
+      "lazy-promisor-pack-installed",
+      "filtered-git-lifecycle",
+      "filter-matrix-blob-none-protocol-and-promisor",
+      "filter-matrix-blob-none-omits-large-before-lazy-fetch",
+      "filter-matrix-blob-none-lazy-byte-identity",
+      "filter-matrix-blob-none-maintenance",
+      "filter-matrix-blob-limit-protocol-and-promisor",
+      "filter-matrix-blob-limit-omits-large-before-lazy-fetch",
+      "filter-matrix-blob-limit-lazy-byte-identity",
+      "filter-matrix-blob-limit-maintenance",
+      "filter-matrix-blob-limit-selects-by-size",
+      "filter-matrix-tree-depth-protocol-and-promisor",
+      "filter-matrix-tree-depth-omits-large-before-lazy-fetch",
+      "filter-matrix-tree-depth-lazy-byte-identity",
+      "filter-matrix-tree-depth-maintenance",
+      "filter-matrix-object-type-tag-protocol-and-promisor",
+      "filter-matrix-object-type-tag-omits-large-before-lazy-fetch",
+      "filter-matrix-object-type-tag-lazy-byte-identity",
+      "filter-matrix-object-type-tag-object-selection",
+      "filter-matrix-object-type-tag-maintenance",
+      "filter-matrix-object-type-commit-protocol-and-promisor",
+      "filter-matrix-object-type-commit-omits-large-before-lazy-fetch",
+      "filter-matrix-object-type-commit-lazy-byte-identity",
+      "filter-matrix-object-type-commit-object-selection",
+      "filter-matrix-object-type-commit-maintenance",
+      "filter-matrix-object-type-tree-protocol-and-promisor",
+      "filter-matrix-object-type-tree-omits-large-before-lazy-fetch",
+      "filter-matrix-object-type-tree-lazy-byte-identity",
+      "filter-matrix-object-type-tree-object-selection",
+      "filter-matrix-object-type-tree-maintenance",
+      "filter-matrix-object-type-blob-protocol-and-promisor",
+      "filter-matrix-object-type-blob-retains-large-before-lazy-fetch",
+      "filter-matrix-object-type-blob-object-selection",
+      "filter-matrix-object-type-blob-maintenance",
+      "filter-matrix-sparse-protocol-and-promisor",
+      "filter-matrix-sparse-omits-large-before-lazy-fetch",
+      "filter-matrix-sparse-lazy-byte-identity",
+      "filter-matrix-sparse-maintenance",
+      "filter-matrix-sparse-path-selection",
+      "filter-matrix-combine-protocol-and-promisor",
+      "filter-matrix-combine-omits-large-before-lazy-fetch",
+      "filter-matrix-combine-lazy-byte-identity",
+      "filter-matrix-combine-maintenance",
+      "filter-matrix-read-only-remote",
+      "everyday-pull-rebase-and-fast-forward",
+      "everyday-notes-round-trip",
+      "everyday-linked-worktree-push",
+      "everyday-recursive-submodule-clone",
+      "everyday-bare-mirror-preserves-all-refs",
+      "hidden-only-oid-rejected-before-range-read",
+      "dangling-oid-rejected-before-range-read",
+      "unknown-oid-rejected-before-range-read",
+      "protocol-disconnect-cleans-session-state",
+      "retained-artifacts-redacted",
+      "filtered-initial-odb-smaller",
+      "filtered-transfer-smaller"
+    ],
+    "candidate_binary_sha256": "46c35dc4f6fc5dfd5e671807618e3f3b7a5cea384aa1c5ea3d02d4d237ccc0b0",
+    "source_dirty": true,
+    "source_dirty_note": "Recorded overlay is the candidate; embedded base SHA alone does not prove an unmodified build."
+  },
+  "validation": {
+    "storage_unit_tests": {
+      "passed": 219,
+      "ignored": 1,
+      "failed": 0
+    },
+    "large_native_http_regression": {
+      "before": "failed with EINVAL",
+      "after": "passed in 4.59 s",
+      "body_bytes": 2147483648,
+      "explicit_ignored_test_executed": true,
+      "ignored_reason": "Requires allocating and sending 2 GiB; not part of default unit suite."
+    },
+    "storage_clippy_all_targets_with_warnings_denied": "passed",
+    "storage_format_check": "passed",
+    "replay_harness_unit_tests": 28,
+    "cli_build_and_private_make_install": "passed"
+  },
+  "limits": [
+    "Local shared-host measurement; no cloud/WAN latency result.",
+    "No matched v1 throughput comparison or causal speedup claim.",
+    "This run does not qualify every provider, OS, FUSE/server/SDK surface, GC failure mode, or large-scale Xet data workload.",
+    "Full workspace/CI qualification was not run; focused storage checks and real workload proofs are recorded."
+  ],
+  "retained_evidence": {
+    "root_relative_to_mounted_workspace": "Github/crabbuild/crab-nextjs-capsule-qualification",
+    "files": {
+      "nextjs-5000-b620-20261011-r1/artifacts/report.json": {
+        "bytes": 244692,
+        "sha256": "0abf61b60b091694772736d745aa4ade80b3a25c1701d1bc7d70b67b4ce35d36"
+      },
+      "nextjs-5000-b620-framed-20261011-r2/artifacts/report.json": {
+        "bytes": 5345261,
+        "sha256": "14909930bc26bace172c0d7b861e52a8a4a8893684bb1a510abf1eaa35ae1974"
+      },
+      "nextjs-5000-b620-framed-20261011-r2/artifacts/requests.jsonl": {
+        "bytes": 6990443,
+        "sha256": "ab6672d40c53a9cb11c567604e8e156f30f11ec2ad0608242f1695c9a19ecfff"
+      },
+      "protocol-v2-b620-framed-20261011-r1/artifacts/report.json": {
+        "bytes": 587393,
+        "sha256": "f8309ad2185a0f77c0dbfbd1fe87c8498056967a5edd5ee21123ef3ebf69dce7"
+      },
+      "independent-audit-v2.json": {
+        "bytes": 3299,
+        "sha256": "cefddae64953c72bfc1e26f075ae44986e66655dac0e146af36a72eb6a7924e3"
+      },
+      "lease-body-audit.json": {
+        "bytes": 1476,
+        "sha256": "1c1e74a84484c2e0f4b019b87937ba646bbccd955f283540a5707d7870768687"
+      },
+      "storage-preflight-b620.json": {
+        "bytes": 1054,
+        "sha256": "4101dc5b20266849b7806f084afc6ca011328597ba5af9058af412797845057f"
+      },
+      "large-upload-before.log": {
+        "bytes": 3421,
+        "sha256": "a864aff831910e9fcf52d10c6111b62fb47d2ff5b26b7ad8e3962506c9f8608e"
+      },
+      "large-upload-after.log": {
+        "bytes": 539,
+        "sha256": "7258fe4bc49a3fae32fdf5d912247f359c3eb7de08d377ca5fc5e0994694bee3"
+      },
+      "storage-unit-tests.log": {
+        "bytes": 18052,
+        "sha256": "61519d6a11250c6618dc6a7cdbe818bd4fbb1cc3411dd8478d958861a262346c"
+      },
+      "storage-clippy.log": {
+        "bytes": 4655,
+        "sha256": "087a1b5935c5ab7866d3aeed4699c1b76ad3b028ecb6a24f4948b67036c46f06"
+      },
+      "build-framed.log": {
+        "bytes": 18245,
+        "sha256": "18c15f5a00f9a1bf30bdea356b13ad62681c0f493fae149afad43cebab66f529"
+      },
+      "upload-framing.patch": {
+        "bytes": 6411,
+        "sha256": "18ea97b3cc80c4fa5cadf0877f4eaf0a25e0bfe73a9f405b8e3b79bc624dfe17"
+      },
+      "upload-framing-provenance.json": {
+        "bytes": 2855,
+        "sha256": "ff83d9c319da3f7566e6b8ae5dc6cfdcbcc6855a10d2fc172d80487558c12252"
+      },
+      "final-store-inventory.json": {
+        "bytes": 1729383,
+        "sha256": "5af0cb76eeb929675b19b84841646657bf2334e579c169b813b09eb7eb51a058"
+      },
+      "trace2-manifest.json": {
+        "bytes": 713965,
+        "sha256": "e40e7fed1798a40be531737884878608b7cf81ad1d076678273ecaefcf2b75bb"
+      }
+    }
+  }
+}

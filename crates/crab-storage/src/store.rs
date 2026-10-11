@@ -76,6 +76,16 @@ const SIGNED_RANGE_CHUNK_BYTES: u64 = 512 * 1024 * 1024;
 const SIGNED_RANGE_READ_CONCURRENCY: usize = 4;
 const SIGNED_RANGE_WRITE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 const SIGNED_RANGE_GET_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
+const UPLOAD_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+fn upload_payload(bytes: Bytes) -> object_store::PutPayload {
+    // The HTTP client emits one frame per buffer. A contiguous multi-GiB
+    // buffer exceeds macOS's vectored-write limit before any bytes are sent.
+    (0..bytes.len())
+        .step_by(UPLOAD_FRAME_BYTES)
+        .map(|offset| bytes.slice(offset..bytes.len().min(offset + UPLOAD_FRAME_BYTES)))
+        .collect()
+}
 
 struct SignedFileTarget<'a> {
     path: &'a std::path::Path,
@@ -715,7 +725,8 @@ impl Store {
                     attributes,
                     ..PutOptions::default()
                 };
-                match self.inner.put_opts(&path, bytes.into(), options).await {
+                let payload = upload_payload(bytes);
+                match self.inner.put_opts(&path, payload, options).await {
                     Ok(_) => Ok(true),
                     Err(error) => {
                         let mapped = map_object_store_error(error, path.as_ref());
@@ -786,8 +797,9 @@ impl Store {
                 let write_path = self.write_path(&path);
                 let write_inner = self.write_inner();
                 let opts = PutOptions::from(PutMode::Create);
+                let payload = upload_payload(bytes);
                 write_inner
-                    .put_opts(&write_path, bytes.into(), opts)
+                    .put_opts(&write_path, payload, opts)
                     .await
                     .map(|result| {
                         self.record_staged_write(&path, &write_path, &expected_hash, size);
@@ -812,8 +824,9 @@ impl Store {
             async move {
                 let (write_path, write_inner, _record_staged_write) =
                     self.exact_write_target(&path);
+                let payload = upload_payload(bytes);
                 write_inner
-                    .put_opts(&write_path, bytes.into(), PutOptions::default())
+                    .put_opts(&write_path, payload, PutOptions::default())
                     .await
                     .map(|_| ())
                     .map_err(|e| map_object_store_error(e, write_path.as_ref()))
@@ -827,10 +840,8 @@ impl Store {
         let write_inner = self.write_inner();
         let size = bytes.len() as u64;
         let opts = PutOptions::from(PutMode::Create);
-        match write_inner
-            .put_opts(&write_path, bytes.clone().into(), opts)
-            .await
-        {
+        let payload = upload_payload(bytes);
+        match write_inner.put_opts(&write_path, payload, opts).await {
             Ok(_) => {
                 self.record_staged_write(path, &write_path, expected_hash, size);
                 Ok(true)
@@ -930,7 +941,8 @@ impl Store {
             ));
         }
         let opts = PutOptions::from(PutMode::Update(etag));
-        match self.inner.put_opts(path, bytes.into(), opts).await {
+        let payload = upload_payload(bytes);
+        match self.inner.put_opts(path, payload, opts).await {
             Ok(result) => Ok(ETag::from(result)),
             Err(err) => Err(map_object_store_error(err, path.as_ref())),
         }
@@ -944,10 +956,8 @@ impl Store {
             async move {
                 let (write_path, write_inner, record_staged_write) = self.exact_write_target(&path);
                 let opts = PutOptions::from(PutMode::Create);
-                match write_inner
-                    .put_opts(&write_path, bytes.clone().into(), opts)
-                    .await
-                {
+                let payload = upload_payload(bytes.clone());
+                match write_inner.put_opts(&write_path, payload, opts).await {
                     Ok(_) => {
                         if record_staged_write {
                             self.record_staged_write(
@@ -2457,7 +2467,7 @@ impl Store {
                 let retry_policy = self.retry;
                 let path = path.clone();
                 let upload_id = object_store::MultipartId::from(upload_id);
-                let payload: object_store::PutPayload = bytes::Bytes::from(buffer).into();
+                let payload = upload_payload(Bytes::from(buffer));
                 let bytes = want as u64;
                 pending.push(async move {
                     let result = retry(&retry_policy, || {
@@ -2675,7 +2685,8 @@ impl Store {
                 }
             }
             let bytes = chunk.len() as u64;
-            let fut = upload.put_part(bytes::Bytes::copy_from_slice(chunk).into());
+            let payload = upload_payload(Bytes::copy_from_slice(chunk));
+            let fut = upload.put_part(payload);
             pending.push(async move { (fut.await, bytes) });
         }
 
@@ -2788,7 +2799,8 @@ impl Store {
             offset += want as u64;
 
             let byte_count = want as u64;
-            let fut = upload.put_part(bytes.into());
+            let payload = upload_payload(bytes);
+            let fut = upload.put_part(payload);
             pending.push(async move { (fut.await, byte_count) });
         }
 
