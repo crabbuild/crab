@@ -30,11 +30,12 @@ impl CommitGraphIndex {
         expected_generation: u64,
         expected_pack_index_hash: &str,
         expected_validation_digest: &str,
-        expected_roots: &[ObjectId],
+        refs: &crate::RepositoryRefs,
         max_bytes: u64,
         cancellation: &CancellationToken,
         runtime: &RemoteGitRuntime,
         budget: &crate::budget::OperationBudget,
+        operation: &crate::OperationContext,
     ) -> Result<Self> {
         let runtime_cancellation = runtime.background_cancellation();
         let graph = tokio::select! {
@@ -46,9 +47,15 @@ impl CommitGraphIndex {
         if graph.descriptor.generation != expected_generation
             || graph.descriptor.pack_index_hash != expected_pack_index_hash
             || graph.descriptor.git_validation_digest != expected_validation_digest
-            || expected_roots
-                .iter()
-                .any(|root| sha1_bytes(*root).is_none_or(|root| !graph.contains(&root)))
+        {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::CommitGraph,
+            });
+        }
+        let roots = crate::repository::resolved_commit_roots(refs, Some(&graph), operation).await?;
+        if roots
+            .iter()
+            .any(|root| sha1_bytes(*root).is_none_or(|root| !graph.contains(&root)))
         {
             return Err(Error::Corrupt {
                 stage: CorruptionStage::CommitGraph,
@@ -68,7 +75,6 @@ impl CommitGraphIndex {
             () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
             permit = runtime.decode_permit(cancellation) => permit?,
         };
-        let roots = expected_roots.to_vec();
         let cancellation = cancellation.clone();
         runtime
             .spawn_blocking(move || {

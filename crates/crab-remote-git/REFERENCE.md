@@ -243,8 +243,9 @@ indexes; the maintenance owner must first bind them to the captured v2 state.
 `with_commit_graph` attaches a newly durable graph to an immutable copy of a
 pinned handle. It keeps authenticated pack lookup sources and runtime identity;
 it clears old path attribution because graph ordinals may differ. Graph loading
-uses verified raw ref targets and tag peeling to select commit roots, so tags
-to trees or blobs do not disable commit acceleration. Root validation, graph
+selects known commit roots from the validated graph and supplied snapshot,
+without requiring pack reads during opening. Unresolved tags use verified raw
+peeling, so tags to trees or blobs do not disable commit acceleration. Root validation, graph
 origin reads and reachability allocation share one operation budget. Standard
 opening retains its aggregate handshake budget.
 

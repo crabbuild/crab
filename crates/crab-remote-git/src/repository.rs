@@ -1376,7 +1376,6 @@ fn load_commit_graph<'a>(
                 .read_admission(operation.cancellation().clone()),
         );
         let result = async {
-            let roots = resolved_commit_roots(&state.refs, &operation).await?;
             let graph = CommitGraphIndex::load(
                 &read_store,
                 &state.layout,
@@ -1384,11 +1383,12 @@ fn load_commit_graph<'a>(
                 state.generation,
                 &state.pack_index_hash,
                 &state.git_validation_digest,
-                &roots,
+                &state.refs,
                 state.options.object.max_commit_graph_bytes,
                 operation.cancellation(),
                 runtime,
                 operation.budget(),
+                &operation,
             )
             .await;
             match graph {
@@ -1751,14 +1751,31 @@ impl TagPeelState {
     }
 }
 
-async fn resolved_commit_roots(
+pub(crate) async fn resolved_commit_roots(
     refs: &RepositoryRefs,
+    graph: Option<&crab_metadata::split_commit_graph::SplitCommitGraph>,
     operation: &OperationContext,
 ) -> Result<Vec<ObjectId>> {
     // Git permits tags to trees and blobs. They confer no commit reachability,
     // but must not disable acceleration for the repository's commit refs.
     let mut roots = Vec::new();
     for reference in &refs.entries {
+        check_cancelled(operation.cancellation())?;
+        let target = reference.peeled.unwrap_or(reference.target);
+        if let Some(graph) = graph {
+            // A validated snapshot's known commit roots need no pack reads at
+            // open. Only unresolved tags need raw peeling; object requests still
+            // verify OIDs/kinds and parent lists before using graph acceleration.
+            if <[u8; 20]>::try_from(target.as_bytes()).is_ok_and(|oid| graph.contains(&oid)) {
+                roots.push(target);
+                continue;
+            }
+            if !reference.name.starts_with("refs/tags/") {
+                return Err(Error::Corrupt {
+                    stage: crate::CorruptionStage::CommitGraph,
+                });
+            }
+        }
         match peel_to_commit(reference.target, operation).await {
             Ok((commit, _)) => {
                 if reference.peeled.is_some_and(|expected| expected != commit) {
@@ -1784,7 +1801,7 @@ async fn prove_reachable(
 ) -> Result<bool> {
     // Visit nearby commits before descending either side of a merge. A depth-first
     // walk can exhaust the read budget before checking even HEAD's first parent.
-    let mut pending = resolved_commit_roots(refs, operation)
+    let mut pending = resolved_commit_roots(refs, None, operation)
         .await?
         .into_iter()
         .collect::<std::collections::VecDeque<_>>();
