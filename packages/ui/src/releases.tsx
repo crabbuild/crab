@@ -1,5 +1,5 @@
 import { repoHref, repositoryRoute } from "./repository-route";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Button, IconButton, Label, TextInput } from "@primer/react";
 import {
   ChevronLeftIcon,
@@ -446,27 +446,6 @@ export function Releases({
 }) {
   const route = repositoryRoute(url);
   const selected = route?.release;
-  const oldRelease = useRequest<Release>(
-    route?.releaseNumber
-      ? endpoint(repo, `releases/${route.releaseNumber}`)
-      : null,
-  );
-  const canonical =
-    oldRelease.data &&
-    repoHref(repo, {
-      view: "releases",
-      release: oldRelease.data.tag_name,
-      action: route?.action,
-    });
-  useEffect(() => {
-    if (canonical) navigate(canonical, true);
-  }, [canonical]);
-  if (route?.releaseNumber)
-    return (
-      <Result state={oldRelease} showTiming={false}>
-        {() => <p role="status">Opening release…</p>}
-      </Result>
-    );
   const canManage = repo.access === "write" && !repo.archived;
   if (route?.action === "new")
     return (

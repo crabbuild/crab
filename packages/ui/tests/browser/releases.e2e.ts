@@ -233,8 +233,6 @@ test("publishes and browses GitHub-style releases and source tags", async ({
   await page.getByRole("button", { name: "Save draft" }).click();
 
   await expect(page).toHaveURL(/\/releases\/tag\/v1\.0\.0$/);
-  await page.goto("/team/project?view=releases&release=2");
-  await expect(page).toHaveURL("/team/project/releases/tag/v1.0.0");
 
   await expect(page.getByRole("heading", { name: "Crab 1.0" })).toBeVisible();
   await expect(page.getByText("A stable release.")).toBeVisible();

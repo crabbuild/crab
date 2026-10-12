@@ -11,7 +11,6 @@ export interface RepositoryRoute {
   pull?: string;
   pullTab?: string;
   release?: string;
-  releaseNumber?: string;
   action?: string;
   section?: string;
   base?: string;
@@ -144,6 +143,24 @@ export function repoHref(
 }
 
 export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
+  // Navigation belongs in the pathname. Reject retired query selectors so an
+  // old deep link cannot silently display the repository's default page.
+  if (
+    [
+      "view",
+      "rev",
+      "path",
+      "issue",
+      "pull",
+      "pull_tab",
+      "release",
+      "action",
+      "section",
+      "base",
+      "head",
+    ].some((key) => url.searchParams.has(key))
+  )
+    return null;
   try {
     const parts = url.pathname.replace(/\/$/, "").split("/").slice(1);
     if (parts.length < 2 || !parts[0] || !parts[1]) return null;
@@ -256,16 +273,6 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
           release: decodeURIComponent(tail.slice(1).join("/")),
           action: tail[0] === "edit" ? "edit" : undefined,
         };
-      // Release numbers are an upgrade boundary for links shipped in v1.2.4.
-      // The loaded release replaces this URL with its canonical tag address.
-      if (/^[1-9]\d*$/.test(tail[0]) && tail.length === 1)
-        return {
-          ...route,
-          view: "releases",
-          releaseNumber: tail[0],
-          action:
-            url.searchParams.get("action") === "edit" ? "edit" : undefined,
-        };
       return null;
     }
     if (
@@ -284,28 +291,4 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
   } catch {
     return null;
   }
-}
-
-export function legacyRepositoryHref(
-  url: URL,
-  repo: Pick<Repository, "owner" | "name">,
-) {
-  if (
-    url.pathname !== repoHref(repo) ||
-    !["view", "rev", "path"].some((key) => url.searchParams.has(key))
-  )
-    return null;
-  // v1.2.4 published query-based bookmarks. Replace them once; all view
-  // selection and generated links use the canonical path after this redirect.
-  const params = Object.fromEntries(url.searchParams);
-  if (params.view === "releases" && params.release === "new") {
-    params.action = "new";
-    delete params.release;
-  }
-  if (params.view === "releases" && /^[1-9]\d*$/.test(params.release ?? "")) {
-    const query = new URLSearchParams(url.searchParams);
-    for (const key of ["view", "release"]) query.delete(key);
-    return `${repoHref(repo)}/releases/${params.release}${query.size ? `?${query}` : ""}${url.hash}`;
-  }
-  return repoHref(repo, params) + url.hash;
 }

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Refs } from "./api";
 import {
-  legacyRepositoryHref,
   repoHref,
   repositoryRoute,
   repositoryRef,
@@ -88,6 +87,11 @@ describe("GitHub repository addresses", () => {
       { release: "new" },
     ],
     [
+      { view: "releases", release: "2" },
+      "/team/repo.name/releases/tag/2",
+      { release: "2" },
+    ],
+    [
       { view: "releases", release: "release/2026", action: "edit" },
       "/team/repo.name/releases/edit/release%2F2026",
       { release: "release/2026", action: "edit" },
@@ -169,9 +173,27 @@ describe("GitHub repository addresses", () => {
   });
 
   it("keeps list filters in the query and navigation in the path", () => {
-    expect(
-      repoHref(repo, { view: "issues", state: "closed", q: "bug fix" }),
-    ).toBe("/team/repo.name/issues?state=closed&q=bug+fix");
+    const href = repoHref(repo, {
+      view: "issues",
+      state: "closed",
+      q: "bug fix",
+    });
+    expect(href).toBe("/team/repo.name/issues?state=closed&q=bug+fix");
+    expect(repositoryRoute(url(href))).toMatchObject({ view: "issues" });
+  });
+
+  it("retains file kinds in path history addresses", () => {
+    const href = repoHref(repo, {
+      view: "commits",
+      rev: "main",
+      path: hex("src/main.rs"),
+      kind: "Blob",
+    });
+    expect(repositoryRoute(url(href))).toMatchObject({
+      view: "commits",
+      path: hex("src/main.rs"),
+      kind: "Blob",
+    });
   });
 
   it.each([
@@ -181,37 +203,22 @@ describe("GitHub repository addresses", () => {
     "/team/repo.name/pull/1/unknown",
     "/team/repo.name/compare/main...",
     "/team/repo.name/commit/main/file",
+    "/team/repo.name/releases/2",
+    "/team/repo.name/releases/2?action=edit",
     "/api",
   ])("rejects unknown or malformed page %s", (path) => {
     expect(repositoryRoute(url(path), refs)).toBeNull();
   });
-});
-
-describe("bookmarks published in v1.2.4", () => {
-  it("replaces the old query address while retaining byte identity and line anchors", () => {
-    expect(
-      legacyRepositoryHref(
-        url(
-          "/team/repo.name?rev=refs%2Fheads%2Ffeature%2Fx&path=ff2f254646&kind=Blob#L7",
-        ),
-        repo,
-      ),
-    ).toBe("/team/repo.name/blob/feature%2Fx/%FF/%25FF#L7");
-  });
-  it("loads a numbered release once before replacing it with the tag URL", () => {
-    expect(
-      legacyRepositoryHref(
-        url("/team/repo.name?view=releases&release=2&action=edit"),
-        repo,
-      ),
-    ).toBe("/team/repo.name/releases/2?action=edit");
-  });
-  it("does not rewrite canonical paths or filter-only addresses", () => {
-    expect(
-      legacyRepositoryHref(url("/team/repo.name/issues?q=bug"), repo),
-    ).toBeNull();
-    expect(
-      legacyRepositoryHref(url("/team/repo.name?scenario=protected"), repo),
-    ).toBeNull();
+  it.each([
+    "/team/repo.name?view=issues&issue=1",
+    "/team/repo.name?rev=main&path=524541444d452e6d64&kind=Blob#L3",
+    "/team/repo.name?view=pulls&pull=1&pull_tab=files",
+    "/team/repo.name?view=releases&release=new",
+    "/team/repo.name/settings?section=members",
+    "/team/repo.name/releases/tag/v1?action=edit",
+    "/team/repo.name/compare?base=main&head=feature",
+    "/team/repo.name/blob/main/README.md?rev=feature",
+  ])("rejects query-based navigation %s", (path) => {
+    expect(repositoryRoute(url(path), refs)).toBeNull();
   });
 });

@@ -94,7 +94,7 @@ mod tests {
     #[tokio::test]
     async fn repository_deep_links_allow_dots_but_unknown_assets_are_not_html() {
         for (path, expected) in [
-            ("/team/repo.name?path=524541444d452e6d64", StatusCode::OK),
+            ("/team/repo.name", StatusCode::OK),
             ("/team/repo.name/tree/main/src", StatusCode::OK),
             (
                 "/team/repo.name/blob/feature%2Fx/src/main.rs",

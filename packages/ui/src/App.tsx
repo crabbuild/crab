@@ -2,7 +2,6 @@ import {
   repoHref,
   repositoryRoute,
   repositoryRef,
-  legacyRepositoryHref,
   revisionAddress,
 } from "./repository-route";
 import {
@@ -190,17 +189,8 @@ export function App() {
       delete root.dataset.themeChanging;
     };
   }, [codeTheme, resolved]);
-  const requestedUrl = new URL(location, window.location.origin);
-  const requestedRoute = repositoryRoute(requestedUrl);
-  const redirected =
-    requestedRoute && legacyRepositoryHref(requestedUrl, requestedRoute);
-  const url = redirected
-    ? new URL(redirected, window.location.origin)
-    : requestedUrl;
+  const url = new URL(location, window.location.origin);
   const route = repositoryRoute(url);
-  useLayoutEffect(() => {
-    if (redirected) navigate(redirected, true);
-  }, [redirected]);
   const session = useRequest<Session>("/api/session");
   const [signingOut, setSigningOut] = useState(false);
   const [sessionError, setSessionError] = useState<string>();
