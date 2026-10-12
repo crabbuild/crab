@@ -53,8 +53,8 @@ environment. Keep failed receipts as evidence.
 | D1 | Graph reuse in index construction | D0 | In progress |
 | D2 | Graph available before complete path attribution | D1 | In progress |
 | D3 | Bounded background probing and foreground isolation | D2 | In progress |
-| D4 | Actual receive staging admission | D0; required before D5 bulk runs | In progress |
-| D5 | Efficient verified native pack intake and preparation | D4; D1-D3 for final concurrent proof | Not started |
+| D4 | Actual receive staging admission | D0; required before D5 bulk runs | Qualified for staging and recovery |
+| D5 | Efficient verified native pack intake and preparation | D4; D1-D3 for final concurrent proof | In progress: phase profiling |
 
 ### D0: establish a green lifecycle baseline
 
@@ -374,7 +374,10 @@ and replaces an invalid checkpoint using its observed conditional token. Three n
 completion/checkpoint repair cases) and ten path-state tests pass after the
 change. Both CLI GC retention tests and the metadata build without storage features
 also pass. Nine-package consumer checks (including test callers) and scoped
-production Clippy pass. The normal release and full live oracle remain pending.
+production Clippy pass. The normal joint server/CLI release at `ce5f2f03ec60`
+passed; independent private mTLS readiness took 5.484 seconds. The full retained
+Next.js fixture is rebuilding canonical attribution; its full oracle remains
+pending.
 The live repair will use
 the same task-owned damaged fixture, retaining its failure receipts and all
 immutable authoritative inputs, before repeating the complete native Git oracle.
@@ -432,8 +435,12 @@ Each cycle verified 150 tree entries, 10 commits, one blob, 20 diffs and six
 expected errors. [PR #515](https://github.com/crabbuild/crab/pull/515) contains the
 slice. Broad consumer compilation then found a missed thin-pack fixture caller
 of the admitted scratch API; that caller now uses the same finite mechanics
-admission. Abrupt receive-crash and broad CI proof remain required; these
-receipts do not qualify incremental or bulk push latency.
+admission. All 20 required checks passed at `f82ae36ef30`; the optional scheduled
+fleet check was skipped. The [exact-source container run](https://github.com/crabbuild/crab/actions/runs/38207101765)
+passed startup, restore, abrupt native receive crash, retry, byte-identical clone
+and restart, followed by the complete cluster lifecycle. Cross-platform Git
+contracts and RustFS Cell recovery also passed. These receipts qualify staging
+and recovery, without qualifying incremental or bulk push latency.
 
 - [x] Reproduce with a small, highly compressible/delta-heavy pack and a small
   shared disk budget. Test real bytes written, not only explicit reservation calls.
@@ -446,7 +453,7 @@ receipts do not qualify incremental or bulk push latency.
 - [x] Preserve source errors. Separate a transfer larger than total capacity
   from temporary shared-capacity contention; map them through existing boundary
   errors. Do not report scratch exhaustion as an inaccurate body-size violation.
-- [ ] Verify disk exhaustion, concurrent Cell reservations, cancelled blocking
+- [x] Verify disk exhaustion, concurrent Cell reservations, cancelled blocking
   workers, client disconnect, failed upload and process restart inventory. A
   worker must drain before its directory/reservation or transfer permit releases.
 
@@ -473,6 +480,24 @@ larger disk configuration.
 visibility walks. `IncomingPack::prepare` emits full zlib entries in OID order,
 discarding incoming deltas. These are optimization candidates; stage profiling
 must establish their costs before claiming which caused the 20-minute miss.
+
+The profiling candidate records bounded phase timings for body intake, private
+pack copy/checksum, inflation, delta resolution, graph validation, per-ref
+visibility, pack encoding, sidecars, content hashing, capsule input/encoding,
+immutable upload and conditional publication. The HTTP receive span follows its
+tracked worker and enters the blocking preparation worker, so concurrent pushes
+retain their operation attribution. Byte counters distinguish wire bytes from
+charged inflation work; neither is an actual scratch high-water measurement.
+Shared reservation/file high-water observations and stage receipts remain
+required before choosing an optimization. No limit, deadline, format or
+dependency changes in this profiling slice.
+
+Profiling validation: 13 pack tests and 12 receive tests passed (two live
+credential-dependent receive tests remain ignored). Test-consumer checks passed
+for Git, remote, write, HTTP, CLI, SDK and S3 gateway; scoped production Clippy
+passed for the four changed libraries. These checks preserve the existing
+object, admission, cancellation and conditional-publication assertions. A
+normal release and measured receive run remain required.
 
 - [ ] Record timings, bytes, object reads and scratch high-water marks for body
   receive, checksum/decode, delta resolution, graph validation, visibility,

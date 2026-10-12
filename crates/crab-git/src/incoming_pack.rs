@@ -5,6 +5,7 @@ use std::{
     fs::File,
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::Path,
+    time::Instant,
 };
 
 use flate2::{Decompress, FlushDecompress, Status};
@@ -259,10 +260,24 @@ where
 {
     let directory = space.directory(space.path(), "crab-receive-")?;
     let mut pack = directory.create("incoming.pack")?;
+    let started = Instant::now();
     let size = copy_pack(reader, &mut pack, limits.max_pack_bytes, &cancelled)?;
+    tracing::info!(
+        phase = "copy",
+        bytes = size,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git quarantine phase completed"
+    );
     drop(pack);
     let mut pack = File::open(directory.path().join("incoming.pack"))?;
+    let started = Instant::now();
     verify_checksum(&mut pack, size, &cancelled)?;
+    tracing::info!(
+        phase = "checksum",
+        bytes = size,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git quarantine phase completed"
+    );
     pack.rewind()?;
     let mut header = [0; 12];
     pack.read_exact(&mut header)?;
@@ -290,6 +305,7 @@ where
     let mut input = BufReader::new(pack.take(size - 20 - 12));
     let mut offset = 12;
     let mut offsets = std::collections::HashSet::new();
+    let started = Instant::now();
     for _ in 0..count {
         state.check()?;
         let entry = read_header(&mut input, offset)?;
@@ -344,6 +360,14 @@ where
             "entry count or trailing data mismatch",
         ));
     }
+    tracing::info!(
+        phase = "inflate",
+        objects = count,
+        inflated_work_bytes = state.inflated_bytes,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git quarantine phase completed"
+    );
+    let started = Instant::now();
     loop {
         while let Some(index) = state.ready.pop_front() {
             state.resolve(index)?;
@@ -390,6 +414,13 @@ where
             };
         }
     }
+    tracing::info!(
+        phase = "resolve",
+        objects = state.objects.len(),
+        inflated_work_bytes = state.inflated_bytes,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git quarantine phase completed"
+    );
     Ok(IncomingPack {
         directory,
         objects: state.objects,
