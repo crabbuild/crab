@@ -1320,6 +1320,14 @@ for candidate in server server-b server-c server-d; do
     fallback_services+=("$candidate")
   fi
 done
+# The second loss leaves only this owner alive, so no follower log can open.
+# Restore a cohort before capturing it; the next replacement must expire a
+# real enrolled log, rather than waiting for enrollment without eligible peers.
+"${compose[@]}" up --detach --no-build --no-deps --force-recreate \
+  "${fallback_services[@]}" >/dev/null
+for service in "${fallback_services[@]}"; do
+  wait_for_healthy "$service"
+done
 # Snapshot the old cohort before replacements start; the owner may rotate and
 # enroll fresh node IDs while replacement services boot.
 node_b_before_fallback=""
