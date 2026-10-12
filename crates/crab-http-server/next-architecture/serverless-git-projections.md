@@ -49,7 +49,7 @@ safe by the projection reconciler.
 | Pack bytes and pack indexes | Object store | Do not copy | Verified range/block cache |
 | Blob contents, LFS, Xet data | Object store | Do not copy | Bounded byte cache |
 | Parsed commits and parents | Object-store Git objects / commit graph | Rebuildable rows | Optional decoded cache |
-| Tree entry metadata | Object-store tree objects | Rebuildable rows | Optional decoded cache |
+| Tree entry metadata | Object-store tree objects | None | Verified remote-reader cache |
 | Last-change attribution | Verified object-store path-state descriptor | Rebuildable trie projection | Bounded node cache |
 | Issues, Pulls, reviews, settings | Repository Cell | Authoritative application rows | No independent authority |
 | Cell recovery state | Object-store LTX graph | Working SQLite database | Local restored files |
@@ -84,7 +84,7 @@ map is:
 | Git ref journal and remote compaction | `crab-write` + `crab-metadata` | Folds direct pushes into a coherent manifest before projection |
 | SQLite WAL capture, LTX frames, recovery, follower publication | `crab-ltx` + `crab-cell-runtime` | Durably replicates the repository Cell, including projection epochs |
 | Git object decoding and range reads | `crab-remote-git` | Rebuilds commit summaries and tree entries without a checkout |
-| Paged/lazy filesystem views | `crab-vfs` and the projection tree hydrator | Not a second Git authority; only an optional local/read optimization |
+| Paged/lazy filesystem views | `crab-vfs` | Independent filesystem consumer; not a Git authority |
 
 Thus the earlier Celld gaps are closed at the correct layer: object-store
 transport and remote Git compaction stay in the existing Crab data plane,
@@ -171,7 +171,6 @@ object store
                                   │
                                   ├─ commits + parents from split graph/Git objects
                                   ├─ refs from the compacted manifest
-                                  ├─ tree entries from verified Git tree reads
                                   └─ attribution nodes/edges from path-state
                                   │
                                   ▼
@@ -192,7 +191,6 @@ For every successful direct push, the rebuild work is:
 | --- | --- | --- |
 | refs | journal-free `RepositorySnapshot.manifest` | one epoch-scoped ref row per ref |
 | commits/parents | generation-bound split commit graph, with verified commit reads for summaries | OID-deduplicated commit rows plus epoch ordinals |
-| trees | verified Git tree objects reached from graph tree OIDs | complete directory-entry rows keyed by tree OID |
 | attribution | generation-bound persistent path-state trie | shared nodes/edges plus one root per epoch/commit ordinal |
 
 The reconciler never copies pack or blob bodies into SQLite. It records the
@@ -402,40 +400,17 @@ the Cell or an LTX batch.
 
 ### Trees
 
-```sql
-CREATE TABLE git_trees (
-    tree_oid                  BLOB PRIMARY KEY,
-    state                     TEXT NOT NULL CHECK (state IN ('building', 'ready')),
-    entry_count               INTEGER NOT NULL,
-    encoded_bytes             INTEGER NOT NULL,
-    last_used_at_ms           INTEGER NOT NULL
-);
+Tree APIs use the canonical verified `crab-remote-git` reader and its bounded
+cache. Reconciliation does not preload tree rows into SQLite: no query consumes
+those rows, recursive recent-history hydration repeats origin work, and a whole
+directory can exceed a Cell command's wire limit while remaining a valid Git
+tree. Tree size therefore cannot block attribution epoch promotion.
 
-CREATE TABLE git_tree_entries (
-    tree_oid                  BLOB NOT NULL,
-    name                      BLOB NOT NULL,
-    mode                      INTEGER NOT NULL,
-    object_oid                BLOB NOT NULL,
-    object_kind               INTEGER NOT NULL,
-    PRIMARY KEY (tree_oid, name),
-    FOREIGN KEY (tree_oid) REFERENCES git_trees(tree_oid)
-) WITHOUT ROWID;
-
-```
-
-Rows contain directory metadata, not blob contents. Tree OIDs are immutable, so
-unchanged subtrees are shared across projection epochs. The builder verifies
-the decoded tree bytes against `tree_oid` before inserting rows. A tree becomes
-query-visible only after all pages are present, `entry_count` matches, and the
-parent row changes to `ready` in a durable command.
-
-The target policy is **selective**, not a second complete copy of repository
-history: build current ref roots and a bounded recent-history window first;
-serve a miss directly from object storage and optionally enqueue that immutable
-tree OID for insertion; evict cold trees in bounded batches. The implementation
-uses that bounded selection today. Selective tree hydration is a cache
-optimization, not an epoch-readiness requirement: a missing or over-budget tree
-always remains available through the verified object-store read path.
+The unshipped tree tables, command and producer were removed together. Release
+tag reachability was checked, including the remote `v1.2.4` commit. Existing
+pre-release application Cells require rebuilding or explicit operator migration
+under the selected release descriptor; never delete collaboration data to
+silently accept a changed migration digest. Canonical Git data needs no rewrite.
 
 ### Attribution
 
@@ -501,15 +476,11 @@ inventing another Git walker:
    or path state is absent.
 5. Re-read; capture all source identity fields.
 6. Stream and verify commit-graph records and path-state layers.
-7. Select current ref tips and a bounded recent commit window for tree
-   hydration. Read those Git trees through `crab-remote-git`, verify each OID,
-   decode raw names, and emit complete-tree batches. Older or evicted trees
-   remain on the direct object-store read path and may be hydrated later by
-   their immutable OID.
-8. Apply idempotent batches through typed Cell commands.
-9. Re-read origin and compare the full captured identity.
-10. Verify row counts, ordinal continuity, root reachability, and foreign keys.
-11. Promote `ready_epoch` through one durable Cell command.
+7. Apply idempotent ref, commit and attribution batches through typed Cell
+   commands; tree reads remain outside the projection pipeline.
+8. Re-read origin and compare the full captured identity.
+9. Verify row counts, ordinal continuity, root reachability, and foreign keys.
+10. Promote `ready_epoch` through one durable Cell command.
 
 The actor never waits for object-store I/O while holding a SQLite transaction.
 The builder gathers and validates one bounded batch outside the actor, then
@@ -520,7 +491,7 @@ public command enum:
 
 ```rust
 struct ProjectionBatch {
-    operation: u8, // begin, refs, commits, trees, attribution, promote, supersede, collect
+    operation: u8, // begin, refs, commits, attribution, promote, supersede, collect
     epoch_id: u64,
     source: Vec<u8>,  // canonical SourceIdentity JSON
     payload: Vec<u8>, // one bounded operation payload
@@ -543,8 +514,9 @@ The repository Cell admits a 64 MiB capture and a 5 GiB database. The current
 projection command is registered with a 768 KiB input bound; its wire payload
 uses a 32 KiB source identity and a 700 KiB JSON batch, at most 256 logical
 rows, and at most 128 SQL statements per runtime SQL call. Commit batches are
-64 graph records, attribution batches are 64 nodes/roots and 512 edges, and a
-tree payload is capped at 640 KiB. The attribution query is split below the
+64 graph records; attribution batches are 64 nodes/roots and at most 512 edges,
+with JSON payloads capped at 640 KiB. Edge batching obeys the byte cap as well as
+the row cap, including raw names that expand when serialized. The attribution query is split below the
 64 KiB query descriptor bound (48 KiB JSON chunks) before it reaches the Cell.
 
 These bounds are intentionally lower than the runtime maximum. The lower row,
@@ -554,22 +526,15 @@ transaction latency, and LTX publication costs are re-qualified together.
 Reaching the repository database limit leaves the prior ready epoch available
 and reports `projection_capacity_exceeded`.
 
-Each tree command is atomic for a complete tree row. A tree that cannot fit the
-current row bound causes the new epoch to fail and the old ready epoch to stay
-visible; the direct object-store tree route remains available. The next
-capacity phase may split one tree across durable pages, keeping
-`git_trees.state = 'building'` until the final count and object identity check
-is durable. A reader must never paginate a partial import.
-
 ## Incremental updates
 
 | Git change | Reuse | Work |
 | --- | --- | --- |
-| Fast-forward branch push | Existing commit/tree/node rows | Import new commits, changed trees, new attribution layer, replace projected refs |
+| Fast-forward branch push | Existing commit/node rows | Import new commits, new attribution layer, replace projected refs |
 | New tag or branch to known commit | All immutable rows | Replace projected refs and epoch membership |
 | Ref deletion | All immutable rows | Replace projected refs |
-| Force push | OID-addressed commit/tree rows that remain reachable | Build a new epoch and new attribution roots; never mutate ready roots in place |
-| Repack with identical Git graph | Parsed commit/tree/node rows after exact semantic verification | Rebind source storage identity; Git object locator remains object-store-owned |
+| Force push | OID-addressed commit rows that remain reachable | Build a new epoch and new attribution roots; never mutate ready roots in place |
+| Repack with identical Git graph | Parsed commit/node rows after exact semantic verification | Rebind source storage identity; Git object locator remains object-store-owned |
 | History recovery | Nothing assumed until recovered manifest is validated | Build a new epoch from the recovered source identity |
 
 The first deliverable may always create a new epoch while still deduplicating
@@ -669,7 +634,6 @@ Per node, use separate bounded admissions for:
 
 - cheap source probes;
 - object-store index construction;
-- tree decoding/import CPU;
 - Cell batch commands; and
 - LTX upload/publication.
 
@@ -684,8 +648,7 @@ epoch for diagnosis. Collection proceeds in small Cell commands:
 
 1. delete expired epoch-scoped refs, commit membership, and attribution roots;
 2. mark commit OIDs and node hashes reachable from retained epochs;
-3. delete unreferenced commit, parent, node, and edge rows in bounded pages; and
-4. evict cold selective tree rows until the configured byte budget is met.
+3. delete unreferenced commit, parent, node, and edge rows in bounded pages.
 
 The ready pointer is read in the same transaction that selects collection
 roots. Collection never follows object-store LIST and never deletes canonical
@@ -745,7 +708,7 @@ indexed relational queries materially reduce UI latency.
 2. Implement source identity capture from `RepositorySnapshot`, including
    committed-journal detection.
 3. Import the existing verified commit graph and path-state descriptor into a
-   hidden epoch; add selective complete-tree import through `crab-remote-git`.
+   hidden epoch. Tree and blob APIs continue through `crab-remote-git`.
 4. Add final origin revalidation and atomic ready-epoch promotion.
 5. Route attribution and commit summaries to the matching ready epoch; retain
    bounded direct object-store commit-history, tree, and blob reads until their
@@ -753,8 +716,7 @@ indexed relational queries materially reduce UI latency.
 6. Add request-driven enqueue, adaptive catalog probing, and optional hints.
 7. Run adaptive catalog-driven anti-entropy, resume interrupted epochs, and
    collect immutable rows while retaining the ready and previous-ready epochs.
-8. Add incremental prefix reuse and request-driven lazy tree hydration after
-   correctness and capacity qualification.
+8. Add incremental prefix reuse after correctness and capacity qualification.
 
 This is a hard cut for new Cell projection data. No existing Cell Git projection
 is migrated, no `cells/v2` prefix is introduced, and native bucket Git data is
@@ -770,7 +732,7 @@ source.
 | Missed event | Disable all hints, push directly, and converge by request and by sweep |
 | Concurrent push | Pause each build phase, push, resume, and prove an old epoch is never served for the new snapshot, including the final-check race |
 | Journal handoff | Observe committed active marker before manifest compaction; base Git is visible and projection waits safely |
-| Fast-forward/tag/delete/force-push | Projected refs, commits, and attribution equal `git`; tree responses equal `git` through the canonical direct path, with selective tree-cache rows checked separately |
+| Fast-forward/tag/delete/force-push | Projected refs, commits, and attribution equal `git`; tree responses equal `git` through the canonical direct path |
 | Non-UTF-8 paths | Tree pagination and attribution preserve exact path bytes |
 | Crash recovery | Kill after every durable cursor; restore from LTX and resume without duplicate visibility |
 | Cell loss | Delete local and remote Cell state only; rebuild from Git object-store data |

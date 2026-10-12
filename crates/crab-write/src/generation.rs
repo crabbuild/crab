@@ -430,7 +430,7 @@ pub async fn maintain_path_state(
     loop {
         let first = base
             .as_ref()
-            .map_or(0, |index| index.descriptor.commit_count);
+            .map_or(0, |index| index.descriptor().commit_count);
         let end = first
             .saturating_add(PATH_STATE_CHECKPOINT_COMMITS)
             .min(graph.descriptor.commit_count);
@@ -441,7 +441,13 @@ pub async fn maintain_path_state(
         let write = append_path_state(base, &graph, inputs)?;
         let descriptor_hash = write.descriptor_hash.clone();
         let commit_count = write.commit_count();
-        upload_path_state(store, layout, &write).await?;
+        upload_path_state(
+            store,
+            layout,
+            &write,
+            options.object_limits().max_path_state_bytes,
+        )
+        .await?;
         if commit_count == graph.descriptor.commit_count {
             return attach_path_state_if_current(
                 store,
@@ -556,8 +562,8 @@ async fn load_previous_path_state(
 }
 
 fn path_state_is_prefix(index: &PathStateIndex, graph: &SplitCommitGraph) -> bool {
-    index.descriptor.commit_count <= graph.descriptor.commit_count
-        && (0..index.descriptor.commit_count).all(|ordinal| {
+    index.descriptor().commit_count <= graph.descriptor.commit_count
+        && (0..index.descriptor().commit_count).all(|ordinal| {
             index
                 .record(ordinal)
                 .zip(graph.record(ordinal))

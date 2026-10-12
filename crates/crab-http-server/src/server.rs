@@ -45,6 +45,7 @@ use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::catalog::CatalogStore;
+use crate::cells::repository::projection::SourceIdentity;
 use crate::{
     CellDurabilityMode, Config, RepositoryConfig, Result, api, app, archive, assets, assignees,
     auth::{self, Authentication, Principal},
@@ -76,6 +77,7 @@ const RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RETIRED_FOLLOWER_COLLECTION_INTERVAL: Duration = Duration::from_secs(60);
 const RETIRED_FOLLOWER_GRACE_MS: i64 = 10 * 60 * 1_000;
 const RETIRED_FOLLOWER_BATCH: usize = 64;
+pub(crate) const BROWSE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 const PROJECTION_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const PROJECTION_SWEEP_BATCH: usize = 16;
 const PROJECTION_RETRY_BASE: Duration = Duration::from_secs(10);
@@ -467,8 +469,20 @@ pub(crate) struct Repository {
     pub layout: StoreLayout<Store>,
     pub identity: RepositoryIdentity,
     pinned: Mutex<Option<PinnedRepository>>,
-    maintenance: Mutex<Option<tokio::task::JoinHandle<crate::maintenance::Result<()>>>>,
+    pub(crate) projection_source: Mutex<Option<crate::projection::CachedSource>>,
+    maintenance: Mutex<MaintenanceState>,
     pub(crate) integrity: crate::integrity::Status,
+}
+
+#[derive(Default)]
+struct MaintenanceState {
+    worker: Option<tokio::task::JoinHandle<crate::maintenance::Result<Option<SourceIdentity>>>>,
+    completed: Option<(SourceIdentity, Instant)>,
+}
+
+pub(crate) enum MaintenanceTrigger<'a> {
+    Poll(&'a SourceIdentity),
+    Repair,
 }
 
 struct PinnedRepository {
@@ -626,11 +640,14 @@ impl Repository {
 
     pub(crate) async fn invalidate(&self) {
         *self.pinned.lock().await = None;
+        *self.projection_source.lock().await = None;
+        self.maintenance.lock().await.completed = None;
     }
 
     pub(crate) async fn schedule_maintenance(
         &self,
         server: &Server,
+        trigger: MaintenanceTrigger<'_>,
     ) -> Result<MaintenanceSchedule> {
         if server
             .git_import
@@ -639,44 +656,59 @@ impl Repository {
         {
             return Ok(MaintenanceSchedule::Deferred);
         }
-        let completed = {
-            let mut worker = self.maintenance.lock().await;
-            worker
-                .as_ref()
-                .is_some_and(tokio::task::JoinHandle::is_finished)
-                .then(|| worker.take())
-                .flatten()
-        };
-        if let Some(completed) = completed {
-            completed.await??;
+        let mut state = self.maintenance.lock().await;
+        if matches!(trigger, MaintenanceTrigger::Repair) {
+            state.completed = None;
+        }
+        if state
+            .worker
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            if let Some(worker) = state.worker.take() {
+                let completed = worker.await??;
+                if matches!(trigger, MaintenanceTrigger::Poll(_)) {
+                    state.completed = completed.map(|source| (source, Instant::now()));
+                }
+            }
             *self.pinned.lock().await = None;
-            // The next retry must reopen the just-published generation. Starting
-            // another worker here would duplicate the same immutable index build.
+            *self.projection_source.lock().await = None;
+            // Reopen the just-published generation before admitting another pass.
             return Ok(MaintenanceSchedule::Completed);
         }
-        let mut worker = self.maintenance.lock().await;
-        if worker.is_some() {
+        if state.worker.is_some() {
             return Ok(MaintenanceSchedule::Running);
+        }
+        if let MaintenanceTrigger::Poll(source) = trigger
+            && state.completed.as_ref().is_some_and(|(complete, checked)| {
+                complete.source_token == source.source_token
+                    && checked.elapsed() < crate::integrity::SCRUB_INTERVAL
+            })
+        {
+            return Ok(MaintenanceSchedule::Completed);
         }
         let permit = match server.maintenance_admission.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => return Ok(MaintenanceSchedule::Deferred),
         };
-        *worker = Some(tokio::spawn(maintenance::run(
-            self.layout.clone(),
-            Arc::clone(&server.maintenance_admission),
-            Some(permit),
-            server.cancellation.clone(),
-            maintenance::Pass::BackgroundMaintenance,
-            Some(maintenance::ProjectionContext {
-                repository_id: self.id,
-                router: server.repository_cells().map(|router| (*router).clone()),
-                metrics: server.metrics.clone(),
-                identity: self.identity.clone(),
-                runtime: Arc::clone(&server.runtime),
-                options: server.options,
-            }),
-        )));
+        *state = MaintenanceState {
+            completed: None,
+            worker: Some(tokio::spawn(maintenance::run(
+                self.layout.clone(),
+                Arc::clone(&server.maintenance_admission),
+                Some(permit),
+                server.cancellation.clone(),
+                maintenance::Pass::BackgroundMaintenance,
+                Some(maintenance::ProjectionContext {
+                    repository_id: self.id,
+                    router: server.repository_cells().map(|router| (*router).clone()),
+                    metrics: server.metrics.clone(),
+                    identity: self.identity.clone(),
+                    runtime: Arc::clone(&server.runtime),
+                    options: server.options,
+                }),
+            ))),
+        };
         Ok(MaintenanceSchedule::Started)
     }
 
@@ -694,6 +726,7 @@ impl Repository {
             None,
         )
         .await
+        .map(drop)
         .map_err(Into::into)
     }
 
@@ -761,6 +794,28 @@ impl Repository {
         Ok((view, repository))
     }
 
+    pub(crate) async fn browse_state(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<(
+        crab_read::capsule_protocol::CapsuleRepositoryActivity,
+        Option<crab_metadata::capsule_protocol::BrowseIndexes>,
+    )> {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(crab_remote_git::Error::Cancelled.into()),
+            result = async {
+                let root = crab_metadata::capsule_protocol::load_root(&self.layout)
+                    .await
+                    .map_err(|source| crate::Error::Settings { source: Box::new(source) })?;
+                let activity = crab_read::capsule_protocol::read_activity_from_root(&self.layout, &root).await?;
+                let indexes = crate::projection::load_browse_indexes(&self.layout).await?
+                    .filter(|value| value.state_digest() == activity.state_digest());
+                Ok((activity, indexes))
+            } => result,
+        }
+    }
+
     pub async fn open(
         &self,
         server: &Server,
@@ -771,30 +826,13 @@ impl Repository {
             pinned = self.pinned.lock() => pinned,
         };
         if let Some(cached) = pinned.as_mut() {
-            if cached.checked.elapsed() < Duration::from_secs(2) {
+            if cached.checked.elapsed() < BROWSE_PROBE_INTERVAL {
                 return Ok(cached.repository.clone());
             }
             // Ref CAS can advance without a root ETag change; derived indexes
             // can arrive without a ref change. Check both before reusing the
             // immutable reader instead of rebuilding it on every cache expiry.
-            let refresh = async {
-                let root = crab_metadata::capsule_protocol::load_root(&self.layout)
-                    .await
-                    .map_err(|source| crate::Error::Settings {
-                        source: Box::new(source),
-                    })?;
-                let activity =
-                    crab_read::capsule_protocol::read_activity_from_root(&self.layout, &root)
-                        .await?;
-                let indexes = crate::projection::load_browse_indexes(&self.layout)
-                    .await?
-                    .filter(|value| value.state_digest() == activity.state_digest());
-                Ok::<_, crate::Error>((activity, indexes))
-            };
-            let (activity, indexes) = tokio::select! {
-                () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
-                result = refresh => result?,
-            };
+            let (activity, indexes) = self.browse_state(cancellation).await?;
             if activity.state_digest() == cached.state_digest && indexes == cached.browse_indexes {
                 cached.checked = Instant::now();
                 return Ok(cached.repository.clone());
@@ -1106,9 +1144,9 @@ impl Server {
     async fn finish_maintenance(&self) -> Result<()> {
         let mut result = Ok(());
         for repository in self.repositories.values() {
-            if let Some(task) = repository.maintenance.lock().await.take() {
+            if let Some(task) = repository.maintenance.lock().await.worker.take() {
                 let completed = match task.await {
-                    Ok(Ok(())) | Ok(Err(crate::maintenance::Error::Cancelled)) => Ok(()),
+                    Ok(Ok(_)) | Ok(Err(crate::maintenance::Error::Cancelled)) => Ok(()),
                     Ok(Err(error)) => Err(crate::Error::from(error)),
                     Err(error) => Err(crate::Error::from(error)),
                 };
@@ -1787,7 +1825,8 @@ async fn materialize_catalog(
             config: entry.clone(),
             store,
             pinned: Mutex::new(None),
-            maintenance: Mutex::new(None),
+            projection_source: Mutex::new(None),
+            maintenance: Mutex::new(MaintenanceState::default()),
             integrity: crate::integrity::Status::default(),
         };
         repositories.insert(
@@ -1891,33 +1930,32 @@ async fn sweep_projections(server: Arc<Server>) -> Result<()> {
             let repository = Arc::clone(&repositories[(start + offset) % repositories.len()]);
             let now = Instant::now();
             let probe_started = now;
-            let source = match crate::projection::current_source(
-                &repository.store,
-                &repository.layout,
-            )
-            .await
-            {
-                Ok(source) => source,
-                Err(error) => {
-                    server.metrics.record_projection_probe(
-                        crate::metrics::ProjectionProbeResult::Error,
-                        probe_started.elapsed(),
-                    );
-                    tracing::warn!(
-                        repository_id = %repository.id,
-                        error = %error,
-                        "Git projection source probe failed"
-                    );
-                    if let Err(schedule_error) = repository.schedule_maintenance(&server).await {
+            let source =
+                match crate::projection::current_source(&repository, &server.cancellation).await {
+                    Ok(source) => source,
+                    Err(error) => {
+                        server.metrics.record_projection_probe(
+                            crate::metrics::ProjectionProbeResult::Error,
+                            probe_started.elapsed(),
+                        );
                         tracing::warn!(
                             repository_id = %repository.id,
-                            error = %schedule_error,
-                            "Git projection repair could not be scheduled"
+                            error = %error,
+                            "Git projection source probe failed"
                         );
+                        if let Err(schedule_error) = repository
+                            .schedule_maintenance(&server, MaintenanceTrigger::Repair)
+                            .await
+                        {
+                            tracing::warn!(
+                                repository_id = %repository.id,
+                                error = %schedule_error,
+                                "Git projection repair could not be scheduled"
+                            );
+                        }
+                        continue;
                     }
-                    continue;
-                }
-            };
+                };
             let state = states
                 .entry(repository.id)
                 .or_insert_with(|| ProjectionSweepState {
@@ -1943,7 +1981,10 @@ async fn sweep_projections(server: Arc<Server>) -> Result<()> {
             if now < state.next_attempt {
                 continue;
             }
-            match repository.schedule_maintenance(&server).await {
+            match repository
+                .schedule_maintenance(&server, MaintenanceTrigger::Poll(&source))
+                .await
+            {
                 Ok(schedule) => state.record_schedule(now, schedule),
                 Err(error) => {
                     tracing::warn!(

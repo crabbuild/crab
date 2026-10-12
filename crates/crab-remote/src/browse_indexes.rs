@@ -29,6 +29,7 @@ pub enum Error {
 ///
 /// This is opt-in background work, never a prerequisite for ref publication. A
 /// superseded snapshot is not published; readers independently reject stale records.
+/// Returns the verified complete record only after owning and completing the pass.
 pub async fn ensure(
     layout: &StoreLayout<Store>,
     identity: &RepositoryIdentity,
@@ -36,8 +37,9 @@ pub async fn ensure(
     options: RepositoryOptions,
     max_bytes: u64,
     cancel: &CancellationToken,
-) -> Result<(), Error> {
-    crab_write::generation::with_generation_owner(
+) -> Result<Option<BrowseIndexes>, Error> {
+    let mut ready = None;
+    crab_write::generation::with_generation_owner::<_, Error>(
         layout.store(),
         layout,
         Duration::from_secs(60),
@@ -74,6 +76,7 @@ pub async fn ensure(
             )
             .await?;
             if previous.as_ref() == Some(&indexes) && indexes.path_state_hash().is_some() {
+                ready = Some(indexes);
                 return Ok(());
             }
             let etag = if previous.as_ref() == Some(&indexes) {
@@ -93,11 +96,17 @@ pub async fn ensure(
                 cancel,
             )
             .await?;
-            publish_current(layout, &complete, etag, cancel).await?;
+            if publish_current(layout, &complete, etag, cancel)
+                .await?
+                .is_some()
+            {
+                ready = Some(complete);
+            }
             Ok(())
         },
     )
-    .await
+    .await?;
+    Ok(ready)
 }
 
 async fn publish_current(

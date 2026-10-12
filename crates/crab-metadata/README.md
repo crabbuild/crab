@@ -61,6 +61,17 @@ budget before buffering, then admit each layer against its authenticated size
 and the remaining aggregate budget. All bodies still require hash and exact
 length verification; malformed provider sizes cannot bypass the encoded-byte
 ceiling. Decoded index structures require separate memory qualification.
+Path-state descriptor/layer version 3 stores each raw path component once per
+layer in a sorted canonical table, with checked component ordinals on edges.
+Decoded edges share immutable component bytes. No release tag contains the prior
+path-state codec; maintenance rebuilds unshipped derived indexes rather than
+reading retired versions. Validated index descriptors/layers expose only immutable
+accessors, so checkpoint append reuses the verified prefix instead of rescanning
+all retained edges. Changed graph ordinals still require a prefix binding check.
+Uploads admit the descriptor plus every retained/new layer against the intended
+reader's byte limit before writing any layer; capsule and manifest builders use
+their existing `max_path_state_bytes` bound. An oversized construction returns a
+structured size error and cannot publish checkpoint or completion readiness.
 Path-state construction and in-memory validation need no storage feature;
 encoded-layer decoding is private to storage loading and codec tests.
 Current file lookup selects the protocol from the root alone: only an absent

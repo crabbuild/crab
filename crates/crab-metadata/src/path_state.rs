@@ -1,6 +1,6 @@
 //! Generation-bound persistent path attribution.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
@@ -23,9 +23,9 @@ pub use storage::{
     load_path_state_descriptor, publish_path_state_checkpoint, upload_path_state,
 };
 
-const LAYER_MAGIC: &[u8; 8] = b"CRABPS02";
-const LAYER_VERSION: u32 = 2;
-const LAYER_HEADER_BYTES: usize = 24;
+const LAYER_MAGIC: &[u8; 8] = b"CRABPS03";
+const LAYER_VERSION: u32 = 3;
+const LAYER_HEADER_BYTES: usize = 28;
 const MAX_AUTHOR_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_PATH_BYTES: usize = 1024 * 1024;
@@ -89,7 +89,7 @@ pub struct PathStateRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathStateNode {
     pub value: Option<u32>,
-    pub children: BTreeMap<Vec<u8>, PathStateNodeRef>,
+    pub children: BTreeMap<Arc<[u8]>, PathStateNodeRef>,
 }
 
 /// One immutable positional path-state layer.
@@ -141,8 +141,8 @@ pub struct PathStateCheckpoint {
 /// Complete validated persistent path-state index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathStateIndex {
-    pub descriptor: PathStateDescriptor,
-    pub layers: Vec<PathStateLayer>,
+    descriptor: PathStateDescriptor,
+    layers: Vec<PathStateLayer>,
 }
 
 /// One encoded immutable layer.
@@ -176,6 +176,18 @@ impl PathStateWrite {
 }
 
 impl PathStateIndex {
+    /// Return the validated descriptor without allowing mutation of its binding.
+    #[must_use]
+    pub fn descriptor(&self) -> &PathStateDescriptor {
+        &self.descriptor
+    }
+
+    /// Return the validated immutable layers.
+    #[must_use]
+    pub fn layers(&self) -> &[PathStateLayer] {
+        &self.layers
+    }
+
     /// Validate decoded layers against one exact positional commit graph.
     pub fn new(
         descriptor: PathStateDescriptor,
@@ -301,7 +313,10 @@ pub fn append_path_state(
     if base_count > graph.descriptor.commit_count {
         return corrupt("path-state base exceeds the commit graph");
     }
-    if let Some(base) = &base {
+    let ordinal_digest = graph.ordinal_digest();
+    if let Some(base) = &base
+        && base.descriptor.commit_ordinal_digest != ordinal_digest
+    {
         for ordinal in 0..base_count {
             let record = base
                 .record(ordinal)
@@ -432,11 +447,18 @@ pub fn append_path_state(
         generation: graph.descriptor.generation,
         pack_index_hash: graph.descriptor.pack_index_hash.clone(),
         git_validation_digest: graph.descriptor.git_validation_digest.clone(),
-        commit_ordinal_digest: graph.ordinal_digest(),
+        commit_ordinal_digest: ordinal_digest,
         commit_count: target_count,
         layers: references,
     };
-    let index = PathStateIndex::new_prefix(descriptor.clone(), layers, graph)?;
+    validate_descriptor_shape(&descriptor)?;
+    // The base is immutable and was fully verified on construction/load. New
+    // records and trie references are built from checked inputs above; scanning
+    // every retained edge on each checkpoint makes construction quadratic.
+    let index = PathStateIndex {
+        descriptor: descriptor.clone(),
+        layers,
+    };
     let descriptor_bytes = serde_json::to_vec(&descriptor).map_err(|source| {
         MetadataError::Internal(format!("path-state descriptor encode: {source}"))
     })?;
@@ -531,7 +553,7 @@ fn node_from_parts<'a>(
 #[derive(Debug, Default)]
 struct WorkingNode {
     value: Option<u32>,
-    children: BTreeMap<Vec<u8>, WorkingChild>,
+    children: BTreeMap<Arc<[u8]>, WorkingChild>,
 }
 
 #[derive(Debug)]
@@ -607,7 +629,7 @@ fn apply_components(
         };
         child.value = Some(ordinal);
         node.children
-            .insert(name.to_vec(), WorkingChild::Owned(Box::new(child)));
+            .insert(Arc::from(*name), WorkingChild::Owned(Box::new(child)));
         return Ok(());
     }
 
@@ -622,7 +644,7 @@ fn apply_components(
         layer_ordinal,
     )?;
     node.children
-        .insert(name.to_vec(), WorkingChild::Owned(Box::new(child)));
+        .insert(Arc::from(*name), WorkingChild::Owned(Box::new(child)));
     Ok(())
 }
 
@@ -649,6 +671,9 @@ fn freeze_node(
     nodes: &mut Vec<PathStateNode>,
     layer_ordinal: u32,
 ) -> Result<PathStateNodeRef> {
+    if node.children.len() > MAX_CHILDREN_PER_NODE {
+        return corrupt("path-state node has too many children");
+    }
     let mut children = BTreeMap::new();
     for (name, child) in node.children {
         let reference = match child {
@@ -846,6 +871,68 @@ mod tests {
 
     #[cfg(feature = "storage")]
     #[tokio::test]
+    async fn path_state_upload_admits_all_retained_layers_before_writing() {
+        use futures_util::TryStreamExt;
+        let graph = graph();
+        let input = |n| PathStateInput {
+            oid: [n; 20],
+            first_parent: (n == 2).then_some([1; 20]),
+            author: b"author".to_vec(),
+            author_seconds: i64::from(n),
+            message: b"change".to_vec(),
+            mutations: vec![PathStateMutation {
+                path: b"file".to_vec(),
+                present: true,
+                reset: false,
+            }],
+        };
+        let store =
+            crab_storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "bounded-write".to_owned());
+        let base = append_path_state(None, &graph, vec![input(1)]).unwrap();
+        upload_path_state(&store, &layout, &base, DEFAULT_MAX_PATH_STATE_BYTES)
+            .await
+            .unwrap();
+        let write = append_path_state(Some(base.into_index()), &graph, vec![input(2)]).unwrap();
+        let suffix_bytes = write.descriptor_bytes.len() as u64 + write.layers[0].bytes.len() as u64;
+        let total_bytes = write.descriptor_bytes.len() as u64
+            + write
+                .index
+                .descriptor
+                .layers
+                .iter()
+                .map(|layer| layer.bytes)
+                .sum::<u64>();
+        let before = store
+            .inner()
+            .list(None)
+            .map_ok(|meta| meta.location)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let result = upload_path_state(&store, &layout, &write, suffix_bytes).await;
+        let after = store
+            .inner()
+            .list(None)
+            .map_ok(|meta| meta.location)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let rejected_without_writes = result.is_err() && after == before;
+        upload_path_state(&store, &layout, &write, total_bytes)
+            .await
+            .unwrap();
+        let loaded = load_path_state(&store, &layout, &write.descriptor_hash, &graph, total_bytes)
+            .await
+            .unwrap();
+        assert_eq!(
+            (rejected_without_writes, loaded == write.index),
+            (true, true)
+        );
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
     async fn path_state_byte_budget_rejects_before_excess_body_reads() {
         use object_store::ObjectStoreExt;
         use std::sync::{
@@ -876,7 +963,9 @@ mod tests {
                 counter.fetch_add(bytes, Ordering::Relaxed);
             }));
         let layout = crab_storage::StoreLayout::new(store.clone(), "bounded-path".to_owned());
-        upload_path_state(&store, &layout, &write).await.unwrap();
+        upload_path_state(&store, &layout, &write, DEFAULT_MAX_PATH_STATE_BYTES)
+            .await
+            .unwrap();
         let descriptor_bytes = write.descriptor_bytes.len() as u64;
         let layer = &write.layers[0];
         let total = descriptor_bytes + layer.bytes.len() as u64;
@@ -907,7 +996,9 @@ mod tests {
                 "budget={budget}, oversized_layer={oversized_layer}"
             );
         }
-        upload_path_state(&store, &layout, &write).await.unwrap();
+        upload_path_state(&store, &layout, &write, DEFAULT_MAX_PATH_STATE_BYTES)
+            .await
+            .unwrap();
         observed.store(0, Ordering::Relaxed);
         let actual = load_path_state(&store, &layout, &write.descriptor_hash, &graph, total)
             .await
@@ -939,7 +1030,9 @@ mod tests {
         let store =
             crab_storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
         let layout = crab_storage::StoreLayout::new(store.clone(), "repair".to_owned());
-        upload_path_state(&store, &layout, &write).await.unwrap();
+        upload_path_state(&store, &layout, &write, DEFAULT_MAX_PATH_STATE_BYTES)
+            .await
+            .unwrap();
         for path in [
             layout.bulk_manifest_path("path-state", &write.descriptor_hash),
             layout.repo_path(&write.layers[0].reference.path),
@@ -955,7 +1048,9 @@ mod tests {
                         .await
                         .is_err()
                 );
-                upload_path_state(&store, &layout, &write).await.unwrap();
+                upload_path_state(&store, &layout, &write, DEFAULT_MAX_PATH_STATE_BYTES)
+                    .await
+                    .unwrap();
                 let actual =
                     load_path_state(&store, &layout, &write.descriptor_hash, &graph, 1 << 20)
                         .await
@@ -966,24 +1061,25 @@ mod tests {
     }
 
     fn graph() -> SplitCommitGraph {
+        graph_with_commits(2)
+    }
+
+    fn graph_with_commits(count: u8) -> SplitCommitGraph {
         let layer = CommitGraphLayer {
             base_ordinal: 0,
-            records: vec![
-                CommitGraphRecord {
-                    oid: [1; 20],
-                    tree_oid: [11; 20],
-                    commit_time: 1,
-                    corrected_generation: 1,
-                    parents: vec![],
-                },
-                CommitGraphRecord {
-                    oid: [2; 20],
-                    tree_oid: [12; 20],
-                    commit_time: 2,
-                    corrected_generation: 2,
-                    parents: vec![0],
-                },
-            ],
+            records: (1..=count)
+                .map(|n| CommitGraphRecord {
+                    oid: [n; 20],
+                    tree_oid: [n + 10; 20],
+                    commit_time: i64::from(n),
+                    corrected_generation: u64::from(n),
+                    parents: if n == 1 {
+                        Vec::new()
+                    } else {
+                        vec![u32::from(n - 2)]
+                    },
+                })
+                .collect(),
         };
         SplitCommitGraph::new(
             CommitGraphDescriptor {
@@ -991,12 +1087,12 @@ mod tests {
                 generation: 7,
                 pack_index_hash: "a".repeat(64),
                 git_validation_digest: "b".repeat(64),
-                commit_count: 2,
+                commit_count: u32::from(count),
                 layers: vec![CommitGraphLayerRef {
                     hash: "c".repeat(64),
                     path: format!("metadata/commit-graph/layers/{}.bin", "c".repeat(64)),
                     base_ordinal: 0,
-                    commit_count: 2,
+                    commit_count: u32::from(count),
                     bytes: 24,
                 }],
             },
@@ -1093,6 +1189,59 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_append_and_compaction_preserve_all_historical_path_values() {
+        let graph = graph_with_commits(40);
+        let input = |n| PathStateInput {
+            oid: [n; 20],
+            first_parent: (n > 1).then(|| [n - 1; 20]),
+            author: Vec::new(),
+            author_seconds: i64::from(n),
+            message: vec![n],
+            mutations: if n == 1 {
+                vec![
+                    PathStateMutation {
+                        path: b"tree/\xff".to_vec(),
+                        present: true,
+                        reset: false,
+                    },
+                    PathStateMutation {
+                        path: b"tree/stable".to_vec(),
+                        present: true,
+                        reset: false,
+                    },
+                ]
+            } else {
+                vec![PathStateMutation {
+                    path: b"tree/\xff".to_vec(),
+                    present: true,
+                    reset: false,
+                }]
+            },
+        };
+        let complete = append_path_state(None, &graph, (1..=40).map(input).collect())
+            .unwrap()
+            .into_index();
+        let mut base = None;
+        for n in 1..=40 {
+            base = Some(
+                append_path_state(base, &graph, vec![input(n)])
+                    .unwrap()
+                    .into_index(),
+            );
+        }
+        let resumed = base.unwrap();
+        assert!(resumed.layers().len() < 40);
+        for n in 1..=40 {
+            let paths = [b"tree/\xff".as_slice(), b"tree/stable".as_slice()];
+            assert_eq!(
+                resumed.latest(&graph, &[n; 20], &paths).unwrap(),
+                complete.latest(&graph, &[n; 20], &paths).unwrap(),
+                "commit {n}"
+            );
+        }
+    }
+
+    #[test]
     fn reset_replaces_a_subtree_without_changing_an_old_commit_root() {
         let graph = graph();
         let write = append_path_state(
@@ -1183,7 +1332,7 @@ mod tests {
             }],
         )
         .expect("prefix");
-        upload_path_state(&store, &layout, &write)
+        upload_path_state(&store, &layout, &write, DEFAULT_MAX_PATH_STATE_BYTES)
             .await
             .expect("upload");
         publish_path_state_checkpoint(

@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use super::{ReceiveError, Result, check_cancelled, validate};
 use crate::{
     auth::Principal,
-    server::{Repository, Server},
+    server::{MaintenanceTrigger, Repository, Server},
 };
 
 const TTL: Duration = Duration::from_secs(300);
@@ -599,7 +599,9 @@ async fn publish_attempt(
             let repository = entry
                 .open_current(server, repository_options(server)?, cancel)
                 .await?;
-            entry.schedule_maintenance(server).await?;
+            entry
+                .schedule_maintenance(server, MaintenanceTrigger::Repair)
+                .await?;
             Ok::<_, crate::Error>(repository.generation())
         })
         .await;
@@ -662,7 +664,9 @@ async fn recover_native_plan(
         let repository = entry
             .open_current(server, repository_options(server)?, cancel)
             .await?;
-        entry.schedule_maintenance(server).await?;
+        entry
+            .schedule_maintenance(server, MaintenanceTrigger::Repair)
+            .await?;
         Ok::<_, crate::Error>(repository.generation())
     })
     .await;

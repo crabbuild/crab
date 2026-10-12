@@ -50,6 +50,33 @@ pub(crate) fn history_with_blob(body: &[u8]) -> GitHistory {
     finish(workspace, git_dir, vec![commit])
 }
 
+pub(crate) fn wide_history(count: usize) -> (GitHistory, Vec<Vec<u8>>) {
+    let workspace = tempfile::tempdir().unwrap();
+    let git_dir = workspace.path().join("repository.git");
+    initialize(&git_dir);
+    let blob = output(
+        &git_dir,
+        &["hash-object", "-w", "--stdin"],
+        b"wide fixture\n",
+    );
+    let paths = (0..count)
+        .map(|index| {
+            let mut name = format!("entry-{index:04}-").into_bytes();
+            name.extend_from_slice(&[0xff; 300]);
+            name
+        })
+        .collect::<Vec<_>>();
+    let mut entries = Vec::new();
+    for path in &paths {
+        entries.extend_from_slice(format!("100644 blob {blob}\t").as_bytes());
+        entries.extend_from_slice(path);
+        entries.push(0);
+    }
+    let tree = output(&git_dir, &["mktree", "-z"], &entries);
+    let commit = output(&git_dir, &["commit-tree", &tree, "-m", "wide"], b"");
+    (finish(workspace, git_dir, vec![commit]), paths)
+}
+
 pub(crate) fn merge_history_with_nested_tag() -> (GitHistory, String) {
     let workspace = tempfile::tempdir().unwrap();
     let git_dir = workspace.path().join("repository.git");

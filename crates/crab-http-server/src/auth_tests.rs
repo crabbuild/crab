@@ -312,7 +312,8 @@ impl Harness {
             layout: StoreLayout::new(store, "test".into()),
             identity: RepositoryIdentity::new("test", "test", 1).unwrap(),
             pinned: Mutex::new(None),
-            maintenance: Mutex::new(None),
+            projection_source: Mutex::new(None),
+            maintenance: Mutex::new(MaintenanceState::default()),
             integrity: crate::integrity::Status::default(),
         };
         crab_write::capsule_protocol::initialize(

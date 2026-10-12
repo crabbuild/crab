@@ -100,15 +100,14 @@ pub async fn build_graph(
     if let Some(paths) = old_paths.filter(|paths| path_state_is_prefix(paths, &graph)) {
         let (progress, replace_checkpoint) =
             path_state_progress(store, layout, &graph, limits.max_path_state_bytes).await?;
-        if progress
-            .as_ref()
-            .is_none_or(|progress| progress.descriptor.commit_count < paths.descriptor.commit_count)
-        {
+        if progress.as_ref().is_none_or(|progress| {
+            progress.descriptor().commit_count < paths.descriptor().commit_count
+        }) {
             // Checkpoint monotonicity applies to verified progress. Replace a
             // corrupt observed descriptor before publishing the new graph, or
             // restart loses the only reusable attribution for retained commits.
             let write = append_path_state(Some(paths), &graph, Vec::new())?;
-            upload_path_state(store, layout, &write).await?;
+            upload_path_state(store, layout, &write, limits.max_path_state_bytes).await?;
             publish_path_state_checkpoint(
                 store,
                 layout,
@@ -156,13 +155,13 @@ pub async fn build_path_state(
         check_cancelled(cancel)?;
         let first = base
             .as_ref()
-            .map_or(0, |index| index.descriptor.commit_count);
+            .map_or(0, |index| index.descriptor().commit_count);
         let end = first
             .saturating_add(PATH_STATE_CHECKPOINT_COMMITS)
             .min(graph.descriptor.commit_count);
         let inputs = collect_path_state_inputs(&repository, &graph, first, end, cancel).await?;
         let write = append_path_state(base, &graph, inputs)?;
-        upload_path_state(store, layout, &write).await?;
+        upload_path_state(store, layout, &write, limits.max_path_state_bytes).await?;
         if write.commit_count() == graph.descriptor.commit_count {
             return BrowseIndexes::new(
                 snapshot.manifest_etag.clone(),

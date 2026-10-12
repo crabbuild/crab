@@ -5,6 +5,7 @@ import concurrent.futures
 import hashlib
 from http.cookiejar import MozillaCookieJar
 import json
+import os
 import random
 import statistics
 import subprocess
@@ -24,6 +25,7 @@ def main():
     parser.add_argument('--directory', action='append', default=[''])
     parser.add_argument('--file', action='append')
     parser.add_argument('--blame', help='Optional ordinary text path for first-parent blame comparison')
+    parser.add_argument('--attribution', action='store_true', help='Verify complete directory attribution against native first-parent history')
     parser.add_argument('--cookies', help='Private Netscape cookie file from an authenticated session')
     parser.add_argument('--historical-commits', type=int, default=0, help='Seeded historical commit sample size')
     parser.add_argument('--history-window', type=int, default=5000, help='First-parent ancestors available to sample')
@@ -102,6 +104,29 @@ def main():
         oracle = [(meta.split()[0].decode().lstrip('0'), meta.split()[2].decode(), name) for meta, name in expected]
         assert actual == oracle, directory
         checks['tree_entries'] += len(items)
+        if args.attribution:
+            attributed = []
+            cursor = None
+            while True:
+                params = {'path': directory, 'limit': 7}
+                if cursor:
+                    params['cursor'] = cursor
+                page = read('tree-attribution', **params)
+                assert page['commit'] == args.revision
+                attributed.extend(page['items'])
+                cursor = page['next']
+                if not cursor:
+                    break
+            assert [(item['path_hex'], item['oid'], item['mode']) for item in attributed] == [
+                (item['path_hex'], item['oid'], item['mode']) for item in items
+            ], directory
+            for item in attributed:
+                path = bytes.fromhex(item['path_hex'])
+                expected_commit = git('--literal-pathspecs', 'log', '--first-parent',
+                                      '--max-count=1', '--format=%H', args.revision,
+                                      '--', os.fsdecode(path)).decode().strip()
+                assert item['last_commit']['oid'] == expected_commit, item['path_hex']
+            checks['tree_attribution_entries'] = checks.get('tree_attribution_entries', 0) + len(attributed)
     page = read('commits', limit=10)
     assert [item['oid'] for item in page['items']] == git('rev-list', '--first-parent', '--max-count=10', args.revision).decode().splitlines()
     for commit in page['items']:
