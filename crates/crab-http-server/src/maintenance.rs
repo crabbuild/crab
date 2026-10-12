@@ -6,6 +6,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::cells::repository::projection::SourceIdentity;
+
 const CAPSULE_THRESHOLD: u32 = 32;
 pub(crate) const FOREGROUND_CAPSULE_THRESHOLD: u32 = 56;
 const PASS_BUDGET: Duration = Duration::from_secs(3 * 60);
@@ -77,9 +79,10 @@ pub(crate) async fn run(
     parent: CancellationToken,
     pass: Pass,
     projection: Option<ProjectionContext>,
-) -> Result<()> {
+) -> Result<Option<SourceIdentity>> {
     let has_projection = projection.is_some();
     let cancel = parent.child_token();
+    let mut completed = None;
     let operation = async {
         let _permit = match initial_permit {
             Some(permit) => permit,
@@ -106,14 +109,38 @@ pub(crate) async fn run(
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            indexed?;
+            let indexed = indexed?;
             let repository_id = projection.repository_id;
-            if let Err(error) = crate::projection::reconcile(&layout, projection, &cancel).await {
-                tracing::warn!(
+            let reconciled = async {
+                if projection.router.is_some() {
+                    crate::projection::reconcile(&layout, projection, &cancel).await
+                } else if indexed.is_some() {
+                    let view = crate::projection::open_view(&layout).await?;
+                    crate::projection::source_identity(&view.git_snapshot()?).map(Some)
+                } else {
+                    Ok(None)
+                }
+            }
+            .await;
+            match reconciled {
+                Ok(Some(source))
+                    if indexed.as_ref().is_some_and(|indexes| {
+                        // Lease contention and superseded publication are benign, but
+                        // cannot prove this exact complete source was verified.
+                        indexes.state_digest() == source.journal_state_digest
+                            && Some(indexes.commit_graph_hash())
+                                == source.commit_graph_hash.as_deref()
+                            && indexes.path_state_hash() == source.path_state_hash.as_deref()
+                    }) =>
+                {
+                    completed = Some(source)
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
                     repository_id = %repository_id,
                     error = ?error,
                     "Git projection reconciliation was deferred"
-                );
+                ),
             }
         }
         result
@@ -126,7 +153,8 @@ pub(crate) async fn run(
         PASS_BUDGET,
         pass,
     )
-    .await
+    .await?;
+    Ok(completed)
 }
 
 async fn await_pass<F>(

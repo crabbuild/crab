@@ -13,6 +13,9 @@ use crate::test_git::history as git_history;
 #[path = "maintenance_tests/browse.rs"]
 mod browse;
 
+#[path = "maintenance_tests/probes.rs"]
+mod probes;
+
 struct UnavailableRoundTrip;
 
 impl cellule_runtime::peer::PeerRoundTrip for UnavailableRoundTrip {
@@ -54,7 +57,8 @@ pub(crate) async fn fixture_without_cells() -> Arc<Server> {
                 store,
                 layout,
                 pinned: Mutex::new(None),
-                maintenance: Mutex::new(None),
+                projection_source: Mutex::new(None),
+                maintenance: Mutex::new(MaintenanceState::default()),
                 integrity: crate::integrity::Status::default(),
             },
         )])
@@ -100,7 +104,7 @@ pub(crate) fn init_test_tracing() {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
         let _ = tracing_subscriber::fmt()
-            .with_env_filter("cellule_runtime=warn")
+            .with_env_filter("cellule_runtime=warn,crab_http_server=warn")
             .with_test_writer()
             .try_init();
     });

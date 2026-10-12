@@ -11,7 +11,6 @@ use super::RepositoryModule;
 pub(crate) const OP_BEGIN: u8 = 1;
 pub(crate) const OP_REFS: u8 = 2;
 pub(crate) const OP_COMMITS: u8 = 3;
-pub(crate) const OP_TREES: u8 = 4;
 pub(crate) const OP_ATTRIBUTION: u8 = 5;
 pub(crate) const OP_PROMOTE: u8 = 6;
 pub(crate) const OP_SUPERSEDE: u8 = 7;
@@ -173,23 +172,6 @@ pub(crate) struct CommitRow {
     pub encoded_bytes: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TreeEntryRow {
-    pub name: Vec<u8>,
-    pub mode: u32,
-    pub object_oid: Vec<u8>,
-    pub object_kind: u8,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TreeRow {
-    pub tree_oid: Vec<u8>,
-    pub entries: Vec<TreeEntryRow>,
-    pub encoded_bytes: u64,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AttributionNodeRow {
@@ -266,17 +248,6 @@ impl Command for ApplyProjectionBatch {
                     ));
                 }
                 apply_commits(context, input.epoch_id, &rows)?;
-                None
-            }
-            OP_TREES => {
-                require_epoch(context, input.epoch_id, &source)?;
-                let rows: Vec<TreeRow> = decode_payload(payload)?;
-                if rows.len() > MAX_BATCH_ROWS {
-                    return Err(cellule_runtime::Error::Command(
-                        "projection tree batch is too large",
-                    ));
-                }
-                apply_trees(context, &rows)?;
                 None
             }
             OP_ATTRIBUTION => {
@@ -736,50 +707,6 @@ fn apply_commits(
     Ok(())
 }
 
-fn apply_trees(context: &CommandContext<'_, '_>, rows: &[TreeRow]) -> cellule_runtime::Result<()> {
-    let mut statements = Vec::new();
-    for row in rows {
-        statements.push(statement(
-            "INSERT OR REPLACE INTO git_trees(tree_oid, state, entry_count, encoded_bytes, last_used_at_ms) VALUES (?, 'building', ?, ?, ?)",
-            vec![
-                SqlValue::Blob(row.tree_oid.clone()),
-                integer(u64::try_from(row.entries.len()).map_err(|_| {
-                    cellule_runtime::Error::Command("projection tree entry count overflowed")
-                })?)?,
-                integer(row.encoded_bytes)?,
-                integer(u64::try_from(context.now_ms()).map_err(|_| {
-                    cellule_runtime::Error::Command("projection timestamp is negative")
-                })?)?,
-            ],
-        ));
-        statements.push(statement(
-            "DELETE FROM git_tree_entries WHERE tree_oid = ?",
-            vec![SqlValue::Blob(row.tree_oid.clone())],
-        ));
-        for entry in &row.entries {
-            statements.push(statement(
-                "INSERT INTO git_tree_entries(tree_oid, name, mode, object_oid, object_kind) VALUES (?, ?, ?, ?, ?)",
-                vec![
-                    SqlValue::Blob(row.tree_oid.clone()),
-                    SqlValue::Blob(entry.name.clone()),
-                    SqlValue::Integer(i64::from(entry.mode)),
-                    SqlValue::Blob(entry.object_oid.clone()),
-                    SqlValue::Integer(i64::from(entry.object_kind)),
-                ],
-            ));
-        }
-        statements.push(statement(
-            "UPDATE git_trees SET state = 'ready' WHERE tree_oid = ? AND entry_count = (SELECT COUNT(*) FROM git_tree_entries WHERE tree_oid = ?)",
-            vec![
-                SqlValue::Blob(row.tree_oid.clone()),
-                SqlValue::Blob(row.tree_oid.clone()),
-            ],
-        ));
-    }
-    execute_statements(context, statements)?;
-    Ok(())
-}
-
 fn apply_attribution(
     context: &CommandContext<'_, '_>,
     epoch_id: u64,
@@ -986,10 +913,6 @@ fn collect(context: &CommandContext<'_, '_>) -> cellule_runtime::Result<()> {
                         LIMIT 256
                     )
                 "#,
-                vec![],
-            ),
-            statement(
-                "DELETE FROM git_trees WHERE tree_oid IN (SELECT tree_oid FROM git_trees WHERE state = 'ready' AND tree_oid NOT IN (SELECT tree_oid FROM git_commits) LIMIT 64)",
                 vec![],
             ),
         ],

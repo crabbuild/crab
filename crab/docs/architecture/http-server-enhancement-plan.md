@@ -52,7 +52,7 @@ environment. Keep failed receipts as evidence.
 | D0 | Green lifecycle baseline and reproducible qualification inputs | None | In progress |
 | D1 | Graph reuse in index construction | D0 | In progress |
 | D2 | Graph available before complete path attribution | D1 | In progress |
-| D3 | Bounded background probing and foreground isolation | D2 | Not started |
+| D3 | Bounded background probing and foreground isolation | D2 | In progress |
 | D4 | Actual receive staging admission | D0; required before D5 bulk runs | Not started |
 | D5 | Efficient verified native pack intake and preparation | D4; D1-D3 for final concurrent proof | Not started |
 
@@ -281,26 +281,55 @@ Its largest attribution layer is 295,305,215 bytes; 158,482,112 bytes repeat
 only 30,803 path-component names. A per-layer canonical component table would
 encode the same layer in approximately 138,027,360 bytes before any other
 optimization. This is a calculated format estimate, not a measured new index.
+The repeated-component regression fails on the prior codec (1,024 stored
+copies), and the aggregate upload regression fails because a suffix-only budget
+allows retained layers to exceed the reader bound. The candidate canonical
+version 3 uses a sorted raw-component table, checked edge ordinals and shared
+immutable names. Read-only validated index accessors permit prefix reuse without
+rescanning every old edge at each checkpoint; changed graph ordinals still receive
+a prefix check. Both capsule and manifest uploads now take their existing reader
+budget before any path-state writes. Focused regressions, full native attribution
+and background/load proof are being run. The tracked Git oracle now supports
+`--attribution` to compare paginated directory entries with native first-parent
+path history, including literal byte paths.
+
+The wide raw-byte directory regression also exposed a Cell readiness dependency:
+recursive tree preloading had no serving/query consumer and rejected valid Git
+trees above a whole-row JSON limit. The candidate removes that producer,
+command, tables and metric kinds. Tree APIs continue using the canonical
+verified remote reader; commit/ref/path rows alone determine projection readiness.
+The release-tag audit found no shipped tree-projection schema. Pre-release Cell
+migration digests change, so qualification uses fresh application Cells; existing
+collaboration data must never be deleted automatically to accept that change.
+
 Keep the existing aggregate reader ceiling and check construction sizes before
 checkpoint/completion publication. Prove the exact loader and native attribution
 on the rebuilt full repository; no budget increase or compatibility reader is
 part of the proposed repair.
 
-`sweep_projections` calls `current_source` before retry backoff; `current_source`
-reopens the control view and verifies a path-state descriptor. The foreground
-unchanged-reader fix in #508 does not eliminate these background reopen costs.
+Before this slice, `sweep_projections` called `current_source` before retry
+backoff and reopened the control view plus immutable descriptor on each sweep.
+The candidate shares the bounded root/ref/index change probe with browse readers,
+revalidates immutable descriptors at changes or the existing hourly scrub, and
+retains only exact owned completion proof. The original blocked-descriptor
+regression failed; it now passes with exactly 3 body GETs and 2 LISTs at 4, 64 and
+256 commits with one ref. All 22 HTTP maintenance tests pass, including the
+1,025-entry raw-byte directory through paginated tree and attribution HTTP
+routes. Source cancellation/corruption and lease-contention regressions pass.
+The architecture guardrails pass; full Next.js idle and mixed-load gates remain
+open. These are semantic test builds, not production latency measurements.
 
-- [ ] Capture root, stable visible-ref activity and the bounded index record
+- [x] Capture root, stable visible-ref activity and the bounded index record
   first. Reuse the validated source when that exact identity is unchanged.
   A root ETag alone is insufficient because ref CAS can change independently.
-- [ ] Validate immutable descriptors when their hashes change; preserve typed
+- [x] Validate immutable descriptors when their hashes change; preserve typed
   corrupt-record errors, generation fencing and source-token identity. Share the
   canonical change probe where it removes duplicate policy.
 - [ ] Preserve one maintenance owner per repository and resumable batches. After
   D1/D2, measure foreground contention; add bounded admission/fair scheduling at
   the existing runtime boundary only if contention still fails the load gate.
   Do not shorten whole-pass timeouts so work restarts endlessly.
-- [ ] Extend unchanged-reader tests to background probes, including LIST counts,
+- [x] Extend unchanged-reader tests to background probes, including LIST counts,
   ref-only changes, graph-only publication, corrupt descriptors and cancellation.
 - [ ] Measure completed-index idle for five minutes, outside scheduled scrubs;
   repeat with different history sizes and the same ref count. Deep background

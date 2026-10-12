@@ -31,7 +31,7 @@ use crate::{
     Config, RepositoryAccess, RepositoryMember, app,
     auth::{Identity, Principal},
     catalog::CatalogStore,
-    server::Server,
+    server::{MaintenanceTrigger, Server},
 };
 
 const MAX_ACTIVE_JOBS: usize = 4;
@@ -602,7 +602,10 @@ async fn import_repository(
         .get(&(request.owner.clone(), request.name.clone()))
     {
         repository.invalidate().await;
-        if let Err(error) = repository.schedule_maintenance(server).await {
+        if let Err(error) = repository
+            .schedule_maintenance(server, MaintenanceTrigger::Repair)
+            .await
+        {
             tracing::warn!(repository_id = %repository.id, error = ?error, "import projection scheduling deferred");
         }
     }

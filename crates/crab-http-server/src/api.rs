@@ -17,7 +17,11 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{auth::Principal, projection, server::Server};
+use crate::{
+    auth::Principal,
+    projection,
+    server::{MaintenanceTrigger, Server},
+};
 
 const MAX_INLINE_TEXT_BYTES: usize = 1024 * 1024;
 
@@ -267,10 +271,12 @@ pub(crate) async fn read(
         generation = Some(repository.generation());
         let projection_source = if matches!(action, Action::TreeAttribution) {
             if let Some(router) = server.repository_cells() {
-                let source = match projection::current_source(&entry.store, &entry.layout).await {
+                let source = match projection::current_source(&entry, &cancellation).await {
                     Ok(source) => source,
                     Err(error @ crate::Error::Remote(Error::Corrupt { .. })) => {
-                        entry.schedule_maintenance(&server).await?;
+                        entry
+                            .schedule_maintenance(&server, MaintenanceTrigger::Repair)
+                            .await?;
                         return Err(ApiError::Service(error));
                     }
                     Err(error) => return Err(error.into()),
@@ -290,11 +296,15 @@ pub(crate) async fn read(
                 match attribution_source {
                     AttributionSource::Projected(source_token) => Some(source_token.to_owned()),
                     AttributionSource::Canonical => {
-                        entry.schedule_maintenance(&server).await?;
+                        entry
+                            .schedule_maintenance(&server, MaintenanceTrigger::Repair)
+                            .await?;
                         None
                     }
                     AttributionSource::Indexing => {
-                        entry.schedule_maintenance(&server).await?;
+                        entry
+                            .schedule_maintenance(&server, MaintenanceTrigger::Repair)
+                            .await?;
                         return Ok((
                             StatusCode::ACCEPTED,
                             [("retry-after", "2")],
@@ -304,7 +314,9 @@ pub(crate) async fn read(
                     }
                 }
             } else if !repository.path_state_available() {
-                entry.schedule_maintenance(&server).await?;
+                entry
+                    .schedule_maintenance(&server, MaintenanceTrigger::Repair)
+                    .await?;
                 return Ok((
                     StatusCode::ACCEPTED,
                     [("retry-after", "2")],
@@ -353,7 +365,9 @@ pub(crate) async fn read(
             stage: CorruptionStage::PathState,
         })) | Err(ApiError::Remote(Error::PathStateIndexing { .. }))
             | Err(ApiError::Service(crate::Error::BrowseIndexes(_)))
-    ) && let Err(error) = entry.schedule_maintenance(&server).await
+    ) && let Err(error) = entry
+        .schedule_maintenance(&server, MaintenanceTrigger::Repair)
+        .await
     {
         tracing::warn!(error = %error, "failed to schedule path-state repair");
     }

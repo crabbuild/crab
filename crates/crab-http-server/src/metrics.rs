@@ -36,8 +36,8 @@ const LTX_READ_ORIGIN_COUNT: usize = 4;
 const PROJECTION_PROBE_RESULT_COUNT: usize = 3;
 const PROJECTION_PHASE_COUNT: usize = 1;
 const PROJECTION_BUILD_RESULT_COUNT: usize = 3;
-const PROJECTION_BATCH_KIND_COUNT: usize = 4;
-const PROJECTION_ORIGIN_READ_KIND_COUNT: usize = 3;
+const PROJECTION_BATCH_KIND_COUNT: usize = 3;
+const PROJECTION_ORIGIN_READ_KIND_COUNT: usize = 2;
 const DURATION_BUCKETS_SECONDS: [f64; 16] = [
     0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
     600.0,
@@ -138,9 +138,9 @@ const PROJECTION_PHASE_LABELS: [&str; PROJECTION_PHASE_COUNT] = ["reconcile"];
 const PROJECTION_BUILD_RESULT_LABELS: [&str; PROJECTION_BUILD_RESULT_COUNT] =
     ["ok", "error", "superseded"];
 const PROJECTION_BATCH_KIND_LABELS: [&str; PROJECTION_BATCH_KIND_COUNT] =
-    ["refs", "commits", "trees", "attribution"];
+    ["refs", "commits", "attribution"];
 const PROJECTION_ORIGIN_READ_KIND_LABELS: [&str; PROJECTION_ORIGIN_READ_KIND_COUNT] =
-    ["snapshot", "graph", "tree"];
+    ["snapshot", "graph"];
 const METADATA: Metadata<'static> = Metadata::new(
     "crab_http_server",
     Level::INFO,
@@ -1440,7 +1440,6 @@ pub(crate) enum ProjectionBuildResult {
 pub(crate) enum ProjectionBatchKind {
     Refs,
     Commits,
-    Trees,
     Attribution,
 }
 
@@ -1448,7 +1447,6 @@ pub(crate) enum ProjectionBatchKind {
 pub(crate) enum ProjectionOriginReadKind {
     Snapshot,
     Graph,
-    Tree,
 }
 
 #[derive(Clone, Copy)]

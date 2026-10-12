@@ -744,6 +744,32 @@ Large initial builds checkpoint verified prefixes every 32 commits; exhausting
 one bounded maintenance pass remains a 202 indexing state and the next pass
 resumes that exact Git generation.
 
+Browse-reader and background source caches share a two-second change probe of
+the capsule root, a stable visible-ref capture and the bounded browse-index
+record. Ref CAS can change without changing the root ETag, and graph/path
+publication can change without moving a ref; both are checked. Immutable path
+descriptors are verified on source changes, explicit invalidation and expiry of
+the existing hourly scrub interval. Transport failures retain their source
+error; missing or corrupt path metadata retains the corruption response.
+
+One maintenance worker runs per repository. Completion is retained only when
+the owned index pass verified the complete source and Cell promotion matched
+it. Lease contention or a superseded pass cannot establish completion. Repair
+requests and source changes reopen maintenance; unchanged completed epochs are
+not repeatedly imported between scrubs. Cell reconciliation does not preload
+tree rows: tree/blob responses continue through the verified remote Git reader.
+Attribution batches obey both row and serialized-byte limits, preserving raw
+path bytes. The current path-state codec stores each raw component once per
+layer and checks all retained layer bytes against the reader budget before any
+write. Its encoded size improvement and full Next.js idle/load gates require
+qualification; focused fixed-ref tests do not prove production throughput.
+
+This changes unshipped derived-index encodings and the application migration
+digest. Existing pre-release application Cells need a deliberate rebuild or
+operator migration under a selected release descriptor. Rebuilding application
+Cells loses collaboration data; never perform that implicitly. Qualification
+uses fresh application Cells and preserves canonical Git objects and refs.
+
 Root commits compare against an empty tree. Path history follows the exact first-parent path. Commit history with `base` instead returns commits reachable from `rev` but not from `base`, across every parent.
 
 ### Git imports
@@ -1693,7 +1719,8 @@ This table collects process and transport limits that otherwise span several rou
 | Interactive repository reads | 16 concurrent, 5 minutes, 4 GiB fetched/inflated, 8 MiB response | `server.rs` and `crab-remote-git` |
 | Collaboration handlers | 8 concurrent, 30s | `app.rs` and route middleware |
 | Git fetch, push, LFS, archives, and release assets | 4 concurrent across the deployment | Process-local fast-path semaphore plus renewable object-store CAS slots under `.crab/http-server/v1/admission` |
-| Read-readiness publication | 2 repositories concurrently, 3-minute cooperative budget | `maintenance.rs` |
+| Foreground read-readiness publication | 2 repositories concurrently, 3-minute cooperative budget | `maintenance.rs` |
+| Background browse indexing/projection | One worker per repository, shared two-repository admission; cooperative shutdown drains the complete resumable pass | `maintenance.rs`; immutable builds retain progress instead of restarting on a short timeout |
 | Deep dependency integrity scrub | One renewable owner per deployment; 2 repositories concurrently, 12-minute cooperative budget each, hourly after an immediate first pass | `integrity.rs`; one CAS-protected aggregate report serves `/integrityz`, which remains excluded from `/readyz` |
 | OIDC callbacks | 8 concurrent, 10s per provider request | `auth.rs` |
 | Archive transfer | 10 minutes, 3 GiB encoded response | `archive.rs` |

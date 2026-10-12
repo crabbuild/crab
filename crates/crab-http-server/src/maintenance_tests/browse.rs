@@ -460,10 +460,77 @@ async fn superseded_partial_graph_does_not_authorize_retained_history() {
     assert_eq!(graph.descriptor.commit_count, 33);
 }
 
+#[tokio::test]
+async fn unchanged_projection_probe_reuses_its_verified_descriptor() {
+    for commit_count in [4, 64, 256] {
+        let server = fixture_without_cells().await;
+        let counting = {
+            let mut current = server.repositories.current.write().unwrap();
+            let repo = Arc::get_mut(current.by_name.values_mut().next().unwrap()).unwrap();
+            let counting = Arc::new(BrowseFaultStore::new(Arc::clone(repo.store.inner())));
+            repo.store = Store::with_retry(
+                counting.clone(),
+                crab_storage::RetryPolicy {
+                    max_attempts: 1,
+                    ..Default::default()
+                },
+            );
+            repo.layout = StoreLayout::new(repo.store.clone(), "maintenance".into());
+            counting
+        };
+        let repo = repository(&server);
+        let history = git_history(commit_count);
+        let root = crab_write::capsule_protocol::open_root(&repo.layout)
+            .await
+            .unwrap();
+        publish_next(
+            &repo,
+            root,
+            None,
+            history.oids[commit_count - 1].clone(),
+            Some(history.pack),
+        )
+        .await;
+        crab_remote::browse_indexes::ensure(
+            &repo.layout,
+            &repo.identity,
+            Arc::clone(&server.runtime),
+            server.options,
+            2 * 1024 * 1024 * 1024,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let source = crate::projection::current_source(&repo, &server.cancellation)
+            .await
+            .unwrap();
+        let descriptor = repo
+            .layout
+            .bulk_manifest_path("path-state", source.path_state_hash.as_deref().unwrap());
+        counting.block_body_reads_for(&descriptor);
+        counting.reset();
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        let repeated = crate::projection::current_source(&repo, &server.cancellation).await;
+        let body_requests = counting.body_requests();
+        let list_requests = counting.list_requests();
+        close(&server).await;
+        assert!(
+            repeated.is_ok(),
+            "unchanged source reopened its blocked immutable descriptor ({body_requests} body reads)"
+        );
+        assert_eq!(
+            (body_requests, list_requests),
+            (3, 2),
+            "unchanged probe at {commit_count} commits exceeded its fixed-ref control reads"
+        );
+    }
+}
+
 #[derive(Debug)]
 struct BrowseFaultStore {
     inner: Arc<dyn object_store::ObjectStore>,
     body_reads: AtomicUsize,
+    lists: AtomicUsize,
     blocked: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
@@ -472,6 +539,7 @@ impl BrowseFaultStore {
         Self {
             inner,
             body_reads: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
             blocked: Default::default(),
         }
     }
@@ -486,10 +554,15 @@ impl BrowseFaultStore {
 
     fn reset(&self) {
         self.body_reads.store(0, Ordering::Relaxed);
+        self.lists.store(0, Ordering::Relaxed);
     }
 
     fn body_requests(&self) -> usize {
         self.body_reads.load(Ordering::Relaxed)
+    }
+
+    fn list_requests(&self) -> usize {
+        self.lists.load(Ordering::Relaxed)
     }
 }
 
@@ -549,6 +622,7 @@ impl object_store::ObjectStore for BrowseFaultStore {
         prefix: Option<&ObjectPath>,
     ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
     {
+        self.lists.fetch_add(1, Ordering::Relaxed);
         self.inner.list(prefix)
     }
 
@@ -556,6 +630,7 @@ impl object_store::ObjectStore for BrowseFaultStore {
         &self,
         prefix: Option<&ObjectPath>,
     ) -> object_store::Result<object_store::ListResult> {
+        self.lists.fetch_add(1, Ordering::Relaxed);
         self.inner.list_with_delimiter(prefix).await
     }
 

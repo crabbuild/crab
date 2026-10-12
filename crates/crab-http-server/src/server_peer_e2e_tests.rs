@@ -1721,7 +1721,8 @@ async fn repository(store: Store, bucket: &str, prefix: String) -> Arc<Repositor
         store,
         layout,
         pinned: Mutex::new(None),
-        maintenance: Mutex::new(None),
+        projection_source: Mutex::new(None),
+        maintenance: Mutex::new(MaintenanceState::default()),
         integrity: crate::integrity::Status::default(),
     })
 }

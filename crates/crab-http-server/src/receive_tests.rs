@@ -336,7 +336,9 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             source: crab_storage::StorageError::NotFound { .. }
         })
     ));
-    repo.schedule_maintenance(&server).await.unwrap();
+    repo.schedule_maintenance(&server, crate::server::MaintenanceTrigger::Repair)
+        .await
+        .unwrap();
     server.finish_maintenance().await.unwrap();
     repo.invalidate().await;
     let indexes = crab_metadata::capsule_protocol::load_browse_indexes(&repo.layout)

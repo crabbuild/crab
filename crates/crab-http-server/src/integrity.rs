@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::server::{Repository, Server};
 
-const SCRUB_INTERVAL: Duration = Duration::from_secs(60 * 60);
+pub(crate) const SCRUB_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const REPORT_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const SCRUB_BUDGET: Duration = Duration::from_secs(12 * 60);
 const MAX_CONTROL_BYTES: u64 = 2 * 1024 * 1024 * 1024;

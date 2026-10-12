@@ -13,6 +13,16 @@ still matches. Missing/stale indexes return HTTP 202 with retry guidance;
 corrupt derived records or path metadata return 503 and schedule repair. Native
 Git and mutation validation do not load the optional browse-index record.
 
+Unchanged browse and background probes share the root/ref/index change probe.
+Immutable descriptors are verified on identity changes and at the existing
+hourly scrub boundary; explicit repair invalidates the cached proof. One worker
+per repository retains completion only for the exact verified source, so idle
+polling does not reimport the same Cell epoch. Tree APIs use the verified remote
+reader; reconciliation imports only consumed ref, commit and attribution rows.
+The current unshipped path-state codec interns raw components per layer and
+rejects aggregate writes above the reader budget before publishing any layers.
+The full Next.js/RustFS idle and mixed-load qualification remains in progress.
+
 ## Architecture
 
 ![Crab HTTP server and pinned Cellule architecture](../../diagram/crab-http-next-architecture/cellule-boundary.svg)

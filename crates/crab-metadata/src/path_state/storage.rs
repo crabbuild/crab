@@ -250,12 +250,29 @@ fn checkpoint_matches(checkpoint: &PathStateCheckpoint, graph: &SplitCommitGraph
         && checkpoint.commit_count <= graph.descriptor.commit_count
 }
 
-/// Upload changed layers before the immutable descriptor.
+/// Upload changed layers before the immutable descriptor, within the reader byte limit.
 pub async fn upload_path_state(
     store: &Store,
     layout: &StoreLayout<Store>,
     write: &PathStateWrite,
+    max_bytes: u64,
 ) -> Result<()> {
+    // Include retained layers, not only this checkpoint's suffix. A durable
+    // pointer to an index its reader cannot load is never valid readiness.
+    let bytes = write.index.descriptor.layers.iter().try_fold(
+        write.descriptor_bytes.len() as u64,
+        |total, layer| {
+            total
+                .checked_add(layer.bytes)
+                .ok_or_else(|| corruption("path-state byte count overflows"))
+        },
+    )?;
+    if bytes > max_bytes {
+        return Err(MetadataError::PathStateSize {
+            bytes,
+            maximum: max_bytes,
+        });
+    }
     for layer in &write.layers {
         crate::derived_index::upload(
             store,

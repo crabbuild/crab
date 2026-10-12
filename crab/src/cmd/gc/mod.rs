@@ -5686,7 +5686,14 @@ mod tests {
             .unwrap();
             let path_state_hash = path_state.descriptor_hash.clone();
             let commit_count = path_state.commit_count();
-            upload_path_state(store, layout, &path_state).await.unwrap();
+            upload_path_state(
+                store,
+                layout,
+                &path_state,
+                crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+            )
+            .await
+            .unwrap();
             (graph_hash, path_state_hash, graph, commit_count)
         }
 

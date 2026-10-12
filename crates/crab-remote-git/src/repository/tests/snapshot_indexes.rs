@@ -63,9 +63,14 @@ async fn snapshot_with_read_indexes(
         }],
     )
     .unwrap();
-    upload_path_state(&fixture.store, &fixture.layout, &paths)
-        .await
-        .unwrap();
+    upload_path_state(
+        &fixture.store,
+        &fixture.layout,
+        &paths,
+        crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+    )
+    .await
+    .unwrap();
     manifest.path_state_hash = Some(paths.descriptor_hash);
     snapshot
 }

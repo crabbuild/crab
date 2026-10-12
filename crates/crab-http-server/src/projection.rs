@@ -1,6 +1,5 @@
 //! Rebuilds the repository Cell's Git browse projection from object storage.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -11,9 +10,7 @@ use cellule_runtime::identity::RequestId;
 use crab_metadata::manifest_store::RepositorySnapshot;
 use crab_metadata::path_state::{PathStateIndex, load_path_state};
 use crab_metadata::split_commit_graph::{SplitCommitGraph, load_split_commit_graph};
-use crab_remote_git::{
-    Commit, EntryKind, OperationKind, RemoteGitRepository, RepositoryOptions, Revision, TreeEntry,
-};
+use crab_remote_git::{Commit, OperationKind, RemoteGitRepository, RepositoryOptions, Revision};
 use crab_storage::{Store, StoreLayout};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -23,11 +20,10 @@ use crate::cells::{RepositoryCellRouter, repository::projection};
 pub(crate) use projection::AttributionItem;
 
 const COMMIT_BATCH: u32 = 64;
-const MAX_TREE_PAYLOAD_BYTES: usize = 640 * 1024;
+const MAX_BATCH_PAYLOAD_BYTES: usize = 640 * 1024;
 const ATTRIBUTION_BATCH_NODES: usize = 64;
 const MAX_MESSAGE_PREVIEW_BYTES: usize = 8 * 1024;
 const MAX_ATTRIBUTION_QUERY_BYTES: usize = 48 * 1024;
-const TREE_HISTORY_WINDOW: u32 = 256;
 const REF_BATCH: usize = 128;
 
 /// Rebuild one immutable projection epoch after Git generation maintenance.
@@ -35,14 +31,14 @@ pub(crate) async fn reconcile(
     layout: &StoreLayout<Store>,
     context: crate::maintenance::ProjectionContext,
     cancellation: &CancellationToken,
-) -> crate::Result<()> {
+) -> crate::Result<Option<projection::SourceIdentity>> {
     let Some(router) = context.router else {
-        return Ok(());
+        return Ok(None);
     };
     let store = layout.store();
     let options = context.options;
     if cancellation.is_cancelled() {
-        return Ok(());
+        return Err(crab_remote_git::Error::Cancelled.into());
     }
     let build_started = Instant::now();
     context
@@ -79,11 +75,15 @@ pub(crate) async fn reconcile(
     )
     .await;
     let result = match result {
-        Ok(()) => collect_epochs(&client, &target, &source).await,
+        Ok(true) => collect_epochs(&client, &target, &source)
+            .await
+            .map(|()| Some(source)),
+        Ok(false) => Ok(None),
         Err(error) => Err(error),
     };
     let build_result = match &result {
-        Ok(()) => crate::metrics::ProjectionBuildResult::Ok,
+        Ok(Some(_)) => crate::metrics::ProjectionBuildResult::Ok,
+        Ok(None) => crate::metrics::ProjectionBuildResult::Superseded,
         Err(crate::Error::Remote(crab_remote_git::Error::SnapshotUnavailable)) => {
             crate::metrics::ProjectionBuildResult::Superseded
         }
@@ -102,8 +102,8 @@ pub(crate) async fn reconcile(
     };
     match (result, drained) {
         (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(source), Ok(())) => Ok(source),
     }
 }
 
@@ -145,26 +145,79 @@ pub(crate) fn source_identity(
     Ok(source)
 }
 
+pub(crate) struct CachedSource {
+    checked: Instant,
+    verified: Instant,
+    state_digest: String,
+    browse_indexes: Option<crab_metadata::capsule_protocol::BrowseIndexes>,
+    source: projection::SourceIdentity,
+}
+
 pub(crate) async fn current_source(
-    store: &Store,
-    layout: &StoreLayout<Store>,
+    repository: &crate::server::Repository,
+    cancellation: &CancellationToken,
 ) -> crate::Result<projection::SourceIdentity> {
-    let source = source_identity(&read_snapshot(store, layout).await?)?;
-    if let Some(path_state_hash) = source.path_state_hash.as_deref() {
-        crab_metadata::path_state::load_path_state_descriptor(
-            store,
-            layout,
-            path_state_hash,
-            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
-        )
-        .await
-        .map_err(|_| {
-            crate::Error::Remote(crab_remote_git::Error::Corrupt {
-                stage: crab_remote_git::CorruptionStage::PathState,
-            })
-        })?;
+    let mut cached = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
+        cached = repository.projection_source.lock() => cached,
+    };
+    if let Some(previous) = cached.as_mut()
+        && previous.verified.elapsed() < crate::integrity::SCRUB_INTERVAL
+    {
+        if previous.checked.elapsed() < crate::server::BROWSE_PROBE_INTERVAL {
+            return Ok(previous.source.clone());
+        }
+        let (activity, indexes) = repository.browse_state(cancellation).await?;
+        if activity.state_digest() == previous.state_digest && indexes == previous.browse_indexes {
+            previous.checked = Instant::now();
+            return Ok(previous.source.clone());
+        }
     }
+    let verified = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
+        verified = async {
+            let view = open_view(&repository.layout).await?;
+            let source = source_identity(&view.git_snapshot()?)?;
+            if let Some(hash) = source.path_state_hash.as_deref() {
+                crab_metadata::path_state::load_path_state_descriptor(
+                    &repository.store,
+                    &repository.layout,
+                    hash,
+                    crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+                )
+                .await
+                .map_err(path_state_error)?;
+            }
+            Ok::<_, crate::Error>(CachedSource {
+                checked: Instant::now(),
+                verified: Instant::now(),
+                state_digest: view.state_digest(),
+                browse_indexes: view.browse_indexes().cloned(),
+                source,
+            })
+        } => verified?,
+    };
+    let source = verified.source.clone();
+    *cached = Some(verified);
     Ok(source)
+}
+
+fn path_state_error(error: crab_metadata::error::MetadataError) -> crate::Error {
+    use crab_metadata::error::MetadataError;
+    match error {
+        MetadataError::CorruptObject { .. }
+        | MetadataError::Storage {
+            source:
+                crab_storage::StorageError::CorruptObject { .. }
+                | crab_storage::StorageError::NotFound { .. },
+        } => crab_remote_git::Error::Corrupt {
+            stage: crab_remote_git::CorruptionStage::PathState,
+        }
+        .into(),
+        error => crab_remote_git::Error::Metadata(error).into(),
+    }
 }
 
 pub(crate) async fn state(
@@ -304,7 +357,7 @@ async fn build_epoch(
     snapshot: &RepositorySnapshot,
     metrics: &crate::metrics::Metrics,
     cancellation: &CancellationToken,
-) -> crate::Result<()> {
+) -> crate::Result<bool> {
     let source_bytes = serde_json::to_vec(source)?;
     let Some(epoch) = apply_batch(
         client,
@@ -317,7 +370,7 @@ async fn build_epoch(
     .await?
     .epoch_id
     else {
-        return Ok(());
+        return Ok(true);
     };
 
     let result = build_epoch_contents(
@@ -363,7 +416,7 @@ async fn build_epoch(
             Vec::new(),
         )
         .await?;
-        return Ok(());
+        return Ok(false);
     }
     apply_batch(
         client,
@@ -374,7 +427,7 @@ async fn build_epoch(
         Vec::new(),
     )
     .await?;
-    Ok(())
+    Ok(true)
 }
 
 #[expect(
@@ -452,18 +505,8 @@ async fn build_epoch_contents(
         cancellation,
     )
     .await?;
-    project_trees(
-        repository,
-        &graph,
-        &snapshot.manifest.refs,
-        client,
-        target,
-        source,
-        epoch,
-        metrics,
-        cancellation,
-    )
-    .await?;
+    // Tree APIs use the verified remote reader. Preloading unconsumed tree rows
+    // would add recursive origin reads and let a wide tree block attribution.
     project_attribution(
         &graph,
         &path_state,
@@ -538,84 +581,6 @@ async fn project_commits(
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "tree hydration keeps the verified Git and Cell boundaries explicit"
-)]
-async fn project_trees(
-    repository: &RemoteGitRepository,
-    graph: &SplitCommitGraph,
-    refs: &std::collections::BTreeMap<String, String>,
-    client: &CellClient,
-    target: &CellTarget,
-    source: &projection::SourceIdentity,
-    epoch: u64,
-    metrics: &crate::metrics::Metrics,
-    cancellation: &CancellationToken,
-) -> crate::Result<()> {
-    let mut roots = HashMap::<Vec<u8>, Vec<u8>>::new();
-    let mut selected = BTreeSet::new();
-    let history_start = graph
-        .descriptor
-        .commit_count
-        .saturating_sub(TREE_HISTORY_WINDOW);
-    selected.extend(history_start..graph.descriptor.commit_count);
-    for oid in refs.values() {
-        let oid = decode_sha1(oid)?;
-        let oid: [u8; 20] = oid
-            .try_into()
-            .map_err(|_| crate::Error::Config("manifest ref is not a SHA-1"))?;
-        if let Some(ordinal) = graph.ordinal(&oid) {
-            selected.insert(ordinal);
-        }
-    }
-    for ordinal in selected {
-        let record = graph
-            .record(ordinal)
-            .ok_or(crate::Error::Config("commit graph ordinal is missing"))?;
-        roots
-            .entry(record.tree_oid.to_vec())
-            .or_insert_with(|| record.oid.to_vec());
-    }
-    for (root, commit) in roots {
-        check_cancelled(cancellation)?;
-        metrics.record_projection_origin_read(crate::metrics::ProjectionOriginReadKind::Tree);
-        let root_oid = object_id(&root)?;
-        let commit_oid = object_id(&commit)?;
-        let operation = repository
-            .operation(OperationKind::Tree, cancellation)
-            .await?;
-        let snapshot = repository
-            .snapshot(&Revision::Commit(commit_oid), &operation)
-            .await?;
-        if snapshot.root_tree_oid() != root_oid {
-            operation
-                .finish(Err(crab_remote_git::Error::Corrupt {
-                    stage: crab_remote_git::CorruptionStage::Tree,
-                }))
-                .await?;
-            return Err(crate::Error::Config(
-                "commit graph root tree does not match the snapshot",
-            ));
-        }
-        let entries_result = snapshot.list_tree_recursive(&operation).await;
-        let entries = operation.finish(entries_result).await?;
-        for row in tree_rows(root, entries)? {
-            send_json_batch(
-                client,
-                target,
-                projection::OP_TREES,
-                epoch,
-                source,
-                &row,
-                metrics,
-            )
-            .await?;
-        }
-    }
-    Ok(())
-}
-
 async fn project_attribution(
     graph: &SplitCommitGraph,
     path_state: &PathStateIndex,
@@ -629,83 +594,119 @@ async fn project_attribution(
     if cancellation.is_cancelled() {
         return Err(crate::Error::Remote(crab_remote_git::Error::Cancelled));
     }
-    let mut nodes = Vec::new();
-    let mut edges = Vec::new();
-    for (layer_index, layer) in path_state.layers.iter().enumerate() {
-        for (node_index, node) in layer.nodes.iter().enumerate() {
+    // Commit nodes before edges and roots to preserve their foreign keys. Build
+    // only the current batch; collecting all edges duplicates a large index.
+    for (layer_index, layer) in path_state.layers().iter().enumerate() {
+        for (batch_index, nodes) in layer.nodes.chunks(ATTRIBUTION_BATCH_NODES).enumerate() {
             check_cancelled(cancellation)?;
+            let nodes = nodes
+                .iter()
+                .enumerate()
+                .map(|(offset, node)| projection::AttributionNodeRow {
+                    node_hash: node_hash(
+                        source,
+                        layer_index as u32,
+                        (batch_index * ATTRIBUTION_BATCH_NODES + offset) as u32,
+                    ),
+                    last_change_ordinal: node.value,
+                    encoded_bytes: 0,
+                })
+                .collect();
+            let batch = projection::AttributionBatch {
+                nodes,
+                edges: Vec::new(),
+                roots: Vec::new(),
+            };
+            send_json_batch(
+                client,
+                target,
+                projection::OP_ATTRIBUTION,
+                epoch,
+                source,
+                &batch,
+                metrics,
+            )
+            .await?;
+        }
+    }
+    let mut batch = projection::AttributionBatch {
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        roots: Vec::new(),
+    };
+    let empty_bytes = serde_json::to_vec(&batch)?.len();
+    let mut encoded_bytes = empty_bytes;
+    for (layer_index, layer) in path_state.layers().iter().enumerate() {
+        for (node_index, node) in layer.nodes.iter().enumerate() {
             let parent_hash = node_hash(source, layer_index as u32, node_index as u32);
-            nodes.push(projection::AttributionNodeRow {
-                node_hash: parent_hash.clone(),
-                last_change_ordinal: node.value,
-                encoded_bytes: 0,
-            });
             for (component, child) in &node.children {
-                edges.push(projection::AttributionEdgeRow {
+                check_cancelled(cancellation)?;
+                let edge = projection::AttributionEdgeRow {
                     parent_hash: parent_hash.clone(),
-                    component: component.clone(),
+                    component: component.to_vec(),
                     child_hash: node_hash(source, child.layer, child.index),
-                });
+                };
+                let edge_bytes = serde_json::to_vec(&edge)?.len() + 1;
+                if empty_bytes + edge_bytes > MAX_BATCH_PAYLOAD_BYTES {
+                    return Err(crate::Error::Config(
+                        "one attribution edge exceeds the projection wire limit",
+                    ));
+                }
+                if !batch.edges.is_empty()
+                    && (batch.edges.len() == ATTRIBUTION_BATCH_NODES * 8
+                        || encoded_bytes + edge_bytes > MAX_BATCH_PAYLOAD_BYTES)
+                {
+                    send_json_batch(
+                        client,
+                        target,
+                        projection::OP_ATTRIBUTION,
+                        epoch,
+                        source,
+                        &batch,
+                        metrics,
+                    )
+                    .await?;
+                    batch.edges.clear();
+                    encoded_bytes = empty_bytes;
+                }
+                encoded_bytes += edge_bytes;
+                batch.edges.push(edge);
             }
         }
     }
-    let roots = (0..graph.descriptor.commit_count)
-        .map(|ordinal| {
-            let root = path_state
-                .record(ordinal)
-                .ok_or(crate::Error::Config("path-state record is missing"))?
-                .root;
-            Ok(projection::AttributionRootRow {
-                commit_ordinal: ordinal,
-                root_hash: node_hash(source, root.layer, root.index),
+    if !batch.edges.is_empty() {
+        send_json_batch(
+            client,
+            target,
+            projection::OP_ATTRIBUTION,
+            epoch,
+            source,
+            &batch,
+            metrics,
+        )
+        .await?;
+    }
+    for start in (0..graph.descriptor.commit_count).step_by(ATTRIBUTION_BATCH_NODES) {
+        check_cancelled(cancellation)?;
+        let end = start
+            .saturating_add(ATTRIBUTION_BATCH_NODES as u32)
+            .min(graph.descriptor.commit_count);
+        let roots = (start..end)
+            .map(|ordinal| {
+                let root = path_state
+                    .record(ordinal)
+                    .ok_or(crate::Error::Config("path-state record is missing"))?
+                    .root;
+                Ok(projection::AttributionRootRow {
+                    commit_ordinal: ordinal,
+                    root_hash: node_hash(source, root.layer, root.index),
+                })
             })
-        })
-        .collect::<crate::Result<Vec<_>>>()?;
-    // Attribution edges and roots have foreign keys into the node table. Upload the
-    // dependency layers separately so a large path-state index cannot expose an edge
-    // before its child node has been committed.
-    for node_batch in nodes.chunks(ATTRIBUTION_BATCH_NODES) {
-        check_cancelled(cancellation)?;
-        let batch = projection::AttributionBatch {
-            nodes: node_batch.to_vec(),
-            edges: Vec::new(),
-            roots: Vec::new(),
-        };
-        send_json_batch(
-            client,
-            target,
-            projection::OP_ATTRIBUTION,
-            epoch,
-            source,
-            &batch,
-            metrics,
-        )
-        .await?;
-    }
-    for edge_batch in edges.chunks(ATTRIBUTION_BATCH_NODES * 8) {
-        check_cancelled(cancellation)?;
-        let batch = projection::AttributionBatch {
-            nodes: Vec::new(),
-            edges: edge_batch.to_vec(),
-            roots: Vec::new(),
-        };
-        send_json_batch(
-            client,
-            target,
-            projection::OP_ATTRIBUTION,
-            epoch,
-            source,
-            &batch,
-            metrics,
-        )
-        .await?;
-    }
-    for root_batch in roots.chunks(ATTRIBUTION_BATCH_NODES) {
-        check_cancelled(cancellation)?;
+            .collect::<crate::Result<Vec<_>>>()?;
         let batch = projection::AttributionBatch {
             nodes: Vec::new(),
             edges: Vec::new(),
-            roots: root_batch.to_vec(),
+            roots,
         };
         send_json_batch(
             client,
@@ -774,88 +775,6 @@ fn commit_row(ordinal: u32, commit: &Commit) -> projection::CommitRow {
     }
 }
 
-fn tree_rows(
-    root: Vec<u8>,
-    entries: Vec<TreeEntry>,
-) -> crate::Result<Vec<Vec<projection::TreeRow>>> {
-    let mut tree_by_path = HashMap::<Vec<u8>, Vec<u8>>::new();
-    tree_by_path.insert(Vec::new(), root);
-    let root_oid = tree_by_path.get(&[][..]).cloned();
-    for entry in &entries {
-        if entry.kind == EntryKind::Tree {
-            let tree_oid = entry.oid.as_slice().to_vec();
-            tree_by_path.insert(entry.path.as_bytes().to_vec(), tree_oid.clone());
-        }
-    }
-    // A Git tree object can be mounted at more than one path.  The recursive
-    // walk reports each mount, while the projection stores one row per tree
-    // object, so coalesce repeated names before sending the row to SQLite.
-    let mut grouped = HashMap::<Vec<u8>, BTreeMap<Vec<u8>, projection::TreeEntryRow>>::new();
-    if let Some(root_oid) = root_oid {
-        grouped.entry(root_oid).or_default();
-    }
-    for entry in entries {
-        let path = entry.path.as_bytes();
-        let parent = path
-            .iter()
-            .rposition(|byte| *byte == b'/')
-            .map_or(&[][..], |index| &path[..index]);
-        let Some(tree_oid) = tree_by_path.get(parent) else {
-            continue;
-        };
-        grouped.entry(tree_oid.clone()).or_default();
-        let Some(name) = entry.path.file_name() else {
-            continue;
-        };
-        let row = projection::TreeEntryRow {
-            name: name.to_vec(),
-            mode: entry.mode.raw(),
-            object_oid: entry.oid.as_slice().to_vec(),
-            object_kind: entry_kind_code(entry.kind),
-        };
-        let entries = grouped.entry(tree_oid.clone()).or_default();
-        if let Some(previous) = entries.insert(row.name.clone(), row.clone())
-            && previous != row
-        {
-            return Err(crate::Error::Remote(crab_remote_git::Error::Corrupt {
-                stage: crab_remote_git::CorruptionStage::Tree,
-            }));
-        }
-    }
-    let mut rows = Vec::new();
-    for (tree_oid, entries) in grouped {
-        let entries = entries.into_values().collect::<Vec<_>>();
-        let row = projection::TreeRow {
-            tree_oid,
-            encoded_bytes: entries
-                .iter()
-                .map(|entry| {
-                    u64::try_from(entry.name.len() + entry.object_oid.len() + 16)
-                        .unwrap_or(u64::MAX)
-                })
-                .sum(),
-            entries,
-        };
-        let encoded = serde_json::to_vec(&row)?;
-        if encoded.len() > MAX_TREE_PAYLOAD_BYTES {
-            return Err(crate::Error::Config(
-                "one Git tree exceeds the projection batch limit",
-            ));
-        }
-        rows.push(vec![row]);
-    }
-    Ok(rows)
-}
-
-fn entry_kind_code(kind: EntryKind) -> u8 {
-    match kind {
-        EntryKind::Tree => 1,
-        EntryKind::Blob => 2,
-        EntryKind::Symlink => 3,
-        EntryKind::Submodule => 4,
-    }
-}
-
 async fn send_json_batch<T: serde::Serialize>(
     client: &CellClient,
     target: &CellTarget,
@@ -881,7 +800,6 @@ async fn send_json_batch<T: serde::Serialize>(
     let kind = match operation {
         projection::OP_REFS => crate::metrics::ProjectionBatchKind::Refs,
         projection::OP_COMMITS => crate::metrics::ProjectionBatchKind::Commits,
-        projection::OP_TREES => crate::metrics::ProjectionBatchKind::Trees,
         projection::OP_ATTRIBUTION => crate::metrics::ProjectionBatchKind::Attribution,
         _ => return Err(crate::Error::Config("invalid projection batch operation")),
     };
@@ -1047,51 +965,8 @@ mod tests {
         let paths = vec![vec![b'x'; MAX_ATTRIBUTION_QUERY_BYTES]];
         assert!(attribution_batches("token", &[0x11; 20], paths).is_err());
     }
-
-    #[test]
-    fn tree_rows_coalesce_reused_tree_objects() {
-        let tree_oid =
-            gix_hash::ObjectId::from_hex(b"2222222222222222222222222222222222222222").unwrap();
-        let blob_oid =
-            gix_hash::ObjectId::from_hex(b"3333333333333333333333333333333333333333").unwrap();
-        let entries = vec![
-            TreeEntry {
-                path: crab_remote_git::GitPath::new(b"one".to_vec()).unwrap(),
-                oid: tree_oid,
-                mode: crab_remote_git::EntryMode::Tree,
-                kind: EntryKind::Tree,
-                size: None,
-            },
-            TreeEntry {
-                path: crab_remote_git::GitPath::new(b"two".to_vec()).unwrap(),
-                oid: tree_oid,
-                mode: crab_remote_git::EntryMode::Tree,
-                kind: EntryKind::Tree,
-                size: None,
-            },
-            TreeEntry {
-                path: crab_remote_git::GitPath::new(b"one/file".to_vec()).unwrap(),
-                oid: blob_oid,
-                mode: crab_remote_git::EntryMode::Regular,
-                kind: EntryKind::Blob,
-                size: None,
-            },
-            TreeEntry {
-                path: crab_remote_git::GitPath::new(b"two/file".to_vec()).unwrap(),
-                oid: blob_oid,
-                mode: crab_remote_git::EntryMode::Regular,
-                kind: EntryKind::Blob,
-                size: None,
-            },
-        ];
-        let rows = tree_rows(vec![0x11; 20], entries).unwrap();
-        let reused_tree = rows
-            .iter()
-            .flatten()
-            .find(|row| row.tree_oid == tree_oid.as_slice())
-            .unwrap();
-        assert_eq!(reused_tree.entries.len(), 1);
-        assert_eq!(reused_tree.entries[0].name, b"file");
-        assert_eq!(reused_tree.entries[0].object_oid, blob_oid.as_slice());
-    }
 }
+
+#[cfg(test)]
+#[path = "projection_tests/probes.rs"]
+mod probe_tests;

@@ -436,24 +436,6 @@ CREATE TABLE git_epoch_commits (
     FOREIGN KEY (commit_oid) REFERENCES git_commits(oid)
 ) STRICT, WITHOUT ROWID;
 
-CREATE TABLE git_trees (
-    tree_oid BLOB PRIMARY KEY,
-    state TEXT NOT NULL CHECK (state IN ('building', 'ready')),
-    entry_count INTEGER NOT NULL,
-    encoded_bytes INTEGER NOT NULL,
-    last_used_at_ms INTEGER NOT NULL
-) STRICT, WITHOUT ROWID;
-
-CREATE TABLE git_tree_entries (
-    tree_oid BLOB NOT NULL,
-    name BLOB NOT NULL,
-    mode INTEGER NOT NULL,
-    object_oid BLOB NOT NULL,
-    object_kind INTEGER NOT NULL,
-    PRIMARY KEY (tree_oid, name),
-    FOREIGN KEY (tree_oid) REFERENCES git_trees(tree_oid) ON DELETE CASCADE
-) STRICT, WITHOUT ROWID;
-
 CREATE TABLE git_attribution_nodes (
     node_hash BLOB PRIMARY KEY,
     last_change_ordinal INTEGER,
