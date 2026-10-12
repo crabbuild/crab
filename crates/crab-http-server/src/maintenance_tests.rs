@@ -311,6 +311,77 @@ async fn browse_refresh_does_not_hide_new_invalid_indexes_behind_cached_state() 
 }
 
 #[tokio::test]
+async fn capsule_browse_builder_does_not_repeat_raw_history_authorization() {
+    let mut request_counts = Vec::new();
+    for count in [64, 128, 256] {
+        let server = fixture_without_cells().await;
+        let reads = Arc::new(AtomicUsize::new(0));
+        {
+            let mut current = server.repositories.current.write().unwrap();
+            let repo = Arc::get_mut(current.by_name.values_mut().next().unwrap()).unwrap();
+            let observed = Arc::clone(&reads);
+            repo.store = repo
+                .store
+                .clone()
+                .with_read_request_observer(Arc::new(move |kind| {
+                    if matches!(
+                        kind,
+                        crab_storage::StorageReadKind::Get | crab_storage::StorageReadKind::Range
+                    ) {
+                        observed.fetch_add(1, Ordering::Relaxed);
+                    }
+                }));
+            repo.layout = StoreLayout::new(repo.store.clone(), "maintenance".into());
+        }
+        let repo = repository(&server);
+        let history = git_history(count);
+        let root = crab_write::capsule_protocol::open_root(&repo.layout)
+            .await
+            .unwrap();
+        publish_next(
+            &repo,
+            root,
+            None,
+            history.oids[count - 1].clone(),
+            Some(history.pack),
+        )
+        .await;
+        // Graph construction reads verified commits in bounded batches. Path
+        // comparison must use that graph, rather than spending a history walk
+        // budget again to authorize each old commit and its first parent.
+        let options = RepositoryOptions::new(
+            server.options.object_limits(),
+            crab_remote_git::OperationLimits {
+                max_history_commits: 1,
+                ..server.options.operation_limits()
+            },
+        )
+        .unwrap();
+        reads.store(0, Ordering::Relaxed);
+        let result = crab_remote::browse_indexes::ensure(
+            &repo.layout,
+            &repo.identity,
+            Arc::clone(&server.runtime),
+            options,
+            2 * 1024 * 1024 * 1024,
+            &CancellationToken::new(),
+        )
+        .await;
+        close(&server).await;
+        eprintln!(
+            "capsule browse builder: {count} commits, {} GET/range reads",
+            reads.load(Ordering::Relaxed)
+        );
+        assert!(result.is_ok(), "{count} commits: {result:?}");
+        request_counts.push(reads.load(Ordering::Relaxed));
+    }
+    assert!(
+        request_counts.windows(2).all(|pair| pair[1] <= pair[0] * 2),
+        "origin work grows faster than history: {request_counts:?}"
+    );
+}
+
+#[tokio::test]
 async fn browse_refresh_attaches_new_indexes_without_a_ref_change() {
     let server = fixture_without_cells().await;
     let repo = repository(&server);

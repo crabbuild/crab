@@ -50,7 +50,7 @@ environment. Keep failed receipts as evidence.
 | Slice | Deliverable | Dependency | Status |
 | --- | --- | --- | --- |
 | D0 | Green lifecycle baseline and reproducible qualification inputs | None | In progress |
-| D1 | Graph reuse in index construction | D0 | Not started |
+| D1 | Graph reuse in index construction | D0 | In progress |
 | D2 | Graph available before complete path attribution | D1 | Not started |
 | D3 | Bounded background probing and foreground isolation | D2 | Not started |
 | D4 | Actual receive staging admission | D0; required before D5 bulk runs | Not started |
@@ -71,6 +71,13 @@ empty set with one live node; `try_recruit_log` then returns `None`. Restore
 eligible peers before capturing the cohort to expire. Preserve all subsequent
 epoch, membership, durability and owner-loss assertions. The corrected full
 Compose rerun remains required.
+
+The unchanged plan revision subsequently passed the
+[complete lifecycle run](https://github.com/crabbuild/crab/actions/runs/38179212631).
+The failure is timing-sensitive: old advertisements can transiently provide an
+eligible cohort after their processes stop. [PR #510](https://github.com/crabbuild/crab/pull/510)
+restores the fixture's explicit precondition; its corrected rerun remains a
+separate proof. The other D0 receipt, attribution and generator gates remain open.
 
 The tracked native-Git oracle now supports a seeded historical sample and
 reports its percentiles separately. The first retained-store baseline verified
@@ -119,6 +126,30 @@ Current path: `browse_indexes::ensure` opens a capsule reader, then
 `collect_path_state_inputs` with the original reader. `resolve(Commit)` therefore
 calls `prove_reachable` over raw commits when that reader has no graph. The
 manifest-backed `maintain_path_state` sibling already opens with its graph.
+
+Execution: the 64/128/256-commit capsule builder regression failed before the
+change (`history commits: actual 2, maximum 1`) and passed after attaching the
+newly durable graph. `RemoteGitRepository::with_commit_graph` retains the
+authenticated reader, runtime and snapshot identity, validates the graph against
+verified commit roots, and clears old path attribution. Full-OID resolution uses
+a pinned reachability map instead of another full graph walk. Its allocation is
+bounded by the verified graph size and charged before allocation; a bounded
+blocking worker honors caller/runtime cancellation.
+
+Seven graph unit tests and four native-Git graph integration tests pass, covering
+merge parents, nested and non-commit tags, unreachable retained objects,
+ref-only staleness and cancellation. Twelve focused HTTP/browser tests pass
+(one credential-dependent test remains ignored). Counted capsule construction
+uses 18/24/36 GET/range reads for 64/128/256 commits, with a regression enforcing
+no faster than linear request growth. These small fixtures carry inline packs;
+they do not predict full Next.js origin counts. Full Next.js completion,
+checkpoint restart and performance proofs remain required.
+
+Scoped production Clippy passed for remote-git, write and HTTP server libraries.
+The final graph integration rerun passed all four tests, and both locator-close
+fault tests passed. No dependency or configuration change is needed for this
+slice. The graph handshake is boxed at its owning boundary so the server binary
+can compile without raising Rust's async type-depth limit.
 
 - [ ] Add a regression at the capsule builder boundary using a multi-commit,
   merge/tag fixture and a counting store. Distinguish necessary commit/tree

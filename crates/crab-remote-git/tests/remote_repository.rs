@@ -4919,6 +4919,213 @@ async fn rejects_wrong_kind_and_unreachable_retained_commit() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn attached_graph_preserves_tag_visibility_and_rejects_retained_commits() {
+    let options = RepositoryOptions::new(
+        ObjectLimits::default(),
+        OperationLimits {
+            max_history_commits: 1,
+            ..OperationLimits::default()
+        },
+    )
+    .unwrap();
+    let fixture = publish(DeltaKind::Ref, false, options).await;
+    let hash = publish_complete_graph(&fixture).await;
+    let cancel = CancellationToken::new();
+    let attached = fixture
+        .repository
+        .with_commit_graph(&hash, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            fixture.repository.commit_graph_available(),
+            attached.commit_graph_available()
+        ),
+        (false, true)
+    );
+    let operation = attached
+        .operation(OperationKind::Resolve, &cancel)
+        .await
+        .unwrap();
+    let result = async {
+        for oid in [fixture.root_commit, fixture.side_commit] {
+            assert_eq!(
+                attached
+                    .resolve(&Revision::Commit(oid), &operation)
+                    .await?
+                    .commit,
+                oid
+            );
+        }
+        assert!(matches!(
+            attached
+                .resolve(&Revision::Commit(fixture.unreachable), &operation)
+                .await,
+            Err(Error::Revision {
+                reason: crab_remote_git::RevisionError::NotReachable
+            })
+        ));
+        assert!(
+            attached
+                .resolve(&Revision::Reference("v2".to_owned()), &operation)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            attached
+                .resolve(&Revision::Reference("blob".to_owned()), &operation)
+                .await,
+            Err(Error::Revision {
+                reason: crab_remote_git::RevisionError::NotCommit
+            })
+        ));
+        Ok(())
+    }
+    .await;
+    let result = operation.finish(result).await;
+    fixture.runtime.shutdown().await;
+    result.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn declared_graph_uses_verified_commit_roots_including_nested_tags() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let hash = publish_complete_graph(&fixture).await;
+    let (mut manifest, etag) = read_manifest(&fixture.store, &fixture.layout)
+        .await
+        .unwrap();
+    manifest.commit_graph_hash = Some(hash);
+    write_manifest_cas(&fixture.store, &fixture.layout, &manifest, &etag)
+        .await
+        .unwrap();
+    let repository = RemoteGitRepository::open(
+        fixture.store.clone(),
+        fixture.layout.clone(),
+        fixture.repository.identity().clone(),
+        Arc::clone(&fixture.runtime),
+        RepositoryOptions::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    fixture.runtime.shutdown().await;
+    assert!(
+        repository.commit_graph_available(),
+        "a tag to a blob must not disable commit acceleration"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_attachment_rejects_other_ref_state_and_cancelled_work() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let hash = publish_complete_graph(&fixture).await;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert!(matches!(
+        fixture.repository.with_commit_graph(&hash, &cancel).await,
+        Err(Error::Cancelled)
+    ));
+    let (mut manifest, etag) = read_manifest(&fixture.store, &fixture.layout)
+        .await
+        .unwrap();
+    manifest.refs.remove("refs/tags/v2");
+    manifest.peeled_refs.clear();
+    manifest.seal_git_validation();
+    write_manifest_cas(&fixture.store, &fixture.layout, &manifest, &etag)
+        .await
+        .unwrap();
+    let repository = RemoteGitRepository::open(
+        fixture.store.clone(),
+        fixture.layout.clone(),
+        fixture.repository.identity().clone(),
+        Arc::clone(&fixture.runtime),
+        RepositoryOptions::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let result = repository
+        .with_commit_graph(&hash, &CancellationToken::new())
+        .await;
+    fixture.runtime.shutdown().await;
+    assert!(matches!(
+        result,
+        Err(Error::Corrupt {
+            stage: crab_remote_git::CorruptionStage::CommitGraph
+        })
+    ));
+}
+
+async fn publish_complete_graph(fixture: &PublishedFixture) -> String {
+    use crab_metadata::split_commit_graph::{
+        CommitGraphInput, append_split_commit_graph, upload_split_commit_graph,
+    };
+    let (manifest, _) = read_manifest(&fixture.store, &fixture.layout)
+        .await
+        .unwrap();
+    let oids = git(
+        &[
+            "--git-dir",
+            path(&fixture.source_git_dir),
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname) %(objecttype)",
+        ],
+        None,
+    );
+    let inputs = String::from_utf8(oids)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_suffix(" commit"))
+        .map(|oid| {
+            let raw = git(
+                &[
+                    "--git-dir",
+                    path(&fixture.source_git_dir),
+                    "cat-file",
+                    "commit",
+                    oid,
+                ],
+                None,
+            );
+            let commit = gix_object::CommitRef::from_bytes(&raw, gix_hash::Kind::Sha1)
+                .unwrap()
+                .into_owned()
+                .unwrap();
+            CommitGraphInput {
+                oid: gix_hash::ObjectId::from_hex(oid.as_bytes())
+                    .unwrap()
+                    .as_bytes()
+                    .try_into()
+                    .unwrap(),
+                tree_oid: commit.tree.as_bytes().try_into().unwrap(),
+                commit_time: commit.committer.time.seconds,
+                parents: commit
+                    .parents
+                    .iter()
+                    .map(|parent| parent.as_bytes().try_into().unwrap())
+                    .collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let roots = inputs.iter().map(|input| input.oid).collect::<Vec<_>>();
+    let graph = append_split_commit_graph(
+        None,
+        manifest.generation,
+        manifest.pack_index_hash,
+        manifest.git_validation_digest,
+        &roots,
+        inputs,
+    )
+    .unwrap()
+    .unwrap();
+    upload_split_commit_graph(&fixture.store, &fixture.layout, &graph)
+        .await
+        .unwrap();
+    graph.descriptor_hash
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn direct_commit_resolution_checks_both_merge_parents_before_deeper_history() {
     for (first_parent, maximum) in [(true, 2), (false, 3)] {
         let options = RepositoryOptions::new(

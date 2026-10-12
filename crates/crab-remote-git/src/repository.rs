@@ -455,39 +455,7 @@ impl RemoteGitRepository {
             identity.clone(),
             manifest.generation,
         )?);
-        let commit_graph = if manifest.commit_graph_hash.is_some() {
-            let _task_token = runtime.operation_token();
-            let child = cancellation.child_token();
-            let _cancel_on_drop = child.clone().drop_guard();
-            let budget = crate::budget::OperationBudget::new(options.operation, runtime.clone());
-            let read_store = layout
-                .store()
-                .clone()
-                .with_read_admission(budget.read_admission(child.clone()));
-            let work = load_commit_graph(
-                &read_store,
-                &layout,
-                &manifest,
-                &refs,
-                &runtime,
-                options.object.max_commit_graph_bytes,
-                &child,
-            );
-            tokio::pin!(work);
-            tokio::select! {
-                result = &mut work => result?,
-                () = tokio::time::sleep(options.operation.max_duration) => {
-                    child.cancel();
-                    return match work.await {
-                        Ok(_) => Err(Error::Cancelled.after_interruption(true)),
-                        Err(error) => Err(error.after_interruption(true)),
-                    };
-                }
-            }
-        } else {
-            None
-        };
-        Ok(Self {
+        Self {
             state: Arc::new(RepositoryState {
                 store: layout.store().clone(),
                 layout,
@@ -504,13 +472,15 @@ impl RemoteGitRepository {
                 inventory,
                 refs,
                 reader: Some(reader),
-                commit_graph,
+                commit_graph: None,
                 path_state_hash: manifest.path_state_hash.as_deref().map(Arc::from),
                 path_state: tokio::sync::OnceCell::new(),
                 shallow_closure: None,
             }),
             generated_pack_lease_provider: None,
-        })
+        }
+        .with_optional_commit_graph(manifest.commit_graph_hash.as_deref(), cancellation, None)
+        .await
     }
 
     /// Open one consistent repository generation from an authenticated store.
@@ -704,16 +674,6 @@ impl RemoteGitRepository {
                     identity.clone(),
                     manifest.generation,
                 )?;
-                let commit_graph = load_commit_graph(
-                    &read_store,
-                    &layout,
-                    &manifest,
-                    &refs,
-                    &runtime,
-                    options.object_limits().max_commit_graph_bytes,
-                    cancellation,
-                )
-                .await?;
                 let shallow_closure = match tokio::select! {
                     biased;
                     () = cancellation.cancelled() => return Err(Error::Cancelled),
@@ -762,15 +722,21 @@ impl RemoteGitRepository {
                     inventory,
                     refs,
                     reader: Some(Arc::new(reader)),
-                    commit_graph,
+                    commit_graph: None,
                     path_state_hash: manifest.path_state_hash.as_deref().map(Arc::from),
                     path_state: tokio::sync::OnceCell::new(),
                     shallow_closure,
                 };
-                return Ok(Self {
+                return Self {
                     state: Arc::new(state),
                     generated_pack_lease_provider: None,
-                });
+                }
+                .with_optional_commit_graph(
+                    manifest.commit_graph_hash.as_deref(),
+                    cancellation,
+                    Some(budget),
+                )
+                .await;
             }
 
             let observed_generation = observed.map(|value| value.generation);
@@ -1244,6 +1210,49 @@ impl RemoteGitRepository {
         Ok(Some(reachable))
     }
 
+    /// Attach a durable graph validated against this handle's exact pinned state.
+    ///
+    /// Retains authenticated capsule lookup sources and runtime ownership. Path
+    /// attribution is cleared because its ordinals may belong to the old graph;
+    /// callers still own retention and freshness checks before publication.
+    pub async fn with_commit_graph(
+        &self,
+        content_hash: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        let graph = load_commit_graph(self, content_hash, cancellation, None, false)
+            .await?
+            .ok_or(Error::InternalInvariant {
+                invariant: "required graph load returned no graph",
+            })?;
+        let mut state = self.state.as_ref().clone();
+        state.commit_graph = Some(graph);
+        state.path_state_hash = None;
+        state.path_state = tokio::sync::OnceCell::new();
+        Ok(Self {
+            state: Arc::new(state),
+            generated_pack_lease_provider: self.generated_pack_lease_provider.clone(),
+        })
+    }
+
+    async fn with_optional_commit_graph(
+        mut self,
+        content_hash: Option<&str>,
+        cancellation: &CancellationToken,
+        budget: Option<crate::budget::OperationBudget>,
+    ) -> Result<Self> {
+        let Some(content_hash) = content_hash else {
+            return Ok(self);
+        };
+        let graph = load_commit_graph(&self, content_hash, cancellation, budget, true).await?;
+        Arc::get_mut(&mut self.state)
+            .ok_or(Error::InternalInvariant {
+                invariant: "new repository state was shared before graph attachment",
+            })?
+            .commit_graph = graph;
+        Ok(self)
+    }
+
     /// Resolve a reference or reachable full commit ID against pinned refs.
     ///
     /// Reference names are resolved deterministically. Unqualified names are
@@ -1265,22 +1274,10 @@ impl RemoteGitRepository {
                 )
             }
             Revision::Commit(commit) => {
-                let roots = self
-                    .state
-                    .refs
-                    .entries
-                    .iter()
-                    .map(|entry| entry.peeled.unwrap_or(entry.target))
-                    .collect::<Vec<_>>();
-                let reachable = match self.commits_reachable_from(
-                    &[*commit],
-                    &roots,
-                    operation.cancellation(),
-                )? {
-                    Some(reachable) => {
-                        reachable.first().copied().ok_or(Error::InternalInvariant {
-                            invariant: "commit graph reachability omitted its candidate",
-                        })?
+                let reachable = match &self.state.commit_graph {
+                    Some(graph) => {
+                        check_cancelled(operation.cancellation())?;
+                        graph.is_reachable(*commit)
                     }
                     None => prove_reachable(*commit, &self.state.refs, operation).await?,
                 };
@@ -1348,49 +1345,86 @@ impl RemoteGitRepository {
     }
 }
 
-async fn load_commit_graph(
-    store: &Store,
-    layout: &StoreLayout<Store>,
-    manifest: &crab_metadata::manifests::Manifest,
-    refs: &RepositoryRefs,
-    runtime: &RemoteGitRuntime,
-    max_bytes: u64,
-    cancellation: &CancellationToken,
-) -> Result<Option<Arc<CommitGraphIndex>>> {
-    let roots = refs
-        .entries
-        .iter()
-        .map(|entry| entry.peeled.unwrap_or(entry.target))
-        .collect::<Vec<_>>();
-    match CommitGraphIndex::load(
-        store,
-        layout,
-        manifest.commit_graph_hash.as_deref(),
-        manifest.generation,
-        &manifest.pack_index_hash,
-        &manifest.git_validation_digest,
-        &roots,
-        max_bytes,
-        cancellation,
-        &runtime.background_cancellation(),
-    )
-    .await
-    {
-        Ok(index) => Ok(index.map(Arc::new)),
-        Err(error) if matches!(error, Error::Cancelled) || admission_rejected(&error) => Err(error),
-        Err(_) => {
-            // Commit graphs accelerate verified raw traversal. A bad accelerator
-            // is not authority; path attribution still rejects an absent graph.
-            runtime.metrics().record(crate::MetricObservation {
-                kind: crate::MetricKind::Metadata,
-                value: 1,
-                duration: None,
-                outcome: Some(crate::MetricOutcome::Error),
-                cache: None,
-            });
-            Ok(None)
+fn load_commit_graph<'a>(
+    repository: &'a RemoteGitRepository,
+    content_hash: &'a str,
+    cancellation: &'a CancellationToken,
+    budget: Option<crate::budget::OperationBudget>,
+    optional: bool,
+) -> futures_util::future::BoxFuture<'a, Result<Option<Arc<CommitGraphIndex>>>> {
+    // The graph handshake contains locator, tag and decode futures. Keep it
+    // on the heap so maintenance callers do not inherit that async stack depth.
+    Box::pin(async move {
+        let state = &repository.state;
+        let runtime = &state.runtime;
+        let budget = budget.unwrap_or_else(|| {
+            crate::budget::OperationBudget::new(state.options.operation, runtime.clone())
+        });
+        // Root validation and graph loading share admission with the opening
+        // handshake; splitting their budgets would admit excess aggregate work.
+        let operation = OperationContext::open_with_budget(
+            Arc::clone(state),
+            OperationKind::Resolve,
+            cancellation,
+            state.options.operation,
+            budget,
+        )
+        .await?;
+        let read_store = state.store.clone().with_read_admission(
+            operation
+                .budget()
+                .read_admission(operation.cancellation().clone()),
+        );
+        let result = async {
+            let graph = CommitGraphIndex::load(
+                &read_store,
+                &state.layout,
+                content_hash,
+                state.generation,
+                &state.pack_index_hash,
+                &state.git_validation_digest,
+                &state.refs,
+                state.options.object.max_commit_graph_bytes,
+                operation.cancellation(),
+                runtime,
+                operation.budget(),
+                &operation,
+            )
+            .await;
+            match graph {
+                Ok(graph) => Ok(Some(Arc::new(graph))),
+                Err(error)
+                    if !optional
+                        || matches!(
+                            error,
+                            Error::Cancelled
+                                | Error::LimitExceeded { .. }
+                                | Error::Allocation { .. }
+                                | Error::DecodeTask { .. }
+                                | Error::Timeout { .. }
+                        )
+                        || admission_rejected(&error) =>
+                {
+                    Err(error)
+                }
+                Err(_) => {
+                    // Optional graph corruption permits bounded raw traversal.
+                    // Apply this policy before finish so locator-close failures
+                    // always remain observable, including during graph repair.
+                    runtime.metrics().record(crate::MetricObservation {
+                        kind: crate::MetricKind::Metadata,
+                        value: 1,
+                        duration: None,
+                        outcome: Some(crate::MetricOutcome::Error),
+                        cache: None,
+                    });
+                    Ok(None)
+                }
+            }
         }
-    }
+        .await;
+        operation.finish(result).await
+    })
 }
 
 async fn load_manifest(
@@ -1717,15 +1751,31 @@ impl TagPeelState {
     }
 }
 
-async fn prove_reachable(
-    target: ObjectId,
+pub(crate) async fn resolved_commit_roots(
     refs: &RepositoryRefs,
+    graph: Option<&crab_metadata::split_commit_graph::SplitCommitGraph>,
     operation: &OperationContext,
-) -> Result<bool> {
-    // Visit nearby commits before descending either side of a merge. A depth-first
-    // walk can exhaust the read budget before checking even HEAD's first parent.
-    let mut pending = std::collections::VecDeque::new();
+) -> Result<Vec<ObjectId>> {
+    // Git permits tags to trees and blobs. They confer no commit reachability,
+    // but must not disable acceleration for the repository's commit refs.
+    let mut roots = Vec::new();
     for reference in &refs.entries {
+        check_cancelled(operation.cancellation())?;
+        let target = reference.peeled.unwrap_or(reference.target);
+        if let Some(graph) = graph {
+            // A validated snapshot's known commit roots need no pack reads at
+            // open. Only unresolved tags need raw peeling; object requests still
+            // verify OIDs/kinds and parent lists before using graph acceleration.
+            if <[u8; 20]>::try_from(target.as_bytes()).is_ok_and(|oid| graph.contains(&oid)) {
+                roots.push(target);
+                continue;
+            }
+            if !reference.name.starts_with("refs/tags/") {
+                return Err(Error::Corrupt {
+                    stage: crate::CorruptionStage::CommitGraph,
+                });
+            }
+        }
         match peel_to_commit(reference.target, operation).await {
             Ok((commit, _)) => {
                 if reference.peeled.is_some_and(|expected| expected != commit) {
@@ -1733,7 +1783,7 @@ async fn prove_reachable(
                         stage: crate::CorruptionStage::Tag,
                     });
                 }
-                pending.push_back(commit);
+                roots.push(commit);
             }
             Err(Error::Revision {
                 reason: RevisionError::NotCommit,
@@ -1741,6 +1791,20 @@ async fn prove_reachable(
             Err(error) => return Err(error),
         }
     }
+    Ok(roots)
+}
+
+async fn prove_reachable(
+    target: ObjectId,
+    refs: &RepositoryRefs,
+    operation: &OperationContext,
+) -> Result<bool> {
+    // Visit nearby commits before descending either side of a merge. A depth-first
+    // walk can exhaust the read budget before checking even HEAD's first parent.
+    let mut pending = resolved_commit_roots(refs, None, operation)
+        .await?
+        .into_iter()
+        .collect::<std::collections::VecDeque<_>>();
     let mut visited = std::collections::HashSet::new();
     while let Some(commit_oid) = pending.pop_front() {
         if !visited.insert(commit_oid) {

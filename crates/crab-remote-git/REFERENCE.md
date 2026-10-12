@@ -240,6 +240,15 @@ request/byte budgets, the operation deadline, caller cancellation and runtime
 shutdown. This reader contract does not publish or discover capsule browse
 indexes; the maintenance owner must first bind them to the captured v2 state.
 
+`with_commit_graph` attaches a newly durable graph to an immutable copy of a
+pinned handle. It keeps authenticated pack lookup sources and runtime identity;
+it clears old path attribution because graph ordinals may differ. Graph loading
+selects known commit roots from the validated graph and supplied snapshot,
+without requiring pack reads during opening. Unresolved tags use verified raw
+peeling, so tags to trees or blobs do not disable commit acceleration. Root validation, graph
+origin reads and reachability allocation share one operation budget. Standard
+opening retains its aggregate handshake budget.
+
 ### Diagnostics and deployment
 
 Each operation emits one structured span with only its bounded operation kind,
@@ -265,6 +274,13 @@ reachability without object-store reads. When that acceleration is unavailable,
 the reader walks verified raw commits breadth-first from the pinned refs, checking
 nearby merge parents before older ancestry on either branch. That fallback remains
 bounded by the operation's history and object budgets.
+
+The graph computes one reachability map for the handle's pinned commit roots.
+Full-OID resolution then performs an ordinal lookup, including exclusion of
+retained commits outside those roots. Construction visits each graph edge once
+on an admitted blocking worker and charges one byte per graph ordinal before
+allocation. Queries against another explicit root set retain their own traversal;
+the pinned proof cannot confer visibility from unrelated refs.
 
 ## Live qualification
 

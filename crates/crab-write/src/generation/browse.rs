@@ -86,6 +86,7 @@ pub async fn build(
     let graph_hash = write.descriptor_hash;
     let graph =
         load_split_commit_graph(store, layout, &graph_hash, limits.max_commit_graph_bytes).await?;
+    let repository = repository.with_commit_graph(&graph_hash, cancel).await?;
     let mut replace_checkpoint = None;
     let mut base = match load_path_state_checkpoint(
         store,
@@ -123,7 +124,7 @@ pub async fn build(
         let end = first
             .saturating_add(PATH_STATE_CHECKPOINT_COMMITS)
             .min(graph.descriptor.commit_count);
-        let inputs = collect_path_state_inputs(repository, &graph, first, end, cancel).await?;
+        let inputs = collect_path_state_inputs(&repository, &graph, first, end, cancel).await?;
         let write = append_path_state(base, &graph, inputs)?;
         upload_path_state(store, layout, &write).await?;
         if write.commit_count() == graph.descriptor.commit_count {

@@ -19,6 +19,7 @@ use crate::{
 };
 
 /// Immutable repository facts shared by handles and snapshots.
+#[derive(Clone)]
 pub(crate) struct RepositoryState {
     pub(crate) store: Store,
     pub(crate) layout: StoreLayout<Store>,
