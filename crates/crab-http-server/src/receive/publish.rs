@@ -86,7 +86,7 @@ struct ReceiveInput {
 }
 
 struct PublishAttempt {
-    directory: crate::local_disk::StagingDirectory,
+    directory: Arc<crate::local_disk::StagingDirectory>,
     plan_id: Option<String>,
 }
 
@@ -333,6 +333,7 @@ async fn publish(
     directory: crate::local_disk::StagingDirectory,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
+    let directory = Arc::new(directory);
     // Capsule validation makes this attempt future large. Heap-place it before
     // nesting under the lease futures or debug Tokio workers exhaust their stack.
     let Some(plan_id) = input.plan_id.clone() else {
@@ -475,10 +476,13 @@ async fn publish_attempt(
         1024
     };
     let options = validate::options(entry.layout.clone(), default_branch, max_ref_updates);
+    let scratch = server
+        .local_staging
+        .scratch(Arc::clone(&attempt.directory))?;
     let prepared = match crab_remote::prepare::prepare_capsule(
         repository.clone(),
         visibility,
-        attempt.directory.path().to_owned(),
+        scratch,
         input.pack,
         request.updates.clone(),
         visibility_bases,
@@ -491,7 +495,7 @@ async fn publish_attempt(
         Ok(prepared) => prepared,
         Err(
             error @ (ReceiveError::Pack(_) | ReceiveError::Graph(_) | ReceiveError::Request(_)),
-        ) if request.report_status => {
+        ) if request.report_status && error.staging_status().is_none() => {
             tracing::warn!(error = ?error, "Git receive validation rejected");
             let mut bytes = Vec::new();
             let unpack = matches!(error, ReceiveError::Pack(_)).then_some("incoming pack rejected");

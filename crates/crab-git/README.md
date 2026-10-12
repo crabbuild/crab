@@ -153,12 +153,17 @@ that is discarded on failure. It does not validate object graphs or publish
 anything. HTTP generated-object publication uses this writer, removing its
 additional compressed-pack buffer; HTTP still owns in-memory input objects.
 
-`incoming_pack::quarantine` accepts a reader, an existing temporary directory,
+`incoming_pack::quarantine` accepts a reader, an admitted `ScratchSpace`,
 explicit resource bounds, a cancellation probe and a thin-base lookup. Invoke it
 on a blocking worker. Input reads and base lookups need caller-owned deadlines;
 base lookup must authorize access before returning bounded object bytes. The
 returned `IncomingPack` retains decoded objects in a private spool, exposes exact
 object IDs/kinds/bytes, and removes its files when dropped.
+`ScratchAdmission` reserves the combined live bytes before private files grow;
+quarantine and preparation share it, including bounded index sidecars. Its owner
+retains admission on refusal and releases bytes after directory cleanup. Hosts
+inject their shared disk policy; standalone and generated inputs use their
+finite `ReceiveLimits` without importing host-specific dependencies.
 `IncomingPack::from_generated_objects` gives trusted in-process Git object
 builders the same bounded identity spool without first compressing and then
 inflating an artificial wire pack. `prepare` remains mandatory and produces the

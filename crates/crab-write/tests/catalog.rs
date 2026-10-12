@@ -98,7 +98,7 @@ async fn catalog_recovery_mode(with_kind_sidecar: bool, missing_sidecars: bool) 
     });
     let incoming = quarantine(
         wire.as_slice(),
-        fixture.path(),
+        &crab_git::incoming_pack::ScratchSpace::new(fixture.path(), 1024_u64 * 1024),
         ReceiveLimits {
             max_pack_bytes: 65536,
             max_objects: 8,

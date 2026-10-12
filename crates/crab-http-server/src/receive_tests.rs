@@ -4,6 +4,34 @@ use std::io::Read as _;
 use std::path::Path;
 use std::process::Output;
 
+#[test]
+fn scratch_failures_keep_their_http_classification_through_io_wrappers() {
+    use axum::response::IntoResponse;
+    use crab_git::incoming_pack::{IncomingPackError, ScratchError};
+
+    for (source, status) in [
+        (
+            ScratchError::Capacity {
+                required: 9,
+                capacity: 8,
+            },
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+        (
+            ScratchError::Io(std::io::ErrorKind::StorageFull.into()),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let error = IncomingPackError::Io(std::io::Error::other(source));
+        assert_eq!(
+            crate::receive::ReceiveError::from(error)
+                .into_response()
+                .status(),
+            status
+        );
+    }
+}
+
 pub(super) async fn git(path: &Path, args: &[&str]) -> Output {
     let path = path.to_owned();
     let args: Vec<_> = args.iter().map(|arg| (*arg).to_owned()).collect();

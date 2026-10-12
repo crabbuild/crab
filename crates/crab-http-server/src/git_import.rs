@@ -249,6 +249,8 @@ enum ImportError {
     NotFound,
     #[error("the import queue is busy")]
     Busy,
+    #[error("import staging failed")]
+    Staging(#[source] crate::local_disk::Error),
     #[error("an import for this repository is already running")]
     Conflict,
     #[error("the import was cancelled")]
@@ -275,7 +277,7 @@ impl IntoResponse for ImportError {
                 "Git import is unavailable on this server",
             ),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Import job not found"),
-            Self::Busy => (
+            Self::Busy | Self::Staging(crate::local_disk::Error::Busy(_)) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "import_busy",
                 "Too many imports are running; try again shortly",
@@ -285,7 +287,9 @@ impl IntoResponse for ImportError {
                 "import_conflict",
                 "An import for this repository is already running",
             ),
-            Self::Cancelled | Self::Timeout => (
+            Self::Cancelled
+            | Self::Timeout
+            | Self::Staging(crate::local_disk::Error::Cancelled) => (
                 StatusCode::REQUEST_TIMEOUT,
                 "import_cancelled",
                 "The import did not finish; retry it to continue",
@@ -295,7 +299,12 @@ impl IntoResponse for ImportError {
                 "git_source_unavailable",
                 "The Git source could not be cloned or published; verify the URL, access, token, and server capacity",
             ),
-            Self::Setup(_) | Self::Catalog(_) | Self::Io(_) => (
+            Self::Staging(crate::local_disk::Error::TooLarge) => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "import_capacity",
+                "Git source exceeds the node disk capacity",
+            ),
+            Self::Setup(_) | Self::Catalog(_) | Self::Io(_) | Self::Staging(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "import_failed",
                 "The repository could not be prepared for import",
@@ -613,16 +622,7 @@ async fn import_repository(
 }
 
 fn map_staging_error(error: crate::local_disk::Error) -> ImportError {
-    match error {
-        crate::local_disk::Error::Busy => ImportError::Busy,
-        crate::local_disk::Error::Cancelled => ImportError::Cancelled,
-        crate::local_disk::Error::TooLarge => {
-            ImportError::Git("Git source exceeds the import storage limit".into())
-        }
-        error => ImportError::Setup(crate::Error::LocalStaging {
-            source: Box::new(error),
-        }),
-    }
+    ImportError::Staging(error)
 }
 
 async fn mirror_size(path: &Path) -> Result<u64, ImportError> {

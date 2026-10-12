@@ -12,7 +12,7 @@ use std::{
 
 use bytes::Bytes;
 use crab_git::{
-    incoming_pack::{self, BaseObject, IncomingPack, PreparedPack, ReceiveLimits},
+    incoming_pack::{self, BaseObject, IncomingPack, PreparedPack, ReceiveLimits, ScratchSpace},
     receive_plan::{
         self, GraphLimits, GraphSource, RefPolicy, RefUpdate, RefVisibility, ValidatedRefUpdates,
         VisibilitySource,
@@ -1325,9 +1325,10 @@ pub async fn prepare(
     cancel: &CancellationToken,
     options: Options<impl Fn(&str) -> RefPolicy + Send + 'static>,
 ) -> Result<Prepared> {
+    let space = ScratchSpace::new(&directory, options.pack);
     prepare_with_layout_binding(
         repository,
-        directory,
+        space,
         input,
         updates,
         visibility_bases,
@@ -1347,7 +1348,7 @@ pub async fn prepare(
 pub async fn prepare_capsule(
     repository: RemoteGitRepository,
     visibility: GitVisibilityIndex,
-    directory: std::path::PathBuf,
+    space: ScratchSpace,
     input: Option<BufReader<File>>,
     updates: Vec<RefUpdate>,
     visibility_bases: BTreeMap<String, (String, ObjectId)>,
@@ -1356,7 +1357,7 @@ pub async fn prepare_capsule(
 ) -> Result<Prepared> {
     prepare_with_layout_binding(
         repository,
-        directory,
+        space,
         input,
         updates,
         visibility_bases,
@@ -1374,7 +1375,7 @@ enum VisibilityBinding {
 
 async fn prepare_with_layout_binding<P>(
     repository: RemoteGitRepository,
-    directory: std::path::PathBuf,
+    space: ScratchSpace,
     input: Option<BufReader<File>>,
     updates: Vec<RefUpdate>,
     visibility_bases: BTreeMap<String, (String, ObjectId)>,
@@ -1433,16 +1434,16 @@ where
                 return Err(Error::Cancelled);
             }
             let incoming = match input {
-                None => IncomingPack::empty(&directory)?,
+                None => IncomingPack::empty(&space)?,
                 Some(mut input) => {
                     if input.fill_buf()?.is_empty()
                         && updates.iter().all(|update| update.new.is_none())
                     {
-                        IncomingPack::empty(&directory)?
+                        IncomingPack::empty(&space)?
                     } else {
                         incoming_pack::quarantine(
                             input,
-                            &directory,
+                            &space,
                             options.pack,
                             || cancel.is_cancelled(),
                             |oid| source.read(oid),
@@ -1515,7 +1516,7 @@ where
                 }
                 visibility.insert(update.name.clone(), evidence);
             }
-            let pack = incoming.prepare(&directory, options.pack.max_pack_bytes, &flag)?;
+            let pack = incoming.prepare(space.path(), options.pack.max_pack_bytes, &flag)?;
             Ok(Prepared {
                 repository,
                 layout: options.layout,

@@ -229,6 +229,18 @@ impl From<ReceiveError> for Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
+        if let Self::Receive(error) = &self
+            && let Some((status, message)) = error.staging_status()
+        {
+            if status.is_server_error() {
+                tracing::error!(error = ?self, "browser file publication failed");
+            }
+            return (
+                status,
+                Json(json!({"error":{"code":"staging","message":message}})),
+            )
+                .into_response();
+        }
         let (status, code, message) = match &self {
             Self::Input(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
             Self::App(app::Error::NotFound) => (

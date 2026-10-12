@@ -13,7 +13,7 @@ use flate2::{Compression, read::ZlibEncoder};
 use gix_hash::ObjectId;
 use sha1::{Digest, Sha1};
 
-use super::{IncomingPack, object_id};
+use super::{IncomingPack, object_id, scratch::ScratchDirectory};
 use crate::{
     PackLocationIter, PackLocatorError, encode_pack_kind_metadata_with_external_deltas,
     pack_locator::{PackIndexEntry, write_pack_index_v2},
@@ -71,7 +71,7 @@ impl ExternalDeltaBase {
 /// and index consistency, not graph connectivity, pointer payloads or publication.
 #[derive(Debug)]
 pub struct PreparedPack {
-    _directory: tempfile::TempDir,
+    _directory: ScratchDirectory,
     pack: PathBuf,
     index: PathBuf,
     reverse: PathBuf,
@@ -257,9 +257,10 @@ impl IncomingPack {
         }
         let object_count = u32::try_from(self.objects.len())
             .map_err(|_| PreparePackError::Mismatch("object count"))?;
-        let directory = tempfile::Builder::new()
-            .prefix("crab-prepared-")
-            .tempdir_in(directory)?;
+        let directory = self
+            .directory
+            .space()
+            .directory(directory, "crab-prepared-")?;
         let staging_pack = directory.path().join("normalized.pack");
         let WrittenPack {
             size,
@@ -269,7 +270,7 @@ impl IncomingPack {
             external_delta_count,
             external_delta_bases: external_delta_map,
         } = self.write_normalized(
-            &staging_pack,
+            &directory,
             max_pack_bytes,
             cancelled,
             delta_bases,
@@ -288,8 +289,16 @@ impl IncomingPack {
         let pack = directory.path().join(format!("pack-{git_sha1}.pack"));
         std::fs::rename(staging_pack, &pack)?;
         let index = pack.with_extension("idx");
+        // Sidecar writers may rename a temporary file. Their format bounds cover
+        // all writes once, including large index offsets, before creation.
+        let index_bytes =
+            crate::max_pack_index_size(u64::from(object_count)).ok_or(PreparePackError::Limit)?;
+        directory.reserve(index_bytes)?;
         write_pack_index_v2(&mut index_entries, &index, git_sha1)?;
         let reverse = pack.with_extension("rev");
+        let reverse_bytes = crate::pack_reverse_index_size(u64::from(object_count))
+            .ok_or(PreparePackError::Limit)?;
+        directory.reserve(reverse_bytes)?;
         write_pack_reverse_index(&index, &reverse)?;
         check(cancelled)?;
         let locations = PackLocationIter::open(&index, &reverse, size)?;
@@ -312,10 +321,9 @@ impl IncomingPack {
             metadata.push((kind, external_delta_map.get(&location.oid).copied()));
         }
         let kinds_path = pack.with_extension("kinds");
-        std::fs::write(
-            &kinds_path,
-            encode_pack_kind_metadata_with_external_deltas(git_sha1, &metadata)?,
-        )?;
+        let kinds = encode_pack_kind_metadata_with_external_deltas(git_sha1, &metadata)?;
+        directory.reserve(kinds.len() as u64)?;
+        std::fs::write(&kinds_path, kinds)?;
         let mut content_hash = blake3::Hasher::new();
         let mut file = File::open(&pack)?;
         let mut buffer = [0; 64 * 1024];
@@ -345,7 +353,7 @@ impl IncomingPack {
 
     fn write_normalized(
         &self,
-        path: &Path,
+        directory: &ScratchDirectory,
         max_pack_bytes: u64,
         cancelled: &AtomicBool,
         delta_bases: &BTreeMap<ObjectId, ObjectId>,
@@ -356,7 +364,7 @@ impl IncomingPack {
         let max_body = max_pack_bytes
             .checked_sub(20)
             .ok_or(PreparePackError::Limit)?;
-        let mut out = BufWriter::new(File::create_new(path)?);
+        let mut out = BufWriter::new(directory.create("normalized.pack")?);
         let mut checksum = Sha1::new();
         let mut size = 0;
         let mut header = b"PACK\0\0\0\x02".to_vec();

@@ -45,6 +45,8 @@ pub(crate) enum Error {
     TooLarge,
     #[error("LFS requests are busy")]
     Busy,
+    #[error("LFS staging failed")]
+    Staging(#[source] crate::local_disk::Error),
     #[error("LFS lock is owned by another user")]
     LockOwner,
     #[error("LFS lock changed concurrently")]
@@ -98,13 +100,7 @@ impl From<crate::transfer_admission::Error> for Error {
 
 impl From<crate::local_disk::Error> for Error {
     fn from(error: crate::local_disk::Error) -> Self {
-        match error {
-            crate::local_disk::Error::TooLarge => Self::TooLarge,
-            crate::local_disk::Error::Busy => Self::Busy,
-            crate::local_disk::Error::Cancelled => Self::Cancelled,
-            crate::local_disk::Error::Io(error) => Self::Io(error),
-            crate::local_disk::Error::Worker(error) => Self::Worker(error),
-        }
+        Self::Staging(error)
     }
 }
 
@@ -147,11 +143,15 @@ impl IntoResponse for Error {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "LFS allows at most 200 objects per batch and 512 MiB per object",
             ),
-            Self::Busy => (
+            Self::Staging(crate::local_disk::Error::TooLarge) => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "LFS staging exceeds the node disk capacity",
+            ),
+            Self::Busy | Self::Staging(crate::local_disk::Error::Busy(_)) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "LFS requests are busy; retry shortly",
             ),
-            Self::Cancelled => (
+            Self::Cancelled | Self::Staging(crate::local_disk::Error::Cancelled) => (
                 StatusCode::REQUEST_TIMEOUT,
                 "LFS operation cancelled or timed out",
             ),

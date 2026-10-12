@@ -591,11 +591,20 @@ Preparation then creates:
 - Crab object-kind sidecar
 - Git pack identity, Blake3 body identity, size, and object count
 
-The indexed OID set must equal the quarantined OID set. Gitoxide writes the version 2 index with one worker after normalized validation.
+The indexed OID set must equal the quarantined OID set. Preparation writes the
+version 2 index after normalized validation and verifies it through the locator.
 
 An empty deletion-only request needs no pack. Partial output and sidecars remain private and disappear with their temporary owner.
 
-Peak temporary disk can contain the incoming spool, quarantine objects, normalized pack, and index sidecars at the same time. The server's 2 GiB wire limit is not a disk-capacity estimate.
+Peak temporary disk can contain the receive body, incoming spool, inflated and
+decoded objects, normalized pack and index sidecars at the same time. The
+server's 8 GiB wire limit is not a disk-capacity estimate. One caller-owned
+scratch ledger covers quarantine and preparation through the existing shared
+Cell disk reservation. Writers admit growth first; sidecar writers admit their
+format bounds before creation. Cleanup releases bytes after workers close their
+files, without charging renames twice. Capacity refusal remains a typed cause:
+HTTP 413 means the transfer exceeds total capacity, and HTTP 429 means temporary
+shared-capacity contention.
 
 ## Plan per-ref visibility
 
