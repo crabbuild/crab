@@ -4322,8 +4322,7 @@ mod tests {
         use crate::storage::store::Store;
         use bytes::Bytes;
         use crab_metadata::path_state::{
-            PathStateCheckpoint, PathStateDescriptor, PathStateLayerRef,
-            path_state_checkpoint_path, path_state_layer_path,
+            PathStateCheckpoint, load_path_state_descriptor, path_state_checkpoint_path,
         };
         use object_store::memory::InMemory;
         use std::sync::Arc;
@@ -4362,41 +4361,30 @@ mod tests {
             .refs
             .insert("refs/heads/main".to_owned(), "a".repeat(40));
         manifest.seal_git_validation();
-        let path_layer_bytes = vec![0; 24];
-        let path_layer_hash = blake3::hash(&path_layer_bytes).to_hex().to_string();
-        let path_layer = path_state_layer_path(&path_layer_hash);
-        store
-            .put(
-                &router.repo_path(&path_layer),
-                Bytes::from(path_layer_bytes),
-            )
-            .await
-            .unwrap();
-        let descriptor = PathStateDescriptor {
-            version: 2,
-            generation: manifest.generation,
-            pack_index_hash: manifest.pack_index_hash.clone(),
-            git_validation_digest: manifest.git_validation_digest.clone(),
-            commit_ordinal_digest: "d".repeat(64),
-            commit_count: 1,
-            layers: vec![PathStateLayerRef {
-                hash: path_layer_hash,
-                path: path_layer.clone(),
-                base_ordinal: 0,
-                commit_count: 1,
-                node_count: 1,
-                bytes: 24,
-            }],
-        };
-        let descriptor_bytes = serde_json::to_vec(&descriptor).unwrap();
-        let descriptor_hash = blake3::hash(&descriptor_bytes).to_hex().to_string();
-        store
-            .put(
-                &router.bulk_manifest_path("path-state", &descriptor_hash),
-                Bytes::from(descriptor_bytes),
-            )
-            .await
-            .unwrap();
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let (_, descriptor_hash, _, _) = write_browse_indexes(
+            store.as_storage(),
+            &layout,
+            manifest.generation,
+            &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
+            [0xaa; 20],
+            [0xbb; 20],
+        )
+        .await;
+        let descriptor = load_path_state_descriptor(
+            store.as_storage(),
+            &layout,
+            &descriptor_hash,
+            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+        )
+        .await
+        .unwrap();
+        let path_layer = descriptor.layers[0].path.clone();
         manifest.path_state_hash = Some(descriptor_hash.clone());
         crate::core::remote_layout::initialize(&store, &router)
             .await
@@ -5612,90 +5600,90 @@ mod tests {
         assert_eq!(outcome.list_parallelism, 7);
     }
 
-    #[tokio::test]
-    async fn capsule_protocol_gc_retains_current_indexes_and_collects_stale_index_generations() {
-        use crab_metadata::capsule_protocol::BrowseIndexes;
+    async fn write_browse_indexes(
+        store: &crab_storage::Store,
+        layout: &crab_storage::StoreLayout<crab_storage::Store>,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+        oid: [u8; 20],
+        tree_oid: [u8; 20],
+    ) -> (
+        String,
+        String,
+        crab_metadata::split_commit_graph::SplitCommitGraph,
+        u32,
+    ) {
         use crab_metadata::path_state::{
-            PathStateInput, PathStateMutation, append_path_state, publish_path_state_checkpoint,
-            upload_path_state,
+            PathStateInput, PathStateMutation, append_path_state, upload_path_state,
         };
         use crab_metadata::split_commit_graph::{
             CommitGraphInput, append_split_commit_graph, load_split_commit_graph,
             upload_split_commit_graph,
         };
+        let graph_write = append_split_commit_graph(
+            None,
+            generation,
+            pack_index_hash.to_owned(),
+            git_validation_digest.to_owned(),
+            &[oid],
+            vec![CommitGraphInput {
+                oid,
+                tree_oid,
+                commit_time: i64::try_from(generation).unwrap(),
+                parents: Vec::new(),
+            }],
+        )
+        .unwrap()
+        .unwrap();
+        let graph_hash = graph_write.descriptor_hash.clone();
+        upload_split_commit_graph(store, layout, &graph_write)
+            .await
+            .unwrap();
+        let graph = load_split_commit_graph(
+            store,
+            layout,
+            &graph_hash,
+            crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+        )
+        .await
+        .unwrap();
+        let path_state = append_path_state(
+            None,
+            &graph,
+            vec![PathStateInput {
+                oid,
+                first_parent: None,
+                author: b"author".to_vec(),
+                author_seconds: i64::try_from(generation).unwrap(),
+                message: b"change".to_vec(),
+                mutations: vec![PathStateMutation {
+                    path: b"file".to_vec(),
+                    present: true,
+                    reset: true,
+                }],
+            }],
+        )
+        .unwrap();
+        let path_state_hash = path_state.descriptor_hash.clone();
+        let commit_count = path_state.commit_count();
+        upload_path_state(
+            store,
+            layout,
+            &path_state,
+            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+        )
+        .await
+        .unwrap();
+        (graph_hash, path_state_hash, graph, commit_count)
+    }
+
+    #[tokio::test]
+    async fn capsule_protocol_gc_retains_current_indexes_and_collects_stale_index_generations() {
+        use crab_metadata::capsule_protocol::BrowseIndexes;
+        use crab_metadata::path_state::publish_path_state_checkpoint;
         use object_store::memory::InMemory;
         use std::sync::Arc;
-
-        async fn write_indexes(
-            store: &crab_storage::Store,
-            layout: &crab_storage::StoreLayout<crab_storage::Store>,
-            generation: u64,
-            pack_index_hash: &str,
-            git_validation_digest: &str,
-            oid: [u8; 20],
-            tree_oid: [u8; 20],
-        ) -> (
-            String,
-            String,
-            crab_metadata::split_commit_graph::SplitCommitGraph,
-            u32,
-        ) {
-            let graph_write = append_split_commit_graph(
-                None,
-                generation,
-                pack_index_hash.to_owned(),
-                git_validation_digest.to_owned(),
-                &[oid],
-                vec![CommitGraphInput {
-                    oid,
-                    tree_oid,
-                    commit_time: i64::try_from(generation).unwrap(),
-                    parents: Vec::new(),
-                }],
-            )
-            .unwrap()
-            .unwrap();
-            let graph_hash = graph_write.descriptor_hash.clone();
-            upload_split_commit_graph(store, layout, &graph_write)
-                .await
-                .unwrap();
-            let graph = load_split_commit_graph(
-                store,
-                layout,
-                &graph_hash,
-                crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
-            )
-            .await
-            .unwrap();
-            let path_state = append_path_state(
-                None,
-                &graph,
-                vec![PathStateInput {
-                    oid,
-                    first_parent: None,
-                    author: b"author".to_vec(),
-                    author_seconds: i64::try_from(generation).unwrap(),
-                    message: b"change".to_vec(),
-                    mutations: vec![PathStateMutation {
-                        path: b"file".to_vec(),
-                        present: true,
-                        reset: true,
-                    }],
-                }],
-            )
-            .unwrap();
-            let path_state_hash = path_state.descriptor_hash.clone();
-            let commit_count = path_state.commit_count();
-            upload_path_state(
-                store,
-                layout,
-                &path_state,
-                crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
-            )
-            .await
-            .unwrap();
-            (graph_hash, path_state_hash, graph, commit_count)
-        }
 
         let store = Store::new(Arc::new(InMemory::new()));
         let router = StoreLayout::new(store.clone(), "org/gc-derived-indexes".to_owned());
@@ -5714,7 +5702,7 @@ mod tests {
         manifest.seal_git_validation();
         let state_digest = "a".repeat(64);
         let (current_graph_hash, current_path_state_hash, current_graph, current_count) =
-            write_indexes(
+            write_browse_indexes(
                 store.as_storage(),
                 &layout,
                 manifest.generation,
@@ -5772,16 +5760,17 @@ mod tests {
         }
 
         let stale_git_validation_digest = "f".repeat(64);
-        let (stale_graph_hash, stale_path_state_hash, stale_graph, stale_count) = write_indexes(
-            store.as_storage(),
-            &layout,
-            manifest.generation + 1,
-            &"f".repeat(64),
-            &stale_git_validation_digest,
-            [5; 20],
-            [6; 20],
-        )
-        .await;
+        let (stale_graph_hash, stale_path_state_hash, stale_graph, stale_count) =
+            write_browse_indexes(
+                store.as_storage(),
+                &layout,
+                manifest.generation + 1,
+                &"f".repeat(64),
+                &stale_git_validation_digest,
+                [5; 20],
+                [6; 20],
+            )
+            .await;
         publish_path_state_checkpoint(
             store.as_storage(),
             &layout,

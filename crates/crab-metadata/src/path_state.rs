@@ -25,6 +25,9 @@ pub use storage::{
 
 const LAYER_MAGIC: &[u8; 8] = b"CRABPS03";
 const LAYER_VERSION: u32 = 3;
+// Earlier descriptors can authenticate false mutations from Git-order merges.
+// Retire those semantics; maintenance rebuilds them without changing the codec.
+const DESCRIPTOR_VERSION: u32 = 4;
 const LAYER_HEADER_BYTES: usize = 28;
 const MAX_AUTHOR_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -443,7 +446,7 @@ pub fn append_path_state(
         layers = vec![layer];
     }
     let descriptor = PathStateDescriptor {
-        version: LAYER_VERSION,
+        version: DESCRIPTOR_VERSION,
         generation: graph.descriptor.generation,
         pack_index_hash: graph.descriptor.pack_index_hash.clone(),
         git_validation_digest: graph.descriptor.git_validation_digest.clone(),
@@ -788,7 +791,7 @@ fn validate_node_ref(
 }
 
 fn validate_descriptor_shape(descriptor: &PathStateDescriptor) -> Result<()> {
-    if descriptor.version != LAYER_VERSION {
+    if descriptor.version != DESCRIPTOR_VERSION {
         return corrupt("unsupported path-state descriptor version");
     }
     validate_content_hash(

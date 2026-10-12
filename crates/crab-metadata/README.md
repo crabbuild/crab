@@ -61,10 +61,14 @@ budget before buffering, then admit each layer against its authenticated size
 and the remaining aggregate budget. All bodies still require hash and exact
 length verification; malformed provider sizes cannot bypass the encoded-byte
 ceiling. Decoded index structures require separate memory qualification.
-Path-state descriptor/layer version 3 stores each raw path component once per
-layer in a sorted canonical table, with checked component ordinals on edges.
-Decoded edges share immutable component bytes. No release tag contains the prior
-path-state codec; maintenance rebuilds unshipped derived indexes rather than
+Path-state descriptor version 4 requires exact-name tree comparison semantics;
+earlier descriptors can authenticate incorrect mutations and are rejected.
+Maintenance rebuilds completed indexes and resumable checkpoints through the
+existing conditional publication path. The unchanged `CRABPS03` layer codec
+stores each raw path component once per layer in a sorted canonical table,
+with checked component ordinals on edges. Decoded edges share immutable component
+bytes. No release tag contains a path-state format; maintenance rebuilds
+unshipped derived indexes rather than
 reading retired versions. Validated index descriptors/layers expose only immutable
 accessors, so checkpoint append reuses the verified prefix instead of rescanning
 all retained edges. Changed graph ordinals still require a prefix binding check.

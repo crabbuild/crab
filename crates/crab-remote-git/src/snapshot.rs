@@ -2151,8 +2151,23 @@ fn compare_trees<'a>(
             return Ok(());
         }
         operation.charge(BudgetDimension::Depth, depth).await?;
-        let base = operation.read_tree(base_oid, parent).await?;
-        let head = operation.read_tree(head_oid, parent).await?;
+        let mut base = operation.read_tree(base_oid, parent).await?;
+        let mut head = operation.read_tree(head_oid, parent).await?;
+        let cancellation = operation.cancellation().clone();
+        // Git order moves a name when its type changes. Match exact paths in
+        // private vectors so unchanged subtrees and listing order stay intact.
+        let (base, head) = operation
+            .runtime()
+            .spawn_blocking(move || {
+                check_cpu_cancellation(&cancellation)?;
+                base.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+                head.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+                check_cpu_cancellation(&cancellation)?;
+                Ok::<_, Error>((base, head))
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })??;
+        operation.ensure_active()?;
         let child_depth = next_depth(depth)?;
         let mut base_position = 0;
         let mut head_position = 0;

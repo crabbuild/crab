@@ -414,6 +414,7 @@ impl PackFixture {
                 (0o040000, "tree", nested_tree, b"same"),
                 (0o100644, "blob", semantic_text_base, b"text.txt"),
                 (0o100644, "blob", semantic_text_base, b"type"),
+                (0o100644, "blob", semantic_text_base, b"type.extra"),
             ],
         );
         let semantic_head_tree = make_tree(
@@ -424,8 +425,10 @@ impl PackFixture {
                 (0o100644, "blob", semantic_text_base, b"new-name.txt"),
                 (0o100644, "blob", semantic_pointer_head, b"pointer.crab"),
                 (0o040000, "tree", nested_tree, b"same"),
+                (0o100644, "blob", semantic_text_head, b"same.extra"),
                 (0o100644, "blob", semantic_text_head, b"text.txt"),
                 (0o040000, "tree", semantic_type_tree, b"type"),
+                (0o100644, "blob", semantic_text_base, b"type.extra"),
             ],
         );
         let semantic_base_commit = parse_oid(&git(
@@ -4340,7 +4343,10 @@ async fn repository_semantics_match_native_git_ground_truth() {
             .next()
             .expect("native blame object ID"),
     );
-    let native_archive = native_tree_entries(&fixture.source_git_dir, &head_oid);
+    let mut native_archive = native_tree_entries(&fixture.source_git_dir, &head_oid);
+    // Archive metadata promises complete raw path order, whereas ls-tree uses
+    // Git's directory-sensitive order. Preserve every entry while aligning them.
+    native_archive.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
     let cancellation = CancellationToken::new();
     let operation = fixture
@@ -4397,8 +4403,8 @@ async fn repository_semantics_match_native_git_ground_truth() {
                 .changes
                 .iter()
                 .map(|change| (change.path.as_bytes().to_vec(), change.kind))
-                .collect::<BTreeMap<_, _>>(),
-            native_changes
+                .collect::<Vec<_>>(),
+            native_changes.into_iter().collect::<Vec<_>>()
         );
 
         let diff = head
