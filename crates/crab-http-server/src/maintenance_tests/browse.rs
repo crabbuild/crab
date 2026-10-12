@@ -1,7 +1,6 @@
 use super::*;
 use crab_metadata::capsule_protocol::{BrowseIndexes, load_browse_indexes};
 use crab_remote_git::OperationKind;
-use crab_storage::test_support::CountingObjectStore;
 
 #[tokio::test]
 async fn capsule_merge_and_nested_tag_preserve_graph_and_first_parent_attribution() {
@@ -9,7 +8,7 @@ async fn capsule_merge_and_nested_tag_preserve_graph_and_first_parent_attributio
     let counting = {
         let mut current = server.repositories.current.write().unwrap();
         let repo = Arc::get_mut(current.by_name.values_mut().next().unwrap()).unwrap();
-        let counting = Arc::new(CountingObjectStore::new(Arc::clone(repo.store.inner())));
+        let counting = Arc::new(BrowseFaultStore::new(Arc::clone(repo.store.inner())));
         repo.store = Store::new(counting.clone());
         repo.layout = StoreLayout::new(repo.store.clone(), "maintenance".into());
         counting
@@ -55,7 +54,7 @@ async fn capsule_merge_and_nested_tag_preserve_graph_and_first_parent_attributio
     )
     .await
     .unwrap();
-    let construction_reads = counting.counts().body_requests();
+    let construction_reads = counting.body_requests();
     let indexes = load_browse_indexes(&repo.layout).await.unwrap().unwrap();
     let graph = crab_metadata::split_commit_graph::load_split_commit_graph(
         &repo.store,
@@ -103,7 +102,7 @@ async fn graph_publication_survives_failed_attribution_and_reader_restart() {
     let counting = {
         let mut current = server.repositories.current.write().unwrap();
         let repo = Arc::get_mut(current.by_name.values_mut().next().unwrap()).unwrap();
-        let counting = Arc::new(CountingObjectStore::new(Arc::clone(repo.store.inner())));
+        let counting = Arc::new(BrowseFaultStore::new(Arc::clone(repo.store.inner())));
         repo.store = Store::with_retry(
             counting.clone(),
             crab_storage::RetryPolicy {
@@ -459,4 +458,113 @@ async fn superseded_partial_graph_does_not_authorize_retained_history() {
     .unwrap();
     close(&server).await;
     assert_eq!(graph.descriptor.commit_count, 33);
+}
+
+#[derive(Debug)]
+struct BrowseFaultStore {
+    inner: Arc<dyn object_store::ObjectStore>,
+    body_reads: AtomicUsize,
+    blocked: std::sync::Mutex<std::collections::BTreeSet<String>>,
+}
+
+impl BrowseFaultStore {
+    fn new(inner: Arc<dyn object_store::ObjectStore>) -> Self {
+        Self {
+            inner,
+            body_reads: AtomicUsize::new(0),
+            blocked: Default::default(),
+        }
+    }
+
+    fn block_body_reads_for(&self, path: &ObjectPath) {
+        self.blocked.lock().unwrap().insert(path.to_string());
+    }
+
+    fn unblock_body_reads_for(&self, path: &ObjectPath) {
+        self.blocked.lock().unwrap().remove(path.as_ref());
+    }
+
+    fn reset(&self) {
+        self.body_reads.store(0, Ordering::Relaxed);
+    }
+
+    fn body_requests(&self) -> usize {
+        self.body_reads.load(Ordering::Relaxed)
+    }
+}
+
+impl std::fmt::Display for BrowseFaultStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("browse-fault-store")
+    }
+}
+
+#[async_trait::async_trait]
+impl object_store::ObjectStore for BrowseFaultStore {
+    async fn put_opts(
+        &self,
+        path: &ObjectPath,
+        payload: object_store::PutPayload,
+        options: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.inner.put_opts(path, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        path: &ObjectPath,
+        options: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(path, options).await
+    }
+
+    async fn get_opts(
+        &self,
+        path: &ObjectPath,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        if !options.head {
+            self.body_reads.fetch_add(1, Ordering::Relaxed);
+            // Release the synchronous guard before awaiting the real provider.
+            let blocked = self.blocked.lock().unwrap().contains(path.as_ref());
+            if blocked {
+                return Err(object_store::Error::Generic {
+                    store: "browse-fault-store",
+                    source: Box::new(std::io::Error::other("immutable body read blocked")),
+                });
+            }
+        }
+        self.inner.get_opts(path, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        paths: futures_util::stream::BoxStream<'static, object_store::Result<ObjectPath>>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<ObjectPath>> {
+        self.inner.delete_stream(paths)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+    {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
 }
