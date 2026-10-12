@@ -1754,6 +1754,10 @@ records current-format correctness, startup/restart proof, endpoint latency,
 origin accounting, and the remaining historical-read, indexing, and bulk-receive
 performance gaps. Its higher-rate runs did not pass the capacity gate.
 
+The [enhancement delivery plan](../../crab/docs/architecture/http-server-enhancement-plan.md)
+defines the follow-up implementation slices, owning code, regression proof and
+acceptance gates for these gaps. Its unchecked slices are planned work.
+
 For durable command throughput, create a JSON template containing a top-level
 `"request_id":"{{request_id}}"`. Run mutations only against a disposable
 repository: the generator assigns a fresh UUIDv7 and creates real state for
