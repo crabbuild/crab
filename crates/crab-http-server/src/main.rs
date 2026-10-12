@@ -449,6 +449,9 @@ async fn management_get(
         .map_err(|source| crab_http_server::Error::Healthcheck { source })?;
     let (url, resolution) = management_target(config, path)?;
     let mut client = reqwest::Client::builder()
+        // PEM identities use Rustls; additive workspace features can select
+        // Native TLS by default, which rejects this identity before connecting.
+        .use_rustls_tls()
         .timeout(Duration::from_secs(10))
         .https_only(true)
         .identity(identity)

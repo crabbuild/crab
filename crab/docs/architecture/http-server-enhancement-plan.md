@@ -95,6 +95,17 @@ measurement. Other host builds were active, and the fixture performs no Crab
 Git or object-store work. Promote the runner and freeze an isolated profile
 before treating this as qualification evidence.
 
+The fresh D3 release also exposed a management CLI transport defect: public
+`/livez` succeeds, but `healthcheck` fails before connection with
+`incompatible TLS identity type`. The joint server/CLI feature graph enables
+both Rustls and default TLS. Pinned reqwest 0.12.28 chooses default TLS when
+enabled, while `Identity::from_pem` constructs a Rustls identity. The candidate
+explicitly selects Rustls for management requests, preserving the configured
+CA, client identity, hostname validation and timeout. Peer requests already use
+an explicit Rustls configuration. The process runner now requires independent
+private mTLS readiness after public liveness, within the original startup budget;
+the corrected native service/restart proof remains required.
+
 - [ ] Identify the first failing command and preserve a bounded failure trace.
   Reproduce it using the exact image/Cellule revision and disposable Compose
   volumes. Compare with the parent revision; fix only a demonstrated defect.
