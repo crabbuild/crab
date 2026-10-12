@@ -1564,7 +1564,7 @@ async fn browse_index_attachment_rejects_ref_only_staleness_without_io() {
     let (layout, observations) = fixture().await;
     let before = view(&layout).await;
     let indexes =
-        BrowseIndexes::new(before.state_digest(), "a".repeat(64), "b".repeat(64)).unwrap();
+        BrowseIndexes::new(before.state_digest(), "a".repeat(64), Some("b".repeat(64))).unwrap();
     observations.0.lock().unwrap().clear();
     let attached = before
         .clone()
@@ -1573,7 +1573,7 @@ async fn browse_index_attachment_rejects_ref_only_staleness_without_io() {
         .unwrap();
     assert_eq!(
         attached.manifest.path_state_hash.as_deref(),
-        Some(indexes.path_state_hash())
+        indexes.path_state_hash()
     );
     assert!(observations.0.lock().unwrap().is_empty());
     publish_blob(&layout, "later").await;

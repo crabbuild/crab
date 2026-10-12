@@ -64,6 +64,7 @@ zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+crab-storage = { workspace = true, features = ["test-support"] }
 cellule-runtime = { workspace = true, features = ["test-support"] }
 cellule-ltx = { workspace = true, features = ["replica"] }
 http-body-util = "0.1"

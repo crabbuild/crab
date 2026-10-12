@@ -1321,7 +1321,7 @@ impl CapsuleRepositoryView {
         manifest.seal_git_validation();
         if let Some(indexes) = &self.browse_indexes {
             manifest.commit_graph_hash = Some(indexes.commit_graph_hash().to_owned());
-            manifest.path_state_hash = Some(indexes.path_state_hash().to_owned());
+            manifest.path_state_hash = indexes.path_state_hash().map(str::to_owned);
         }
         Ok(manifest)
     }

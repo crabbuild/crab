@@ -389,7 +389,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
         .await
         .unwrap()
         .unwrap();
-    let path_state_hash = indexes.path_state_hash();
+    let path_state_hash = indexes.path_state_hash().unwrap();
     for corruption in [
         "missing descriptor",
         "corrupt descriptor",

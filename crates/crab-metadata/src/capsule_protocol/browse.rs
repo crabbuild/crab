@@ -14,18 +14,19 @@ pub struct BrowseIndexes {
     version: u32,
     state_digest: String,
     commit_graph_hash: String,
-    path_state_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_state_hash: Option<String>,
 }
 
 impl BrowseIndexes {
-    /// Bind complete durable indexes to their captured root and visible ref positions.
+    /// Bind durable indexes to their captured root and visible ref positions.
     pub fn new(
         state_digest: String,
         commit_graph_hash: String,
-        path_state_hash: String,
+        path_state_hash: Option<String>,
     ) -> Result<Self> {
         let value = Self {
-            version: 1,
+            version: 2,
             state_digest,
             commit_graph_hash,
             path_state_hash,
@@ -48,11 +49,11 @@ impl BrowseIndexes {
 
     /// Return the immutable complete path-state descriptor hash.
     #[must_use]
-    pub fn path_state_hash(&self) -> &str {
-        &self.path_state_hash
+    pub fn path_state_hash(&self) -> Option<&str> {
+        self.path_state_hash.as_deref()
     }
 
-    /// Encode a bounded, validated record after both indexes are durable.
+    /// Encode a bounded record after every named index is durable.
     pub fn encode(&self) -> Result<Bytes> {
         self.validate()?;
         serde_json::to_vec(self)
@@ -75,7 +76,7 @@ impl BrowseIndexes {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.version != 1 {
+        if self.version != 2 {
             return Err(corrupt_object(
                 "browse indexes",
                 "unsupported record version",
@@ -84,9 +85,11 @@ impl BrowseIndexes {
         for (field, hash) in [
             ("state digest", &self.state_digest),
             ("commit graph", &self.commit_graph_hash),
-            ("path state", &self.path_state_hash),
         ] {
             validate_content_hash(hash, field, "browse indexes")?;
+        }
+        if let Some(hash) = &self.path_state_hash {
+            validate_content_hash(hash, "path state", "browse indexes")?;
         }
         Ok(())
     }
@@ -116,8 +119,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn graph_ready_record_round_trips_without_complete_path_attribution() {
+        let encoded = serde_json::json!({
+            "version": 2,
+            "state_digest": "1".repeat(64),
+            "commit_graph_hash": "2".repeat(64),
+        });
+        let record = BrowseIndexes::decode(&serde_json::to_vec(&encoded).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&record.encode().unwrap()).unwrap(),
+            encoded
+        );
+    }
+
+    #[test]
     fn browse_indexes_round_trip_exact_state_and_complete_descriptors() {
-        let record = BrowseIndexes::new("1".repeat(64), "2".repeat(64), "3".repeat(64)).unwrap();
+        let record =
+            BrowseIndexes::new("1".repeat(64), "2".repeat(64), Some("3".repeat(64))).unwrap();
         assert_eq!(
             BrowseIndexes::decode(&record.encode().unwrap()).unwrap(),
             record
@@ -125,12 +143,12 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_partial_browse_indexes_are_rejected() {
+    fn malformed_browse_indexes_are_rejected() {
         let valid = serde_json::to_value(
-            BrowseIndexes::new("1".repeat(64), "2".repeat(64), "3".repeat(64)).unwrap(),
+            BrowseIndexes::new("1".repeat(64), "2".repeat(64), Some("3".repeat(64))).unwrap(),
         )
         .unwrap();
-        for field in ["state_digest", "commit_graph_hash", "path_state_hash"] {
+        for field in ["state_digest", "commit_graph_hash"] {
             let mut missing = valid.clone();
             missing.as_object_mut().unwrap().remove(field);
             assert!(BrowseIndexes::decode(&serde_json::to_vec(&missing).unwrap()).is_err());
@@ -138,8 +156,11 @@ mod tests {
             malformed[field] = serde_json::json!("../invalid");
             assert!(BrowseIndexes::decode(&serde_json::to_vec(&malformed).unwrap()).is_err());
         }
+        let mut malformed_path = valid.clone();
+        malformed_path["path_state_hash"] = serde_json::json!("../invalid");
+        assert!(BrowseIndexes::decode(&serde_json::to_vec(&malformed_path).unwrap()).is_err());
         let mut unsupported = valid;
-        unsupported["version"] = serde_json::json!(2);
+        unsupported["version"] = serde_json::json!(1);
         assert!(BrowseIndexes::decode(&serde_json::to_vec(&unsupported).unwrap()).is_err());
         assert!(BrowseIndexes::decode(&vec![b' '; MAX_BROWSE_INDEXES_BYTES as usize + 1]).is_err());
     }

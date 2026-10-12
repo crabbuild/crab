@@ -50,6 +50,58 @@ pub(crate) fn history_with_blob(body: &[u8]) -> GitHistory {
     finish(workspace, git_dir, vec![commit])
 }
 
+pub(crate) fn merge_history_with_nested_tag() -> (GitHistory, String) {
+    let workspace = tempfile::tempdir().unwrap();
+    let git_dir = workspace.path().join("repository.git");
+    initialize(&git_dir);
+    let blob = output(&git_dir, &["hash-object", "-w", "--stdin"], b"asset\n");
+    let tree = output(
+        &git_dir,
+        &["mktree"],
+        format!("100644 blob {blob}\tasset\n").as_bytes(),
+    );
+    let root = output(&git_dir, &["commit-tree", &tree, "-m", "root"], b"");
+    let left = output(
+        &git_dir,
+        &["commit-tree", &tree, "-p", &root, "-m", "left"],
+        b"",
+    );
+    let right = output(
+        &git_dir,
+        &["commit-tree", &tree, "-p", &root, "-m", "right"],
+        b"",
+    );
+    let merge = output(
+        &git_dir,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &left,
+            "-p",
+            &right,
+            "-m",
+            "merge",
+        ],
+        b"",
+    );
+    let inner = output(
+        &git_dir,
+        &["hash-object", "-t", "tag", "-w", "--stdin"],
+        format!("object {right}\ntype commit\ntag inner\ntagger Crab Test <crab@example.invalid> 1 +0000\n\ninner\n").as_bytes(),
+    );
+    let outer = output(
+        &git_dir,
+        &["hash-object", "-t", "tag", "-w", "--stdin"],
+        format!("object {inner}\ntype tag\ntag outer\ntagger Crab Test <crab@example.invalid> 1 +0000\n\nouter\n").as_bytes(),
+    );
+    output(&git_dir, &["update-ref", "refs/tags/outer", &outer], b"");
+    (
+        finish(workspace, git_dir, vec![root, left, right, merge]),
+        outer,
+    )
+}
+
 pub(crate) async fn publish_blob(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     body: &[u8],

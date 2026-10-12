@@ -4,12 +4,13 @@ use crab_metadata::capsule_protocol::BrowseIndexes;
 
 use super::*;
 
-/// Build complete indexes without publishing mutable repository authority.
+/// Build a durable graph without waiting for complete path attribution.
 ///
 /// The caller holds generation ownership and GC fences, supplies an origin-backed
 /// reader for `snapshot`, and rechecks capsule freshness before publishing the
-/// result. Interrupted path-state work resumes from verified 32-commit checkpoints.
-pub async fn build(
+/// result. A reusable path prefix is checkpointed before replacing the old record
+/// so restart and GC retain it while the new graph is available to readers.
+pub async fn build_graph(
     layout: &StoreLayout<Store>,
     repository: &RemoteGitRepository,
     snapshot: &manifest_store::RepositorySnapshot,
@@ -37,18 +38,20 @@ pub async fn build(
         .await
         {
             Ok(graph) => {
-                match load_path_state(
-                    store,
-                    layout,
-                    previous.path_state_hash(),
-                    &graph,
-                    limits.max_path_state_bytes,
-                )
-                .await
-                {
-                    Ok(paths) => old_paths = Some(paths),
-                    Err(error) if immutable_metadata_unavailable(&error) => {}
-                    Err(error) => return Err(error.into()),
+                if let Some(path_hash) = previous.path_state_hash() {
+                    match load_path_state(
+                        store,
+                        layout,
+                        path_hash,
+                        &graph,
+                        limits.max_path_state_bytes,
+                    )
+                    .await
+                    {
+                        Ok(paths) => old_paths = Some(paths),
+                        Err(error) if immutable_metadata_unavailable(&error) => {}
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 old_graph = Some(graph);
             }
@@ -57,6 +60,14 @@ pub async fn build(
         }
     }
     check_cancelled(cancel)?;
+    // A superseded partial graph may retain commits no longer reachable from
+    // these refs. Without complete attribution to reuse, start from current
+    // roots so path construction never authorizes a retained unreachable commit.
+    if previous.is_some_and(|previous| previous.state_digest() != snapshot.manifest_etag)
+        && old_paths.is_none()
+    {
+        old_graph = None;
+    }
     if let Some(previous) = previous
         && previous.state_digest() == snapshot.manifest_etag
         && old_graph.as_ref().is_some_and(|graph| {
@@ -86,36 +97,61 @@ pub async fn build(
     let graph_hash = write.descriptor_hash;
     let graph =
         load_split_commit_graph(store, layout, &graph_hash, limits.max_commit_graph_bytes).await?;
-    let repository = repository.with_commit_graph(&graph_hash, cancel).await?;
-    let mut replace_checkpoint = None;
-    let mut base = match load_path_state_checkpoint(
-        store,
-        layout,
-        &graph,
-        limits.max_path_state_bytes,
-    )
-    .await
-    {
-        Ok(base) => base,
-        Err(error) if immutable_metadata_unavailable(&error) => {
-            replace_checkpoint = match load_path_state_checkpoint_record(
+    if let Some(paths) = old_paths.filter(|paths| path_state_is_prefix(paths, &graph)) {
+        let (progress, replace_checkpoint) =
+            path_state_progress(store, layout, &graph, limits.max_path_state_bytes).await?;
+        if progress
+            .as_ref()
+            .is_none_or(|progress| progress.descriptor.commit_count < paths.descriptor.commit_count)
+        {
+            // Checkpoint monotonicity applies to verified progress. Replace a
+            // corrupt observed descriptor before publishing the new graph, or
+            // restart loses the only reusable attribution for retained commits.
+            let write = append_path_state(Some(paths), &graph, Vec::new())?;
+            upload_path_state(store, layout, &write).await?;
+            publish_path_state_checkpoint(
                 store,
                 layout,
-                &graph.descriptor.git_validation_digest,
+                &graph,
+                &write.descriptor_hash,
+                write.commit_count(),
+                replace_checkpoint.as_deref(),
             )
-            .await
-            {
-                Ok(record) => record.map(|record| record.descriptor_hash),
-                Err(error) if immutable_metadata_unavailable(&error) => None,
-                Err(error) => return Err(error.into()),
-            };
-            None
+            .await?;
         }
-        Err(error) => return Err(error.into()),
-    };
-    if base.is_none() {
-        base = old_paths.filter(|paths| path_state_is_prefix(paths, &graph));
     }
+    BrowseIndexes::new(snapshot.manifest_etag.clone(), graph_hash, None).map_err(Into::into)
+}
+
+/// Finish path attribution from the graph's durable construction checkpoint.
+///
+/// The caller retains generation ownership and GC fences through publication;
+/// the supplied graph record and reader must bind the exact captured snapshot.
+pub async fn build_path_state(
+    layout: &StoreLayout<Store>,
+    repository: &RemoteGitRepository,
+    snapshot: &manifest_store::RepositorySnapshot,
+    indexes: &BrowseIndexes,
+    options: RepositoryOptions,
+    cancel: &CancellationToken,
+) -> Result<BrowseIndexes> {
+    if !repository.matches_snapshot(snapshot)
+        || !repository.matches_store_layout(layout)
+        || indexes.state_digest() != snapshot.manifest_etag
+    {
+        return Err(WriteError::Internal(
+            "path-state reader and graph do not match their captured origin and snapshot"
+                .to_owned(),
+        ));
+    }
+    let store = layout.store();
+    let limits = options.object_limits();
+    let graph_hash = indexes.commit_graph_hash();
+    let graph =
+        load_split_commit_graph(store, layout, graph_hash, limits.max_commit_graph_bytes).await?;
+    let repository = repository.with_commit_graph(graph_hash, cancel).await?;
+    let (mut base, mut replace_checkpoint) =
+        path_state_progress(store, layout, &graph, limits.max_path_state_bytes).await?;
     loop {
         check_cancelled(cancel)?;
         let first = base
@@ -130,8 +166,8 @@ pub async fn build(
         if write.commit_count() == graph.descriptor.commit_count {
             return BrowseIndexes::new(
                 snapshot.manifest_etag.clone(),
-                graph_hash,
-                write.descriptor_hash,
+                graph_hash.to_owned(),
+                Some(write.descriptor_hash),
             )
             .map_err(Into::into);
         }

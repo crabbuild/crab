@@ -51,7 +51,7 @@ environment. Keep failed receipts as evidence.
 | --- | --- | --- | --- |
 | D0 | Green lifecycle baseline and reproducible qualification inputs | None | In progress |
 | D1 | Graph reuse in index construction | D0 | In progress |
-| D2 | Graph available before complete path attribution | D1 | Not started |
+| D2 | Graph available before complete path attribution | D1 | In progress |
 | D3 | Bounded background probing and foreground isolation | D2 | Not started |
 | D4 | Actual receive staging admission | D0; required before D5 bulk runs | Not started |
 | D5 | Efficient verified native pack intake and preparation | D4; D1-D3 for final concurrent proof | Not started |
@@ -76,8 +76,9 @@ The unchanged plan revision subsequently passed the
 [complete lifecycle run](https://github.com/crabbuild/crab/actions/runs/38179212631).
 The failure is timing-sensitive: old advertisements can transiently provide an
 eligible cohort after their processes stop. [PR #510](https://github.com/crabbuild/crab/pull/510)
-restores the fixture's explicit precondition; its corrected rerun remains a
-separate proof. The other D0 receipt, attribution and generator gates remain open.
+restores the fixture's explicit precondition; the
+[corrected exact-source lifecycle run](https://github.com/crabbuild/crab/actions/runs/38180477390)
+passed. The other D0 receipt, attribution and generator gates remain open.
 
 The tracked native-Git oracle now supports a seeded historical sample and
 reports its percentiles separately. The first retained-store baseline verified
@@ -85,10 +86,19 @@ reports its percentiles separately. The first retained-store baseline verified
 maximum 251.843 ms at concurrency 8. Caches were not flushed; this is neither
 an improvement claim nor a passing latency gate.
 
+Independent transport headroom diagnostics use the frozen qualification binary
+and endpoint payload sizes from the retained baseline: 1,000 offered requests/s
+produced 999.42 successful requests/s (p99 2 ms), and 2,000 offered requests/s
+produced 1,978.00 (p99 5 ms), with zero HTTP/transport/body-limit errors. Each run
+had five targets, three workers per target, a five-second warmup and a 30-second
+measurement. Other host builds were active, and the fixture performs no Crab
+Git or object-store work. Promote the runner and freeze an isolated profile
+before treating this as qualification evidence.
+
 - [ ] Identify the first failing command and preserve a bounded failure trace.
   Reproduce it using the exact image/Cellule revision and disposable Compose
   volumes. Compare with the parent revision; fix only a demonstrated defect.
-- [ ] Require a green lifecycle run. Do not mute assertions, extend deadlines
+- [x] Require a green lifecycle run. Do not mute assertions, extend deadlines
   without evidence, or count a source build as recovery proof.
 - [ ] Promote the existing qualification workload into a repeatable tracked
   runner by extending `verify_live.py` and the existing transport/process tools.
@@ -151,6 +161,31 @@ fault tests passed. No dependency or configuration change is needed for this
 slice. The graph handshake is boxed at its owning boundary so the server binary
 can compile without raising Rust's async type-depth limit.
 
+[PR #511](https://github.com/crabbuild/crab/pull/511) contains this implementation.
+Its frozen release binary ran the native-Git oracle against Next.js/RustFS:
+100 historical commits were exact, but indexing-active p95 was 2,608.337 ms,
+p99 3,771.228 ms and maximum 3,821.825 ms. This failed receipt remains evidence;
+the graph is not available to readers until complete attribution publication.
+The first attempt used `README.md`, which is absent at the source revision;
+the retained rerun uses its actual `readme.md`. The full builder subsequently
+published a 36,186-commit graph. A completed-graph 100-commit sample matched
+native Git: p50 5.752 ms, p95 10.291 ms, p99 12.409 ms, maximum 12.868 ms.
+This is a warm retained-store receipt, separate from cold opening and mixed load.
+Attribution still returned `503 path_state_corrupt`: its 11 encoded layers total
+300,983,245 bytes, exceeding the existing 268,435,456-byte reader limit. The
+writer published that unreadable completion. Preserve this failed receipt;
+writer/reader size agreement and a bounded full Next.js index are required.
+The latency sample overlapped local Cargo compilation on the same host; it is
+a diagnostic failed receipt, not isolated performance qualification.
+
+The first broad CI run found five regressions in snapshot opening and optional
+index admission. Graph loading was moved ahead of raw root peeling: known commit
+roots come from the validated graph and captured snapshot; only unresolved tags
+need raw reads during opening. All 27 unchanged repository unit tests and four native tag/reachability tests
+passed after correction; scoped production Clippy and the release library build
+also passed. The corrected broad CI rerun is in progress. The PR remains unqualified
+until its corrected CI passes.
+
 - [ ] Add a regression at the capsule builder boundary using a multi-commit,
   merge/tag fixture and a counting store. Distinguish necessary commit/tree
   reads from repeated authorization walks; do not assert that indexing reads
@@ -189,19 +224,43 @@ and the full Next.js builder completes with separately reported request counts.
 after path state is complete. Historical commit reads consequently wait for the
 more expensive attribution build to gain graph acceleration.
 
-- [ ] Update the canonical derived-index record to represent a durable graph
+Execution: the graph-only codec regression failed before the change (missing
+`path_state_hash`) and passes with the canonical version 2 record. All 19 local
+release tags were inspected; none contains this codec, and the remote release
+tag inventory was checked. No legacy reader or alternate key is needed for an
+unreleased derived record. The builder now checkpoints any reusable path prefix
+before publishing a graph-only record, then publishes complete attribution with
+the returned CAS token. Restart, partial failure, same-state cache refresh,
+superseding refs and GC retention proofs are being completed.
+The restart regression verifies a 32-commit checkpoint produces byte-identical
+64-commit completion using one graph attachment and 32 comparison operations.
+A corrupt successor checkpoint initially lost a verified reusable prefix and
+failed with `NotReachable`; checkpoint verification and replacement selection
+are now shared with manifest maintenance, and that regression passes.
+
+Focused proof: 17 HTTP browse/maintenance tests pass (one credential-dependent
+test remains ignored), plus conditional-publication tests, codec tests and the
+CLI derived-index GC regression. A native Git merge with a nested annotated tag
+retains ordered parents and first-parent attribution under a one-commit history
+budget. With attribution deliberately failed, the actual HTTP router returns
+200 for a historical commit and tree, and 202 for attribution; a fresh runtime
+reopens the graph and later observes same-state completion. These fixtures use
+the official in-memory object-store implementation. The full Next.js/RustFS
+partial-state latency and mixed-load gates are still open.
+
+- [x] Update the canonical derived-index record to represent a durable graph
   and optional complete path state. Keep exact capsule-state binding; derived
   metadata remains separate from ref authority.
-- [ ] Inspect release-tag reachability and every reader/writer/GC consumer before
+- [x] Inspect release-tag reachability and every reader/writer/GC consumer before
   selecting the codec version. Document migration for any actually shipped
   shape. Do not add an alternate key, legacy reader or fake path-state hash.
-- [ ] Publish graph readiness with the existing generation owner/GC fence and
+- [x] Publish graph readiness with the existing generation owner/GC fence and
   conditional create/update, after rechecking root plus visible ref positions.
   Publish complete path state later using the same ownership/CAS rules.
-- [ ] Make capsule readers attach the graph independently. Keep attribution's
+- [x] Make capsule readers attach the graph independently. Keep attribution's
   existing indexing response until complete path state is available; tree pages
   remain renderable. Preserve error behavior for corrupt metadata.
-- [ ] Prove partial publication survives restart, a stale builder cannot replace
+- [x] Prove partial publication survives restart, a stale builder cannot replace
   a successor, same-state graph-to-path-state publication refreshes cached readers,
   and retention/GC protects a published graph throughout delayed attribution.
 
@@ -216,6 +275,16 @@ pass the Git oracle and latency gate. No change to authoritative capsule runs,
 native ref CAS or commit/blob/tree response formats.
 
 ### D3: bound background probes and protect foreground work
+
+The completed Next.js receipt exposed an additional writer/reader size defect.
+Its largest attribution layer is 295,305,215 bytes; 158,482,112 bytes repeat
+only 30,803 path-component names. A per-layer canonical component table would
+encode the same layer in approximately 138,027,360 bytes before any other
+optimization. This is a calculated format estimate, not a measured new index.
+Keep the existing aggregate reader ceiling and check construction sizes before
+checkpoint/completion publication. Prove the exact loader and native attribution
+on the rebuilt full repository; no budget increase or compatibility reader is
+part of the proposed repair.
 
 `sweep_projections` calls `current_source` before retry backoff; `current_source`
 reopens the control view and verifies a path-state descriptor. The foreground
