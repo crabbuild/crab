@@ -95,10 +95,11 @@ replaces the ref with that OID, preserving the path and line fragment, following
 
 Deep links survive direct reloads through the embedded asset handler; service
 and asset namespaces retain their own 404 behavior. List filters and pagination
-stay in query parameters. Query-based bookmarks published in v1.2.4 are replaced
-once with their canonical paths; old numeric release bookmarks load the release
-once to resolve its tag. The release tag API uses the existing unique tag index
-and the same repository permissions and draft visibility as numbered reads.
+stay in query parameters. Browser navigation query selectors (such as `view`,
+`rev`, and `path`) and numeric release pages are rejected with “Page not found”.
+Release pages address tags directly. The release tag API uses the existing
+unique tag index and the same repository permissions and draft visibility as
+numbered reads.
 
 ## Build and run
 

@@ -811,19 +811,27 @@ test("GitHub paths retain file context, pin permalinks, and restore browser hist
   ).toBe(true);
 });
 
-test("shipped query bookmarks redirect without adding a browser history entry", async ({
-  page,
-}) => {
-  await page.goto("/team/project/issues");
-  await expect(page.getByRole("heading", { name: "All issues" })).toBeVisible();
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob#L3`,
-  );
-  await expect(page).toHaveURL("/team/project/blob/main/README.md#L3");
-  await expect(page.locator(".file-panel")).toBeVisible();
-  await page.goBack();
-  await expect(page).toHaveURL("/team/project/issues");
-});
+for (const path of [
+  `/team/project?rev=main&path=${pathHex("README.md")}&kind=Blob#L3`,
+  "/team/project?view=releases&release=2",
+  "/team/project/releases/2",
+]) {
+  test(`unsupported browser address shows not found without repository reads: ${path}`, async ({
+    page,
+  }) => {
+    const repositoryReads: string[] = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname.startsWith("/api/repos"))
+        repositoryReads.push(request.url());
+    });
+    await page.goto(path);
+    await expect(
+      page.getByText("Page not found", { exact: true }),
+    ).toBeVisible();
+    await expect(page).toHaveURL(path);
+    expect(repositoryReads).toEqual([]);
+  });
+}
 
 for (const theme of ["light", "dark"] as const) {
   test(`repository views pass automated WCAG A and AA checks in ${theme} theme`, async ({

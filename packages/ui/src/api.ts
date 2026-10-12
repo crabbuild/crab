@@ -400,14 +400,13 @@ export function useLocation() {
       window.location.pathname + window.location.search + window.location.hash,
   );
 }
-export function navigate(href: string, replace = false) {
+export function navigate(href: string) {
   if (
     href ===
     window.location.pathname + window.location.search + window.location.hash
   )
     return;
-  if (replace) window.history.replaceState(null, "", href);
-  else window.history.pushState(null, "", href);
+  window.history.pushState(null, "", href);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 export function parentHex(path: string) {
