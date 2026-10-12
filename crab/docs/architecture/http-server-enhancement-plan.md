@@ -406,8 +406,16 @@ payload now preserves capacity and I/O classification. Twelve receive-filter
 tests pass, plus the initially ignored fault/recovery and native Git push/clone
 tests against fresh real RustFS prefixes. Seventeen LFS tests, scoped production
 Clippy, architecture guardrails and seven-package checks including CLI, SDK and
-S3 gateway pass. Production joint-release/process proof and broad CI remain
-required; these receipts do not qualify incremental or bulk push latency.
+S3 gateway pass. The normal joint server/CLI release at `b2850aa2672`
+built successfully in 738.29 seconds. Its exact binary passed two real RustFS
+startup/private-mTLS/native-Git-oracle/shutdown cycles: readiness took 7.968 and
+5.302 seconds, shutdown took 2.358 and 2.562 seconds, and both exited successfully.
+Each cycle verified 150 tree entries, 10 commits, one blob, 20 diffs and six
+expected errors. [PR #515](https://github.com/crabbuild/crab/pull/515) contains the
+slice. Broad consumer compilation then found a missed thin-pack fixture caller
+of the admitted scratch API; that caller now uses the same finite mechanics
+admission. Abrupt receive-crash and broad CI proof remain required; these
+receipts do not qualify incremental or bulk push latency.
 
 - [x] Reproduce with a small, highly compressible/delta-heavy pack and a small
   shared disk budget. Test real bytes written, not only explicit reservation calls.

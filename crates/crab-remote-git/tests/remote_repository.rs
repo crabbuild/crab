@@ -1745,7 +1745,7 @@ async fn external_thin_subset_pack_keeps_the_proven_base_outside_the_pack() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn incoming_thin_pack_resolves_bases_through_bounded_remote_reads() {
-    use crab_git::incoming_pack::{BaseObject, ReceiveLimits, quarantine};
+    use crab_git::incoming_pack::{BaseObject, ReceiveLimits, ScratchSpace, quarantine};
 
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let base = fixture_ref_delta_base(&fixture);
@@ -1773,7 +1773,7 @@ async fn incoming_thin_pack_resolves_bases_through_bounded_remote_reads() {
         let mut requested = Vec::new();
         let received = quarantine(
             fs::File::open(generated.path()).expect("incoming pack"),
-            root.path(),
+            &ScratchSpace::new(root.path(), limits),
             limits,
             || cancel.is_cancelled(),
             |oid| {
