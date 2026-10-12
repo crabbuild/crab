@@ -1,3 +1,4 @@
+import { repoHref, revisionAddress } from "./repository-route";
 import { useState } from "react";
 import { Button, IconButton, Label, TextInput } from "@primer/react";
 import {
@@ -8,13 +9,7 @@ import {
   TagIcon,
   TrashIcon,
 } from "@primer/octicons-react";
-import {
-  endpoint,
-  repoHref,
-  type Ref,
-  type Refs,
-  type Repository,
-} from "./api";
+import { endpoint, type Ref, type Refs, type Repository } from "./api";
 import { Link, short } from "./ui";
 
 const names = new Intl.Collator("en", {
@@ -29,6 +24,7 @@ function refName(ref: Ref) {
 function RefRow({
   repo,
   ref,
+  revision,
   defaultBranch,
   protectedBranch,
   canCompare,
@@ -38,6 +34,7 @@ function RefRow({
 }: {
   repo: Repository;
   ref: Ref;
+  revision: string;
   defaultBranch: boolean;
   protectedBranch: boolean;
   canCompare: boolean;
@@ -53,7 +50,7 @@ function RefRow({
   return (
     <li>
       <div className="ref-name-cell">
-        <Link href={repoHref(repo, { rev: ref.name })}>{name}</Link>
+        <Link href={repoHref(repo, { rev: revision })}>{name}</Link>
         <IconButton
           icon={CopyIcon}
           aria-label={copied ? `Copied ${name}` : `Copy ${name}`}
@@ -236,6 +233,7 @@ export function RefsPage({
       />
       {defaultRef && (
         <RefGroup
+          knownRefs={refs}
           title="Default"
           repo={repo}
           refs={[defaultRef]}
@@ -246,6 +244,7 @@ export function RefsPage({
         />
       )}
       <RefGroup
+        knownRefs={refs}
         title={type === "branches" ? "Branches" : "Tags"}
         repo={repo}
         refs={remaining}
@@ -266,6 +265,7 @@ export function RefsPage({
 }
 
 function RefGroup({
+  knownRefs,
   title,
   repo,
   refs,
@@ -275,6 +275,7 @@ function RefGroup({
   onDeleteBranch,
   empty,
 }: {
+  knownRefs: Refs;
   title: string;
   repo: Repository;
   refs: Ref[];
@@ -303,6 +304,7 @@ function RefGroup({
           <ol className="ref-list">
             {refs.map((ref) => (
               <RefRow
+                revision={revisionAddress(knownRefs, ref.name)}
                 key={ref.name}
                 repo={repo}
                 ref={ref}

@@ -725,6 +725,106 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+test("GitHub paths retain file context, pin permalinks, and restore browser history", async ({
+  page,
+}) => {
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/refs",
+    (route) =>
+      route.fulfill({
+        json: {
+          head: { name: "refs/heads/main", oid },
+          unborn_head: null,
+          generation: 1,
+          refs: [
+            { name: "refs/heads/main", oid },
+            { name: "refs/heads/feature/x", oid },
+          ],
+        },
+      }),
+  );
+  const catalogReads: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/repos") catalogReads.push(url.search);
+  });
+  await page.goto("/team/project");
+  const navigation = page.getByRole("navigation", {
+    name: "Repository",
+    exact: true,
+  });
+  await expect(navigation.getByRole("link")).toHaveText([
+    "Code",
+    "Issues",
+    "Pull requests",
+    "Settings",
+  ]);
+  await expect(
+    navigation.getByRole("link", { name: "Pull requests" }),
+  ).toHaveAttribute("href", "/team/project/pulls");
+  await page.getByRole("button", { name: "Add file", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Create new file" }).click();
+  await expect(page).toHaveURL("/team/project/new/main");
+  await page.goBack();
+  await expect(
+    page.getByRole("region", { name: "Folders and files" }),
+  ).toBeVisible();
+  await page
+    .getByRole("region", { name: "Folders and files" })
+    .getByRole("link", { name: "README.md", exact: true })
+    .click();
+  await expect(page).toHaveURL("/team/project/blob/main/README.md");
+  await page.getByRole("button", { name: "Blame", exact: true }).click();
+  await expect(page).toHaveURL("/team/project/blame/main/README.md");
+  await page.reload();
+  await expect(page.getByLabel("Blame commits")).toBeVisible();
+  await page.keyboard.press("y");
+  await expect(page).toHaveURL(`/team/project/blame/${oid}/README.md`);
+  await expect(
+    page.getByRole("button", {
+      name: "Switch branches or tags, current aaaaaaa",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL("/team/project/blame/main/README.md");
+  await expect(page.getByLabel("Blame commits")).toBeVisible();
+  await page
+    .getByRole("button", {
+      name: "Switch branches or tags, current main",
+      exact: true,
+    })
+    .click();
+  await page
+    .getByRole("menuitemradio", { name: "feature/x", exact: true })
+    .click();
+  await expect(page).toHaveURL("/team/project/blame/feature%2Fx/README.md");
+  await page.reload();
+  await expect(page.getByLabel("Blame commits")).toBeVisible();
+  expect(catalogReads.length).toBeGreaterThan(0);
+  expect(
+    catalogReads.every(
+      (query) =>
+        new URLSearchParams(query).get("owner") === "team" &&
+        new URLSearchParams(query).get("name") === "project",
+    ),
+  ).toBe(true);
+});
+
+test("shipped query bookmarks redirect without adding a browser history entry", async ({
+  page,
+}) => {
+  await page.goto("/team/project/issues");
+  await expect(page.getByRole("heading", { name: "All issues" })).toBeVisible();
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob#L3`,
+  );
+  await expect(page).toHaveURL("/team/project/blob/main/README.md#L3");
+  await expect(page.locator(".file-panel")).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL("/team/project/issues");
+});
+
 for (const theme of ["light", "dark"] as const) {
   test(`repository views pass automated WCAG A and AA checks in ${theme} theme`, async ({
     page,
@@ -737,26 +837,26 @@ for (const theme of ["light", "dark"] as const) {
         ready: page.getByRole("region", { name: "Folders and files" }),
       },
       {
-        location: `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
+        location: `/team/project/blob/main/README.md`,
         ready: page.locator(".file-panel"),
       },
       {
-        location: `/team/project?view=commit&rev=${oid}`,
+        location: `/team/project/commit/${oid}`,
         ready: page.getByRole("heading", {
           name: "3 changed files",
           exact: true,
         }),
       },
       {
-        location: "/team/project?view=issues",
+        location: "/team/project/issues",
         ready: page.getByRole("heading", { name: "All issues" }),
       },
       {
-        location: "/team/project?view=issues&issue=new",
+        location: "/team/project/issues/new",
         ready: page.getByRole("heading", { name: "New issue", exact: true }),
       },
       {
-        location: "/team/project?view=branches",
+        location: "/team/project/branches",
         ready: page.getByRole("heading", {
           name: "Branches",
           exact: true,
@@ -764,7 +864,7 @@ for (const theme of ["light", "dark"] as const) {
         }),
       },
       {
-        location: "/team/project?view=settings",
+        location: "/team/project/settings",
         ready: page.getByRole("heading", { name: "General", exact: true }),
       },
     ]) {
@@ -780,7 +880,7 @@ for (const theme of ["light", "dark"] as const) {
 test("new issue Markdown toolbar formats selections and remains usable on mobile", async ({
   page,
 }) => {
-  await page.goto("/team/project?view=issues&issue=new");
+  await page.goto("/team/project/issues/new");
   const editor = page.locator(".discussion-editor");
   const toolbar = editor.getByRole("toolbar", {
     name: "Description formatting",
@@ -841,7 +941,7 @@ test("new issue Markdown toolbar formats selections and remains usable on mobile
 test("commit page keeps a sticky file tree beside independently scrolling diffs", async ({
   page,
 }) => {
-  await page.goto(`/team/project?view=commit&rev=${oid}`);
+  await page.goto(`/team/project/commit/${oid}`);
 
   await expect(
     page.getByRole("heading", { name: "3 changed files", exact: true }),
@@ -986,7 +1086,7 @@ test("overview groups files with their commit and opens the tree when navigating
   const readmeRow = panel.getByRole("row").filter({ hasText: "README.md" });
   await expect(readmeRow.getByText("Update README.md")).toHaveAttribute(
     "href",
-    `/team/project?view=commit&rev=${oid}`,
+    `/team/project/commit/${oid}`,
   );
   await expect(readmeRow.getByRole("time")).toHaveAttribute(
     "datetime",
@@ -1018,10 +1118,7 @@ test("overview groups files with their commit and opens the tree when navigating
   ).toBeVisible();
   await expect(
     readmePanel.getByRole("link", { name: "source entry" }),
-  ).toHaveAttribute(
-    "href",
-    `/team/project?rev=${oid}&path=${pathHex("src/index.ts")}&kind=Blob`,
-  );
+  ).toHaveAttribute("href", `/team/project/blob/main/src/index.ts`);
   await expect(
     readmePanel.getByRole("img", { name: "Architecture" }),
   ).toHaveAttribute(
@@ -1045,7 +1142,7 @@ test("overview groups files with their commit and opens the tree when navigating
     "32px",
   );
   await panel.getByRole("link", { name: "README.md", exact: true }).click();
-  await expect(page).toHaveURL(/rev=refs%2Fheads%2Fmain/);
+  await expect(page).toHaveURL(/\/(tree|blob)\/main(?:\/|$)/);
   await expect(page.locator(".tree-sidebar")).toBeVisible();
   await expect(page.locator(".breadcrumb")).toContainText("project/README.md");
   await page.getByRole("button", { name: "Copy path", exact: true }).click();
@@ -1082,16 +1179,11 @@ test("overview groups files with their commit and opens the tree when navigating
   ).toBeVisible();
   await page.getByPlaceholder("Go to file").press("Escape");
   await page.getByRole("link", { name: "History", exact: true }).click();
-  await expect(page).toHaveURL(
-    new RegExp(`view=commits.*path=${pathHex("README.md")}.*kind=Blob`),
-  );
+  await expect(page).toHaveURL(/\/commits\/main\/README\.md\?kind=Blob$/);
   await expect(page.getByRole("heading", { name: "Commits" })).toBeVisible();
   await expect(
     page.getByRole("link", { name: "README.md", exact: true }),
-  ).toHaveAttribute(
-    "href",
-    `/team/project?rev=${oid}&path=${pathHex("README.md")}&kind=Blob`,
-  );
+  ).toHaveAttribute("href", `/team/project/blob/main/README.md`);
   await expect(page.locator(".commit-list")).toContainText("Update this path");
   await expect(page.getByRole("button", { name: "Newer" })).toBeDisabled();
   await page.getByRole("button", { name: "Older" }).click();
@@ -1104,9 +1196,7 @@ test("overview groups files with their commit and opens the tree when navigating
 test("Markdown files switch between source and a repository-aware preview", async ({
   page,
 }) => {
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/README.md`);
   await page.getByRole("button", { name: "Preview", exact: true }).click();
   const preview = page.locator(".file-markdown-preview");
   await expect(
@@ -1114,10 +1204,7 @@ test("Markdown files switch between source and a repository-aware preview", asyn
   ).toBeVisible();
   await expect(
     preview.getByRole("link", { name: "source entry" }),
-  ).toHaveAttribute(
-    "href",
-    `/team/project?rev=${oid}&path=${pathHex("src/index.ts")}&kind=Blob`,
-  );
+  ).toHaveAttribute("href", `/team/project/blob/main/src/index.ts`);
   await expect(
     preview.getByRole("img", { name: "Architecture" }),
   ).toHaveAttribute(
@@ -1134,9 +1221,7 @@ test("Markdown files switch between source and a repository-aware preview", asyn
 test("code palette persists and follows light and dark appearance", async ({
   page,
 }) => {
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/README.md`);
   await page.getByRole("button", { name: "Preview", exact: true }).click();
   const highlighted = page.locator(".markdown-code-block");
   await expect(highlighted).toContainText('const project: string = "Crab";');
@@ -1181,9 +1266,7 @@ test("supported source files expose browser-parsed current-file symbols", async 
   page,
 }) => {
   await page.setViewportSize({ width: 1600, height: 1200 });
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("src/lib.rs")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/src/lib.rs`);
 
   const treeSidebar = page.locator(".tree-sidebar");
   const tree = page.locator(".repository-tree");
@@ -1304,9 +1387,7 @@ test("supported source files expose browser-parsed current-file symbols", async 
     page.getByRole("complementary", { name: "Code symbols" }),
   ).toBeVisible();
 
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("src/symbols.ts")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/src/symbols.ts`);
   const typeScriptSymbols = page.getByRole("complementary", {
     name: "Code symbols",
   });
@@ -1324,9 +1405,7 @@ test("supported source files expose browser-parsed current-file symbols", async 
     ["src/repository.c", /browse function 3/],
     ["src/repository.cpp", /browse function 6/],
   ] as const) {
-    await page.goto(
-      `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex(path)}&kind=Blob`,
-    );
+    await page.goto(`/team/project/blob/main/${path}`);
     await expect(
       page
         .getByRole("complementary", { name: "Code symbols" })
@@ -1401,9 +1480,7 @@ test("format-aware previews explore data, office files, media, and databases loc
     },
   });
 
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("metrics.csv")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/metrics.csv`);
   const csvWorkbench = page.getByRole("region", {
     name: "metrics.csv query workbench",
   });
@@ -1460,9 +1537,7 @@ test("format-aware previews explore data, office files, media, and databases loc
   await expectNoAccessibilityViolations(page);
   await page.setViewportSize({ width: 1280, height: 720 });
 
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("diagram.svg")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/diagram.svg`);
   const image = page.getByRole("img", { name: "Preview of diagram.svg" });
   await expect(image).toBeVisible();
   await expect
@@ -1471,17 +1546,13 @@ test("format-aware previews explore data, office files, media, and databases loc
     )
     .toBe(80);
 
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("report.xlsx")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/report.xlsx`);
   await expect(
     page.getByRole("navigation", { name: "Workbook sheets" }),
   ).toContainText("Experiments");
   await expect(page.getByRole("cell", { name: "0.42" })).toBeVisible();
 
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("runs.sqlite")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/runs.sqlite`);
   const sqliteWorkbench = page.getByRole("region", {
     name: "runs.sqlite query workbench",
   });
@@ -1525,9 +1596,7 @@ test("format-aware previews explore data, office files, media, and databases loc
     sqliteWorkbench.getByRole("button", { name: "Run query" }),
   ).toBeEnabled();
 
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("features.parquet")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/features.parquet`);
   const parquetWorkbench = page.getByRole("region", {
     name: "features.parquet query workbench",
   });
@@ -1569,9 +1638,7 @@ test("format-aware previews explore data, office files, media, and databases loc
   await expect(countResult.getByRole("row")).toHaveCount(2);
   await expect(countResult.getByRole("cell", { name: "2" })).toBeVisible();
 
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("batch.arrow")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/batch.arrow`);
   const arrowWorkbench = page.getByRole("region", {
     name: "batch.arrow query workbench",
   });
@@ -1586,18 +1653,14 @@ test("format-aware previews explore data, office files, media, and databases loc
   await selectDarkTheme(page);
   await expectNoAccessibilityViolations(page);
 
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("handbook.pdf")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/handbook.pdf`);
   await expect(
     page.getByRole("img", { name: "Page 1 of handbook.pdf" }),
   ).toBeVisible();
   await expect(page.getByText("Page 1 of 1")).toBeVisible();
   await expect(page.getByText("Private in-browser PDF preview")).toBeAttached();
 
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("model.onnx")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/model.onnx`);
   await expect(page.getByText("ONNX model")).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Hex and ASCII" }),
@@ -1608,9 +1671,7 @@ test("format-aware previews explore data, office files, media, and databases loc
 test("blame and source panes resize with pointer and keyboard controls", async ({
   page,
 }) => {
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/README.md`);
   await page.getByRole("button", { name: "Blame", exact: true }).click();
 
   const separator = page.getByRole("separator", {
@@ -1645,9 +1706,7 @@ test("blame and source panes resize with pointer and keyboard controls", async (
 test("file tree and content panes resize with pointer and keyboard controls", async ({
   page,
 }) => {
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/README.md`);
 
   const separator = page.getByRole("separator", {
     name: "Resize file tree pane",
@@ -1685,9 +1744,7 @@ test("file tree and content panes resize with pointer and keyboard controls", as
 });
 
 test("blame commit messages open their commit details", async ({ page }) => {
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/README.md`);
   await page.getByRole("button", { name: "Blame", exact: true }).click();
 
   const message = page.getByRole("link", {
@@ -1696,7 +1753,7 @@ test("blame commit messages open their commit details", async ({ page }) => {
   });
   await expect(message).toHaveAttribute(
     "href",
-    `/team/project?view=commit&rev=${"1".repeat(40)}`,
+    `/team/project/commit/${"1".repeat(40)}`,
   );
   await message.click();
   await expect(
@@ -1743,7 +1800,7 @@ test("Go to file finds a deep repository path before its directory is expanded",
   await page.setExtraHTTPHeaders({ "x-test-latest-commit": "fail-once" });
   await page.goto("/team/project");
   await expect(
-    page.getByRole("button", { name: "Browse files", exact: true }),
+    page.getByRole("button", { name: "Go to file T", exact: true }),
   ).toBeVisible();
   await page.keyboard.press("t");
   await expect(page.getByPlaceholder("Go to file")).toBeFocused();
@@ -1753,9 +1810,7 @@ test("Go to file finds a deep repository path before its directory is expanded",
     .getByRole("option", { name: "src/index.ts" });
   await expect(result).toBeVisible();
   await page.getByPlaceholder("Go to file").press("Enter");
-  await expect(page).toHaveURL(
-    new RegExp(`path=${pathHex("src/index.ts")}.*kind=Blob`),
-  );
+  await expect(page).toHaveURL(/\/blob\/main\/src\/index\.ts$/);
   await expect(page.getByPlaceholder("Go to file")).toHaveValue("");
   await expect(page.getByLabel("Repository files")).toBeVisible();
   await expect(page.locator(".breadcrumb")).toContainText(
@@ -1777,7 +1832,7 @@ test("Go to file finds a deep repository path before its directory is expanded",
 test("deep links expand the active path and select its file", async ({
   page,
 }) => {
-  await page.goto(`/team/project?path=${pathHex("src/index.ts")}&kind=Blob`);
+  await page.goto(`/team/project/blob/main/src/index.ts`);
   const state = await page
     .locator('[aria-label="Repository files"]')
     .evaluate((tree) => {
@@ -1842,9 +1897,7 @@ test("one directory click selects, expands, and loads its children", async ({
     if (new URL(request.url()).pathname.endsWith("/tree"))
       treeRequests.push(request.url());
   });
-  await page.goto(
-    `/team/project?rev=${oid}&path=${pathHex("README.md")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/README.md`);
   const tree = page.locator('[aria-label="Repository files"]');
   const directory = tree.getByRole("treeitem", {
     name: "src",
@@ -1856,7 +1909,7 @@ test("one directory click selects, expands, and loads its children", async ({
 
   await directory.click();
 
-  await expect(page).toHaveURL(new RegExp(`path=${pathHex("src")}.*kind=Tree`));
+  await expect(page).toHaveURL("/team/project/tree/main/src");
   await expect(directory).toHaveAttribute("aria-selected", "true");
   await expect(directory).toHaveAttribute("aria-expanded", "true");
   await expect(
@@ -1878,7 +1931,7 @@ test("file-tree add menu commits a file and keeps GitHub control spacing", async
   page,
 }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.goto(`/team/project?path=${pathHex("README.md")}&kind=Blob`);
+  await page.goto(`/team/project/blob/main/README.md`);
   const add = page.getByRole("button", {
     name: "Add file",
     exact: true,
@@ -1900,9 +1953,7 @@ test("file-tree add menu commits a file and keeps GitHub control spacing", async
   await page.getByLabel("File content").fill("Created from Crab\n");
   await page.getByLabel("Commit message").fill("Create NEW.md");
   await page.getByRole("button", { name: "Commit changes" }).click();
-  await expect(page).toHaveURL(
-    new RegExp(`rev=refs%2Fheads%2Fmain.*path=${pathHex("NEW.md")}`),
-  );
+  await expect(page).toHaveURL(/\/blob\/main\/NEW\.md$/);
   await expect(page.locator(".breadcrumb")).toContainText("project/NEW.md");
   await page.getByRole("button", { name: "Copy file contents" }).click();
   await expect
@@ -1913,7 +1964,7 @@ test("file-tree add menu commits a file and keeps GitHub control spacing", async
 test("file-tree add menu uploads text and binary files in one commit", async ({
   page,
 }) => {
-  await page.goto(`/team/project?path=${pathHex("README.md")}&kind=Blob`);
+  await page.goto(`/team/project/blob/main/README.md`);
   await page.getByRole("button", { name: "Add file" }).click();
   await page.getByRole("menuitem", { name: "Upload files" }).click();
   await expect(
@@ -1942,7 +1993,7 @@ test("file-tree add menu uploads text and binary files in one commit", async ({
   ).toBeLessThanOrEqual(360);
   await page.getByLabel("Commit message").fill("Upload repository files");
   await page.getByRole("button", { name: "Commit changes" }).click();
-  await expect(page).toHaveURL(/rev=refs%2Fheads%2Fmain/);
+  await expect(page).toHaveURL(/\/(tree|blob)\/main(?:\/|$)/);
   await expect(
     page.getByRole("region", { name: "Folders and files" }),
   ).toContainText("raw.bin");
@@ -1951,9 +2002,7 @@ test("file-tree add menu uploads text and binary files in one commit", async ({
 test("protected file edits create a review branch and open the exact comparison", async ({
   page,
 }) => {
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob&view=edit&scenario=protected`,
-  );
+  await page.goto(`/team/project/edit/main/README.md?scenario=protected`);
   await expect(
     page.getByRole("heading", { name: "Editing README.md" }),
   ).toBeVisible();
@@ -1970,7 +2019,7 @@ test("protected file edits create a review branch and open the exact comparison"
   await page.getByLabel("Commit message").fill("Propose README update");
   await page.getByLabel("New branch name").fill("docs/readme-review");
   await page.getByRole("button", { name: "Propose changes" }).click();
-  await expect(page).toHaveURL(/view=pulls&pull=new/);
+  await expect(page).toHaveURL(/\/compare\//);
   await expect(page.locator(".compare-picker select").nth(0)).toHaveValue(
     "refs/heads/main",
   );
@@ -1987,9 +2036,7 @@ test("branch file actions edit and delete through reviewable commit pages", asyn
   page,
 }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.goto(
-    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
-  );
+  await page.goto(`/team/project/blob/main/README.md`);
   const edit = page.getByRole("button", {
     name: "Edit this file",
     exact: true,
@@ -2027,7 +2074,7 @@ test("branch file actions edit and delete through reviewable commit pages", asyn
   );
   await page.getByLabel("Commit message").fill("Delete README");
   await page.getByRole("button", { name: "Commit changes" }).click();
-  await expect(page).toHaveURL("/team/project?rev=refs%2Fheads%2Fmain");
+  await expect(page).toHaveURL("/team/project/tree/main");
   await expect(
     page.getByRole("region", { name: "Folders and files" }),
   ).not.toContainText("README.md");
@@ -2081,7 +2128,7 @@ test("mobile Code menu stays within the viewport and theme selection persists", 
 test("issues follow the GitHub list hierarchy in both themes and on mobile", async ({
   page,
 }) => {
-  await page.goto("/team/project?view=issues");
+  await page.goto("/team/project/issues");
   const navigation = page.getByRole("complementary", {
     name: "Issue navigation",
   });
@@ -2201,7 +2248,7 @@ test("revision picker filters branches and tags and restores keyboard focus", as
   await page.keyboard.press("Enter");
   await expect(dialog).toHaveCount(0);
   await expect(anchor).toBeFocused();
-  await expect(page).toHaveURL(new RegExp("rev=refs%2Fheads%2Frelease"));
+  await expect(page).toHaveURL(/\/tree\/release%2F/);
   await page.setViewportSize({ width: 360, height: 800 });
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
@@ -2328,7 +2375,7 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
   );
   await page.goto("/team/project?scenario=protected");
   await page.getByRole("link", { name: "3 branches", exact: true }).click();
-  await expect(page).toHaveURL(/view=branches/);
+  await expect(page).toHaveURL(/\/branches$/);
   await expect(
     page.getByRole("link", { name: "Code", exact: true }),
   ).toHaveAttribute("aria-current", "page");
@@ -2350,10 +2397,7 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
   ).toBeVisible();
   await expect(
     branches.getByRole("link", { name: "Compare", exact: true }).first(),
-  ).toHaveAttribute(
-    "href",
-    "/team/project?view=pulls&pull=new&base=refs%2Fheads%2Fmain&head=refs%2Fheads%2Falpha",
-  );
+  ).toHaveAttribute("href", "/team/project/compare/main...alpha");
   await expect(
     defaultGroup.getByRole("button", { name: /^Delete / }),
   ).toHaveCount(0);
@@ -2379,7 +2423,7 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
     .getByRole("navigation", { name: "Repository refs" })
     .getByRole("link", { name: "Tags", exact: true })
     .click();
-  await expect(page).toHaveURL(/view=tags/);
+  await expect(page).toHaveURL(/\/tags$/);
   await expect(page.getByRole("region", { name: "Tags" })).toContainText(
     "v1.0",
   );
@@ -2428,7 +2472,7 @@ test("repository settings changes the default branch with explicit confirmation"
     },
   );
 
-  await page.goto("/team/project?view=settings");
+  await page.goto("/team/project/settings");
   await expect(
     page.getByRole("link", { name: "Settings", exact: true }),
   ).toHaveAttribute("aria-current", "page");
@@ -2477,7 +2521,7 @@ test("repository settings archive and unarchive the repository with exact confir
       updates.push(request.postDataJSON());
   });
 
-  await page.goto("/team/project?view=settings");
+  await page.goto("/team/project/settings");
   await expect(
     page.getByRole("heading", { name: "Danger Zone" }),
   ).toBeVisible();
@@ -2512,12 +2556,12 @@ test("repository settings archive and unarchive the repository with exact confir
 
   await page.getByRole("link", { name: "Issues", exact: true }).first().click();
   await expect(page.getByRole("button", { name: "New issue" })).toHaveCount(0);
-  await page.goto("/team/project?view=issues&issue=new");
+  await page.goto("/team/project/issues/new");
   await expect(
     page.getByRole("heading", { name: "This repository is read-only" }),
   ).toBeVisible();
 
-  await page.goto("/team/project?view=settings");
+  await page.goto("/team/project/settings");
   await page
     .getByRole("button", { name: "Unarchive this repository", exact: true })
     .click();
@@ -2566,7 +2610,7 @@ test("repository settings create, edit, and delete branch protection rules", asy
       updates.push(request.postDataJSON());
   });
 
-  await page.goto("/team/project?view=settings&section=branches");
+  await page.goto("/team/project/settings/branches");
   await expect(
     page.getByRole("link", { name: "Branches", exact: true }),
   ).toHaveAttribute("aria-current", "page");
@@ -2704,7 +2748,7 @@ test("repository settings manage members with a revisioned CSRF-protected replac
     },
   );
 
-  await page.goto("/team/project?view=settings&section=members");
+  await page.goto("/team/project/settings/access");
   await expect(
     page.getByRole("link", { name: "Members", exact: true }),
   ).toHaveAttribute("aria-current", "page");
@@ -2816,7 +2860,7 @@ test("revision picker creates a branch from the exact viewed commit", async ({
     name: "feature/browser",
     source_oid: oid,
   });
-  await expect(page).toHaveURL(/rev=refs%2Fheads%2Ffeature%2Fbrowser/);
+  await expect(page).toHaveURL(/\/tree\/feature%2Fbrowser$/);
   await expect(anchor).toHaveText("feature/browser");
   await anchor.click();
   await expect(

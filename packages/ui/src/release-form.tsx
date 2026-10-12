@@ -1,3 +1,4 @@
+import { repoHref } from "./repository-route";
 import { useMemo, useState } from "react";
 import { Button, TextInput } from "@primer/react";
 import {
@@ -9,7 +10,6 @@ import {
 import {
   endpoint,
   navigate,
-  repoHref,
   useRequest,
   type Refs,
   type Repository,
@@ -238,7 +238,7 @@ function EditReleaseForm({
   const pending = Boolean(pendingAction);
   const detailHref = repoHref(repo, {
     view: "releases",
-    release: String(release.number),
+    release: release.tag_name,
   });
   const update = async (draft: boolean) => {
     setPendingAction(draft ? "draft" : "publish");
@@ -347,16 +347,18 @@ function EditReleaseForm({
 
 export function EditRelease({
   repo,
-  number,
+  tag,
   csrf,
   onPublished,
 }: {
   repo: Repository;
-  number: string;
+  tag: string;
   csrf: string;
   onPublished: () => void;
 }) {
-  const release = useRequest<Release>(endpoint(repo, `releases/${number}`));
+  const release = useRequest<Release>(
+    endpoint(repo, `releases/tag/${encodeURIComponent(tag)}`),
+  );
   return (
     <Result state={release} showTiming={false}>
       {(current) => (
@@ -441,7 +443,7 @@ export function NewRelease({
       navigate(
         repoHref(repo, {
           view: "releases",
-          release: String(result.number),
+          release: result.tag_name,
         }),
       );
     } catch (failure) {

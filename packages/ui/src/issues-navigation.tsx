@@ -1,6 +1,7 @@
+import { repoHref } from "./repository-route";
 import type { ReactNode } from "react";
 import { IssueOpenedIcon, TagIcon } from "@primer/octicons-react";
-import { repoHref, type Repository } from "./api";
+import { type Repository } from "./api";
 import { Link } from "./ui";
 
 export function IssuesWorkspace({

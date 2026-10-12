@@ -926,6 +926,7 @@ Release routes use durable request reservations and versioned records:
 | --- | --- |
 | `GET/POST /api/repos/{owner}/{name}/releases` | List or create releases |
 | `GET/PATCH/DELETE /api/repos/{owner}/{name}/releases/{number}` | Read, edit, or tombstone one release |
+| `GET /api/repos/{owner}/{name}/releases/tag/{tag}` | Read by unique tag, including slash-containing tags; same draft visibility as numbered reads |
 | `POST /api/repos/{owner}/{name}/releases/{number}/assets` | Upload a release asset |
 | `GET/DELETE /api/repos/{owner}/{name}/releases/{number}/assets/{asset_id}` | Download or remove an asset |
 

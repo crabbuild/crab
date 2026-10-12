@@ -1,3 +1,4 @@
+import { repoHref } from "./repository-route";
 import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@primer/react";
 import {
@@ -9,7 +10,6 @@ import {
 import {
   displayHex,
   endpoint,
-  repoHref,
   useRequest,
   type Content,
   type Entry,
@@ -39,6 +39,7 @@ function readmeEntry(entries: Entry[]) {
 function ReadmePreview({
   repo,
   rev,
+  revision,
   directory,
   entry,
   onEntry,
@@ -47,6 +48,7 @@ function ReadmePreview({
 }: {
   repo: Repository;
   rev: string;
+  revision: string;
   directory: string;
   entry: Entry;
   onEntry: (entry: Entry) => void;
@@ -63,7 +65,7 @@ function ReadmePreview({
         <BookIcon />
         <Link
           href={repoHref(repo, {
-            rev,
+            rev: revision,
             path: entry.path_hex,
             kind: entry.kind,
           })}
@@ -83,6 +85,7 @@ function ReadmePreview({
             <RepositoryMarkdown
               repo={repo}
               rev={rev}
+              revision={revision}
               directory={directory}
               className="repository-readme-body"
               theme={theme}
@@ -100,6 +103,7 @@ function ReadmePreview({
 export function Directory({
   repo,
   rev,
+  revision,
   path,
   onEntry,
   header,
@@ -108,6 +112,7 @@ export function Directory({
 }: {
   repo: Repository;
   rev: string;
+  revision: string;
   path: string;
   onEntry: (entry: Entry) => void;
   header: ReactNode;
@@ -281,6 +286,7 @@ export function Directory({
             </section>
             {readme && (
               <ReadmePreview
+                revision={revision}
                 repo={repo}
                 rev={rev}
                 directory={path}
@@ -300,11 +306,13 @@ export function Directory({
 export function History({
   repo,
   rev,
+  revision,
   path,
   kind,
 }: {
   repo: Repository;
   rev: string;
+  revision: string;
   path: string;
   kind: string;
 }) {
@@ -326,7 +334,7 @@ export function History({
             {path ? (
               <span className="muted">
                 History for{" "}
-                <Link href={repoHref(repo, { rev, path, kind })}>
+                <Link href={repoHref(repo, { rev: revision, path, kind })}>
                   {displayHex(path)}
                 </Link>
               </span>

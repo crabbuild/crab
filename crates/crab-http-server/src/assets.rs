@@ -12,15 +12,37 @@ pub(crate) async fn serve(request: Request) -> Response {
     }
     let path = request.uri().path().trim_start_matches('/');
     let asset = ASSETS.iter().find(|(name, _)| *name == path);
-    // Only the catalog and repository routes fall back to the application shell.
-    // Dots are valid in repository identifiers; missing assets still return 404.
-    let components: Vec<_> = path.split('/').collect();
+    // Repository deep links must survive reloads. Reserve service namespaces
+    // and recognize only browser pages so missing APIs/assets still return 404.
+    let components: Vec<_> = path.trim_end_matches('/').split('/').collect();
     let application_route = path.is_empty()
-        || (components.len() == 2
+        || (components.len() >= 2
             && components[0] != "api"
             && components[0] != "assets"
             && components[0] != "auth"
             && components[0] != "git"
+            && (components.len() == 2
+                || matches!(
+                    components[2],
+                    "tree"
+                        | "blob"
+                        | "blame"
+                        | "commits"
+                        | "commit"
+                        | "issues"
+                        | "pulls"
+                        | "pull"
+                        | "compare"
+                        | "branches"
+                        | "tags"
+                        | "releases"
+                        | "settings"
+                        | "labels"
+                        | "new"
+                        | "upload"
+                        | "edit"
+                        | "delete"
+                ))
             && components
                 .iter()
                 .all(|part| !part.is_empty() && !matches!(*part, "." | "..")));
@@ -73,8 +95,28 @@ mod tests {
     async fn repository_deep_links_allow_dots_but_unknown_assets_are_not_html() {
         for (path, expected) in [
             ("/team/repo.name?path=524541444d452e6d64", StatusCode::OK),
+            ("/team/repo.name/tree/main/src", StatusCode::OK),
+            (
+                "/team/repo.name/blob/feature%2Fx/src/main.rs",
+                StatusCode::OK,
+            ),
+            ("/team/repo.name/commits/main/src", StatusCode::OK),
+            (
+                "/team/repo.name/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                StatusCode::OK,
+            ),
+            ("/team/repo.name/issues/1", StatusCode::OK),
+            ("/team/repo.name/pull/2/files", StatusCode::OK),
+            ("/team/repo.name/compare/main...feature%2Fx", StatusCode::OK),
+            ("/team/repo.name/releases/tag/v1.0.0", StatusCode::OK),
+            ("/team/repo.name/settings/access", StatusCode::OK),
+            ("/team/repo.name/unknown.js", StatusCode::NOT_FOUND),
             ("/assets/missing.js", StatusCode::NOT_FOUND),
+            ("/assets/repo/blob/main/missing.js", StatusCode::NOT_FOUND),
             ("/api/missing", StatusCode::NOT_FOUND),
+            ("/api/repos/team/blob/main/missing", StatusCode::NOT_FOUND),
+            ("/auth/repo/issues/1", StatusCode::NOT_FOUND),
+            ("/git/repo/tree/main", StatusCode::NOT_FOUND),
             ("/unknown", StatusCode::NOT_FOUND),
         ] {
             let response = serve(Request::builder().uri(path).body(Body::empty()).unwrap()).await;

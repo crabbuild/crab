@@ -1,3 +1,4 @@
+import { repoHref } from "./repository-route";
 import { useState } from "react";
 import { Button, IconButton, TextInput, VisuallyHidden } from "@primer/react";
 import {
@@ -13,7 +14,6 @@ import {
   endpoint,
   navigate,
   parentHex,
-  repoHref,
   useRequest,
   type Content,
   type Repository,

@@ -156,6 +156,10 @@ pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/repos/{owner}/{name}/releases", get(list).post(create))
         .route(
+            "/api/repos/{owner}/{name}/releases/tag/{*tag}",
+            get(detail_by_tag),
+        )
+        .route(
             "/api/repos/{owner}/{name}/releases/{number}",
             get(detail).patch(edit).delete(remove),
         )
@@ -391,10 +395,13 @@ async fn visible_release(
     principal: &Principal,
     number: u64,
 ) -> Result<Release> {
-    let include_drafts = principal.can_write(&repo.config);
     let actor = app::actor(principal)?;
-    storage::release(server, repo, &actor, app::number(number)?)
-        .await?
+    let release = storage::release(server, repo, &actor, app::number(number)?).await?;
+    visible_release_record(release, principal.can_write(&repo.config))
+}
+
+fn visible_release_record(release: Option<Release>, include_drafts: bool) -> Result<Release> {
+    release
         .filter(|release| {
             !release.deleted
                 && (include_drafts || (!release.draft && release.publication_pending.is_none()))
@@ -629,6 +636,19 @@ async fn detail(
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
     let release = visible_release(&server, repo, &principal, number).await?;
+    Ok(Json(view(&release)))
+}
+
+async fn detail_by_tag(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, tag)): Path<(String, String, String)>,
+) -> Result<Json<Value>> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let (tag, _) = tag_name(&tag)?;
+    let actor = app::actor(&principal)?;
+    let release = storage::release_by_tag(&server, &repo, &actor, tag).await?;
+    let release = visible_release_record(release, principal.can_write(&repo.config))?;
     Ok(Json(view(&release)))
 }
 

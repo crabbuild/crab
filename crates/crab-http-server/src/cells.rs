@@ -75,6 +75,7 @@ pub(crate) const REPOSITORY_EFFECT_CLAIM_COMMAND_ID: u32 = 6;
 pub(crate) const REPOSITORY_EFFECT_LEASE_COMMAND_ID: u32 = 7;
 pub(crate) const REPOSITORY_EFFECT_VALIDATE_QUERY_ID: u32 = 5;
 pub(crate) const REPOSITORY_EFFECT_STATUS_QUERY_ID: u32 = 35;
+pub(crate) const REPOSITORY_RELEASE_TAG_QUERY_ID: u32 = 37;
 pub(crate) const REPOSITORY_PROJECTION_COMMAND_ID: u32 = 31;
 pub(crate) const REPOSITORY_PROJECTION_STATE_QUERY_ID: u32 = 27;
 pub(crate) const REPOSITORY_PROJECTION_ATTRIBUTION_QUERY_ID: u32 = 28;
@@ -230,6 +231,7 @@ const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
     ),
     operation(REPOSITORY_EFFECT_STATUS_QUERY_ID, 36, 1024 * 1024),
     operation(36, 8, 464 * 1024),
+    operation(REPOSITORY_RELEASE_TAG_QUERY_ID, 1024, 1024 * 1024),
 ];
 
 pub(super) fn repository_replica_limits() -> ReplicaLimits {
@@ -2394,7 +2396,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "19f3069317479c310ad1ce325cc1ef50abe7f83454eb16c6f19813a7d345d5ee"
+            "649bd14cf06eb91169510e3828761059fe8b21164cac3044110b2c5fd2160f95"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 2);
@@ -2407,7 +2409,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(operation_ids("commands"), (1..=35).collect::<Vec<_>>());
-        assert_eq!(operation_ids("queries"), (1..=36).collect::<Vec<_>>());
+        assert_eq!(operation_ids("queries"), (1..=37).collect::<Vec<_>>());
         assert_eq!(descriptor["namespaces"][0]["role"], "application");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);
     }
