@@ -66,6 +66,8 @@ pub(crate) enum Error {
     ReleaseConflict,
     #[error("Git writes are busy")]
     ReleaseBusy,
+    #[error("Release staging failed")]
+    ReleaseStaging(#[source] crate::local_disk::Error),
     #[error("Release not found")]
     ReleaseNotFound,
     #[error("Release asset not found")]
@@ -80,8 +82,6 @@ pub(crate) enum Error {
     ReleaseAssetBody(#[source] axum::Error),
     #[error("Release asset temporary file operation failed")]
     ReleaseAssetIo(#[source] std::io::Error),
-    #[error("Release asset worker failed")]
-    ReleaseAssetWorker(#[source] tokio::task::JoinError),
     #[error("Release asset transfer admission failed")]
     ReleaseAssetCoordination(#[source] crab_coordination::CoordinationError),
     #[error("Release tag publication failed")]
@@ -132,13 +132,24 @@ impl IntoResponse for Error {
                     | Self::MergeObject(_)
                     | Self::Release(_)
                     | Self::ReleaseAssetIo(_)
-                    | Self::ReleaseAssetWorker(_)
                     | Self::ReleaseAssetCoordination(_)
+                    | Self::ReleaseStaging(_)
                     | Self::CellContract(_)
                     | Self::Cell(_)
             )
         {
             tracing::error!(error = ?self, "collaboration request failed");
+        }
+        let staging = match &self {
+            Self::Merge(error) | Self::Release(error) => error.staging_status(),
+            _ => None,
+        };
+        if let Some((status, message)) = staging {
+            return (
+                status,
+                Json(json!({"error":{"code":"staging","message":message}})),
+            )
+                .into_response();
         }
         let (status, code, message) = match &self {
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
@@ -230,7 +241,12 @@ impl IntoResponse for Error {
                 "release_conflict",
                 "A release already exists for this tag or the tag points to another commit",
             ),
-            Self::ReleaseBusy => (
+            Self::ReleaseStaging(crate::local_disk::Error::TooLarge) => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "asset_too_large",
+                "Release staging exceeds the node disk capacity",
+            ),
+            Self::ReleaseBusy | Self::ReleaseStaging(crate::local_disk::Error::Busy(_)) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "busy",
                 "Git writes are busy; retry this release shortly",
@@ -251,7 +267,8 @@ impl IntoResponse for Error {
                 "asset_too_large",
                 "Release assets must be no larger than 512 MiB",
             ),
-            Self::ReleaseAssetCancelled => (
+            Self::ReleaseAssetCancelled
+            | Self::ReleaseStaging(crate::local_disk::Error::Cancelled) => (
                 StatusCode::REQUEST_TIMEOUT,
                 "asset_cancelled",
                 "Release asset upload was cancelled or timed out",
@@ -262,7 +279,7 @@ impl IntoResponse for Error {
                 "Invalid release asset body",
             ),
             Self::ReleaseAssetIo(_)
-            | Self::ReleaseAssetWorker(_)
+            | Self::ReleaseStaging(_)
             | Self::ReleaseAssetCoordination(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "asset_storage",
@@ -346,6 +363,7 @@ impl IntoResponse for Error {
                 "Collaboration storage is unavailable. A write may have succeeded; retry the same submission to recover it",
             ),
         };
+
         (
             status,
             Json(json!({"error":{"code":code,"message":message}})),

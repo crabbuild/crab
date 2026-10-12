@@ -153,7 +153,7 @@ fn native_git_negotiates_exact_commands_packs_and_failure_status() {
         if let Some(expected) = expected_objects {
             let pack = incoming_pack::quarantine(
                 pack_bytes,
-                path,
+                &incoming_pack::ScratchSpace::new(path, 16_u64 * 1024 * 1024),
                 incoming_pack::ReceiveLimits {
                     max_pack_bytes: 1024 * 1024,
                     max_objects: 10,

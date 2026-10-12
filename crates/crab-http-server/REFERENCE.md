@@ -1488,7 +1488,17 @@ The server acquires sorted ref leases, the shared namespace lease for creates or
 | Aggregate dependency content | 2 GiB |
 | Publication lease lifetime | 5 minutes, renewed while owned work drains |
 
-Temporary disk use can exceed the wire limit because quarantine, normalized pack output, and index sidecars can overlap.
+Receive staging shares the Cell local-disk budget. Admission covers the received
+body and every simultaneously live quarantine, inflated-object, decoded-object,
+prepared-pack and index-sidecar file. File growth reserves capacity first;
+directory cleanup releases it after owned workers drain. Overwriting or renaming
+an admitted file does not charge its bytes again.
+
+Temporary disk use can exceed the wire limit because these files overlap. A
+transfer that exceeds total staging capacity returns HTTP 413; temporary shared
+disk pressure returns HTTP 429. Those errors describe staging capacity rather
+than the 8 GiB wire-body limit. Native receive reports them as HTTP failures,
+preserving malformed-pack rejection as a separate Git protocol result.
 
 ### Handle rejection and uncertain outcomes
 

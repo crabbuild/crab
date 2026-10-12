@@ -223,7 +223,10 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
                         let prepared = crab_remote::prepare::prepare_capsule(
                             repository,
                             visibility,
-                            directory.path().to_owned(),
+                            crab_git::incoming_pack::ScratchSpace::new(
+                                directory.path(),
+                                64_u64 * 1024 * 1024,
+                            ),
                             Some(input),
                             request.updates,
                             BTreeMap::new(),

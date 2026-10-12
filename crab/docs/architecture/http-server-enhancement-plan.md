@@ -53,7 +53,7 @@ environment. Keep failed receipts as evidence.
 | D1 | Graph reuse in index construction | D0 | In progress |
 | D2 | Graph available before complete path attribution | D1 | In progress |
 | D3 | Bounded background probing and foreground isolation | D2 | In progress |
-| D4 | Actual receive staging admission | D0; required before D5 bulk runs | Not started |
+| D4 | Actual receive staging admission | D0; required before D5 bulk runs | In progress |
 | D5 | Efficient verified native pack intake and preparation | D4; D1-D3 for final concurrent proof | Not started |
 
 ### D0: establish a green lifecycle baseline
@@ -336,6 +336,31 @@ routes. Source cancellation/corruption and lease-contention regressions pass.
 The architecture guardrails pass; full Next.js idle and mixed-load gates remain
 open. These are semantic test builds, not production latency measurements.
 
+The normal joint-package release at `0ba1747ad70` published the complete Next.js
+PS03 descriptor for all 36,186 commits. Its 11 layers and descriptor total
+141,224,192 bytes, within the unchanged 268,435,456-byte reader cap; the prior
+PS02 total was 300,983,245 bytes. Cell attribution promotion remains in progress.
+An indexing-active mixed run offered 100 requests/s for 60 seconds after a
+five-second warmup, with three workers for each of five endpoints. All 4,510
+responses succeeded, but throughput was only 74.86 requests/s and endpoint
+p99 ranged from 585 to 804 ms. The runner failed its existing throughput gate;
+500 and 1,000 requests/s were not run. This is shared-host diagnostic evidence,
+not isolated qualification. A separate round-robin comparison of 50 identical
+signed root reads per route found p99 0.91 ms through the counting proxy,
+0.41 ms direct to RustFS, and 0.97 ms through a second proxy with Nagle disabled.
+That probe did not reproduce a proxy-induced small-response latency problem;
+the failed mixed-load receipt remains open.
+
+The expanded native-Git oracle then failed complete directory attribution for
+`.claude`: the index reported `50f367bc21e08ef142cce8b3e9047191e746b0f4`, while
+native first-parent history reported `6836c26b723aa1b66c801039763618fb3cc1e3a7`.
+Two API repetitions confirmed it. At the reported commit, `/changes` falsely
+deletes and re-adds an identical `.claude/skills` symlink when the distinct
+`.claude-plugin` directory is added. Tree comparison merges Git-ordered entries
+using raw path ordering. Fix that canonical comparison boundary and rebuild
+affected derived indexes before promoting attribution or repeating performance
+qualification. The encoded-size result above is not full correctness proof.
+
 - [x] Capture root, stable visible-ref activity and the bounded index record
   first. Reuse the validated source when that exact identity is unchanged.
   A root ETag alone is insufficient because ref CAS can change independently.
@@ -367,15 +392,40 @@ retain the receive body, another incoming pack, inflated data and decoded object
 at once; preparation adds encoded output and sidecars. Observed staging exceeded
 the configured 32 GiB Cell disk limit. Body length is not scratch usage.
 
-- [ ] Reproduce with a small, highly compressible/delta-heavy pack and a small
+The minimal reproduction used a valid native pack containing one compressible
+512 KiB blob and a 128 KiB shared budget. Before the change it retained
+1,049,710 scratch bytes against a 4,096-byte reservation. The candidate binds
+quarantine and prepared artifacts to one caller-owned admission ledger and
+reserves before file growth, including sidecar format bounds. HTTP connects that
+ledger to the existing Cell disk budget and retains ownership through worker
+drain. All 12 local-disk tests pass, including rejection before excess writes,
+concurrent Cell pressure, cleanup and restart inventory. Fourteen pack tests pass,
+including prepared sidecar admission and output cleanup. The wrapper regression
+first returned HTTP 400 instead of 413; explicit inspection of `io::Error`'s
+payload now preserves capacity and I/O classification. Twelve receive-filter
+tests pass, plus the initially ignored fault/recovery and native Git push/clone
+tests against fresh real RustFS prefixes. Seventeen LFS tests, scoped production
+Clippy, architecture guardrails and seven-package checks including CLI, SDK and
+S3 gateway pass. The normal joint server/CLI release at `b2850aa2672`
+built successfully in 738.29 seconds. Its exact binary passed two real RustFS
+startup/private-mTLS/native-Git-oracle/shutdown cycles: readiness took 7.968 and
+5.302 seconds, shutdown took 2.358 and 2.562 seconds, and both exited successfully.
+Each cycle verified 150 tree entries, 10 commits, one blob, 20 diffs and six
+expected errors. [PR #515](https://github.com/crabbuild/crab/pull/515) contains the
+slice. Broad consumer compilation then found a missed thin-pack fixture caller
+of the admitted scratch API; that caller now uses the same finite mechanics
+admission. Abrupt receive-crash and broad CI proof remain required; these
+receipts do not qualify incremental or bulk push latency.
+
+- [x] Reproduce with a small, highly compressible/delta-heavy pack and a small
   shared disk budget. Test real bytes written, not only explicit reservation calls.
-- [ ] Add a narrow scratch-admission behavior boundary in Git mechanics. The
+- [x] Add a narrow scratch-admission behavior boundary in Git mechanics. The
   HTTP owner connects it to the existing shared `LocalStaging`/Cell disk budget;
   lower crates must not depend on the HTTP server or Cell runtime.
-- [ ] Reserve before file growth across receive, quarantine and preparation;
+- [x] Reserve before file growth across receive, quarantine and preparation;
   account all simultaneously live copies and sidecars. Release bytes only after
   their files are removed, and avoid double charging ownership transfers.
-- [ ] Preserve source errors. Separate a transfer larger than total capacity
+- [x] Preserve source errors. Separate a transfer larger than total capacity
   from temporary shared-capacity contention; map them through existing boundary
   errors. Do not report scratch exhaustion as an inaccurate body-size violation.
 - [ ] Verify disk exhaustion, concurrent Cell reservations, cancelled blocking

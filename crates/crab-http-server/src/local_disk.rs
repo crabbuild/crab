@@ -1,20 +1,24 @@
 use std::{
     io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 const MIB: u64 = 1024 * 1024;
+pub(crate) const RESERVATION_GROWTH: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
     #[error("local staging request exceeds the node disk budget")]
     TooLarge,
     #[error("local staging disk is busy")]
-    Busy,
+    Busy(#[source] Option<Box<dyn std::error::Error + Send + Sync>>),
     #[error("local staging was cancelled")]
     Cancelled,
     #[error("local staging I/O failed")]
@@ -115,13 +119,16 @@ impl LocalStaging {
         if bytes > self.budget.capacity() {
             return Err(Error::TooLarge);
         }
-        let reservation = self.budget.try_reserve(bytes).map_err(|_| Error::Busy)?;
+        let reservation = self
+            .budget
+            .try_reserve(bytes)
+            .map_err(|source| Error::Busy(Some(Box::new(source))))?;
         let required = self
             .disk_reserve_bytes
             .checked_add(self.budget.used())
             .ok_or(Error::TooLarge)?;
         if fs4::available_space(self.root.as_path())? < required {
-            return Err(Error::Busy);
+            return Err(Error::Busy(None));
         }
         let root = Arc::clone(&self.root);
         let directory = tokio::task::spawn_blocking(move || {
@@ -140,11 +147,14 @@ impl LocalStaging {
     }
 
     pub(crate) fn resize(&self, directory: &StagingDirectory, bytes: u64) -> Result<(), Error> {
+        if bytes > self.budget.capacity() {
+            return Err(Error::TooLarge);
+        }
         let previous = directory._reservation.bytes();
         directory
             ._reservation
             .resize(bytes.max(1))
-            .map_err(|_| Error::Busy)?;
+            .map_err(|source| Error::Busy(Some(Box::new(source))))?;
         let required = match self.disk_reserve_bytes.checked_add(self.budget.used()) {
             Some(required) => required,
             None => {
@@ -161,9 +171,27 @@ impl LocalStaging {
         };
         if available < required {
             let _ = directory._reservation.resize(previous);
-            return Err(Error::Busy);
+            return Err(Error::Busy(None));
         }
         Ok(())
+    }
+
+    pub(crate) fn scratch(
+        &self,
+        directory: Arc<StagingDirectory>,
+    ) -> Result<crab_git::incoming_pack::ScratchSpace, Error> {
+        let body_bytes = inventory_bytes(directory.path())?;
+        self.resize(&directory, body_bytes)?;
+        let path = directory.path().to_owned();
+        Ok(crab_git::incoming_pack::ScratchSpace::new(
+            &path,
+            StagingAdmission {
+                staging: self.clone(),
+                directory,
+                body_bytes,
+                last_bytes: AtomicU64::new(0),
+            },
+        ))
     }
 
     pub(crate) fn available_bytes(&self) -> u64 {
@@ -179,6 +207,43 @@ impl LocalStaging {
     #[cfg(test)]
     pub(crate) fn available_mebibytes(&self) -> u64 {
         self.available_bytes() / MIB
+    }
+}
+
+struct StagingAdmission {
+    staging: LocalStaging,
+    directory: Arc<StagingDirectory>,
+    body_bytes: u64,
+    last_bytes: AtomicU64,
+}
+
+impl crab_git::incoming_pack::ScratchAdmission for StagingAdmission {
+    fn resize(&self, bytes: u64) -> Result<(), crab_git::incoming_pack::ScratchError> {
+        use crab_git::incoming_pack::ScratchError;
+        let required = self
+            .body_bytes
+            .checked_add(bytes)
+            .ok_or(ScratchError::Overflow)?;
+        let previous = self.directory._reservation.bytes();
+        let shrinking = bytes < self.last_bytes.load(Ordering::Relaxed);
+        if shrinking || required > previous {
+            let desired = if shrinking {
+                required
+            } else {
+                required
+                    .saturating_add(RESERVATION_GROWTH)
+                    .min(self.staging.budget.capacity())
+                    .min(previous.saturating_add(self.staging.budget.available()))
+                    .max(required)
+            };
+            self.staging
+                .resize(&self.directory, desired)
+                .map_err(|source| ScratchError::Admission(Box::new(source)))?;
+        }
+        // ScratchSpace serializes this policy. Retain admitted headroom between
+        // bounded writes; release it when a private directory actually disappears.
+        self.last_bytes.store(bytes, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -201,7 +266,9 @@ fn reserve_restart_inventory(
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(RestartDiskInventory {
-                _reservation: budget.try_reserve(0).map_err(|_| Error::Busy)?,
+                _reservation: budget
+                    .try_reserve(0)
+                    .map_err(|source| Error::Busy(Some(Box::new(source))))?,
                 bytes: 0,
                 sessions: 0,
             });
@@ -230,7 +297,9 @@ fn reserve_restart_inventory(
         session_count = session_count.checked_add(1).ok_or(Error::TooLarge)?;
     }
 
-    let reservation = budget.try_reserve(bytes).map_err(|_| Error::Busy)?;
+    let reservation = budget
+        .try_reserve(bytes)
+        .map_err(|source| Error::Busy(Some(Box::new(source))))?;
     Ok(RestartDiskInventory {
         _reservation: reservation,
         bytes,
@@ -277,6 +346,67 @@ impl StagingDirectory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn compressible_native_pack_cannot_exceed_shared_staging_capacity() {
+        use axum::{http::StatusCode, response::IntoResponse};
+        for (object_bytes, competing_bytes, expected_status) in [
+            (512 * 1024, 0, StatusCode::PAYLOAD_TOO_LARGE),
+            (32 * 1024, 96 * 1024, StatusCode::TOO_MANY_REQUESTS),
+        ] {
+            let owner = tempfile::TempDir::new().unwrap();
+            let budget = cellule_runtime::ltx::DiskBudget::new(128 * 1024);
+            let staging =
+                LocalStaging::new(owner.path().join("staging"), budget.clone(), 0).unwrap();
+            let directory = staging
+                .create(4096, &CancellationToken::new())
+                .await
+                .unwrap();
+            let competing = budget.try_reserve(competing_bytes).unwrap();
+            let data = vec![b'x'; object_bytes];
+            let mut wire = Vec::new();
+            crab_git::pack_writer::write_pack(
+                &mut wire,
+                [Ok((
+                    gix_object::Kind::Blob,
+                    data.len() as u64,
+                    std::io::Cursor::new(data),
+                ))]
+                .into_iter(),
+                1024 * 1024,
+                || false,
+            )
+            .unwrap();
+            assert!(wire.len() < 4096);
+            std::fs::write(directory.path().join("receive"), &wire).unwrap();
+            let directory = Arc::new(directory);
+            let path = directory.path().to_owned();
+            let scratch = staging.scratch(Arc::clone(&directory)).unwrap();
+            let error = crab_git::incoming_pack::quarantine(
+                std::io::Cursor::new(wire),
+                &scratch,
+                crab_git::incoming_pack::ReceiveLimits {
+                    max_pack_bytes: 1024 * 1024,
+                    max_objects: 1,
+                    max_object_bytes: 1024 * 1024,
+                    max_inflated_bytes: 2 * 1024 * 1024,
+                    max_delta_depth: 8,
+                },
+                || false,
+                |_| Ok(None),
+            )
+            .err()
+            .unwrap();
+            assert!(inventory_bytes(&path).unwrap() <= budget.used() - competing_bytes);
+            let response = crate::receive::ReceiveError::from(error).into_response();
+            assert_eq!(response.status(), expected_status);
+            drop(scratch);
+            drop(directory);
+            assert!(!path.exists());
+            assert_eq!(budget.used(), competing_bytes);
+            drop(competing);
+        }
+    }
 
     #[test]
     fn restart_inventory_counts_stale_sessions_but_not_the_new_session() {
@@ -335,7 +465,7 @@ mod tests {
         let budget = cellule_runtime::ltx::DiskBudget::new(8);
         assert!(matches!(
             reserve_restart_inventory(data.path(), &current, budget.clone()),
-            Err(Error::Busy)
+            Err(Error::Busy(Some(_)))
         ));
         assert_eq!(budget.used(), 0);
     }
@@ -409,7 +539,7 @@ mod tests {
         assert_eq!(staging.available_bytes(), 0);
         assert!(matches!(
             staging.create(1, &CancellationToken::new()).await,
-            Err(Error::Busy)
+            Err(Error::Busy(Some(_)))
         ));
         drop(staging);
         assert_eq!(budget.used(), 0);
@@ -454,7 +584,7 @@ mod tests {
         assert_eq!(staging.available_bytes(), 0);
         assert!(matches!(
             staging.create(1, &cancellation).await,
-            Err(Error::Busy)
+            Err(Error::Busy(Some(_)))
         ));
         drop(first);
         assert_eq!(staging.available_bytes(), 2 * MIB);
@@ -471,7 +601,7 @@ mod tests {
 
         assert!(matches!(
             staging.create(MIB, &CancellationToken::new()).await,
-            Err(Error::Busy)
+            Err(Error::Busy(Some(_)))
         ));
         drop(cell);
         assert!(staging.create(MIB, &CancellationToken::new()).await.is_ok());
@@ -495,7 +625,7 @@ mod tests {
         assert_eq!(staging.available_bytes(), 0);
         assert!(matches!(
             staging.create(1, &CancellationToken::new()).await,
-            Err(Error::Busy)
+            Err(Error::Busy(Some(_)))
         ));
         drop(directory);
         assert_eq!(staging.available_bytes(), 3 * MIB);
@@ -534,7 +664,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             staging.create(1, &CancellationToken::new()).await,
-            Err(Error::Busy)
+            Err(Error::Busy(None))
         ));
         assert_eq!(staging.available_bytes(), MIB);
         assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);

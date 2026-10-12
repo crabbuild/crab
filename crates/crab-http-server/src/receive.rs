@@ -20,8 +20,6 @@ mod validate;
 const MAX_BODY: u64 = 8 * 1024 * 1024 * 1024;
 pub(crate) const INITIAL_RECEIVE_RESERVATION: u64 = 2 * 1024 * 1024 * 1024;
 pub(crate) const IMPORT_RECEIVE_INITIAL_RESERVATION: u64 = 64 * 1024 * 1024;
-const IMPORT_RECEIVE_RESERVE_MARGIN: u64 = 64 * 1024 * 1024;
-const RECEIVE_RESERVATION_GROWTH: u64 = 256 * 1024 * 1024;
 const REQUEST_BUDGET: Duration = Duration::from_secs(30 * 60);
 const REF_UPDATE_BUDGET: Duration = Duration::from_secs(30);
 const CONTENT_TYPE: &str = "application/x-git-receive-pack-result";
@@ -48,6 +46,8 @@ pub(crate) enum ReceiveError {
     Cancelled,
     #[error("receive body exceeds 8 GiB")]
     TooLarge,
+    #[error("receive staging failed")]
+    Staging(#[source] crate::local_disk::Error),
     #[error("receive body failed")]
     Body(#[from] axum::Error),
     #[error("receive temporary I/O failed")]
@@ -110,13 +110,64 @@ impl From<crate::transfer_admission::Error> for ReceiveError {
 
 impl From<crate::local_disk::Error> for ReceiveError {
     fn from(error: crate::local_disk::Error) -> Self {
-        match error {
-            crate::local_disk::Error::TooLarge => Self::TooLarge,
-            crate::local_disk::Error::Busy => Self::Busy,
-            crate::local_disk::Error::Cancelled => Self::Cancelled,
-            crate::local_disk::Error::Io(error) => Self::Io(error),
-            crate::local_disk::Error::Worker(error) => Self::Worker(error),
+        Self::Staging(error)
+    }
+}
+
+impl ReceiveError {
+    pub(crate) fn staging_status(&self) -> Option<(StatusCode, &'static str)> {
+        // Git mechanics preserve admission failures through I/O wrappers. Inspect
+        // typed causes here so disk pressure cannot become "invalid pack" or a
+        // misleading body-size violation at the transport boundary.
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(self);
+        let mut staging = false;
+        while let Some(error) = cause {
+            if matches!(
+                error.downcast_ref::<crate::local_disk::Error>(),
+                Some(crate::local_disk::Error::TooLarge)
+            ) || matches!(
+                error.downcast_ref::<crab_git::incoming_pack::ScratchError>(),
+                Some(crab_git::incoming_pack::ScratchError::Capacity { .. })
+            ) {
+                return Some((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Receive staging exceeds the node disk capacity",
+                ));
+            }
+            if matches!(
+                error.downcast_ref::<crate::local_disk::Error>(),
+                Some(crate::local_disk::Error::Busy(_))
+            ) {
+                return Some((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "Receive staging disk is busy; retry shortly",
+                ));
+            }
+            staging |= error.is::<crate::local_disk::Error>()
+                || error.is::<crab_git::incoming_pack::ScratchError>();
+            if matches!(
+                error.downcast_ref::<crate::local_disk::Error>(),
+                Some(crate::local_disk::Error::Cancelled)
+            ) {
+                return Some((
+                    StatusCode::REQUEST_TIMEOUT,
+                    "Receive cancelled or timed out",
+                ));
+            }
+            // io::Error::source() skips its custom payload. Inspect that payload
+            // as well, or a leaf scratch refusal is misreported as corrupt input.
+            cause = match error.downcast_ref::<std::io::Error>() {
+                Some(error) => error
+                    .get_ref()
+                    .map(|inner| inner as &(dyn std::error::Error + 'static))
+                    .or_else(|| std::error::Error::source(error)),
+                None => error.source(),
+            };
         }
+        staging.then_some((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Receive staging could not finish; inspect server logs",
+        ))
     }
 }
 
@@ -239,7 +290,7 @@ async fn publish_generated_objects(
 impl IntoResponse for ReceiveError {
     fn into_response(self) -> Response {
         tracing::error!(error = ?self, "Git receive failed");
-        let (status, message) = match self {
+        let (status, message) = self.staging_status().unwrap_or(match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "Repository not found"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "Write access required"),
             Self::Protected => (
@@ -270,7 +321,7 @@ impl IntoResponse for ReceiveError {
                 "Receive cancelled or timed out",
             ),
             Self::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "Receive body exceeds 8 GiB"),
-            Self::Cancelled => (
+            Self::Cancelled | Self::Staging(crate::local_disk::Error::Cancelled) => (
                 StatusCode::REQUEST_TIMEOUT,
                 "Receive cancelled or timed out",
             ),
@@ -281,7 +332,7 @@ impl IntoResponse for ReceiveError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Receive could not finish; check remote refs before retrying and inspect server logs",
             ),
-        };
+        });
         (
             status,
             [("content-type", "text/plain; charset=utf-8")],
@@ -412,7 +463,7 @@ pub(crate) async fn receive(
                     .ok_or(ReceiveError::TooLarge)?;
                 if size > reserved {
                     reserved = size
-                        .saturating_add(RECEIVE_RESERVATION_GROWTH)
+                        .saturating_add(crate::local_disk::RESERVATION_GROWTH)
                         .min(MAX_BODY);
                     worker_server.local_staging.resize(&directory, reserved)?;
                 }
@@ -421,16 +472,7 @@ pub(crate) async fn receive(
             }
             file.flush().await?;
             drop(file);
-            let final_reservation = if internal_import {
-                size.saturating_mul(2)
-                    .saturating_add(IMPORT_RECEIVE_RESERVE_MARGIN)
-                    .clamp(IMPORT_RECEIVE_INITIAL_RESERVATION, MAX_BODY)
-            } else {
-                MAX_BODY
-            };
-            worker_server
-                .local_staging
-                .resize(&directory, final_reservation)?;
+            worker_server.local_staging.resize(&directory, size)?;
             publish::run(
                 &worker_server,
                 &principal,

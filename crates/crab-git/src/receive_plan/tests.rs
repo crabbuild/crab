@@ -1,5 +1,5 @@
 use super::*;
-use crate::incoming_pack::{ReceiveLimits, object_id, quarantine};
+use crate::incoming_pack::{ReceiveLimits, ScratchSpace, object_id, quarantine};
 use flate2::{Compression, write::ZlibEncoder};
 use gix_pack::data::entry::Header;
 use sha1::{Digest, Sha1};
@@ -59,7 +59,7 @@ fn incoming(objects: &[(Kind, Vec<u8>)]) -> IncomingPack {
     pack.extend_from_slice(&hash);
     quarantine(
         &pack[..],
-        &std::env::temp_dir(),
+        &ScratchSpace::new(&std::env::temp_dir(), 64_u64 * 1024 * 1024),
         ReceiveLimits {
             max_pack_bytes: 16 * 1024 * 1024,
             max_objects: 1000,

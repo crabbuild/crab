@@ -37,6 +37,90 @@ fn no_base(
 }
 
 #[test]
+fn prepared_sidecars_share_quarantine_admission_and_failed_growth_releases_only_the_output() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    };
+
+    struct Admission {
+        held: Arc<AtomicU64>,
+        capacity: Arc<AtomicU64>,
+    }
+    impl ScratchAdmission for Admission {
+        fn resize(&self, bytes: u64) -> std::result::Result<(), ScratchError> {
+            let capacity = self.capacity.load(Ordering::Relaxed);
+            capacity.resize(bytes)?;
+            self.held.store(bytes, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let held = Arc::new(AtomicU64::new(0));
+    let capacity = Arc::new(AtomicU64::new(u64::MAX));
+    let space = ScratchSpace::new(
+        root.path(),
+        Admission {
+            held: Arc::clone(&held),
+            capacity: Arc::clone(&capacity),
+        },
+    );
+    let wire = pack(&[(Header::Blob, vec![b'x'; 64 * 1024])]);
+    let incoming = quarantine(Cursor::new(wire), &space, limits(), || false, no_base).unwrap();
+    let quarantine_bytes = held.load(Ordering::Relaxed);
+    let cancelled = AtomicBool::new(false);
+    let prepared = incoming
+        .prepare(root.path(), limits().max_pack_bytes, &cancelled)
+        .unwrap()
+        .unwrap();
+    let prepared_bytes = [
+        prepared.pack_path(),
+        prepared.index_path(),
+        prepared.reverse_path(),
+        prepared.kinds_path(),
+    ]
+    .iter()
+    .map(|path| path.metadata().unwrap().len())
+    .sum::<u64>();
+    assert!(held.load(Ordering::Relaxed) >= quarantine_bytes + prepared_bytes);
+    let output_size = prepared.size();
+    drop(prepared);
+    assert_eq!(held.load(Ordering::Relaxed), quarantine_bytes);
+
+    // The pack itself fits. Index admission must fail before writing sidecars,
+    // while the verified quarantine and its reservation remain usable.
+    capacity.store(quarantine_bytes + output_size, Ordering::Relaxed);
+    let error = incoming
+        .prepare(root.path(), limits().max_pack_bytes, &cancelled)
+        .unwrap_err();
+    assert!(
+        matches!(error, PreparePackError::Io(ref source) if matches!(
+            source.get_ref().and_then(|error| error.downcast_ref::<ScratchError>()),
+            Some(ScratchError::Capacity { .. })
+        ))
+    );
+    assert_eq!(held.load(Ordering::Relaxed), quarantine_bytes);
+    assert_eq!(root.path().read_dir().unwrap().count(), 1);
+    assert_eq!(
+        incoming
+            .read_object(&object_id(Kind::Blob, &vec![b'x'; 64 * 1024]))
+            .unwrap()
+            .unwrap()
+            .data
+            .len(),
+        64 * 1024
+    );
+    cancelled.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        incoming.prepare(root.path(), limits().max_pack_bytes, &cancelled),
+        Err(PreparePackError::Cancelled)
+    ));
+    drop(incoming);
+    assert_eq!(held.load(Ordering::Relaxed), 0);
+    assert_eq!(root.path().read_dir().unwrap().count(), 0);
+}
+
+#[test]
 fn generated_objects_spool_once_with_identity_and_resource_bounds() {
     let temp = tempfile::tempdir().unwrap();
     let generated = IncomingPack::from_generated_objects(
@@ -93,7 +177,7 @@ fn resolves_forward_ref_deltas_and_cleans_private_spools() {
     ]);
     let accepted = quarantine(
         Cursor::new(bytes),
-        temp.path(),
+        &ScratchSpace::new(temp.path(), limits()),
         limits(),
         || false,
         |_| panic!("in-pack base should not be fetched"),
@@ -120,7 +204,7 @@ fn resolves_thin_delta_and_verifies_external_base_identity() {
     )]);
     let accepted = quarantine(
         Cursor::new(&bytes),
-        temp.path(),
+        &ScratchSpace::new(temp.path(), limits()),
         limits(),
         || false,
         |requested| {
@@ -143,7 +227,7 @@ fn resolves_thin_delta_and_verifies_external_base_identity() {
     assert!(matches!(
         quarantine(
             Cursor::new(bytes),
-            temp.path(),
+            &ScratchSpace::new(temp.path(), limits()),
             limits(),
             || false,
             |_| Ok(Some(BaseObject {
@@ -182,7 +266,14 @@ fn rejects_corrupt_truncated_extra_and_oversized_pack_data() {
         ("entry size", wrong_size),
     ] {
         assert!(
-            quarantine(Cursor::new(bytes), temp.path(), limits(), || false, no_base).is_err(),
+            quarantine(
+                Cursor::new(bytes),
+                &ScratchSpace::new(temp.path(), limits()),
+                limits(),
+                || false,
+                no_base
+            )
+            .is_err(),
             "{name}"
         );
         assert_eq!(
@@ -212,7 +303,7 @@ fn rejects_corrupt_truncated_extra_and_oversized_pack_data() {
         assert!(matches!(
             quarantine(
                 Cursor::new(&valid),
-                temp.path(),
+                &ScratchSpace::new(temp.path(), limits()),
                 constrained,
                 || false,
                 no_base
@@ -233,7 +324,7 @@ fn rejects_missing_bases_invalid_offsets_depth_and_cancelled_intake() {
     assert!(matches!(
         quarantine(
             Cursor::new(&bytes),
-            temp.path(),
+            &ScratchSpace::new(temp.path(), limits()),
             limits(),
             || false,
             no_base
@@ -243,7 +334,7 @@ fn rejects_missing_bases_invalid_offsets_depth_and_cancelled_intake() {
     assert!(matches!(
         quarantine(
             Cursor::new(&bytes),
-            temp.path(),
+            &ScratchSpace::new(temp.path(), limits()),
             ReceiveLimits {
                 max_delta_depth: 0,
                 ..limits()
@@ -263,7 +354,7 @@ fn rejects_missing_bases_invalid_offsets_depth_and_cancelled_intake() {
     assert!(
         quarantine(
             Cursor::new(invalid),
-            temp.path(),
+            &ScratchSpace::new(temp.path(), limits()),
             limits(),
             || false,
             no_base
@@ -271,7 +362,13 @@ fn rejects_missing_bases_invalid_offsets_depth_and_cancelled_intake() {
         .is_err()
     );
     assert!(matches!(
-        quarantine(Cursor::new(bytes), temp.path(), limits(), || true, no_base),
+        quarantine(
+            Cursor::new(bytes),
+            &ScratchSpace::new(temp.path(), limits()),
+            limits(),
+            || true,
+            no_base
+        ),
         Err(IncomingPackError::Cancelled)
     ));
     assert_eq!(temp.path().read_dir().unwrap().count(), 0);
@@ -286,7 +383,7 @@ fn rejects_overlong_headers_and_cancellation_after_base_lookup() {
     assert!(
         quarantine(
             Cursor::new(checksum(bytes)),
-            temp.path(),
+            &ScratchSpace::new(temp.path(), limits()),
             limits(),
             || false,
             no_base
@@ -302,7 +399,7 @@ fn rejects_overlong_headers_and_cancellation_after_base_lookup() {
     )]);
     let result = quarantine(
         Cursor::new(bytes),
-        temp.path(),
+        &ScratchSpace::new(temp.path(), limits()),
         limits(),
         || cancel.get(),
         |_| {
@@ -328,7 +425,7 @@ fn preserves_base_lookup_source_errors() {
     )]);
     let result = quarantine(
         Cursor::new(bytes),
-        temp.path(),
+        &ScratchSpace::new(temp.path(), limits()),
         limits(),
         || false,
         |_| {
@@ -404,7 +501,7 @@ fn native_git_full_and_thin_packs_reconstruct_byte_identical_objects() {
         let mut lookups = 0;
         let accepted = quarantine(
             Cursor::new(bytes),
-            temp.path(),
+            &ScratchSpace::new(temp.path(), limits()),
             limits(),
             || false,
             |oid| {
@@ -712,7 +809,7 @@ fn prepared_artifacts_are_deterministic_and_empty_packs_need_no_artifacts() {
     ];
     let first = quarantine(
         Cursor::new(pack(&entries)),
-        temp.path(),
+        &ScratchSpace::new(temp.path(), limits()),
         limits(),
         || false,
         no_base,
@@ -723,7 +820,7 @@ fn prepared_artifacts_are_deterministic_and_empty_packs_need_no_artifacts() {
     reversed.push(entries[0].clone());
     let second = quarantine(
         Cursor::new(pack(&reversed)),
-        temp.path(),
+        &ScratchSpace::new(temp.path(), limits()),
         limits(),
         || false,
         no_base,
@@ -740,7 +837,7 @@ fn prepared_artifacts_are_deterministic_and_empty_packs_need_no_artifacts() {
     verify_prepared_with_native_git(&first, temp.path());
     let empty = quarantine(
         Cursor::new(pack(&[])),
-        temp.path(),
+        &ScratchSpace::new(temp.path(), limits()),
         limits(),
         || false,
         no_base,
@@ -755,7 +852,7 @@ fn preparation_bounds_and_corruption_fail_without_retaining_artifacts() {
     let temp = tempfile::tempdir().unwrap();
     let accepted = quarantine(
         Cursor::new(pack(&[(Header::Blob, b"test data".to_vec())])),
-        temp.path(),
+        &ScratchSpace::new(temp.path(), limits()),
         limits(),
         || false,
         no_base,

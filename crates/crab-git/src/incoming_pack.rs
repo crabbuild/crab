@@ -16,7 +16,10 @@ use sha1::{Digest, Sha1};
 use crate::delta;
 
 mod prepared;
+mod scratch;
 pub use prepared::{ExternalDeltaBase, PreparePackError, PreparedPack};
+pub use scratch::{ScratchAdmission, ScratchError, ScratchSpace};
+use scratch::{ScratchDirectory, ScratchFile};
 
 type Result<T> = std::result::Result<T, IncomingPackError>;
 
@@ -29,6 +32,24 @@ pub struct ReceiveLimits {
     /// Includes inflated delta programs, reconstructed results and external bases.
     pub max_inflated_bytes: u64,
     pub max_delta_depth: u32,
+}
+
+impl ScratchAdmission for ReceiveLimits {
+    fn resize(&self, bytes: u64) -> std::result::Result<(), ScratchError> {
+        // Generated and standalone inputs have finite mechanics bounds. Hosts
+        // with a shared disk ledger supply that admission instead.
+        let objects = u64::from(self.max_objects);
+        let sidecars = crate::max_pack_index_size(objects)
+            .and_then(|index| index.checked_add(crate::pack_reverse_index_size(objects)?))
+            .and_then(|indexes| indexes.checked_add(crate::max_pack_kind_metadata_size(objects)?))
+            .ok_or(ScratchError::Overflow)?;
+        let capacity = self
+            .max_pack_bytes
+            .saturating_mul(2)
+            .saturating_add(self.max_inflated_bytes.saturating_mul(2))
+            .saturating_add(sidecars);
+        capacity.resize(bytes)
+    }
 }
 
 /// A fully reconstructed Git object returned by an authorized base lookup.
@@ -79,16 +100,16 @@ pub struct IncomingObject {
 /// for object syntax, graph connectivity and exact ref checks before publication;
 /// pointer payloads still need storage proof. No canonical repository data is written.
 pub struct IncomingPack {
-    directory: tempfile::TempDir,
+    directory: ScratchDirectory,
     objects: BTreeMap<ObjectId, IncomingObject>,
     received_objects: u32,
 }
 
 impl IncomingPack {
     /// Create an empty quarantine for a receive request containing only deletions.
-    pub fn empty(directory: &Path) -> Result<Self> {
+    pub fn empty(space: &ScratchSpace) -> Result<Self> {
         Ok(Self {
-            directory: tempfile::tempdir_in(directory)?,
+            directory: space.directory(space.path(), "crab-empty-")?,
             objects: BTreeMap::new(),
             received_objects: 0,
         })
@@ -110,14 +131,9 @@ impl IncomingPack {
     where
         C: Fn() -> bool,
     {
-        let directory = tempfile::Builder::new()
-            .prefix("crab-generated-")
-            .tempdir_in(directory)?;
-        let mut decoded = File::options()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(directory.path().join("objects"))?;
+        let space = ScratchSpace::new(directory, limits);
+        let directory = space.directory(space.path(), "crab-generated-")?;
+        let mut decoded = directory.create("objects")?;
         let mut stored = BTreeMap::new();
         let mut decoded_bytes = 0_u64;
         for (kind, data) in objects {
@@ -207,8 +223,8 @@ struct Resolved {
 }
 struct Quarantine<C> {
     entries: Vec<Entry>,
-    inflated: File,
-    decoded: File,
+    inflated: ScratchFile,
+    decoded: ScratchFile,
     objects: BTreeMap<ObjectId, IncomingObject>,
     known: HashMap<Base, Resolved>,
     waiting: HashMap<Base, Vec<usize>>,
@@ -220,7 +236,7 @@ struct Quarantine<C> {
 
 /// Copies and verifies one complete pack, then resolves its delta graph in quarantine.
 ///
-/// `directory` must already exist on the caller's temporary volume. `lookup` is
+/// The scratch space must exist on the caller's temporary volume. `lookup` is
 /// called only for unresolved ref-delta bases after in-pack objects are exhausted;
 /// it must enforce repository visibility and its own I/O and allocation bounds.
 /// The returned bytes are independently checked against the requested Git OID.
@@ -228,7 +244,7 @@ struct Quarantine<C> {
 /// delta instructions. The reader and lookup must provide their own I/O deadlines.
 pub fn quarantine<R, C, F>(
     reader: R,
-    directory: &Path,
+    space: &ScratchSpace,
     limits: ReceiveLimits,
     cancelled: C,
     mut lookup: F,
@@ -241,13 +257,11 @@ where
     )
         -> std::result::Result<Option<BaseObject>, Box<dyn std::error::Error + Send + Sync>>,
 {
-    let directory = tempfile::Builder::new()
-        .prefix("crab-receive-")
-        .tempdir_in(directory)?;
-    let mut pack = File::create_new(directory.path().join("incoming.pack"))?;
+    let directory = space.directory(space.path(), "crab-receive-")?;
+    let mut pack = directory.create("incoming.pack")?;
     let size = copy_pack(reader, &mut pack, limits.max_pack_bytes, &cancelled)?;
     drop(pack);
-    pack = File::open(directory.path().join("incoming.pack"))?;
+    let mut pack = File::open(directory.path().join("incoming.pack"))?;
     verify_checksum(&mut pack, size, &cancelled)?;
     pack.rewind()?;
     let mut header = [0; 12];
@@ -261,16 +275,8 @@ where
     }
     let mut state = Quarantine {
         entries: Vec::new(),
-        inflated: File::options()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(directory.path().join("inflated"))?,
-        decoded: File::options()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(directory.path().join("objects"))?,
+        inflated: directory.create("inflated")?,
+        decoded: directory.create("objects")?,
         objects: BTreeMap::new(),
         known: HashMap::new(),
         waiting: HashMap::new(),
@@ -510,7 +516,7 @@ fn check(cancelled: &impl Fn() -> bool) -> Result<()> {
         Ok(())
     }
 }
-fn read_region(file: &mut File, offset: u64, size: usize) -> Result<Vec<u8>> {
+fn read_region(file: &mut (impl Read + Seek), offset: u64, size: usize) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     data.try_reserve_exact(size)?;
     data.resize(size, 0);
@@ -526,7 +532,7 @@ pub(crate) fn object_id(kind: Kind, data: &[u8]) -> ObjectId {
 }
 fn copy_pack(
     mut input: impl Read,
-    output: &mut File,
+    output: &mut impl Write,
     maximum: u64,
     cancelled: &impl Fn() -> bool,
 ) -> Result<u64> {
@@ -570,7 +576,7 @@ fn verify_checksum(file: &mut File, size: u64, cancelled: &impl Fn() -> bool) ->
 }
 fn copy_inflated(
     input: &mut impl BufRead,
-    output: &mut File,
+    output: &mut impl Write,
     expected: usize,
     cancelled: &impl Fn() -> bool,
 ) -> Result<u64> {

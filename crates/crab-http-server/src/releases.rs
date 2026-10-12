@@ -40,13 +40,7 @@ fn transfer_error(error: crate::transfer_admission::Error) -> Error {
 }
 
 fn staging_error(error: crate::local_disk::Error) -> Error {
-    match error {
-        crate::local_disk::Error::TooLarge => Error::ReleaseAssetTooLarge,
-        crate::local_disk::Error::Busy => Error::ReleaseBusy,
-        crate::local_disk::Error::Cancelled => Error::ReleaseAssetCancelled,
-        crate::local_disk::Error::Io(error) => Error::ReleaseAssetIo(error),
-        crate::local_disk::Error::Worker(error) => Error::ReleaseAssetWorker(error),
-    }
+    Error::ReleaseStaging(error)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
