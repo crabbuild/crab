@@ -146,40 +146,42 @@ pub(crate) fn source_identity(
 }
 
 pub(crate) struct CachedSource {
-    checked: Instant,
     verified: Instant,
-    state_digest: String,
-    browse_indexes: Option<crab_metadata::capsule_protocol::BrowseIndexes>,
-    source: projection::SourceIdentity,
+    source_token: String,
 }
 
 pub(crate) async fn current_source(
     repository: &crate::server::Repository,
+    server: &crate::server::Server,
     cancellation: &CancellationToken,
 ) -> crate::Result<projection::SourceIdentity> {
+    let opened = repository.open(server, cancellation).await?;
+    validate_source(repository, &opened.source, cancellation).await?;
+    Ok(opened.source)
+}
+
+pub(crate) async fn validate_source(
+    repository: &crate::server::Repository,
+    source: &projection::SourceIdentity,
+    cancellation: &CancellationToken,
+) -> crate::Result<()> {
     let mut cached = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
         cached = repository.projection_source.lock() => cached,
     };
-    if let Some(previous) = cached.as_mut()
-        && previous.verified.elapsed() < crate::integrity::SCRUB_INTERVAL
-    {
-        if previous.checked.elapsed() < crate::server::BROWSE_PROBE_INTERVAL {
-            return Ok(previous.source.clone());
-        }
-        let (activity, indexes) = repository.browse_state(cancellation).await?;
-        if activity.state_digest() == previous.state_digest && indexes == previous.browse_indexes {
-            previous.checked = Instant::now();
-            return Ok(previous.source.clone());
-        }
+    // Foreground attribution and background probes share proof for the captured
+    // source; a second open could validate a newer snapshot than the reader.
+    if cached.as_ref().is_some_and(|previous| {
+        previous.source_token == source.source_token
+            && previous.verified.elapsed() < crate::integrity::SCRUB_INTERVAL
+    }) {
+        return Ok(());
     }
-    let verified = tokio::select! {
+    tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
-        verified = async {
-            let view = open_view(&repository.layout).await?;
-            let source = source_identity(&view.git_snapshot()?)?;
+        result = async {
             if let Some(hash) = source.path_state_hash.as_deref() {
                 crab_metadata::path_state::load_path_state_descriptor(
                     &repository.store,
@@ -190,18 +192,14 @@ pub(crate) async fn current_source(
                 .await
                 .map_err(path_state_error)?;
             }
-            Ok::<_, crate::Error>(CachedSource {
-                checked: Instant::now(),
-                verified: Instant::now(),
-                state_digest: view.state_digest(),
-                browse_indexes: view.browse_indexes().cloned(),
-                source,
-            })
-        } => verified?,
-    };
-    let source = verified.source.clone();
-    *cached = Some(verified);
-    Ok(source)
+            Ok::<_, crate::Error>(())
+        } => result?,
+    }
+    *cached = Some(CachedSource {
+        verified: Instant::now(),
+        source_token: source.source_token.clone(),
+    });
+    Ok(())
 }
 
 fn path_state_error(error: crab_metadata::error::MetadataError) -> crate::Error {
@@ -902,7 +900,9 @@ pub(crate) async fn open_view(
     let root = crab_metadata::capsule_protocol::load_root(layout)
         .await
         .map_err(metadata_error)?;
-    let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+    // Origin-backed readers need complete visibility controls, while Git pack
+    // bodies remain in their authenticated sources for bounded range reads.
+    let view = crab_read::capsule_protocol::open_view_from_root_for_checkpoint(
         layout,
         root,
         crab_read::capsule_protocol::CapsuleReadLimits {

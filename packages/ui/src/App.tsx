@@ -188,6 +188,7 @@ export function App() {
       delete root.dataset.themeChanging;
     };
   }, [codeTheme, resolved]);
+  const url = new URL(location, window.location.origin);
   const session = useRequest<Session>("/api/session");
   const [signingOut, setSigningOut] = useState(false);
   const [sessionError, setSessionError] = useState<string>();
@@ -196,9 +197,21 @@ export function App() {
     window.addEventListener("crab-session-expired", expired);
     return () => window.removeEventListener("crab-session-expired", expired);
   });
+  const pathParts = url.pathname.split("/");
+  const [gitAccessOpen, setGitAccessOpen] = useState(false);
   const catalog = useRequest<{ repositories: Repository[] }>(
-    session.data?.authenticated ? "/api/repos" : null,
+    session.data?.authenticated && (pathParts.length !== 3 || gitAccessOpen)
+      ? "/api/repos"
+      : null,
   );
+  const repositoryCatalog = useRequest<{ repositories: Repository[] }>(
+    session.data?.authenticated && pathParts.length === 3
+      ? `/api/repos?${new URLSearchParams({ owner: pathParts[1], name: pathParts[2] })}`
+      : null,
+  );
+  // A repository page must not wait for settings reads from unrelated Cells.
+  // Load the full catalog only for navigation or an open Git access selector.
+  const pageCatalog = pathParts.length === 3 ? repositoryCatalog : catalog;
   const [importedRepository, setImportedRepository] = useState<{
     owner: string;
     name: string;
@@ -222,8 +235,7 @@ export function App() {
       setSigningOut(false);
     }
   }
-  const url = new URL(location, window.location.origin);
-  const repo = catalog.data?.repositories.find(
+  const repo = pageCatalog.data?.repositories.find(
     (repo) => `/${repo.owner}/${repo.name}` === url.pathname,
   );
   useEffect(() => {
@@ -277,6 +289,7 @@ export function App() {
               <GitAccess
                 session={session.data}
                 repositories={catalog.data?.repositories ?? []}
+                onOpenChange={setGitAccessOpen}
               />
               <span title={session.data.user.subject}>
                 {session.data.user.name}
@@ -337,7 +350,7 @@ export function App() {
               </Button>
             </div>
           ) : (
-            <Result state={catalog} showTiming={false}>
+            <Result state={pageCatalog} showTiming={false}>
               {(data) =>
                 url.pathname === "/" ? (
                   <div className="catalog">
@@ -405,7 +418,10 @@ export function App() {
                     codeThemes={codeThemeChoices[codeTheme].themes}
                     csrf={session.data?.csrf ?? ""}
                     identity={session.data?.user ?? null}
-                    onRepositoryChanged={catalog.retry}
+                    onRepositoryChanged={() => {
+                      catalog.retry();
+                      repositoryCatalog.retry();
+                    }}
                   />
                 ) : (
                   <div className="notice">

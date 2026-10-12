@@ -187,10 +187,12 @@ async fn graph_publication_survives_failed_attribution_and_reader_restart() {
     // same-state complete publication must then replace its cached partial view.
     let before = repo.open(&server, &CancellationToken::new()).await.unwrap();
     let operation = before
+        .git
         .operation(OperationKind::Commit, &CancellationToken::new())
         .await
         .unwrap();
     let historical = before
+        .git
         .snapshot(
             &crab_remote_git::Revision::Commit(
                 gix_hash::ObjectId::from_hex(history.oids[0].as_bytes()).unwrap(),
@@ -211,14 +213,15 @@ async fn graph_publication_survives_failed_attribution_and_reader_restart() {
     )
     .await
     .unwrap();
-    repo.pinned.lock().await.as_mut().unwrap().checked = Instant::now() - Duration::from_secs(3);
+    repo.pinned.lock().await.as_mut().unwrap().checked =
+        Some(Instant::now() - Duration::from_secs(3));
     let after = repo.open(&server, &CancellationToken::new()).await.unwrap();
     close(&server).await;
     assert_eq!(
         (
-            before.commit_graph_available(),
-            before.path_state_available(),
-            after.path_state_available()
+            before.git.commit_graph_available(),
+            before.git.path_state_available(),
+            after.git.path_state_available()
         ),
         (true, false, true)
     );
@@ -616,7 +619,7 @@ async fn unchanged_projection_probe_reuses_its_verified_descriptor() {
         )
         .await
         .unwrap();
-        let source = crate::projection::current_source(&repo, &server.cancellation)
+        let source = crate::projection::current_source(&repo, &server, &server.cancellation)
             .await
             .unwrap();
         let descriptor = repo
@@ -625,7 +628,9 @@ async fn unchanged_projection_probe_reuses_its_verified_descriptor() {
         counting.block_body_reads_for(&descriptor);
         counting.reset();
         tokio::time::sleep(Duration::from_millis(2100)).await;
-        let repeated = crate::projection::current_source(&repo, &server.cancellation).await;
+        repo.open(&server, &server.cancellation).await.unwrap();
+        let repeated =
+            crate::projection::current_source(&repo, &server, &server.cancellation).await;
         let body_requests = counting.body_requests();
         let list_requests = counting.list_requests();
         close(&server).await;
@@ -641,12 +646,50 @@ async fn unchanged_projection_probe_reuses_its_verified_descriptor() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn source_probe_cancels_a_pending_cold_control_read() {
+    let server = fixture_without_cells().await;
+    let counting = {
+        let mut current = server.repositories.current.write().unwrap();
+        let repo = Arc::get_mut(current.by_name.values_mut().next().unwrap()).unwrap();
+        let counting = Arc::new(BrowseFaultStore::new(Arc::clone(repo.store.inner())));
+        repo.store = Store::new(counting.clone());
+        repo.layout = StoreLayout::new(repo.store.clone(), "maintenance".into());
+        counting
+    };
+    let repo = repository(&server);
+    let started = counting.park_body_reads_for(&repo.layout.capsule_root_path());
+    let cancellation = CancellationToken::new();
+    let mut worker = tokio::spawn({
+        let server = Arc::clone(&server);
+        let cancellation = cancellation.clone();
+        async move { crate::projection::current_source(&repo, &server, &cancellation).await }
+    });
+    tokio::time::timeout(Duration::from_secs(30), started.notified())
+        .await
+        .unwrap();
+    cancellation.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(2), &mut worker).await;
+    if result.is_err() {
+        worker.abort();
+        let _ = worker.await;
+    }
+    close(&server).await;
+    assert!(matches!(
+        result,
+        Ok(Ok(Err(crate::Error::Remote(
+            crab_remote_git::Error::Cancelled
+        ))))
+    ));
+}
+
 #[derive(Debug)]
 struct BrowseFaultStore {
     inner: Arc<dyn object_store::ObjectStore>,
     body_reads: AtomicUsize,
     lists: AtomicUsize,
     blocked: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    parked: std::sync::Mutex<Option<(String, Arc<tokio::sync::Notify>)>>,
 }
 
 impl BrowseFaultStore {
@@ -656,6 +699,7 @@ impl BrowseFaultStore {
             body_reads: AtomicUsize::new(0),
             lists: AtomicUsize::new(0),
             blocked: Default::default(),
+            parked: Default::default(),
         }
     }
 
@@ -665,6 +709,12 @@ impl BrowseFaultStore {
 
     fn unblock_body_reads_for(&self, path: &ObjectPath) {
         self.blocked.lock().unwrap().remove(path.as_ref());
+    }
+
+    fn park_body_reads_for(&self, path: &ObjectPath) -> Arc<tokio::sync::Notify> {
+        let started = Arc::new(tokio::sync::Notify::new());
+        *self.parked.lock().unwrap() = Some((path.to_string(), Arc::clone(&started)));
+        started
     }
 
     fn reset(&self) {
@@ -720,6 +770,17 @@ impl object_store::ObjectStore for BrowseFaultStore {
                     store: "browse-fault-store",
                     source: Box::new(std::io::Error::other("immutable body read blocked")),
                 });
+            }
+            let parked = self
+                .parked
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|(location, _)| location == path.as_ref())
+                .map(|(_, started)| Arc::clone(started));
+            if let Some(started) = parked {
+                started.notify_one();
+                std::future::pending::<()>().await;
             }
         }
         self.inner.get_opts(path, options).await

@@ -20,9 +20,11 @@ interface GitToken {
 export function GitAccess({
   session,
   repositories,
+  onOpenChange,
 }: {
   session: Session;
   repositories: Repository[];
+  onOpenChange: (open: boolean) => void;
 }) {
   const [token, setToken] = useState<GitToken>();
   const [selected, setSelected] = useState("");
@@ -73,7 +75,10 @@ export function GitAccess({
     }
   }
   return (
-    <details className="git-access">
+    <details
+      className="git-access"
+      onToggle={(event) => onOpenChange(event.currentTarget.open)}
+    >
       <summary>Git access</summary>
       <div className="panel git-popover">
         <h2>Git access token</h2>

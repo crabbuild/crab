@@ -265,25 +265,20 @@ pub(crate) async fn read(
             None
         };
         let timer = Instant::now();
-        let repository = entry.open(&server, &cancellation).await;
+        let opened = entry.open(&server, &cancellation).await;
         open_ms = timer.elapsed().as_secs_f64() * 1000.0;
-        let repository = repository?;
+        let opened = opened?;
+        let repository = &opened.git;
         generation = Some(repository.generation());
         let projection_source = if matches!(action, Action::TreeAttribution) {
             if let Some(router) = server.repository_cells() {
-                let source = match projection::current_source(&entry, &cancellation).await {
-                    Ok(source) => source,
-                    Err(error @ crate::Error::Remote(Error::Corrupt { .. })) => {
-                        entry
-                            .schedule_maintenance(&server, MaintenanceTrigger::Repair)
-                            .await?;
-                        return Err(ApiError::Service(error));
-                    }
-                    Err(error) => return Err(error.into()),
-                };
+                // Attribution must identify the same immutable snapshot as the
+                // directory reader, even if refs advance during this request.
+                let source = &opened.source;
+                projection::validate_source(&entry, source, &cancellation).await?;
                 let state = projection::state(&router, entry.id).await?;
                 let attribution_source =
-                    attribution_source(&source, &state, repository.path_state_available());
+                    attribution_source(source, &state, repository.path_state_available());
                 let ready = matches!(attribution_source, AttributionSource::Projected(_));
                 let lag_generations = state
                     .generation
@@ -331,7 +326,7 @@ pub(crate) async fn read(
         };
         let payload = execute(
             &server,
-            &repository,
+            repository,
             entry.id,
             action,
             &params,
@@ -363,7 +358,9 @@ pub(crate) async fn read(
         &result,
         Err(ApiError::Remote(Error::Corrupt {
             stage: CorruptionStage::PathState,
-        })) | Err(ApiError::Remote(Error::PathStateIndexing { .. }))
+        })) | Err(ApiError::Service(crate::Error::Remote(Error::Corrupt {
+            stage: CorruptionStage::PathState,
+        }))) | Err(ApiError::Remote(Error::PathStateIndexing { .. }))
             | Err(ApiError::Service(crate::Error::BrowseIndexes(_)))
     ) && let Err(error) = entry
         .schedule_maintenance(&server, MaintenanceTrigger::Repair)

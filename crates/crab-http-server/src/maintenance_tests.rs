@@ -32,7 +32,10 @@ impl cellule_runtime::peer::PeerRoundTrip for UnavailableRoundTrip {
 }
 
 pub(crate) async fn fixture_without_cells() -> Arc<Server> {
-    let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+    fixture_with_store(Store::new(Arc::new(object_store::memory::InMemory::new()))).await
+}
+
+async fn fixture_with_store(store: Store) -> Arc<Server> {
     let admission_store = store.clone();
     let layout = StoreLayout::new(store.clone(), "maintenance".into());
     crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
@@ -237,7 +240,8 @@ async fn unchanged_browse_refresh_reads_only_mutable_control_metadata() {
     )
     .await;
     repo.open(&server, &CancellationToken::new()).await.unwrap();
-    repo.pinned.lock().await.as_mut().unwrap().checked = Instant::now() - Duration::from_secs(3);
+    repo.pinned.lock().await.as_mut().unwrap().checked =
+        Some(Instant::now() - Duration::from_secs(3));
     reads.store(0, Ordering::Relaxed);
 
     repo.open(&server, &CancellationToken::new()).await.unwrap();
@@ -274,12 +278,13 @@ async fn browse_refresh_observes_ref_publication_without_a_root_change() {
             .etag(),
         &root_etag
     );
-    repo.pinned.lock().await.as_mut().unwrap().checked = Instant::now() - Duration::from_secs(3);
+    repo.pinned.lock().await.as_mut().unwrap().checked =
+        Some(Instant::now() - Duration::from_secs(3));
 
     let current = repo.open(&server, &CancellationToken::new()).await.unwrap();
 
     assert_eq!(
-        current.refs().head.as_ref().unwrap().target.to_string(),
+        current.git.refs().head.as_ref().unwrap().target.to_string(),
         history.oids[1]
     );
     close(&server).await;
@@ -309,7 +314,8 @@ async fn browse_refresh_does_not_hide_new_invalid_indexes_behind_cached_state() 
         )
         .await
         .unwrap();
-    repo.pinned.lock().await.as_mut().unwrap().checked = Instant::now() - Duration::from_secs(3);
+    repo.pinned.lock().await.as_mut().unwrap().checked =
+        Some(Instant::now() - Duration::from_secs(3));
 
     let result = repo.open(&server, &CancellationToken::new()).await;
 
@@ -415,11 +421,12 @@ async fn browse_refresh_attaches_new_indexes_without_a_ref_change() {
     )
     .await
     .unwrap();
-    repo.pinned.lock().await.as_mut().unwrap().checked = Instant::now() - Duration::from_secs(3);
+    repo.pinned.lock().await.as_mut().unwrap().checked =
+        Some(Instant::now() - Duration::from_secs(3));
 
     let current = repo.open(&server, &CancellationToken::new()).await.unwrap();
 
-    assert!(current.commit_graph_available());
+    assert!(current.git.commit_graph_available());
     close(&server).await;
 }
 
@@ -911,4 +918,164 @@ async fn foreground_checkpoint_preserves_headroom_before_the_hard_bound() {
     assert_eq!(after.refs().get("refs/heads/main"), Some(&result.1));
     assert_eq!(after.ref_capsule_count("refs/heads/main"), 1);
     close(&server).await;
+}
+
+#[derive(Default)]
+struct ReadBytes(std::sync::atomic::AtomicU64);
+
+impl crab_storage::StorageObserver for ReadBytes {
+    fn started(&self, _: crab_storage::StorageOperation) {}
+
+    fn finished(&self, observation: crab_storage::StorageObservation) {
+        self.0.fetch_add(observation.bytes_read, Ordering::Relaxed);
+    }
+}
+
+#[tokio::test]
+async fn browse_revalidation_keeps_unchanged_capsule_payloads_cached() {
+    let observed = Arc::new(ReadBytes::default());
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_storage_observer(observed.clone());
+    let server = fixture_with_store(store).await;
+    let repo = repository(&server);
+    let body = (0_u32..32 * 1024)
+        .map(|index| blake3::hash(&index.to_le_bytes()).as_bytes()[0])
+        .collect::<Vec<_>>();
+    let history = crate::test_git::history_with_blob(&body);
+    let root = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    publish_next(
+        &repo,
+        root,
+        None,
+        history.oids[0].clone(),
+        Some(history.pack),
+    )
+    .await;
+    repo.open(&server, &server.cancellation).await.unwrap();
+    repo.pinned.lock().await.as_mut().unwrap().checked =
+        Some(Instant::now() - Duration::from_secs(3));
+    observed.0.store(0, Ordering::Relaxed);
+
+    repo.open(&server, &server.cancellation).await.unwrap();
+    let revalidated_bytes = observed.0.load(Ordering::Relaxed);
+    repo.invalidate().await;
+    observed.0.store(0, Ordering::Relaxed);
+    repo.open(&server, &server.cancellation).await.unwrap();
+    let invalidated_bytes = observed.0.load(Ordering::Relaxed);
+    close(&server).await;
+    assert!(
+        revalidated_bytes < body.len() as u64 && invalidated_bytes < body.len() as u64,
+        "unchanged open reread {revalidated_bytes} bytes after expiry and {invalidated_bytes} after invalidation"
+    );
+}
+
+#[tokio::test]
+async fn browse_open_leaves_git_pack_bodies_in_the_origin() {
+    let observed = Arc::new(ReadBytes::default());
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_storage_observer(observed.clone());
+    let server = fixture_with_store(store).await;
+    let repo = repository(&server);
+    let body = (0_u32..32 * 1024)
+        .map(|index| blake3::hash(&index.to_le_bytes()).as_bytes()[0])
+        .collect::<Vec<_>>();
+    let history = crate::test_git::history_with_blob(&body);
+    let root = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    publish_next(
+        &repo,
+        root,
+        None,
+        history.oids[0].clone(),
+        Some(history.pack),
+    )
+    .await;
+    observed.0.store(0, Ordering::Relaxed);
+
+    let opened = repo.open(&server, &server.cancellation).await.unwrap();
+    let open_bytes = observed.0.load(Ordering::Relaxed);
+    let operation = opened
+        .git
+        .operation(
+            crab_remote_git::OperationKind::Content,
+            &server.cancellation,
+        )
+        .await
+        .unwrap();
+    let content = async {
+        let snapshot = opened
+            .git
+            .snapshot(
+                &crab_remote_git::Revision::parse("refs/heads/main")?,
+                &operation,
+            )
+            .await?;
+        snapshot
+            .read_blob(
+                &crab_remote_git::GitPath::new(b"asset".to_vec())?,
+                &operation,
+            )
+            .await
+    }
+    .await;
+    let content = operation.finish(content).await.unwrap();
+    close(&server).await;
+    assert!(open_bytes < body.len() as u64 && content.bytes.as_ref() == body.as_slice());
+}
+
+#[tokio::test]
+async fn attribution_schedules_repair_for_a_corrupt_pinned_descriptor() {
+    let server = fixture().await;
+    let repo = repository(&server);
+    let history = git_history(2);
+    let root = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    publish_next(
+        &repo,
+        root,
+        None,
+        history.oids[1].clone(),
+        Some(history.pack),
+    )
+    .await;
+    crab_remote::browse_indexes::ensure(
+        &repo.layout,
+        &repo.identity,
+        Arc::clone(&server.runtime),
+        server.options,
+        2 * GIB,
+        &server.cancellation,
+    )
+    .await
+    .unwrap();
+    let opened = repo.open(&server, &server.cancellation).await.unwrap();
+    let hash = opened.source.path_state_hash.as_deref().unwrap();
+    repo.store
+        .put_overwrite(
+            &repo.layout.bulk_manifest_path("path-state", hash),
+            Bytes::from_static(b"{"),
+        )
+        .await
+        .unwrap();
+
+    let response = router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos/team/repo/tree-attribution")
+                .header("host", "localhost:8788")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let repair_scheduled = repo.maintenance.lock().await.worker.is_some();
+    close(&server).await;
+    assert_eq!(
+        (response.status(), repair_scheduled),
+        (StatusCode::SERVICE_UNAVAILABLE, true)
+    );
 }

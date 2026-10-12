@@ -31,6 +31,9 @@ identity, integrity and admission checks; a journal ref change discards stale
 base indexes even when its generation is unchanged. Snapshots without indexes
 make no additional index requests. Publication of capsule-bound browse indexes
 is a separate maintenance responsibility, not part of opening or pushing.
+Without a commit graph, full commit-ID resolution checks matching ref tips
+before traversing other roots. Matching annotated tags still require verified
+peeling; non-tip commits retain bounded breadth-first reachability traversal.
 
 ## Choose an entry point
 

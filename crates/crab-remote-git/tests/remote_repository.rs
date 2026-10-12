@@ -5132,6 +5132,92 @@ async fn publish_complete_graph(fixture: &PublishedFixture) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn direct_ref_tip_snapshot_does_not_read_unrelated_roots() {
+    let options = RepositoryOptions::new(
+        ObjectLimits::default(),
+        OperationLimits {
+            max_logical_objects: 3,
+            max_history_commits: 1,
+            ..OperationLimits::default()
+        },
+    )
+    .expect("options");
+    let fixture = publish(DeltaKind::Ref, false, options).await;
+    let cancellation = CancellationToken::new();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Snapshot, &cancellation)
+        .await
+        .expect("operation");
+    let result = fixture
+        .repository
+        .snapshot(&Revision::Commit(fixture.root_commit), &operation)
+        .await;
+    let result = operation.finish(result).await;
+    fixture.runtime.shutdown().await;
+    assert_eq!(
+        result.expect("direct tip fits the budget").commit_oid(),
+        fixture.root_commit
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn peeled_tip_resolution_verifies_its_tag_chain() {
+    for corrupt in [false, true] {
+        let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+        let target = if corrupt {
+            fixture.root_commit
+        } else {
+            fixture
+                .repository
+                .refs()
+                .head
+                .as_ref()
+                .expect("HEAD")
+                .target
+        };
+        let (mut manifest, etag) = read_manifest(&fixture.store, &fixture.layout)
+            .await
+            .expect("manifest");
+        manifest.refs.retain(|name, _| name == "refs/tags/v2");
+        manifest
+            .peeled_refs
+            .insert("refs/tags/v2".into(), target.to_string());
+        manifest.seal_git_validation();
+        write_manifest_cas(&fixture.store, &fixture.layout, &manifest, &etag)
+            .await
+            .expect("publish tag-only refs");
+        let cancellation = CancellationToken::new();
+        let repository = RemoteGitRepository::open(
+            fixture.store.clone(),
+            fixture.layout.clone(),
+            fixture.repository.identity().clone(),
+            Arc::clone(&fixture.runtime),
+            RepositoryOptions::default(),
+            &cancellation,
+        )
+        .await
+        .expect("repository");
+        let operation = repository
+            .operation(OperationKind::Resolve, &cancellation)
+            .await
+            .expect("operation");
+        let result = repository
+            .resolve(&Revision::Commit(target), &operation)
+            .await;
+        let result = operation.finish(result).await;
+        fixture.runtime.shutdown().await;
+        assert!(match result {
+            Ok(resolved) => !corrupt && resolved.commit == target,
+            Err(Error::Corrupt {
+                stage: crab_remote_git::CorruptionStage::Tag,
+            }) => corrupt,
+            _ => false,
+        });
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn direct_commit_resolution_checks_both_merge_parents_before_deeper_history() {
     for (first_parent, maximum) in [(true, 2), (false, 3)] {
         let options = RepositoryOptions::new(

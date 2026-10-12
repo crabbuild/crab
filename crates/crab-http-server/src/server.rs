@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use axum::http::StatusCode;
 use axum::{
     Extension, Json, Router,
-    extract::{Request, State},
+    extract::{Query, Request, State},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -486,10 +486,16 @@ pub(crate) enum MaintenanceTrigger<'a> {
 }
 
 struct PinnedRepository {
-    checked: Instant,
+    checked: Option<Instant>,
     state_digest: String,
     browse_indexes: Option<crab_metadata::capsule_protocol::BrowseIndexes>,
-    repository: RemoteGitRepository,
+    opened: BrowseRepository,
+}
+
+#[derive(Clone)]
+pub(crate) struct BrowseRepository {
+    pub git: RemoteGitRepository,
+    pub source: crate::cells::repository::projection::SourceIdentity,
 }
 
 pub(crate) struct RepositorySet {
@@ -638,8 +644,19 @@ impl Repository {
         repository_settings::load_lifecycle(server, self, actor).await
     }
 
+    #[cfg(test)]
+    pub(crate) async fn expire_browse_probe(&self) {
+        if let Some(cached) = self.pinned.lock().await.as_mut() {
+            cached.checked = None;
+        }
+    }
+
     pub(crate) async fn invalidate(&self) {
-        *self.pinned.lock().await = None;
+        // Maintenance can finish without changing Git state. Keep verified
+        // data while forcing the next read to check ref and index authority.
+        if let Some(cached) = self.pinned.lock().await.as_mut() {
+            cached.checked = None;
+        }
         *self.projection_source.lock().await = None;
         self.maintenance.lock().await.completed = None;
     }
@@ -671,9 +688,12 @@ impl Repository {
                     state.completed = completed.map(|source| (source, Instant::now()));
                 }
             }
-            *self.pinned.lock().await = None;
+            if let Some(cached) = self.pinned.lock().await.as_mut() {
+                cached.checked = None;
+            }
             *self.projection_source.lock().await = None;
-            // Reopen the just-published generation before admitting another pass.
+            // Retain the completed source while forcing a control/index probe;
+            // invalidate would erase completion and reschedule the same epoch.
             return Ok(MaintenanceSchedule::Completed);
         }
         if state.worker.is_some() {
@@ -816,34 +836,39 @@ impl Repository {
         }
     }
 
-    pub async fn open(
+    pub(crate) async fn open(
         &self,
         server: &Server,
         cancellation: &CancellationToken,
-    ) -> Result<RemoteGitRepository> {
+    ) -> Result<BrowseRepository> {
         let mut pinned = tokio::select! {
             _ = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
             pinned = self.pinned.lock() => pinned,
         };
         if let Some(cached) = pinned.as_mut() {
-            if cached.checked.elapsed() < BROWSE_PROBE_INTERVAL {
-                return Ok(cached.repository.clone());
+            if cached
+                .checked
+                .is_some_and(|checked| checked.elapsed() < BROWSE_PROBE_INTERVAL)
+            {
+                return Ok(cached.opened.clone());
             }
             // Ref CAS can advance without a root ETag change; derived indexes
             // can arrive without a ref change. Check both before reusing the
             // immutable reader instead of rebuilding it on every cache expiry.
             let (activity, indexes) = self.browse_state(cancellation).await?;
             if activity.state_digest() == cached.state_digest && indexes == cached.browse_indexes {
-                cached.checked = Instant::now();
-                return Ok(cached.repository.clone());
+                cached.checked = Some(Instant::now());
+                return Ok(cached.opened.clone());
             }
         }
-        let cached = self
-            .open_browse(server, server.options, cancellation)
-            .await?;
-        let repository = cached.repository.clone();
+        let cached = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
+            cached = self.open_browse(server, server.options, cancellation) => cached?,
+        };
+        let opened = cached.opened.clone();
         *pinned = Some(cached);
-        Ok(repository)
+        Ok(opened)
     }
 
     pub(crate) async fn open_current(
@@ -868,7 +893,8 @@ impl Repository {
         let view = crate::projection::open_view(&self.layout).await?;
         let state_digest = view.state_digest();
         let browse_indexes = view.browse_indexes().cloned();
-        let repository = view
+        let source = crate::projection::source_identity(&view.git_snapshot()?)?;
+        let git = view
             .git_repository_from_store(
                 self.layout.clone(),
                 self.identity.clone(),
@@ -879,10 +905,10 @@ impl Repository {
             )
             .await?;
         Ok(PinnedRepository {
-            checked: Instant::now(),
+            checked: Some(Instant::now()),
             state_digest,
             browse_indexes,
-            repository,
+            opened: BrowseRepository { git, source },
         })
     }
 }
@@ -1931,7 +1957,9 @@ async fn sweep_projections(server: Arc<Server>) -> Result<()> {
             let now = Instant::now();
             let probe_started = now;
             let source =
-                match crate::projection::current_source(&repository, &server.cancellation).await {
+                match crate::projection::current_source(&repository, &server, &server.cancellation)
+                    .await
+                {
                     Ok(source) => source,
                     Err(error) => {
                         server.metrics.record_projection_probe(
@@ -2356,17 +2384,35 @@ fn readiness_unavailable() -> Response {
         .into_response()
 }
 
+#[derive(Default, serde::Deserialize)]
+struct RepositorySelection {
+    owner: Option<String>,
+    name: Option<String>,
+}
+
 async fn catalog(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
+    Query(selection): Query<RepositorySelection>,
 ) -> app::Result<Json<serde_json::Value>> {
+    if selection.owner.is_some() != selection.name.is_some() {
+        return Err(app::Error::Invalid(
+            "owner and name must be provided together",
+        ));
+    }
     let actor = app::actor(&principal)?;
     let mut repositories = Vec::new();
     for repository in server
         .repositories
         .values()
         .into_iter()
-        .filter(|repository| principal.can_read(&repository.config))
+        .filter(|repository| {
+            principal.can_read(&repository.config)
+                && selection.owner.as_ref().is_none_or(|owner| {
+                    owner == &repository.config.owner
+                        && selection.name.as_ref() == Some(&repository.config.name)
+                })
+        })
     {
         let protections = repository.branch_protections(&server, &actor).await?;
         let lifecycle = repository.lifecycle(&server, &actor).await?;
@@ -2656,6 +2702,51 @@ mod tests {
     use cellule_host::CellNodeTaskGroup;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn scoped_catalog_skips_unrelated_repository_cells() {
+        let server = super::maintenance_tests::fixture().await;
+        let existing = server.repositories.values().pop().unwrap();
+        let mut config = existing.config.clone();
+        config.owner = "other".into();
+        config.name = "unavailable".into();
+        let unavailable = Arc::new(Repository {
+            id: Uuid::from_bytes([2; 16]),
+            config,
+            identity: existing.identity.clone(),
+            store: existing.store.clone(),
+            layout: existing.layout.clone(),
+            pinned: Mutex::new(None),
+            projection_source: Mutex::new(None),
+            maintenance: Mutex::new(MaintenanceState::default()),
+            integrity: crate::integrity::Status::default(),
+        });
+        server.repositories.replace(RepositoryIndex::new(
+            1,
+            BTreeMap::from([
+                (("team".into(), "repo".into()), existing),
+                (("other".into(), "unavailable".into()), unavailable),
+            ]),
+        ));
+        let response = router(Arc::clone(&server))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/repos?owner=team&name=repo")
+                    .header("host", "localhost:8788")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        super::maintenance_tests::close(&server).await;
+        assert_eq!(
+            (status, value["repositories"].as_array().map(Vec::len)),
+            (StatusCode::OK, Some(1))
+        );
+    }
 
     #[tokio::test]
     async fn delayed_catalog_materialization_preserves_newer_membership() {
