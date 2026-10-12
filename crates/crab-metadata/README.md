@@ -47,8 +47,11 @@ loading multi-ref activation records. Restore can leave retired heads in storage
 their checkpoint positions and dependencies must not enter the restored catalog.
 Current-epoch activation and checkpoint-chain errors still fail closed.
 `v2/browse-indexes` is a bounded, mutable derived record, not ref authority.
-It binds complete immutable commit-graph and path-state descriptors to the exact
-capsule state, including visible per-ref transactions. Readers ignore stale
+Its version 2 record binds a durable immutable commit graph and optional complete
+path attribution to the exact capsule state, including visible per-ref
+transactions. Graph publication does not wait for path construction. The prior
+version was never reachable from a release tag; maintenance rebuilds this derived
+record in place, without a legacy reader. Readers ignore stale
 records; absent indexes remain a readiness state. Rebuilding an immutable index
 verifies the generated content identity and repairs corrupt stored bytes only
 with a conditional update against the observed version, followed by readback.

@@ -10,6 +10,9 @@ use tower::ServiceExt;
 
 use crate::test_git::history as git_history;
 
+#[path = "maintenance_tests/browse.rs"]
+mod browse;
+
 struct UnavailableRoundTrip;
 
 impl cellule_runtime::peer::PeerRoundTrip for UnavailableRoundTrip {

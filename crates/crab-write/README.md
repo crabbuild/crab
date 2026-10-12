@@ -53,10 +53,13 @@ It does not rewrite source packs or publish an embedded checkpoint.
 
 ## Initialization
 
-`generation::browse::build` consumes a pinned, origin-backed capsule Git reader
-and exact snapshot. It reuses verified graph/path prefixes and persists path
-progress every 32 commits. Graph discovery drains a separate bounded operation
-per batch. `generation::with_generation_owner` shares renewed owner election and
+`generation::browse::build_graph` consumes a pinned, origin-backed capsule Git
+reader and exact snapshot. It persists a reusable attribution prefix before the
+orchestrator publishes graph readiness. `build_path_state` then attaches that
+verified graph, resumes attribution from its checkpoint and persists progress
+every 32 commits. Completion replaces the partial record through the returned
+CAS token; cached readers observe both phases without a ref change. Graph
+discovery drains a separate bounded operation per batch. `generation::with_generation_owner` shares renewed owner election and
 global/repository GC fences between v1 maintenance and the v2 orchestrator;
 all acquired leases are released on returned failure or cancellation. The
 orchestrator rechecks capsule activity and conditionally publishes the small

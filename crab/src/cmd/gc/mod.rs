@@ -3402,22 +3402,23 @@ async fn mark_derived_index_objects(
                 .map(|layer| layout.repo_path(&layer.path).to_string()),
         );
 
-        let path_state_hash = indexes.path_state_hash();
-        let path_state_path = layout.bulk_manifest_path("path-state", path_state_hash);
-        let path_state = crab_metadata::path_state::load_path_state_descriptor(
-            store,
-            layout,
-            path_state_hash,
-            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
-        )
-        .await?;
-        reachable.insert(path_state_path.to_string());
-        reachable.extend(
-            path_state
-                .layers
-                .iter()
-                .map(|layer| layout.repo_path(&layer.path).to_string()),
-        );
+        if let Some(path_state_hash) = indexes.path_state_hash() {
+            let path_state_path = layout.bulk_manifest_path("path-state", path_state_hash);
+            let path_state = crab_metadata::path_state::load_path_state_descriptor(
+                store,
+                layout,
+                path_state_hash,
+                crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+            )
+            .await?;
+            reachable.insert(path_state_path.to_string());
+            reachable.extend(
+                path_state
+                    .layers
+                    .iter()
+                    .map(|layer| layout.repo_path(&layer.path).to_string()),
+            );
+        }
     }
 
     if let Some(checkpoint) = crab_metadata::path_state::load_path_state_checkpoint_record(
@@ -5726,19 +5727,42 @@ mod tests {
         )
         .await
         .unwrap();
-        let indexes = BrowseIndexes::new(
-            state_digest.clone(),
-            current_graph_hash.clone(),
-            current_path_state_hash.clone(),
-        )
-        .unwrap();
-        store
-            .put(
-                &layout.capsule_browse_indexes_path(),
-                indexes.encode().unwrap(),
+        let mut index_etag = None;
+        for path_state in [None, Some(current_path_state_hash.clone())] {
+            let indexes =
+                BrowseIndexes::new(state_digest.clone(), current_graph_hash.clone(), path_state)
+                    .unwrap();
+            let index_path = layout.capsule_browse_indexes_path();
+            let bytes = indexes.encode().unwrap();
+            index_etag = Some(match index_etag {
+                Some(etag) => store.update(&index_path, bytes, etag).await.unwrap(),
+                None => store
+                    .create_strict_with_etag(&index_path, bytes)
+                    .await
+                    .unwrap(),
+            });
+            let mut retained = HashSet::new();
+            mark_derived_index_objects(
+                store.as_storage(),
+                &layout,
+                &state_digest,
+                &manifest,
+                &mut retained,
             )
             .await
             .unwrap();
+            assert!(
+                retained.contains(
+                    &layout
+                        .bulk_manifest_path("commit-graph", &current_graph_hash)
+                        .to_string()
+                ) && retained.contains(
+                    &layout
+                        .repo_path(&current_graph.descriptor.layers[0].path)
+                        .to_string()
+                )
+            );
+        }
 
         let stale_git_validation_digest = "f".repeat(64);
         let (stale_graph_hash, stale_path_state_hash, stale_graph, stale_count) = write_indexes(

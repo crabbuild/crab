@@ -405,32 +405,13 @@ pub async fn maintain_path_state(
             Err(error) => return Err(error.into()),
         }
     }
-    let mut replace_checkpoint = None;
-    let mut base = match load_path_state_checkpoint(
+    let (mut base, mut replace_checkpoint) = path_state_progress(
         store,
         layout,
         &graph,
         options.object_limits().max_path_state_bytes,
     )
-    .await
-    {
-        Ok(checkpoint) => checkpoint,
-        Err(error) if immutable_metadata_unavailable(&error) => {
-            replace_checkpoint = match load_path_state_checkpoint_record(
-                store,
-                layout,
-                &graph.descriptor.git_validation_digest,
-            )
-            .await
-            {
-                Ok(checkpoint) => checkpoint.map(|checkpoint| checkpoint.descriptor_hash),
-                Err(error) if immutable_metadata_unavailable(&error) => None,
-                Err(error) => return Err(error.into()),
-            };
-            None
-        }
-        Err(error) => return Err(error.into()),
-    };
+    .await?;
     if base.is_none() {
         base = load_previous_path_state(store, layout, manifest, &graph, options).await?;
     }
@@ -482,6 +463,32 @@ pub async fn maintain_path_state(
         .await?;
         replace_checkpoint = None;
         base = Some(write.into_index());
+    }
+}
+
+async fn path_state_progress(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    graph: &SplitCommitGraph,
+    max_bytes: u64,
+) -> Result<(Option<PathStateIndex>, Option<String>)> {
+    match load_path_state_checkpoint(store, layout, graph, max_bytes).await {
+        Ok(progress) => Ok((progress, None)),
+        Err(error) if immutable_metadata_unavailable(&error) => {
+            let record = match load_path_state_checkpoint_record(
+                store,
+                layout,
+                &graph.descriptor.git_validation_digest,
+            )
+            .await
+            {
+                Ok(record) => record,
+                Err(error) if immutable_metadata_unavailable(&error) => None,
+                Err(error) => return Err(error.into()),
+            };
+            Ok((None, record.map(|record| record.descriptor_hash)))
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
