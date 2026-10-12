@@ -7,6 +7,7 @@ use std::{
     io::{self, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
+    time::Instant,
 };
 
 use flate2::{Compression, read::ZlibEncoder};
@@ -262,6 +263,7 @@ impl IncomingPack {
             .space()
             .directory(directory, "crab-prepared-")?;
         let staging_pack = directory.path().join("normalized.pack");
+        let started = Instant::now();
         let WrittenPack {
             size,
             git_sha1,
@@ -278,8 +280,16 @@ impl IncomingPack {
             max_delta_depth,
             max_delta_object_bytes,
         )?;
+        tracing::info!(
+            phase = "encode",
+            objects = object_count,
+            bytes = size,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "Git preparation phase completed"
+        );
 
         check(cancelled)?;
+        let started = Instant::now();
         let external_delta_bases = external_delta_map
             .values()
             .copied()
@@ -324,6 +334,13 @@ impl IncomingPack {
         let kinds = encode_pack_kind_metadata_with_external_deltas(git_sha1, &metadata)?;
         directory.reserve(kinds.len() as u64)?;
         std::fs::write(&kinds_path, kinds)?;
+        tracing::info!(
+            phase = "sidecars",
+            objects = object_count,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "Git preparation phase completed"
+        );
+        let started = Instant::now();
         let mut content_hash = blake3::Hasher::new();
         let mut file = File::open(&pack)?;
         let mut buffer = [0; 64 * 1024];
@@ -335,6 +352,12 @@ impl IncomingPack {
             }
             content_hash.update(&buffer[..count]);
         }
+        tracing::info!(
+            phase = "content_hash",
+            bytes = size,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "Git preparation phase completed"
+        );
         Ok(Some(PreparedPack {
             _directory: directory,
             pack,

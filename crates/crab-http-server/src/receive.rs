@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Extension,
@@ -11,6 +14,7 @@ use crab_remote_git::RepositoryOptions;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::{auth::Principal, server::Server};
 
@@ -422,9 +426,14 @@ pub(crate) async fn receive(
     let worker_cancel = cancel.clone();
     let worker_server = Arc::clone(&server);
     let (send, result) = tokio::sync::oneshot::channel();
+    let span = tracing::info_span!(
+        "git_receive",
+        receive_id = %uuid::Uuid::now_v7(),
+        repository_id = %entry.id,
+    );
     // The tracker owns the worker even if the HTTP response future disappears.
     // Shutdown cancels and drains it before closing remote readers.
-    server.receives.spawn(async move {
+    let worker = async move {
         let permit = permit;
         let work = async {
             let directory = worker_server
@@ -442,6 +451,7 @@ pub(crate) async fn receive(
             let mut file = tokio::fs::File::create(&path).await?;
             let mut stream = request.into_body().into_data_stream();
             let mut body_hasher = blake3::Hasher::new_derive_key("crab http receive body v1");
+            let started = Instant::now();
             let mut size = 0_u64;
             let mut reserved = if internal_import {
                 IMPORT_RECEIVE_INITIAL_RESERVATION
@@ -473,6 +483,12 @@ pub(crate) async fn receive(
             file.flush().await?;
             drop(file);
             worker_server.local_staging.resize(&directory, size)?;
+            tracing::info!(
+                phase = "body",
+                bytes = size,
+                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                "Git receive phase completed"
+            );
             publish::run(
                 &worker_server,
                 &principal,
@@ -496,7 +512,8 @@ pub(crate) async fn receive(
             tracing::error!(error = ?error, "disconnected Git receive failed");
         }
         permit.release().await;
-    });
+    };
+    server.receives.spawn(worker.instrument(span));
     let bytes = result
         .await
         .map_err(|_| ReceiveError::Request("Receive worker stopped"))??;

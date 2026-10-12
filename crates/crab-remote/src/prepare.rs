@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
@@ -822,6 +822,7 @@ impl Prepared {
         limits: crab_read::dependency_proof::DependencyProofLimits,
         cancel: &CancellationToken,
     ) -> Result<CapsuleArtifacts> {
+        let started = Instant::now();
         let repository_refs = self
             .repository
             .refs()
@@ -927,6 +928,12 @@ impl Prepared {
         let changes_namespace = edits
             .iter()
             .any(|edit| edit.expected_old().is_none() != edit.new_oid().is_none());
+        tracing::info!(
+            phase = "capsule_input",
+            packs = packs.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "Git receive phase completed"
+        );
         Ok(CapsuleArtifacts {
             layout: self.layout.clone(),
             base: view.root_snapshot().clone(),
@@ -965,11 +972,19 @@ impl CapsuleArtifacts {
             )?,
         };
         let transaction_id = transaction.id()?;
+        let started = Instant::now();
         let capsule = crab_metadata::capsule_protocol::Capsule::build(
             &transaction,
             self.packs,
             self.sections,
         )?;
+        tracing::info!(
+            phase = "capsule_encode",
+            %transaction_id,
+            bytes = capsule.bytes().len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "Git receive phase completed"
+        );
         let publish = if self.changes_namespace {
             let ref_names = transaction
                 .edits()
@@ -1421,7 +1436,11 @@ where
         watched.cancelled().await;
         watched_flag.store(true, Ordering::Release);
     });
+    // Blocking workers do not inherit the receive span; enter it here so
+    // concurrent pack phases retain the originating operation identity.
+    let span = tracing::Span::current();
     let work = tokio::task::spawn_blocking(move || {
+        let _entered = span.enter();
         let mut source = Source {
             operation: &operation,
             proof,
@@ -1451,6 +1470,7 @@ where
                     }
                 }
             };
+            let started = Instant::now();
             let plan = receive_plan::validate(
                 &incoming,
                 &base,
@@ -1460,6 +1480,14 @@ where
                 options.graph,
                 || cancel.is_cancelled(),
             )?;
+            tracing::info!(
+                phase = "graph",
+                objects = incoming.received_objects(),
+                refs = updates.len(),
+                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                "Git receive phase completed"
+            );
+            let started = Instant::now();
             let mut visibility = BTreeMap::new();
             let mut count = 0usize;
             for update in &updates {
@@ -1516,6 +1544,13 @@ where
                 }
                 visibility.insert(update.name.clone(), evidence);
             }
+            tracing::info!(
+                phase = "visibility",
+                objects = count,
+                refs = visibility.len(),
+                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                "Git receive phase completed"
+            );
             let pack = incoming.prepare(space.path(), options.pack.max_pack_bytes, &flag)?;
             Ok(Prepared {
                 repository,

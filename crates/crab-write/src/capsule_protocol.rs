@@ -1,5 +1,7 @@
 //! Capsule publication through independently mutable ref heads and transaction records.
 
+use std::time::Instant;
+
 use bytes::Bytes;
 use crab_metadata::capsule_protocol::{
     Capsule, CapsulePointer, CapsuleRun, CapsuleTransaction, CheckpointPointer, HistorySegment,
@@ -291,7 +293,16 @@ pub async fn prepare_publication_with_ref_head_bases(
             .iter()
             .filter_map(|(_, compacted)| compacted.clone()),
     );
-    upload_immutable_runs(router, immutable_runs).await?;
+    let started = Instant::now();
+    let uploaded = upload_immutable_runs(router, immutable_runs).await;
+    tracing::info!(
+        phase = "upload",
+        %transaction_id,
+        succeeded = uploaded.is_ok(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git capsule publication phase finished"
+    );
+    uploaded?;
     let refs = prepared
         .into_iter()
         .map(|(prepared, _)| prepared)
@@ -322,7 +333,16 @@ async fn publish_prepared(
             .into_iter()
             .next()
             .ok_or_else(|| WriteError::Internal("single-ref publication disappeared".to_owned()))?;
-        commit_single_ref(router, prepared).await?;
+        let started = Instant::now();
+        let committed = commit_single_ref(router, prepared).await;
+        tracing::info!(
+            phase = "ref_cas",
+            %transaction_id,
+            succeeded = committed.is_ok(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "Git capsule publication phase finished"
+        );
+        committed?;
         return verify_ref_epoch(router, &base).await;
     }
 
@@ -339,7 +359,16 @@ async fn publish_prepared(
         ),
         None => None,
     };
-    commit_multi_ref(router, &transaction_id, &activation_id, refs).await?;
+    let started = Instant::now();
+    let committed = commit_multi_ref(router, &transaction_id, &activation_id, refs).await;
+    tracing::info!(
+        phase = "ref_transaction",
+        %transaction_id,
+        succeeded = committed.is_ok(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git capsule publication phase finished"
+    );
+    committed?;
     if let Some(intent) = plan_intent {
         crab_metadata::capsule_protocol::publish_capsule_plan_receipt(
             router.store(),
