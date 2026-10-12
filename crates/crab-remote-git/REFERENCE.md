@@ -215,7 +215,11 @@ name. It never reads blob bodies. `list_tree_recursive` remains the exhaustive
 metadata traversal for callers that need the complete tree. Child sizes are
 absent unless the caller requests bounded page-only metadata. Directory cursors
 resume after an exact entry in the pinned tree, preserving Git order when files
-and directories share a name prefix. Comparison prunes equal tree IDs. History,
+and directories share a name prefix. Comparison prunes equal tree IDs and
+normalizes its private entry vectors by exact raw path before matching them.
+This preserves one type change when a name moves in Git order and avoids false
+changes to unchanged prefix siblings. Sorting runs in the tracked blocking
+worker; listing and prefix seeking retain canonical Git order. History,
 diff, blame, archive, storage, inflation, and response work have independent
 aggregate limits.
 

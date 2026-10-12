@@ -361,6 +361,24 @@ using raw path ordering. Fix that canonical comparison boundary and rebuild
 affected derived indexes before promoting attribution or repeating performance
 qualification. The encoded-size result above is not full correctness proof.
 
+The minimized native-Git fixture reproduced both false subtree delete/add pairs
+and a file-to-directory replacement reported as deletion instead of one type
+change. A second regression accepted a validly hashed retired attribution
+completion/checkpoint. The candidate normalizes only comparison's privately
+owned entries by exact raw path in the existing tracked blocking worker;
+listing and prefix seeking retain canonical Git order. Descriptor semantics
+advance to version 4 while the compact `CRABPS03` layer encoding/version 3 stays
+unchanged. All 19 release tags lack path-state formats; no legacy reader is added.
+Canonical maintenance rejects old descriptors, rebuilds from the verified graph,
+and replaces an invalid checkpoint using its observed conditional token. Three native semantic tests, ten HTTP browse tests (including both retired
+completion/checkpoint repair cases) and ten path-state tests pass after the
+change. Both CLI GC retention tests and the metadata build without storage features
+also pass. Nine-package consumer checks (including test callers) and scoped
+production Clippy pass. The normal release and full live oracle remain pending.
+The live repair will use
+the same task-owned damaged fixture, retaining its failure receipts and all
+immutable authoritative inputs, before repeating the complete native Git oracle.
+
 - [x] Capture root, stable visible-ref activity and the bounded index record
   first. Reuse the validated source when that exact identity is unchanged.
   A root ETag alone is insufficient because ref CAS can change independently.

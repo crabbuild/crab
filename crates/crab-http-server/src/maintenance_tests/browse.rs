@@ -310,6 +310,121 @@ async fn reusable_complete_prefix_repairs_a_corrupt_successor_checkpoint() {
 }
 
 #[tokio::test]
+async fn retired_attribution_semantics_rebuild_completion_and_checkpoint() {
+    for complete_record in [false, true] {
+        let server = fixture_without_cells().await;
+        let repo = repository(&server);
+        let history = git_history(64);
+        let root = crab_write::capsule_protocol::open_root(&repo.layout)
+            .await
+            .unwrap();
+        publish_next(
+            &repo,
+            root,
+            None,
+            history.oids[63].clone(),
+            Some(history.pack),
+        )
+        .await;
+        let build = || {
+            crab_remote::browse_indexes::ensure(
+                &repo.layout,
+                &repo.identity,
+                Arc::clone(&server.runtime),
+                server.options,
+                2 * 1024 * 1024 * 1024,
+                &server.cancellation,
+            )
+        };
+        let expected = build().await.unwrap().unwrap();
+        let graph = crab_metadata::split_commit_graph::load_split_commit_graph(
+            &repo.store,
+            &repo.layout,
+            expected.commit_graph_hash(),
+            server.options.object_limits().max_commit_graph_bytes,
+        )
+        .await
+        .unwrap();
+        let mut descriptor = crab_metadata::path_state::load_path_state_descriptor(
+            &repo.store,
+            &repo.layout,
+            expected.path_state_hash().unwrap(),
+            server.options.object_limits().max_path_state_bytes,
+        )
+        .await
+        .unwrap();
+        // A valid content hash cannot prove mutations made by retired comparison
+        // semantics. Completion and resumable progress must both be rebuilt.
+        descriptor.version = 3;
+        let bytes = serde_json::to_vec(&descriptor).unwrap();
+        let retired_hash = blake3::hash(&bytes).to_hex().to_string();
+        repo.store
+            .put_overwrite(
+                &repo.layout.bulk_manifest_path("path-state", &retired_hash),
+                Bytes::from(bytes),
+            )
+            .await
+            .unwrap();
+        let retired_rejected = crab_metadata::path_state::load_path_state_descriptor(
+            &repo.store,
+            &repo.layout,
+            &retired_hash,
+            server.options.object_limits().max_path_state_bytes,
+        )
+        .await
+        .is_err();
+        let checkpoint = crab_metadata::path_state::PathStateCheckpoint {
+            version: 1,
+            generation: graph.descriptor.generation,
+            pack_index_hash: graph.descriptor.pack_index_hash.clone(),
+            git_validation_digest: graph.descriptor.git_validation_digest.clone(),
+            commit_ordinal_digest: graph.ordinal_digest(),
+            commit_count: 64,
+            descriptor_hash: retired_hash.clone(),
+        };
+        let checkpoint_path =
+            repo.layout
+                .repo_path(&crab_metadata::path_state::path_state_checkpoint_path(
+                    &graph.descriptor.git_validation_digest,
+                ));
+        repo.store
+            .put_overwrite(
+                &checkpoint_path,
+                Bytes::from(serde_json::to_vec(&checkpoint).unwrap()),
+            )
+            .await
+            .unwrap();
+        let retired = BrowseIndexes::new(
+            expected.state_digest().to_owned(),
+            expected.commit_graph_hash().to_owned(),
+            complete_record.then_some(retired_hash),
+        )
+        .unwrap();
+        repo.store
+            .put_overwrite(
+                &repo.layout.capsule_browse_indexes_path(),
+                retired.encode().unwrap(),
+            )
+            .await
+            .unwrap();
+        let rebuilt = build().await;
+        let checkpoint = crab_metadata::path_state::load_path_state_checkpoint_record(
+            &repo.store,
+            &repo.layout,
+            &graph.descriptor.git_validation_digest,
+        )
+        .await;
+        close(&server).await;
+        assert!(
+            retired_rejected,
+            "validly hashed retired semantics were accepted"
+        );
+        assert_eq!(rebuilt.unwrap(), Some(expected));
+        assert_eq!(checkpoint.unwrap().unwrap().commit_count, 32);
+    }
+}
+
+#[tokio::test]
 async fn attribution_restart_reuses_the_verified_thirty_two_commit_checkpoint() {
     let server = fixture_without_cells().await;
     let repo = repository(&server);
