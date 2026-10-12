@@ -104,7 +104,13 @@ explicitly selects Rustls for management requests, preserving the configured
 CA, client identity, hostname validation and timeout. Peer requests already use
 an explicit Rustls configuration. The process runner now requires independent
 private mTLS readiness after public liveness, within the original startup budget;
-the corrected native service/restart proof remains required.
+the corrected normal joint-package release at `0ba1747ad70` passed two real
+startup/readiness/oracle/shutdown cycles against the retained RustFS fixture.
+Full readiness took 7.493 and 5.054 seconds; graceful shutdown took 2.131 and
+0.784 seconds, with successful process exits. Each cycle independently verified
+150 tree entries, 10 commits, one blob, 20 diffs and six expected error cases.
+The persistent service also passed `healthcheck`, live capacity and metrics
+commands. These are local single-node semantic receipts, not throughput proof.
 
 - [ ] Identify the first failing command and preserve a bounded failure trace.
   Reproduce it using the exact image/Cellule revision and disposable Compose
