@@ -54,6 +54,23 @@ def main():
                     if time.monotonic() >= deadline:
                         raise TimeoutError('server did not become live within 60 seconds')
                     time.sleep(0.05)
+                report['public_liveness_ms'] = (time.monotonic() - started) * 1000
+                with (output / f'readiness-{iteration}.log').open('wb') as readiness:
+                    while True:
+                        if process.poll() is not None:
+                            raise RuntimeError(f'server exited before readiness: {process.returncode}')
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError('private mTLS readiness did not pass within 60 seconds')
+                        ready = subprocess.run(
+                            [args.server_binary, '--config', args.config, 'healthcheck'],
+                            stdout=readiness, stderr=readiness, timeout=min(12, remaining),
+                        )
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError('private mTLS readiness did not pass within 60 seconds')
+                        if ready.returncode == 0:
+                            break
+                        time.sleep(0.05)
                 report['startup_ms'] = (time.monotonic() - started) * 1000
                 with (output / f'checks-{iteration}.json').open('wb') as results:
                     subprocess.run(
