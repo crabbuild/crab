@@ -12,6 +12,16 @@ project one captured snapshot and promote only if its complete source identity
 still matches. Missing/stale indexes return HTTP 202 with retry guidance;
 corrupt derived records or path metadata return 503 and schedule repair. Native
 Git and mutation validation do not load the optional browse-index record.
+Browse readers retain verified immutable data while revalidating the root,
+transaction-consistent refs, and derived index hashes every two seconds. Ref or
+index changes open a new reader. Attribution uses that reader's captured source
+identity instead of opening the capsule payloads again for the same request.
+Cold browse opens load complete control metadata; Git pack bodies stay in their
+authenticated object-store sources and objects use verified bounded range reads.
+Repository pages select their metadata with `/api/repos?owner=OWNER&name=NAME`
+so unrelated repository Cell reads do not block browsing. The unfiltered catalog
+still supplies the repository list and loads Git access scopes when that
+selector is opened.
 
 Unchanged browse and background probes share the root/ref/index change probe.
 Immutable descriptors are verified on identity changes and at the existing

@@ -16,7 +16,7 @@ async fn completed_maintenance_expires_and_observes_ref_only_changes() {
         Some(history.pack),
     )
     .await;
-    let initial = crate::projection::current_source(&repo, &server.cancellation)
+    let initial = crate::projection::current_source(&repo, &server, &server.cancellation)
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -34,7 +34,7 @@ async fn completed_maintenance_expires_and_observes_ref_only_changes() {
     })
     .await
     .unwrap();
-    let source = crate::projection::current_source(&repo, &server.cancellation)
+    let source = crate::projection::current_source(&repo, &server, &server.cancellation)
         .await
         .unwrap();
     assert_eq!(

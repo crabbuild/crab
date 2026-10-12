@@ -1756,42 +1756,50 @@ pub(crate) async fn resolved_commit_roots(
     graph: Option<&crab_metadata::split_commit_graph::SplitCommitGraph>,
     operation: &OperationContext,
 ) -> Result<Vec<ObjectId>> {
-    // Git permits tags to trees and blobs. They confer no commit reachability,
-    // but must not disable acceleration for the repository's commit refs.
     let mut roots = Vec::new();
     for reference in &refs.entries {
-        check_cancelled(operation.cancellation())?;
-        let target = reference.peeled.unwrap_or(reference.target);
-        if let Some(graph) = graph {
-            // A validated snapshot's known commit roots need no pack reads at
-            // open. Only unresolved tags need raw peeling; object requests still
-            // verify OIDs/kinds and parent lists before using graph acceleration.
-            if <[u8; 20]>::try_from(target.as_bytes()).is_ok_and(|oid| graph.contains(&oid)) {
-                roots.push(target);
-                continue;
-            }
-            if !reference.name.starts_with("refs/tags/") {
-                return Err(Error::Corrupt {
-                    stage: crate::CorruptionStage::CommitGraph,
-                });
-            }
-        }
-        match peel_to_commit(reference.target, operation).await {
-            Ok((commit, _)) => {
-                if reference.peeled.is_some_and(|expected| expected != commit) {
-                    return Err(Error::Corrupt {
-                        stage: crate::CorruptionStage::Tag,
-                    });
-                }
-                roots.push(commit);
-            }
-            Err(Error::Revision {
-                reason: RevisionError::NotCommit,
-            }) if reference.name.starts_with("refs/tags/") => {}
-            Err(error) => return Err(error),
+        if let Some(commit) = resolved_commit_root(reference, graph, operation).await? {
+            roots.push(commit);
         }
     }
     Ok(roots)
+}
+
+async fn resolved_commit_root(
+    reference: &crate::RepositoryRef,
+    graph: Option<&crab_metadata::split_commit_graph::SplitCommitGraph>,
+    operation: &OperationContext,
+) -> Result<Option<ObjectId>> {
+    check_cancelled(operation.cancellation())?;
+    let target = reference.peeled.unwrap_or(reference.target);
+    if let Some(graph) = graph {
+        // A validated snapshot's known commit roots need no pack reads at
+        // open. Only unresolved tags need raw peeling; object requests still
+        // verify OIDs/kinds and parent lists before using graph acceleration.
+        if <[u8; 20]>::try_from(target.as_bytes()).is_ok_and(|oid| graph.contains(&oid)) {
+            return Ok(Some(target));
+        }
+        if !reference.name.starts_with("refs/tags/") {
+            return Err(Error::Corrupt {
+                stage: crate::CorruptionStage::CommitGraph,
+            });
+        }
+    }
+    match peel_to_commit(reference.target, operation).await {
+        Ok((commit, _)) => {
+            if reference.peeled.is_some_and(|expected| expected != commit) {
+                return Err(Error::Corrupt {
+                    stage: crate::CorruptionStage::Tag,
+                });
+            }
+            Ok(Some(commit))
+        }
+        // Git permits tags to trees and blobs; they confer no commit reachability.
+        Err(Error::Revision {
+            reason: RevisionError::NotCommit,
+        }) if reference.name.starts_with("refs/tags/") => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 async fn prove_reachable(
@@ -1801,10 +1809,32 @@ async fn prove_reachable(
 ) -> Result<bool> {
     // Visit nearby commits before descending either side of a merge. A depth-first
     // walk can exhaust the read budget before checking even HEAD's first parent.
-    let mut pending = resolved_commit_roots(refs, None, operation)
-        .await?
-        .into_iter()
-        .collect::<std::collections::VecDeque<_>>();
+    let mut pending = std::collections::VecDeque::new();
+    // A matching tip proves reachability after its tag chain is verified.
+    // Peeling unrelated roots first turns a cold tip read into hundreds of GETs.
+    let is_target = |reference: &crate::RepositoryRef| {
+        reference.target == target || reference.peeled == Some(target)
+    };
+    let references = refs
+        .entries
+        .iter()
+        .filter(|reference| is_target(reference))
+        .chain(
+            refs.entries
+                .iter()
+                .filter(|reference| !is_target(reference)),
+        );
+    for reference in references {
+        if let Some(commit) = resolved_commit_root(reference, None, operation).await? {
+            if commit == target {
+                operation
+                    .charge(crate::BudgetDimension::HistoryCommits, 1)
+                    .await?;
+                return Ok(true);
+            }
+            pending.push_back(commit);
+        }
+    }
     let mut visited = std::collections::HashSet::new();
     while let Some(commit_oid) = pending.pop_front() {
         if !visited.insert(commit_oid) {

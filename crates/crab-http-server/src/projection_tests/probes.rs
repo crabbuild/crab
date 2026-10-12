@@ -31,7 +31,7 @@ async fn indexed_fixture() -> (Arc<Server>, Arc<Repository>) {
 #[tokio::test]
 async fn source_probe_observes_ref_only_publication_and_same_state_index_changes() {
     let (server, repository) = indexed_fixture().await;
-    let first = current_source(&repository, &server.cancellation)
+    let first = current_source(&repository, &server, &server.cancellation)
         .await
         .unwrap();
     let root = load_root(&repository.layout).await.unwrap();
@@ -56,14 +56,8 @@ async fn source_probe_observes_ref_only_publication_and_same_state_index_changes
         load_root(&repository.layout).await.unwrap().etag(),
         &root_etag
     );
-    repository
-        .projection_source
-        .lock()
-        .await
-        .as_mut()
-        .unwrap()
-        .checked -= Duration::from_secs(3);
-    let changed = current_source(&repository, &server.cancellation)
+    repository.expire_browse_probe().await;
+    let changed = current_source(&repository, &server, &server.cancellation)
         .await
         .unwrap();
     assert_ne!(first.source_token, changed.source_token);
@@ -78,14 +72,8 @@ async fn source_probe_observes_ref_only_publication_and_same_state_index_changes
     )
     .await
     .unwrap();
-    repository
-        .projection_source
-        .lock()
-        .await
-        .as_mut()
-        .unwrap()
-        .checked -= Duration::from_secs(3);
-    let complete = current_source(&repository, &server.cancellation)
+    repository.expire_browse_probe().await;
+    let complete = current_source(&repository, &server, &server.cancellation)
         .await
         .unwrap();
     assert_eq!(changed.journal_state_digest, complete.journal_state_digest);
@@ -104,14 +92,8 @@ async fn source_probe_observes_ref_only_publication_and_same_state_index_changes
         )
         .await
         .unwrap();
-    repository
-        .projection_source
-        .lock()
-        .await
-        .as_mut()
-        .unwrap()
-        .checked -= Duration::from_secs(3);
-    let partial = current_source(&repository, &server.cancellation)
+    repository.expire_browse_probe().await;
+    let partial = current_source(&repository, &server, &server.cancellation)
         .await
         .unwrap();
     maintenance_tests::close(&server).await;
@@ -125,7 +107,7 @@ async fn source_probe_observes_ref_only_publication_and_same_state_index_changes
 async fn source_probe_revalidates_corruption_after_invalidation_or_scrub_expiry() {
     for invalidate in [false, true] {
         let (server, repository) = indexed_fixture().await;
-        let source = current_source(&repository, &server.cancellation)
+        let source = current_source(&repository, &server, &server.cancellation)
             .await
             .unwrap();
         let path = repository
@@ -143,7 +125,7 @@ async fn source_probe_revalidates_corruption_after_invalidation_or_scrub_expiry(
                 .unwrap()
                 .verified -= crate::integrity::SCRUB_INTERVAL;
         }
-        let result = current_source(&repository, &server.cancellation).await;
+        let result = current_source(&repository, &server, &server.cancellation).await;
         maintenance_tests::close(&server).await;
         assert!(
             matches!(
@@ -160,13 +142,13 @@ async fn source_probe_revalidates_corruption_after_invalidation_or_scrub_expiry(
 #[tokio::test]
 async fn source_probe_honors_cancellation_and_preserves_invalid_record_errors() {
     let (server, repository) = indexed_fixture().await;
-    current_source(&repository, &server.cancellation)
+    current_source(&repository, &server, &server.cancellation)
         .await
         .unwrap();
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(matches!(
-        current_source(&repository, &cancelled).await,
+        current_source(&repository, &server, &cancelled).await,
         Err(crate::Error::Remote(crab_remote_git::Error::Cancelled))
     ));
     repository
@@ -177,14 +159,8 @@ async fn source_probe_honors_cancellation_and_preserves_invalid_record_errors() 
         )
         .await
         .unwrap();
-    repository
-        .projection_source
-        .lock()
-        .await
-        .as_mut()
-        .unwrap()
-        .checked -= Duration::from_secs(3);
-    let result = current_source(&repository, &server.cancellation).await;
+    repository.expire_browse_probe().await;
+    let result = current_source(&repository, &server, &server.cancellation).await;
     maintenance_tests::close(&server).await;
     assert!(matches!(result, Err(crate::Error::BrowseIndexes(_))));
 }
@@ -192,7 +168,7 @@ async fn source_probe_honors_cancellation_and_preserves_invalid_record_errors() 
 #[tokio::test]
 async fn completed_maintenance_reuses_exact_source_until_repair() {
     let (server, repository) = indexed_fixture().await;
-    let source = current_source(&repository, &server.cancellation)
+    let source = current_source(&repository, &server, &server.cancellation)
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(30), async {
