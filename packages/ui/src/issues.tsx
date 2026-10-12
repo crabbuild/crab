@@ -1,10 +1,10 @@
+import { repoHref, repositoryRoute } from "./repository-route";
 import { useEffect, useRef, useState } from "react";
 import { Button, Spinner } from "@primer/react";
 import { IssueClosedIcon, IssueOpenedIcon } from "@primer/octicons-react";
 import {
   endpoint,
   navigate,
-  repoHref,
   useRequest,
   type Repository,
   type RepositoryAssignee,
@@ -69,7 +69,7 @@ export function Issues({
   url: URL;
   csrf: string;
 }) {
-  const issue = url.searchParams.get("issue");
+  const issue = repositoryRoute(url)?.issue;
   if (issue === "new")
     return repo.archived ? (
       <div className="notice">

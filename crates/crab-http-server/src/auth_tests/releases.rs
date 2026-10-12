@@ -109,6 +109,36 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
     let commit = crate::server::receive_tests::success(source.path(), &["rev-parse", "HEAD"]).await;
     crate::server::receive_tests::success(source.path(), &["push", git_url.as_str(), "main"]).await;
 
+    for path in [
+        "/team/private/blob/main/README.md",
+        "/team/private/blame/main/README.md",
+        "/team/private/tree/main",
+        "/team/private/commits/main",
+        "/team/private/commit/",
+        "/team/private/issues/1",
+        "/team/private/pull/1/files",
+        "/team/private/releases/tag/v1.0.0",
+        "/team/private/settings/access",
+    ] {
+        let address = if path.ends_with("/commit/") {
+            format!("{path}{commit}")
+        } else {
+            path.to_owned()
+        };
+        let response = h
+            .http
+            .get(format!("{}{address}", h.origin))
+            .header(header::COOKIE, &alice)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{address}");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+    }
+
     let first = json!({
         "request_id":"11111111-1111-4111-8111-111111111111",
         "tag_name":"v1.0.0",
@@ -136,6 +166,10 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
     assert_eq!(created.1["tag_oid"], commit);
     assert_eq!(created.1["target_oid"], commit);
     assert_eq!(created.1["version"], 1);
+    assert_eq!(
+        h.json(&format!("{RELEASES}/tag/v1.0.0"), &alice).await,
+        created.1
+    );
     assert!(created.1["assets"].as_array().unwrap().is_empty());
 
     let asset_url = format!(
@@ -394,6 +428,14 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         .await
         .unwrap();
     assert_eq!(deleted.status(), StatusCode::NOT_FOUND);
+    let missing_tag = h
+        .http
+        .get(format!("{}{RELEASES}/tag/v2.0.0", h.origin))
+        .header(header::COOKIE, &alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_tag.status(), StatusCode::NOT_FOUND);
     let retained_tag = crate::server::receive_tests::success(
         source.path(),
         &["ls-remote", git_url.as_str(), "refs/tags/v2.0.0"],
@@ -417,6 +459,10 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
     assert_eq!(replacement.1["tag_oid"], tag_oid);
     assert_eq!(replacement.1["version"], 1);
     assert_eq!(
+        h.json(&format!("{RELEASES}/tag/v2.0.0"), &alice).await["number"],
+        3
+    );
+    assert_eq!(
         h.json(RELEASES, &alice).await["items"]
             .as_array()
             .unwrap()
@@ -438,6 +484,10 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
     assert_eq!(draft.1["draft"], true);
     assert!(draft.1["tag_oid"].is_null());
     assert!(draft.1["published_at"].is_null());
+    assert_eq!(
+        h.json(&format!("{RELEASES}/tag/v3.0.0"), &alice).await,
+        draft.1
+    );
     assert!(
         crate::server::receive_tests::success(
             source.path(),
@@ -533,6 +583,14 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         .await
         .unwrap();
     assert_eq!(hidden_draft.status(), StatusCode::NOT_FOUND);
+    let hidden_tag = h
+        .http
+        .get(format!("{}{RELEASES}/tag/v3.0.0", h.origin))
+        .header(header::COOKIE, &bob)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hidden_tag.status(), StatusCode::NOT_FOUND);
     assert!(
         h.json(&format!("{RELEASES}?query=ready"), &bob).await["items"]
             .as_array()
@@ -558,6 +616,10 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
     assert_eq!(published.1["draft"], false);
     assert_eq!(published.1["tag_oid"], next_commit);
     assert!(published.1["published_at"].is_number());
+    assert_eq!(
+        h.json(&format!("{RELEASES}/tag/v3.0.0"), &bob).await,
+        published.1
+    );
     assert_eq!(
         crate::server::receive_tests::success(
             source.path(),
@@ -608,16 +670,47 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         StatusCode::FORBIDDEN
     );
 
+    let slash_tag = publish_release(
+        &h,
+        &alice,
+        csrf,
+        &json!({
+            "request_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "tag_name":"release/2026",
+            "target_oid":next_commit,
+            "title":"Slash tag",
+            "body":"",
+            "prerelease":false,
+            "draft":true
+        }),
+    )
+    .await;
+    assert_eq!(slash_tag.0, StatusCode::CREATED, "{}", slash_tag.1);
+    for tag in ["release/2026", "release%2F2026"] {
+        assert_eq!(
+            h.json(&format!("{RELEASES}/tag/{tag}"), &alice).await,
+            slash_tag.1
+        );
+    }
+
     *h.provider.mode.lock().await = "outsider".into();
     let outsider = h.login().await;
     let response = h
         .http
         .get(format!("{}{RELEASES}", h.origin))
-        .header(header::COOKIE, outsider)
+        .header(header::COOKIE, &outsider)
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let tag_response = h
+        .http
+        .get(format!("{}{RELEASES}/tag/v1.0.0", h.origin))
+        .header(header::COOKIE, &outsider)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tag_response.status(), StatusCode::NOT_FOUND);
     assert!(
         repo.store
             .list_prefix(&repo.layout.repo_path("app/v1/releases"))

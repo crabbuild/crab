@@ -1,3 +1,4 @@
+import { repoHref } from "./repository-route";
 import {
   lazy,
   Suspense,
@@ -29,7 +30,6 @@ import {
   endpoint,
   navigate,
   parentHex,
-  repoHref,
   useRequest,
   type Blame,
   type Change,
@@ -62,6 +62,8 @@ const FilePreview = lazy(() =>
 type Props = {
   repo: Repository;
   rev: string;
+  revision: string;
+  blameView?: boolean;
   path: string;
   name: string;
   theme: "light" | "dark";
@@ -132,6 +134,8 @@ export interface DiffReviewState {
 export function FileView({
   repo,
   rev,
+  revision,
+  blameView = false,
   path,
   name,
   theme,
@@ -143,9 +147,10 @@ export function FileView({
   const state = useRequest<Content>(
     endpoint(repo, "file", { rev, path_hex: path }),
   );
-  const [view, setView] = useState<"code" | "preview" | "blame">(
+  const [presentation, setView] = useState<"code" | "preview">(
     previewFirst ? "preview" : "code",
   );
+  const view = blameView ? "blame" : presentation;
   const [blamePaneWidth, setBlamePaneWidth] = useState(
     DEFAULT_BLAME_PANE_WIDTH,
   );
@@ -161,6 +166,32 @@ export function FileView({
   useEffect(() => {
     if (preview === null && state.data?.text === null) setView("preview");
   }, [preview, state.data?.oid, state.data?.text]);
+  useEffect(() => {
+    const permalink = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (
+        event.key.toLowerCase() !== "y" ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        (target instanceof HTMLElement &&
+          (target.isContentEditable ||
+            ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)))
+      )
+        return;
+      event.preventDefault();
+      navigate(
+        repoHref(repo, {
+          rev,
+          path,
+          kind: "Blob",
+          view: blameView ? "blame" : "code",
+        }) + window.location.hash,
+      );
+    };
+    window.addEventListener("keydown", permalink);
+    return () => window.removeEventListener("keydown", permalink);
+  }, [repo.owner, repo.name, rev, path, blameView]);
   const blame = useRequest<Blame>(
     view === "blame" ? endpoint(repo, "blame", { rev, path_hex: path }) : null,
   );
@@ -281,7 +312,17 @@ export function FileView({
                       ? (["blame"] as const)
                       : []),
                   ] as const;
-                  setView(views[index] ?? "code");
+                  const next = views[index] ?? "code";
+                  setView(next === "blame" ? "code" : next);
+                  if (blameView || next === "blame")
+                    navigate(
+                      repoHref(repo, {
+                        rev: revision,
+                        path,
+                        kind: "Blob",
+                        view: next === "blame" ? "blame" : "code",
+                      }) + window.location.hash,
+                    );
                 }}
               >
                 <SegmentedControl.Button selected={view === "code"}>
@@ -404,6 +445,7 @@ export function FileView({
                 descriptor={activePreview}
                 repo={repo}
                 rev={rev}
+                revision={revision}
                 directory={parentHex(path)}
                 name={name}
                 text={content.text}
@@ -921,7 +963,7 @@ function DiffView({
   codeThemes,
   eager,
   review,
-}: Omit<Props, "name" | "path"> & {
+}: Omit<Props, "name" | "path" | "revision" | "blameView"> & {
   base?: string;
   change: Change;
   eager: boolean;

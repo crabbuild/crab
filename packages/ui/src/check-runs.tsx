@@ -1,3 +1,4 @@
+import { repoHref } from "./repository-route";
 import {
   CheckCircleFillIcon,
   ClockIcon,
@@ -5,7 +6,7 @@ import {
   SkipIcon,
   XCircleFillIcon,
 } from "@primer/octicons-react";
-import { endpoint, repoHref, useRequest, type Repository } from "./api";
+import { endpoint, useRequest, type Repository } from "./api";
 import { DiscussionMarkdown } from "./discussion";
 import { Link, Result, short } from "./ui";
 

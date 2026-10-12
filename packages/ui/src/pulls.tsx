@@ -1,3 +1,4 @@
+import { repoHref, repositoryRoute } from "./repository-route";
 import { useEffect, useMemo, useState } from "react";
 import type { SelectedLineRange } from "@pierre/diffs";
 import { ActionList, ActionMenu, Button, TextInput } from "@primer/react";
@@ -17,7 +18,6 @@ import {
 import {
   endpoint,
   navigate,
-  repoHref,
   request,
   useRequest,
   type Commit,
@@ -260,7 +260,7 @@ export function PullRequests({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
 }) {
-  const pull = url.searchParams.get("pull");
+  const pull = repositoryRoute(url)?.pull;
   if (pull === "new")
     return repo.archived ? (
       <div className="notice">
@@ -312,7 +312,7 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
   return (
     <section className="pulls-page">
       <div className="section-heading">
-        <h2>Pulls</h2>
+        <h2>Pull requests</h2>
         {!repo.archived && (
           <Button
             variant="primary"
@@ -477,16 +477,20 @@ function NewPull({
   const branches = refs.refs.filter((ref) =>
     ref.name.startsWith("refs/heads/"),
   );
-  const requestedBase = url.searchParams.get("base");
+  const requestedBase = repositoryRoute(url)?.base;
   const initialBase =
-    branches.find((ref) => ref.name === requestedBase)?.name ??
+    branches.find(
+      (ref) => ref.name === requestedBase || branch(ref.name) === requestedBase,
+    )?.name ??
     refs.head?.name ??
     branches[0]?.name ??
     "";
-  const requestedHead = url.searchParams.get("head");
+  const requestedHead = repositoryRoute(url)?.head;
   const [base, setBase] = useState(initialBase);
   const [head, setHead] = useState(
-    branches.find((ref) => ref.name === requestedHead)?.name ??
+    branches.find(
+      (ref) => ref.name === requestedHead || branch(ref.name) === requestedHead,
+    )?.name ??
       branches.find((ref) => ref.name !== initialBase)?.name ??
       initialBase,
   );
@@ -628,7 +632,7 @@ function PullDetail({
 }) {
   const path = endpoint(repo, `pulls/${number}`);
   const pull = useRequest<PullRequest>(path);
-  const requestedTab = url.searchParams.get("pull_tab");
+  const requestedTab = repositoryRoute(url)?.pullTab;
   const tab =
     requestedTab === "commits" ||
     requestedTab === "files" ||

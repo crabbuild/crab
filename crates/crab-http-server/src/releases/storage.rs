@@ -15,9 +15,9 @@ use crate::{
             CompleteReleasePublicationOutcome, CreateRelease, CreateReleaseInput,
             CreateReleaseOutcome, DeleteRelease, DeleteReleaseAsset, DeleteReleaseAssetInput,
             DeleteReleaseAssetOutcome, DeleteReleaseInput, DeleteReleaseOutcome, GetRelease,
-            ListReleases, ReleaseAssetReservation, ReleaseListInput, ReleaseRecord,
-            ReserveReleaseAsset, ReserveReleaseAssetInput, ReserveReleaseAssetOutcome,
-            UpdateRelease, UpdateReleaseInput, UpdateReleaseOutcome,
+            GetReleaseByTag, ListReleases, ReleaseAssetReservation, ReleaseListInput,
+            ReleaseRecord, ReserveReleaseAsset, ReserveReleaseAssetInput,
+            ReserveReleaseAssetOutcome, UpdateRelease, UpdateReleaseInput, UpdateReleaseOutcome,
         },
     },
     server::{Repository, Server},
@@ -73,6 +73,22 @@ pub(super) async fn release(
         routed
             .client
             .query::<GetRelease>(&routed.target, None, number)
+            .await,
+    )
+    .map(|value| value.map(from_release))
+}
+
+pub(super) async fn release_by_tag(
+    server: &Server,
+    repo: &Repository,
+    actor: &Identity,
+    tag: String,
+) -> Result<Option<Release>> {
+    let routed = route(server, repo, actor, "repository.read").await?;
+    query_output(
+        routed
+            .client
+            .query::<GetReleaseByTag>(&routed.target, None, tag)
             .await,
     )
     .map(|value| value.map(from_release))

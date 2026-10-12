@@ -36,6 +36,7 @@ type Props = {
   descriptor: PreviewDescriptor;
   repo: Repository;
   rev: string;
+  revision: string;
   directory: string;
   name: string;
   text: string | null;
@@ -134,13 +135,14 @@ function sourceText(value?: string | string[]) {
 function NotebookPreview({
   repo,
   rev,
+  revision,
   directory,
   text,
   theme,
   codeThemes,
 }: Pick<
   Props,
-  "repo" | "rev" | "directory" | "text" | "theme" | "codeThemes"
+  "repo" | "rev" | "revision" | "directory" | "text" | "theme" | "codeThemes"
 >) {
   let notebook: Notebook;
   try {
@@ -169,6 +171,7 @@ function NotebookPreview({
               <RepositoryMarkdown
                 repo={repo}
                 rev={rev}
+                revision={revision}
                 directory={directory}
                 theme={theme}
                 codeThemes={codeThemes}
@@ -522,6 +525,7 @@ export function FilePreview(props: Props) {
       <RepositoryMarkdown
         repo={props.repo}
         rev={props.rev}
+        revision={props.revision}
         directory={props.directory}
         className="file-markdown-preview"
         theme={props.theme}
@@ -535,6 +539,7 @@ export function FilePreview(props: Props) {
       <NotebookPreview
         repo={props.repo}
         rev={props.rev}
+        revision={props.revision}
         directory={props.directory}
         text={props.text}
         theme={props.theme}

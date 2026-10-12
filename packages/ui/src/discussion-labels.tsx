@@ -1,9 +1,9 @@
+import { repoHref } from "./repository-route";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@primer/react";
 import { TagIcon } from "@primer/octicons-react";
 import {
   endpoint,
-  repoHref,
   useRequest,
   type Repository,
   type RepositoryLabel,

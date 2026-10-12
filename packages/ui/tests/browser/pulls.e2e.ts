@@ -510,7 +510,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
     });
   });
 
-  await page.goto("/team/project?view=pulls");
+  await page.goto("/team/project/pulls");
   await expect(
     page.getByRole("link", { name: "Improve the README", exact: true }),
   ).toBeVisible();
@@ -562,7 +562,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await page
     .getByRole("button", { name: "Create pull request", exact: true })
     .click();
-  await expect(page).toHaveURL(/pull=2/);
+  await expect(page).toHaveURL(/\/pull\/2$/);
   await expect(
     page.getByRole("heading", { name: /Document the feature #2/ }),
   ).toBeVisible();

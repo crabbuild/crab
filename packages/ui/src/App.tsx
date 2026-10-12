@@ -1,4 +1,11 @@
 import {
+  repoHref,
+  repositoryRoute,
+  repositoryRef,
+  legacyRepositoryHref,
+  revisionAddress,
+} from "./repository-route";
+import {
   Suspense,
   lazy,
   useEffect,
@@ -40,7 +47,6 @@ import {
   endpoint,
   navigate,
   parentHex,
-  repoHref,
   useLocation,
   useRequest,
   type Entry,
@@ -70,11 +76,7 @@ import {
   UploadFiles,
 } from "./content-editor";
 import { IssuesWorkspace } from "./issues-navigation";
-import {
-  RepositoryRefControls,
-  RepositoryToolbar,
-  revisionLabel,
-} from "./repository-toolbar";
+import { RepositoryRefControls, RepositoryToolbar } from "./repository-toolbar";
 import crabMark from "../../web/crab.optimized.svg";
 const RepositoryTree = lazy(() =>
   import("./tree").then((module) => ({ default: module.RepositoryTree })),
@@ -188,7 +190,17 @@ export function App() {
       delete root.dataset.themeChanging;
     };
   }, [codeTheme, resolved]);
-  const url = new URL(location, window.location.origin);
+  const requestedUrl = new URL(location, window.location.origin);
+  const requestedRoute = repositoryRoute(requestedUrl);
+  const redirected =
+    requestedRoute && legacyRepositoryHref(requestedUrl, requestedRoute);
+  const url = redirected
+    ? new URL(redirected, window.location.origin)
+    : requestedUrl;
+  const route = repositoryRoute(url);
+  useLayoutEffect(() => {
+    if (redirected) navigate(redirected, true);
+  }, [redirected]);
   const session = useRequest<Session>("/api/session");
   const [signingOut, setSigningOut] = useState(false);
   const [sessionError, setSessionError] = useState<string>();
@@ -197,21 +209,20 @@ export function App() {
     window.addEventListener("crab-session-expired", expired);
     return () => window.removeEventListener("crab-session-expired", expired);
   });
-  const pathParts = url.pathname.split("/");
   const [gitAccessOpen, setGitAccessOpen] = useState(false);
   const catalog = useRequest<{ repositories: Repository[] }>(
-    session.data?.authenticated && (pathParts.length !== 3 || gitAccessOpen)
+    session.data?.authenticated && (url.pathname === "/" || gitAccessOpen)
       ? "/api/repos"
       : null,
   );
   const repositoryCatalog = useRequest<{ repositories: Repository[] }>(
-    session.data?.authenticated && pathParts.length === 3
-      ? `/api/repos?${new URLSearchParams({ owner: pathParts[1], name: pathParts[2] })}`
+    session.data?.authenticated && route
+      ? `/api/repos?${new URLSearchParams({ owner: route.owner, name: route.name })}`
       : null,
   );
   // A repository page must not wait for settings reads from unrelated Cells.
   // Load the full catalog only for navigation or an open Git access selector.
-  const pageCatalog = pathParts.length === 3 ? repositoryCatalog : catalog;
+  const pageCatalog = route ? repositoryCatalog : catalog;
   const [importedRepository, setImportedRepository] = useState<{
     owner: string;
     name: string;
@@ -236,7 +247,7 @@ export function App() {
     }
   }
   const repo = pageCatalog.data?.repositories.find(
-    (repo) => `/${repo.owner}/${repo.name}` === url.pathname,
+    (repo) => repo.owner === route?.owner && repo.name === route.name,
   );
   useEffect(() => {
     document.title = repo
@@ -348,6 +359,11 @@ export function App() {
                   ? "Continue with GitHub"
                   : "Continue to sign in"}
               </Button>
+            </div>
+          ) : url.pathname !== "/" && !route ? (
+            <div className="notice error" role="alert">
+              <h1>Page not found</h1>
+              <Link href="/">Back to repositories</Link>
             </div>
           ) : (
             <Result state={pageCatalog} showTiming={false}>
@@ -541,7 +557,8 @@ function RepositoryPage({
   identity: Session["user"];
   onRepositoryChanged: () => void;
 }) {
-  const view = url.searchParams.get("view") ?? "code";
+  const route = repositoryRoute(url);
+  const view = route?.view ?? "code";
   const canWrite = repo.access === "write" && !repo.archived;
   const refs = useRequest<Refs>(
     view === "issues" || view === "labels" ? null : endpoint(repo, "refs"),
@@ -571,13 +588,21 @@ function RepositoryPage({
     : undefined;
   const visibleRefState = { ...refs, data: visibleRefs };
   const revName =
-    url.searchParams.get("rev") ??
+    (route?.rev === "HEAD" ? undefined : route?.rev) ??
     visibleRefs?.head?.name ??
     visibleRefs?.refs[0]?.name;
-  const selected = visibleRefs?.refs.find((ref) => ref.name === revName);
-  const rev = selected?.peeled ?? selected?.oid ?? revName;
-  const path = url.searchParams.get("path") ?? "";
-  const kind = url.searchParams.get("kind") ?? "Tree";
+  const resolvedRoute = repositoryRoute(url, visibleRefs);
+  const requestedRevision =
+    resolvedRoute?.rev === "HEAD" ? undefined : resolvedRoute?.rev;
+  const revision = requestedRevision ?? revName;
+  const selected = repositoryRef(visibleRefs, revision);
+  const rev = selected?.peeled ?? selected?.oid ?? revision;
+  const navigationRevision =
+    selected && visibleRefs
+      ? revisionAddress(visibleRefs, selected.name)
+      : revision;
+  const path = resolvedRoute?.path ?? "";
+  const kind = resolvedRoute?.kind ?? "Tree";
   const [showTree, setShowTree] = useState(Boolean(path));
   const [searchFocusRequest, setSearchFocusRequest] = useState(0);
   const [treePaneWidth, setTreePaneWidth] = useState(DEFAULT_TREE_PANE_WIDTH);
@@ -602,10 +627,10 @@ function RepositoryPage({
     return () => observer.disconnect();
   }, [showTree]);
   const overview = view === "code" && !path && !showTree;
-  const fileWorkspace = view === "code" && !overview;
+  const fileWorkspace = (view === "code" || view === "blame") && !overview;
   const issuesView = view === "issues" || view === "labels";
   const issueNavigation =
-    view === "labels" || (view === "issues" && !url.searchParams.has("issue"));
+    view === "labels" || (view === "issues" && !route?.issue);
   const branch = selected?.name.startsWith("refs/heads/")
     ? selected
     : undefined;
@@ -613,9 +638,19 @@ function RepositoryPage({
   function selectEntry(entry: Entry) {
     navigate(
       repoHref(repo, {
-        rev: branch?.name ?? rev,
+        rev: navigationRevision,
         path: entry.path_hex,
         kind: entry.kind,
+      }),
+    );
+  }
+  function openFileAction(view: "create" | "upload") {
+    if (!branch) return;
+    navigate(
+      repoHref(repo, {
+        rev: branch.name,
+        view,
+        path: kind === "Tree" ? path : parentHex(path),
       }),
     );
   }
@@ -695,7 +730,7 @@ function RepositoryPage({
     const focusSearch = (event: KeyboardEvent) => {
       const target = event.target;
       if (
-        view !== "code" ||
+        !["code", "blame"].includes(view) ||
         event.key.toLowerCase() !== "t" ||
         event.metaKey ||
         event.ctrlKey ||
@@ -715,73 +750,45 @@ function RepositoryPage({
     <>
       <div className="repo-header">
         <nav aria-label="Repository">
-          <Link
-            className={
-              [
-                "code",
-                "create",
-                "upload",
-                "edit",
-                "delete",
-                "branches",
-                "tags",
-                "releases",
-              ].includes(view)
-                ? "active"
-                : ""
-            }
-            aria-current={
-              [
-                "code",
-                "create",
-                "upload",
-                "edit",
-                "delete",
-                "branches",
-                "tags",
-                "releases",
-              ].includes(view)
-                ? "page"
-                : undefined
-            }
-            href={repoHref(repo, { rev })}
-          >
-            <CodeIcon /> Code
-          </Link>
-          <Link
-            className={view === "commits" || view === "commit" ? "active" : ""}
-            aria-current={
-              view === "commits" || view === "commit" ? "page" : undefined
-            }
-            href={repoHref(repo, { rev, view: "commits" })}
-          >
-            <HistoryIcon /> Commits
-          </Link>
-          <Link
-            className={view === "pulls" ? "active" : ""}
-            aria-current={view === "pulls" ? "page" : undefined}
-            href={repoHref(repo, { view: "pulls" })}
-          >
-            <GitPullRequestIcon /> Pulls
-          </Link>
-          <Link
-            className={view === "issues" || view === "labels" ? "active" : ""}
-            aria-current={
-              view === "issues" || view === "labels" ? "page" : undefined
-            }
-            href={repoHref(repo, { view: "issues" })}
-          >
-            <IssueOpenedIcon /> Issues
-          </Link>
-          {repo.can_admin && (
+          {[
+            {
+              view: "code",
+              label: "Code",
+              icon: CodeIcon,
+              active: !["issues", "labels", "pulls", "settings"].includes(view),
+            },
+            {
+              view: "issues",
+              label: "Issues",
+              icon: IssueOpenedIcon,
+              active: issuesView,
+            },
+            {
+              view: "pulls",
+              label: "Pull requests",
+              icon: GitPullRequestIcon,
+              active: view === "pulls",
+            },
+            ...(repo.can_admin
+              ? [
+                  {
+                    view: "settings",
+                    label: "Settings",
+                    icon: GearIcon,
+                    active: view === "settings",
+                  },
+                ]
+              : []),
+          ].map(({ view: tab, label, icon: Icon, active }) => (
             <Link
-              className={view === "settings" ? "active" : ""}
-              aria-current={view === "settings" ? "page" : undefined}
-              href={repoHref(repo, { view: "settings" })}
+              key={tab}
+              className={active ? "active" : ""}
+              aria-current={active ? "page" : undefined}
+              href={repoHref(repo, { view: tab })}
             >
-              <GearIcon /> Settings
+              <Icon /> {label}
             </Link>
-          )}
+          ))}
         </nav>
       </div>
       {repo.archived && (
@@ -809,9 +816,9 @@ function RepositoryPage({
                     refs={data}
                     csrf={csrf}
                     section={
-                      url.searchParams.get("section") === "branches"
+                      route?.section === "branches"
                         ? "branches"
-                        : url.searchParams.get("section") === "members"
+                        : route?.section === "members"
                           ? "members"
                           : "general"
                     }
@@ -983,7 +990,7 @@ function RepositoryPage({
                         <RepositoryToolbar
                           repo={repo}
                           refs={data}
-                          revision={revisionLabel(data, revName ?? rev)}
+                          revision={selected?.name ?? revision ?? rev}
                           archiveRevision={rev}
                           view={view}
                           path={path || undefined}
@@ -992,6 +999,7 @@ function RepositoryPage({
                           onCreateBranch={canWrite ? createBranch : undefined}
                         />
                         <History
+                          revision={navigationRevision ?? rev}
                           key={`${rev}:${path}`}
                           repo={repo}
                           rev={rev}
@@ -1004,7 +1012,7 @@ function RepositoryPage({
                         <RepositoryToolbar
                           repo={repo}
                           refs={data}
-                          revision={revisionLabel(data, revName ?? rev)}
+                          revision={selected?.name ?? revision ?? rev}
                           archiveRevision={rev}
                           view={view}
                           onRefresh={refs.retry}
@@ -1024,12 +1032,22 @@ function RepositoryPage({
                           <RepositoryToolbar
                             repo={repo}
                             refs={data}
-                            revision={revisionLabel(data, revName ?? rev)}
+                            revision={selected?.name ?? revision ?? rev}
                             archiveRevision={rev}
                             view={view}
                             onRefresh={refs.retry}
                             onCreateBranch={canWrite ? createBranch : undefined}
-                            onBrowse={() => setShowTree(true)}
+                            onBrowse={focusFileSearch}
+                            onCreateFile={
+                              canWrite && branch
+                                ? () => openFileAction("create")
+                                : undefined
+                            }
+                            onUploadFiles={
+                              canWrite && branch
+                                ? () => openFileAction("upload")
+                                : undefined
+                            }
                           />
                         )}
                         <div
@@ -1067,10 +1085,15 @@ function RepositoryPage({
                                 <RepositoryRefControls
                                   repo={repo}
                                   refs={data}
-                                  revision={revisionLabel(data, revName ?? rev)}
+                                  revision={selected?.name ?? revision ?? rev}
                                   onSelect={(name) =>
                                     navigate(
-                                      repoHref(repo, { rev: name, view }),
+                                      repoHref(repo, {
+                                        rev: revisionAddress(data, name),
+                                        view,
+                                        path,
+                                        kind,
+                                      }),
                                     )
                                   }
                                   compact
@@ -1079,34 +1102,12 @@ function RepositoryPage({
                                   }
                                   onCreateFile={
                                     canWrite && branch
-                                      ? () =>
-                                          navigate(
-                                            repoHref(repo, {
-                                              rev: branch.name,
-                                              view: "create",
-                                              path:
-                                                kind === "Tree"
-                                                  ? path
-                                                  : parentHex(path),
-                                              kind: "Tree",
-                                            }),
-                                          )
+                                      ? () => openFileAction("create")
                                       : undefined
                                   }
                                   onUploadFiles={
                                     canWrite && branch
-                                      ? () =>
-                                          navigate(
-                                            repoHref(repo, {
-                                              rev: branch.name,
-                                              view: "upload",
-                                              path:
-                                                kind === "Tree"
-                                                  ? path
-                                                  : parentHex(path),
-                                              kind: "Tree",
-                                            }),
-                                          )
+                                      ? () => openFileAction("upload")
                                       : undefined
                                   }
                                   onSearch={() =>
@@ -1150,10 +1151,11 @@ function RepositoryPage({
                               <FileNavigation
                                 repo={repo}
                                 refs={data}
-                                revision={revisionLabel(data, revName ?? rev)}
+                                revision={selected?.name ?? revision ?? rev}
                                 archiveRevision={rev}
-                                rev={branch?.name ?? rev}
+                                rev={navigationRevision ?? rev}
                                 path={path}
+                                kind={kind}
                                 view={view}
                                 onOpenTree={() => setShowTree(true)}
                                 onSearch={focusFileSearch}
@@ -1162,12 +1164,13 @@ function RepositoryPage({
                             {!overview && showTree && (
                               <FileBreadcrumb
                                 repo={repo}
-                                rev={branch?.name ?? rev}
+                                rev={navigationRevision ?? rev}
                                 path={path}
                               />
                             )}
                             {kind !== "Tree" && (
                               <LatestCommit
+                                revision={navigationRevision ?? rev}
                                 repo={repo}
                                 rev={rev}
                                 path={path}
@@ -1184,6 +1187,7 @@ function RepositoryPage({
                             >
                               {kind === "Tree" ? (
                                 <Directory
+                                  revision={navigationRevision ?? rev}
                                   key={`${rev}:${path}`}
                                   repo={repo}
                                   rev={rev}
@@ -1193,6 +1197,7 @@ function RepositoryPage({
                                   onEntry={selectEntry}
                                   header={
                                     <LatestCommit
+                                      revision={navigationRevision ?? rev}
                                       repo={repo}
                                       rev={rev}
                                       path={path}
@@ -1209,6 +1214,8 @@ function RepositoryPage({
                                   key={`${rev}:${path}`}
                                   repo={repo}
                                   rev={rev}
+                                  revision={navigationRevision ?? rev}
+                                  blameView={view === "blame"}
                                   path={path}
                                   name={displayHex(path)}
                                   theme={theme}
@@ -1295,17 +1302,19 @@ function RepositoryPage({
 function LatestCommit({
   repo,
   rev,
+  revision,
   path,
   kind,
 }: {
   repo: Repository;
   rev: string;
+  revision: string;
   path?: string;
   kind?: string;
 }) {
   const historyHref = repoHref(repo, {
     view: "commits",
-    rev,
+    rev: revision,
     path: path || undefined,
     kind: path ? kind : undefined,
   });

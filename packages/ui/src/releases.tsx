@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { repoHref, repositoryRoute } from "./repository-route";
+import { useEffect, useState } from "react";
 import { Button, IconButton, Label, TextInput } from "@primer/react";
 import {
   ChevronLeftIcon,
@@ -12,7 +13,6 @@ import {
 import {
   endpoint,
   navigate,
-  repoHref,
   useRequest,
   type Refs,
   type Repository,
@@ -156,7 +156,7 @@ function ReleaseCard({
               <Link
                 href={repoHref(repo, {
                   view: "releases",
-                  release: String(release.number),
+                  release: release.tag_name,
                 })}
               >
                 {release.title}
@@ -305,7 +305,7 @@ function ReleaseList({
                     className={index === 0 ? "active" : undefined}
                     href={repoHref(repo, {
                       view: "releases",
-                      release: String(release.number),
+                      release: release.tag_name,
                     })}
                   >
                     {release.tag_name}
@@ -325,7 +325,7 @@ function ReleaseList({
                               navigate(
                                 repoHref(repo, {
                                   view: "releases",
-                                  release: String(release.number),
+                                  release: release.tag_name,
                                   action: "edit",
                                 }),
                               ),
@@ -379,16 +379,18 @@ function ReleaseList({
 
 function ReleaseDetail({
   repo,
-  number,
+  tag,
   csrf,
   canManage,
 }: {
   repo: Repository;
-  number: string;
+  tag: string;
   csrf: string;
   canManage: boolean;
 }) {
-  const release = useRequest<Release>(endpoint(repo, `releases/${number}`));
+  const release = useRequest<Release>(
+    endpoint(repo, `releases/tag/${encodeURIComponent(tag)}`),
+  );
   return (
     <Result state={release} showTiming={false}>
       {(current) => (
@@ -409,7 +411,7 @@ function ReleaseDetail({
                       navigate(
                         repoHref(repo, {
                           view: "releases",
-                          release: number,
+                          release: tag,
                           action: "edit",
                         }),
                       ),
@@ -442,9 +444,31 @@ export function Releases({
   csrf: string;
   onPublished: () => void;
 }) {
-  const selected = url.searchParams.get("release");
+  const route = repositoryRoute(url);
+  const selected = route?.release;
+  const oldRelease = useRequest<Release>(
+    route?.releaseNumber
+      ? endpoint(repo, `releases/${route.releaseNumber}`)
+      : null,
+  );
+  const canonical =
+    oldRelease.data &&
+    repoHref(repo, {
+      view: "releases",
+      release: oldRelease.data.tag_name,
+      action: route?.action,
+    });
+  useEffect(() => {
+    if (canonical) navigate(canonical, true);
+  }, [canonical]);
+  if (route?.releaseNumber)
+    return (
+      <Result state={oldRelease} showTiming={false}>
+        {() => <p role="status">Opening release…</p>}
+      </Result>
+    );
   const canManage = repo.access === "write" && !repo.archived;
-  if (selected === "new")
+  if (route?.action === "new")
     return (
       <NewRelease
         repo={repo}
@@ -460,7 +484,7 @@ export function Releases({
         {repo.access === "write" && !repo.archived && (
           <Link
             className="button-link primary"
-            href={repoHref(repo, { view: "releases", release: "new" })}
+            href={repoHref(repo, { view: "releases", action: "new" })}
           >
             Draft a new release
           </Link>
@@ -470,11 +494,11 @@ export function Releases({
         repo={repo}
         query={selected ? undefined : (url.searchParams.get("query") ?? "")}
       />
-      {selected && url.searchParams.get("action") === "edit" ? (
+      {selected && route?.action === "edit" ? (
         canManage ? (
           <EditRelease
             repo={repo}
-            number={selected}
+            tag={selected}
             csrf={csrf}
             onPublished={onPublished}
           />
@@ -486,7 +510,7 @@ export function Releases({
       ) : selected ? (
         <ReleaseDetail
           repo={repo}
-          number={selected}
+          tag={selected}
           csrf={csrf}
           canManage={canManage}
         />

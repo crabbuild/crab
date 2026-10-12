@@ -97,7 +97,7 @@ async function openDiscussion(page: Page) {
       );
     await route.fulfill({ json });
   });
-  await page.goto("/team/project?view=issues&issue=1");
+  await page.goto("/team/project/issues/1");
   await expect(
     page.getByRole("heading", { name: "Keyboard discussion #1" }),
   ).toBeVisible();

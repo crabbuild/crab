@@ -121,6 +121,17 @@ test("publishes and browses GitHub-style releases and source tags", async ({
         : releases;
       return route.fulfill({ json: { items, next: null } });
     }
+    const tag = url.pathname.match(/\/releases\/tag\/(.+)$/);
+    if (tag) {
+      const release = releases.find(
+        (release) => release.tag_name === decodeURIComponent(tag[1]),
+      );
+      return route.fulfill(
+        release
+          ? { json: release }
+          : { status: 404, json: { error: { message: "Release not found" } } },
+      );
+    }
     const detail = url.pathname.match(/\/releases\/(\d+)$/);
     if (detail) {
       const index = releases.findIndex(
@@ -167,7 +178,7 @@ test("publishes and browses GitHub-style releases and source tags", async ({
     });
   });
 
-  await page.goto("/team/project?view=releases");
+  await page.goto("/team/project/releases");
   await expect(
     page.getByRole("heading", { name: "Releases", level: 2 }),
   ).toBeVisible();
@@ -198,7 +209,7 @@ test("publishes and browses GitHub-style releases and source tags", async ({
   await expectNoAccessibilityViolations(page);
 
   await page.getByRole("link", { name: "Tags", exact: true }).click();
-  await expect(page).toHaveURL(/view=tags/);
+  await expect(page).toHaveURL(/\/tags$/);
   await expect(
     page.getByRole("heading", { name: "Tags", level: 2 }),
   ).toBeVisible();
@@ -221,7 +232,10 @@ test("publishes and browses GitHub-style releases and source tags", async ({
   await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Save draft" }).click();
 
-  await expect(page).toHaveURL(/view=releases&release=2/);
+  await expect(page).toHaveURL(/\/releases\/tag\/v1\.0\.0$/);
+  await page.goto("/team/project?view=releases&release=2");
+  await expect(page).toHaveURL("/team/project/releases/tag/v1.0.0");
+
   await expect(page.getByRole("heading", { name: "Crab 1.0" })).toBeVisible();
   await expect(page.getByText("A stable release.")).toBeVisible();
   await expect(page.getByText("Draft", { exact: true })).toBeVisible();
@@ -232,7 +246,7 @@ test("publishes and browses GitHub-style releases and source tags", async ({
   expect(submission).toBeDefined();
 
   await page.getByRole("button", { name: "Edit Crab 1.0" }).click();
-  await expect(page).toHaveURL(/release=2&action=edit/);
+  await expect(page).toHaveURL(/\/releases\/edit\/v1\.0\.0$/);
   await expect(page.getByLabel("Release title")).toHaveValue("Crab 1.0");
   await page.getByLabel("Release title").fill("Crab 1.0 final");
   await page
@@ -240,7 +254,7 @@ test("publishes and browses GitHub-style releases and source tags", async ({
     .fill("Updated release notes.");
   await page.getByLabel("Set as a pre-release").uncheck();
   await page.getByRole("button", { name: "Save draft" }).click();
-  await expect(page).toHaveURL(/view=releases&release=2$/);
+  await expect(page).toHaveURL(/\/releases\/tag\/v1\.0\.0$/);
   await expect(
     page.getByRole("heading", { name: "Crab 1.0 final" }),
   ).toBeVisible();
@@ -274,7 +288,7 @@ test("publishes and browses GitHub-style releases and source tags", async ({
   await expect(page.getByText(/Tag v1\.0\.0 will remain/)).toBeVisible();
   await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Delete this release" }).click();
-  await expect(page).toHaveURL(/view=releases$/);
+  await expect(page).toHaveURL(/\/releases$/);
   await expect(page.getByRole("heading", { name: "Crab 0.9" })).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Crab 1.0 patched" }),

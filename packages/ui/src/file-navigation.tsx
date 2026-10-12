@@ -1,3 +1,4 @@
+import { repoHref, revisionAddress } from "./repository-route";
 import { Fragment, useState } from "react";
 import { Button, IconButton } from "@primer/react";
 import {
@@ -7,13 +8,7 @@ import {
   SearchIcon,
   SidebarExpandIcon,
 } from "@primer/octicons-react";
-import {
-  navigate,
-  repoHref,
-  displayHex,
-  type Refs,
-  type Repository,
-} from "./api";
+import { navigate, displayHex, type Refs, type Repository } from "./api";
 import { CloneMenu } from "./git-access";
 import { RevisionPicker } from "./revision-picker";
 import { Link } from "./ui";
@@ -91,6 +86,7 @@ export function FileNavigation({
   archiveRevision,
   rev,
   path,
+  kind,
   view,
   onOpenTree,
   onSearch,
@@ -101,6 +97,7 @@ export function FileNavigation({
   archiveRevision: string;
   rev: string;
   path: string;
+  kind: string;
   view: string;
   onOpenTree: () => void;
   onSearch: () => void;
@@ -118,7 +115,16 @@ export function FileNavigation({
       <RevisionPicker
         refs={refs}
         revision={revision}
-        onSelect={(name) => navigate(repoHref(repo, { rev: name, view }))}
+        onSelect={(name) =>
+          navigate(
+            repoHref(repo, {
+              rev: revisionAddress(refs, name),
+              view,
+              path,
+              kind,
+            }),
+          )
+        }
       />
       <FileBreadcrumb repo={repo} rev={rev} path={path} />
       <button className="file-search-opener" type="button" onClick={onSearch}>

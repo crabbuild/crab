@@ -1,3 +1,4 @@
+import { repoHref } from "./repository-route";
 import {
   Children,
   Suspense,
@@ -7,7 +8,7 @@ import {
 } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { endpoint, repoHref, type Repository } from "./api";
+import { endpoint, type Repository } from "./api";
 import { Link } from "./ui";
 import { enableCodeKeyboardScroll, type CodeThemes } from "./code-theme";
 
@@ -62,6 +63,7 @@ function repositoryTarget(directory: string, value?: string) {
 export function RepositoryMarkdown({
   repo,
   rev,
+  revision,
   directory,
   children,
   className,
@@ -70,6 +72,7 @@ export function RepositoryMarkdown({
 }: {
   repo: Repository;
   rev: string;
+  revision: string;
   directory: string;
   children: string;
   className?: string;
@@ -92,7 +95,7 @@ export function RepositoryMarkdown({
             return target ? (
               <Link
                 href={`${repoHref(repo, {
-                  rev,
+                  rev: revision,
                   path: target.path,
                   kind: target.kind,
                 })}${target.fragment}`}

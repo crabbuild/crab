@@ -47,10 +47,10 @@ pub(crate) use releases::{
     CompleteReleasePublication, CompleteReleasePublicationInput, CompleteReleasePublicationOutcome,
     CreateRelease, CreateReleaseInput, CreateReleaseOutcome, DeleteRelease, DeleteReleaseAsset,
     DeleteReleaseAssetInput, DeleteReleaseAssetOutcome, DeleteReleaseInput, DeleteReleaseOutcome,
-    GetRelease, GetReleaseSubmission, ListReleases, ReleaseAssetRecord, ReleaseAssetReservation,
-    ReleaseListInput, ReleasePage, ReleasePublication, ReleaseRecord, ReleaseSubmissionKey,
-    ReserveReleaseAsset, ReserveReleaseAssetInput, ReserveReleaseAssetOutcome, UpdateRelease,
-    UpdateReleaseInput, UpdateReleaseOutcome,
+    GetRelease, GetReleaseByTag, GetReleaseSubmission, ListReleases, ReleaseAssetRecord,
+    ReleaseAssetReservation, ReleaseListInput, ReleasePage, ReleasePublication, ReleaseRecord,
+    ReleaseSubmissionKey, ReserveReleaseAsset, ReserveReleaseAssetInput,
+    ReserveReleaseAssetOutcome, UpdateRelease, UpdateReleaseInput, UpdateReleaseOutcome,
 };
 pub(crate) use settings::{
     BranchProtectionRecord, BranchProtectionSettings, GetBranchProtections, GetRepositoryLifecycle,
@@ -694,6 +694,7 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> cellule_runtime::Resul
     registry.bind_query::<GetPullReviewReplySubmission>()?;
     registry.bind_query::<GetPullMergeSubmission>()?;
     registry.bind_query::<GetRelease>()?;
+    registry.bind_query::<GetReleaseByTag>()?;
     registry.bind_query::<GetReleaseSubmission>()?;
     registry.bind_query::<ListReleases>()?;
     projection::register(registry)

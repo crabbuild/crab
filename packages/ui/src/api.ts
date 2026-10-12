@@ -387,27 +387,28 @@ export function endpoint(
 
 const subscribe = (listener: () => void) => {
   window.addEventListener("popstate", listener);
-  return () => window.removeEventListener("popstate", listener);
+  window.addEventListener("hashchange", listener);
+  return () => {
+    window.removeEventListener("popstate", listener);
+    window.removeEventListener("hashchange", listener);
+  };
 };
 export function useLocation() {
   return useSyncExternalStore(
     subscribe,
-    () => window.location.pathname + window.location.search,
+    () =>
+      window.location.pathname + window.location.search + window.location.hash,
   );
 }
-export function navigate(href: string) {
-  if (href === window.location.pathname + window.location.search) return;
-  window.history.pushState(null, "", href);
+export function navigate(href: string, replace = false) {
+  if (
+    href ===
+    window.location.pathname + window.location.search + window.location.hash
+  )
+    return;
+  if (replace) window.history.replaceState(null, "", href);
+  else window.history.pushState(null, "", href);
   window.dispatchEvent(new PopStateEvent("popstate"));
-}
-export function repoHref(
-  repo: Repository,
-  params: Record<string, string | undefined> = {},
-) {
-  const query = new URLSearchParams();
-  for (const [key, value] of Object.entries(params))
-    if (value) query.set(key, value);
-  return `/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}${query.size ? `?${query}` : ""}`;
 }
 export function parentHex(path: string) {
   for (let offset = path.length - 2; offset >= 0; offset -= 2)

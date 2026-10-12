@@ -123,7 +123,7 @@ test("repository metadata can be managed and assigned to an issue", async ({
     throw new Error(`Unexpected label request: ${request.method()} ${path}`);
   });
 
-  await page.goto("/team/project?view=labels");
+  await page.goto("/team/project/labels");
   await page.getByLabel("Name", { exact: true }).fill("bug");
   await page
     .getByLabel("Description", { exact: true })
@@ -140,7 +140,7 @@ test("repository metadata can be managed and assigned to an issue", async ({
   await edit.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByText("kind/bug", { exact: true })).toBeVisible();
 
-  await page.goto("/team/project?view=issues&issue=1");
+  await page.goto("/team/project/issues/1");
   await page.getByLabel("Edit labels").click();
   await expectNoAccessibilityViolations(page);
   await page.getByRole("checkbox", { name: "kind/bug" }).check();
@@ -154,7 +154,7 @@ test("repository metadata can be managed and assigned to an issue", async ({
   await expect(metadata).toContainText("Repository maintainer");
   await expectNoAccessibilityViolations(page);
 
-  await page.goto("/team/project?view=labels");
+  await page.goto("/team/project/labels");
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Delete", exact: true }).click();
   await expect(page.getByText("No labels yet")).toBeVisible();

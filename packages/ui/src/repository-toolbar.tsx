@@ -1,14 +1,14 @@
+import { repoHref, revisionAddress } from "./repository-route";
 import { ActionList, ActionMenu, Button, IconButton } from "@primer/react";
 import {
   FileAddedIcon,
   GitBranchIcon,
   PlusIcon,
   SearchIcon,
-  SidebarExpandIcon,
   TagIcon,
   UploadIcon,
 } from "@primer/octicons-react";
-import { navigate, repoHref, type Refs, type Repository } from "./api";
+import { navigate, type Refs, type Repository } from "./api";
 import { CloneMenu } from "./git-access";
 import { RevisionPicker } from "./revision-picker";
 import { Link } from "./ui";
@@ -49,32 +49,11 @@ export function RepositoryRefControls({
         onCreateBranch={onCreateBranch}
       />
       {compact && onCreateFile && onUploadFiles && (
-        <ActionMenu>
-          <ActionMenu.Anchor>
-            <IconButton
-              className="add-file-menu"
-              icon={PlusIcon}
-              aria-label="Add file"
-              size="small"
-            />
-          </ActionMenu.Anchor>
-          <ActionMenu.Overlay width="small">
-            <ActionList>
-              <ActionList.Item onSelect={onCreateFile}>
-                <ActionList.LeadingVisual>
-                  <FileAddedIcon />
-                </ActionList.LeadingVisual>
-                Create new file
-              </ActionList.Item>
-              <ActionList.Item onSelect={onUploadFiles}>
-                <ActionList.LeadingVisual>
-                  <UploadIcon />
-                </ActionList.LeadingVisual>
-                Upload files
-              </ActionList.Item>
-            </ActionList>
-          </ActionMenu.Overlay>
-        </ActionMenu>
+        <AddFileMenu
+          compact
+          onCreateFile={onCreateFile}
+          onUploadFiles={onUploadFiles}
+        />
       )}
       {compact && onSearch ? (
         <IconButton
@@ -104,13 +83,6 @@ export function RepositoryRefControls({
   );
 }
 
-export function revisionLabel(refs: Refs, revision: string) {
-  return (
-    refs.refs.find((ref) => (ref.peeled ?? ref.oid) === revision)?.name ??
-    revision
-  );
-}
-
 export function RepositoryToolbar({
   repo,
   refs,
@@ -122,6 +94,8 @@ export function RepositoryToolbar({
   onRefresh,
   onBrowse,
   onCreateBranch,
+  onCreateFile,
+  onUploadFiles,
 }: {
   repo: Repository;
   refs: Refs;
@@ -133,6 +107,8 @@ export function RepositoryToolbar({
   onRefresh: () => void;
   onBrowse?: () => void;
   onCreateBranch?: (name: string) => Promise<void>;
+  onCreateFile?: () => void;
+  onUploadFiles?: () => void;
 }) {
   return (
     <div className="toolbar">
@@ -141,19 +117,32 @@ export function RepositoryToolbar({
         refs={refs}
         revision={revision}
         onSelect={(name) =>
-          navigate(repoHref(repo, { rev: name, view, path, kind }))
+          navigate(
+            repoHref(repo, {
+              rev: revisionAddress(refs, name),
+              view,
+              path,
+              kind,
+            }),
+          )
         }
         onCreateBranch={onCreateBranch}
       />
       <div className="repository-actions">
         {onBrowse && (
           <Button
-            leadingVisual={SidebarExpandIcon}
+            leadingVisual={SearchIcon}
             onClick={onBrowse}
             aria-expanded={false}
           >
-            Browse files
+            Go to file <kbd>T</kbd>
           </Button>
+        )}
+        {onCreateFile && onUploadFiles && (
+          <AddFileMenu
+            onCreateFile={onCreateFile}
+            onUploadFiles={onUploadFiles}
+          />
         )}
         <Button onClick={onRefresh}>Refresh</Button>
         {view === "code" && (
@@ -161,5 +150,48 @@ export function RepositoryToolbar({
         )}
       </div>
     </div>
+  );
+}
+
+function AddFileMenu({
+  compact = false,
+  onCreateFile,
+  onUploadFiles,
+}: {
+  compact?: boolean;
+  onCreateFile: () => void;
+  onUploadFiles: () => void;
+}) {
+  return (
+    <ActionMenu>
+      <ActionMenu.Anchor>
+        {compact ? (
+          <IconButton
+            className="add-file-menu"
+            icon={PlusIcon}
+            aria-label="Add file"
+            size="small"
+          />
+        ) : (
+          <Button trailingVisual={PlusIcon}>Add file</Button>
+        )}
+      </ActionMenu.Anchor>
+      <ActionMenu.Overlay width="small">
+        <ActionList>
+          <ActionList.Item onSelect={onCreateFile}>
+            <ActionList.LeadingVisual>
+              <FileAddedIcon />
+            </ActionList.LeadingVisual>
+            Create new file
+          </ActionList.Item>
+          <ActionList.Item onSelect={onUploadFiles}>
+            <ActionList.LeadingVisual>
+              <UploadIcon />
+            </ActionList.LeadingVisual>
+            Upload files
+          </ActionList.Item>
+        </ActionList>
+      </ActionMenu.Overlay>
+    </ActionMenu>
   );
 }

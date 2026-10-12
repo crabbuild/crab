@@ -725,6 +725,39 @@ impl Query for GetRelease {
     }
 }
 
+pub(crate) struct GetReleaseByTag;
+
+impl Query for GetReleaseByTag {
+    const MODULE: &'static str = RepositoryModule::NAME;
+    const ID: u32 = super::super::REPOSITORY_RELEASE_TAG_QUERY_ID;
+    const CODEC_VERSION: u32 = 1;
+    type Input = String;
+    type Output = Option<ReleaseRecord>;
+
+    fn execute(
+        context: &mut QueryContext<'_>,
+        tag: Self::Input,
+    ) -> cellule_runtime::Result<Self::Output> {
+        validate_tag_name(&tag)?;
+        // Tag claims are unique and indexed. Resolve the record in this query's
+        // snapshot instead of scanning release pages or opening a second Cell.
+        let result = context.sql(&SqlBatch {
+            statements: vec![statement(
+                "SELECT release_number FROM repository_release_tag_claims WHERE tag_name = ?",
+                vec![SqlValue::Text(tag)],
+            )],
+        })?;
+        result[0]
+            .rows
+            .first()
+            .map(|row| result_u64_from_row(row, 0))
+            .transpose()?
+            .map(|number| load_release_query(context, number))
+            .transpose()
+            .map(Option::flatten)
+    }
+}
+
 pub(crate) struct GetReleaseSubmission;
 
 impl Query for GetReleaseSubmission {

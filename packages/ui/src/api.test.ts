@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { displayHex, endpoint, parentHex, repoHref, request } from "./api";
+import { displayHex, endpoint, parentHex, request } from "./api";
 
 const repo = {
   owner: "team",
@@ -23,14 +23,7 @@ describe("byte-preserving repository navigation", () => {
     expect(displayHex("ff2f252f612562")).toBe("%FF/%25/a%25b");
     expect(displayHex("254646")).toBe("%25FF");
   });
-  it("encodes refs, cursors, and raw paths without changing their identity", () => {
-    const href = repoHref(repo, {
-      rev: "refs/heads/feature/x",
-      path: "ff2f25",
-    });
-    const params = new URL(href, "http://localhost").searchParams;
-    expect(params.get("rev")).toBe("refs/heads/feature/x");
-    expect(params.get("path")).toBe("ff2f25");
+  it("preserves opaque API cursors", () => {
     expect(
       new URL(
         endpoint(repo, "tree", { cursor: "a+b/c=" }),

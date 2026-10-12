@@ -61,6 +61,45 @@ uses the same server-side browser session contract but does not provide signed
 OIDC logout tokens. The exact API, catalog migration, and rollout contracts are in
 [Team sign-in](REFERENCE.md#team-sign-in).
 
+## Browser navigation
+
+Repository pages use GitHub-style paths. **Code**, **Issues**, **Pull requests**,
+and **Settings** appear in that order; commit history lives under Code.
+**Go to file** (keyboard `T`) opens file search, and **Add file** offers the
+existing create and upload actions.
+
+| Page | Path after `/{owner}/{name}` |
+| --- | --- |
+| Repository default branch | Root |
+| Directory or file | `/tree/{ref}/{path}`, `/blob/{ref}/{path}` |
+| File blame | `/blame/{ref}/{path}` |
+| Commit history or detail | `/commits/{ref}/{path?}`, `/commit/{oid}` |
+| Issues or new issue | `/issues`, `/issues/{number}`, `/issues/new` |
+| Pull requests or detail | `/pulls`, `/pull/{number}` |
+| Pull request tabs | `/pull/{number}/commits`, `/pull/{number}/files`, `/pull/{number}/checks` |
+| New pull request | `/compare/{base}...{head}` |
+| Releases or release detail | `/releases`, `/releases/tag/{tag}` |
+| Release creation or editing | `/releases/new`, `/releases/edit/{tag}` |
+| Branches, tags, or labels | `/branches`, `/tags`, `/labels` |
+| Settings | `/settings`, `/settings/branches`, `/settings/access` |
+| File creation, upload, editing, deletion | `/new/{ref}/{directory?}`, `/upload/{ref}/{directory?}`, `/edit/{ref}/{path}`, `/delete/{ref}/{path}` |
+
+Generated links encode a slash-containing ref as one URL segment. Pasted paths
+with unescaped ref slashes resolve against the longest known ref. Raw Git
+filename bytes are percent-encoded without UTF-8 replacement; literal percent
+signs remain distinct from escaped bytes. A tag sharing a branch name retains
+its full ref namespace. Named-ref navigation keeps its branch or tag while data
+reads remain pinned to the resolved commit OID. On a file page, keyboard `Y`
+replaces the ref with that OID, preserving the path and line fragment, following
+[GitHub's permanent file link convention](https://docs.github.com/en/repositories/working-with-files/using-files/getting-permanent-links-to-files).
+
+Deep links survive direct reloads through the embedded asset handler; service
+and asset namespaces retain their own 404 behavior. List filters and pagination
+stay in query parameters. Query-based bookmarks published in v1.2.4 are replaced
+once with their canonical paths; old numeric release bookmarks load the release
+once to resolve its tag. The release tag API uses the existing unique tag index
+and the same repository permissions and draft visibility as numbered reads.
+
 ## Build and run
 
 For a new S3-backed Cell deployment that requires every acknowledged mutation
