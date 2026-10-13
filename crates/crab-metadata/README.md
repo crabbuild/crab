@@ -327,3 +327,12 @@ manifest or opens SlateDB. The root cardinality is checked before segment
 fetches, and the normal verified segment reader is reused. Clones share lookup
 state until explicit close; scope and content retention remain the caller's
 responsibility.
+
+### Paged path attribution
+
+Unreleased path-state descriptor version 5 authenticates bounded record, node,
+component and child pages inside each immutable layer object. Canonical full
+loads validate the complete physical closure; `PathStateReader` resolves selected
+paths through verified ranges and a bounded parsed-page cache. Graph and ordinal
+bindings are retained. GC retains the layer object and therefore every embedded
+page. See the [format and qualification contract](../../crab/docs/architecture/indexed-remote-reads.md#paged-path-state-format).

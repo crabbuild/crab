@@ -11,6 +11,12 @@ use crate::{
 };
 
 mod codec;
+mod paged;
+#[cfg(feature = "storage")]
+mod reader;
+pub use paged::{PathStateLayerPages, PathStatePageRef};
+#[cfg(feature = "storage")]
+pub use reader::PathStateReader;
 #[cfg(feature = "storage")]
 mod storage;
 
@@ -23,12 +29,10 @@ pub use storage::{
     load_path_state_descriptor, publish_path_state_checkpoint, upload_path_state,
 };
 
-const LAYER_MAGIC: &[u8; 8] = b"CRABPS03";
-const LAYER_VERSION: u32 = 3;
-// Earlier descriptors can authenticate false mutations from Git-order merges.
-// Retire those semantics; maintenance rebuilds them without changing the codec.
-const DESCRIPTOR_VERSION: u32 = 4;
-const LAYER_HEADER_BYTES: usize = 28;
+// Whole-layer predecessors are unreleased derived data. Rebuild them before
+// publishing paged readiness, retaining the exact tree-comparison semantics.
+const DESCRIPTOR_VERSION: u32 = 5;
+const MAX_DESCRIPTOR_BYTES: u64 = 128 * 1024;
 const MAX_AUTHOR_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_PATH_BYTES: usize = 1024 * 1024;
@@ -113,6 +117,7 @@ pub struct PathStateLayerRef {
     pub commit_count: u32,
     pub node_count: u32,
     pub bytes: u64,
+    pub pages: PathStateLayerPages,
 }
 
 /// Immutable generation-bound path-state descriptor.
@@ -415,7 +420,8 @@ pub fn append_path_state(
             records,
             nodes,
         };
-        let bytes = encode_layer(&layer)?;
+        let encoded = encode_layer(&layer)?;
+        let bytes = encoded.bytes;
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let reference = PathStateLayerRef {
             path: path_state_layer_path(&hash),
@@ -424,6 +430,7 @@ pub fn append_path_state(
             commit_count: layer.records.len() as u32,
             node_count: layer.nodes.len() as u32,
             bytes: bytes.len() as u64,
+            pages: encoded.pages,
         };
         references.push(reference.clone());
         objects.push(PathStateLayerObject { reference, bytes });
@@ -431,7 +438,8 @@ pub fn append_path_state(
     }
     if layers.len() > MAX_LAYERS_BEFORE_COMPACTION {
         let layer = compact_layers(&layers)?;
-        let bytes = encode_layer(&layer)?;
+        let encoded = encode_layer(&layer)?;
+        let bytes = encoded.bytes;
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let reference = PathStateLayerRef {
             path: path_state_layer_path(&hash),
@@ -440,6 +448,7 @@ pub fn append_path_state(
             commit_count: layer.records.len() as u32,
             node_count: layer.nodes.len() as u32,
             bytes: bytes.len() as u64,
+            pages: encoded.pages,
         };
         references = vec![reference.clone()];
         objects = vec![PathStateLayerObject { reference, bytes }];
@@ -465,6 +474,9 @@ pub fn append_path_state(
     let descriptor_bytes = serde_json::to_vec(&descriptor).map_err(|source| {
         MetadataError::Internal(format!("path-state descriptor encode: {source}"))
     })?;
+    if descriptor_bytes.len() as u64 > MAX_DESCRIPTOR_BYTES {
+        return corrupt("path-state descriptor exceeds its byte bound");
+    }
     Ok(PathStateWrite {
         descriptor_hash: blake3::hash(&descriptor_bytes).to_hex().to_string(),
         descriptor_bytes,
@@ -791,7 +803,9 @@ fn validate_node_ref(
 }
 
 fn validate_descriptor_shape(descriptor: &PathStateDescriptor) -> Result<()> {
-    if descriptor.version != DESCRIPTOR_VERSION {
+    if descriptor.version != DESCRIPTOR_VERSION
+        || descriptor.layers.len() > MAX_LAYERS_BEFORE_COMPACTION
+    {
         return corrupt("unsupported path-state descriptor version");
     }
     validate_content_hash(
@@ -820,9 +834,26 @@ fn validate_descriptor_shape(descriptor: &PathStateDescriptor) -> Result<()> {
             || reference.base_ordinal != next
             || reference.commit_count == 0
             || reference.node_count == 0
-            || reference.bytes < LAYER_HEADER_BYTES as u64
+            || reference.pages.records.count != reference.commit_count
+            || reference.pages.nodes.count != reference.node_count
         {
             return corrupt("invalid path-state layer reference");
+        }
+        reference
+            .pages
+            .records
+            .validate(paged::Kind::Records, reference.bytes)?;
+        reference
+            .pages
+            .nodes
+            .validate(paged::Kind::Nodes, reference.bytes)?;
+        if reference.pages.records.first != 0u32.to_be_bytes()
+            || reference.pages.nodes.first != 0u32.to_be_bytes()
+        {
+            return corrupt("positional layer roots do not start at zero");
+        }
+        if let Some(names) = &reference.pages.names {
+            names.validate(paged::Kind::Names, reference.bytes)?;
         }
         next = next
             .checked_add(reference.commit_count)
@@ -1067,7 +1098,7 @@ mod tests {
         graph_with_commits(2)
     }
 
-    fn graph_with_commits(count: u8) -> SplitCommitGraph {
+    pub(super) fn graph_with_commits(count: u8) -> SplitCommitGraph {
         let layer = CommitGraphLayer {
             base_ordinal: 0,
             records: (1..=count)

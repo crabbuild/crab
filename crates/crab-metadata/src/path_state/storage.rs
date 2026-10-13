@@ -21,7 +21,7 @@ pub async fn load_path_state_descriptor(
         .map(|(descriptor, _)| descriptor)
 }
 
-async fn load_path_state_descriptor_with_size(
+pub(super) async fn load_path_state_descriptor_with_size(
     store: &Store,
     layout: &StoreLayout<Store>,
     descriptor_hash: &str,
@@ -35,7 +35,11 @@ async fn load_path_state_descriptor_with_size(
     let descriptor_path = layout.bulk_manifest_path("path-state", descriptor_hash);
     let expected = decode_hash(descriptor_hash, descriptor_path.as_ref())?;
     let descriptor_bytes = store
-        .verify_bounded(&descriptor_path, &expected, max_bytes)
+        .verify_bounded(
+            &descriptor_path,
+            &expected,
+            max_bytes.min(super::MAX_DESCRIPTOR_BYTES),
+        )
         .await?;
     let descriptor_bytes_len = descriptor_bytes.len() as u64;
     let descriptor = serde_json::from_slice(&descriptor_bytes).map_err(|source| {
