@@ -2,10 +2,11 @@
 
 Planned at `51435f76bd21142bc20a94745984a48b6c7db43b`, 2026-10-13.
 Priority P1; effort XL; correctness and publication risk HIGH.
-Status: implementation in progress. Existing indexed-read stages 1–3 are partially
-qualified. Slice A's paged producer/component reader is implemented and qualified;
-full foreground conversion and the remaining slices are incomplete. The canonical
-indexed-read ledger records the evidence and remaining gates.
+Status reconciled at `d8d6927c0f9a894dfc0e23d76ff76bf4906434cf`. Existing
+indexed-read stages 1–3 are partially qualified. PR #528 supplies the paged graph;
+PR #530 supplies authenticated ancestor sets and component qualification. These
+remain open PRs. Foreground conversion, bounded opening and later slices are
+incomplete. The canonical ledger records actual evidence and remaining gates.
 
 ## Executor contract
 
@@ -148,6 +149,52 @@ Existing stages 1–3 establish baseline and path-state foundations. Finish thei
 outstanding qualification without rebuilding them. Execute A → B → C → D → E;
 F may proceed after the shared recipe/ownership audit and joins G. H follows D.
 Lifecycle tests accompany every slice; G is the combined release gate.
+
+### Next executable slice: use the graph in foreground operations
+
+Start from the qualified paged graph/ancestor-set head, after checking its CI and
+parent PRs. Do not rebuild the codecs or claim their tests prove foreground use.
+
+1. In `crab-remote-git/src/commit_graph.rs`, replace the capsule reader's owned
+   `SplitCommitGraph` and `pinned_reachable` bitmap with the immutable
+   `CommitGraphReader` and roots captured from the authorized ref view. Retain
+   the released manifest contract through an explicit format boundary, not an
+   error-triggered full-scan fallback.
+2. Convert OID resolution, parent validation, generation reads and membership
+   callers in repository/snapshot code to asynchronous batches. Preserve input
+   order and duplicates. Membership checks use the captured tip sets; retained
+   records and a guessed root are insufficient. Resolve tags through the verified
+   object reader and preserve shallow-boundary behavior.
+3. Remove foreground path-state dependence on `graph()` and full
+   `ordinal_digest()` computation. Bind the path reader to the captured verified
+   descriptor's positional identity; validate consumed path records with batched
+   graph records. Keep full DAG/ordinal validation in the maintenance owner.
+4. Pass admitted stores and cancellation through each operation, including cache
+   hits. Finish locator sessions on success/error/cancellation. Do not retain an
+   operation token in the reusable graph/page cache.
+5. Prove the real repository APIs resolve commits, list attributed trees and read
+   files using pages. Instrument an explicit failure if the capsule foreground
+   path calls the eager graph loader or allocates a history-sized bitmap.
+
+Acceptance: native Git agrees for both merge parents, tags, rewind/deleted refs,
+raw paths and file/tree replacement; corruption cannot become absence; cancellation
+closes the operation. At 100/1k/10k history, fixed point queries meet the existing
+byte/page limits without historical graph decode. Report opening separately:
+slice C still owns the remaining full capsule/ref-control capture.
+
+### Attribution contract before history/blame work
+
+Keep three results distinct. A tree entry's current OID/mode comes from the
+selected tree. File/directory last-change attribution comes from the path-state
+index under the chosen first-parent semantics. A blame line's origin comes from
+comparisons of relevant content versions; it cannot be inferred from a chunk
+hash or a file's latest author. Mode-only changes affect entry attribution without
+transferring ownership of unchanged lines. Directory attribution reflects changes
+under that path, rather than inventing an author on the immutable tree object.
+
+For an Xet pointer, return version attribution from Git metadata without hydration.
+Full logical line blame over a 10-GiB text payload remains a separately budgeted
+capability. Git's pointer-blob blame is not logical-payload blame.
 
 ### A. Page graph lookup and make positional identity immutable
 
