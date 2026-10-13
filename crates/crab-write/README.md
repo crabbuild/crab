@@ -59,12 +59,13 @@ orchestrator publishes graph readiness. `build_path_state` then attaches that
 verified graph, resumes attribution from its checkpoint and persists progress
 every 32 commits. Completion replaces the partial record through the returned
 CAS token; cached readers observe both phases without a ref change. Graph
-construction writes paged descriptor version 2, reuses unchanged paged layers
+construction writes paged descriptor version 3, reuses unchanged paged layers
 and performs bounded-directory carries. Released manifest maintenance retains
 the eager version-1 encoding. The capsule owner rebuilds an eager browse graph
 even when its state digest is otherwise current, preserving reusable attribution
 through the existing checkpoint boundary. Full readback validates graph/page
-closure before the returned descriptor can become readiness. Graph discovery
+closure, including recomputed ancestor-set recurrence, before the returned
+descriptor can become readiness. Graph discovery
 drains a separate bounded operation per batch. `generation::with_generation_owner` shares renewed owner election and
 global/repository GC fences between v1 maintenance and the v2 orchestrator;
 all acquired leases are released on returned failure or cancellation. The

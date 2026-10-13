@@ -47,12 +47,14 @@ pub(crate) enum Kind {
     Names,
     CommitRecords,
     CommitOids,
+    CommitAncestryRoots,
+    CommitAncestryNodes,
 }
 
 impl Kind {
     pub(crate) fn key_bytes(self) -> usize {
         match self {
-            Self::Names => 32,
+            Self::Names | Self::CommitAncestryNodes => 32,
             Self::CommitOids => 20,
             _ => 4,
         }
@@ -83,7 +85,10 @@ impl PageRef {
         {
             return Err(corruption("invalid metadata page reference"));
         }
-        if matches!(kind, Kind::Records | Kind::Nodes | Kind::CommitRecords) {
+        if matches!(
+            kind,
+            Kind::Records | Kind::Nodes | Kind::CommitRecords | Kind::CommitAncestryRoots
+        ) {
             let first = integer(&self.first)?;
             let last = integer(&self.last)?;
             if last.checked_sub(first).and_then(|span| span.checked_add(1)) != Some(self.count) {
@@ -286,14 +291,15 @@ pub(crate) fn decode(
             {
                 return corrupt_at(path, "invalid page directory routing or ancestry");
             }
-            if matches!(kind, Kind::Records | Kind::Nodes | Kind::CommitRecords)
-                && children.last().is_some_and(|previous| {
-                    integer(&previous.last)
-                        .ok()
-                        .and_then(|last| last.checked_add(1))
-                        != integer(&child.first).ok()
-                })
-            {
+            if matches!(
+                kind,
+                Kind::Records | Kind::Nodes | Kind::CommitRecords | Kind::CommitAncestryRoots
+            ) && children.last().is_some_and(|previous| {
+                integer(&previous.last)
+                    .ok()
+                    .and_then(|last| last.checked_add(1))
+                    != integer(&child.first).ok()
+            }) {
                 return corrupt_at(path, "positional directory has a key gap");
             }
             total = total
@@ -310,7 +316,7 @@ pub(crate) fn decode(
         Page::Branch(children)
     };
     input.finish()?;
-    tracing::debug!(target:"crab_metadata::index_decode", index_format=if matches!(kind, Kind::CommitRecords | Kind::CommitOids) { "commit_graph" } else { "path_state" },
+    tracing::debug!(target:"crab_metadata::index_decode", index_format=if matches!(kind, Kind::CommitRecords | Kind::CommitOids | Kind::CommitAncestryRoots | Kind::CommitAncestryNodes) { "commit_graph" } else { "path_state" },
         decoded_bytes=bytes.len() as u64, "index page decoded");
     Ok(page)
 }
@@ -367,14 +373,15 @@ fn validate_rows(kind: Kind, rows: &Rows) -> Result<()> {
     {
         return Err(corruption("page keys are empty, invalid or unordered"));
     }
-    if matches!(kind, Kind::Records | Kind::Nodes | Kind::CommitRecords)
-        && rows.windows(2).any(|pair| {
-            integer(&pair[0].0)
-                .ok()
-                .and_then(|value| value.checked_add(1))
-                != integer(&pair[1].0).ok()
-        })
-    {
+    if matches!(
+        kind,
+        Kind::Records | Kind::Nodes | Kind::CommitRecords | Kind::CommitAncestryRoots
+    ) && rows.windows(2).any(|pair| {
+        integer(&pair[0].0)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            != integer(&pair[1].0).ok()
+    }) {
         return Err(corruption("positional leaf has a key gap"));
     }
     Ok(())

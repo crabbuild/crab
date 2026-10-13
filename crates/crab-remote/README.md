@@ -83,3 +83,8 @@ ordinal/parent records and duplicate OID batches through `CommitGraphReader`.
 It verifies the derived graph's captured state and Git identity before reads.
 Control capture remains in the reported opening measurements; this component
 workload does not claim bounded foreground opening or replace ref visibility.
+
+`graph-ancestry` adds membership checks against the HEAD tip from the same captured
+ref view. The native oracle uses `git merge-base --is-ancestor`, treating only
+exit status 1 as a valid negative answer. Foreground graph conversion is a separate
+gate; this component qualification does not bypass repository visibility.

@@ -10,6 +10,7 @@ use crate::validation::validate_content_hash;
 #[cfg(feature = "storage")]
 use crab_storage::{Store, StoreLayout};
 
+mod ancestry;
 mod paged;
 pub use paged::CommitGraphLayerPages;
 #[cfg(feature = "storage")]
@@ -17,7 +18,7 @@ mod reader;
 #[cfg(feature = "storage")]
 pub use reader::CommitGraphReader;
 
-const PAGED_VERSION: u32 = 2;
+const PAGED_VERSION: u32 = 3;
 const MAX_PAGED_LAYERS: usize = 32;
 
 const LAYER_MAGIC: &[u8; 8] = b"CRABCG01";
@@ -642,6 +643,11 @@ fn update_split_commit_graph(
         return Ok(None);
     }
 
+    let ancestry = if encoding == PAGED_VERSION {
+        Some(ancestry::Index::build(&layers)?)
+    } else {
+        None
+    };
     let mut layer_refs = Vec::with_capacity(layers.len());
     let mut layer_objects = Vec::new();
     for (index, layer) in layers.iter().enumerate() {
@@ -653,7 +659,12 @@ fn update_split_commit_graph(
             continue;
         }
         let (bytes, pages) = if encoding == PAGED_VERSION {
-            let (bytes, pages) = paged::encode_layer(layer)?;
+            let (bytes, pages) = paged::encode_layer(
+                layer,
+                ancestry.as_ref().ok_or_else(|| {
+                    crate::validation::corrupt_object("graph", "ancestry construction is absent")
+                })?,
+            )?;
             (bytes, Some(pages))
         } else {
             (encode_commit_graph_layer(layer)?, None)
@@ -823,6 +834,8 @@ pub async fn load_split_commit_graph(
         read_split_commit_graph_descriptor(store, router, descriptor_hash, max_bytes).await?;
     let descriptor_path = router.bulk_manifest_path("commit-graph", descriptor_hash);
     let mut layers = Vec::with_capacity(descriptor.layers.len());
+    let mut ancestry_roots = Vec::new();
+    let mut ancestry_nodes = BTreeMap::new();
     for reference in &descriptor.layers {
         fetched_bytes = fetched_bytes.checked_add(reference.bytes).ok_or_else(|| {
             MetadataError::CorruptObject {
@@ -848,11 +861,27 @@ pub async fn load_split_commit_graph(
             });
         }
         layers.push(match &reference.pages {
-            Some(pages) => paged::decode_layer(&bytes, reference, pages, path.as_ref())?,
+            Some(pages) => {
+                let decoded = paged::decode_layer(&bytes, reference, pages, path.as_ref())?;
+                ancestry_roots.extend(decoded.roots);
+                for (hash, node) in decoded.nodes {
+                    if ancestry_nodes
+                        .insert(hash, (node, reference.base_ordinal, reference.commit_count))
+                        .is_some()
+                    {
+                        return corrupt("ancestry node occurs in multiple layers");
+                    }
+                }
+                decoded.graph
+            }
             None => decode_commit_graph_layer(&bytes, path.as_ref())?,
         });
     }
-    SplitCommitGraph::new(descriptor, layers)
+    let graph = SplitCommitGraph::new(descriptor, layers)?;
+    if graph.descriptor.version == PAGED_VERSION {
+        ancestry::Index::build(&graph.layers)?.validate_layers(&ancestry_roots, &ancestry_nodes)?;
+    }
+    Ok(graph)
 }
 
 /// Load and content-verify only the small split-graph descriptor.

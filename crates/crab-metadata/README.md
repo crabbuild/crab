@@ -61,9 +61,16 @@ budget before buffering, then admit each layer against its authenticated size
 and the remaining aggregate budget. All bodies still require hash and exact
 length verification; malformed provider sizes cannot bypass the encoded-byte
 ceiling. Decoded index structures require separate memory qualification.
-Capsule browse construction writes split-graph descriptor version 2, with
+Capsule browse construction writes split-graph descriptor version 3, with
 authenticated ordinal-record and OID-directory pages and a verified positional
-digest. Its carry rule caps the layer directory at 32 entries even for decreasing
+digest. Per-commit ancestor roots and content-addressed interval nodes share
+unchanged subtrees and collapse full ordinal ranges. Maintenance recomputes the
+sets from the complete verified DAG and checks their canonical first-use layer;
+local page hashes alone cannot certify ancestry. Point membership reads preserve
+duplicates, verify the root contains itself and fail on missing required nodes.
+The caller must authorize roots against its captured refs before using membership
+as a visibility proof. Version 2 was an unreleased derived format; its owner
+rebuilds it rather than introducing a retired-format reader. Its carry rule caps the layer directory at 32 entries even for decreasing
 append batch sizes; internal page directories remain bounded. `CommitGraphReader`
 loads only the descriptor and dependency ranges, preserves duplicate query
 positions and validates selected parent ordering/corrected generations. It does

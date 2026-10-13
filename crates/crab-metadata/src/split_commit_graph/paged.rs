@@ -14,9 +14,14 @@ use crate::pages::{self, Kind, Writer};
 pub struct CommitGraphLayerPages {
     pub records: PageRef,
     pub oids: PageRef,
+    pub ancestry_roots: PageRef,
+    pub ancestry_nodes: PageRef,
 }
 
-pub(super) fn encode_layer(layer: &CommitGraphLayer) -> Result<(Vec<u8>, CommitGraphLayerPages)> {
+pub(super) fn encode_layer(
+    layer: &CommitGraphLayer,
+    ancestry: &ancestry::Index,
+) -> Result<(Vec<u8>, CommitGraphLayerPages)> {
     let mut writer = Writer::default();
     let mut records = Vec::with_capacity(layer.records.len());
     let mut oids = BTreeMap::new();
@@ -51,7 +56,40 @@ pub(super) fn encode_layer(layer: &CommitGraphLayer) -> Result<(Vec<u8>, CommitG
     }
     let records = writer.tree(Kind::CommitRecords, records)?;
     let oids = writer.tree(Kind::CommitOids, oids.into_iter().collect())?;
-    Ok((writer.bytes, CommitGraphLayerPages { records, oids }))
+    let end = layer
+        .base_ordinal
+        .checked_add(layer.records.len() as u32)
+        .ok_or_else(|| crate::validation::corrupt_object("ancestry", "ordinal range overflows"))?;
+    let roots = ancestry
+        .roots
+        .get(layer.base_ordinal as usize..end as usize)
+        .ok_or_else(|| crate::validation::corrupt_object("ancestry", "layer roots are absent"))?;
+    let ancestry_roots = writer.tree(
+        Kind::CommitAncestryRoots,
+        roots
+            .iter()
+            .enumerate()
+            .map(|(index, root)| {
+                (
+                    (layer.base_ordinal + index as u32).to_be_bytes().to_vec(),
+                    root.encode(),
+                )
+            })
+            .collect(),
+    )?;
+    let ancestry_nodes = writer.tree(
+        Kind::CommitAncestryNodes,
+        ancestry.rows(layer.base_ordinal, layer.records.len() as u32)?,
+    )?;
+    Ok((
+        writer.bytes,
+        CommitGraphLayerPages {
+            records,
+            oids,
+            ancestry_roots,
+            ancestry_nodes,
+        },
+    ))
 }
 
 pub(super) fn validate_roots(
@@ -63,12 +101,21 @@ pub(super) fn validate_roots(
         .records
         .validate(Kind::CommitRecords, reference.bytes)?;
     roots.oids.validate(Kind::CommitOids, reference.bytes)?;
+    roots
+        .ancestry_roots
+        .validate(Kind::CommitAncestryRoots, reference.bytes)?;
+    roots
+        .ancestry_nodes
+        .validate(Kind::CommitAncestryNodes, reference.bytes)?;
     let end = reference
         .base_ordinal
         .checked_add(reference.commit_count)
         .and_then(|end| end.checked_sub(1));
     if roots.records.count != reference.commit_count
         || roots.oids.count != reference.commit_count
+        || roots.ancestry_roots.count != reference.commit_count
+        || roots.ancestry_roots.first != roots.records.first
+        || roots.ancestry_roots.last != roots.records.last
         || roots.records.first != reference.base_ordinal.to_be_bytes()
         || end.is_none_or(|end| roots.records.last != end.to_be_bytes())
     {
@@ -107,12 +154,19 @@ pub(super) fn record(bytes: &[u8], ordinal: u32, path: &str) -> Result<CommitGra
 }
 
 #[cfg(any(feature = "storage", test))]
+pub(super) struct DecodedLayer {
+    pub(super) graph: CommitGraphLayer,
+    pub(super) roots: Vec<ancestry::Reference>,
+    pub(super) nodes: BTreeMap<[u8; 32], Vec<u8>>,
+}
+
+#[cfg(any(feature = "storage", test))]
 pub(super) fn decode_layer(
     bytes: &[u8],
     reference: &CommitGraphLayerRef,
     roots: &CommitGraphLayerPages,
     path: &str,
-) -> Result<CommitGraphLayer> {
+) -> Result<DecodedLayer> {
     validate_roots(reference, roots, path)?;
     let mut visited = BTreeMap::new();
     let rows = pages::scan(
@@ -145,6 +199,32 @@ pub(super) fn decode_layer(
             "graph OID directory disagrees with positional records",
         );
     }
+    let ancestry_roots = pages::scan(
+        bytes,
+        &roots.ancestry_roots,
+        Kind::CommitAncestryRoots,
+        path,
+        &mut visited,
+    )?
+    .into_iter()
+    .map(|(_, value)| ancestry::Reference::decode(&value, path))
+    .collect::<Result<Vec<_>>>()?;
+    let mut ancestry_nodes = BTreeMap::new();
+    for (key, value) in pages::scan(
+        bytes,
+        &roots.ancestry_nodes,
+        Kind::CommitAncestryNodes,
+        path,
+        &mut visited,
+    )? {
+        let hash = key.as_slice().try_into().map_err(|_| {
+            crate::validation::corrupt_object(path, "invalid ancestry node hash key")
+        })?;
+        if *blake3::hash(&value).as_bytes() != hash {
+            return corrupt_at(path, "ancestry directory node hash mismatch");
+        }
+        ancestry_nodes.insert(hash, value);
+    }
     let mut offset = 0u64;
     for (start, (_, page)) in visited {
         if start != offset {
@@ -157,8 +237,12 @@ pub(super) fn decode_layer(
     if offset != bytes.len() as u64 {
         return corrupt_at(path, "graph has trailing unreferenced bytes");
     }
-    Ok(CommitGraphLayer {
-        base_ordinal: reference.base_ordinal,
-        records,
+    Ok(DecodedLayer {
+        graph: CommitGraphLayer {
+            base_ordinal: reference.base_ordinal,
+            records,
+        },
+        roots: ancestry_roots,
+        nodes: ancestry_nodes,
     })
 }
