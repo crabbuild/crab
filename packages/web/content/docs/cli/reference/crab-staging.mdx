@@ -15,6 +15,7 @@ Manage the staging area.
 
 ```bash
 crab staging stats
+crab staging upgrade
 crab staging verify
 crab staging clean [OPTIONS]
 ```
@@ -23,7 +24,7 @@ crab staging clean [OPTIONS]
 
 The Crab staging area (`.crab/staging/`) stores chunk data locally between
 `crab add` and `git push`. The `crab staging` command provides subcommands
-to inspect and clean this area.
+to inspect, upgrade and clean this area.
 
 For conceptual background, see [Staging Area](/docs/cli/storage/staging-area).
 
@@ -36,6 +37,21 @@ Print staging area statistics (read-only, never blocks writers).
 ```bash
 crab staging stats
 ```
+
+### upgrade
+
+Upgrade local staging layout v1, shipped in Crab v1.2.4, to layout v2:
+
+```bash
+crab staging upgrade
+crab staging verify
+```
+
+Upgrade preserves staged payloads, recipes and ownership. It adds two ownership
+indexes and advances the local writer marker under an exclusive staging lock.
+Stop active add, filter and push processes first. Unknown schema shapes are
+rejected without deleting data. Old binaries cannot open the upgraded layout.
+Remote objects and pointer formats do not change.
 
 ### verify
 

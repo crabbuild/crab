@@ -13,8 +13,8 @@ flowchart LR
     cli[cmd/add.rs run_add]
     attrs[TrackedClassifier and PatternFilter]
     walker[collect_candidates]
-    stream[cmd/stream_stage.rs stage_file_streaming]
-    staging[(StagingArea segments + SQLite)]
+    stream[crab-staging stream file adapter]
+    staging[(Shared ingestion + durable payload authority)]
     plan[crab-staging canonical authority]
     remote[(optional crab:// remote chunk index)]
     gitblob[gix write_blob]
@@ -39,7 +39,9 @@ The important ownership boundaries are:
 | `crab/src/cmd/add.rs` | CLI orchestration, candidate discovery, progress, rollback, pointer publication |
 | `crab/src/cache/add_validation.rs` | Per-worktree v1 proof cache for already-verified indexed content |
 | `crab/src/cache/add_remote_candidates.rs` | Bucket/global-prefix scoped advisory cache for proof-backed remote chunk candidates |
-| `crates/crab-staging/src/stream.rs` | Bounded file streaming, Blake3 hashing, CDC chunking, preparation-wide claims, provisional staging adoption |
+| `crates/crab-staging/src/stream.rs` | Descriptor-safe file adapter and source validation |
+| `crates/crab-staging/src/ingest.rs` | Shared byte ingestion, prepared verification/replay, ordered recipes and lifecycle |
+| `crates/crab-staging/src/ingest/prepared.rs` | Bounded xorb workers, preparation coordination and durable body installation |
 | `crates/crab-staging/src/lib.rs` | Segment writes, SQLite rows, flush/promotion, staged-file adoption and retirement |
 | `crates/crab-staging/src/add_push_plan.rs` | Add-time push-plan construction from staged chunk rows |
 | `crates/crab-staging/src/push_plan.rs` | Add-time plan model, prepared-xorb payload helpers, and diagnostics |
@@ -107,14 +109,23 @@ pointer.
 
 ## Streaming and Staging Algorithm
 
-`crab/src/cmd/stream_stage.rs` is the bounded-memory file path shared by
-`crab add` and `crab adopt`.
+`crates/crab-staging/src/stream.rs` supplies descriptor-safe reads for
+`crab add`, adopt, SDK and VFS callers. It feeds
+`crates/crab-staging/src/ingest.rs`, the same staging session used by Git clean.
+The session owns hashing, chunking, ordered recording, claims, prepared payloads,
+rollback and durability; callers retain input validation and Git publication.
+
+Native add validates descriptor/path stability between `finish_input` and
+`seal`. Git clean decodes packet payloads and seals only after the content flush.
+Reused prepared bodies are pinned by preparation ownership, reused segments by
+recording terms, and verification candidates by an operation path lease. Recipe
+leases replace temporary ownership before publication. Index checkpoints make
+ownership durable before pointer emission or physical payload reclamation.
 
 ```mermaid
 flowchart TD
     start[open file]
     key[derive provisional staging key from relative path]
-    retire[retire stale provisional rows]
     stat1[capture before stat]
     read[read 1 MiB buffer]
     hash[update Blake3 file hasher]
@@ -128,7 +139,7 @@ flowchart TD
     done[return file hash, size, chunk sequence, index stat]
     cleanup[retire provisional rows and error]
 
-    start --> key --> retire --> stat1 --> read
+    start --> stat1 --> key --> read
     read --> hash --> cdc --> batch --> eof
     eof -- no --> read
     eof -- yes --> stat2 --> changed
@@ -141,10 +152,9 @@ flushed to staging in bounded batches, and progress counters are updated from
 the same stream. The staging schema keys rows by file hash, so the stream first
 writes under a provisional key and then calls `StagingArea::adopt_staged_file`
 once the final Blake3 file hash is known.
-Because the provisional key is retired before streaming begins, the stream uses
-the retired-file staging path to avoid a redundant pending-position probe for
-each flush batch while keeping the general `stage_chunks_batch` stale-position
-guard for shared callers.
+Each operation derives a fresh key from its unique batch identity. Its segment
+writes can skip a redundant pending-position probe; the general
+`stage_chunks_batch` API retains that guard for callers reusing file identities.
 
 Rollback rules:
 

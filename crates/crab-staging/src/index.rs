@@ -18,8 +18,18 @@ type StoredRecipeMetadata = (i64, i64, Vec<u8>, i64, Vec<u8>, String);
 type StoredRecipeWithHashRow = (Vec<u8>, i64, i64, Vec<u8>, i64, Vec<u8>, String, Vec<u8>);
 type ResidualAuthorityRow = (i64, Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
 
-/// Canonical pre-release on-disk layout contract.
-const LAYOUT_VERSION: &str = "1";
+/// Canonical local ownership layout; v1 shipped in release v1.2.4.
+const LAYOUT_VERSION: &str = "2";
+const UNOWNED_CHUNK_PAYLOAD: &str = "NOT EXISTS (
+    SELECT 1 FROM recipe_payload_leases WHERE recipe_payload_leases.chunk_hash = chunk_payloads.chunk_hash
+) AND NOT EXISTS (
+    SELECT 1 FROM chunks WHERE chunks.chunk_hash = chunk_payloads.chunk_hash
+) AND NOT EXISTS (
+    SELECT 1 FROM pending_chunks WHERE pending_chunks.chunk_hash = chunk_payloads.chunk_hash
+) AND NOT EXISTS (
+    SELECT 1 FROM recipe_recording_terms AS term
+    WHERE term.chunk_hash = chunk_payloads.chunk_hash AND term.chunk_size = chunk_payloads.size
+)";
 const PUBLISHED_RECIPE_LOOKUP_BATCH_SIZE: usize = 512;
 
 const CANONICAL_TABLES: &[&str] = &[
@@ -58,6 +68,7 @@ const CANONICAL_TABLES: &[&str] = &[
 
 const CANONICAL_INDEXES: &[&str] = &[
     "add_preparation_batches_by_batch",
+    "chunk_payloads_by_segment",
     "chunks_by_hash",
     "chunks_by_segment",
     "leases_by_file",
@@ -72,6 +83,7 @@ const CANONICAL_INDEXES: &[&str] = &[
     "recipe_payload_leases_by_chunk",
     "recipe_remote_chunks_by_hash",
     "recipes_by_file",
+    "recording_terms_by_chunk",
 ];
 
 const CANONICAL_TRIGGERS: &[&str] = &["chunks_register_payload", "pending_chunks_register_payload"];
@@ -152,6 +164,7 @@ pub(crate) enum PreparedChunkClaim {
     Segment,
     Claimed,
     Pending,
+    Missing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,7 +295,7 @@ fn nonnegative_count(field: &str, value: i64) -> Result<u64> {
 
 fn retired_staging_schema() -> StagingError {
     StagingError::StagingCorrupt(
-        "staging schema is not canonical v1; remove .crab/staging and restage".to_owned(),
+        "staging schema is not canonical v2; run `crab staging upgrade` for tagged v1; preserve staged-only data before recreating an unknown layout".to_owned(),
     )
 }
 
@@ -497,8 +510,8 @@ impl Index {
     /// Open (or create) the staging index at `path`.
     ///
     /// Enables WAL mode, `PRAGMA synchronous = NORMAL`, and foreign key
-    /// enforcement. Initializes a fresh canonical v1 schema or rejects any
-    /// other shape with an explicit restage instruction.
+    /// enforcement. Initializes a fresh canonical v2 schema or rejects any
+    /// other shape with explicit upgrade or data-preservation guidance.
     ///
     /// # Errors
     ///
@@ -515,8 +528,9 @@ impl Index {
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| StagingError::Internal(format!("failed to set WAL mode: {e}")))?;
 
-        // NORMAL synchronous is safe with WAL — commits are durable after
-        // the WAL write; only a full OS crash can lose the last transaction.
+        // Recording batches can be rebuilt after a crash. Explicit FULL
+        // checkpoints make publication and reclamation durable without syncing
+        // every intermediate chunk batch.
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(|e| {
                 StagingError::Internal(format!("failed to set synchronous = NORMAL: {e}"))
@@ -577,76 +591,116 @@ impl Index {
         Ok(index)
     }
 
-    fn open_canonical_schema(&mut self) -> Result<()> {
+    fn validate_schema(&self, layout_version: &str, indexes: &[&str]) -> Result<()> {
         let existing_tables = self.application_objects("table")?;
-        let fresh = existing_tables.is_empty();
-        if !fresh {
-            if existing_tables
+        if existing_tables
+            .iter()
+            .map(String::as_str)
+            .ne(CANONICAL_TABLES.iter().copied())
+        {
+            return Err(retired_staging_schema());
+        }
+        let existing_indexes = self.application_objects("index")?;
+        if existing_indexes
+            .iter()
+            .map(String::as_str)
+            .ne(indexes.iter().copied())
+        {
+            return Err(retired_staging_schema());
+        }
+        let existing_triggers = self.application_objects("trigger")?;
+        if existing_triggers
+            .iter()
+            .map(String::as_str)
+            .ne(CANONICAL_TRIGGERS.iter().copied())
+        {
+            return Err(retired_staging_schema());
+        }
+        if self
+            .table_columns("publication_intent_entries")?
+            .iter()
+            .map(String::as_str)
+            .ne(PUBLICATION_INTENT_ENTRY_COLUMNS.iter().copied())
+        {
+            return Err(retired_staging_schema());
+        }
+        if self
+            .table_columns("recording_remote_chunks")?
+            .iter()
+            .map(String::as_str)
+            .ne(REMOTE_CHUNK_COLUMNS.iter().copied())
+            || self
+                .table_columns("recipe_remote_chunks")?
                 .iter()
                 .map(String::as_str)
-                .ne(CANONICAL_TABLES.iter().copied())
-            {
-                return Err(retired_staging_schema());
-            }
-            let existing_indexes = self.application_objects("index")?;
-            if existing_indexes
-                .iter()
-                .map(String::as_str)
-                .ne(CANONICAL_INDEXES.iter().copied())
-            {
-                return Err(retired_staging_schema());
-            }
-            let existing_triggers = self.application_objects("trigger")?;
-            if existing_triggers
-                .iter()
-                .map(String::as_str)
-                .ne(CANONICAL_TRIGGERS.iter().copied())
-            {
-                return Err(retired_staging_schema());
-            }
-            if self
-                .table_columns("publication_intent_entries")?
-                .iter()
-                .map(String::as_str)
-                .ne(PUBLICATION_INTENT_ENTRY_COLUMNS.iter().copied())
-            {
-                return Err(retired_staging_schema());
-            }
-            if self
-                .table_columns("recording_remote_chunks")?
-                .iter()
-                .map(String::as_str)
-                .ne(REMOTE_CHUNK_COLUMNS.iter().copied())
-                || self
-                    .table_columns("recipe_remote_chunks")?
-                    .iter()
-                    .map(String::as_str)
-                    .ne(RECIPE_REMOTE_CHUNK_COLUMNS.iter().copied())
-            {
-                return Err(retired_staging_schema());
-            }
-            if self
-                .table_columns("staging_batches")?
-                .iter()
-                .map(String::as_str)
-                .ne(STAGING_BATCH_COLUMNS.iter().copied())
-            {
-                return Err(retired_staging_schema());
-            }
-            let version: Option<String> = self
-                .conn
-                .query_row(
-                    "SELECT value FROM staging_meta WHERE key = 'layout_version'",
-                    [],
-                    |row| row.get(0),
+                .ne(RECIPE_REMOTE_CHUNK_COLUMNS.iter().copied())
+        {
+            return Err(retired_staging_schema());
+        }
+        if self
+            .table_columns("staging_batches")?
+            .iter()
+            .map(String::as_str)
+            .ne(STAGING_BATCH_COLUMNS.iter().copied())
+        {
+            return Err(retired_staging_schema());
+        }
+        let version: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM staging_meta WHERE key = 'layout_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to read staging layout version: {e}"))
+            })?;
+        if version.as_deref() != Some(layout_version) {
+            return Err(retired_staging_schema());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn upgrade_layout(path: &Path) -> Result<()> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        let index = Self { conn };
+        let version: String = index.conn.query_row(
+            "SELECT value FROM staging_meta WHERE key = 'layout_version'",
+            [],
+            |row| row.get(0),
+        )?;
+        if version == LAYOUT_VERSION {
+            return index.validate_schema(LAYOUT_VERSION, CANONICAL_INDEXES);
+        }
+        // Only the tagged v1 layout has an upgrade contract. The exclusive
+        // staging lock must be held; old writers must never reopen upgraded data.
+        let old_indexes = CANONICAL_INDEXES
+            .iter()
+            .copied()
+            .filter(|name| {
+                !matches!(
+                    *name,
+                    "chunk_payloads_by_segment" | "recording_terms_by_chunk"
                 )
-                .optional()
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to read staging layout version: {e}"))
-                })?;
-            if version.as_deref() != Some(LAYOUT_VERSION) {
-                return Err(retired_staging_schema());
-            }
+            })
+            .collect::<Vec<_>>();
+        index.validate_schema("1", &old_indexes)?;
+        let tx = index.conn.unchecked_transaction()?;
+        tx.execute_batch("CREATE INDEX chunk_payloads_by_segment ON chunk_payloads(segment_id);
+            CREATE INDEX recording_terms_by_chunk ON recipe_recording_terms(chunk_hash, chunk_size, batch_id);
+            UPDATE staging_meta SET value = '2' WHERE key = 'layout_version';")?;
+        tx.commit()?;
+        index.checkpoint()?;
+        index.validate_schema(LAYOUT_VERSION, CANONICAL_INDEXES)
+    }
+
+    fn open_canonical_schema(&mut self) -> Result<()> {
+        let fresh = self.application_objects("table")?.is_empty();
+        if !fresh {
+            self.validate_schema(LAYOUT_VERSION, CANONICAL_INDEXES)?;
         }
 
         self.initialize_schema()?;
@@ -663,6 +717,23 @@ impl Index {
                 version = LAYOUT_VERSION,
                 "initialized canonical staging schema"
             );
+        }
+        Ok(())
+    }
+
+    pub fn checkpoint(&self) -> Result<()> {
+        // NORMAL avoids fsync for every recording batch. FULL checkpoints sync
+        // the WAL and database before pointers or physical reclamation depend on it.
+        let (busy, frames, checkpointed): (i64, i64, i64) =
+            self.conn
+                .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+        if busy != 0 || frames != checkpointed {
+            return Err(StagingError::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "staging durability checkpoint is blocked",
+            )));
         }
         Ok(())
     }
@@ -813,6 +884,9 @@ impl Index {
                         ON DELETE CASCADE
                 );
 
+                CREATE INDEX IF NOT EXISTS recording_terms_by_chunk
+                    ON recipe_recording_terms(chunk_hash, chunk_size, batch_id);
+
                 CREATE TABLE IF NOT EXISTS file_recipes (
                     recipe_hash    BLOB PRIMARY KEY,
                     file_hash      BLOB NOT NULL,
@@ -921,6 +995,9 @@ impl Index {
                     segment_offset INTEGER NOT NULL,
                     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
                 );
+
+                CREATE INDEX IF NOT EXISTS chunk_payloads_by_segment
+                    ON chunk_payloads(segment_id);
 
                 CREATE TABLE IF NOT EXISTS recipe_payload_leases (
                     recipe_hash BLOB NOT NULL,
@@ -1535,6 +1612,9 @@ impl Index {
                  LEFT JOIN pending_chunks p ON p.segment_id = s.segment_id
                  WHERE s.live_chunk_count = 0
                    AND s.sealed_at IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM chunk_payloads WHERE segment_id = s.segment_id
+                   )
                  GROUP BY s.segment_id
                  HAVING COUNT(p.rowid) = 0",
             )
@@ -1579,7 +1659,10 @@ impl Index {
                  LEFT JOIN (
                      SELECT segment_id, COUNT(*) AS n FROM pending_chunks GROUP BY segment_id
                  ) p ON p.segment_id = s.segment_id
-                 WHERE s.sealed_at IS NULL",
+                 WHERE s.sealed_at IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM chunk_payloads WHERE segment_id = s.segment_id
+                   )",
             )
             .map_err(|e| {
                 StagingError::Internal(format!(
@@ -1654,7 +1737,10 @@ impl Index {
                  ) p ON p.segment_id = s.segment_id
                  WHERE s.segment_id != ?1
                    AND COALESCE(c.n, 0) = 0
-                   AND COALESCE(p.n, 0) = 0",
+                   AND COALESCE(p.n, 0) = 0
+                   AND NOT EXISTS (
+                       SELECT 1 FROM chunk_payloads WHERE segment_id = s.segment_id
+                   )",
             )
             .map_err(|e| {
                 StagingError::Internal(format!("failed to prepare abandoned query: {e}"))
@@ -1693,7 +1779,7 @@ impl Index {
         let count: i64 = self
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM chunks WHERE segment_id = ?1",
+                "SELECT COUNT(*) FROM chunk_payloads WHERE segment_id = ?1",
                 params![segment_id],
                 |row| row.get(0),
             )
@@ -1817,6 +1903,17 @@ impl Index {
             .conn
             .unchecked_transaction()
             .map_err(|e| StagingError::Internal(format!("failed to begin drop segment tx: {e}")))?;
+
+        let retained: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunk_payloads WHERE segment_id = ?1)",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if retained {
+            return Err(StagingError::StagingCorrupt(format!(
+                "segment {id} still has retained payloads"
+            )));
+        }
 
         tx.execute("DELETE FROM chunks WHERE segment_id = ?1", params![id])
             .map_err(|e| {
@@ -1961,6 +2058,52 @@ impl Index {
         Ok(first)
     }
 
+    fn retained_recipe_for_file(
+        &self,
+        file_hash: &[u8; 32],
+    ) -> Result<Option<crate::recipe::FileRecipe>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT DISTINCT lease.recipe_hash FROM path_leases AS lease
+             JOIN verified_recipes USING (recipe_hash)
+             JOIN staging_batches USING (batch_id)
+             WHERE lease.file_hash = ?1 AND staging_batches.state IN ('open', 'published')",
+        )?;
+        let hashes = statement
+            .query_map(params![file_hash.as_slice()], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut selected = None;
+        for hash in hashes {
+            let hash = decode_hash_blob("retained recipe hash", hash)?;
+            let recipe = self.verified_local_recipe(&hash)?.ok_or_else(|| {
+                StagingError::StagingCorrupt("retained verified recipe disappeared".to_owned())
+            })?;
+            if selected.as_ref().is_some_and(|prior| prior != &recipe) {
+                return Err(StagingError::StagingCorrupt(
+                    "one file hash has conflicting retained recipes".to_owned(),
+                ));
+            }
+            selected = Some(recipe);
+        }
+        Ok(selected)
+    }
+
+    fn recipe_chunks(&self, recipe: &crate::recipe::FileRecipe) -> Result<Vec<([u8; 32], u64)>> {
+        let mut chunks = Vec::new();
+        let mut next = 0u64;
+        while next < recipe.chunk_count() {
+            let page = self.recipe_page(recipe, next)?;
+            next = page.next_occurrence();
+            chunks.extend(
+                page.chunks
+                    .into_iter()
+                    .map(|chunk| (chunk.chunk_hash.into(), chunk.len)),
+            );
+        }
+        Ok(chunks)
+    }
+
     /// Return the ordered list of chunk hashes for a given file.
     ///
     /// Queries both `chunks` and `pending_chunks` tables, deduplicated
@@ -1968,6 +2111,15 @@ impl Index {
     /// ordered by `chunk_index`. Returns an empty vec if the file is
     /// not found.
     pub fn chunks_for_file(&self, file_hash: &[u8; 32]) -> Result<Vec<[u8; 32]>> {
+        // Physical segment rows can be partial for a mixed-authority recipe.
+        // A sealed owner defines every occurrence even before publication.
+        if let Some(recipe) = self.retained_recipe_for_file(file_hash)? {
+            return Ok(self
+                .recipe_chunks(&recipe)?
+                .into_iter()
+                .map(|(hash, _)| hash)
+                .collect());
+        }
         let fh: &[u8] = file_hash;
         let mut stmt = self
             .conn
@@ -2017,6 +2169,9 @@ impl Index {
     /// Queries both durable and pending chunk tables, deduplicated by
     /// `chunk_index` with durable rows preferred over pending rows.
     pub fn chunks_for_file_with_sizes(&self, file_hash: &[u8; 32]) -> Result<Vec<([u8; 32], u64)>> {
+        if let Some(recipe) = self.retained_recipe_for_file(file_hash)? {
+            return self.recipe_chunks(&recipe);
+        }
         self.chunks_for_file_with_locators(file_hash).map(|chunks| {
             chunks
                 .into_iter()
@@ -2226,6 +2381,39 @@ impl Index {
         Ok(())
     }
 
+    pub fn begin_ingest_batch(
+        &self,
+        preparation_id: &str,
+        batch_id: &str,
+        own_preparation: bool,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        if own_preparation {
+            tx.execute(
+                "INSERT INTO add_preparations (preparation_id, state) VALUES (?1, 'recording')",
+                params![preparation_id],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO staging_batches (batch_id, state) VALUES (?1, 'open')",
+            params![batch_id],
+        )?;
+        let attached = tx.execute(
+            "INSERT INTO add_preparation_batches (preparation_id, batch_id)
+             SELECT ?1, ?2 WHERE EXISTS (
+                 SELECT 1 FROM add_preparations WHERE preparation_id = ?1 AND state = 'recording'
+             )",
+            params![preparation_id, batch_id],
+        )?;
+        if attached != 1 {
+            return Err(StagingError::NotFound {
+                path: format!("recording preparation {preparation_id}"),
+            });
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn insert_batch(&self, batch_id: &str) -> Result<()> {
         self.conn
             .execute(
@@ -2280,22 +2468,36 @@ impl Index {
             })
     }
 
+    #[cfg(test)]
     pub fn claim_prepared_chunks(
         &self,
         preparation_id: &str,
         batch_id: &str,
         chunks: &[([u8; 32], u64)],
     ) -> Result<Vec<PreparedChunkClaim>> {
-        if chunks.len() > super::stream::STAGE_BATCH_CHUNKS {
+        if chunks.len() > super::ingest::STAGE_BATCH_CHUNKS {
             return Err(StagingError::StagingCorrupt(format!(
                 "prepared claim batch has {} terms, limit is {}",
                 chunks.len(),
-                super::stream::STAGE_BATCH_CHUNKS
+                super::ingest::STAGE_BATCH_CHUNKS
             )));
         }
         let tx = self.conn.unchecked_transaction().map_err(|error| {
             StagingError::Internal(format!("failed to begin prepared claim batch: {error}"))
         })?;
+        let claims =
+            Self::claim_prepared_chunks_in_tx(&tx, preparation_id, batch_id, chunks, true)?;
+        tx.commit()?;
+        Ok(claims)
+    }
+
+    fn claim_prepared_chunks_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        preparation_id: &str,
+        batch_id: &str,
+        chunks: &[([u8; 32], u64)],
+        prepare_missing: bool,
+    ) -> Result<Vec<PreparedChunkClaim>> {
         let valid_owner: bool = tx
             .query_row(
                 "SELECT EXISTS(
@@ -2320,9 +2522,6 @@ impl Index {
             });
         }
         if chunks.is_empty() {
-            tx.commit().map_err(|error| {
-                StagingError::Internal(format!("failed to commit empty claim batch: {error}"))
-            })?;
             return Ok(Vec::new());
         }
 
@@ -2480,6 +2679,7 @@ impl Index {
         }
 
         let mut out = Vec::with_capacity(chunks.len());
+        let mut retained_xorbs = HashSet::new();
         for (chunk_hash, size) in chunks {
             if let Some(locator) = prepared.get(chunk_hash) {
                 if u64::from(locator.size) != *size {
@@ -2488,6 +2688,15 @@ impl Index {
                         crab_xet::hash::MerkleHash::from(*chunk_hash).hex(),
                         locator.size
                     )));
+                }
+                // Lookup and retention share the transaction: retirement must not
+                // unlink a reused body while the replacement recipe is recording.
+                if retained_xorbs.insert(locator.xorb_hash) {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO preparation_payloads (preparation_id, xorb_hash)
+                         VALUES (?1, ?2)",
+                        params![preparation_id, locator.xorb_hash.as_slice()],
+                    )?;
                 }
                 out.push(PreparedChunkClaim::Prepared(*locator));
                 continue;
@@ -2513,6 +2722,10 @@ impl Index {
                 continue;
             }
 
+            if !prepare_missing {
+                out.push(PreparedChunkClaim::Missing);
+                continue;
+            }
             tx.execute(
                 "INSERT INTO prepared_chunk_claims
                  (chunk_hash, preparation_id, owner_batch_id, uncompressed_size)
@@ -2530,9 +2743,6 @@ impl Index {
             claims.insert(*chunk_hash, (preparation_id.to_owned(), *size));
             out.push(PreparedChunkClaim::Claimed);
         }
-        tx.commit().map_err(|error| {
-            StagingError::Internal(format!("failed to commit prepared claim batch: {error}"))
-        })?;
         Ok(out)
     }
 
@@ -3073,11 +3283,11 @@ impl Index {
         if chunks.is_empty() {
             return Ok(());
         }
-        if chunks.len() > super::stream::STAGE_BATCH_CHUNKS {
+        if chunks.len() > super::ingest::STAGE_BATCH_CHUNKS {
             return Err(StagingError::StagingCorrupt(format!(
                 "recipe recording append has {} terms, limit is {}",
                 chunks.len(),
-                super::stream::STAGE_BATCH_CHUNKS
+                super::ingest::STAGE_BATCH_CHUNKS
             )));
         }
         let tx = self.conn.unchecked_transaction().map_err(|e| {
@@ -3349,6 +3559,7 @@ impl Index {
     }
 
     /// Atomically append recipe terms and their proof-bearing remote authorities.
+    #[cfg(test)]
     pub fn append_recording_batch(
         &self,
         batch_id: &str,
@@ -3360,18 +3571,18 @@ impl Index {
         if recipe_chunks.is_empty() && remote_chunks.is_empty() {
             return Ok(());
         }
-        if recipe_chunks.len() > super::stream::STAGE_BATCH_CHUNKS {
+        if recipe_chunks.len() > super::ingest::STAGE_BATCH_CHUNKS {
             return Err(StagingError::StagingCorrupt(format!(
                 "recipe recording append has {} terms, limit is {}",
                 recipe_chunks.len(),
-                super::stream::STAGE_BATCH_CHUNKS
+                super::ingest::STAGE_BATCH_CHUNKS
             )));
         }
-        if remote_chunks.len() > super::stream::STAGE_BATCH_CHUNKS {
+        if remote_chunks.len() > super::ingest::STAGE_BATCH_CHUNKS {
             return Err(StagingError::StagingCorrupt(format!(
                 "remote authority append has {} terms, limit is {}",
                 remote_chunks.len(),
-                super::stream::STAGE_BATCH_CHUNKS
+                super::ingest::STAGE_BATCH_CHUNKS
             )));
         }
         let tx = self.conn.unchecked_transaction().map_err(|error| {
@@ -3389,6 +3600,53 @@ impl Index {
         tx.commit().map_err(|error| {
             StagingError::Internal(format!("failed to commit recording batch append: {error}"))
         })
+    }
+
+    pub fn record_and_claim_chunks(
+        &self,
+        preparation_id: &str,
+        batch_id: &str,
+        start_occurrence: u64,
+        start_offset: u64,
+        terms: &[(crab_xet::hash::MerkleHash, u64)],
+        remote: &[ExistingChunkWrite],
+        prepare_missing: bool,
+    ) -> Result<Vec<PreparedChunkClaim>> {
+        if terms.len() > super::ingest::STAGE_BATCH_CHUNKS {
+            return Err(StagingError::StagingCorrupt(
+                "recording batch exceeds chunk limit".to_owned(),
+            ));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        ensure_recording_batch_open(&tx, batch_id, "authority")?;
+        Self::append_recording_remote_chunks_in_tx(&tx, batch_id, remote)?;
+        Self::append_recipe_recording_terms_in_tx(
+            &tx,
+            batch_id,
+            start_occurrence,
+            start_offset,
+            terms,
+        )?;
+        let remote_hashes = remote
+            .iter()
+            .map(|chunk| chunk.chunk_hash)
+            .collect::<HashSet<_>>();
+        let misses = terms
+            .iter()
+            .filter_map(|(hash, size)| {
+                let hash: [u8; 32] = (*hash).into();
+                (!remote_hashes.contains(&hash)).then_some((hash, *size))
+            })
+            .collect::<Vec<_>>();
+        let claims = Self::claim_prepared_chunks_in_tx(
+            &tx,
+            preparation_id,
+            batch_id,
+            &misses,
+            prepare_missing,
+        )?;
+        tx.commit()?;
+        Ok(claims)
     }
 
     pub fn mark_batch_published(&self, batch_id: &str) -> Result<Vec<[u8; 32]>> {
@@ -4072,11 +4330,12 @@ impl Index {
         Ok(recipes)
     }
 
-    /// Load the newest verified open recipe for a path when every chunk has
+    /// Load the newest verified retained recipe for a path when every chunk has
     /// reusable local segment or prepared-xorb authority.
-    pub fn unpublished_local_recipe_for_path(
+    pub fn local_recipe_for_path(
         &self,
         path_bytes: &[u8],
+        include_published: bool,
     ) -> Result<Option<crate::recipe::FileRecipe>> {
         let stored: Option<StoredRecipeWithHashRow> = self
             .conn
@@ -4090,7 +4349,7 @@ impl Index {
                  JOIN file_recipes AS recipe USING (recipe_hash)
                  JOIN verified_recipes AS verified USING (recipe_hash)
                  WHERE lease.path_bytes = ?1
-                   AND batch.state = 'open'
+                   AND (batch.state = 'open' OR (?2 AND batch.state = 'published'))
                    AND NOT EXISTS (
                        SELECT 1
                        FROM recipe_occurrences AS occurrence
@@ -4113,7 +4372,7 @@ impl Index {
                    )
                  ORDER BY batch.rowid DESC
                  LIMIT 1",
-                params![path_bytes],
+                params![path_bytes, include_published],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -4130,7 +4389,7 @@ impl Index {
             .optional()
             .map_err(|e| {
                 StagingError::Internal(format!(
-                    "failed to query unpublished local recipe for path: {e}"
+                    "failed to query retained local recipe for path: {e}"
                 ))
             })?;
         let Some((
@@ -4146,8 +4405,8 @@ impl Index {
         else {
             return Ok(None);
         };
-        let file_hash = decode_hash_blob("unpublished local recipe file hash", file_hash)?;
-        let recipe_hash = decode_hash_blob("unpublished local recipe hash", recipe_hash)?;
+        let file_hash = decode_hash_blob("retained local recipe file hash", file_hash)?;
+        let recipe_hash = decode_hash_blob("retained local recipe hash", recipe_hash)?;
         self.load_stored_recipe(
             &recipe_hash,
             &file_hash,
@@ -5057,6 +5316,36 @@ impl Index {
     }
 
     /// Atomically persist an immutable recipe and attach one batch/path lease.
+    pub fn retain_verified_recipe(
+        &self,
+        batch_id: &str,
+        path: &[u8],
+        recipe: &crate::recipe::FileRecipe,
+    ) -> Result<()> {
+        // Pin the already-verified candidate before streaming verification.
+        // A hash-only lookup cannot protect its recipe pages or payload leases.
+        let changed = self.conn.execute(
+            "INSERT INTO path_leases (batch_id, path_bytes, file_hash, recipe_hash)
+             SELECT ?1, ?2, recipe.file_hash, recipe.recipe_hash
+             FROM file_recipes AS recipe JOIN verified_recipes USING (recipe_hash)
+             WHERE recipe.recipe_hash = ?3 AND recipe.file_hash = ?4 AND recipe.file_size = ?5
+               AND EXISTS (SELECT 1 FROM staging_batches WHERE batch_id = ?1 AND state = 'open')",
+            params![
+                batch_id,
+                path,
+                recipe.hash().as_slice(),
+                <[u8; 32]>::from(recipe.file_hash()).as_slice(),
+                sqlite_i64("candidate file size", recipe.file_size())?
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StagingError::StagingCorrupt(
+                "prepared candidate has no verified recipe authority".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn insert_recipe_lease(
         &self,
         batch_id: &str,
@@ -5976,24 +6265,9 @@ impl Index {
         }
 
         tx.execute(
-            "DELETE FROM chunk_payloads
-             WHERE NOT EXISTS (
-                       SELECT 1 FROM recipe_payload_leases
-                       WHERE recipe_payload_leases.chunk_hash = chunk_payloads.chunk_hash
-                   )
-               AND NOT EXISTS (
-                       SELECT 1 FROM chunks
-                       WHERE chunks.chunk_hash = chunk_payloads.chunk_hash
-                   )
-               AND NOT EXISTS (
-                       SELECT 1 FROM pending_chunks
-                       WHERE pending_chunks.chunk_hash = chunk_payloads.chunk_hash
-                   )",
+            &format!("DELETE FROM chunk_payloads WHERE {UNOWNED_CHUNK_PAYLOAD}"),
             [],
-        )
-        .map_err(|e| {
-            StagingError::Internal(format!("failed to delete unleased chunk payloads: {e}"))
-        })?;
+        )?;
 
         let reclaimable_payloads = {
             let mut statement = tx
@@ -6077,10 +6351,21 @@ impl Index {
             StagingError::Internal(format!("failed to begin chunk retirement: {e}"))
         })?;
         let stats = Self::delete_chunks_for_file_in(&tx, file_hash)?;
+        Self::prune_segment_payloads(&tx, &stats.segments_touched)?;
         tx.commit().map_err(|e| {
             StagingError::Internal(format!("failed to commit chunk retirement: {e}"))
         })?;
         Ok((stats.rows_deleted, stats.segments_touched))
+    }
+
+    fn prune_segment_payloads(tx: &rusqlite::Transaction<'_>, segments: &[u64]) -> Result<()> {
+        let mut statement = tx.prepare_cached(&format!(
+            "DELETE FROM chunk_payloads WHERE segment_id = ?1 AND {UNOWNED_CHUNK_PAYLOAD}"
+        ))?;
+        for segment in segments {
+            statement.execute(params![segment])?;
+        }
+        Ok(())
     }
 
     fn delete_chunks_for_file_in(
@@ -7577,6 +7862,12 @@ impl Index {
             }
         }
 
+        let replaced_segments = old_segment_counts
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        Self::prune_segment_payloads(&tx, &replaced_segments)?;
+
         tx.commit().map_err(|e| {
             StagingError::Internal(format!("failed to commit insert_chunks_for_file tx: {e}"))
         })?;
@@ -7639,17 +7930,13 @@ impl Index {
     ///
     /// Returns [`StagingError::Internal`] on SQLite failure.
     pub fn delete_pending_for_segment(&self, segment_id: u64) -> Result<u64> {
-        let n = self
-            .conn
-            .execute(
-                "DELETE FROM pending_chunks WHERE segment_id = ?1",
-                params![segment_id],
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to delete pending chunks for segment {segment_id}: {e}"
-                ))
-            })?;
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "DELETE FROM pending_chunks WHERE segment_id = ?1",
+            params![segment_id],
+        )?;
+        Self::prune_segment_payloads(&tx, &[segment_id])?;
+        tx.commit()?;
         Ok(n as u64)
     }
 
@@ -8413,7 +8700,7 @@ impl Index {
     ///
     /// Returns [`StagingError::Internal`] on SQLite failure.
     pub fn compaction_candidates(&self, dead_ratio: f64) -> Result<Vec<u64>> {
-        // Compute live_bytes per segment from the chunks table, then
+        // Compute live bytes from retained physical payloads, then
         // compare against segments.size_bytes.
         let mut stmt = self
             .conn
@@ -8422,7 +8709,7 @@ impl Index {
                  FROM segments s
                  LEFT JOIN (
                      SELECT segment_id, SUM(size + 8) AS live_bytes
-                     FROM chunks
+                     FROM chunk_payloads
                      GROUP BY segment_id
                  ) c ON s.segment_id = c.segment_id
                  WHERE s.sealed_at IS NOT NULL
@@ -8449,66 +8736,33 @@ impl Index {
 
     /// Return live chunks for a segment, ordered by segment offset.
     ///
-    /// Each tuple is `(chunk_hash, file_hash, chunk_index, size, segment_offset)`.
+    /// Each tuple is `(chunk_hash, size, segment_offset)`, once per physical payload.
     ///
     /// # Errors
     ///
     /// Returns [`StagingError::Internal`] on SQLite failure.
-    #[expect(
-        clippy::type_complexity,
-        reason = "tuple matches the design's specified return shape"
-    )]
-    pub fn live_chunks_for_segment(
-        &self,
-        segment_id: u64,
-    ) -> Result<Vec<([u8; 32], [u8; 32], i64, i64, u64)>> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT chunk_hash, file_hash, chunk_index, size, segment_offset
-                 FROM chunks
-                 WHERE segment_id = ?1
-                 ORDER BY segment_offset ASC",
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to prepare live_chunks query for segment {segment_id}: {e}"
-                ))
-            })?;
-
-        let rows = stmt
+    pub fn live_chunks_for_segment(&self, segment_id: u64) -> Result<Vec<([u8; 32], u32, u64)>> {
+        let mut statement = self.conn.prepare(
+            "SELECT chunk_hash, size, segment_offset FROM chunk_payloads
+             WHERE segment_id = ?1 ORDER BY segment_offset",
+        )?;
+        statement
             .query_map(params![segment_id], |row| {
-                let ch_blob: Vec<u8> = row.get(0)?;
-                let fh_blob: Vec<u8> = row.get(1)?;
-                let mut ch = [0u8; 32];
-                let mut fh = [0u8; 32];
-                if ch_blob.len() == 32 {
-                    ch.copy_from_slice(&ch_blob);
-                }
-                if fh_blob.len() == 32 {
-                    fh.copy_from_slice(&fh_blob);
-                }
                 Ok((
-                    ch,
-                    fh,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, u64>(4)?,
-                ))
-            })
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to query live chunks for segment {segment_id}: {e}"
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, u64>(2)?,
                 ))
             })?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to collect live chunks for segment {segment_id}: {e}"
+            .map(|row| {
+                let (hash, size, offset) = row?;
+                Ok((
+                    decode_hash_blob("compaction chunk hash", hash)?,
+                    size,
+                    offset,
                 ))
-            })?;
-
-        Ok(rows)
+            })
+            .collect()
     }
 
     /// Atomically swap chunk locators from an old segment to a new one.
@@ -8526,39 +8780,45 @@ impl Index {
         old_segment_id: u64,
         new_segment_id: u64,
         new_size_bytes: u64,
-        updates: &[([u8; 32], [u8; 32], i64, u64)], // (chunk_hash, file_hash, chunk_index, new_offset)
+        updates: &[([u8; 32], u64)], // (chunk_hash, new_offset)
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction().map_err(|e| {
             StagingError::Internal(format!("failed to begin swap_locators tx: {e}"))
         })?;
 
-        // Update each chunk's locator to point at the new segment.
-        {
-            let mut stmt = tx
-                .prepare_cached(
-                    "UPDATE chunks
-                     SET segment_id = ?1, segment_offset = ?2
-                     WHERE chunk_hash = ?3 AND file_hash = ?4 AND chunk_index = ?5",
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to prepare swap update: {e}"))
-                })?;
-
-            for (chunk_hash, file_hash, chunk_index, new_offset) in updates {
-                let ch: &[u8] = chunk_hash;
-                let fh: &[u8] = file_hash;
-                stmt.execute(params![
-                    new_segment_id,
-                    *new_offset as i64,
-                    ch,
-                    fh,
-                    chunk_index,
-                ])
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to swap locator for chunk: {e}"))
-                })?;
+        // Compact physical authorities, including chunks retained only by recipes
+        // or an in-progress recording. Move every occurrence with the authority.
+        for (hash, offset) in updates {
+            for table in ["chunk_payloads", "chunks", "pending_chunks"] {
+                tx.execute(
+                    &format!(
+                        "UPDATE {table} SET segment_id = ?1, segment_offset = ?2
+                              WHERE chunk_hash = ?3 AND segment_id = ?4"
+                    ),
+                    params![
+                        new_segment_id,
+                        sqlite_i64("compaction offset", *offset)?,
+                        hash.as_slice(),
+                        old_segment_id
+                    ],
+                )?;
             }
         }
+        let remaining: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunk_payloads WHERE segment_id = ?1)",
+            params![old_segment_id],
+            |row| row.get(0),
+        )?;
+        if remaining {
+            return Err(StagingError::StagingCorrupt(
+                "compaction did not move every retained payload".to_owned(),
+            ));
+        }
+        let occurrence_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE segment_id = ?1",
+            params![new_segment_id],
+            |row| row.get(0),
+        )?;
 
         // Insert the new segment as sealed.
         let chunk_count = updates.len() as i64;
@@ -8572,7 +8832,7 @@ impl Index {
             params![
                 new_size_bytes as i64,
                 chunk_count,
-                chunk_count,
+                occurrence_count,
                 new_segment_id
             ],
         )
@@ -9078,6 +9338,75 @@ mod tests {
     }
 
     #[test]
+    fn prepared_reuse_survives_retirement_until_preparation_aborts() {
+        let idx = open_in_memory();
+        let chunk_hash = test_hash(0xa1);
+        let xorb_hash = test_hash(0xa2);
+        idx.conn
+            .execute(
+                "INSERT INTO prepared_payloads (xorb_hash, payload_hash, bytes) VALUES (?1, ?2, 8)",
+                params![xorb_hash.as_slice(), test_hash(0xa3).as_slice()],
+            )
+            .expect("payload");
+        idx.conn.execute(
+            "INSERT INTO prepared_payload_chunks (xorb_hash, chunk_index, chunk_hash, uncompressed_size)
+             VALUES (?1, 0, ?2, 8)",
+            params![xorb_hash.as_slice(), chunk_hash.as_slice()],
+        ).expect("chunk authority");
+        idx.insert_add_preparation("reuse").expect("preparation");
+        idx.insert_batch("reuse-batch").expect("batch");
+        idx.attach_add_preparation_batch("reuse", "reuse-batch")
+            .expect("attach");
+        idx.claim_prepared_chunks("reuse", "reuse-batch", &[(chunk_hash, 8)])
+            .expect("reuse");
+        idx.remove_files(&[test_hash(0xa4)])
+            .expect("retire former owner");
+        let retained: bool = idx
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM prepared_payloads WHERE xorb_hash = ?1)",
+                params![xorb_hash.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("retained authority");
+        assert!(retained);
+        assert_eq!(
+            idx.abort_add_preparation("reuse").expect("abort"),
+            vec![xorb_hash]
+        );
+    }
+
+    #[test]
+    fn recording_terms_retain_segment_after_its_file_retires() {
+        let idx = open_in_memory();
+        let segment = idx.allocate_segment_id().expect("segment");
+        let file_hash = test_hash(0xb1);
+        let chunk_hash = test_hash(0xb2);
+        insert_test_file(&idx, &file_hash, 8);
+        idx.conn.execute(
+            "INSERT INTO chunks (chunk_hash, file_hash, chunk_index, size, segment_id, segment_offset)
+             VALUES (?1, ?2, 0, 8, ?3, 0)",
+            params![chunk_hash.as_slice(), file_hash.as_slice(), segment],
+        ).expect("segment authority");
+        idx.seal_segment(segment, 16).expect("seal");
+        idx.insert_batch("recording").expect("batch");
+        idx.append_recipe_recording_terms("recording", 0, 0, &[(chunk_hash.into(), 8)])
+            .expect("record");
+        idx.remove_files(&[file_hash])
+            .expect("retire original file");
+        assert!(idx.sweep_candidates().expect("sweep candidates").is_empty());
+        let retained: bool = idx
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM chunk_payloads WHERE chunk_hash = ?1)",
+                params![chunk_hash.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("retained payload");
+        assert!(retained);
+    }
+
+    #[test]
     fn prepared_claim_pages_large_unique_batch() {
         const CLAIMS: usize = 1024;
 
@@ -9453,7 +9782,7 @@ mod tests {
             .expect("drop chunk lease index");
         drop(idx);
 
-        assert_staging_corrupt_contains(Index::open(path), "canonical v1");
+        assert_staging_corrupt_contains(Index::open(path), "canonical v2");
     }
 
     #[test]
@@ -9479,7 +9808,7 @@ mod tests {
             .expect("install retired publication table");
         drop(idx);
 
-        assert_staging_corrupt_contains(Index::open(path), "canonical v1");
+        assert_staging_corrupt_contains(Index::open(path), "canonical v2");
     }
 
     #[test]
@@ -9496,7 +9825,7 @@ mod tests {
             .expect("install retired remote authority table");
         drop(idx);
 
-        assert_staging_corrupt_contains(Index::open(path), "canonical v1");
+        assert_staging_corrupt_contains(Index::open(path), "canonical v2");
     }
 
     #[test]
@@ -9650,7 +9979,7 @@ mod tests {
         idx.insert_batch("batch-large").expect("batch");
         let mut occurrence = 0u64;
         let mut offset = 0u64;
-        for page in chunks.chunks(crate::stream::STAGE_BATCH_CHUNKS) {
+        for page in chunks.chunks(crate::ingest::STAGE_BATCH_CHUNKS) {
             idx.append_recipe_recording_terms("batch-large", occurrence, offset, page)
                 .expect("record repeated recipe terms");
             occurrence += u64::try_from(page.len()).expect("page length");
@@ -10048,7 +10377,7 @@ mod tests {
                 .expect("create retired schema");
         }
 
-        assert_staging_corrupt_contains(Index::open(&path), "canonical v1");
+        assert_staging_corrupt_contains(Index::open(&path), "canonical v2");
 
         let connection = Connection::open(&path).expect("reopen retired db");
         let tables: Vec<String> = connection
@@ -10677,45 +11006,25 @@ mod tests {
     }
 
     #[test]
-    fn drop_segment_removes_chunks_and_segment() {
+    fn drop_segment_requires_retirement_of_retained_payloads() {
         let idx = open_in_memory();
-        let seg_id = idx.allocate_segment_id().expect("alloc");
-
-        let fh = test_hash(0xF1);
-        insert_test_file(&idx, &fh, 100);
-
-        let rows = vec![PendingRow {
-            chunk_hash: test_hash(0xC1),
-            file_hash: fh,
+        let segment = idx.allocate_segment_id().expect("segment");
+        let file_hash = test_hash(0xf1);
+        insert_test_file(&idx, &file_hash, 50);
+        idx.insert_pending(&[PendingRow {
+            chunk_hash: test_hash(0xc1),
+            file_hash,
             chunk_index: 0,
             size: 50,
-            segment_id: seg_id,
+            segment_id: segment,
             segment_offset: 0,
-        }];
-        idx.insert_pending(&rows).expect("insert");
-        idx.flush_pending(seg_id, 58).expect("flush");
-
-        idx.drop_segment(seg_id).expect("drop");
-
-        let seg_count: i64 = idx
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM segments WHERE segment_id = ?1",
-                params![seg_id],
-                |r| r.get(0),
-            )
-            .expect("count segments");
-        assert_eq!(seg_count, 0);
-
-        let chunk_count: i64 = idx
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM chunks WHERE segment_id = ?1",
-                params![seg_id],
-                |r| r.get(0),
-            )
-            .expect("count chunks");
-        assert_eq!(chunk_count, 0);
+        }])
+        .expect("pending payload");
+        idx.flush_pending(segment, 58).expect("flush");
+        assert_staging_corrupt_contains(idx.drop_segment(segment), "retained payloads");
+        idx.remove_files(&[file_hash]).expect("retire owner");
+        idx.drop_segment(segment).expect("drop unowned segment");
+        assert!(idx.all_segments().expect("segments").is_empty());
     }
 
     #[test]

@@ -956,7 +956,17 @@ where
             }
             // Fetch/list never need local staging. Open one reader per push batch
             // so a damaged local index cannot block reads or retain a session lock.
-            let staging = if matches!(batch, Batch::Push(_)) && !options.dry_run {
+            // A parse-rejected atomic batch cannot publish. Admission must not
+            // let unrelated local layout/lock errors mask its protocol rejection.
+            let needs_staging = match &batch {
+                Batch::Push(items) if !options.dry_run => {
+                    items.iter().any(|item| matches!(item, PushItem::Spec(_)))
+                        && (!options.atomic
+                            || items.iter().all(|item| matches!(item, PushItem::Spec(_))))
+                }
+                _ => false,
+            };
+            let staging = if needs_staging {
                 open_staging_for_push().await?
             } else {
                 PushStaging::Missing

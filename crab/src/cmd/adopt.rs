@@ -577,7 +577,7 @@ async fn run_head_only(
             abs_path,
             repo_root,
             &staging,
-            crate::cmd::stream_stage::StreamStageProgress::default(),
+            crab_staging::ingest::StreamStageProgress::default(),
             cancel,
         )
         .await?;

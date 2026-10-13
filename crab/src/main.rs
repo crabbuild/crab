@@ -1937,6 +1937,8 @@ enum StatCmd {
 
 #[derive(Subcommand)]
 enum StagingCmd {
+    /// Upgrade the tagged local staging layout while preserving staged data.
+    Upgrade,
     /// Print staging area statistics.
     Stats {
         /// Structured JSON output (envelope format).
@@ -2373,6 +2375,7 @@ impl Cmd {
             Self::Replica(_) => "replica",
             Self::Staging(StagingCmd::Stats { .. }) => "staging.stats",
             Self::Staging(StagingCmd::Verify) => "staging.verify",
+            Self::Staging(StagingCmd::Upgrade) => "staging.upgrade",
             Self::Staging(StagingCmd::Clean { .. }) => "staging.clean",
             Self::Errors { .. } => "errors",
             Self::Status { workflow: true, .. } => {
@@ -4220,6 +4223,9 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 StagingCmd::Stats { json } => {
                     let mode = OutputMode::from_flags(json, false);
                     crab::cmd::staging::run_staging_stats(mode).await?;
+                }
+                StagingCmd::Upgrade => {
+                    crab::cmd::staging::run_staging_upgrade().await?;
                 }
                 StagingCmd::Verify => {
                     crab::cmd::staging::run_staging_verify().await?;

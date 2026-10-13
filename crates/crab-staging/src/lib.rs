@@ -1,6 +1,6 @@
 //! Segment-based staging area for chunks awaiting upload.
 //!
-//! Canonical layout (v1):
+//! Canonical layout (v2):
 //! ```text
 //! {root}/
 //! ├── segments/
@@ -41,6 +41,7 @@ mod add_push_plan;
 pub mod config;
 pub mod error;
 mod index;
+pub mod ingest;
 pub mod metrics;
 pub mod multipart_resume;
 pub mod push_plan;
@@ -958,9 +959,12 @@ fn remove_indexed_files(
     index: &Mutex<Index>,
     file_hashes: &[[u8; 32]],
 ) -> Result<Vec<RetireStats>> {
-    let (retired, payloads) = lock_index(index)?.remove_files(file_hashes)?;
-    // SQL ownership commits before filesystem reclamation. A failed unlink
-    // leaves only an orphan for the existing sweep, never a missing live body.
+    let index = lock_index(index)?;
+    let (retired, payloads) = index.remove_files(file_hashes)?;
+    index.checkpoint()?;
+    // Hold the index through unlink: a new claim cannot begin packing a
+    // matching body between inventory retirement and removal of its old file.
+    // A failed unlink leaves an orphan, never a missing live authority.
     remove_prepared_payload_files(root, &payloads)?;
     Ok(retired)
 }
@@ -2000,6 +2004,17 @@ fn seal_current_segment_blocking(
 }
 
 impl StagingArea {
+    /// Upgrade the tagged v1 index under exclusive admission, preserving payloads and owners.
+    /// Returns an error for active holders or any unrecognized schema.
+    pub async fn upgrade_layout(root: PathBuf) -> Result<()> {
+        tokio::task::spawn_blocking(move || {
+            let _lock = acquire_flock_exclusive(&root)?;
+            Index::upgrade_layout(&root.join("index.db"))
+        })
+        .await
+        .map_err(|error| StagingError::Io(std::io::Error::other(error)))?
+    }
+
     /// Open or create a staging area at the given root path.
     ///
     /// Acquires an advisory flock, validates the canonical schema, performs
@@ -2079,6 +2094,7 @@ impl StagingArea {
         let db_path = root.join("index.db");
         let index = Index::open(&db_path)?;
         let abandoned_payloads = index.abort_all_add_preparations()?;
+        index.checkpoint()?;
         remove_prepared_payload_files(&root, &abandoned_payloads)?;
         sweep_abandoned_prepared_payload_files(&root, &index)?;
         sweep_stream_prepared_temps(&root)?;
@@ -2311,6 +2327,14 @@ impl StagingArea {
         Ok(())
     }
 
+    /// Sync committed index ownership before exposing pointers or closing staging.
+    pub async fn flush_index(&self) -> Result<()> {
+        let index = Arc::clone(&self.index);
+        tokio::task::spawn_blocking(move || lock_index(&index)?.checkpoint())
+            .await
+            .map_err(|error| StagingError::Io(std::io::Error::other(error)))?
+    }
+
     /// Read a staged chunk by hash, verifying CRC and Blake3.
     ///
     /// # Errors
@@ -2448,6 +2472,23 @@ impl StagingArea {
         Ok(batch_id)
     }
 
+    pub(crate) fn begin_ingest_batch(
+        &self,
+        preparation: Option<&AddPreparationId>,
+    ) -> Result<(StagingBatchId, Option<AddPreparationId>)> {
+        let batch = new_staging_batch_id();
+        let owned = preparation.is_none().then(new_add_preparation_id);
+        let owner = preparation
+            .or(owned.as_ref())
+            .ok_or_else(|| StagingError::Internal("missing ingestion owner".to_owned()))?;
+        lock_index(&self.index)?.begin_ingest_batch(
+            owner.as_str(),
+            batch.as_str(),
+            owned.is_some(),
+        )?;
+        Ok((batch, owned))
+    }
+
     /// Create one durable owner spanning every direct-stream file in an add.
     pub fn create_add_preparation(&self) -> Result<AddPreparationId> {
         let preparation_id = new_add_preparation_id();
@@ -2464,20 +2505,24 @@ impl StagingArea {
             .attach_add_preparation_batch(preparation_id.as_str(), batch_id.as_str())
     }
 
-    pub(crate) fn claim_prepared_chunks(
+    pub(crate) fn record_and_claim_chunks(
         &self,
         preparation_id: &AddPreparationId,
         batch_id: &StagingBatchId,
-        chunks: &[(MerkleHash, u64)],
+        start_occurrence: u64,
+        start_offset: u64,
+        terms: &[(MerkleHash, u64)],
+        remote: &[ExistingChunkWrite],
+        prepare_missing: bool,
     ) -> Result<Vec<index::PreparedChunkClaim>> {
-        let chunks = chunks
-            .iter()
-            .map(|(hash, size)| (<[u8; 32]>::from(*hash), *size))
-            .collect::<Vec<_>>();
-        lock_index(&self.index)?.claim_prepared_chunks(
+        lock_index(&self.index)?.record_and_claim_chunks(
             preparation_id.as_str(),
             batch_id.as_str(),
-            &chunks,
+            start_occurrence,
+            start_offset,
+            terms,
+            remote,
+            prepare_missing,
         )
     }
 
@@ -2485,7 +2530,7 @@ impl StagingArea {
         &self,
         preparation_id: &AddPreparationId,
         owner_batch_id: &StagingBatchId,
-        payloads: &[stream::StreamStagePreparedXorb],
+        payloads: &[ingest::StreamStagePreparedXorb],
     ) -> Result<()> {
         let payloads = payloads
             .iter()
@@ -2532,7 +2577,11 @@ impl StagingArea {
     }
 
     pub fn abort_add_preparation(&self, preparation_id: &AddPreparationId) -> Result<()> {
-        let removed = lock_index(&self.index)?.abort_add_preparation(preparation_id.as_str())?;
+        let index = lock_index(&self.index)?;
+        let removed = index.abort_add_preparation(preparation_id.as_str())?;
+        if !removed.is_empty() {
+            index.checkpoint()?;
+        }
         remove_prepared_payload_files(&self.root, &removed)
     }
 
@@ -2549,23 +2598,6 @@ impl StagingArea {
             start_occurrence,
             start_offset,
             chunks,
-        )
-    }
-
-    pub(crate) fn append_recording_batch(
-        &self,
-        batch_id: &StagingBatchId,
-        start_occurrence: u64,
-        start_offset: u64,
-        recipe_chunks: &[(MerkleHash, u64)],
-        remote_chunks: &[ExistingChunkWrite],
-    ) -> Result<()> {
-        lock_index(&self.index)?.append_recording_batch(
-            batch_id.as_str(),
-            start_occurrence,
-            start_offset,
-            recipe_chunks,
-            remote_chunks,
         )
     }
 
@@ -2613,6 +2645,19 @@ impl StagingArea {
         Ok(())
     }
 
+    pub(crate) fn retain_verified_recipe(
+        &self,
+        batch_id: &StagingBatchId,
+        path: &Path,
+        recipe: &recipe::FileRecipe,
+    ) -> Result<()> {
+        lock_index(&self.index)?.retain_verified_recipe(
+            batch_id.as_str(),
+            &staging_path_bytes(path),
+            recipe,
+        )
+    }
+
     /// Mark a batch as published after its Git index replacement commits.
     pub fn mark_batch_published(&self, batch_id: &StagingBatchId) -> Result<()> {
         let unleased = lock_index(&self.index)?.mark_batch_published(batch_id.as_str())?;
@@ -2653,7 +2698,11 @@ impl StagingArea {
                 )
             })
             .collect::<Vec<_>>();
-        lock_index(&self.index)?.create_publication_intent(intent_id.as_str(), &stored)?;
+        let index = lock_index(&self.index)?;
+        index.create_publication_intent(intent_id.as_str(), &stored)?;
+        // Git index mutation can outlive a crash before publication is recorded.
+        // Persist its recovery intent before the caller changes that index.
+        index.checkpoint()?;
         Ok(intent_id)
     }
 
@@ -2885,13 +2934,20 @@ impl StagingArea {
         lock_index(&self.index)?.published_recipe_for_file(&file_hash)
     }
 
+    /// Return the newest retained recipe for a path with complete local payload authority.
+    pub fn local_recipe_for_path(&self, path: &Path) -> Result<Option<crate::recipe::FileRecipe>> {
+        lock_index(&self.index)?.local_recipe_for_path(&staging_path_bytes(path), true)
+    }
+
+    // The unpublished-only query is a public contract shipped in v1.2.4.
+    // Clean uses the broader retained query so published exact input avoids CDC.
     /// Return the newest verified but unpublished recipe for a path when all
     /// of its chunks remain reusable from local segment or prepared authority.
     pub fn unpublished_local_recipe_for_path(
         &self,
         path: &Path,
     ) -> Result<Option<crate::recipe::FileRecipe>> {
-        lock_index(&self.index)?.unpublished_local_recipe_for_path(&staging_path_bytes(path))
+        lock_index(&self.index)?.local_recipe_for_path(&staging_path_bytes(path), false)
     }
 
     /// Read one bounded page from an indexed immutable recipe.
@@ -2977,7 +3033,9 @@ impl StagingArea {
                 prepared_xorbs: &prepared_xorbs[index],
             })
             .collect::<Vec<_>>();
-        let removed = lock_index(&self.index)?.insert_file_push_plans(&writes)?;
+        let index = lock_index(&self.index)?;
+        let removed = index.insert_file_push_plans(&writes)?;
+        index.checkpoint()?;
         remove_prepared_payload_files(&self.root, &removed)?;
         Ok(())
     }
@@ -3091,7 +3149,7 @@ impl StagingArea {
                 return Ok(false);
             }
             let (retired, payloads) = idx.remove_files(&[fh])?;
-            drop(idx);
+            idx.checkpoint()?;
             remove_prepared_payload_files(&self.root, &payloads)?;
             retired
                 .into_iter()
@@ -3166,6 +3224,8 @@ impl StagingArea {
         for seg_id in &candidates {
             let (size_bytes, chunk_count) = idx.segment_info(*seg_id)?;
 
+            idx.drop_segment(*seg_id)?;
+            idx.checkpoint()?;
             let seg_path = segments_dir.join(format!("{seg_id:016x}.seg"));
             match std::fs::remove_file(&seg_path) {
                 Ok(()) => {}
@@ -3174,8 +3234,6 @@ impl StagingArea {
                 }
                 Err(e) => return Err(e.into()),
             }
-
-            idx.drop_segment(*seg_id)?;
 
             segments_removed += 1;
             bytes_reclaimed += size_bytes;
@@ -3315,14 +3373,17 @@ impl StagingArea {
             let n = lock_index(&self.index)?.delete_pending_for_segment(*seg_id)?;
             pending_removed += n;
 
+            {
+                let index = lock_index(&self.index)?;
+                index.drop_segment(*seg_id)?;
+                index.checkpoint()?;
+            }
             let seg_path = segments_dir.join(format!("{seg_id:016x}.seg"));
             match std::fs::remove_file(&seg_path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
-
-            lock_index(&self.index)?.drop_segment(*seg_id)?;
 
             segments_removed += 1;
             bytes_reclaimed += size_bytes;
@@ -3338,6 +3399,7 @@ impl StagingArea {
                 let size = persisted_size.max(current_write_offset);
                 let n = idx.delete_pending_for_segment(current_id)?;
                 idx.drop_segment(current_id)?;
+                idx.checkpoint()?;
                 (size, n)
             };
 
@@ -3535,16 +3597,10 @@ impl StagingArea {
             .open(&tmp_path)?;
 
         let mut new_offset: u64 = 0;
-        let mut updates: Vec<([u8; 32], [u8; 32], i64, u64)> =
-            Vec::with_capacity(live_chunks.len());
+        let mut updates: Vec<([u8; 32], u64)> = Vec::with_capacity(live_chunks.len());
 
-        for (chunk_hash, file_hash, chunk_index, size, old_offset) in &live_chunks {
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "size is always non-negative and bounded by segment hard cap"
-            )]
-            let length = *size as u32;
+        for (chunk_hash, size, old_offset) in &live_chunks {
+            let length = *size;
 
             // Read the full record from the old segment (CRC-verified).
             let data = old_reader.read(*old_offset, length)?;
@@ -3553,7 +3609,7 @@ impl StagingArea {
             let record = segment::encode_record(&data);
             std::io::Write::write_all(&mut new_file, &record)?;
 
-            updates.push((*chunk_hash, *file_hash, *chunk_index, new_offset));
+            updates.push((*chunk_hash, new_offset));
 
             new_offset += record.len() as u64;
         }
@@ -3577,6 +3633,11 @@ impl StagingArea {
             &updates,
         )?;
 
+        {
+            let index = lock_index(&self.index)?;
+            index.drop_segment(old_segment_id)?;
+            index.checkpoint()?;
+        }
         // Now safe to delete the old segment file.
         let old_seg_path = segments_dir.join(format!("{old_segment_id:016x}.seg"));
         let old_size = std::fs::metadata(&old_seg_path).map_or(0, |m| m.len());
@@ -3590,9 +3651,6 @@ impl StagingArea {
         // fsync directory after unlink.
         let dir_fd = File::open(segments_dir)?;
         dir_fd.sync_all()?;
-
-        // Drop the old segment from the index (it has 0 live chunks now).
-        lock_index(&self.index)?.drop_segment(old_segment_id)?;
 
         let bytes_reclaimed = old_size.saturating_sub(new_offset);
 
@@ -3624,6 +3682,7 @@ impl StagingArea {
     pub async fn close(self) -> Result<()> {
         // Flush any remaining pending chunks.
         self.flush_pending().await?;
+        self.flush_index().await?;
         // Dropping self releases the writer, readers, index, and lock file.
         Ok(())
     }
@@ -4071,7 +4130,11 @@ impl StagingAreaReadOnly {
                 )
             })
             .collect::<Vec<_>>();
-        lock_index(&self.index)?.create_publication_intent(intent_id.as_str(), &stored)?;
+        let index = lock_index(&self.index)?;
+        index.create_publication_intent(intent_id.as_str(), &stored)?;
+        // Git index mutation can outlive a crash before publication is recorded.
+        // Persist its recovery intent before the caller changes that index.
+        index.checkpoint()?;
         Ok(intent_id)
     }
 
@@ -4208,6 +4271,8 @@ impl StagingAreaReadOnly {
         for seg_id in &candidates {
             let (size_bytes, chunk_count) = idx.segment_info(*seg_id)?;
 
+            idx.drop_segment(*seg_id)?;
+            idx.checkpoint()?;
             let seg_path = segments_dir.join(format!("{seg_id:016x}.seg"));
             match std::fs::remove_file(&seg_path) {
                 Ok(()) => {}
@@ -4217,14 +4282,14 @@ impl StagingAreaReadOnly {
                 Err(e) => return Err(e.into()),
             }
 
-            idx.drop_segment(*seg_id)?;
-
             segments_removed += 1;
             bytes_reclaimed += size_bytes;
             chunks_reclaimed += chunk_count;
         }
 
         if let Some((seg_id, size_bytes, chunk_count)) = idx.abandoned_current_segment()? {
+            idx.drop_segment(seg_id)?;
+            idx.checkpoint()?;
             let seg_path = segments_dir.join("current.seg");
             match std::fs::remove_file(&seg_path) {
                 Ok(()) => {}
@@ -4233,8 +4298,6 @@ impl StagingAreaReadOnly {
                 }
                 Err(e) => return Err(e.into()),
             }
-
-            idx.drop_segment(seg_id)?;
 
             segments_removed += 1;
             bytes_reclaimed += size_bytes;
@@ -5945,7 +6008,7 @@ mod tests {
             &file_path,
             tmp.path(),
             &staging,
-            crate::stream::StreamStageProgress::default(),
+            crate::ingest::StreamStageProgress::default(),
             &tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -5994,7 +6057,7 @@ mod tests {
             tmp.path(),
             logical_path,
             &staging,
-            crate::stream::StreamStageProgress::default(),
+            crate::ingest::StreamStageProgress::default(),
             &cancel,
         )
         .await
@@ -6007,7 +6070,7 @@ mod tests {
             tmp.path(),
             logical_path,
             &staging,
-            crate::stream::StreamStageProgress::default(),
+            crate::ingest::StreamStageProgress::default(),
             &cancel,
         )
         .await

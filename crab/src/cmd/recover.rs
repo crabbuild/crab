@@ -24,10 +24,11 @@ use crate::audit::{AuditEvent, AuditOutcome, NewAuditEvent, append_event, defaul
 #[cfg(test)]
 use crate::cmd::plan_apply::PlanApplyOperation;
 use crate::cmd::plan_apply::PlanApplyResult;
-use crate::cmd::stream_stage::{StreamStageProgress, stage_file_streaming_as};
+use crate::cmd::stream_stage::stage_file_streaming_as;
 use crate::core::error::{CrabError, Result};
 use crate::core::output::{OutputMode, emit_json};
 use crate::release::{ReleaseLargeFile, ReleaseManifest, ReleaseWorkflowOutput};
+use crab_staging::ingest::StreamStageProgress;
 
 pub const RECOVER_PLAN_SCHEMA: &str = "recover.plan";
 pub const RECOVER_APPLY_SCHEMA: &str = "recover.apply";

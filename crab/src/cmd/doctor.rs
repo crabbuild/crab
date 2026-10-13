@@ -913,7 +913,7 @@ async fn check_staging(root: &Path) -> CheckResult {
             return CheckResult::fail(
                 "staging area",
                 format!(
-                    "cannot open canonical staging lifecycle metadata: {error}; recreate staging and re-add affected paths"
+                    "cannot open canonical staging lifecycle metadata: {error}; for layout v1 run `crab staging upgrade`, then `crab staging verify`; preserve staged-only data before any manual recreation"
                 ),
             );
         }
@@ -2568,7 +2568,8 @@ mod tests {
     use super::*;
 
     use crab_cache::path_class::cache_route_contract;
-    use crab_staging::stream::{StreamStageProgress, stage_file_streaming_as};
+    use crab_staging::ingest::StreamStageProgress;
+    use crab_staging::stream::stage_file_streaming_as;
     use crab_staging::{PublicationIntentEntry, StagingArea, StagingAreaReadOnly};
 
     #[test]

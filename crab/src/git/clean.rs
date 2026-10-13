@@ -24,13 +24,10 @@ use bytes::{Bytes, BytesMut};
 use crab_git::lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE};
 use crab_git::pointer_detect::{PointerKind, classify};
 use crab_staging::StagingArea;
-use crab_staging::recipe::{ChunkingPolicyId, FileRecipe, RecipeChunk, RecipePage, RecipeRecorder};
+
 use crab_types::pointer::Pointer;
 use crab_xet::hash::MerkleHash;
 use gix_object::Find;
-
-/// Default capacity for the in-memory chunk-buffer ring (32 MiB).
-pub const DEFAULT_CHUNK_BUFFER_CAP: usize = 32 * 1024 * 1024;
 
 /// Default minimum file size for the fast path (64 MiB).
 pub const DEFAULT_FASTPATH_MIN_SIZE: u64 = 64 * 1024 * 1024;
@@ -282,972 +279,42 @@ impl FileIndexChecker for StoreFileIndexChecker {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Staging trait
-// ---------------------------------------------------------------------------
-
-/// Trait abstracting chunk staging for testability.
-///
-/// The real implementation writes chunks to the segment-based staging area
-/// and records them in index.db within a transaction.
-pub trait ChunkStager: Send {
-    /// Stage a batch of chunks transactionally.
-    ///
-    /// On success, all chunks are recorded in index.db. Callers must
-    /// flush the stager before emitting the corresponding pointer so
-    /// recovery preserves the durable segment boundary. On failure,
-    /// callers must not emit that pointer; a later retry will retire
-    /// stale rows before re-staging.
-    ///
-    /// Chunks are passed as `(hash, data)` pairs where `data` is `Bytes`
-    /// (zero-copy reference-counted) to avoid copying chunk data out of
-    /// the CDC output.
-    ///
-    /// `chunk_index_offset` is the number of chunks of this file that
-    /// have already been staged by previous calls. The implementation
-    /// must assign `chunk_index = offset + i` to each chunk so
-    /// consecutive batches produce non-overlapping
-    /// `(file_hash, chunk_index)` keys. Pass `0` for the first batch.
-    fn stage_chunks(
-        &self,
-        chunks: &[([u8; 32], Bytes)],
-        file_hash: &[u8; 32],
-        file_size: u64,
-        chunk_index_offset: u64,
-    ) -> Result<()>;
-
-    /// Persist the canonical recipe/path lease before emitting its pointer.
-    fn publish_recipe(&self, _path: &Path, _recipe: &FileRecipe) -> Result<()> {
-        Ok(())
-    }
-
-    /// Preserve a locally staged recipe already referenced by Git history.
-    fn preserve_committed_recipe(
-        &self,
-        _repo_root: &Path,
-        _path: &Path,
-        _new_file_hash: &[u8; 32],
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    /// Return whether the exact recipe already has durable local payload rows.
-    fn has_recipe(&self, _recipe: &FileRecipe) -> Result<bool> {
-        Ok(false)
-    }
-
-    /// Return a verified unpublished recipe that can be promoted without
-    /// rewriting its locally retained payload.
-    fn unpublished_local_recipe_for_path(&self, _path: &Path) -> Result<Option<FileRecipe>> {
-        Ok(None)
-    }
-
-    /// Read one bounded metadata page from the prepared recipe.
-    fn prepared_recipe_page(
-        &self,
-        _recipe: &FileRecipe,
-        _start_occurrence: u64,
-    ) -> Result<RecipePage> {
-        Err(CrabError::Internal(
-            "prepared recipe paging is unavailable".to_owned(),
+fn clean_xorb_builder(ctx: &AppContext) -> crab_staging::ingest::StreamStageXorbBuilder {
+    let config = crate::git::push::PushConfig::from_config(ctx.config());
+    crab_staging::ingest::StreamStageXorbBuilder::new(1, move || {
+        config.configure_builder(crab_xet::xorb::builder::XorbBuilder::with_policy(
+            config.compression_policy(),
         ))
-    }
-
-    /// Read a bounded ordered group of locally authoritative recipe chunks.
-    fn prepared_chunk_payloads(&self, _chunks: &[RecipeChunk]) -> Result<Vec<Bytes>> {
-        Err(CrabError::Internal(
-            "prepared chunk replay is unavailable".to_owned(),
-        ))
-    }
-
-    /// Adopt chunks staged under a provisional hash into the final file hash.
-    ///
-    /// Streaming clean callers use this after EOF, once Blake3 has
-    /// finalized the real file hash. The default no-op keeps unit-test
-    /// stagers lightweight; production stagers must make the rename
-    /// durable before the pointer is emitted.
-    fn adopt_staged_file(
-        &self,
-        _source_file_hash: &[u8; 32],
-        _target_file_hash: &[u8; 32],
-        _file_size: u64,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    /// Drop a provisional file and its staged rows when the clean fast path wins.
-    fn discard_staged_file(&self, _file_hash: &[u8; 32]) -> Result<()> {
-        Ok(())
-    }
-
-    /// Flush any staged bytes that must be durable before the pointer
-    /// is emitted to Git.
-    ///
-    /// Implementations that only record in-memory/test state may leave
-    /// this as a no-op.
-    fn flush_pending(&self) -> Result<()> {
-        Ok(())
-    }
+    })
 }
 
-/// No-op stager that accepts all chunks for tests and dependency injection.
-#[derive(Debug, Default)]
-struct NoopChunkStager;
-
-impl ChunkStager for NoopChunkStager {
-    fn stage_chunks(
-        &self,
-        _chunks: &[([u8; 32], Bytes)],
-        _file_hash: &[u8; 32],
-        _file_size: u64,
-        _chunk_index_offset: u64,
-    ) -> Result<()> {
-        Ok(())
-    }
-}
-
-/// Real chunk stager backed by the segment-based [`StagingArea`].
-///
-/// Bridges the synchronous [`ChunkStager`] trait with the async
-/// `StagingArea` API by using `Handle::block_on`. This is safe because
-/// the filter-process loop runs inside `spawn_blocking`, so blocking on
-/// async calls won't starve the tokio runtime.
-pub struct StagingChunkStager {
+/// Product adapter retaining Git publication policy outside shared ingestion.
+struct CleanStaging {
     staging: Arc<StagingArea>,
     handle: tokio::runtime::Handle,
-}
-
-impl StagingChunkStager {
-    /// Create a new stager wrapping the given staging area.
-    ///
-    /// `handle` must be a handle to the tokio runtime that owns the
-    /// staging area's async locks.
-    pub fn new(staging: Arc<StagingArea>, handle: tokio::runtime::Handle) -> Self {
-        Self { staging, handle }
-    }
-}
-
-// SAFETY: StagingArea is Send (Arc-wrapped internals), and Handle is Send+Sync.
-unsafe impl Send for StagingChunkStager {}
-
-impl ChunkStager for StagingChunkStager {
-    fn stage_chunks(
-        &self,
-        chunks: &[([u8; 32], Bytes)],
-        file_hash: &[u8; 32],
-        file_size: u64,
-        chunk_index_offset: u64,
-    ) -> Result<()> {
-        let file_merkle = MerkleHash::from(*file_hash);
-
-        // Pre-insert the file row so the staging index can attach every
-        // pending row to the final file hash before the pointer is emitted.
-        self.staging.pre_register_file(&file_merkle, file_size)?;
-
-        // Build the batch: convert hashes and borrow data slices.
-        let batch: Vec<(MerkleHash, &[u8])> = chunks
-            .iter()
-            .map(|(hash, data)| (MerkleHash::from(*hash), data.as_ref()))
-            .collect();
-
-        let refs: Vec<(&MerkleHash, &[u8])> =
-            batch.iter().map(|(hash, data)| (hash, *data)).collect();
-
-        // Stage all chunks in a single batch — one writer lock, one
-        // SQLite transaction, and the staging layer's own threshold
-        // flush check. The clean checkpoint performs the final flush
-        // before emitting the pointer, so mid-stream fsyncs are only a
-        // crash-recovery boundary.
-        self.handle.block_on(self.staging.stage_chunks_batch(
-            &refs,
-            &file_merkle,
-            chunk_index_offset,
-        ))?;
-
-        tracing::debug!(
-            file_hash = %file_merkle.hex(),
-            chunks = chunks.len(),
-            size = file_size,
-            "staged chunks for file (batch)"
-        );
-
-        Ok(())
-    }
-
-    fn publish_recipe(&self, path: &Path, recipe: &FileRecipe) -> Result<()> {
-        let batch_id = self.staging.create_batch()?;
-        let file_hash = recipe.file_hash();
-        let publish = (|| -> Result<()> {
-            self.staging
-                .pre_register_file(&file_hash, recipe.file_size())?;
-            self.staging
-                .record_verified_recipe_lease(&batch_id, path, recipe)?;
-            self.staging
-                .record_file_path(&file_hash, &path.to_string_lossy())?;
-            self.staging.mark_batch_published(&batch_id)?;
-            Ok(())
-        })();
-        if let Err(error) = publish {
-            let _ = self.staging.rollback_batch(&batch_id);
-            let _ = self.staging.retire_file_if_unleased(&file_hash);
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    fn preserve_committed_recipe(
-        &self,
-        repo_root: &Path,
-        path: &Path,
-        new_file_hash: &[u8; 32],
-    ) -> Result<()> {
-        let path = path.to_path_buf();
-        let pointers = crate::git::worktree::committed_pointers_for_paths(
-            repo_root,
-            std::slice::from_ref(&path),
-        )?;
-        let Some(pointers) = pointers.get(&path) else {
-            return Ok(());
-        };
-        for pointer in pointers {
-            if pointer.file_hash == *new_file_hash {
-                continue;
-            }
-            self.staging.preserve_published_history_recipe(
-                &MerkleHash::from(pointer.file_hash),
-                pointer.size,
-            )?;
-        }
-        Ok(())
-    }
-
-    fn has_recipe(&self, recipe: &FileRecipe) -> Result<bool> {
-        self.staging
-            .has_verified_local_recipe(recipe)
-            .map_err(CrabError::from)
-    }
-
-    fn unpublished_local_recipe_for_path(&self, path: &Path) -> Result<Option<FileRecipe>> {
-        self.staging
-            .unpublished_local_recipe_for_path(path)
-            .map_err(CrabError::from)
-    }
-
-    fn prepared_recipe_page(
-        &self,
-        recipe: &FileRecipe,
-        start_occurrence: u64,
-    ) -> Result<RecipePage> {
-        self.staging
-            .recipe_page(recipe, start_occurrence)
-            .map_err(CrabError::from)
-    }
-
-    fn prepared_chunk_payloads(&self, chunks: &[RecipeChunk]) -> Result<Vec<Bytes>> {
-        let hashes = chunks
-            .iter()
-            .map(|chunk| chunk.chunk_hash)
-            .collect::<Vec<_>>();
-        let payloads = self
-            .handle
-            .block_on(self.staging.get_chunks_batch(&hashes))?
-            .into_iter()
-            .map(|(_, payload)| payload)
-            .collect::<Vec<_>>();
-        if payloads.len() != chunks.len() {
-            return Err(CrabError::StagingCorrupt(format!(
-                "prepared replay returned {} chunks for {} recipe terms",
-                payloads.len(),
-                chunks.len()
-            )));
-        }
-        Ok(payloads)
-    }
-
-    fn adopt_staged_file(
-        &self,
-        source_file_hash: &[u8; 32],
-        target_file_hash: &[u8; 32],
-        file_size: u64,
-    ) -> Result<()> {
-        let source = MerkleHash::from(*source_file_hash);
-        let target = MerkleHash::from(*target_file_hash);
-        let adopted = self
-            .staging
-            .adopt_staged_file(&source, &target, file_size)?;
-
-        tracing::debug!(
-            source_file_hash = %source.hex(),
-            target_file_hash = %target.hex(),
-            rows = adopted,
-            size = file_size,
-            "clean filter: adopted provisional staged file"
-        );
-
-        Ok(())
-    }
-
-    fn discard_staged_file(&self, file_hash: &[u8; 32]) -> Result<()> {
-        let file_merkle = MerkleHash::from(*file_hash);
-        let removed = self.staging.unregister_file(&file_merkle)?;
-        let abandoned = self.handle.block_on(self.staging.clean_abandoned(true));
-
-        tracing::debug!(
-            file_hash = %file_merkle.hex(),
-            removed,
-            "clean filter: discarded provisional staged file"
-        );
-
-        match abandoned {
-            Ok((segments_removed, bytes_reclaimed, pending_removed)) => {
-                if segments_removed > 0 || bytes_reclaimed > 0 || pending_removed > 0 {
-                    tracing::debug!(
-                        file_hash = %file_merkle.hex(),
-                        segments_removed,
-                        bytes_reclaimed,
-                        pending_removed,
-                        "clean filter: reclaimed discarded provisional staging"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    file_hash = %file_merkle.hex(),
-                    error = %e,
-                    "clean filter: discarded provisional rows but could not reclaim abandoned staging bytes"
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    fn flush_pending(&self) -> Result<()> {
-        self.handle.block_on(self.staging.flush_pending())?;
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// BatchedChunkStager
-// ---------------------------------------------------------------------------
-
-/// Maximum number of accumulated chunks before sealing a staging batch.
-/// Keeps each SQLite transaction modest without fsyncing per chunk.
-const STAGER_BATCH_THRESHOLD: usize = 64;
-
-/// Buffers CDC chunks until the file hash is known or the memory cap is reached.
-///
-/// Small files keep the old no-I/O fast path: staging can be skipped after
-/// EOF when the file-index already knows the hash. Larger streams spill into
-/// [`ProvisionalChunkStager`] so chunk payload memory stays bounded.
-struct BatchedChunkStager {
-    /// Accumulated chunk batches, each ready for a single `stage_chunks` call.
-    batches: Vec<Vec<([u8; 32], Bytes)>>,
-    /// Current batch being filled during the CDC loop.
-    current_batch: Vec<([u8; 32], Bytes)>,
-    /// Total chunks accumulated across all batches.
-    total_chunks: usize,
-    /// Total chunk payload bytes currently buffered in memory.
-    total_bytes: usize,
-}
-
-impl BatchedChunkStager {
-    /// Create a new stager with pre-allocated capacity.
-    fn new(estimated_chunks: usize) -> Self {
-        Self {
-            batches: Vec::new(),
-            current_batch: Vec::with_capacity(estimated_chunks.min(STAGER_BATCH_THRESHOLD)),
-            total_chunks: 0,
-            total_bytes: 0,
-        }
-    }
-
-    /// Add CDC chunks to the current batch. When the batch reaches the
-    /// threshold, it is sealed and a new batch starts.
-    fn add_chunks(&mut self, chunks: Vec<crab_xet::chunker::Chunk>) {
-        for c in chunks {
-            let hash_bytes: [u8; 32] = c.hash.into();
-            self.total_bytes = self.total_bytes.saturating_add(c.data.len());
-            self.current_batch.push((hash_bytes, c.data));
-            self.total_chunks += 1;
-
-            if self.current_batch.len() >= STAGER_BATCH_THRESHOLD {
-                let full_batch = std::mem::replace(
-                    &mut self.current_batch,
-                    Vec::with_capacity(STAGER_BATCH_THRESHOLD),
-                );
-                self.batches.push(full_batch);
-            }
-        }
-    }
-
-    /// Total number of chunks accumulated so far.
-    fn chunk_count(&self) -> usize {
-        self.total_chunks
-    }
-
-    /// Buffered payload bytes currently held in memory.
-    fn buffered_bytes(&self) -> usize {
-        self.total_bytes
-    }
-
-    /// Move all buffered chunks into provisional staging.
-    fn spill_into(
-        &mut self,
-        provisional: &mut ProvisionalChunkStager,
-        stager: &mut Box<dyn ChunkStager>,
-    ) -> Result<()> {
-        if !self.current_batch.is_empty() {
-            let full_batch = std::mem::replace(
-                &mut self.current_batch,
-                Vec::with_capacity(STAGER_BATCH_THRESHOLD),
-            );
-            self.batches.push(full_batch);
-        }
-
-        let batches = std::mem::take(&mut self.batches);
-        for batch in batches {
-            provisional.stage_batch(batch, stager)?;
-        }
-
-        self.total_chunks = 0;
-        self.total_bytes = 0;
-        Ok(())
-    }
-
     #[cfg(test)]
-    fn checkpoint(
-        &mut self,
-        stager: &mut Box<dyn ChunkStager>,
-        file_hash: &[u8; 32],
-        file_size: u64,
-    ) -> Result<()> {
-        if !self.current_batch.is_empty() {
-            let full_batch = std::mem::replace(
-                &mut self.current_batch,
-                Vec::with_capacity(STAGER_BATCH_THRESHOLD),
-            );
-            self.batches.push(full_batch);
-        }
-        let batches = std::mem::take(&mut self.batches);
-        if batches.is_empty() {
-            self.total_bytes = 0;
-            return Ok(());
-        }
-        Self::stage_batches(batches, stager, file_hash, file_size)?;
-        self.total_bytes = 0;
-        stager.flush_pending()
-    }
-
-    #[cfg(test)]
-    fn stage_batches(
-        batches: Vec<Vec<([u8; 32], Bytes)>>,
-        stager: &mut Box<dyn ChunkStager>,
-        file_hash: &[u8; 32],
-        file_size: u64,
-    ) -> Result<()> {
-        let mut offset = 0u64;
-        for batch in batches {
-            let batch_len = u64::try_from(batch.len()).map_err(|_| {
-                CrabError::StagingCorrupt("clean staging batch length overflow".to_owned())
-            })?;
-            stager.stage_chunks(&batch, file_hash, file_size, offset)?;
-            offset = offset.checked_add(batch_len).ok_or_else(|| {
-                CrabError::StagingCorrupt("clean staging chunk index overflow".to_owned())
-            })?;
-        }
-        Ok(())
-    }
+    _temporary: Option<tempfile::TempDir>,
 }
 
-/// Stages chunks under a provisional file hash until the final hash is known.
-struct ProvisionalChunkStager {
-    file_hash: [u8; 32],
-    current_batch: Vec<([u8; 32], Bytes)>,
-    staged_chunks: u64,
-}
-
-impl ProvisionalChunkStager {
-    fn new(pathname: &str) -> Self {
-        Self {
-            file_hash: provisional_file_hash(pathname),
-            current_batch: Vec::with_capacity(STAGER_BATCH_THRESHOLD),
-            staged_chunks: 0,
-        }
-    }
-
-    fn add_chunks(
-        &mut self,
-        chunks: Vec<crab_xet::chunker::Chunk>,
-        stager: &mut Box<dyn ChunkStager>,
-    ) -> Result<()> {
-        for c in chunks {
-            let hash_bytes: [u8; 32] = c.hash.into();
-            self.current_batch.push((hash_bytes, c.data));
-
-            if self.current_batch.len() >= STAGER_BATCH_THRESHOLD {
-                self.flush_current_batch(stager)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn chunk_count(&self) -> Result<usize> {
-        let current = u64::try_from(self.current_batch.len()).map_err(|_| {
-            CrabError::StagingCorrupt("provisional clean batch length overflow".to_owned())
-        })?;
-        let total = self.staged_chunks.checked_add(current).ok_or_else(|| {
-            CrabError::StagingCorrupt("provisional clean chunk count overflow".to_owned())
-        })?;
-        usize::try_from(total).map_err(|_| {
-            CrabError::StagingCorrupt("provisional clean chunk count cannot be represented".into())
-        })
-    }
-
-    fn stage_batch(
-        &mut self,
-        batch: Vec<([u8; 32], Bytes)>,
-        stager: &mut Box<dyn ChunkStager>,
-    ) -> Result<()> {
-        if batch.is_empty() {
-            return Ok(());
-        }
-
-        let batch_len = u64::try_from(batch.len()).map_err(|_| {
-            CrabError::StagingCorrupt(format!(
-                "provisional clean batch length {} cannot be represented",
-                batch.len()
-            ))
-        })?;
-        stager.stage_chunks(&batch, &self.file_hash, 0, self.staged_chunks)?;
-        self.staged_chunks = self.staged_chunks.checked_add(batch_len).ok_or_else(|| {
-            CrabError::StagingCorrupt(format!(
-                "provisional clean chunk index overflow at offset {}",
-                self.staged_chunks
-            ))
-        })?;
-        Ok(())
-    }
-
-    fn flush_current_batch(&mut self, stager: &mut Box<dyn ChunkStager>) -> Result<()> {
-        if self.current_batch.is_empty() {
-            return Ok(());
-        }
-        let batch = std::mem::replace(
-            &mut self.current_batch,
-            Vec::with_capacity(STAGER_BATCH_THRESHOLD),
+#[cfg(test)]
+fn test_staging() -> CleanStaging {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    std::thread::spawn(|| {
+        let runtime = RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().unwrap());
+        let temporary = tempfile::tempdir().unwrap();
+        let staging = Arc::new(
+            runtime
+                .block_on(StagingArea::open(temporary.path().join("staging")))
+                .unwrap(),
         );
-        self.stage_batch(batch, stager)
-    }
-
-    fn checkpoint(
-        &mut self,
-        stager: &mut Box<dyn ChunkStager>,
-        final_file_hash: &[u8; 32],
-        file_size: u64,
-    ) -> Result<()> {
-        self.flush_current_batch(stager)?;
-        stager.adopt_staged_file(&self.file_hash, final_file_hash, file_size)?;
-        stager.flush_pending()
-    }
-
-    fn discard(&mut self, stager: &mut Box<dyn ChunkStager>) -> Result<()> {
-        self.current_batch.clear();
-        if let Err(e) = stager.discard_staged_file(&self.file_hash) {
-            tracing::warn!(
-                provisional_file_hash = %hex_encode(&self.file_hash),
-                error = %e,
-                "clean filter: failed to discard provisional staging after fast path"
-            );
-            return Err(e);
+        CleanStaging {
+            staging,
+            handle: runtime.handle().clone(),
+            _temporary: Some(temporary),
         }
-        Ok(())
-    }
-}
-
-fn discard_provisional_stager(
-    provisional: &mut Option<ProvisionalChunkStager>,
-    stager: &mut Box<dyn ChunkStager>,
-) -> Result<()> {
-    if let Some(mut provisional) = provisional.take() {
-        provisional.discard(stager)?;
-    }
-    Ok(())
-}
-
-fn provisional_file_hash(pathname: &str) -> [u8; 32] {
-    static NEXT_PROVISIONAL_FILE_ID: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(1);
-
-    let id = NEXT_PROVISIONAL_FILE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"crab provisional clean staging v1\0");
-    hasher.update(pathname.as_bytes());
-    hasher.update(&std::process::id().to_le_bytes());
-    hasher.update(&id.to_le_bytes());
-    *hasher.finalize().as_bytes()
-}
-
-fn buffer_or_stage_clean_chunks(
-    chunks: Vec<crab_xet::chunker::Chunk>,
-    buffered: &mut BatchedChunkStager,
-    provisional: &mut Option<ProvisionalChunkStager>,
-    stager: &mut Box<dyn ChunkStager>,
-    recipe_recorder: &mut RecipeRecorder,
-    pathname: &str,
-    buffer_cap: usize,
-) -> Result<()> {
-    if chunks.is_empty() {
-        return Ok(());
-    }
-
-    record_clean_chunks(recipe_recorder, &chunks)?;
-
-    if let Some(provisional) = provisional.as_mut() {
-        return provisional.add_chunks(chunks, stager);
-    }
-
-    buffered.add_chunks(chunks);
-    if buffered.buffered_bytes() <= buffer_cap {
-        return Ok(());
-    }
-
-    let mut next = ProvisionalChunkStager::new(pathname);
-    buffered.spill_into(&mut next, stager)?;
-    *provisional = Some(next);
-    Ok(())
-}
-
-fn record_clean_chunks(
-    recorder: &mut RecipeRecorder,
-    chunks: &[crab_xet::chunker::Chunk],
-) -> Result<()> {
-    for chunk in chunks {
-        recorder.record(
-            MerkleHash::from(<[u8; 32]>::from(chunk.hash)),
-            u64::try_from(chunk.data.len()).map_err(|_| {
-                CrabError::StagingCorrupt("clean chunk length cannot be represented".to_owned())
-            })?,
-        )?;
-    }
-    Ok(())
-}
-
-const PREPARED_REPLAY_BATCH_CHUNKS: usize = 64;
-
-struct PreparedRecipeCursor {
-    recipe: FileRecipe,
-    page: Option<RecipePage>,
-    page_index: usize,
-    next_occurrence: u64,
-    next_offset: u64,
-}
-
-impl PreparedRecipeCursor {
-    fn new(recipe: FileRecipe) -> Self {
-        Self {
-            recipe,
-            page: None,
-            page_index: 0,
-            next_occurrence: 0,
-            next_offset: 0,
-        }
-    }
-
-    fn next(&mut self, stager: &dyn ChunkStager) -> Result<Option<RecipeChunk>> {
-        if self.next_occurrence == self.recipe.chunk_count() {
-            return Ok(None);
-        }
-        if self.next_occurrence > self.recipe.chunk_count() {
-            return Err(CrabError::StagingCorrupt(
-                "prepared recipe cursor exceeded its chunk count".to_owned(),
-            ));
-        }
-
-        if self
-            .page
-            .as_ref()
-            .is_none_or(|page| self.page_index == page.chunks.len())
-        {
-            let page = stager.prepared_recipe_page(&self.recipe, self.next_occurrence)?;
-            if page.start_occurrence != self.next_occurrence
-                || page.start_offset != self.next_offset
-                || page.chunks.is_empty()
-                || page.next_occurrence() > self.recipe.chunk_count()
-            {
-                return Err(CrabError::StagingCorrupt(format!(
-                    "prepared recipe page at occurrence {} is non-contiguous",
-                    self.next_occurrence
-                )));
-            }
-            self.page = Some(page);
-            self.page_index = 0;
-        }
-
-        let chunk = self
-            .page
-            .as_ref()
-            .and_then(|page| page.chunks.get(self.page_index))
-            .copied()
-            .ok_or_else(|| {
-                CrabError::StagingCorrupt(
-                    "prepared recipe page ended before its declared chunks".to_owned(),
-                )
-            })?;
-        if chunk.offset != self.next_offset || chunk.len == 0 {
-            return Err(CrabError::StagingCorrupt(format!(
-                "prepared recipe chunk {} has an invalid byte range",
-                self.next_occurrence
-            )));
-        }
-        self.page_index += 1;
-        self.next_occurrence = self.next_occurrence.checked_add(1).ok_or_else(|| {
-            CrabError::StagingCorrupt("prepared recipe occurrence overflow".to_owned())
-        })?;
-        self.next_offset = self.next_offset.checked_add(chunk.len).ok_or_else(|| {
-            CrabError::StagingCorrupt("prepared recipe byte offset overflow".to_owned())
-        })?;
-        Ok(Some(chunk))
-    }
-}
-
-enum PreparedVerification {
-    Matching,
-    Exact,
-    Changed {
-        verified_occurrences: u64,
-        bytes: Bytes,
-    },
-}
-
-struct PreparedRecipeVerifier {
-    cursor: PreparedRecipeCursor,
-    expected: Option<RecipeChunk>,
-    pending: BytesMut,
-    verified_occurrences: u64,
-}
-
-impl PreparedRecipeVerifier {
-    fn new(recipe: FileRecipe) -> Self {
-        Self {
-            cursor: PreparedRecipeCursor::new(recipe),
-            expected: None,
-            pending: BytesMut::new(),
-            verified_occurrences: 0,
-        }
-    }
-
-    fn feed(&mut self, mut input: &[u8], stager: &dyn ChunkStager) -> Result<PreparedVerification> {
-        while !input.is_empty() {
-            if self.expected.is_none() {
-                self.expected = self.cursor.next(stager)?;
-            }
-            let Some(expected) = self.expected else {
-                return Ok(self.changed(input));
-            };
-            let expected_len = usize::try_from(expected.len).map_err(|_| {
-                CrabError::StagingCorrupt(
-                    "prepared recipe chunk length cannot be represented".to_owned(),
-                )
-            })?;
-            let needed = expected_len
-                .checked_sub(self.pending.len())
-                .ok_or_else(|| {
-                    CrabError::StagingCorrupt(
-                        "prepared verification buffered beyond its chunk boundary".to_owned(),
-                    )
-                })?;
-            let take = needed.min(input.len());
-            self.pending.extend_from_slice(&input[..take]);
-            input = &input[take..];
-            if self.pending.len() != expected_len {
-                return Ok(PreparedVerification::Matching);
-            }
-            if crab_xet::hash::compute_data_hash(&self.pending) != expected.chunk_hash {
-                return Ok(self.changed(input));
-            }
-            self.pending.clear();
-            self.expected = None;
-            self.verified_occurrences =
-                self.verified_occurrences.checked_add(1).ok_or_else(|| {
-                    CrabError::StagingCorrupt(
-                        "prepared verification occurrence overflow".to_owned(),
-                    )
-                })?;
-        }
-        Ok(PreparedVerification::Matching)
-    }
-
-    fn finish(&mut self, stager: &dyn ChunkStager) -> Result<PreparedVerification> {
-        if !self.pending.is_empty() {
-            return Ok(self.changed(&[]));
-        }
-        if self.expected.is_none() {
-            self.expected = self.cursor.next(stager)?;
-        }
-        if self.expected.is_some() {
-            return Ok(self.changed(&[]));
-        }
-        Ok(PreparedVerification::Exact)
-    }
-
-    fn changed(&mut self, remaining: &[u8]) -> PreparedVerification {
-        let mut bytes = std::mem::take(&mut self.pending);
-        bytes.extend_from_slice(remaining);
-        PreparedVerification::Changed {
-            verified_occurrences: self.verified_occurrences,
-            bytes: bytes.freeze(),
-        }
-    }
-}
-
-struct PreparedChangedReplay {
-    chunker: Option<crab_xet::chunker::GearChunker>,
-    buffered: BatchedChunkStager,
-    provisional: Option<ProvisionalChunkStager>,
-    recipe_recorder: RecipeRecorder,
-}
-
-impl PreparedChangedReplay {
-    fn new() -> Self {
-        Self {
-            chunker: Some(crab_xet::chunker::GearChunker::new()),
-            buffered: BatchedChunkStager::new(1),
-            provisional: None,
-            recipe_recorder: RecipeRecorder::new(ChunkingPolicyId::XetGearV1_64KiB),
-        }
-    }
-
-    fn replay_prefix(
-        &mut self,
-        recipe: &FileRecipe,
-        occurrence_count: u64,
-        stager: &mut Box<dyn ChunkStager>,
-        pathname: &str,
-        buffer_cap: usize,
-    ) -> Result<()> {
-        let mut cursor = PreparedRecipeCursor::new(recipe.clone());
-        let mut replayed = 0u64;
-        while replayed < occurrence_count {
-            let remaining = occurrence_count - replayed;
-            let batch_len = usize::try_from(remaining)
-                .unwrap_or(usize::MAX)
-                .min(PREPARED_REPLAY_BATCH_CHUNKS);
-            let mut terms = Vec::with_capacity(batch_len);
-            for _ in 0..batch_len {
-                terms.push(cursor.next(stager.as_ref())?.ok_or_else(|| {
-                    CrabError::StagingCorrupt(
-                        "prepared replay prefix exceeded the recipe".to_owned(),
-                    )
-                })?);
-            }
-            let payloads = stager.prepared_chunk_payloads(&terms)?;
-            if payloads.len() != terms.len() {
-                return Err(CrabError::StagingCorrupt(
-                    "prepared replay payload cardinality mismatch".to_owned(),
-                ));
-            }
-            for (term, payload) in terms.iter().zip(payloads) {
-                if payload.len() as u64 != term.len
-                    || crab_xet::hash::compute_data_hash(&payload) != term.chunk_hash
-                {
-                    return Err(CrabError::StagingCorrupt(format!(
-                        "prepared replay payload does not match occurrence {replayed}"
-                    )));
-                }
-                self.feed(&payload, stager, pathname, buffer_cap)?;
-                replayed = replayed.checked_add(1).ok_or_else(|| {
-                    CrabError::StagingCorrupt("prepared replay occurrence overflow".to_owned())
-                })?;
-            }
-        }
-        Ok(())
-    }
-
-    fn feed(
-        &mut self,
-        bytes: &[u8],
-        stager: &mut Box<dyn ChunkStager>,
-        pathname: &str,
-        buffer_cap: usize,
-    ) -> Result<()> {
-        let chunks = self
-            .chunker
-            .as_mut()
-            .ok_or_else(|| {
-                CrabError::Internal("prepared replay chunker already finalized".to_owned())
-            })?
-            .feed(bytes);
-        buffer_or_stage_clean_chunks(
-            chunks,
-            &mut self.buffered,
-            &mut self.provisional,
-            stager,
-            &mut self.recipe_recorder,
-            pathname,
-            buffer_cap,
-        )
-    }
-
-    fn finish(
-        &mut self,
-        stager: &mut Box<dyn ChunkStager>,
-        pathname: &str,
-        buffer_cap: usize,
-    ) -> Result<()> {
-        if let Some(last) = self
-            .chunker
-            .take()
-            .ok_or_else(|| {
-                CrabError::Internal("prepared replay chunker already finalized".to_owned())
-            })?
-            .finalize()
-        {
-            buffer_or_stage_clean_chunks(
-                vec![last],
-                &mut self.buffered,
-                &mut self.provisional,
-                stager,
-                &mut self.recipe_recorder,
-                pathname,
-                buffer_cap,
-            )?;
-        }
-        Ok(())
-    }
-}
-
-fn feed_prepared_clean_bytes(
-    bytes: &[u8],
-    prepared: &FileRecipe,
-    verifier: &mut Option<PreparedRecipeVerifier>,
-    replay: &mut Option<PreparedChangedReplay>,
-    stager: &mut Box<dyn ChunkStager>,
-    pathname: &str,
-    buffer_cap: usize,
-) -> Result<()> {
-    if let Some(replay) = replay.as_mut() {
-        return replay.feed(bytes, stager, pathname, buffer_cap);
-    }
-    let outcome = verifier
-        .as_mut()
-        .ok_or_else(|| CrabError::Internal("prepared verifier disappeared".to_owned()))?
-        .feed(bytes, stager.as_ref())?;
-    if let PreparedVerification::Changed {
-        verified_occurrences,
-        bytes,
-    } = outcome
-    {
-        *replay = Some(PreparedChangedReplay::new());
-        *verifier = None;
-        let changed = replay.as_mut().ok_or_else(|| {
-            CrabError::Internal("prepared changed-content replay disappeared".to_owned())
-        })?;
-        changed.replay_prefix(prepared, verified_occurrences, stager, pathname, buffer_cap)?;
-        changed.feed(&bytes, stager, pathname, buffer_cap)?;
-    }
-    Ok(())
+    })
+    .join()
+    .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,7 +323,7 @@ fn feed_prepared_clean_bytes(
 
 /// Per-session state for the clean pipeline.
 ///
-/// Maintains the bloom filter, chunk buffer, and metrics across multiple
+/// Maintains the bloom filter, shared staging resources, and metrics across multiple
 /// clean operations within a single filter-process invocation. Supports
 /// both crab-native (Blake3 + CDC) and LFS (SHA-256) clean paths,
 /// selected per-file based on `.gitattributes` `filter=` settings.
@@ -1266,8 +333,8 @@ pub struct CleanSession {
     /// File hashes confirmed via HEAD, with their shard hint if the file-index has one.
     confirmed_hashes: HashMap<[u8; 32], Option<[u8; 32]>>,
     file_index_checker: Box<dyn FileIndexChecker>,
-    chunk_stager: Box<dyn ChunkStager>,
-    chunk_buffer_cap: usize,
+    staging: Option<CleanStaging>,
+    xorb_builder: crab_staging::ingest::StreamStageXorbBuilder,
     fastpath_min_size: u64,
     /// Compiled include/exclude filter for auto-hydrate. `Some` when
     /// `hydrate.auto = true` and patterns compiled successfully.
@@ -1314,9 +381,8 @@ pub struct CleanSession {
     /// When `Some`, the backing staging area is unavailable for writes
     /// and the crab-native clean path must fail instead of producing
     /// a pointer that points at chunks we never staged. `None` means
-    /// the stager is writable (or this is a unit-test session where
-    /// staging simply isn't used — tests opt into that by leaving the
-    /// flag unset).
+    /// writable admission has not been rejected; novel content still requires
+    /// an attached staging owner.
     ///
     /// The inner `Option<u32>` carries the holder PID when known, so
     /// the surfaced `CRAB-E0081` error tells the user which process
@@ -1334,14 +400,18 @@ impl CleanSession {
         let fastpath_min_size = ctx.perf().effective_fastpath_min_size();
 
         let hydrate_filter = Self::compile_hydrate_filter(&ctx);
+        let xorb_builder = clean_xorb_builder(&ctx);
 
         Self {
             ctx,
             bloom: FileHashBloom::new(1024),
             confirmed_hashes: HashMap::new(),
             file_index_checker: Box::new(NoopFileIndexChecker),
-            chunk_stager: Box::new(NoopChunkStager),
-            chunk_buffer_cap: DEFAULT_CHUNK_BUFFER_CAP,
+            #[cfg(test)]
+            staging: Some(test_staging()),
+            #[cfg(not(test))]
+            staging: None,
+            xorb_builder,
             fastpath_min_size,
             hydrate_filter,
             lfs_fetch_filter: None,
@@ -1363,47 +433,27 @@ impl CleanSession {
         &self.ctx
     }
 
-    /// Create a session with custom dependencies.
-    pub fn with_deps(
+    #[cfg(test)]
+    fn with_deps(
         ctx: AppContext,
         checker: Box<dyn FileIndexChecker>,
-        stager: Box<dyn ChunkStager>,
+        staging: Option<CleanStaging>,
         bloom_items: &[[u8; 32]],
         fastpath_min_size: u64,
-        chunk_buffer_cap: usize,
     ) -> Self {
-        let mut bloom = FileHashBloom::new(bloom_items.len().max(64));
-        for hash in bloom_items {
-            bloom.insert(hash);
-        }
-        let hydrate_filter = Self::compile_hydrate_filter(&ctx);
-        Self {
-            ctx,
-            bloom,
-            confirmed_hashes: HashMap::new(),
-            file_index_checker: checker,
-            chunk_stager: stager,
-            chunk_buffer_cap,
-            fastpath_min_size,
-            hydrate_filter,
-            lfs_fetch_filter: None,
-            lfs_skip_download_errors: false,
-            lfs_storage_dir: None,
-            repo_root: None,
-            lfs_patterns: Vec::new(),
-            #[cfg(feature = "gix-pathmatch")]
-            lfs_attrs: std::sync::OnceLock::new(),
-            filter_attr_cache: None,
-            shard_hints: ShardHintCache::new(),
-            staging_unavailable: None,
-        }
+        let mut session = Self::new(ctx);
+        session.file_index_checker = checker;
+        session.staging = staging.or_else(|| Some(test_staging()));
+        session.seed_bloom(bloom_items);
+        session.fastpath_min_size = fastpath_min_size;
+        session
     }
 
     /// Mark the session as having no writable staging area because
     /// another process holds the exclusive lock. The crab-native
     /// clean path will refuse with
     /// [`CrabError::StagingLocked`] instead of emitting a pointer
-    /// against `NoopChunkStager`, which would produce a valid-looking
+    /// without a writable owner, which would produce a valid-looking
     /// pointer backed by no chunks — irrecoverably broken on push.
     pub fn set_staging_locked(&mut self, holder_pid: Option<u32>) {
         self.staging_unavailable = Some(holder_pid);
@@ -1418,22 +468,14 @@ impl CleanSession {
         self.staging_unavailable = Some(None);
     }
 
-    /// Swap in a writable chunk stager after the session was created
-    /// without one. The filter session defers staging-area open until
-    /// a `clean` command actually arrives, so `git status` — which
-    /// only issues `smudge` commands through the filter — never
-    /// acquires `LOCK_EX` on the staging root and doesn't contend
-    /// with a concurrent `crab add`.
-    ///
-    /// Clears any prior "staging unavailable" flag set at session
-    /// construction: successful lazy-open means the crab-native
-    /// clean path can now emit backed pointers. Callers that still
-    /// want the session to refuse writes must re-assert via
-    /// [`set_staging_locked`](Self::set_staging_locked) or
-    /// [`set_staging_unavailable`](Self::set_staging_unavailable)
-    /// after this call.
-    pub fn set_chunk_stager(&mut self, stager: Box<dyn ChunkStager>) {
-        self.chunk_stager = stager;
+    /// Attach the lazily acquired writer before processing clean content.
+    pub fn set_staging(&mut self, staging: Arc<StagingArea>, handle: tokio::runtime::Handle) {
+        self.staging = Some(CleanStaging {
+            staging,
+            handle,
+            #[cfg(test)]
+            _temporary: None,
+        });
         self.staging_unavailable = None;
     }
 
@@ -1641,8 +683,23 @@ impl CleanSession {
         let Some(root) = self.repo_root.as_ref() else {
             return Ok(());
         };
-        self.chunk_stager
-            .preserve_committed_recipe(root, Path::new(pathname), new_file_hash)
+        let Some(staging) = &self.staging else {
+            return Ok(());
+        };
+        let path = Path::new(pathname).to_path_buf();
+        let pointers =
+            crate::git::worktree::committed_pointers_for_paths(root, std::slice::from_ref(&path))?;
+        if let Some(pointers) = pointers.get(&path) {
+            for pointer in pointers {
+                if pointer.file_hash != *new_file_hash {
+                    staging.staging.preserve_published_history_recipe(
+                        &MerkleHash::from(pointer.file_hash),
+                        pointer.size,
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Return the resolved local LFS storage directory for this session.
@@ -1838,135 +895,20 @@ impl CleanSession {
         let config = crate::lfs::config::LfsConfig::resolve(&ctx.current_worktree_root)?;
         Ok(config.storage_dir(&ctx.common_git_dir))
     }
-
-    /// Crab clean path: Blake3 hash + CDC chunk in a single pass, stage, return pointer.
-    ///
-    /// Uses [`BatchedChunkStager`] to preserve chunk order while keeping each
-    /// staging transaction bounded.
-    ///
-    /// The file hash isn't known until all data is consumed (single-pass
-    /// blake3+CDC), so chunks are buffered during the loop and staged
-    /// in batches once `checkpoint()` is called with the hash.
-    ///
-    /// The staging-availability check runs *after* the fast-path lookup
-    /// so a file already known to the file-index doesn't need a
-    /// writable staging area. That lets `git status` / `git diff` on
-    /// hydrated files succeed even while another crab process holds
-    /// `.crab/staging`.
     fn crab_clean_path(&mut self, pathname: &str, content: Vec<u8>) -> Result<Vec<u8>> {
-        use crab_xet::chunker::GearChunker;
-
-        let file_size = content.len() as u64;
-
-        // Single-pass: compute blake3 file hash and CDC chunk boundaries
-        // simultaneously. This eliminates a separate full-file hash pass
-        // (~300ms saved per GB on modern hardware).
-        let mut file_hasher = blake3::Hasher::new();
-        let mut chunker = GearChunker::new();
-        let estimated_chunks = (file_size / 65536).max(1) as usize;
-
-        let mut batch_stager = BatchedChunkStager::new(estimated_chunks);
-        let mut recipe_recorder = RecipeRecorder::new(ChunkingPolicyId::XetGearV1_64KiB);
-
-        // Hash in one adaptive pass (serial loop or rayon-parallel based
-        // on size), then feed the CDC chunker block-by-block. The CDC
-        // chunker is stateful and still needs incremental feeding; the
-        // hasher doesn't.
-        let use_rayon = file_size >= crate::engine::hashing::BLAKE3_RAYON_THRESHOLD;
-        tracing::debug!(
-            hash_rayon = use_rayon,
-            file_size,
-            reason = if use_rayon {
-                "above_threshold"
-            } else {
-                "below_threshold"
-            },
-            "clean: blake3 hash path selected",
-        );
-        crate::engine::hashing::update_blake3_adaptive(&mut file_hasher, &content);
-
-        for block in content.chunks(128 * 1024) {
-            let new_chunks = chunker.feed(block);
-            if !new_chunks.is_empty() {
-                record_clean_chunks(&mut recipe_recorder, &new_chunks)?;
-                batch_stager.add_chunks(new_chunks);
+        let mut content = Bytes::from(content);
+        self.crab_clean_content(pathname, || {
+            if content.is_empty() {
+                return Ok(None);
             }
-        }
-        if let Some(last) = chunker.finalize() {
-            record_clean_chunks(&mut recipe_recorder, std::slice::from_ref(&last))?;
-            batch_stager.add_chunks(vec![last]);
-        }
-
-        let file_hash: [u8; 32] = *file_hasher.finalize().as_bytes();
-        let total_chunks = batch_stager.chunk_count();
-
-        tracing::debug!(
-            path = %pathname,
-            size = file_size,
-            file_hash = %hex_encode(&file_hash),
-            chunks = total_chunks,
-            "clean: hash + CDC complete (single pass)"
-        );
-
-        // Before the bloom/file-index fast path, consult the git
-        // index directly. If the working-tree content hashes to the
-        // same file_hash as a pointer blob already committed for this
-        // path, the file is a hydrated copy — emit the committed
-        // pointer verbatim, no staging needed. Works with zero
-        // network traffic and regardless of bloom state.
-        if let Some(pointer_bytes) = self.try_index_pointer_match(pathname, &file_hash) {
-            return Ok(pointer_bytes);
-        }
-
-        // Attempt fast path with the computed hash. A hit emits a
-        // pointer whose chunks already exist remotely — no staging
-        // needed, so this works even when `.crab/staging` is locked.
-        if let Some(pointer_bytes) = self.try_fast_path(file_size, &file_hash)? {
-            return Ok(pointer_bytes);
-        }
-
-        // Slow path: we're about to stage chunks. Refuse now if the
-        // stager is a no-op — otherwise we'd emit a correct-looking
-        // pointer into git's index and lose every chunk byte, which
-        // surfaces as "shard not found" the first time any other
-        // clone tries to hydrate.
-        self.check_staging_available()?;
-
-        let recipe = recipe_recorder.seal(MerkleHash::from(file_hash), file_size)?;
-        if self.chunk_stager.has_recipe(&recipe)? {
-            self.preserve_committed_recipe_before_publication(pathname, &file_hash)?;
-            self.chunk_stager
-                .publish_recipe(Path::new(pathname), &recipe)?;
-            let pointer = self.build_pointer(file_hash, file_size, None);
-            let pointer_bytes = pointer.serialize();
-            return Ok(pointer_bytes);
-        }
-        let mut provisional = ProvisionalChunkStager::new(pathname);
-        batch_stager.spill_into(&mut provisional, &mut self.chunk_stager)?;
-        provisional.checkpoint(&mut self.chunk_stager, &file_hash, file_size)?;
-        self.preserve_committed_recipe_before_publication(pathname, &file_hash)?;
-        self.chunk_stager
-            .publish_recipe(Path::new(pathname), &recipe)?;
-
-        let pointer = self.build_pointer(file_hash, file_size, None);
-        let pointer_bytes = pointer.serialize();
-        Ok(pointer_bytes)
+            let length = content.len().min(crab_staging::ingest::READ_BUF_SIZE);
+            Ok(Some(content.split_to(length)))
+        })
     }
 
-    /// Streaming variant of [`clean_file`] that feeds a pkt-line reader
-    /// directly into the hasher and CDC chunker.
+    /// Clean one packet-framed request using bounded shared ingestion.
     ///
-    /// On the crab path, peak chunk-payload memory is bounded by the
-    /// session's `chunk_buffer_cap`: small files keep staging deferred
-    /// until EOF, while larger files spill into provisional staging and
-    /// later adopt those rows under the finalized Blake3 hash. For any
-    /// given input, the output pointer bytes are identical to
-    /// [`clean_file`] on the same content.
-    ///
-    /// Pointer passthrough is decided from the complete input only while it
-    /// remains below Git LFS's pointer-size cutoff. Unextended LFS content
-    /// streams to a temporary cache file while hashing, so memory use is
-    /// independent of object size.
+    /// Pointer and LFS dispatch is resolved before Crab content enters staging.
     pub fn clean_stream<R: std::io::Read>(
         &mut self,
         pathname: &str,
@@ -2069,18 +1011,8 @@ impl CleanSession {
         }
     }
 
-    /// Crab streaming clean: drives [`GearChunker::feed`] off a
-    /// pkt-line reader, buffers chunks up to `chunk_buffer_cap`, spills
-    /// larger streams into provisional staging, runs [`try_fast_path`]
-    /// at EOF, and adopts staged rows under the final file hash before
-    /// emitting the pointer.
-    ///
-    /// `first` holds the bounded pointer probe that [`clean_stream`] already
-    /// consumed. When that probe reached the flush packet, `reached_flush`
-    /// prevents a second read past the command boundary.
-    ///
-    /// [`GearChunker::feed`]: crab_xet::chunker::GearChunker::feed
-    /// [`try_fast_path`]: Self::try_fast_path
+    // Decode packets into bounded blocks. Only the request flush ends content;
+    // packet boundaries never finalize the shared content-defined chunker.
     fn crab_clean_stream<R: std::io::Read>(
         &mut self,
         pathname: &str,
@@ -2088,318 +1020,118 @@ impl CleanSession {
         reader: &mut crate::git::filter_process::PktLineReader<R>,
         reached_flush: bool,
     ) -> Result<Vec<u8>> {
-        use crab_xet::chunker::GearChunker;
-
-        if let Some(recipe) = self
-            .chunk_stager
-            .unpublished_local_recipe_for_path(Path::new(pathname))?
-        {
-            return self.crab_clean_prepared_stream(pathname, first, reader, reached_flush, recipe);
-        }
-
-        let staging_available = self.staging_unavailable.is_none();
-        let mut file_hasher = blake3::Hasher::new();
-        let mut chunker = staging_available.then(GearChunker::new);
-        let mut buffered_stager = BatchedChunkStager::new(1);
-        let mut provisional_stager: Option<ProvisionalChunkStager> = None;
-        let mut recipe_recorder = RecipeRecorder::new(ChunkingPolicyId::XetGearV1_64KiB);
-        let mut file_size: u64 = 0;
-
-        let result = (|| -> Result<Vec<u8>> {
-            // Feed the previously-peeked first packet.
-            if !first.is_empty() {
-                file_size += first.len() as u64;
-                file_hasher.update(&first);
-                if let Some(chunker) = chunker.as_mut() {
-                    let new_chunks = chunker.feed(&first);
-                    buffer_or_stage_clean_chunks(
-                        new_chunks,
-                        &mut buffered_stager,
-                        &mut provisional_stager,
-                        &mut self.chunk_stager,
-                        &mut recipe_recorder,
-                        pathname,
-                        self.chunk_buffer_cap,
-                    )?;
-                }
+        let mut prefix = Some(Bytes::from(first));
+        let mut ended = reached_flush;
+        self.crab_clean_content(pathname, || {
+            if let Some(prefix) = prefix.take() {
+                return Ok(Some(prefix));
             }
-
-            // Drain the remaining packets.
-            if !reached_flush {
-                while let Some(pkt) = reader.read_packet()? {
-                    file_size += pkt.len() as u64;
-                    file_hasher.update(pkt);
-                    if let Some(chunker) = chunker.as_mut() {
-                        let new_chunks = chunker.feed(pkt);
-                        buffer_or_stage_clean_chunks(
-                            new_chunks,
-                            &mut buffered_stager,
-                            &mut provisional_stager,
-                            &mut self.chunk_stager,
-                            &mut recipe_recorder,
-                            pathname,
-                            self.chunk_buffer_cap,
-                        )?;
+            if ended {
+                return Ok(None);
+            }
+            let mut bytes = BytesMut::with_capacity(crab_staging::ingest::READ_BUF_SIZE);
+            while bytes.len() < crab_staging::ingest::READ_BUF_SIZE {
+                match reader.read_packet()? {
+                    Some(packet) => bytes.extend_from_slice(packet),
+                    None => {
+                        ended = true;
+                        break;
                     }
                 }
             }
-
-            if let Some(chunker) = chunker.take()
-                && let Some(last) = chunker.finalize()
-            {
-                buffer_or_stage_clean_chunks(
-                    vec![last],
-                    &mut buffered_stager,
-                    &mut provisional_stager,
-                    &mut self.chunk_stager,
-                    &mut recipe_recorder,
-                    pathname,
-                    self.chunk_buffer_cap,
-                )?;
-            }
-
-            let file_hash: [u8; 32] = *file_hasher.finalize().as_bytes();
-            let total_chunks = match provisional_stager.as_ref() {
-                Some(provisional) => provisional.chunk_count()?,
-                None => buffered_stager.chunk_count(),
-            };
-
-            tracing::debug!(
-                path = %pathname,
-                size = file_size,
-                file_hash = %hex_encode(&file_hash),
-                chunks = total_chunks,
-                "clean_stream: hash + CDC complete (streaming)"
-            );
-
-            // Before the bloom/file-index fast path, consult the git
-            // index for a matching pointer. Hydrated files always
-            // produce content whose blake3 hash equals the pointer's
-            // file_hash in the index — emit the pointer verbatim with
-            // zero network traffic and no staging lock needed.
-            if let Some(pointer_bytes) = self.try_index_pointer_match(pathname, &file_hash) {
-                discard_provisional_stager(&mut provisional_stager, &mut self.chunk_stager)?;
-                return Ok(pointer_bytes);
-            }
-
-            // Fast-path check using the computed hash. On hit, the chunks
-            // accumulated in memory are dropped; provisional rows are
-            // explicitly discarded. No final staging is needed, so this
-            // succeeds even when `.crab/staging` is locked — the
-            // hydrated-file workflow depends on this.
-            if let Some(pointer_bytes) = self.try_fast_path(file_size, &file_hash)? {
-                discard_provisional_stager(&mut provisional_stager, &mut self.chunk_stager)?;
-                return Ok(pointer_bytes);
-            }
-
-            // Slow path: we're about to stage chunks. Refuse now if the
-            // stager is a no-op. See the mirror check in
-            // [`crab_clean_path`] for the failure mode this prevents
-            // (pointer emitted without backing chunks).
-            self.check_staging_available()?;
-
-            let recipe = recipe_recorder.seal(MerkleHash::from(file_hash), file_size)?;
-            if self.chunk_stager.has_recipe(&recipe)? {
-                discard_provisional_stager(&mut provisional_stager, &mut self.chunk_stager)?;
-                self.preserve_committed_recipe_before_publication(pathname, &file_hash)?;
-                self.chunk_stager
-                    .publish_recipe(Path::new(pathname), &recipe)?;
-                let pointer = self.build_pointer(file_hash, file_size, None);
-                let pointer_bytes = pointer.serialize();
-                return Ok(pointer_bytes);
-            }
-            if provisional_stager.is_none() {
-                let mut provisional = ProvisionalChunkStager::new(pathname);
-                buffered_stager.spill_into(&mut provisional, &mut self.chunk_stager)?;
-                provisional_stager = Some(provisional);
-            }
-            provisional_stager
-                .as_mut()
-                .ok_or_else(|| CrabError::Internal("missing clean staging attempt".to_owned()))?
-                .checkpoint(&mut self.chunk_stager, &file_hash, file_size)?;
-            self.preserve_committed_recipe_before_publication(pathname, &file_hash)?;
-            self.chunk_stager
-                .publish_recipe(Path::new(pathname), &recipe)?;
-
-            let pointer = self.build_pointer(file_hash, file_size, None);
-            let pointer_bytes = pointer.serialize();
-            Ok(pointer_bytes)
-        })();
-
-        if result.is_err()
-            && let Err(e) =
-                discard_provisional_stager(&mut provisional_stager, &mut self.chunk_stager)
-        {
-            tracing::warn!(error = %e, "clean filter: failed to discard provisional staging after error");
-        }
-
-        result
+            Ok((!bytes.is_empty()).then(|| bytes.freeze()))
+        })
     }
 
-    /// Verify a deferred recipe against its ordered local chunks and promote
-    /// it without CDC, staging writes, or a full-file spool. A changed stream
-    /// reconstructs only its verified prefix before continuing through the
-    /// canonical clean path.
-    fn crab_clean_prepared_stream<R: std::io::Read>(
+    fn crab_clean_content(
         &mut self,
         pathname: &str,
-        first: Vec<u8>,
-        reader: &mut crate::git::filter_process::PktLineReader<R>,
-        reached_flush: bool,
-        prepared: FileRecipe,
+        mut read: impl FnMut() -> Result<Option<Bytes>>,
     ) -> Result<Vec<u8>> {
-        let verify_start = std::time::Instant::now();
-        let mut hasher = blake3::Hasher::new();
-        let mut file_size = 0u64;
-        let mut verifier = Some(PreparedRecipeVerifier::new(prepared.clone()));
-        let mut replay: Option<PreparedChangedReplay> = None;
-        let result = (|| -> Result<Vec<u8>> {
+        if self.staging_unavailable.is_some() || self.staging.is_none() {
+            let mut hasher = blake3::Hasher::new();
+            let mut size = 0u64;
+            while let Some(bytes) = read()? {
+                hasher.update(&bytes);
+                size = size.checked_add(bytes.len() as u64).ok_or_else(|| {
+                    CrabError::StagingCorrupt("clean input size overflow".to_owned())
+                })?;
+            }
+            let hash = *hasher.finalize().as_bytes();
+            if let Some(pointer) = self.try_index_pointer_match(pathname, &hash) {
+                return Ok(pointer);
+            }
+            if let Some(pointer) = self.try_fast_path(size, &hash)? {
+                return Ok(pointer);
+            }
             self.check_staging_available()?;
-            {
-                let mut append = |bytes: &[u8]| -> Result<()> {
-                    hasher.update(bytes);
-                    file_size = file_size.checked_add(bytes.len() as u64).ok_or_else(|| {
-                        CrabError::StagingCorrupt("clean promotion byte count overflow".to_owned())
-                    })?;
-                    feed_prepared_clean_bytes(
-                        bytes,
-                        &prepared,
-                        &mut verifier,
-                        &mut replay,
-                        &mut self.chunk_stager,
-                        pathname,
-                        self.chunk_buffer_cap,
-                    )
-                };
-                append(&first)?;
-                if !reached_flush {
-                    while let Some(packet) = reader.read_packet()? {
-                        append(packet)?;
-                    }
-                }
-            }
-
-            if replay.is_none() {
-                let outcome = verifier
-                    .as_mut()
-                    .ok_or_else(|| CrabError::Internal("prepared verifier disappeared".to_owned()))?
-                    .finish(self.chunk_stager.as_ref())?;
-                match outcome {
-                    PreparedVerification::Exact => {}
-                    PreparedVerification::Changed {
-                        verified_occurrences,
-                        bytes,
-                    } => {
-                        replay = Some(PreparedChangedReplay::new());
-                        verifier = None;
-                        let changed = replay.as_mut().ok_or_else(|| {
-                            CrabError::Internal(
-                                "prepared changed-content replay disappeared".to_owned(),
-                            )
-                        })?;
-                        changed.replay_prefix(
-                            &prepared,
-                            verified_occurrences,
-                            &mut self.chunk_stager,
-                            pathname,
-                            self.chunk_buffer_cap,
-                        )?;
-                        changed.feed(
-                            &bytes,
-                            &mut self.chunk_stager,
-                            pathname,
-                            self.chunk_buffer_cap,
-                        )?;
-                    }
-                    PreparedVerification::Matching => {
-                        return Err(CrabError::Internal(
-                            "prepared verifier remained incomplete at EOF".to_owned(),
-                        ));
-                    }
-                }
-            }
-
-            let file_hash = *hasher.finalize().as_bytes();
-            if replay.is_none() {
-                if prepared.file_hash() != MerkleHash::from(file_hash)
-                    || prepared.file_size() != file_size
-                {
-                    return Err(CrabError::StagingCorrupt(
-                        "prepared recipe chunks matched but its file identity did not".to_owned(),
-                    ));
-                }
-                self.preserve_committed_recipe_before_publication(pathname, &file_hash)?;
-                self.chunk_stager
-                    .publish_recipe(Path::new(pathname), &prepared)?;
-                let pointer_bytes = self.build_pointer(file_hash, file_size, None).serialize();
-                tracing::info!(
-                    path = %pathname,
-                    size = file_size,
-                    verification_duration_ms = verify_start.elapsed().as_millis() as u64,
-                    "clean filter: promoted verified prepared recipe without CDC or spool"
-                );
-                return Ok(pointer_bytes);
-            }
-
-            let changed = replay.as_mut().ok_or_else(|| {
-                CrabError::Internal("prepared changed-content replay disappeared".to_owned())
-            })?;
-            changed.finish(&mut self.chunk_stager, pathname, self.chunk_buffer_cap)?;
-
-            if let Some(pointer_bytes) = self.try_index_pointer_match(pathname, &file_hash) {
-                discard_provisional_stager(&mut changed.provisional, &mut self.chunk_stager)?;
-                return Ok(pointer_bytes);
-            }
-            if let Some(pointer_bytes) = self.try_fast_path(file_size, &file_hash)? {
-                discard_provisional_stager(&mut changed.provisional, &mut self.chunk_stager)?;
-                return Ok(pointer_bytes);
-            }
-
-            let recipe_recorder = std::mem::replace(
-                &mut changed.recipe_recorder,
-                RecipeRecorder::new(ChunkingPolicyId::XetGearV1_64KiB),
-            );
-            let recipe = recipe_recorder.seal(MerkleHash::from(file_hash), file_size)?;
-            if self.chunk_stager.has_recipe(&recipe)? {
-                discard_provisional_stager(&mut changed.provisional, &mut self.chunk_stager)?;
-            } else {
-                if changed.provisional.is_none() {
-                    let mut provisional = ProvisionalChunkStager::new(pathname);
-                    changed
-                        .buffered
-                        .spill_into(&mut provisional, &mut self.chunk_stager)?;
-                    changed.provisional = Some(provisional);
-                }
-                changed
-                    .provisional
-                    .as_mut()
-                    .ok_or_else(|| CrabError::Internal("missing clean staging attempt".to_owned()))?
-                    .checkpoint(&mut self.chunk_stager, &file_hash, file_size)?;
-            }
-            self.preserve_committed_recipe_before_publication(pathname, &file_hash)?;
-            self.chunk_stager
-                .publish_recipe(Path::new(pathname), &recipe)?;
-            let pointer_bytes = self.build_pointer(file_hash, file_size, None).serialize();
-            tracing::info!(
-                path = %pathname,
-                size = file_size,
-                verification_duration_ms = verify_start.elapsed().as_millis() as u64,
-                "clean filter: prepared recipe changed; reconstructed verified prefix and replayed through CDC"
-            );
-            Ok(pointer_bytes)
-        })();
-        if result.is_err()
-            && let Some(changed) = replay.as_mut()
-            && let Err(error) =
-                discard_provisional_stager(&mut changed.provisional, &mut self.chunk_stager)
-        {
-            tracing::warn!(
-                path = %pathname,
-                error = %error,
-                "clean filter: failed to discard prepared-replay staging after error"
-            );
+            return Err(CrabError::StagingLocked { holder_pid: None });
         }
-        result
+        let backend = self
+            .staging
+            .as_ref()
+            .ok_or_else(|| CrabError::StagingLocked { holder_pid: None })?;
+        let staging = Arc::clone(&backend.staging);
+        let handle = backend.handle.clone();
+        let prepared = staging.local_recipe_for_path(Path::new(pathname))?;
+        let progress = crab_staging::ingest::StreamStageProgress {
+            xorb_builder: Some(self.xorb_builder.clone()),
+            ..Default::default()
+        };
+        let cancel = self.ctx.cancel_token();
+        let mut session = handle.block_on(crab_staging::ingest::IngestSession::begin(
+            &staging,
+            Path::new(pathname),
+            progress,
+            &cancel,
+            prepared,
+        ))?;
+        let input = (|| -> Result<()> {
+            while let Some(bytes) = read()? {
+                handle.block_on(session.feed(bytes))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = input {
+            handle.block_on(session.abort())?;
+            return Err(error);
+        }
+        let completed = handle.block_on(session.finish_input())?;
+        let hash = completed.file_hash();
+        let size = completed.size();
+        let fast_path = self
+            .try_index_pointer_match(pathname, &hash)
+            .map(|pointer| Ok(Some(pointer)))
+            .unwrap_or_else(|| self.try_fast_path(size, &hash));
+        match fast_path {
+            Ok(Some(pointer)) => {
+                handle.block_on(completed.abort())?;
+                return Ok(pointer);
+            }
+            Err(error) => {
+                handle.block_on(completed.abort())?;
+                return Err(error);
+            }
+            Ok(None) => {}
+        }
+        if let Err(error) = self.preserve_committed_recipe_before_publication(pathname, &hash) {
+            handle.block_on(completed.abort())?;
+            return Err(error);
+        }
+        let staged = handle.block_on(completed.seal())?;
+        // Git provides no later index-commit acknowledgment. Retain before
+        // pointer emission, including when the output pipe subsequently fails.
+        staging.mark_batch_published(&staged.batch_id)?;
+        tracing::debug!(
+            path = pathname,
+            size,
+            chunks = staged.chunks,
+            chunking_ms = staged.timings.chunking_duration_ms,
+            compression_ms = staged.timings.compression_duration_ms,
+            payload_write_ms = staged.timings.payload_write_duration_ms,
+            "clean content durably staged"
+        );
+        Ok(self.build_pointer(hash, size, None).serialize())
     }
 
     /// Construct a [`Pointer`], attaching a `shard-hint` when one is
@@ -2768,356 +1500,6 @@ mod tests {
         );
     }
 
-    #[derive(Default)]
-    struct CountingChunkStageStats {
-        calls: std::sync::Mutex<Vec<(usize, u64)>>,
-        flushes: std::sync::Mutex<u32>,
-    }
-
-    struct CountingChunkStager {
-        stats: Arc<CountingChunkStageStats>,
-    }
-
-    impl ChunkStager for CountingChunkStager {
-        fn stage_chunks(
-            &self,
-            chunks: &[([u8; 32], Bytes)],
-            _file_hash: &[u8; 32],
-            _file_size: u64,
-            chunk_index_offset: u64,
-        ) -> Result<()> {
-            self.stats
-                .calls
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((chunks.len(), chunk_index_offset));
-            Ok(())
-        }
-
-        fn flush_pending(&self) -> Result<()> {
-            let mut flushes = self
-                .stats
-                .flushes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *flushes += 1;
-            Ok(())
-        }
-    }
-
-    struct PreparedPromotionChunkStager {
-        recipe: FileRecipe,
-        prepared_chunks: Vec<Bytes>,
-        stage_calls: Arc<AtomicUsize>,
-        payload_reads: Arc<AtomicUsize>,
-        publications: Arc<AtomicUsize>,
-    }
-
-    impl ChunkStager for PreparedPromotionChunkStager {
-        fn stage_chunks(
-            &self,
-            _chunks: &[([u8; 32], Bytes)],
-            _file_hash: &[u8; 32],
-            _file_size: u64,
-            _chunk_index_offset: u64,
-        ) -> Result<()> {
-            self.stage_calls.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-
-        fn publish_recipe(&self, _path: &Path, _recipe: &FileRecipe) -> Result<()> {
-            self.publications.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-
-        fn unpublished_local_recipe_for_path(&self, _path: &Path) -> Result<Option<FileRecipe>> {
-            Ok(Some(self.recipe.clone()))
-        }
-
-        fn prepared_recipe_page(
-            &self,
-            _recipe: &FileRecipe,
-            start_occurrence: u64,
-        ) -> Result<RecipePage> {
-            use crab_diff::chunk_sequence::{ChunkOrigin, ChunkSpan};
-
-            let start = usize::try_from(start_occurrence).map_err(|_| {
-                CrabError::StagingCorrupt("prepared test recipe occurrence overflow".to_owned())
-            })?;
-            let start_offset =
-                self.prepared_chunks
-                    .iter()
-                    .take(start)
-                    .try_fold(0u64, |offset, payload| {
-                        offset.checked_add(payload.len() as u64).ok_or_else(|| {
-                            CrabError::StagingCorrupt(
-                                "prepared test recipe offset overflow".to_owned(),
-                            )
-                        })
-                    })?;
-            let mut offset = start_offset;
-            let chunks = self
-                .prepared_chunks
-                .iter()
-                .skip(start)
-                .take(crab_staging::recipe::RECIPE_PAGE_ENTRIES)
-                .map(|payload| {
-                    let len = payload.len() as u64;
-                    let chunk = ChunkSpan {
-                        chunk_hash: crab_xet::hash::compute_data_hash(payload),
-                        offset,
-                        len,
-                        origin: ChunkOrigin {
-                            xorb_hash: None,
-                            xorb_chunk_index: None,
-                        },
-                    };
-                    offset = offset.saturating_add(len);
-                    chunk
-                })
-                .collect();
-            Ok(RecipePage {
-                start_occurrence,
-                start_offset,
-                chunks,
-            })
-        }
-
-        fn prepared_chunk_payloads(&self, chunks: &[RecipeChunk]) -> Result<Vec<Bytes>> {
-            self.payload_reads
-                .fetch_add(chunks.len(), Ordering::Relaxed);
-            chunks
-                .iter()
-                .map(|term| {
-                    self.prepared_chunks
-                        .iter()
-                        .find(|payload| {
-                            payload.len() as u64 == term.len
-                                && crab_xet::hash::compute_data_hash(payload) == term.chunk_hash
-                        })
-                        .cloned()
-                        .ok_or_else(|| {
-                            CrabError::StagingCorrupt(format!(
-                                "prepared test payload {} is unavailable",
-                                term.chunk_hash.hex()
-                            ))
-                        })
-                })
-                .collect()
-        }
-    }
-
-    struct FailAfterFirstChunkStager {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl ChunkStager for FailAfterFirstChunkStager {
-        fn stage_chunks(
-            &self,
-            _chunks: &[([u8; 32], Bytes)],
-            _file_hash: &[u8; 32],
-            _file_size: u64,
-            _chunk_index_offset: u64,
-        ) -> Result<()> {
-            let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
-            if call > 1 {
-                return Err(CrabError::Internal("injected staging failure".into()));
-            }
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct RecordingChunkStagerStats {
-        staged_hashes: std::sync::Mutex<Vec<[u8; 32]>>,
-        adopted: std::sync::Mutex<Vec<([u8; 32], [u8; 32], u64)>>,
-        discarded: std::sync::Mutex<Vec<[u8; 32]>>,
-        flushes: AtomicUsize,
-    }
-
-    struct RecordingChunkStager {
-        stats: Arc<RecordingChunkStagerStats>,
-    }
-
-    impl ChunkStager for RecordingChunkStager {
-        fn stage_chunks(
-            &self,
-            _chunks: &[([u8; 32], Bytes)],
-            file_hash: &[u8; 32],
-            _file_size: u64,
-            _chunk_index_offset: u64,
-        ) -> Result<()> {
-            self.stats
-                .staged_hashes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(*file_hash);
-            Ok(())
-        }
-
-        fn adopt_staged_file(
-            &self,
-            source_file_hash: &[u8; 32],
-            target_file_hash: &[u8; 32],
-            file_size: u64,
-        ) -> Result<()> {
-            self.stats
-                .adopted
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((*source_file_hash, *target_file_hash, file_size));
-            Ok(())
-        }
-
-        fn discard_staged_file(&self, file_hash: &[u8; 32]) -> Result<()> {
-            self.stats
-                .discarded
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(*file_hash);
-            Ok(())
-        }
-
-        fn flush_pending(&self) -> Result<()> {
-            self.stats.flushes.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-    }
-
-    struct FailSecondRecordingChunkStager {
-        stats: Arc<RecordingChunkStagerStats>,
-        calls: AtomicUsize,
-    }
-
-    impl ChunkStager for FailSecondRecordingChunkStager {
-        fn stage_chunks(
-            &self,
-            _chunks: &[([u8; 32], Bytes)],
-            file_hash: &[u8; 32],
-            _file_size: u64,
-            _chunk_index_offset: u64,
-        ) -> Result<()> {
-            let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
-            if call > 1 {
-                return Err(CrabError::Internal(
-                    "injected provisional staging failure".into(),
-                ));
-            }
-            self.stats
-                .staged_hashes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(*file_hash);
-            Ok(())
-        }
-
-        fn discard_staged_file(&self, file_hash: &[u8; 32]) -> Result<()> {
-            self.stats
-                .discarded
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(*file_hash);
-            Ok(())
-        }
-    }
-
-    struct FailDiscardRecordingChunkStager {
-        stats: Arc<RecordingChunkStagerStats>,
-    }
-
-    impl ChunkStager for FailDiscardRecordingChunkStager {
-        fn stage_chunks(
-            &self,
-            _chunks: &[([u8; 32], Bytes)],
-            file_hash: &[u8; 32],
-            _file_size: u64,
-            _chunk_index_offset: u64,
-        ) -> Result<()> {
-            self.stats
-                .staged_hashes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(*file_hash);
-            Ok(())
-        }
-
-        fn discard_staged_file(&self, file_hash: &[u8; 32]) -> Result<()> {
-            self.stats
-                .discarded
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(*file_hash);
-            Err(CrabError::Internal(
-                "injected provisional discard failure".into(),
-            ))
-        }
-    }
-
-    #[test]
-    fn batched_checkpoint_flushes_once_after_all_batches() {
-        let mut batches = BatchedChunkStager {
-            batches: vec![
-                vec![([1; 32], Bytes::from_static(b"one"))],
-                vec![
-                    ([2; 32], Bytes::from_static(b"two")),
-                    ([3; 32], Bytes::from_static(b"three")),
-                ],
-            ],
-            current_batch: Vec::new(),
-            total_chunks: 3,
-            total_bytes: 11,
-        };
-        let stats = Arc::new(CountingChunkStageStats::default());
-        let mut stager: Box<dyn ChunkStager> = Box::new(CountingChunkStager {
-            stats: Arc::clone(&stats),
-        });
-
-        batches.checkpoint(&mut stager, &[9; 32], 11).unwrap();
-
-        assert_eq!(
-            *stats
-                .flushes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            1
-        );
-        assert_eq!(
-            *stats
-                .calls
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            vec![(1, 0), (2, 1)]
-        );
-    }
-
-    #[test]
-    fn batched_stage_error_keeps_stager_in_place() {
-        let batches = vec![
-            vec![([1; 32], Bytes::from_static(b"one"))],
-            vec![([2; 32], Bytes::from_static(b"two"))],
-        ];
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut stager: Box<dyn ChunkStager> = Box::new(FailAfterFirstChunkStager {
-            calls: Arc::clone(&calls),
-        });
-
-        let err = BatchedChunkStager::stage_batches(batches, &mut stager, &[9; 32], 11)
-            .expect_err("second batch should fail");
-        assert!(
-            err.to_string().contains("injected staging failure"),
-            "unexpected error: {err}"
-        );
-
-        let err = stager
-            .stage_chunks(&[], &[9; 32], 11, 0)
-            .expect_err("same stager should still fail, not accept as no-op");
-        assert!(
-            err.to_string().contains("injected staging failure"),
-            "expected failing stager, got: {err}"
-        );
-        assert_eq!(calls.load(Ordering::Relaxed), 3);
-    }
-
     // --- Mock file-index checker ---
 
     struct MockFileIndexChecker {
@@ -3331,10 +1713,9 @@ mod tests {
         let mut session = CleanSession::with_deps(
             ctx.clone(),
             Box::new(checker),
-            Box::new(NoopChunkStager),
+            None,
             &[file_hash],
-            64 * 1024 * 1024, // 64 MiB threshold
-            DEFAULT_CHUNK_BUFFER_CAP,
+            64 * 1024 * 1024,
         );
 
         let pointer_bytes = session.clean_file("big.bin", content.clone()).unwrap();
@@ -3361,10 +1742,9 @@ mod tests {
         let mut session = CleanSession::with_deps(
             ctx.clone(),
             Box::new(checker),
-            Box::new(NoopChunkStager),
+            None,
             &[file_hash],
             64 * 1024 * 1024,
-            DEFAULT_CHUNK_BUFFER_CAP,
         );
 
         let _pointer_bytes = session.clean_file("big2.bin", content).unwrap();
@@ -3390,10 +1770,9 @@ mod tests {
         let mut session = CleanSession::with_deps(
             ctx.clone(),
             Box::new(checker),
-            Box::new(NoopChunkStager),
+            None,
             &[file_hash],
             64 * 1024 * 1024,
-            DEFAULT_CHUNK_BUFFER_CAP,
         );
 
         let _pointer_bytes = session.clean_file("small.bin", content.to_vec()).unwrap();
@@ -3444,7 +1823,7 @@ mod tests {
         // Regression guard for the silent-pointer-without-chunks bug:
         // when staging is unavailable, the clean path must return
         // `StagingLocked` instead of producing a valid-looking pointer
-        // backed by `NoopChunkStager`. Emitting such a pointer advances
+        // backed by no staging owner. Emitting such a pointer advances
         // git's index past content that will never reach object storage,
         // which breaks hydration on every other clone of the repo.
         let content = b"large file content we would have chunked";
@@ -3852,14 +2231,8 @@ mod tests {
         };
 
         let ctx = AppContext::default();
-        let mut session = CleanSession::with_deps(
-            ctx.clone(),
-            Box::new(checker),
-            Box::new(NoopChunkStager),
-            &[file_hash],
-            0,
-            DEFAULT_CHUNK_BUFFER_CAP,
-        );
+        let mut session =
+            CleanSession::with_deps(ctx.clone(), Box::new(checker), None, &[file_hash], 0);
 
         session.clean_file("big.bin", content.clone()).unwrap();
         let pointer_bytes = session.clean_file("copy.bin", content).unwrap();
@@ -4258,391 +2631,6 @@ mod tests {
     }
 
     #[test]
-    fn clean_stream_spills_buffered_chunks_to_provisional_staging() {
-        use crate::git::filter_process::PktLineReader;
-
-        let content = b"streaming spill adoption".repeat(1024);
-        let expected_hash: [u8; 32] = *blake3::hash(&content).as_bytes();
-        let stats = Arc::new(RecordingChunkStagerStats::default());
-        let stager: Box<dyn ChunkStager> = Box::new(RecordingChunkStager {
-            stats: Arc::clone(&stats),
-        });
-        let mut session = CleanSession::with_deps(
-            AppContext::default(),
-            Box::new(NoopFileIndexChecker),
-            stager,
-            &[],
-            u64::MAX,
-            1,
-        );
-        let framed = frame_as_pktlines(&content);
-        let mut reader = PktLineReader::from_slice(&framed);
-
-        let pointer_bytes = session.clean_stream("large.bin", &mut reader).unwrap();
-
-        let pointer = Pointer::parse(&pointer_bytes).unwrap();
-        assert_eq!(pointer.file_hash, expected_hash);
-        assert_eq!(pointer.size, content.len() as u64);
-
-        let adopted = stats
-            .adopted
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(adopted.len(), 1);
-        assert_eq!(adopted[0].1, expected_hash);
-        assert_eq!(adopted[0].2, content.len() as u64);
-        assert_ne!(adopted[0].0, expected_hash);
-
-        let staged_hashes = stats
-            .staged_hashes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(!staged_hashes.is_empty());
-        assert!(staged_hashes.iter().all(|hash| *hash == adopted[0].0));
-        assert_eq!(stats.flushes.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn clean_stream_exact_prepared_promotion_skips_cdc_staging() {
-        use crate::git::filter_process::PktLineReader;
-
-        let content = b"prepared promotion payload".repeat(512 * 1024);
-        let file_hash = MerkleHash::from(*blake3::hash(&content).as_bytes());
-        let chunk_hash = crab_xet::hash::compute_data_hash(&content);
-        let recipe = FileRecipe::from_staged_chunks(
-            ChunkingPolicyId::XetGearV1_64KiB,
-            file_hash,
-            content.len() as u64,
-            &[(chunk_hash, content.len() as u64)],
-        )
-        .unwrap();
-        let stage_calls = Arc::new(AtomicUsize::new(0));
-        let payload_reads = Arc::new(AtomicUsize::new(0));
-        let publications = Arc::new(AtomicUsize::new(0));
-        let stager: Box<dyn ChunkStager> = Box::new(PreparedPromotionChunkStager {
-            recipe,
-            prepared_chunks: vec![Bytes::from(content.clone())],
-            stage_calls: Arc::clone(&stage_calls),
-            payload_reads: Arc::clone(&payload_reads),
-            publications: Arc::clone(&publications),
-        });
-        let mut session = CleanSession::with_deps(
-            AppContext::default(),
-            Box::new(NoopFileIndexChecker),
-            stager,
-            &[],
-            u64::MAX,
-            1,
-        );
-        let framed = frame_as_pktlines(&content);
-        let mut reader = PktLineReader::from_slice(&framed);
-
-        let pointer = session.clean_stream("model.bin", &mut reader).unwrap();
-
-        assert_eq!(
-            Pointer::parse(&pointer).unwrap().file_hash,
-            <[u8; 32]>::from(file_hash)
-        );
-        assert_eq!(stage_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(payload_reads.load(Ordering::Relaxed), 0);
-        assert_eq!(publications.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn clean_stream_changed_prepared_content_replays_into_staging() {
-        use crate::git::filter_process::PktLineReader;
-
-        let prepared_content = b"prepared payload".repeat(1024);
-        let incoming = b"changed payload".repeat(1024 * 128);
-        let prepared_hash = MerkleHash::from(*blake3::hash(&prepared_content).as_bytes());
-        let prepared_chunk_hash = crab_xet::hash::compute_data_hash(&prepared_content);
-        let recipe = FileRecipe::from_staged_chunks(
-            ChunkingPolicyId::XetGearV1_64KiB,
-            prepared_hash,
-            prepared_content.len() as u64,
-            &[(prepared_chunk_hash, prepared_content.len() as u64)],
-        )
-        .unwrap();
-        let stage_calls = Arc::new(AtomicUsize::new(0));
-        let payload_reads = Arc::new(AtomicUsize::new(0));
-        let publications = Arc::new(AtomicUsize::new(0));
-        let stager: Box<dyn ChunkStager> = Box::new(PreparedPromotionChunkStager {
-            recipe,
-            prepared_chunks: vec![Bytes::from(prepared_content)],
-            stage_calls: Arc::clone(&stage_calls),
-            payload_reads: Arc::clone(&payload_reads),
-            publications: Arc::clone(&publications),
-        });
-        let mut session = CleanSession::with_deps(
-            AppContext::default(),
-            Box::new(NoopFileIndexChecker),
-            stager,
-            &[],
-            u64::MAX,
-            1,
-        );
-        let framed = frame_as_pktlines(&incoming);
-        let mut reader = PktLineReader::from_slice(&framed);
-
-        let pointer = session.clean_stream("model.bin", &mut reader).unwrap();
-
-        assert_eq!(
-            Pointer::parse(&pointer).unwrap().file_hash,
-            *blake3::hash(&incoming).as_bytes()
-        );
-        assert!(stage_calls.load(Ordering::Relaxed) > 0);
-        assert_eq!(payload_reads.load(Ordering::Relaxed), 0);
-        assert_eq!(publications.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn clean_stream_changed_prepared_content_reconstructs_verified_prefix() {
-        use crate::git::filter_process::PktLineReader;
-        use crab_xet::chunker::GearChunker;
-
-        let mut state = 0x0123_4567_89ab_cdefu64;
-        let prepared_content = (0..8 * 1024 * 1024)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                state as u8
-            })
-            .collect::<Vec<_>>();
-        let mut chunker = GearChunker::new();
-        let mut chunks = chunker.feed(&prepared_content);
-        if let Some(chunk) = chunker.finalize() {
-            chunks.push(chunk);
-        }
-        assert!(chunks.len() > 4);
-
-        let prepared_chunks = chunks
-            .iter()
-            .map(|chunk| chunk.data.clone())
-            .collect::<Vec<_>>();
-        let recipe_terms = chunks
-            .iter()
-            .map(|chunk| (chunk.hash, chunk.data.len() as u64))
-            .collect::<Vec<_>>();
-        let prepared_hash = MerkleHash::from(*blake3::hash(&prepared_content).as_bytes());
-        let recipe = FileRecipe::from_staged_chunks(
-            ChunkingPolicyId::XetGearV1_64KiB,
-            prepared_hash,
-            prepared_content.len() as u64,
-            &recipe_terms,
-        )
-        .unwrap();
-        let verified_prefix_size = chunks
-            .iter()
-            .take(3)
-            .map(|chunk| chunk.data.len())
-            .sum::<usize>();
-        let mut incoming = prepared_content;
-        incoming[verified_prefix_size + 17] ^= 0xff;
-
-        let stage_calls = Arc::new(AtomicUsize::new(0));
-        let payload_reads = Arc::new(AtomicUsize::new(0));
-        let publications = Arc::new(AtomicUsize::new(0));
-        let stager: Box<dyn ChunkStager> = Box::new(PreparedPromotionChunkStager {
-            recipe,
-            prepared_chunks,
-            stage_calls: Arc::clone(&stage_calls),
-            payload_reads: Arc::clone(&payload_reads),
-            publications: Arc::clone(&publications),
-        });
-        let mut session = CleanSession::with_deps(
-            AppContext::default(),
-            Box::new(NoopFileIndexChecker),
-            stager,
-            &[],
-            u64::MAX,
-            1,
-        );
-        let framed = frame_as_pktlines(&incoming);
-        let mut reader = PktLineReader::from_slice(&framed);
-
-        let pointer = session.clean_stream("model.bin", &mut reader).unwrap();
-
-        assert_eq!(
-            Pointer::parse(&pointer).unwrap().file_hash,
-            *blake3::hash(&incoming).as_bytes()
-        );
-        assert!(stage_calls.load(Ordering::Relaxed) > 0);
-        assert!(payload_reads.load(Ordering::Relaxed) >= 3);
-        assert_eq!(publications.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn clean_stream_discards_provisional_rows_when_fast_path_wins() {
-        use crate::git::filter_process::PktLineReader;
-
-        let content = b"streaming fast path discard".repeat(1024);
-        let file_hash: [u8; 32] = *blake3::hash(&content).as_bytes();
-        let stats = Arc::new(RecordingChunkStagerStats::default());
-        let stager: Box<dyn ChunkStager> = Box::new(RecordingChunkStager {
-            stats: Arc::clone(&stats),
-        });
-        let checker = MockFileIndexChecker {
-            known_hashes: HashSet::from([file_hash]),
-            shard_hint: None,
-        };
-        let mut session = CleanSession::with_deps(
-            AppContext::default(),
-            Box::new(checker),
-            stager,
-            &[file_hash],
-            0,
-            1,
-        );
-        let framed = encode_pktline_then_flush(&content);
-        let mut reader = PktLineReader::from_slice(&framed);
-
-        let pointer_bytes = session.clean_stream("known.bin", &mut reader).unwrap();
-
-        let pointer = Pointer::parse(&pointer_bytes).unwrap();
-        assert_eq!(pointer.file_hash, file_hash);
-
-        let adopted = stats
-            .adopted
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(adopted.is_empty());
-
-        let discarded = stats
-            .discarded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(discarded.len(), 1);
-
-        let staged_hashes = stats
-            .staged_hashes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(!staged_hashes.is_empty());
-        assert!(staged_hashes.iter().all(|hash| *hash == discarded[0]));
-        assert_eq!(stats.flushes.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn clean_stream_fails_fast_path_when_provisional_discard_fails() {
-        use crate::git::filter_process::PktLineReader;
-
-        let content = b"streaming discard failure".repeat(1024);
-        let file_hash: [u8; 32] = *blake3::hash(&content).as_bytes();
-        let stats = Arc::new(RecordingChunkStagerStats::default());
-        let stager: Box<dyn ChunkStager> = Box::new(FailDiscardRecordingChunkStager {
-            stats: Arc::clone(&stats),
-        });
-        let checker = MockFileIndexChecker {
-            known_hashes: HashSet::from([file_hash]),
-            shard_hint: None,
-        };
-        let mut session = CleanSession::with_deps(
-            AppContext::default(),
-            Box::new(checker),
-            stager,
-            &[file_hash],
-            0,
-            1,
-        );
-        let framed = frame_as_pktlines(&content);
-        let mut reader = PktLineReader::from_slice(&framed);
-
-        let err = session
-            .clean_stream("known-discard-fails.bin", &mut reader)
-            .expect_err("fast path must not publish a pointer when provisional discard fails");
-        assert!(
-            err.to_string()
-                .contains("injected provisional discard failure"),
-            "unexpected error: {err}"
-        );
-
-        let staged_hashes = stats
-            .staged_hashes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(
-            !staged_hashes.is_empty(),
-            "test should stage provisional rows before the fast path wins"
-        );
-
-        let discarded = stats
-            .discarded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(discarded.len(), 1);
-        assert!(staged_hashes.iter().all(|hash| *hash == discarded[0]));
-        assert!(
-            stats
-                .adopted
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn clean_stream_discards_provisional_rows_on_stage_error() {
-        use crate::git::filter_process::PktLineReader;
-
-        let mut content = Vec::with_capacity(9 * 1024 * 1024);
-        for i in 0..content.capacity() {
-            content.push((u64::try_from(i).unwrap().wrapping_mul(2_654_435_761) >> 24) as u8);
-        }
-
-        let stats = Arc::new(RecordingChunkStagerStats::default());
-        let stager: Box<dyn ChunkStager> = Box::new(FailSecondRecordingChunkStager {
-            stats: Arc::clone(&stats),
-            calls: AtomicUsize::new(0),
-        });
-        let mut session = CleanSession::with_deps(
-            AppContext::default(),
-            Box::new(NoopFileIndexChecker),
-            stager,
-            &[],
-            u64::MAX,
-            1,
-        );
-        let framed = frame_as_pktlines(&content);
-        let mut reader = PktLineReader::from_slice(&framed);
-
-        let err = session
-            .clean_stream("large-fails.bin", &mut reader)
-            .expect_err("second provisional staging batch should fail");
-        assert!(
-            err.to_string()
-                .contains("injected provisional staging failure"),
-            "unexpected error: {err}"
-        );
-
-        let staged_hashes = stats
-            .staged_hashes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(
-            !staged_hashes.is_empty(),
-            "test should stage at least one provisional batch before failing"
-        );
-        let discarded = stats
-            .discarded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(
-            discarded.len(),
-            1,
-            "failed streaming clean should discard its provisional rows"
-        );
-        assert!(staged_hashes.iter().all(|hash| *hash == discarded[0]));
-        assert!(
-            stats
-                .adopted
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_empty()
-        );
-    }
-
-    #[test]
     fn clean_fast_path_discards_real_provisional_staging_bytes() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -4665,17 +2653,17 @@ mod tests {
             known_hashes: HashSet::from([file_hash]),
             shard_hint: None,
         };
-        let stager: Box<dyn ChunkStager> = Box::new(StagingChunkStager::new(
-            Arc::clone(&staging),
-            rt.handle().clone(),
-        ));
+        let stager = Some(CleanStaging {
+            staging: Arc::clone(&staging),
+            handle: rt.handle().clone(),
+            _temporary: None,
+        });
         let mut session = CleanSession::with_deps(
             AppContext::default(),
             Box::new(checker),
             stager,
             &[file_hash],
             0,
-            1,
         );
 
         let pointer_bytes = session.clean_file("known-large.bin", content).unwrap();
@@ -4701,17 +2689,17 @@ mod tests {
         );
         let content = b"shared clean recipe payload".repeat(64 * 1024);
         let expected_hash = *blake3::hash(&content).as_bytes();
-        let stager: Box<dyn ChunkStager> = Box::new(StagingChunkStager::new(
-            Arc::clone(&staging),
-            rt.handle().clone(),
-        ));
+        let stager = Some(CleanStaging {
+            staging: Arc::clone(&staging),
+            handle: rt.handle().clone(),
+            _temporary: None,
+        });
         let mut session = CleanSession::with_deps(
             AppContext::default(),
             Box::new(NoopFileIndexChecker),
             stager,
             &[],
             u64::MAX,
-            DEFAULT_CHUNK_BUFFER_CAP,
         );
 
         let first = session.clean_file("first.bin", content.clone()).unwrap();
@@ -4752,12 +2740,12 @@ mod tests {
                 &path,
                 tmp.path(),
                 &staging,
-                crab_staging::stream::StreamStageProgress {
-                    xorb_builder: Some(crab_staging::stream::StreamStageXorbBuilder::new(
+                crab_staging::ingest::StreamStageProgress {
+                    xorb_builder: Some(crab_staging::ingest::StreamStageXorbBuilder::new(
                         1,
                         crab_xet::xorb::builder::XorbBuilder::new,
                     )),
-                    ..crab_staging::stream::StreamStageProgress::default()
+                    ..crab_staging::ingest::StreamStageProgress::default()
                 },
                 &tokio_util::sync::CancellationToken::new(),
             ))
@@ -4770,17 +2758,17 @@ mod tests {
             Some(prepared.recipe.clone())
         );
 
-        let stager: Box<dyn ChunkStager> = Box::new(StagingChunkStager::new(
-            Arc::clone(&staging),
-            rt.handle().clone(),
-        ));
+        let stager = Some(CleanStaging {
+            staging: Arc::clone(&staging),
+            handle: rt.handle().clone(),
+            _temporary: None,
+        });
         let mut session = CleanSession::with_deps(
             AppContext::default(),
             Box::new(NoopFileIndexChecker),
             stager,
             &[],
             u64::MAX,
-            1,
         );
         let framed = frame_as_pktlines(&content);
         let mut reader = PktLineReader::from_slice(&framed);

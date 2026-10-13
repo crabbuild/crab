@@ -189,8 +189,8 @@ async fn direct_push_publishes_staged_pointer_dependencies_first() {
         &path,
         checkout.path(),
         &staging,
-        crab_staging::stream::StreamStageProgress {
-            xorb_builder: Some(crab_staging::stream::StreamStageXorbBuilder::new(
+        crab_staging::ingest::StreamStageProgress {
+            xorb_builder: Some(crab_staging::ingest::StreamStageXorbBuilder::new(
                 1,
                 crab_xet::xorb::builder::XorbBuilder::new,
             )),

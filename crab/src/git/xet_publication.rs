@@ -1236,9 +1236,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn prepared_uploads_respect_requested_concurrency() {
-        use crab_staging::stream::{
-            StreamStageProgress, StreamStageXorbBuilder, stage_file_streaming,
-        };
+        use crab_staging::ingest::{StreamStageProgress, StreamStageXorbBuilder};
+        use crab_staging::stream::stage_file_streaming;
         use object_store::throttle::{ThrottleConfig, ThrottledStore};
         use std::sync::atomic::Ordering::SeqCst;
 

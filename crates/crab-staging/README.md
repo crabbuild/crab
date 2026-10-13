@@ -1,8 +1,8 @@
 # crab-staging
 
 `crab-staging` is Crab's durable local write buffer for chunks produced while
-cleaning files and preparing a push. It stores payloads in append-only segment
-files and records their locations in SQLite so deduplication, recovery, and
+cleaning files and preparing a push. It retains prepared xorbs or append-only segment
+payloads and records their locations in SQLite so deduplication, recovery, and
 push planning can share one local source of truth.
 
 ## Why it exists
@@ -19,15 +19,16 @@ objects, and retire rows only after publication succeeds.
 ## Architecture
 
 ```text
-clean/filter process
-        │ pre-register file + append chunk batch
+native descriptor reads / Git content packets
+        │ bounded byte blocks
         ▼
-segments/*.seg  ── payload bytes, CRC/BLAKE3 checked
-index.db        ── file/chunk locators, pending and durable boundaries
-lockfile        ── process-wide advisory flock
-        │ flush, verify, plan, retire
+IngestSession   ── hash, CDC or prepared verification, authority claims
+index.db        ── recording terms, preparation ownership, recipe/path leases
+push-plans/     ── durable prepared xorb bodies for missing chunks
+segments/       ── existing segment consumers and reusable segment authority
+        │ source validation, payload flush, recipe seal, index checkpoint
         ▼
-push upload / recipe publication
+caller publication / push upload
 ```
 
 `StagingArea::open` acquires an exclusive process lock, validates the canonical
@@ -36,15 +37,28 @@ schema, runs crash recovery, and opens the current segment.
 In-process index and writer locks are scoped so no synchronous mutex is held
 across an async suspension.
 
-`stage_chunks_batch` is the hot path: it deduplicates, appends, inserts
-locators atomically, and performs the configured flush check. `flush_pending`
-fsyncs the segment and records the durable boundary. Reads verify both the
-record checksum and the requested BLAKE3 hash. Recipes, push plans, streaming
-helpers, compaction, verification, and retirement build on these primitives.
+`ingest::IngestSession` is the shared mutation path for native add and Git
+clean. `stream` supplies descriptor-safe file reads and validation. Git owns
+packet framing, LFS/pointer dispatch, history preservation and pointer emission.
+The session batches chunk work, retains existing authority, prepares only
+missing payloads, and records every ordered occurrence. Exact prepared input
+avoids CDC and payload writes. Changed input retains verified prefix terms and
+replays only the last verified chunk to preserve EOF-tail boundary behavior.
+
+`finish_input` completes input and workers. After source validation, `seal`
+flushes payloads and installs a complete unpublished recipe lease. Callers own
+publication. Clean retains published ownership before replying because Git
+provides no later index-commit acknowledgment. Explicit abort and writable
+reopen recovery retire unfinished operations.
+
+`stage_chunks_batch` remains available to import, LFS, adopt and VFS segment
+consumers. Reads verify record checksums and BLAKE3. Compaction moves canonical
+payload inventory, including chunks retained solely by recipes or recordings.
 
 Ownership retirement removes each unowned file batch in one SQLite transaction,
 including chunk rows, segment live counts and unreferenced payload inventory.
-Prepared bodies are unlinked only after that transaction commits. A database
+Prepared bodies are unlinked only after the transaction commits and its WAL
+checkpoint completes. The index lock remains held through unlink. A database
 failure rolls back the batch; an unlink failure leaves an orphan for recovery,
 not a missing live payload. This shares one cleanup path across publication,
 rollback and push, avoiding repeated per-file commits and inventory scans.
@@ -63,8 +77,9 @@ Recovery treats missing files differently from failed filesystem operations:
 | Current segment metadata lookup fails for another reason | Return the I/O cause before changing that segment's rows or boundary. |
 | Orphan `current.seg.tmp` entry | Remove the entry; an already absent entry is harmless. |
 
-`flush_pending` is the durability barrier before publication. `close` performs
-that flush explicitly; dropping staging only releases handles. Recovery is not
+`flush_pending` syncs segment bytes; `flush_index` completes a FULL WAL
+checkpoint for durable ownership. `seal` and `close` perform the required
+barriers explicitly; dropping staging only releases handles. Recovery is not
 a substitute for flushing a successful operation.
 
 ## Multipart cleanup
@@ -106,8 +121,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Production cleaners normally use `stream` or `recipe` helpers and submit
-multiple batches with consecutive chunk offsets. Flush all staged bytes before
+Production cleaners use `ingest`; file-based callers use the `stream` adapter. Flush all staged bytes before
 publishing a push bundle; otherwise a remote upload can reference data that is
 not yet durable locally.
 
@@ -119,3 +133,13 @@ not yet durable locally.
   does not own the staging database.
 - [`crab-storage`](../crab-storage/README.md) publishes remote objects after
   staging has flushed and the push plan is ready.
+
+## Local layout version
+
+The canonical local layout is version 2. Version 1 shipped in release v1.2.4.
+Run `crab staging upgrade`, then `crab staging verify`, to preserve staged-only
+content and ownership while adding the two ownership indexes and advancing
+the writer-admission marker. Upgrade requires exclusive admission and rejects
+unrecognized schema shapes. Ordinary opens reject old layouts; no fallback
+reader or automatic deletion is provided. Old binaries reject upgraded data.
+Pointer and remote xorb formats are unchanged.
