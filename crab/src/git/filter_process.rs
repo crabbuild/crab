@@ -282,7 +282,7 @@ where
             }
             Err(arc) => {
                 // Another Arc<StagingArea> clone still exists — typically a
-                // StagingChunkStager attached to the CleanSession, or a
+                // writer attached to the CleanSession, or a
                 // background task that outlived the loop. Those clones keep
                 // the staging flock alive until they drop, so log the strong
                 // count to make leaks diagnosable. EOF or parent exit ends
@@ -744,9 +744,8 @@ fn run_filter_loop_with_lfs_source<R: BufRead, W: Write>(
 ) -> Result<()> {
     handshake(&mut input, &mut output)?;
 
-    // Start with a no-op stager. The first `clean` command lazily
-    // opens the staging area (LOCK_EX) and swaps in a real
-    // `StagingChunkStager` via `CleanSession::set_chunk_stager`.
+    // The first `clean` command lazily acquires exclusive staging admission
+    // and attaches the writer through `CleanSession::set_staging`.
     // Sessions that only receive smudge commands never touch staging
     // and never acquire `LOCK_EX` — that's what lets `git status` run
     // concurrently with `crab add`.
@@ -1112,8 +1111,7 @@ fn dispatch_command<R: Read, W: Write>(
             } else if let Some(h) = handle {
                 match h.block_on(acquire_writer(staging_cell.as_ref())) {
                     StagingAcquire::Writer(sa) => {
-                        let stager = super::clean::StagingChunkStager::new(sa, h.clone());
-                        session.set_chunk_stager(Box::new(stager));
+                        session.set_staging(sa, h.clone());
                     }
                     StagingAcquire::Locked { holder_pid } => {
                         session.set_staging_locked(holder_pid);
@@ -1131,10 +1129,8 @@ fn dispatch_command<R: Read, W: Write>(
                 session.set_staging_unavailable();
             }
 
-            // Stream pkt-line packets straight into the CDC chunker and
-            // blake3 hasher, bounding peak memory to one packet
-            // (≤64 KiB), the ≤1 KiB pointer probe, and the chunker's
-            // internal window instead of the full file payload.
+            // Decode into bounded input blocks; shared ingestion owns CDC
+            // batches and serialized-payload admission. Never spool the file.
             let pointer_bytes = session.clean_stream(&cmd.pathname, input)?;
 
             output.content_response(|output| write_content(output, &pointer_bytes))?;

@@ -137,6 +137,13 @@ pub async fn run_staging_stats(mode: OutputMode) -> Result<()> {
     Ok(())
 }
 
+/// Upgrade the tagged local staging layout without restaging file contents.
+pub async fn run_staging_upgrade() -> Result<()> {
+    StagingArea::upgrade_layout(Path::new(STAGING_ROOT).to_path_buf()).await?;
+    println!("Staging layout upgraded; run `crab staging verify` before pushing.");
+    Ok(())
+}
+
 /// Open the staging area and verify registered files plus chunk payloads.
 ///
 /// Uses a read-only shared lock and the same chunk readers as push, so

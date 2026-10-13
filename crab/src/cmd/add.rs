@@ -30,13 +30,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::cache::add_validation::VerifiedPath;
-use crate::cmd::stream_stage::cleanup_stream_prepared_xorbs;
 use crate::core::error::{self, CrabError, Result};
 use crate::core::output::event_payloads::{FileDonePayload, ProgressPayload};
 use crate::core::output::{JsonlStream, OutputMode, emit_json};
 use crate::core::pattern::{PatternFilter, build_filter};
 use crate::git::progress::{format_bytes, format_rate, is_tty, render_bar};
 use crate::git::push::PushConfig;
+use crab_staging::ingest::cleanup_stream_prepared_xorbs;
 use crab_staging::{PublicationIntentEntry, PublicationIntentId, StagingArea, StagingAreaReadOnly};
 use crab_types::pointer::Pointer;
 use crab_xet::hash::MerkleHash;
@@ -104,10 +104,10 @@ struct FileResult {
     /// Canonical indexed recipe root produced by the verified chunking pass.
     recipe: crab_staging::recipe::FileRecipe,
     /// Prepared xorbs produced during the verified streaming pass.
-    prepared_xorbs: Vec<crate::cmd::stream_stage::StreamStagePreparedXorb>,
+    prepared_xorbs: Vec<crab_staging::ingest::StreamStagePreparedXorb>,
     /// Stat snapshot captured while the staged bytes were verified.
     index_stat: Option<crate::cmd::stream_stage::VerifiedIndexStat>,
-    timings: crab_staging::stream::StreamStageTimings,
+    timings: crab_staging::ingest::StreamStageTimings,
     /// Wall-clock duration of the operation in milliseconds.
     duration_ms: u64,
 }
@@ -118,7 +118,7 @@ struct StagedEntry {
     file_hash: [u8; 32],
     size: u64,
     recipe: crab_staging::recipe::FileRecipe,
-    prepared_xorbs: Vec<crate::cmd::stream_stage::StreamStagePreparedXorb>,
+    prepared_xorbs: Vec<crab_staging::ingest::StreamStagePreparedXorb>,
     index_stat: Option<crate::cmd::stream_stage::VerifiedIndexStat>,
 }
 
@@ -149,14 +149,14 @@ struct AddExecutionPlans {
 }
 
 struct StreamPreparedXorbPlan {
-    builder: crate::cmd::stream_stage::StreamStageXorbBuilder,
+    builder: crab_staging::ingest::StreamStageXorbBuilder,
     enabled_paths: HashSet<PathBuf>,
 }
 
 const ADD_STREAM_XORB_BUILDERS: usize = 2;
 
 impl StreamPreparedXorbPlan {
-    fn builder_for(&self, path: &Path) -> Option<crate::cmd::stream_stage::StreamStageXorbBuilder> {
+    fn builder_for(&self, path: &Path) -> Option<crab_staging::ingest::StreamStageXorbBuilder> {
         self.enabled_paths
             .contains(path)
             .then(|| self.builder.clone())
@@ -1723,7 +1723,7 @@ fn spawn_primary_add_task(
     progress: Arc<AddProgress>,
     file_progress: Arc<AddFileProgress>,
     abs_path: PathBuf,
-    stream_xorb_builder: Option<crate::cmd::stream_stage::StreamStageXorbBuilder>,
+    stream_xorb_builder: Option<crab_staging::ingest::StreamStageXorbBuilder>,
     existing_lookup: Option<Arc<dyn crab_staging::push_plan::ExistingChunkLookup>>,
 ) -> JoinHandle<Result<FileResult>> {
     tokio::spawn(async move {
@@ -1757,7 +1757,7 @@ fn spawn_duplicate_add_task(
     file_progress: Arc<AddFileProgress>,
     abs_path: PathBuf,
     reusable: Option<ReusableStagedFile>,
-    stream_xorb_builder: Option<crate::cmd::stream_stage::StreamStageXorbBuilder>,
+    stream_xorb_builder: Option<crab_staging::ingest::StreamStageXorbBuilder>,
     existing_lookup: Option<Arc<dyn crab_staging::push_plan::ExistingChunkLookup>>,
 ) -> JoinHandle<Result<FileResult>> {
     tokio::spawn(async move {
@@ -1850,7 +1850,7 @@ async fn process_file(
     staging: &StagingArea,
     progress: &Arc<AddProgress>,
     file_progress: &Arc<AddFileProgress>,
-    xorb_builder: Option<crate::cmd::stream_stage::StreamStageXorbBuilder>,
+    xorb_builder: Option<crab_staging::ingest::StreamStageXorbBuilder>,
     existing_lookup: Option<Arc<dyn crab_staging::push_plan::ExistingChunkLookup>>,
     cancel: &CancellationToken,
 ) -> Result<FileResult> {
@@ -1860,7 +1860,7 @@ async fn process_file(
         abs_path,
         repo_root,
         staging,
-        crate::cmd::stream_stage::StreamStageProgress {
+        crab_staging::ingest::StreamStageProgress {
             bytes_done: Some(Arc::clone(&file_progress.bytes_done)),
             chunk_bytes_done: Some(Arc::clone(&file_progress.chunk_bytes_done)),
             chunks_done: Some(Arc::clone(&file_progress.chunks_done)),
@@ -1916,7 +1916,7 @@ async fn process_duplicate_candidate(
     progress: &Arc<AddProgress>,
     file_progress: &Arc<AddFileProgress>,
     reusable: Option<ReusableStagedFile>,
-    fallback_xorb_builder: Option<crate::cmd::stream_stage::StreamStageXorbBuilder>,
+    fallback_xorb_builder: Option<crab_staging::ingest::StreamStageXorbBuilder>,
     existing_lookup: Option<Arc<dyn crab_staging::push_plan::ExistingChunkLookup>>,
     cancel: &CancellationToken,
 ) -> Result<FileResult> {
@@ -1975,7 +1975,7 @@ async fn process_duplicate_candidate(
     let batch_id = staging.create_batch()?;
     if let Some(preparation_id) = fallback_xorb_builder
         .as_ref()
-        .and_then(crate::cmd::stream_stage::StreamStageXorbBuilder::preparation_id)
+        .and_then(crab_staging::ingest::StreamStageXorbBuilder::preparation_id)
         && let Err(error) = staging.attach_add_preparation_batch(preparation_id, &batch_id)
     {
         let _ = staging.rollback_batch(&batch_id);
@@ -2018,7 +2018,7 @@ async fn process_duplicate_candidate(
         recipe,
         prepared_xorbs: Vec::new(),
         index_stat: Some(verified.index_stat),
-        timings: crab_staging::stream::StreamStageTimings::default(),
+        timings: crab_staging::ingest::StreamStageTimings::default(),
         duration_ms: start.elapsed().as_millis() as u64,
     })
 }
@@ -2053,7 +2053,7 @@ fn add_execution_plans(candidates: &[(PathBuf, u64)], total_bytes: u64) -> AddEx
                 .map(|(path, _)| path.clone())
                 .collect();
             StreamPreparedXorbPlan {
-                builder: crate::cmd::stream_stage::StreamStageXorbBuilder::new(
+                builder: crab_staging::ingest::StreamStageXorbBuilder::new(
                     ADD_STREAM_XORB_BUILDERS,
                     move || {
                         let builder = XorbBuilder::with_policy(push_config.compression_policy());
@@ -4561,12 +4561,12 @@ mod tests {
             &path,
             dir.path(),
             &staging,
-            crate::cmd::stream_stage::StreamStageProgress {
-                xorb_builder: Some(crate::cmd::stream_stage::StreamStageXorbBuilder::new(
+            crab_staging::ingest::StreamStageProgress {
+                xorb_builder: Some(crab_staging::ingest::StreamStageXorbBuilder::new(
                     1,
                     XorbBuilder::new,
                 )),
-                ..crate::cmd::stream_stage::StreamStageProgress::default()
+                ..crab_staging::ingest::StreamStageProgress::default()
             },
             &CancellationToken::new(),
         )
@@ -4907,12 +4907,12 @@ mod tests {
             &path,
             dir.path(),
             &staging,
-            crate::cmd::stream_stage::StreamStageProgress {
-                xorb_builder: Some(crate::cmd::stream_stage::StreamStageXorbBuilder::new(
+            crab_staging::ingest::StreamStageProgress {
+                xorb_builder: Some(crab_staging::ingest::StreamStageXorbBuilder::new(
                     1,
                     XorbBuilder::new,
                 )),
-                ..crate::cmd::stream_stage::StreamStageProgress::default()
+                ..crab_staging::ingest::StreamStageProgress::default()
             },
             &CancellationToken::new(),
         )

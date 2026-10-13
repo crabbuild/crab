@@ -9,7 +9,7 @@ meta:
 
 # Staging Area
 
-The staging area is Crab's local buffer for chunk data. When you run `crab add`, file chunks are written here. When you `git push`, chunks are uploaded from here to cloud storage. It's the bridge between your local working tree and the remote.
+The staging area is Crab's local buffer for chunk data. Native `crab add` and Git clean for Crab-tracked files feed the same bounded ingestion session. They share chunk authority, recipes, durability and rollback; file validation and Git packet framing remain in their input adapters. When you `git push`, chunks are uploaded from here to cloud storage. It's the bridge between your local working tree and the remote.
 
 ## Why a Staging Area?
 
@@ -31,8 +31,9 @@ This separation means you can add files throughout the day (fast, offline-capabl
 
 The staging area lives at `.crab/staging/` and contains:
 
+- **Prepared xorbs** — Serialized chunk payloads ready for upload
 - **Segment files** — Append-only files containing raw chunk data
-- **SQLite index** — Maps file hashes to their chunks and segment locations
+- **SQLite index** — Records complete file recipes and retains segment or prepared payloads while an operation or published pointer owns them
 - **Inflight markers** — Track in-progress operations for crash recovery
 
 ## Inspecting the Staging Area
@@ -59,6 +60,21 @@ Key metrics:
 - **Dead bytes** — Data no longer referenced (from reset files or re-added files)
 - **Dead ratio** — When this gets high, `staging clean` will reclaim significant space
 - **Inflight markers** — Should be 0 when no operations are running; non-zero indicates a crash
+
+## Upgrading the Local Layout
+
+Layout v1 shipped in Crab v1.2.4. The shared ingestion lifecycle uses layout v2.
+With active add, filter and push processes stopped, run:
+
+```bash
+crab staging upgrade
+crab staging verify
+```
+
+The upgrade preserves staged-only contents and their owners. It requires an
+exclusive lock and accepts only the known v1 schema or an already current v2
+schema. Ordinary opens reject older layouts, and old binaries reject v2.
+Preserve staged-only data before manually recreating an unknown staging layout.
 
 ## Cleaning the Staging Area
 

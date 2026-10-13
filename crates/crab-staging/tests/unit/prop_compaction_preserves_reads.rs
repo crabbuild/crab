@@ -245,17 +245,12 @@ async fn run_compaction_test(
         let mut new_offset: u64 = 0;
         let mut updates = Vec::new();
 
-        for (chunk_hash, file_hash, chunk_index, size, old_offset) in &live_chunks {
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "size bounded by segment cap"
-            )]
-            let length = *size as u32;
+        for (chunk_hash, size, old_offset) in &live_chunks {
+            let length = *size;
             let data = old_reader.read(*old_offset, length).expect("read");
             let record = segment::encode_record(&data);
             std::io::Write::write_all(&mut new_file, &record).expect("write");
-            updates.push((*chunk_hash, *file_hash, *chunk_index, new_offset));
+            updates.push((*chunk_hash, new_offset));
             new_offset += record.len() as u64;
         }
 

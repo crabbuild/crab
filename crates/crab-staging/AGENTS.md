@@ -5,7 +5,7 @@ Root `AGENTS.md` and `crates/AGENTS.md` apply. Read
 
 ## Purpose and ownership
 
-Owns local segment bytes, SQLite locators, durable boundaries, recipes, prepared plans, and recovery. Remote publication and retirement decisions remain with push callers.
+Owns shared byte ingestion, local segment/prepared bytes, SQLite locators, durable boundaries, recipes, prepared plans, and recovery. Remote publication and retirement decisions remain with push callers.
 
 ## Read first
 
@@ -13,7 +13,8 @@ Owns local segment bytes, SQLite locators, durable boundaries, recipes, prepared
 2. `crates/crab-staging/src/index.rs` — `Index::chunks_for_file / chunks_for_file_with_sizes`: file-version membership and transactions.
 3. `crates/crab-staging/src/segment.rs` — `SegmentWriter / decode_record`: record framing and durable writes.
 4. `crates/crab-staging/src/recovery.rs` — `recover`: torn-tail and sealed-segment handling.
-5. `crates/crab-staging/src/push_plan.rs` — `FilePushPlan / PreparedXorbCache`: prepared xorb identity and persistence.
+5. `crates/crab-staging/src/ingest.rs` — `IngestSession / CompletedInput`: byte ingestion, authority retention, seal/abort.
+6. `crates/crab-staging/src/push_plan.rs` — `FilePushPlan / PreparedXorbCache`: prepared xorb identity and persistence.
 
 Trace one path: `crab/src/cmd/add.rs` (`close_staging_before_indexing`) →
 `StagingArea::flush_pending` in `crates/crab-staging/src/lib.rs` →
@@ -29,6 +30,8 @@ Trace one path: `crab/src/cmd/add.rs` (`close_staging_before_indexing`) →
 
 ## Invariants
 
+- Retain reused authority before materialization. Seal payloads and recipe ownership before publishing; FULL index checkpoints protect publication and unlink. Tagged v1 upgrades require exclusive admission.
+  Sources: `crates/crab-staging/src/ingest.rs`, `crates/crab-staging/src/index.rs`.
 - Keep process admission and in-process locks separate; synchronous index guards must end before await points.
   Source: `crates/crab-staging/src/lib.rs`.
 - File-version reads must include all ordered chunk occurrences, even when chunk bytes deduplicate; inspect recipe consumers before changing index membership.

@@ -1438,7 +1438,7 @@ fn stage_crab_overlay_files(
                     &worktree,
                     Path::new(&file.path),
                     &staging,
-                    crab_staging::stream::StreamStageProgress::default(),
+                    crab_staging::ingest::StreamStageProgress::default(),
                     &cancel,
                 ))
                 .await?;

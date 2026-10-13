@@ -1284,7 +1284,7 @@ fn stage_and_publish_migration_data(
                 &root,
                 &repo_path,
                 &staging,
-                crab_staging::stream::StreamStageProgress::default(),
+                crab_staging::ingest::StreamStageProgress::default(),
                 &cancel,
             )
             .await

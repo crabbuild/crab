@@ -47,7 +47,7 @@ use crab::core::context::AppContext;
 use crab::core::error::CrabError;
 use crab::core::metrics::Metrics;
 use crab::core::output::OutputMode;
-use crab::git::clean::{CleanSession, StagingChunkStager};
+use crab::git::clean::CleanSession;
 use crab::git::push::{PushConfig, PushRejectReason, RefPushOutcome};
 use crab::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
 use crab::git::push_state::PushState;
@@ -628,10 +628,7 @@ async fn clean_content_to_pointer(root: &Path, rel_path: &str, content: Vec<u8>)
     );
     let mut session = CleanSession::new(AppContext::default());
     session.set_repo_root(root.to_path_buf());
-    session.set_chunk_stager(Box::new(StagingChunkStager::new(
-        Arc::clone(&staging),
-        tokio::runtime::Handle::current(),
-    )));
+    session.set_staging(Arc::clone(&staging), tokio::runtime::Handle::current());
     let rel_path = rel_path.to_owned();
     let pointer_bytes = tokio::task::spawn_blocking(move || {
         session

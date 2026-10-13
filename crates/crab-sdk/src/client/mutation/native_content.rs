@@ -82,7 +82,7 @@ pub(crate) async fn prepare_native_sources(
     let staging = crab_staging::StagingArea::open(directory.join("native-staging"))
         .await
         .map_err(staging_error)?;
-    let builder = crab_staging::stream::StreamStageXorbBuilder::new(
+    let builder = crab_staging::ingest::StreamStageXorbBuilder::new(
         1,
         crab_xet::xorb::builder::XorbBuilder::new,
     );
@@ -97,7 +97,7 @@ pub(crate) async fn prepare_native_sources(
         #[cfg(not(feature = "local"))]
         let NativeSource::Hydrated(source) = source;
         let repository_path = format!("hydrated-{index}");
-        let progress = crab_staging::stream::StreamStageProgress {
+        let progress = crab_staging::ingest::StreamStageProgress {
             xorb_builder: Some(builder.clone()),
             ..Default::default()
         };

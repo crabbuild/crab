@@ -42,10 +42,6 @@ pub struct AddPushPlanSummary {
 }
 
 /// Looks up already-uploaded chunk placements for staged chunks.
-#[expect(
-    clippy::double_must_use,
-    reason = "async_trait marks boxed futures must-use; Result is also must-use"
-)]
 #[async_trait]
 pub trait ExistingChunkLookup: Send + Sync {
     async fn lookup_existing_candidates(
@@ -55,10 +51,6 @@ pub trait ExistingChunkLookup: Send + Sync {
 }
 
 /// Adds local prepared-xorb candidates to the staging cache.
-#[expect(
-    clippy::double_must_use,
-    reason = "async_trait marks boxed futures must-use; Result is also must-use"
-)]
 #[async_trait]
 pub trait LocalXorbCandidateLookup: Send + Sync {
     async fn load_candidates(
@@ -1976,12 +1968,12 @@ mod tests {
             &path,
             tmp.path(),
             &staging,
-            crate::stream::StreamStageProgress {
-                xorb_builder: Some(crate::stream::StreamStageXorbBuilder::new(
+            crate::ingest::StreamStageProgress {
+                xorb_builder: Some(crate::ingest::StreamStageXorbBuilder::new(
                     1,
                     small_raw_xorb_builder,
                 )),
-                ..crate::stream::StreamStageProgress::default()
+                ..crate::ingest::StreamStageProgress::default()
             },
             &CancellationToken::new(),
         )
