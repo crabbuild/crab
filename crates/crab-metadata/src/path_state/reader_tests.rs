@@ -7,7 +7,7 @@ use bytes::Bytes;
 use object_store::{ObjectStoreExt, memory::InMemory};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-async fn fixture() -> (
+pub(super) async fn fixture() -> (
     Store,
     StoreLayout<Store>,
     SplitCommitGraph,

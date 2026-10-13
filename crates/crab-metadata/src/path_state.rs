@@ -16,7 +16,7 @@ mod paged;
 mod reader;
 pub use paged::{PathStateLayerPages, PathStatePageRef};
 #[cfg(feature = "storage")]
-pub use reader::PathStateReader;
+pub use reader::{PathStateItem, PathStateReader, PathStateScan};
 #[cfg(feature = "storage")]
 mod storage;
 

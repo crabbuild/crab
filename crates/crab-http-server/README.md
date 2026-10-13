@@ -28,7 +28,17 @@ Immutable descriptors are verified on identity changes and at the existing
 hourly scrub boundary; explicit repair invalidates the cached proof. One worker
 per repository retains completion only for the exact verified source, so idle
 polling does not reimport the same Cell epoch. Tree APIs use the verified remote
-reader; reconciliation imports only consumed ref, commit and attribution rows.
+reader; reconciliation imports only consumed ref, summary and attribution rows.
+It streams authenticated path-state pages into provisional Cell epochs without
+rereading raw Git commits. Retained summaries cannot authorize a revision: the
+foreground reader still checks current ref visibility before querying the Cell.
+Schema migration 3 preserves existing summaries and epoch membership while
+removing unconsumed Git fields. Existing Cells upgrade through release maintenance;
+their collaboration data must not be discarded to rebuild browse metadata.
+Projection reads and ingestion borrow runtime-owned Cells like collaboration
+requests. Cold read completion does not drain the Cell or wait for ingestion.
+Scheduler cleanup releases an unused cold activation only when no other operation
+holds it; runtime budgets, pressure eviction and node shutdown own retained Cells.
 The current unshipped path-state codec interns raw components per layer and
 rejects aggregate writes above the reader budget before publishing any layers.
 The full Next.js/RustFS idle and mixed-load qualification remains in progress.

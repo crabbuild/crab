@@ -431,18 +431,18 @@ impl RepositoryCellRouter {
         .await
     }
 
-    pub(crate) async fn route_projection(
-        &self,
-        repository: Uuid,
-    ) -> crate::Result<ScheduledRepositoryCell> {
+    pub(crate) async fn route_projection(&self, repository: Uuid) -> crate::Result<RepositoryCell> {
         let target = CellTarget::new(
             self.identity.tenant(),
             self.identity.application(),
             REPOSITORY_NAMESPACE,
             repository.as_bytes(),
         )?;
+        // Like collaboration requests, browse work borrows a runtime-owned
+        // Cell. Draining a cold read here would wait for concurrent ingestion.
         self.route_runtime(target, self.runtime_principal(&["repository.projection"]))
             .await
+            .map(|scheduled| scheduled.cell)
     }
 
     pub(crate) async fn route_runtime(
@@ -1186,10 +1186,29 @@ impl RepositoryCellRouter {
     }
 
     pub(crate) async fn drain_local_target(&self, target: &CellTarget) -> crate::Result<()> {
-        let _operation: OwnedRwLockWriteGuard<()> =
+        let operation: OwnedRwLockWriteGuard<()> =
             Arc::clone(&self.operation[activation_shard(target)])
                 .write_owned()
                 .await;
+        self.drain_local_target_locked(target, operation).await
+    }
+
+    pub(crate) async fn drain_unused_local_target(&self, target: &CellTarget) -> crate::Result<()> {
+        // A cold scheduler activation may have gained foreground or importer
+        // borrowers. Leave that Cell with the bounded runtime instead of
+        // queuing a writer that blocks every subsequent reader until they exit.
+        let Ok(operation) = Arc::clone(&self.operation[activation_shard(target)]).try_write_owned()
+        else {
+            return Ok(());
+        };
+        self.drain_local_target_locked(target, operation).await
+    }
+
+    async fn drain_local_target_locked(
+        &self,
+        target: &CellTarget,
+        _operation: OwnedRwLockWriteGuard<()>,
+    ) -> crate::Result<()> {
         let proof = self
             .catalog
             .lookup(target.cell_id())

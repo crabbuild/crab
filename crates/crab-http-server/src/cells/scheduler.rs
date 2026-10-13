@@ -751,7 +751,8 @@ impl RepositoryCellScheduler {
                 } else {
                     drop(cell);
                 }
-                if release_after && let Err(error) = router.drain_local_target(&target).await {
+                if release_after && let Err(error) = router.drain_unused_local_target(&target).await
+                {
                     tracing::warn!(error = %error, "Workflow scheduler Cell release failed");
                 }
                 drop(activity_cell);
@@ -797,7 +798,7 @@ impl RepositoryCellScheduler {
         let target = cell.target.clone();
         drop(cell);
         if release_after {
-            self.router.drain_local_target(&target).await
+            self.router.drain_unused_local_target(&target).await
         } else {
             Ok(())
         }

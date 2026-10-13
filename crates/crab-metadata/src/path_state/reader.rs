@@ -17,6 +17,10 @@ use crate::split_commit_graph::{CommitGraphLayerRef, SplitCommitGraph};
 const CACHE_BYTES: usize = 8 * 1024 * 1024;
 const CACHE_PAGES: usize = 256;
 
+#[path = "scan.rs"]
+mod scan;
+pub use scan::{PathStateItem, PathStateScan};
+
 /// Verified path attribution with bounded, shared immutable-page caching.
 #[derive(Debug)]
 pub struct PathStateReader {

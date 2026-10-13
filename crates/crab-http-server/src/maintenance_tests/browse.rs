@@ -3,6 +3,165 @@ use crab_metadata::capsule_protocol::{BrowseIndexes, load_browse_indexes};
 use crab_remote_git::OperationKind;
 
 #[tokio::test]
+async fn projection_reads_reuse_the_runtime_cell_during_background_ingestion() {
+    let server = fixture().await;
+    let repo = repository(&server);
+    let router = server.repository_cells.as_ref().unwrap();
+    crate::projection::state(router, repo.id).await.unwrap();
+    // A read-only cold activation is owned but not yet Residency::Resident.
+    // Count retained actors rather than using that narrower routing probe.
+    let retained = router.runtime().unreleased_cell_count().await.unwrap();
+    let importer = router.route_projection(repo.id).await.unwrap();
+    let state = tokio::time::timeout(
+        Duration::from_secs(1),
+        crate::projection::state(router, repo.id),
+    )
+    .await;
+    drop(importer);
+    close(&server).await;
+    assert_eq!((retained, matches!(state, Ok(Ok(_)))), (1, true));
+}
+
+#[tokio::test]
+async fn scheduler_cleanup_preserves_borrowed_projection_and_releases_unused_cell() {
+    let server = fixture().await;
+    let repo = repository(&server);
+    let router = server.repository_cells.as_ref().unwrap();
+    let importer = router.route_projection(repo.id).await.unwrap();
+    let target = importer.target.clone();
+    let release = tokio::time::timeout(
+        Duration::from_secs(1),
+        router.drain_unused_local_target(&target),
+    )
+    .await;
+    let state = tokio::time::timeout(
+        Duration::from_secs(1),
+        crate::projection::state(router, repo.id),
+    )
+    .await;
+    drop(importer);
+    router.drain_unused_local_target(&target).await.unwrap();
+    let retained = router.runtime().unreleased_cell_count().await.unwrap();
+    close(&server).await;
+    assert_eq!(
+        (
+            matches!(release, Ok(Ok(()))),
+            matches!(state, Ok(Ok(_))),
+            retained
+        ),
+        (true, true, 0)
+    );
+}
+
+#[tokio::test]
+async fn projected_attribution_survives_force_push_rewind_with_retained_graph_records() {
+    let server = fixture().await;
+    let repo = repository(&server);
+    let (history, _) = crate::test_git::merge_history_with_nested_tag();
+    let mut root = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    let mut old = None;
+    let mut responses = Vec::new();
+    for index in [3, 0] {
+        let published = publish_next(
+            &repo,
+            root,
+            old,
+            history.oids[index].clone(),
+            (index == 3).then(|| history.pack.clone()),
+        )
+        .await;
+        root = published.0;
+        old = Some(published.1);
+        let result = crate::maintenance::run(
+            repo.layout.clone(),
+            Arc::clone(&server.maintenance_admission),
+            None,
+            server.cancellation.clone(),
+            crate::maintenance::Pass::BackgroundMaintenance,
+            Some(crate::maintenance::ProjectionContext {
+                repository_id: repo.id,
+                router: server.repository_cells.as_ref().cloned(),
+                metrics: server.metrics.clone(),
+                identity: repo.identity.clone(),
+                runtime: Arc::clone(&server.runtime),
+                options: server.options,
+            }),
+        )
+        .await;
+        if !matches!(result, Ok(Some(_))) {
+            close(&server).await;
+            panic!("projection did not promote after publishing commit {index}: {result:?}");
+        }
+        repo.invalidate().await;
+        let response = router(Arc::clone(&server))
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/repos/team/repo/tree-attribution?rev={}&limit=100",
+                        history.oids[index]
+                    ))
+                    .header("host", "localhost:8788")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        responses.push((index, status, value));
+    }
+    let indexes = load_browse_indexes(&repo.layout).await.unwrap().unwrap();
+    let graph = crab_metadata::split_commit_graph::load_split_commit_graph(
+        &repo.store,
+        &repo.layout,
+        indexes.commit_graph_hash(),
+        server.options.object_limits().max_commit_graph_bytes,
+    )
+    .await
+    .unwrap();
+    let merge = gix_hash::ObjectId::from_hex(history.oids[3].as_bytes()).unwrap();
+    let retained = graph
+        .ordinal(merge.as_bytes().try_into().unwrap())
+        .is_some();
+    // Projection summaries include retained ordinals. The foreground revision
+    // boundary must still reject history removed by the current ref rewind.
+    let hidden = router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/repos/team/repo/tree-attribution?rev={}&limit=100",
+                    history.oids[3]
+                ))
+                .header("host", "localhost:8788")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status();
+    close(&server).await;
+    assert_eq!((retained, hidden), (true, StatusCode::NOT_FOUND));
+    assert!(
+        responses
+            .iter()
+            .all(|(index, status, value)| *status == StatusCode::OK
+                && value["items"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty()
+                        && (*index != 0
+                            || items
+                                .iter()
+                                .all(|entry| entry["last_commit"]["oid"] == history.oids[0])))),
+        "{responses:?}"
+    );
+}
+
+#[tokio::test]
 async fn capsule_merge_and_nested_tag_preserve_graph_and_first_parent_attribution() {
     let mut server = fixture_without_cells().await;
     let counting = {
