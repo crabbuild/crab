@@ -83,7 +83,7 @@ all compiling invocations. No local `target/` or external-source mutation.
 
 ```sh
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ios-abf8fc00-push-audit" \
-  cargo build -p crab-remote-git --release --examples --locked
+  cargo build -p crab-remote --features publication --release --examples --locked
 
 python3 crab/scripts/e2e/run_remote_read_scaling_rustfs.py \
   --root "$HOME/Workspace/CrabData/indexed-read-abf8fc00" \

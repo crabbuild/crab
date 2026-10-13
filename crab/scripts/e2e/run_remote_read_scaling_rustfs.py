@@ -77,9 +77,9 @@ class ReadScalingRunner(AddCommitPushSmoke):
         source_root = self.artifacts / "qualified-source"
         source_root.mkdir()
         inputs = (
-            "Cargo.lock", "crates/crab-remote-git/Cargo.toml",
-            "crates/crab-remote-git/examples/qualify_remote.rs",
-            "crates/crab-remote-git/examples/support/mod.rs",
+            "Cargo.lock", "crates/crab-remote/Cargo.toml",
+            "crates/crab-remote/examples/qualify_remote.rs",
+            "crates/crab-remote/examples/support/mod.rs",
             "crates/crab-metadata/src/path_state/codec.rs",
             "crates/crab-metadata/src/split_commit_graph.rs",
             "crab/scripts/e2e/run_remote_read_scaling_rustfs.py",
