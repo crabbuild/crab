@@ -387,7 +387,206 @@ proptest::proptest! {
         let eager = append_split_commit_graph(None, 1, "a".repeat(64), "b".repeat(64), &roots, additions.clone()).unwrap().unwrap();
         let paged = append_paged_commit_graph(None, 1, "a".repeat(64), "b".repeat(64), &roots, additions).unwrap().unwrap();
         let eager_layers = eager.layers.iter().map(|object| decode_commit_graph_layer(&object.bytes, "eager").unwrap()).collect::<Vec<_>>();
-        let paged_layers = paged.layers.iter().map(|object| decode_layer(&object.bytes, &object.reference, object.reference.pages.as_ref().unwrap(), "paged").unwrap()).collect::<Vec<_>>();
+        let paged_layers = paged.layers.iter().map(|object| decode_layer(&object.bytes, &object.reference, object.reference.pages.as_ref().unwrap(), "paged").unwrap().graph).collect::<Vec<_>>();
         proptest::prop_assert_eq!(&paged_layers, &eager_layers);
     }
+}
+
+#[tokio::test]
+async fn ancestry_membership_includes_both_merge_parents_but_excludes_retained_other_history() {
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let layout = StoreLayout::new(store.clone(), "branch-ancestry".to_owned());
+    let mut additions = inputs(0, 5);
+    additions[2].parents = vec![oid(0)];
+    additions[3].parents = vec![oid(1), oid(2)];
+    additions[4].parents.clear();
+    let write = append_paged_commit_graph(
+        None,
+        1,
+        "a".repeat(64),
+        "b".repeat(64),
+        &[oid(3)],
+        additions,
+    )
+    .unwrap()
+    .unwrap();
+    upload_split_commit_graph(&store, &layout, &write)
+        .await
+        .unwrap();
+    let reader = CommitGraphReader::load(
+        &store,
+        &layout,
+        &write.descriptor_hash,
+        DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+    )
+    .await
+    .unwrap();
+    let queries = [
+        (
+            3,
+            vec![0, 1, 2, 3, 4, 2],
+            vec![true, true, true, true, false, true],
+        ),
+        (1, vec![0, 1, 2, 3], vec![true, true, false, false]),
+        (
+            4,
+            vec![0, 1, 2, 3, 4],
+            vec![false, false, false, false, true],
+        ),
+    ];
+    for (root, candidates, expected) in queries {
+        assert_eq!(
+            reader
+                .ancestry_membership(&store, root, &candidates)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn ancestry_lookup_reads_dependency_pages_and_charges_warm_queries() {
+    let (store, layout, write, observed) = fixture(10_000).await;
+    let mut reader = CommitGraphReader::load(&store, &layout, &write.descriptor_hash, 512 * 1024)
+        .await
+        .unwrap();
+    observed.store(0, Ordering::Relaxed);
+    let candidates = [0, 1, 5_000, 9_999, 10_000, 5_000];
+    assert_eq!(
+        reader
+            .ancestry_membership(&store, 9_999, &candidates)
+            .await
+            .unwrap(),
+        vec![true, true, true, true, false, true]
+    );
+    assert!(observed.load(Ordering::Relaxed) < 512 * 1024);
+    observed.store(0, Ordering::Relaxed);
+    reader
+        .ancestry_membership(&store, 9_999, &candidates)
+        .await
+        .unwrap();
+    assert_eq!(observed.load(Ordering::Relaxed), 0);
+    reader.max_bytes = reader.descriptor_bytes;
+    assert!(
+        reader
+            .ancestry_membership(&store, 9_999, &candidates)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn missing_ancestry_nodes_cannot_become_a_negative_membership_answer() {
+    let (store, layout, write, _) = fixture(100).await;
+    let reader = CommitGraphReader::load(
+        &store,
+        &layout,
+        &write.descriptor_hash,
+        DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+    )
+    .await
+    .unwrap();
+    let roots = write.layers[0].reference.pages.as_ref().unwrap();
+    let mut bytes = write.layers[0].bytes.clone();
+    bytes[roots.ancestry_nodes.offset as usize] ^= 1;
+    store
+        .inner()
+        .put(
+            &layout.repo_path(&write.layers[0].reference.path),
+            bytes::Bytes::from(bytes).into(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        reader
+            .ancestry_membership(&store, 99, &[200])
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn full_validation_rejects_a_resigned_set_that_grants_a_non_ancestor() {
+    use super::super::ancestry::Reference;
+    use crate::pages::{self, Kind, Writer};
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let layout = StoreLayout::new(store.clone(), "forged-ancestry".to_owned());
+    let mut additions = inputs(0, 4);
+    additions[2].parents = vec![oid(0)];
+    let mut write = append_paged_commit_graph(
+        None,
+        1,
+        "a".repeat(64),
+        "b".repeat(64),
+        &[oid(3)],
+        additions,
+    )
+    .unwrap()
+    .unwrap();
+    let object = &mut write.layers[0];
+    let roots = object.reference.pages.as_ref().unwrap();
+    let scan = |root: &crate::PageRef, kind| {
+        pages::scan(
+            &object.bytes,
+            root,
+            kind,
+            "original",
+            &mut Default::default(),
+        )
+        .unwrap()
+    };
+    let records = scan(&roots.records, Kind::CommitRecords);
+    let oids = scan(&roots.oids, Kind::CommitOids);
+    let mut ancestry_roots = scan(&roots.ancestry_roots, Kind::CommitAncestryRoots);
+    let old = Reference::decode(&ancestry_roots[3].1, "old").unwrap();
+    let fake = vec![0, 2, 0, 0, 0, 0];
+    let reference = Reference {
+        hash: *blake3::hash(&fake).as_bytes(),
+        start: 0,
+        height: 2,
+    };
+    ancestry_roots[3].1 = reference.encode();
+    let mut nodes = scan(&roots.ancestry_nodes, Kind::CommitAncestryNodes)
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    nodes.remove(old.hash.as_slice());
+    nodes.insert(reference.hash.to_vec(), fake);
+    let mut writer = Writer::default();
+    let pages = CommitGraphLayerPages {
+        records: writer.tree(Kind::CommitRecords, records).unwrap(),
+        oids: writer.tree(Kind::CommitOids, oids).unwrap(),
+        ancestry_roots: writer
+            .tree(Kind::CommitAncestryRoots, ancestry_roots)
+            .unwrap(),
+        ancestry_nodes: writer
+            .tree(Kind::CommitAncestryNodes, nodes.into_iter().collect())
+            .unwrap(),
+    };
+    object.bytes = writer.bytes;
+    object.reference.hash = blake3::hash(&object.bytes).to_hex().to_string();
+    object.reference.path = commit_graph_layer_path(&object.reference.hash);
+    object.reference.bytes = object.bytes.len() as u64;
+    object.reference.pages = Some(pages);
+    let mut descriptor =
+        decode_commit_graph_descriptor(&write.descriptor_bytes, "descriptor").unwrap();
+    descriptor.layers[0] = object.reference.clone();
+    write.descriptor_bytes = encode_commit_graph_descriptor(&descriptor).unwrap();
+    write.descriptor_hash = blake3::hash(&write.descriptor_bytes).to_hex().to_string();
+    upload_split_commit_graph(&store, &layout, &write)
+        .await
+        .unwrap();
+    let error = load_split_commit_graph(
+        &store,
+        &layout,
+        &write.descriptor_hash,
+        DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("ancestry coverage differs from the verified DAG")
+    );
 }

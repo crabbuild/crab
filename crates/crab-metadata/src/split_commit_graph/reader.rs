@@ -21,6 +21,131 @@ struct Work {
 }
 
 impl CommitGraphReader {
+    /// Test membership in a captured commit's verified ancestor set, including itself.
+    ///
+    /// The caller authorizes the root against captured refs and admits request/output counts.
+    pub async fn ancestry_membership(
+        &self,
+        store: &Store,
+        root: u32,
+        candidates: &[u32],
+    ) -> Result<Vec<bool>> {
+        if root >= self.descriptor.commit_count {
+            return corrupt("ancestry root ordinal is absent");
+        }
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let layer = self
+            .descriptor
+            .layers
+            .partition_point(|layer| layer.base_ordinal <= root)
+            .checked_sub(1)
+            .ok_or_else(|| crate::validation::corrupt_object("ancestry", "root has no layer"))?;
+        let mut work = self.work();
+        let values = self
+            .lookup(
+                store,
+                layer,
+                &self.roots(&self.descriptor.layers[layer])?.ancestry_roots,
+                Kind::CommitAncestryRoots,
+                &[root.to_be_bytes().to_vec()],
+                &mut work,
+            )
+            .await?;
+        let reference = ancestry::Reference::decode(
+            values[0].as_deref().ok_or_else(|| {
+                crate::validation::corrupt_object("ancestry", "required root is absent")
+            })?,
+            "ancestry root",
+        )?;
+        let mut requested = candidates.to_vec();
+        requested.push(root);
+        let mut output = vec![false; requested.len()];
+        let mut pending = vec![(reference, (0..requested.len()).collect::<Vec<_>>())];
+        while !pending.is_empty() {
+            let references = pending
+                .iter()
+                .map(|(reference, _)| *reference)
+                .collect::<Vec<_>>();
+            let nodes = self.ancestry_nodes(store, &references, &mut work).await?;
+            let mut next = BTreeMap::<[u8; 32], (ancestry::Reference, Vec<usize>)>::new();
+            for ((_, positions), node) in std::mem::take(&mut pending).into_iter().zip(nodes) {
+                if node.children.is_none() && node.reference.end() > u64::from(root) + 1 {
+                    return corrupt("ancestry set contains a future ordinal");
+                }
+                for position in positions {
+                    let candidate = requested[position];
+                    if candidate > root || !node.reference.contains(candidate) {
+                        continue;
+                    }
+                    let Some(children) = node.children else {
+                        output[position] = true;
+                        continue;
+                    };
+                    if let Some(child) =
+                        children.into_iter().find(|child| child.contains(candidate))
+                    {
+                        let batch = next.entry(child.hash).or_insert((child, Vec::new()));
+                        if batch.0 != child {
+                            return corrupt("ancestry node has conflicting routing references");
+                        }
+                        batch.1.push(position);
+                    }
+                }
+            }
+            pending = next.into_values().collect();
+        }
+        if output.pop() != Some(true) {
+            return corrupt("ancestry root does not contain itself");
+        }
+        Ok(output)
+    }
+
+    async fn ancestry_nodes(
+        &self,
+        store: &Store,
+        references: &[ancestry::Reference],
+        work: &mut Work,
+    ) -> Result<Vec<ancestry::Node>> {
+        let keys = references
+            .iter()
+            .map(|reference| reference.hash.to_vec())
+            .collect::<Vec<_>>();
+        let mut output = vec![None; references.len()];
+        for (layer, reference) in self.descriptor.layers.iter().enumerate() {
+            let values = self
+                .lookup(
+                    store,
+                    layer,
+                    &self.roots(reference)?.ancestry_nodes,
+                    Kind::CommitAncestryNodes,
+                    &keys,
+                    work,
+                )
+                .await?;
+            for (index, value) in values.into_iter().enumerate() {
+                let Some(value) = value else { continue };
+                if output[index].is_some() {
+                    return corrupt("ancestry node occurs in multiple layers");
+                }
+                output[index] = Some(ancestry::Node::decode(
+                    &value,
+                    references[index],
+                    "ancestry node",
+                )?);
+            }
+        }
+        output
+            .into_iter()
+            .map(|node| {
+                node.ok_or_else(|| {
+                    crate::validation::corrupt_object("ancestry", "required node is absent")
+                })
+            })
+            .collect()
+    }
+
     /// Load a bounded paged descriptor without fetching graph layers.
     pub async fn load(
         store: &Store,

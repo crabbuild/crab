@@ -29,7 +29,7 @@ Xet files and unified local staging are subsequent workstreams.
 | 1 | Reproducible cold/warm baseline and contracts | Native Git oracle, isolated query/open measurements, process resources, HTTP bytes/classes, index decode counts, history scaling receipts | Implemented; RustFS history-scaling baseline passed; cloud latency cell pending |
 | 2 | Authenticated bounded path-state pages | Equivalence/property tests; malformed hashes, lengths, ordering, routing and allocations rejected; bounded internal directories | Implemented; 23 focused tests, GC retention regression and 1,000/10,000-commit RustFS format qualification passed |
 | 3 | Lazy canonical and projected attribution | Fixed directory page reads only needed pages; branch/force-push/recreation/raw-path/restart E2E proof | Canonical scaling/transitions passed; streaming Cell ingestion, projected native Git oracle and two process starts passed on RustFS; broader cloud/lifecycle qualification remains open |
-| 4 | Lazy graph lookup and bounded opening | Paged OID/ordinal/parent/summary queries; reachable versus retained proof; tag/shallow/cancellation/cleanup checks | Paged producer/component reader implemented; explicit visibility and bounded foreground opening remain pending |
+| 4 | Lazy graph lookup and bounded opening | Paged OID/ordinal/parent/summary queries; reachable versus retained proof; tag/shallow/cancellation/cleanup checks | Paged producer and authenticated ancestor-set component qualified; foreground conversion and bounded opening remain pending |
 | 5 | Change-point history and first-parent blame | Exact native Git origins under matching semantics; fixed file changes with growing unrelated history; comparison/result cache isolation | Pending |
 | 6 | Indexed historical Xet catalog | Indexed checkpoints and visible deltas; bounded compaction; 10-GiB edits and byte-identical cold historical hydration; protected receive and sibling consumers | Pending |
 | 7 | Lifecycle and migration | Interrupted publication/builds, concurrent owners, GC retained roots/readers, stale caches and released-format migration qualification | Pending; also required in every earlier implementation |
@@ -379,3 +379,49 @@ Receipts, failed negative controls, source hashes and binary hashes remain outsi
 the checkout. Stage 4 still requires explicit visible ancestry proof, lazy
 foreground conversion, removal of full positional-digest work and bounded control
 opening. Stages 5–8 remain incomplete.
+
+## Authenticated ancestor-set component
+
+Unreleased capsule graph version 3 replaces version 2 with a dense commit-to-set
+root directory and a content-addressed node directory in each existing layer
+object. Persistent binary interval trees share immutable children, collapse full
+ranges and omit unary branches. Exact DAG unions preserve both merge parents and
+disconnected history. Full readback recomputes every set from verified positional
+records, verifies canonical node bytes and first-use layer placement, and rejects
+extra or missing nodes. Removing recurrence validation makes a re-signed forged
+set pass; restoring it rejects that set. This proves why authenticated pages alone
+are insufficient for visibility. Released manifest graph version 1 is unchanged.
+
+`CommitGraphReader::ancestry_membership` reads the selected root and batched node
+dependencies, preserves duplicates, checks self membership and rejects missing
+nodes and malformed interval routing. Its caller must supply roots authorized by
+the captured ref view. It does not authorize a root from record presence. The
+foreground repository still uses the materialized graph and pinned bitmap; their
+replacement and lazy path-state graph binding are the next implementation slice.
+
+`paged-ancestry-r1` passes 20 isolated cold/warm native Git comparisons at each of
+100, 1,000 and 10,000 commits, plus separate attribution checks. HTTP observation
+and whole-process CPU/RSS accompany opening and query measurements. At 10,000
+commits, the sampled record/OID/membership component reads at most 411,872 bytes;
+all warm component queries read zero backend bytes. Its cold p95 is 60.388 ms on
+the debug host, so these receipts do not establish a final foreground latency pass.
+Maintenance writes 47,483 / 649,672 / 8,238,957 backend bytes, with 0.15 / 1.03 /
+13.49 process CPU seconds; these include migration/build work, not just set union.
+The prototype's encoded membership storage test stays below 3x on each doubling
+from 1k to 8k for linear, eight-branch, criss-cross and disconnected shapes. This
+is fixture qualification, not a worst-case complexity claim.
+
+`ancestry-transitions-r1` uses a separate task-created native Git repository and
+RustFS prefix. The main tip excludes side descendants, a merge includes both
+parents, and force-push rewind plus side-ref deletion excludes physically retained
+descendants. Native Git independently verifies all membership answers. The source
+fixtures and raw receipts remain outside the checkout. Full stage-4 opening,
+ref-count/frontier scaling, release-image/cloud performance and stages 5–8 remain
+open.
+
+The final rebuilt binary also passes `paged-ancestry-r2` (60 cold/warm native Git
+comparisons and attribution checks) and `ancestry-transitions-r2`. Focused final
+checks pass 27 graph/ancestry tests, 21 path-state tests, capsule browse publication
+integration, payload-only compilation, strict metadata library Clippy, qualifier
+diagnostic Clippy and architecture guardrails. The negative-control source is
+restored; final source/binary hashes and receipts are retained externally.

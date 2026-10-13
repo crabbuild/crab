@@ -100,7 +100,7 @@ def verify_queries(source: Path, records: list[dict], revision: str) -> dict:
                 require(item["commit"] == expected, "last-change commit differs")
         elif name == "blame":
             lines_checked += check_line_origins(git, head, path, value["ranges"])
-        elif name == "graph-pages":
+        elif name in {"graph-pages", "graph-ancestry"}:
             rows = value["records"]
             require(len(rows) == 4 and rows[1] == rows[3], "graph batch order/duplicates differ")
             for item in rows:
@@ -112,6 +112,13 @@ def verify_queries(source: Path, records: list[dict], revision: str) -> dict:
                 require(item["tree"] == tree and item["parents"] == parents
                         and item["committer_seconds"] == int(committer.rsplit(b" ", 2)[1]),
                         "graph record differs from native Git")
+            if name == "graph-ancestry":
+                require(value["root"] == head, "ancestry root differs from captured HEAD")
+                require(len(value["membership"]) == len(rows), "missing ancestry answers")
+                for item, actual in zip(rows, value["membership"]):
+                    result = subprocess.run(["git", "-C", str(source), "merge-base", "--is-ancestor", item["oid"], value["root"]], capture_output=True)
+                    require(result.returncode in {0, 1}, "native ancestry oracle failed")
+                    require(actual == (result.returncode == 0), "ancestry membership differs from native Git")
         else:
             raise AssertionError("unverified qualification operation: " + name)
     return {"status":"passed", "head":head, "queries_checked":len(results),
