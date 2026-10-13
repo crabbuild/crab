@@ -108,7 +108,7 @@ impl SchedulerStatus {
         self.completed.store(true, Ordering::Release);
         let _ = self
             .progress
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |progress| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |progress| {
                 progress.checked_add(1)
             });
     }
