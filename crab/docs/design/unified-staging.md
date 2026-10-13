@@ -124,6 +124,15 @@ ownership and segment payload inventory. Operation creation is transactional;
 prepared verification candidates acquire a path lease before input is consumed.
 The same lease is replaced on sealing, or removed on abort.
 
+Staging writer and shared-reader connections set a 64 MiB page-cache budget.
+The recording/claim indexes use hash order and exceed SQLite's default 2 MiB
+cache on a 10 GiB recipe. A production-API probe with 163,840 unique terms took
+3.5 s in memory, 147.9 s on disk with the default cache, and 57.0 s with 64 MiB
+on this workspace volume. This isolates index I/O; it is one diagnostic trial,
+not a controlled end-to-end speedup claim. The temporary probe is retained with
+local receipts outside Git and removed from product/tests. The budget is per
+connection, allocated as needed; it follows the [SQLite cache contract](https://sqlite.org/pragma.html#pragma_cache_size).
+
 SQLite retains `synchronous=NORMAL` for recording batches. FULL WAL checkpoints
 sync ownership before publication and reclamation; a busy/incomplete checkpoint
 fails the operation. This follows the [SQLite checkpoint contract](https://sqlite.org/pragma.html#pragma_wal_checkpoint).
@@ -262,9 +271,13 @@ evidence, not final-revision qualification.
 
 The broad minimal-feature Crab suite passed 4,162 tests and exposed 12 failures.
 One was related: staging admission masked an already parse-rejected atomic push;
-production admission now skips such batches. The other failures concern tier,
-provider and replication behavior outside this refactor; default-feature CI and
-scoped baseline proof must distinguish them from staging regressions.
+production admission now skips such batches. The rerun confirms the atomic regression passes. It also exposes the existing
+import cancellation test: cancellation occurs before any worker claims a row,
+leaving all 50 pending. That is permitted by the unchanged cancel-before-claim
+contract on `origin/main`; the test assumes worker progress within 50 ms, which
+Tokio does not promise. Keep that timing-test gap explicit. Other failures
+concern tier, provider and replication behavior outside this refactor;
+default-feature CI must distinguish them from staging regressions.
 
 ## Expected gains and limits
 

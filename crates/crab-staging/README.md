@@ -35,7 +35,9 @@ caller publication / push upload
 schema, runs crash recovery, and opens the current segment.
 `StagingAreaReadOnly` acquires a shared lock for concurrent push readers.
 In-process index and writer locks are scoped so no synchronous mutex is held
-across an async suspension.
+across an async suspension. Writer and shared-reader connections use a 64 MiB
+page-cache budget to avoid random hash-index I/O with SQLite's smaller default.
+This is a per-connection budget, not memory proportional to file size.
 
 `ingest::IngestSession` is the shared mutation path for native add and Git
 clean. `stream` supplies descriptor-safe file reads and validation. Git owns

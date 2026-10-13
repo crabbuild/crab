@@ -20,6 +20,7 @@ type ResidualAuthorityRow = (i64, Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>)
 
 /// Canonical local ownership layout; v1 shipped in release v1.2.4.
 const LAYOUT_VERSION: &str = "2";
+const INDEX_CACHE_KIB: i64 = 64 * 1024;
 const UNOWNED_CHUNK_PAYLOAD: &str = "NOT EXISTS (
     SELECT 1 FROM recipe_payload_leases WHERE recipe_payload_leases.chunk_hash = chunk_payloads.chunk_hash
 ) AND NOT EXISTS (
@@ -553,6 +554,10 @@ impl Index {
         conn.pragma_update(None, "temp_store", "FILE")
             .map_err(|e| StagingError::Internal(format!("failed to set temp_store = FILE: {e}")))?;
 
+        // Recording and claim indexes use hash order, so the default 2 MiB
+        // cache thrashes on large files. Bound this shared connection to 64 MiB
+        // instead of growing memory with the number of chunk occurrences.
+        conn.pragma_update(None, "cache_size", -INDEX_CACHE_KIB)?;
         let mut idx = Self { conn };
         idx.open_canonical_schema()?;
         Ok(idx)
@@ -586,6 +591,7 @@ impl Index {
             .map_err(|e| StagingError::Internal(format!("failed to enable foreign keys: {e}")))?;
         conn.pragma_update(None, "temp_store", "FILE")
             .map_err(|e| StagingError::Internal(format!("failed to set temp_store = FILE: {e}")))?;
+        conn.pragma_update(None, "cache_size", -INDEX_CACHE_KIB)?;
         let mut index = Self { conn };
         index.open_canonical_schema()?;
         Ok(index)
