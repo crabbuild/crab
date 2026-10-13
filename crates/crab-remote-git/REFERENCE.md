@@ -296,7 +296,7 @@ workload gets a fresh runtime and runs cold/warm with opening reported separatel
 
 ```console
 CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-remote-qualification \
-  cargo run -p crab-remote-git --release --example qualify_remote -- \
+  cargo run -p crab-remote --features publication --release --example qualify_remote -- \
   <bucket> <repository-prefix> <text-path> [operation|all|build-indexes]
 ```
 

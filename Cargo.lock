@@ -2538,12 +2538,14 @@ dependencies = [
  "rand 0.9.4",
  "serde",
  "serde_json",
+ "sha1 0.10.6",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "toml",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2555,8 +2557,6 @@ dependencies = [
  "bytes",
  "crab-git",
  "crab-metadata",
- "crab-read",
- "crab-remote",
  "crab-storage",
  "crab-xet",
  "flate2",

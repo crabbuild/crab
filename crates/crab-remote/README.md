@@ -69,3 +69,12 @@ Every publication callback retains its terminal outcome while leases and
 heartbeats drain. Missing historical proof stays indeterminate; current ref
 equality never invents attribution. Protected receive remains server-authorized
 and cannot be invoked as a client-authorized commit.
+
+## Read qualification
+
+The `publication` feature exposes `qualify_remote` and `qualify_browse` examples.
+They compose capsule capture, read APIs and explicit browse-index maintenance at
+this orchestration boundary. The low-level remote Git reader retains its narrow
+Git/storage/metadata dependency boundary. See the
+[indexed-read qualification contract](../../crab/docs/architecture/indexed-remote-reads.md)
+for commands, native Git oracles and cold/warm measurement semantics.
