@@ -1821,12 +1821,11 @@ fn stage_owned_chunks_batch_blocking(
         .enumerate()
         .map(|(index, (hash, _))| (index, (*hash).into()))
         .collect();
-    let (existing, new_chunk_indices) =
-        lock_index(index)?.batch_dedup_check(&hashes, &file_hash)?;
+    let (existing, new_chunk_indices) = lock_index(index)?.batch_dedup_check(&hashes)?;
 
     let existing_refs = existing
         .into_iter()
-        .map(|(index, chunk_hash, locator, _is_mapped)| {
+        .map(|(index, chunk_hash, locator)| {
             Ok(PendingRow {
                 chunk_hash,
                 file_hash,
@@ -6972,12 +6971,6 @@ mod batch_diagnostic_tests {
     /// Intra-batch duplicate: when a chunk hash repeats within the same
     /// batch AND the chunk already exists on disk (e.g. from an earlier
     /// file that shares chunks), both positions must be inserted.
-    ///
-    /// Prior buggy behavior: `batch_dedup_check` marked both occurrences
-    /// `is_mapped=false` since the chunk wasn't yet in THIS file, so
-    /// both got inserted — that case worked. The failure mode is the
-    /// cross-batch one above. This test locks down the intra-batch
-    /// cross-file shared-chunk case for regression coverage.
     #[tokio::test(flavor = "multi_thread")]
     async fn stage_chunks_batch_preserves_positions_on_repeat_hash_within_single_batch() {
         use tests::make_chunk_pub as make_chunk;
@@ -7002,9 +6995,7 @@ mod batch_diagnostic_tests {
             .await
             .expect("stage other");
 
-        // Real file layout: [A, B, A] as a single batch. `batch_dedup_check`
-        // will see A as existing (from the other file) with
-        // `is_mapped=false` for the real file's rows.
+        // Cross-file payload reuse must still record both occurrences of A.
         let real_file = compute_data_hash(b"real-file");
         let total_bytes = (a_data.len() * 2 + b_data.len()) as u64;
         staging

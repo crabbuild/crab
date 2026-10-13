@@ -229,7 +229,7 @@ pub(crate) struct StoredPublicationIntent {
     pub entries: Vec<StoredPublicationIntentEntry>,
 }
 
-pub(crate) type BatchDedupExisting = (usize, [u8; 32], ChunkLocator, bool);
+pub(crate) type BatchDedupExisting = (usize, [u8; 32], ChunkLocator);
 pub(crate) type BatchDedupResult = (Vec<BatchDedupExisting>, Vec<usize>);
 
 const PREPARED_XORB_QUERY_BATCH: usize = 500;
@@ -8324,184 +8324,82 @@ impl Index {
         Ok(())
     }
 
-    /// Batch dedup check: classify chunks as existing (with locator) or new.
+    /// Classify requested chunk occurrences by existing payload locator or absence.
     ///
-    /// For each `(index, chunk_hash)` pair, checks both `chunks` and
-    /// `pending_chunks` tables. Returns two vecs:
-    /// - `existing`: `(original_index, chunk_hash, locator, is_mapped)` for
-    ///   chunks already stored. `is_mapped` is true if the chunk is already
-    ///   associated with `file_hash`.
-    /// - `new_indices`: indices of chunks not found in either table.
-    ///
-    /// Uses a temp table + batch INSERT to avoid per-chunk round-trips.
-    pub fn batch_dedup_check(
-        &self,
-        hashes: &[(usize, [u8; 32])],
-        file_hash: &[u8; 32],
-    ) -> Result<BatchDedupResult> {
-        if hashes.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
-        }
-
-        let fh: &[u8] = file_hash;
+    /// Committed locators take precedence over pending locators. Every requested
+    /// occurrence is retained, including repeated hashes and cross-file reuse.
+    pub fn batch_dedup_check(&self, hashes: &[(usize, [u8; 32])]) -> Result<BatchDedupResult> {
         let mut indices_by_hash: std::collections::HashMap<[u8; 32], Vec<usize>> =
             std::collections::HashMap::with_capacity(hashes.len());
-        for (i, hash) in hashes {
-            indices_by_hash.entry(*hash).or_default().push(*i);
+        for (index, hash) in hashes {
+            indices_by_hash.entry(*hash).or_default().push(*index);
         }
+        let mut existing_by_hash = std::collections::HashMap::<[u8; 32], ChunkLocator>::new();
 
-        let unique_hashes: Vec<[u8; 32]> = indices_by_hash.keys().copied().collect();
-        let mut existing_by_hash: std::collections::HashMap<[u8; 32], (ChunkLocator, bool)> =
-            std::collections::HashMap::new();
-
-        // Look up one locator per unique hash. Repeated chunk hashes
-        // are common for sparse or zero-filled large files; joining
-        // every batch row against every existing row for the same hash
-        // turns into an O(batch * staged_rows) explosion.
-        let mut found_set = std::collections::HashSet::new();
-        const DEDUP_LOOKUP_BATCH: usize = 400;
-        for unique_batch in unique_hashes.chunks(DEDUP_LOOKUP_BATCH) {
-            let placeholders = vec!["?"; unique_batch.len()].join(",");
-            let sql = format!(
-                "SELECT picked.chunk_hash, c.segment_id, c.segment_offset, c.size,
-                        EXISTS(SELECT 1 FROM chunks c2
-                               WHERE c2.chunk_hash = picked.chunk_hash
-                                 AND c2.file_hash = ? LIMIT 1)
-                 FROM (
-                     SELECT chunk_hash, MIN(rowid) AS picked_rowid
-                     FROM chunks
-                     WHERE chunk_hash IN ({placeholders})
-                     GROUP BY chunk_hash
-                 ) picked
-                 INNER JOIN chunks c ON c.rowid = picked.picked_rowid"
-            );
-            let mut stmt = self
-                .conn
-                .prepare(&sql)
-                .map_err(|e| StagingError::Internal(format!("prepare committed join: {e}")))?;
-
-            let rows = stmt
-                .query_map(
-                    params_from_iter(
-                        std::iter::once(fh).chain(unique_batch.iter().map(|h| h.as_slice())),
-                    ),
-                    |row| {
-                        let blob: Vec<u8> = row.get(0)?;
-                        let seg_id: u64 = row.get(1)?;
-                        let offset: u64 = row.get(2)?;
-                        let length: u32 = row.get(3)?;
-                        let mapped: bool = row.get(4)?;
-                        Ok((blob, seg_id, offset, length, mapped))
-                    },
-                )
-                .map_err(|e| StagingError::Internal(format!("query committed join: {e}")))?;
-
-            for row in rows {
-                let (blob, seg_id, offset, length, mapped) =
-                    row.map_err(|e| StagingError::Internal(format!("read committed row: {e}")))?;
-                let mut hash = [0u8; 32];
-                if blob.len() == 32 {
-                    hash.copy_from_slice(&blob);
-                }
-                existing_by_hash.insert(
-                    hash,
-                    (
-                        ChunkLocator {
-                            segment_id: seg_id,
-                            offset,
-                            length,
-                        },
-                        mapped,
-                    ),
+        // Membership is recorded separately for every occurrence. Computing an
+        // unused per-file membership flag here made each reused chunk scan the
+        // growing destination file, turning repeated-file ingestion quadratic.
+        for table in ["chunks", "pending_chunks"] {
+            let missing = indices_by_hash
+                .keys()
+                .filter(|hash| !existing_by_hash.contains_key(*hash))
+                .copied()
+                .collect::<Vec<_>>();
+            for batch in missing.chunks(400) {
+                let placeholders = vec!["?"; batch.len()].join(",");
+                let sql = format!(
+                    "SELECT picked.chunk_hash, c.segment_id, c.segment_offset, c.size
+                     FROM (
+                         SELECT chunk_hash, MIN(rowid) AS picked_rowid
+                         FROM {table}
+                         WHERE chunk_hash IN ({placeholders})
+                         GROUP BY chunk_hash
+                     ) picked
+                     INNER JOIN {table} c ON c.rowid = picked.picked_rowid"
                 );
+                let mut statement = self.conn.prepare(&sql).map_err(|error| {
+                    StagingError::Internal(format!("prepare {table} dedup lookup: {error}"))
+                })?;
+                let rows = statement
+                    .query_map(
+                        params_from_iter(batch.iter().map(|hash| hash.as_slice())),
+                        |row| {
+                            Ok((
+                                row.get::<_, Vec<u8>>(0)?,
+                                ChunkLocator {
+                                    segment_id: row.get(1)?,
+                                    offset: row.get(2)?,
+                                    length: row.get(3)?,
+                                },
+                            ))
+                        },
+                    )
+                    .map_err(|error| {
+                        StagingError::Internal(format!("query {table} dedup lookup: {error}"))
+                    })?;
+                for row in rows {
+                    let (blob, locator) = row.map_err(|error| {
+                        StagingError::Internal(format!("read {table} dedup locator: {error}"))
+                    })?;
+                    let mut hash = [0; 32];
+                    if blob.len() == 32 {
+                        hash.copy_from_slice(&blob);
+                    }
+                    existing_by_hash.insert(hash, locator);
+                }
             }
         }
 
-        let missing_hashes: Vec<[u8; 32]> = unique_hashes
+        let new_indices = hashes
             .iter()
-            .copied()
-            .filter(|hash| !existing_by_hash.contains_key(hash))
+            .filter_map(|(index, hash)| (!existing_by_hash.contains_key(hash)).then_some(*index))
             .collect();
-
-        for missing_batch in missing_hashes.chunks(DEDUP_LOOKUP_BATCH) {
-            let pending_placeholders = vec!["?"; missing_batch.len()].join(",");
-            let sql = format!(
-                "SELECT picked.chunk_hash, p.segment_id, p.segment_offset, p.size,
-                        EXISTS(SELECT 1 FROM pending_chunks p2
-                               WHERE p2.chunk_hash = picked.chunk_hash
-                                 AND p2.file_hash = ? LIMIT 1)
-                 FROM (
-                     SELECT chunk_hash, MIN(rowid) AS picked_rowid
-                     FROM pending_chunks
-                     WHERE chunk_hash IN ({pending_placeholders})
-                     GROUP BY chunk_hash
-                 ) picked
-                 INNER JOIN pending_chunks p ON p.rowid = picked.picked_rowid"
-            );
-            let mut stmt = self
-                .conn
-                .prepare(&sql)
-                .map_err(|e| StagingError::Internal(format!("prepare pending join: {e}")))?;
-
-            let rows = stmt
-                .query_map(
-                    params_from_iter(
-                        std::iter::once(fh).chain(missing_batch.iter().map(|h| h.as_slice())),
-                    ),
-                    |row| {
-                        let blob: Vec<u8> = row.get(0)?;
-                        let seg_id: u64 = row.get(1)?;
-                        let offset: u64 = row.get(2)?;
-                        let length: u32 = row.get(3)?;
-                        let mapped: bool = row.get(4)?;
-                        Ok((blob, seg_id, offset, length, mapped))
-                    },
-                )
-                .map_err(|e| StagingError::Internal(format!("query pending join: {e}")))?;
-
-            for row in rows {
-                let (blob, seg_id, offset, length, mapped) =
-                    row.map_err(|e| StagingError::Internal(format!("read pending row: {e}")))?;
-                let mut hash = [0u8; 32];
-                if blob.len() == 32 {
-                    hash.copy_from_slice(&blob);
-                }
-                existing_by_hash.insert(
-                    hash,
-                    (
-                        ChunkLocator {
-                            segment_id: seg_id,
-                            offset,
-                            length,
-                        },
-                        mapped,
-                    ),
-                );
-            }
-        }
-
         let mut existing = Vec::new();
-        for (hash, (loc, mapped)) in existing_by_hash {
+        for (hash, locator) in existing_by_hash {
             if let Some(indices) = indices_by_hash.get(&hash) {
-                for &idx in indices {
-                    found_set.insert(idx);
-                    existing.push((idx, hash, loc, mapped));
-                }
+                existing.extend(indices.iter().map(|index| (*index, hash, locator)));
             }
         }
-
-        // Everything not in found_set is new.
-        let new_indices: Vec<usize> = hashes
-            .iter()
-            .filter_map(|(i, _)| {
-                if found_set.contains(i) {
-                    None
-                } else {
-                    Some(*i)
-                }
-            })
-            .collect();
-
         Ok((existing, new_indices))
     }
 
@@ -10360,6 +10258,101 @@ mod tests {
     }
 
     #[test]
+    fn batch_dedup_preserves_occurrences_and_committed_precedence() {
+        let idx = open_in_memory();
+        let file_hash = test_hash(0xA0);
+        let segment_id = idx.allocate_segment_id().unwrap();
+        insert_test_file(&idx, &file_hash, 3);
+        let a = test_hash(1);
+        let b = test_hash(2);
+        let c = test_hash(3);
+        for (table, position, hash, offset) in [
+            ("chunks", 0, a, 10),
+            ("chunks", 1, c, 20),
+            ("pending_chunks", 0, a, 30),
+            ("pending_chunks", 1, b, 40),
+        ] {
+            idx.conn.execute(
+                &format!("INSERT INTO {table} (chunk_hash, file_hash, chunk_index, size, segment_id, segment_offset)
+                          VALUES (?1, ?2, ?3, 1, ?4, ?5)"),
+                params![hash.as_slice(), file_hash.as_slice(), position, segment_id, offset],
+            ).unwrap();
+        }
+        let (existing, missing) = idx
+            .batch_dedup_check(&[(0, a), (1, b), (2, a), (3, c), (4, test_hash(4))])
+            .unwrap();
+        let mut locations = existing
+            .into_iter()
+            .map(|(index, hash, locator)| (index, hash, locator.offset))
+            .collect::<Vec<_>>();
+        locations.sort_by_key(|(index, _, _)| *index);
+        assert_eq!(
+            (locations, missing),
+            (
+                vec![(0, a, 10), (1, b, 40), (2, a, 10), (3, c, 20)],
+                vec![4]
+            )
+        );
+    }
+
+    #[test]
+    fn batch_dedup_work_is_bounded_by_requested_chunks() {
+        let idx = open_in_memory();
+        let source = test_hash(0xA1);
+        let target = test_hash(0xA2);
+        let segment_id = idx.allocate_segment_id().unwrap();
+        insert_test_file(&idx, &source, 64);
+        insert_test_file(&idx, &target, 32_000);
+        let hash = |index: u64| {
+            let mut hash = [0; 32];
+            hash[..8].copy_from_slice(&index.to_le_bytes());
+            hash
+        };
+        let rows = (0..32_064_u64)
+            .map(|index| PendingRow {
+                chunk_hash: hash(index),
+                file_hash: if index < 64 { source } else { target },
+                chunk_index: index as i64,
+                size: 1,
+                segment_id,
+                segment_offset: index * 9,
+            })
+            .collect::<Vec<_>>();
+        idx.insert_pending(&rows).unwrap();
+        let requested = (0..64)
+            .map(|index| (index, hash(index as u64)))
+            .collect::<Vec<_>>();
+
+        extern "C" fn interrupt_over_budget(_: *mut std::ffi::c_void) -> std::ffi::c_int {
+            1
+        }
+        // Bound SQLite work, not wall time: a file-membership scan per reused
+        // chunk exceeds this budget even though callers need only its locator.
+        // SAFETY: this test owns the live connection; the callback accesses no
+        // state and is removed before asserting or dropping the connection.
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(
+                idx.conn.handle(),
+                1_000_000,
+                Some(interrupt_over_budget),
+                std::ptr::null_mut(),
+            );
+        }
+        let result = idx.batch_dedup_check(&requested);
+        // SAFETY: the same live connection is exclusively owned by this test.
+        unsafe {
+            rusqlite::ffi::sqlite3_progress_handler(
+                idx.conn.handle(),
+                0,
+                None,
+                std::ptr::null_mut(),
+            );
+        }
+        let (existing, missing) = result.expect("bounded dedup lookup");
+        assert_eq!((existing.len(), missing), (requested.len(), Vec::new()));
+    }
+
+    #[test]
     fn batch_dedup_check_pages_unique_hashes_below_sqlite_bind_limit() {
         const HASHES: usize = 1024;
 
@@ -10375,7 +10368,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let (existing, new_indices) = idx
-            .batch_dedup_check(&hashes, &file_hash)
+            .batch_dedup_check(&hashes)
             .expect("paged batch dedup check");
         assert!(existing.is_empty());
         assert_eq!(new_indices.len(), HASHES);

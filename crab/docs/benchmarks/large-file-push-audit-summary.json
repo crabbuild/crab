@@ -1,0 +1,724 @@
+{
+  "run_id": "large-10g-r2",
+  "status": "passed",
+  "finished_at": "2026-10-13T05:22:25+00:00",
+  "backend": "Native RustFS 1.0.0-rc.1, loopback S3, shared macOS host",
+  "source_tip": "e9d1dea6402f9b6a75dda6c95f29b80495f70989",
+  "provenance": {
+    "crab_binary_sha256": "587de9935c28a276058ab79a53fb379e43346872e315a1e73ba18453cae69935",
+    "source_patch_sha256": "232a44a320dc8ac97e540c5d9d15ff61cd398f355dcd0d0ea640b1bf0e247bb6",
+    "harness_sha256": "f5f880c4f87901941fa8269bffa473a9d2d472ac43a7a3ba80fba687ce2525a3",
+    "report_sha256": "482df92dc96a1448dee0a85a1044bd5d3d4164afb1f8563a9341c3bf2844179c",
+    "large_file_edits_sha256": "ef814ce9427f0b43b780faa4003e8572327961f82cd55475ffd445b5a4ab1443",
+    "raw_artifacts": "Retained in large-file-push-audit-abf8fc00/large-10g-r2 on the mounted workspace volume; diagnostic runs retained separately"
+  },
+  "workload": {
+    "code_files": 5000,
+    "file_bytes": 10737418240,
+    "files": 2,
+    "initial_unique_bytes": 10737418240,
+    "versions": 4
+  },
+  "correctness": {
+    "checks_passed": 49,
+    "historical_sha256_comparisons": 8,
+    "strict_git_fsck_runs": 2,
+    "remote_fsck": {
+      "errors": 0,
+      "info_count": 0,
+      "repaired": 0,
+      "repair_failures": 0,
+      "passed": true
+    },
+    "binary_unchanged": true,
+    "proxy_errors": {}
+  },
+  "history": [
+    {
+      "version": 0,
+      "commit": "eb46e049b7c70f31259179bbb47e6110d7cf0b2d",
+      "files": {
+        "model-a.bin": "67d2d65f0e66bbf859d265c7d6d60f24c3457dcf68bb72373433f2fe65d80aa5",
+        "model-b.bin": "67d2d65f0e66bbf859d265c7d6d60f24c3457dcf68bb72373433f2fe65d80aa5"
+      }
+    },
+    {
+      "version": 1,
+      "commit": "6e054b2e32ec4cf65241b23b9860e36b7fd6ed0c",
+      "files": {
+        "model-a.bin": "f3b5371e8a8120300ef11a6b942ab2cf870e6c8617ba1c75d7457a50fc46e39b",
+        "model-b.bin": "a9b203c3e70c8233999b8758f065e5361207c79a3fbb2e3bf9fb23e24626716d"
+      }
+    },
+    {
+      "version": 2,
+      "commit": "642abfa64aba8e32827b3b51802c7fc696829b10",
+      "files": {
+        "model-a.bin": "c14f0d3083a68ef34f49f49e073f6e4b335c1fbfb7b760c505d0cf7df5a02200",
+        "model-b.bin": "ad5bddcb8fc58c6d807895caaaa590b2bd065369db64a112a0211a822272b4bd"
+      }
+    },
+    {
+      "version": 3,
+      "commit": "850b74a5e7ebb7e01c75734ad7824c9e475bba04",
+      "files": {
+        "model-a.bin": "606a4258c24b325b31e24378e3ac60faf17c23113382cc1fadc475c534aa3306",
+        "model-b.bin": "463e784dbd54c5fab6aa89b9fb0db26bfa6a4ac03b20960706103e4f4f7fbc80"
+      }
+    }
+  ],
+  "phases": [
+    {
+      "version": 0,
+      "phase": "add",
+      "duration_ms": 279418,
+      "staging_directory_bytes": {
+        "segments": 0,
+        "push-plans": 10744916848
+      },
+      "transport": {
+        "requests": 3,
+        "response_body_bytes": 1034,
+        "request_body_bytes": 0,
+        "operations": {
+          "get": 1,
+          "list": 2
+        },
+        "proxy_errors": {},
+        "methods": {
+          "GET": 3
+        },
+        "classes": {
+          ".crab:list": 2,
+          "e2e-add-commit-push:get": 1
+        },
+        "statuses": {
+          "2xx": 3
+        },
+        "categories": {
+          ".crab": 2,
+          "e2e-add-commit-push": 1
+        }
+      }
+    },
+    {
+      "version": 0,
+      "phase": "push",
+      "duration_ms": 227336,
+      "new_xorb_bytes": 10744916848,
+      "xorbs": {
+        "objects": 161,
+        "bytes": 10744916848
+      },
+      "transport": {
+        "requests": 371,
+        "response_body_bytes": 10774388946,
+        "request_body_bytes": 10774388101,
+        "operations": {
+          "get": 176,
+          "head": 8,
+          "list": 3,
+          "put": 184
+        },
+        "proxy_errors": {},
+        "methods": {
+          "GET": 179,
+          "HEAD": 8,
+          "PUT": 184
+        },
+        "classes": {
+          ".crab:get": 168,
+          ".crab:head": 4,
+          ".crab:put": 172,
+          "e2e-add-commit-push:get": 8,
+          "e2e-add-commit-push:head": 4,
+          "e2e-add-commit-push:list": 3,
+          "e2e-add-commit-push:put": 12
+        },
+        "statuses": {
+          "2xx": 366,
+          "4xx": 5
+        },
+        "categories": {
+          ".crab": 344,
+          "e2e-add-commit-push": 27
+        }
+      },
+      "upload_concurrency": 4
+    },
+    {
+      "version": 1,
+      "phase": "add",
+      "duration_ms": 486400,
+      "staging_directory_bytes": {
+        "segments": 10739857220,
+        "push-plans": 10744916848
+      },
+      "transport": {
+        "requests": 2,
+        "response_body_bytes": 896,
+        "request_body_bytes": 0,
+        "operations": {
+          "get": 2
+        },
+        "proxy_errors": {},
+        "methods": {
+          "GET": 2
+        },
+        "classes": {
+          "e2e-add-commit-push:get": 2
+        },
+        "statuses": {
+          "2xx": 2
+        },
+        "categories": {
+          "e2e-add-commit-push": 2
+        }
+      }
+    },
+    {
+      "version": 1,
+      "phase": "push",
+      "duration_ms": 2795,
+      "new_xorb_bytes": 2216724,
+      "xorbs": {
+        "objects": 163,
+        "bytes": 10747133572
+      },
+      "transport": {
+        "requests": 36,
+        "response_body_bytes": 31901749,
+        "request_body_bytes": 13311081,
+        "operations": {
+          "get": 15,
+          "head": 4,
+          "list": 2,
+          "put": 15
+        },
+        "proxy_errors": {},
+        "methods": {
+          "GET": 17,
+          "HEAD": 4,
+          "PUT": 15
+        },
+        "classes": {
+          ".crab:get": 7,
+          ".crab:head": 2,
+          ".crab:put": 9,
+          "e2e-add-commit-push:get": 8,
+          "e2e-add-commit-push:head": 2,
+          "e2e-add-commit-push:list": 2,
+          "e2e-add-commit-push:put": 6
+        },
+        "statuses": {
+          "2xx": 35,
+          "4xx": 1
+        },
+        "categories": {
+          ".crab": 18,
+          "e2e-add-commit-push": 18
+        }
+      },
+      "upload_concurrency": 1
+    },
+    {
+      "version": 2,
+      "phase": "add",
+      "duration_ms": 209544,
+      "staging_directory_bytes": {
+        "segments": 10739857220,
+        "push-plans": 10747050718
+      },
+      "transport": {
+        "requests": 3,
+        "response_body_bytes": 1034,
+        "request_body_bytes": 0,
+        "operations": {
+          "get": 1,
+          "list": 2
+        },
+        "proxy_errors": {},
+        "methods": {
+          "GET": 3
+        },
+        "classes": {
+          ".crab:list": 2,
+          "e2e-add-commit-push:get": 1
+        },
+        "statuses": {
+          "2xx": 3
+        },
+        "categories": {
+          ".crab": 2,
+          "e2e-add-commit-push": 1
+        }
+      }
+    },
+    {
+      "version": 2,
+      "phase": "push",
+      "duration_ms": 3737,
+      "new_xorb_bytes": 2133870,
+      "xorbs": {
+        "objects": 165,
+        "bytes": 10749267442
+      },
+      "transport": {
+        "requests": 37,
+        "response_body_bytes": 32020334,
+        "request_body_bytes": 13227636,
+        "operations": {
+          "get": 16,
+          "head": 4,
+          "list": 2,
+          "put": 15
+        },
+        "proxy_errors": {},
+        "methods": {
+          "GET": 18,
+          "HEAD": 4,
+          "PUT": 15
+        },
+        "classes": {
+          ".crab:get": 7,
+          ".crab:head": 2,
+          ".crab:put": 9,
+          "e2e-add-commit-push:get": 9,
+          "e2e-add-commit-push:head": 2,
+          "e2e-add-commit-push:list": 2,
+          "e2e-add-commit-push:put": 6
+        },
+        "statuses": {
+          "2xx": 36,
+          "4xx": 1
+        },
+        "categories": {
+          ".crab": 18,
+          "e2e-add-commit-push": 19
+        }
+      },
+      "upload_concurrency": 4
+    },
+    {
+      "version": 3,
+      "phase": "add",
+      "duration_ms": 335961,
+      "staging_directory_bytes": {
+        "segments": 10744203478,
+        "push-plans": 10747050718
+      },
+      "transport": {
+        "requests": 2,
+        "response_body_bytes": 896,
+        "request_body_bytes": 0,
+        "operations": {
+          "get": 2
+        },
+        "proxy_errors": {},
+        "methods": {
+          "GET": 2
+        },
+        "classes": {
+          "e2e-add-commit-push:get": 2
+        },
+        "statuses": {
+          "2xx": 2
+        },
+        "categories": {
+          "e2e-add-commit-push": 2
+        }
+      }
+    },
+    {
+      "version": 3,
+      "phase": "push",
+      "duration_ms": 3473,
+      "new_xorb_bytes": 2215428,
+      "xorbs": {
+        "objects": 167,
+        "bytes": 10751482870
+      },
+      "transport": {
+        "requests": 38,
+        "response_body_bytes": 32303789,
+        "request_body_bytes": 13312478,
+        "operations": {
+          "get": 17,
+          "head": 4,
+          "list": 2,
+          "put": 15
+        },
+        "proxy_errors": {},
+        "methods": {
+          "GET": 19,
+          "HEAD": 4,
+          "PUT": 15
+        },
+        "classes": {
+          ".crab:get": 7,
+          ".crab:head": 2,
+          ".crab:put": 9,
+          "e2e-add-commit-push:get": 10,
+          "e2e-add-commit-push:head": 2,
+          "e2e-add-commit-push:list": 2,
+          "e2e-add-commit-push:put": 6
+        },
+        "statuses": {
+          "2xx": 37,
+          "4xx": 1
+        },
+        "categories": {
+          ".crab": 18,
+          "e2e-add-commit-push": 20
+        }
+      },
+      "upload_concurrency": 4
+    },
+    {
+      "version": 0,
+      "phase": "cold-hydrate",
+      "duration_ms": 427898,
+      "transport": {
+        "requests": 180,
+        "response_body_bytes": 11054361646,
+        "request_body_bytes": 0,
+        "operations": {
+          "get": 176,
+          "head": 2,
+          "list": 2
+        },
+        "proxy_errors": {},
+        "methods": {
+          "GET": 178,
+          "HEAD": 2
+        },
+        "classes": {
+          ".crab:get": 169,
+          ".crab:head": 2,
+          "e2e-add-commit-push:get": 7,
+          "e2e-add-commit-push:list": 2
+        },
+        "statuses": {
+          "2xx": 180
+        },
+        "categories": {
+          ".crab": 171,
+          "e2e-add-commit-push": 9
+        }
+      }
+    },
+    {
+      "version": 1,
+      "phase": "cold-hydrate",
+      "duration_ms": 408690,
+      "transport": {
+        "requests": 182,
+        "response_body_bytes": 11056599730,
+        "request_body_bytes": 0,
+        "operations": {
+          "get": 178,
+          "head": 2,
+          "list": 2
+        },
+        "proxy_errors": {},
+        "methods": {
+          "GET": 180,
+          "HEAD": 2
+        },
+        "classes": {
+          ".crab:get": 171,
+          ".crab:head": 2,
+          "e2e-add-commit-push:get": 7,
+          "e2e-add-commit-push:list": 2
+        },
+        "statuses": {
+          "2xx": 182
+        },
+        "categories": {
+          ".crab": 173,
+          "e2e-add-commit-push": 9
+        }
+      }
+    },
+    {
+      "version": 2,
+      "phase": "cold-hydrate",
+      "duration_ms": 415700,
+      "transport": {
+        "requests": 185,
+        "response_body_bytes": 11125862652,
+        "request_body_bytes": 0,
+        "operations": {
+          "get": 181,
+          "head": 2,
+          "list": 2
+        },
+        "proxy_errors": {},
+        "methods": {
+          "GET": 183,
+          "HEAD": 2
+        },
+        "classes": {
+          ".crab:get": 174,
+          ".crab:head": 2,
+          "e2e-add-commit-push:get": 7,
+          "e2e-add-commit-push:list": 2
+        },
+        "statuses": {
+          "2xx": 185
+        },
+        "categories": {
+          ".crab": 176,
+          "e2e-add-commit-push": 9
+        }
+      }
+    },
+    {
+      "version": 3,
+      "phase": "cold-hydrate",
+      "duration_ms": 445431,
+      "transport": {
+        "requests": 189,
+        "response_body_bytes": 11262267320,
+        "request_body_bytes": 0,
+        "operations": {
+          "get": 185,
+          "head": 2,
+          "list": 2
+        },
+        "proxy_errors": {},
+        "methods": {
+          "GET": 187,
+          "HEAD": 2
+        },
+        "classes": {
+          ".crab:get": 178,
+          ".crab:head": 2,
+          "e2e-add-commit-push:get": 7,
+          "e2e-add-commit-push:list": 2
+        },
+        "statuses": {
+          "2xx": 189
+        },
+        "categories": {
+          ".crab": 180,
+          "e2e-add-commit-push": 9
+        }
+      }
+    }
+  ],
+  "timed_commands": [
+    {
+      "name": "v0 Crab add",
+      "duration_ms": 279418,
+      "exit_code": 0,
+      "max_rss_bytes": 367640576
+    },
+    {
+      "name": "v0 Crab push",
+      "duration_ms": 227336,
+      "exit_code": 0,
+      "max_rss_bytes": 816906240
+    },
+    {
+      "name": "v0 published refs",
+      "duration_ms": 463,
+      "exit_code": 0,
+      "max_rss_bytes": 101040128
+    },
+    {
+      "name": "v1 Git clean-filter add",
+      "duration_ms": 486400,
+      "exit_code": 0,
+      "max_rss_bytes": 90112000
+    },
+    {
+      "name": "v1 Crab push",
+      "duration_ms": 2795,
+      "exit_code": 0,
+      "max_rss_bytes": 286834688
+    },
+    {
+      "name": "v1 published refs",
+      "duration_ms": 643,
+      "exit_code": 0,
+      "max_rss_bytes": 99074048
+    },
+    {
+      "name": "v2 Crab add",
+      "duration_ms": 209544,
+      "exit_code": 0,
+      "max_rss_bytes": 291930112
+    },
+    {
+      "name": "v2 Crab push",
+      "duration_ms": 3737,
+      "exit_code": 0,
+      "max_rss_bytes": 298008576
+    },
+    {
+      "name": "v2 published refs",
+      "duration_ms": 603,
+      "exit_code": 0,
+      "max_rss_bytes": 100302848
+    },
+    {
+      "name": "v3 Git clean-filter add",
+      "duration_ms": 335961,
+      "exit_code": 0,
+      "max_rss_bytes": 88948736
+    },
+    {
+      "name": "v3 Crab push",
+      "duration_ms": 3473,
+      "exit_code": 0,
+      "max_rss_bytes": 293437440
+    },
+    {
+      "name": "v3 published refs",
+      "duration_ms": 670,
+      "exit_code": 0,
+      "max_rss_bytes": 102072320
+    },
+    {
+      "name": "independent clone",
+      "duration_ms": 2465,
+      "exit_code": 0,
+      "max_rss_bytes": 99975168
+    },
+    {
+      "name": "v0 checkout",
+      "duration_ms": 452,
+      "exit_code": 0,
+      "max_rss_bytes": 21856256
+    },
+    {
+      "name": "v0 cold hydrate",
+      "duration_ms": 427898,
+      "exit_code": 0,
+      "max_rss_bytes": 942620672
+    },
+    {
+      "name": "v0 dehydrate",
+      "duration_ms": 49357,
+      "exit_code": 0,
+      "max_rss_bytes": 19185664
+    },
+    {
+      "name": "v1 checkout",
+      "duration_ms": 11796,
+      "exit_code": 0,
+      "max_rss_bytes": 21872640
+    },
+    {
+      "name": "v1 cold hydrate",
+      "duration_ms": 408690,
+      "exit_code": 0,
+      "max_rss_bytes": 995835904
+    },
+    {
+      "name": "v1 dehydrate",
+      "duration_ms": 44390,
+      "exit_code": 0,
+      "max_rss_bytes": 19136512
+    },
+    {
+      "name": "v2 checkout",
+      "duration_ms": 456,
+      "exit_code": 0,
+      "max_rss_bytes": 21823488
+    },
+    {
+      "name": "v2 cold hydrate",
+      "duration_ms": 415700,
+      "exit_code": 0,
+      "max_rss_bytes": 1114570752
+    },
+    {
+      "name": "v2 dehydrate",
+      "duration_ms": 78493,
+      "exit_code": 0,
+      "max_rss_bytes": 19103744
+    },
+    {
+      "name": "v3 checkout",
+      "duration_ms": 368,
+      "exit_code": 0,
+      "max_rss_bytes": 21725184
+    },
+    {
+      "name": "v3 cold hydrate",
+      "duration_ms": 445431,
+      "exit_code": 0,
+      "max_rss_bytes": 888586240
+    },
+    {
+      "name": "v3 dehydrate",
+      "duration_ms": 111306,
+      "exit_code": 0,
+      "max_rss_bytes": 19218432
+    },
+    {
+      "name": "remote integrity",
+      "duration_ms": 153300,
+      "exit_code": 0,
+      "max_rss_bytes": 249544704
+    }
+  ],
+  "transport_total": {
+    "requests": 1518,
+    "request_body_bytes": 10814939744,
+    "response_body_bytes": 66374060674,
+    "methods": {
+      "GET": 1243,
+      "HEAD": 28,
+      "POST": 2,
+      "PUT": 245
+    },
+    "operations": {
+      "get": 1196,
+      "head": 28,
+      "list": 47,
+      "multipart_complete": 1,
+      "multipart_create": 1,
+      "multipart_part": 1,
+      "put": 244
+    },
+    "categories": {
+      ".crab": 1273,
+      "e2e-add-commit-push": 245
+    },
+    "classes": {
+      ".crab:get": 1052,
+      ".crab:head": 18,
+      ".crab:list": 4,
+      ".crab:put": 199,
+      "e2e-add-commit-push:get": 144,
+      "e2e-add-commit-push:head": 10,
+      "e2e-add-commit-push:list": 43,
+      "e2e-add-commit-push:multipart_complete": 1,
+      "e2e-add-commit-push:multipart_create": 1,
+      "e2e-add-commit-push:multipart_part": 1,
+      "e2e-add-commit-push:put": 45
+    },
+    "statuses": {
+      "2xx": 1500,
+      "4xx": 18
+    },
+    "proxy_errors": {}
+  },
+  "validation": {
+    "focused_rust_tests_passed": 181,
+    "release_build": "passed; no-default-features, simd-accel,gix-pathmatch",
+    "format": "passed",
+    "strict_staging_clippy": "failed: two pre-existing unfulfilled lint expectations in add_push_plan.rs",
+    "staging_clippy_diagnostic": "passed with only unfulfilled-lint-expectations allowed on command line"
+  },
+  "scope_limits": [
+    "Synthetic 5000-file tree, not real-repository history",
+    "Shared-host timings, no isolated throughput claim",
+    "Native/Git staging duplication and full catalog scans remain",
+    "Protected publication covered by store tests, not service E2E",
+    "Hosted S3, fault/concurrent-writer, default-feature and cross-platform qualification remain"
+  ]
+}

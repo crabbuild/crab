@@ -13,12 +13,15 @@ use crab_xet::xorb::builder::{RunId, XorbBuilder, XorbResult};
 use crab_xet::xorb::format::{Chunk, ChunkPlacement, MAX_XORB_SIZE, XorbRef};
 use crab_xet::xorb::parser::XorbParser;
 use futures_util::StreamExt;
+use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::metrics::Metrics;
 
-const PREPARED_XORB_UPLOAD_CONCURRENCY: usize = 4;
+// Each task can retain a complete candidate and origin readback. Keep that
+// existing payload bound even when a caller requests more network concurrency.
+const MAX_IN_FLIGHT_XORBS: usize = 4;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct XetPublicationStats {
@@ -27,6 +30,10 @@ pub(crate) struct XetPublicationStats {
     pub xorb_bytes_uploaded: u64,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "publication dependencies and admission are explicit"
+)]
 pub(crate) async fn prepare_delta(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     base: &crab_metadata::capsule_protocol::RootSnapshot,
@@ -34,6 +41,7 @@ pub(crate) async fn prepare_delta(
     staging: Option<&Arc<StagingAreaReadOnly>>,
     caching_store: Option<&crab_cache_store::CachingStore>,
     metrics: Option<&Metrics>,
+    upload_concurrency: usize,
     publish_gc_roots: bool,
     cancel: &CancellationToken,
 ) -> Result<(
@@ -47,6 +55,7 @@ pub(crate) async fn prepare_delta(
     if pointers.is_empty() {
         return Ok((PointerCatalog::new(), XetPublicationStats::default()));
     }
+    let concurrency = upload_concurrency.clamp(1, MAX_IN_FLIGHT_XORBS);
     let view = crab_read::capsule_protocol::open_view_from_root_with_control(
         layout,
         base.clone(),
@@ -101,21 +110,8 @@ pub(crate) async fn prepare_delta(
         }
     })?;
 
-    // The pinned catalog already validates hashes and dependency closure.
-    // Known files need no new recipe; expand placements only for unresolved
-    // files, avoiding a second full chunk index and descriptor copy.
     let mut xorb_entries = HashMap::<MerkleHash, XorbCatalogEntry>::new();
     let mut placements = ChunkPlacementMap::new();
-    for (hash, entry) in base_catalog.xorbs() {
-        let hash = parse_merkle_hash(hash, "base xorb")?;
-        let xorb_placements = placements_for_catalog_xorb(hash, entry)?;
-        for placement in &xorb_placements {
-            placements
-                .entry(placement.chunk_hash)
-                .or_insert_with(|| placement.clone());
-        }
-        xorb_entries.insert(hash, entry.clone());
-    }
 
     let mut delta = PointerCatalog::new();
     let mut shard_session = PushShardSession::new();
@@ -197,6 +193,42 @@ pub(crate) async fn prepare_delta(
         prepared_files.push((file_hash, file_size, chunks, plan));
     }
 
+    // Catalog decoding already validates every descriptor. Retain placements
+    // only for outgoing recipes, so a small edit does not duplicate the entire
+    // historical chunk index and unrelated xorb descriptors in memory.
+    let mut needed_chunks = prepared_files
+        .iter()
+        .flat_map(|(_, _, chunks, _)| chunks.iter().map(|(hash, _)| hash.hex()))
+        .collect::<HashSet<_>>();
+    for (hash, entry) in base_catalog.xorbs() {
+        if needed_chunks.is_empty() {
+            break;
+        }
+        let mut selected = false;
+        for (index, chunk) in entry.chunks().iter().enumerate() {
+            if !needed_chunks.remove(chunk.hash()) {
+                continue;
+            }
+            let chunk_hash = parse_merkle_hash(chunk.hash(), "catalog chunk")?;
+            placements.insert(
+                chunk_hash,
+                ChunkPlacement {
+                    chunk_hash,
+                    xorb_hash: parse_merkle_hash(hash, "base xorb")?,
+                    chunk_index: u32::try_from(index).map_err(|_| {
+                        CrabError::Internal("catalog xorb has too many chunks".to_owned())
+                    })?,
+                    uncompressed_size: chunk.uncompressed_size(),
+                },
+            );
+            selected = true;
+        }
+        if selected {
+            xorb_entries.insert(parse_merkle_hash(hash, "base xorb")?, entry.clone());
+        }
+    }
+    drop(needed_chunks);
+
     let mut external_candidates = external_candidates
         .into_iter()
         .filter(|(hash, refs)| {
@@ -227,7 +259,7 @@ pub(crate) async fn prepare_delta(
                 Ok((ordinal, verified))
             },
         ))
-        .buffer_unordered(PREPARED_XORB_UPLOAD_CONCURRENCY);
+        .buffer_unordered(concurrency);
     tokio::pin!(external_reads);
     let mut verified_external = Vec::new();
     while let Some(result) = external_reads.next().await {
@@ -293,7 +325,22 @@ pub(crate) async fn prepare_delta(
             check_cancelled(cancel)?;
             let planned_hash = planned.hash()?;
             let path = crab_staging::push_plan::prepared_xorb_path(staging.root(), &planned_hash);
-            let bytes = Bytes::from(tokio::fs::read(&path).await?);
+            if planned.bytes > MAX_XORB_SIZE as u64 {
+                return Err(CrabError::StagingCorrupt(format!(
+                    "prepared xorb {} exceeds the {} byte limit",
+                    planned_hash.hex(),
+                    MAX_XORB_SIZE,
+                )));
+            }
+            // A changed or corrupt local body must fail without allocating its
+            // untrusted filesystem length; verification rejects short/long reads.
+            let mut bytes = Vec::new();
+            tokio::fs::File::open(&path)
+                .await?
+                .take(planned.bytes + 1)
+                .read_to_end(&mut bytes)
+                .await?;
+            let bytes = Bytes::from(bytes);
             let (entry, xorb_placements) =
                 verify_prepared_xorb(&path, planned_hash, &planned, bytes.clone())?;
             let (entry, xorb_placements, created) = publish_xorb_candidate(
@@ -315,7 +362,7 @@ pub(crate) async fn prepare_delta(
             ))
         },
     ))
-    .buffer_unordered(PREPARED_XORB_UPLOAD_CONCURRENCY);
+    .buffer_unordered(concurrency);
     tokio::pin!(uploads);
     let mut verified_candidates = Vec::new();
     while let Some(result) = uploads.next().await {
@@ -560,6 +607,20 @@ async fn publish_xorb_candidate(
     bool,
 )> {
     let path = layout.xorb_path(&xorb_hash);
+    let staged = layout.store().staging_write_prefix().is_some();
+    let expected_refs = local_placements
+        .iter()
+        .map(|placement| {
+            (
+                placement.chunk_hash,
+                XorbRef {
+                    xorb_hash,
+                    chunk_index: placement.chunk_index,
+                    uncompressed_size: placement.uncompressed_size,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let cache_has_candidate = match caching_store {
         Some(cache) => {
             cache
@@ -576,26 +637,13 @@ async fn publish_xorb_candidate(
         }
         None => false,
     };
-    if cache_has_candidate {
+    if cache_has_candidate || staged {
         match layout
             .store()
             .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
             .await
         {
             Ok((existing, _)) => {
-                let expected_refs = local_placements
-                    .iter()
-                    .map(|placement| {
-                        (
-                            placement.chunk_hash,
-                            XorbRef {
-                                xorb_hash,
-                                chunk_index: placement.chunk_index,
-                                uncompressed_size: placement.uncompressed_size,
-                            },
-                        )
-                    })
-                    .collect::<HashMap<_, _>>();
                 let verified = verify_external_xorb(&path, xorb_hash, &expected_refs, existing)?
                     .ok_or_else(|| CrabError::CorruptObject {
                         path: path.to_string(),
@@ -609,6 +657,13 @@ async fn publish_xorb_candidate(
             Err(crab_storage::StorageError::NotFound { .. }) => {}
             Err(error) => return Err(error.into()),
         }
+    }
+    if staged {
+        // Protected clients may only write their session prefix. Reuse the
+        // canonical encoding above when present; otherwise record verified
+        // staged bytes for service-owned promotion before ref publication.
+        let created = layout.store().put_if_absent_verified(&path, bytes).await?;
+        return Ok((local_entry, local_placements, created));
     }
     let cache_bytes = caching_store.map(|_| bytes.clone());
     match layout
@@ -629,19 +684,6 @@ async fn publish_xorb_candidate(
             Ok((local_entry, local_placements, true))
         }
         crab_storage::ImmutableCreateOutcome::Existing(existing) => {
-            let expected_refs = local_placements
-                .iter()
-                .map(|placement| {
-                    (
-                        placement.chunk_hash,
-                        XorbRef {
-                            xorb_hash,
-                            chunk_index: placement.chunk_index,
-                            uncompressed_size: placement.uncompressed_size,
-                        },
-                    )
-                })
-                .collect::<HashMap<_, _>>();
             let verified = verify_external_xorb(&path, xorb_hash, &expected_refs, existing)?
                 .ok_or_else(|| CrabError::CorruptObject {
                     path: path.to_string(),
@@ -1081,6 +1123,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    4,
                     true,
                     &CancellationToken::new(),
                 )
@@ -1104,6 +1147,173 @@ mod tests {
             ),
             (true, 0, 0, 0, 0),
         );
+    }
+
+    #[tokio::test]
+    async fn edited_recipe_expands_only_its_xorb_dependencies() {
+        let (catalog, _) = pointer_catalog(64, 1024);
+        let (layout, base) = publish_catalog(catalog.encode().unwrap()).await;
+        let root = tempfile::tempdir().unwrap();
+        let data = b"chunk 100";
+        let chunk_hash = compute_data_hash(data);
+        let file_bytes = data.repeat(2);
+        let file_hash = *blake3::hash(&file_bytes).as_bytes();
+        let staging = crab_staging::StagingArea::open(root.path().to_owned())
+            .await
+            .unwrap();
+        staging
+            .pre_register_file(&MerkleHash::from(file_hash), 18)
+            .unwrap();
+        staging
+            .stage_chunks_batch(
+                &[
+                    (&chunk_hash, data.as_slice()),
+                    (&chunk_hash, data.as_slice()),
+                ],
+                &MerkleHash::from(file_hash),
+                0,
+            )
+            .await
+            .unwrap();
+        staging.close().await.unwrap();
+        let staging = Arc::new(
+            StagingAreaReadOnly::open(root.path().to_owned())
+                .await
+                .unwrap(),
+        );
+        EXPANDED_CATALOG_CHUNKS.set(0);
+        let (delta, stats) = prepare_delta(
+            &layout,
+            &base,
+            &[Pointer {
+                file_hash,
+                size: 18,
+                shard_hint: None,
+            }],
+            Some(&staging),
+            None,
+            None,
+            4,
+            true,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let expanded = EXPANDED_CATALOG_CHUNKS.replace(0);
+        let shard_hash = delta.files()[&MerkleHash::from(file_hash).hex()].shard_hash();
+        assert_eq!(
+            (
+                expanded,
+                stats.xorbs_uploaded,
+                delta.shards()[shard_hash].xorb_hashes().len()
+            ),
+            (1024, 0, 1),
+        );
+    }
+
+    #[derive(Default)]
+    struct UploadObserver {
+        active: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crab_storage::StorageObserver for UploadObserver {
+        fn started(&self, operation: crab_storage::StorageOperation) {
+            use std::sync::atomic::Ordering::SeqCst;
+            if operation == crab_storage::StorageOperation::Put {
+                let active = self.active.fetch_add(1, SeqCst) + 1;
+                self.peak.fetch_max(active, SeqCst);
+            }
+        }
+
+        fn finished(&self, observation: crab_storage::StorageObservation) {
+            if observation.operation == crab_storage::StorageOperation::Put {
+                self.active
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prepared_uploads_respect_requested_concurrency() {
+        use crab_staging::stream::{
+            StreamStageProgress, StreamStageXorbBuilder, stage_file_streaming,
+        };
+        use object_store::throttle::{ThrottleConfig, ThrottledStore};
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let root = tempfile::tempdir().unwrap();
+        let staging_root = root.path().join("staging");
+        let staging = crab_staging::StagingArea::open(staging_root.clone())
+            .await
+            .unwrap();
+        let mut pointers = Vec::new();
+        for index in 0..6 {
+            let path = root.path().join(format!("file-{index}"));
+            std::fs::write(&path, vec![index; 65536]).unwrap();
+            let preparation = staging.create_add_preparation().unwrap();
+            let builders = StreamStageXorbBuilder::new(1, XorbBuilder::new)
+                .bind_preparation(preparation.clone());
+            let result = stage_file_streaming(
+                &path,
+                root.path(),
+                &staging,
+                StreamStageProgress {
+                    xorb_builder: Some(builders),
+                    ..Default::default()
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            staging.finalize_add_preparation(&preparation).unwrap();
+            staging.mark_batch_published(&result.batch_id).unwrap();
+            pointers.push(Pointer {
+                file_hash: result.file_hash,
+                size: 65536,
+                shard_hint: None,
+            });
+        }
+        staging.close().await.unwrap();
+        let staging = Arc::new(StagingAreaReadOnly::open(staging_root).await.unwrap());
+        for concurrency in [1, 4] {
+            let observer = Arc::new(UploadObserver::default());
+            let backend = ThrottledStore::new(
+                object_store::memory::InMemory::new(),
+                ThrottleConfig {
+                    wait_put_per_call: std::time::Duration::from_millis(100),
+                    ..Default::default()
+                },
+            );
+            let store =
+                crab_storage::Store::new(Arc::new(backend)).with_storage_observer(observer.clone());
+            let layout = crab_storage::StoreLayout::new(store, "repo".to_owned());
+            let base = crab_write::capsule_protocol::initialize(
+                &layout,
+                &"1".repeat(64),
+                "refs/heads/main",
+            )
+            .await
+            .unwrap();
+            observer.peak.store(0, SeqCst);
+            let (_, stats) = prepare_delta(
+                &layout,
+                &base,
+                &pointers,
+                Some(&staging),
+                None,
+                None,
+                concurrency,
+                false,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                (stats.xorbs_uploaded, observer.peak.load(SeqCst)),
+                (6, concurrency)
+            );
+        }
     }
 
     #[tokio::test]
@@ -1136,6 +1346,7 @@ mod tests {
                 None,
                 None,
                 None,
+                4,
                 true,
                 &CancellationToken::new(),
             )
@@ -1166,6 +1377,7 @@ mod tests {
             None,
             None,
             None,
+            4,
             true,
             &CancellationToken::new(),
         )
@@ -1190,6 +1402,7 @@ mod tests {
             None,
             None,
             None,
+            4,
             true,
             &CancellationToken::new(),
         )
@@ -1221,6 +1434,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn protected_xorb_is_verified_and_recorded_without_canonical_write() {
+        let candidate = build_xorb(b"protected file contents", CompressionScheme::None);
+        let bytes = candidate.bytes.clone();
+        let canonical_store =
+            crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(
+            canonical_store
+                .clone()
+                .with_staging_writes("repo/staging/session".to_owned()),
+            "repo".to_owned(),
+        );
+        let path = layout.xorb_path(&candidate.hash);
+        let entry = catalog_xorb_entry(
+            bytes.len() as u64,
+            blake3::hash(&bytes).to_hex().to_string(),
+            &candidate.placements,
+        )
+        .unwrap();
+        publish_xorb_candidate(
+            &layout,
+            None,
+            candidate.hash,
+            candidate.bytes,
+            entry,
+            candidate.placements,
+        )
+        .await
+        .unwrap();
+        let writes = layout.store().flush_staged_writes(1).await.unwrap();
+        let staged = object_store::path::Path::from(writes[0].staged_key.clone());
+        let (stored, _) = canonical_store
+            .get_with_etag_bounded(&staged, MAX_XORB_SIZE as u64)
+            .await
+            .unwrap();
+        let absent = matches!(
+            canonical_store
+                .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
+                .await,
+            Err(crab_storage::StorageError::NotFound { .. })
+        );
+        assert_eq!(
+            (
+                writes.len(),
+                writes[0].canonical_key.as_str(),
+                stored,
+                absent
+            ),
+            (1, path.as_ref(), bytes, true)
+        );
+    }
+
+    #[tokio::test]
     async fn logical_xorb_conflict_adopts_fully_verified_existing_encoding() {
         let data = (0..128 * 1024)
             .map(|index| ((index * 31 + index / 7) % 251) as u8)
@@ -1244,23 +1509,42 @@ mod tests {
         )
         .expect("candidate entry");
 
-        let (entry, placements, created) = publish_xorb_candidate(
-            &layout,
-            None,
-            candidate.hash,
-            candidate.bytes,
-            candidate_entry,
-            candidate.placements,
-        )
-        .await
-        .expect("adopt logical xorb conflict");
-
-        assert!(!created);
-        assert_eq!(entry.encoded_size(), existing.bytes.len() as u64);
-        assert_eq!(
-            entry.body_digest(),
-            blake3::hash(&existing.bytes).to_hex().as_str()
-        );
-        assert_eq!(placements.len(), existing.placements.len());
+        for staged in [false, true] {
+            let store = if staged {
+                layout
+                    .store()
+                    .clone()
+                    .with_staging_writes("repo/staging/session".to_owned())
+            } else {
+                layout.store().clone()
+            };
+            let layout = crab_storage::StoreLayout::new(store, "repo".to_owned());
+            let (entry, placements, created) = publish_xorb_candidate(
+                &layout,
+                None,
+                candidate.hash,
+                candidate.bytes.clone(),
+                candidate_entry.clone(),
+                candidate.placements.clone(),
+            )
+            .await
+            .expect("adopt logical xorb conflict");
+            assert_eq!(
+                (
+                    created,
+                    entry.encoded_size(),
+                    entry.body_digest(),
+                    placements.len(),
+                    layout.store().staged_writes().len()
+                ),
+                (
+                    false,
+                    existing.bytes.len() as u64,
+                    blake3::hash(&existing.bytes).to_hex().as_str(),
+                    existing.placements.len(),
+                    0
+                ),
+            );
+        }
     }
 }
