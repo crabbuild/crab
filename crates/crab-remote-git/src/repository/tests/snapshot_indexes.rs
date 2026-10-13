@@ -127,15 +127,28 @@ async fn snapshot_read_indexes_supply_exact_attribution_without_manifest_or_cata
         .unwrap();
         assert!(repository.commit_graph_available());
         assert!(repository.path_state_available());
-        let index = repository.state.path_state(&cancel).await.unwrap().unwrap();
+        let operation = repository
+            .operation(crate::OperationKind::History, &cancel)
+            .await
+            .unwrap();
+        let index = repository
+            .state
+            .path_state(&operation)
+            .await
+            .unwrap()
+            .unwrap();
         let latest = index
             .latest(
+                &repository.state.store,
                 ObjectId::Sha1([0x11; 20]),
                 &[crate::GitPath::new(b"README.md".to_vec()).unwrap()],
+                &operation,
             )
+            .await
             .unwrap();
         assert_eq!(latest[0].oid, ObjectId::Sha1([0x11; 20]));
         assert_eq!(latest[0].message.as_ref(), b"initial");
+        operation.finish(Ok(())).await.unwrap();
     }
     runtime.shutdown().await;
 }
@@ -241,8 +254,13 @@ async fn snapshot_read_indexes_fail_attribution_when_declared_metadata_is_corrup
         )
         .await
         .unwrap();
+        let operation = repository
+            .operation(crate::OperationKind::History, &cancel)
+            .await
+            .unwrap();
+        let result = repository.state.path_state(&operation).await.map(|_| ());
         assert!(matches!(
-            repository.state.path_state(&cancel).await,
+            operation.finish(result).await,
             Err(Error::Corrupt {
                 stage: crate::CorruptionStage::PathState
             })
@@ -292,6 +310,176 @@ async fn snapshot_read_indexes_drain_on_cancellation_shutdown_and_deadline() {
         if mode == "caller" {
             cancel.cancel();
         } else if mode == "shutdown" {
+            tokio::time::timeout(Duration::from_secs(2), runtime.shutdown())
+                .await
+                .unwrap();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            match mode {
+                "deadline" => matches!(result, Err(Error::Timeout { .. })),
+                _ => matches!(result, Err(Error::Cancelled)),
+            },
+            "{mode}: {result:?}"
+        );
+        runtime.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn snapshot_read_indexes_admit_descriptor_pages_and_warm_semantic_results() {
+    for mode in ["descriptor", "page", "warm"] {
+        let fixture = open_fixture(1, None).await;
+        let snapshot = snapshot_with_read_indexes(&fixture).await;
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let cancel = CancellationToken::new();
+        let repository = RemoteGitRepository::from_snapshot(
+            fixture.layout.clone(),
+            &snapshot,
+            RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+            runtime.clone(),
+            RepositoryOptions::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let paths = [crate::GitPath::new(b"README.md".to_vec()).unwrap()];
+        if mode != "descriptor" {
+            let warm = repository
+                .operation(crate::OperationKind::History, &cancel)
+                .await
+                .unwrap();
+            let index = repository.state.path_state(&warm).await.unwrap().unwrap();
+            if mode == "warm" {
+                index
+                    .latest(
+                        &repository.state.store,
+                        ObjectId::Sha1([0x11; 20]),
+                        &paths,
+                        &warm,
+                    )
+                    .await
+                    .unwrap();
+            }
+            warm.finish(Ok(())).await.unwrap();
+        }
+        let limits = match mode {
+            "descriptor" => OperationLimits {
+                max_fetched_bytes: 1,
+                ..Default::default()
+            },
+            "page" => OperationLimits {
+                max_storage_requests: 1,
+                ..Default::default()
+            },
+            _ => OperationLimits {
+                max_response_bytes: 1,
+                ..Default::default()
+            },
+        };
+        let operation = crate::OperationContext::open(
+            repository.state.clone(),
+            crate::OperationKind::History,
+            &cancel,
+            limits,
+        )
+        .await
+        .unwrap();
+        let result = async {
+            let index = repository.state.path_state(&operation).await?.unwrap();
+            index
+                .latest(
+                    &repository.state.store,
+                    ObjectId::Sha1([0x11; 20]),
+                    &paths,
+                    &operation,
+                )
+                .await
+        }
+        .await;
+        let error = operation.finish(result).await.unwrap_err();
+        assert!(
+            match mode {
+                "warm" => matches!(
+                    error,
+                    Error::LimitExceeded {
+                        limit: "response bytes",
+                        ..
+                    }
+                ),
+                _ => admission_rejected(&error),
+            },
+            "{mode}: {error:?}"
+        );
+        runtime.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_read_indexes_cancel_inflight_dependency_pages() {
+    for mode in ["caller", "shutdown", "deadline"] {
+        let fixture = open_fixture(1, None).await;
+        let snapshot = snapshot_with_read_indexes(&fixture).await;
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let cancel = CancellationToken::new();
+        let repository = RemoteGitRepository::from_snapshot(
+            fixture.layout.clone(),
+            &snapshot,
+            RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+            runtime.clone(),
+            RepositoryOptions::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+        fixture
+            .backend
+            .block_path_containing("metadata/path-state/layers/");
+        let worker_cancel = cancel.clone();
+        let worker = tokio::spawn(async move {
+            let limits = OperationLimits {
+                max_duration: if mode == "deadline" {
+                    Duration::from_millis(50)
+                } else {
+                    Duration::from_secs(60)
+                },
+                ..Default::default()
+            };
+            let operation = crate::OperationContext::open(
+                repository.state.clone(),
+                crate::OperationKind::History,
+                &worker_cancel,
+                limits,
+            )
+            .await
+            .unwrap();
+            let result = async {
+                let index = repository.state.path_state(&operation).await?.unwrap();
+                index
+                    .latest(
+                        &repository.state.store,
+                        ObjectId::Sha1([0x11; 20]),
+                        &[crate::GitPath::new(b"README.md".to_vec()).unwrap()],
+                        &operation,
+                    )
+                    .await
+            }
+            .await;
+            operation.finish(result).await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            fixture.backend.request_started.notified(),
+        )
+        .await
+        .unwrap();
+        if mode == "caller" {
+            cancel.cancel();
+        }
+        if mode == "shutdown" {
             tokio::time::timeout(Duration::from_secs(2), runtime.shutdown())
                 .await
                 .unwrap();
