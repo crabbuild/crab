@@ -293,6 +293,9 @@ class RequestCountingProxyTest(unittest.TestCase):
             body = response.read()
 
         self.assertEqual(body, b"payload")
+        snapshot = self.proxy.snapshot()
+        self.assertEqual(snapshot["class_request_body_bytes"], {"git_object_catalog_db/manifest:put": 7})
+        self.assertEqual(snapshot["class_response_body_bytes"], {"git_object_catalog_db/manifest:put": 7})
         self.assertEqual(
             self.proxy.snapshot()["classes"],
             {"git_object_catalog_db/manifest:put": 1},

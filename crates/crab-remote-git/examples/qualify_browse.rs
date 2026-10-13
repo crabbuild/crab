@@ -1,38 +1,44 @@
 //! Emit remote-only browsing evidence for comparison with an independent Git oracle.
-use std::error::Error as StdError;
+mod support;
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crab_remote_git::{
     EntryKind, Error, GitPath, HistoryTraversal, ObjectLimits, OperationKind, OperationLimits,
-    PageRequest, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
-    Revision,
+    PageRequest, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions, Revision,
 };
 use crab_storage::{StorageProviderKind, StoreLayout, build_static_env_store};
 use futures_util::TryStreamExt;
 use serde_json::json;
-use sha1::{Digest, Sha1};
 use tokio_util::sync::CancellationToken;
 
-type Result<T> = std::result::Result<T, Box<dyn StdError>>;
+use support::{Measurements, Result, open_repository};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let [bucket, prefix] = args.as_slice() else {
-        return Err(io::Error::other("usage: qualify_browse <bucket> <prefix>").into());
+    let [bucket, prefix, text_path] = args.as_slice() else {
+        return Err(io::Error::other("usage: qualify_browse <bucket> <prefix> <text-path>").into());
     };
     let runtime = Arc::new(RemoteGitRuntime::default());
-    let result = qualify(bucket, prefix, Arc::clone(&runtime)).await;
+    let result = qualify(bucket, prefix, text_path, Arc::clone(&runtime)).await;
     runtime.shutdown().await;
     result
 }
 
-async fn qualify(bucket: &str, prefix: &str, runtime: Arc<RemoteGitRuntime>) -> Result<()> {
+async fn qualify(
+    bucket: &str,
+    prefix: &str,
+    text_path: &str,
+    runtime: Arc<RemoteGitRuntime>,
+) -> Result<()> {
     let started = Instant::now();
     let cancellation = CancellationToken::new();
-    let store = build_static_env_store(bucket, StorageProviderKind::S3)?;
+    let counters = Arc::new(Measurements::default());
+    counters.install()?;
+    let store = build_static_env_store(bucket, StorageProviderKind::S3)?
+        .with_storage_observer(counters.clone());
     // A complete large snapshot needs a larger aggregate archive budget than
     // interactive browsing. Each object remains subject to the default bound.
     let options = RepositoryOptions::new(
@@ -46,15 +52,19 @@ async fn qualify(bucket: &str, prefix: &str, runtime: Arc<RemoteGitRuntime>) -> 
             ..OperationLimits::default()
         },
     )?;
-    let repository = RemoteGitRepository::open(
-        store.clone(),
-        StoreLayout::new(store, prefix.to_owned()),
-        RepositoryIdentity::new(format!("s3:{bucket}"), prefix, 1)?,
-        runtime,
-        options,
-        &cancellation,
-    )
-    .await?;
+    let repository = counters
+        .measure(
+            "open",
+            "cold",
+            open_repository(
+                StoreLayout::new(store, prefix.to_owned()),
+                RepositoryIdentity::new(format!("s3:{bucket}"), prefix, 1)?,
+                runtime,
+                options,
+                &cancellation,
+            ),
+        )
+        .await?;
     for reference in &repository.refs().entries {
         println!(
             "{}",
@@ -78,6 +88,45 @@ async fn qualify(bucket: &str, prefix: &str, runtime: Arc<RemoteGitRuntime>) -> 
         json!({"kind":"snapshot", "commit":snapshot.commit_oid().to_string(),
         "tree":snapshot.root_tree_oid().to_string(), "generation":repository.generation(),
         "packs":repository.pack_count()})
+    );
+
+    let selected_path = GitPath::new(bytes::Bytes::copy_from_slice(text_path.as_bytes()))?;
+    let path_history = counters
+        .measure("path-history", "shared", async {
+            let operation = repository
+                .operation(OperationKind::PathHistory, &cancellation)
+                .await?;
+            let result = snapshot
+                .path_history(
+                    &selected_path,
+                    HistoryTraversal::FirstParent,
+                    &PageRequest::new(1000, None)?,
+                    &operation,
+                )
+                .await;
+            Ok(operation.finish(result).await?)
+        })
+        .await?;
+    println!(
+        "{}",
+        json!({"kind":"path-history", "path":selected_path.as_bytes(),
+        "commits":path_history.items.iter().map(|entry| entry.commit.oid.to_string()).collect::<Vec<_>>(),
+        "has_more":path_history.next.is_some()})
+    );
+    let blame = counters
+        .measure("blame", "shared", async {
+            let operation = repository
+                .operation(OperationKind::Blame, &cancellation)
+                .await?;
+            let result = snapshot.blame(&selected_path, &operation).await;
+            Ok(operation.finish(result).await?)
+        })
+        .await?;
+    println!(
+        "{}",
+        json!({"kind":"blame", "path":selected_path.as_bytes(),
+        "ranges":blame.ranges.iter().map(|range| json!({"start":range.start,"lines":range.lines,
+            "commit":range.commit.oid.to_string(),"source_path":range.source_path.as_bytes()})).collect::<Vec<_>>()})
     );
 
     let mut cursor = None;
@@ -118,7 +167,23 @@ async fn qualify(bucket: &str, prefix: &str, runtime: Arc<RemoteGitRuntime>) -> 
             let request = PageRequest::new(17, cursor)?;
             let result = snapshot.list_directory(&path, &request, &operation).await;
             let page = operation.finish(result).await?;
-            for entry in page.items {
+            let commits = counters
+                .measure("attribution", "shared", async {
+                    let operation = repository
+                        .operation(OperationKind::DirectoryAttribution, &cancellation)
+                        .await?;
+                    let result = snapshot
+                        .latest_directory_entry_commits(&path, &page.items, &operation)
+                        .await;
+                    Ok(operation.finish(result).await?)
+                })
+                .await?;
+            for (entry, commit) in page.items.into_iter().zip(commits) {
+                println!(
+                    "{}",
+                    json!({"kind":"attribution", "path":entry.path.as_bytes(),
+                    "oid":entry.oid.to_string(), "commit":commit.oid.to_string()})
+                );
                 println!(
                     "{}",
                     json!({"kind":"entry", "path":entry.path.as_bytes(),
@@ -162,7 +227,7 @@ async fn qualify(bucket: &str, prefix: &str, runtime: Arc<RemoteGitRuntime>) -> 
             "{}",
             json!({"kind":"blob", "path":path.as_bytes(),
             "oid":blob.metadata.oid.to_string(), "bytes":blob.bytes.len(),
-            "computed_oid":blob_oid(&blob.bytes)})
+            "computed_oid":support::object_oid("blob", &blob.bytes)})
         );
         samples += 1;
     }
@@ -204,7 +269,7 @@ async fn qualify(bucket: &str, prefix: &str, runtime: Arc<RemoteGitRuntime>) -> 
             "{}",
             json!({"kind":"archive", "path":entry.path.as_bytes(),
             "mode":entry.mode.raw(), "bytes":entry.bytes.as_ref().map(|bytes| bytes.len()),
-            "computed_oid":entry.bytes.as_ref().map(|bytes| blob_oid(bytes))})
+            "computed_oid":entry.bytes.as_ref().map(|bytes| support::object_oid("blob", bytes))})
         );
         archive_entries += 1;
         if archive_entries.is_multiple_of(5000) {
@@ -218,11 +283,4 @@ async fn qualify(bucket: &str, prefix: &str, runtime: Arc<RemoteGitRuntime>) -> 
         "elapsed_ms":started.elapsed().as_millis()})
     );
     Ok(())
-}
-
-fn blob_oid(bytes: &[u8]) -> String {
-    let mut hash = Sha1::new();
-    hash.update(format!("blob {}\0", bytes.len()));
-    hash.update(bytes);
-    format!("{:x}", hash.finalize())
 }
