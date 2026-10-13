@@ -61,13 +61,19 @@ budget before buffering, then admit each layer against its authenticated size
 and the remaining aggregate budget. All bodies still require hash and exact
 length verification; malformed provider sizes cannot bypass the encoded-byte
 ceiling. Decoded index structures require separate memory qualification.
-Path-state descriptor version 4 requires exact-name tree comparison semantics;
-earlier descriptors can authenticate incorrect mutations and are rejected.
+Path-state descriptor version 5 requires exact-name tree comparison semantics
+and authenticated pages; retired descriptors are rejected.
 Maintenance rebuilds completed indexes and resumable checkpoints through the
-existing conditional publication path. The unchanged `CRABPS03` layer codec
-stores each raw path component once per layer in a sorted canonical table,
-with checked component ordinals on edges. Decoded edges share immutable component
-bytes. No release tag contains a path-state format; maintenance rebuilds
+existing conditional publication path. Record, node, component and child pages
+have bounded authenticated directories. Raw components are stored once per layer,
+with checked component ordinals on edges. `PathStateReader` fetches only the pages
+required by a point/batch query. Its maintenance scan emits nodes before dependent
+edges and records, verifies complete layer hashes and physical page coverage, and
+retains only the current layer's dictionary/audit plus the bounded page cache.
+Only successful EOF proves a complete scan; callers must not publish readiness
+after partial output or an error. Full-layer hashing followed by page traversal
+adds maintenance I/O while avoiding complete layer/index buffering.
+No release tag contains a path-state format; maintenance rebuilds
 unshipped derived indexes rather than
 reading retired versions. Validated index descriptors/layers expose only immutable
 accessors, so checkpoint append reuses the verified prefix instead of rescanning

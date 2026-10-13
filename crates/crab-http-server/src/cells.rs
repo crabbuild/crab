@@ -65,6 +65,8 @@ pub(crate) use scheduler::{RepositoryCellScheduler, SchedulerStatus};
 
 const REPOSITORY_MIGRATION: &str = include_str!("cells/migrations/0001_repository_identity.sql");
 const REPOSITORY_MIGRATION_V2: &str = include_str!("cells/migrations/0002_pull_review_threads.sql");
+const REPOSITORY_MIGRATION_V3: &str =
+    include_str!("cells/migrations/0003_git_attribution_summaries.sql");
 const REPOSITORY_MAX_DATABASE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const REPOSITORY_MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
 const REPOSITORY_MAX_FILE_BYTES: u64 = 6 * 1024 * 1024 * 1024;
@@ -94,7 +96,8 @@ pub(crate) fn initialize_repository_schema(
     transaction: &rusqlite::Transaction<'_>,
 ) -> rusqlite::Result<()> {
     transaction.execute_batch(REPOSITORY_MIGRATION)?;
-    transaction.execute_batch(REPOSITORY_MIGRATION_V2)
+    transaction.execute_batch(REPOSITORY_MIGRATION_V2)?;
+    transaction.execute_batch(REPOSITORY_MIGRATION_V3)
 }
 
 const MAX_LIVE_NODES: usize = 10_000;
@@ -297,7 +300,7 @@ pub(crate) fn compiled_application() -> cellule_runtime::Result<Arc<CompiledAppl
                     CatalogRole::Application,
                     1,
                 )?
-                .with_schema_range(1, 2)?
+                .with_schema_range(1, 3)?
                 .with_limits(REPOSITORY_MAX_DATABASE_BYTES, REPOSITORY_MAX_CAPTURE_BYTES)?,
             )?;
             Ok(())
@@ -2084,7 +2087,7 @@ async fn verify_cell_inventory(
 }
 
 fn repository_descriptor() -> &'static ModuleDescriptor {
-    static MIGRATIONS: OnceLock<[MigrationDescriptor; 2]> = OnceLock::new();
+    static MIGRATIONS: OnceLock<[MigrationDescriptor; 3]> = OnceLock::new();
     static DESCRIPTOR: OnceLock<ModuleDescriptor> = OnceLock::new();
     let migrations = MIGRATIONS.get_or_init(|| {
         [
@@ -2098,6 +2101,11 @@ fn repository_descriptor() -> &'static ModuleDescriptor {
                 sql: REPOSITORY_MIGRATION_V2,
                 digest: digest(REPOSITORY_MIGRATION_V2.as_bytes()),
             },
+            MigrationDescriptor {
+                version: 3,
+                sql: REPOSITORY_MIGRATION_V3,
+                digest: digest(REPOSITORY_MIGRATION_V3.as_bytes()),
+            },
         ]
     });
     DESCRIPTOR.get_or_init(|| ModuleDescriptor {
@@ -2105,7 +2113,7 @@ fn repository_descriptor() -> &'static ModuleDescriptor {
         source_digest: repository_source_digest(),
         retained_codes: &[],
         schema_min: 1,
-        schema_max: 2,
+        schema_max: 3,
         migrations,
         commands: REPOSITORY_COMMANDS,
         queries: REPOSITORY_QUERIES,
@@ -2127,6 +2135,7 @@ fn repository_source_digest() -> Digest {
     hasher.update(b"crab.http.repository.module.v2\0");
     hasher.update(REPOSITORY_MIGRATION.as_bytes());
     hasher.update(REPOSITORY_MIGRATION_V2.as_bytes());
+    hasher.update(REPOSITORY_MIGRATION_V3.as_bytes());
     hasher.update(include_bytes!("cells/repository.rs"));
     hasher.update(include_bytes!("cells/repository/codec.rs"));
     hasher.update(include_bytes!("cells/repository/checks.rs"));
@@ -2142,6 +2151,7 @@ fn repository_source_digest() -> Digest {
     hasher.update(include_bytes!("cells/repository/releases_codec.rs"));
     hasher.update(include_bytes!("cells/repository/settings.rs"));
     hasher.update(include_bytes!("cells/repository/settings_codec.rs"));
+    hasher.update(include_bytes!("cells/repository/projection.rs"));
     Digest::from_bytes(*hasher.finalize().as_bytes())
 }
 
@@ -2150,7 +2160,7 @@ const fn operation(id: u32, input_limit: u32, output_limit: u32) -> OperationDes
         id,
         codec_version: 1,
         schema_min: 1,
-        schema_max: 2,
+        schema_max: 3,
         input_limit,
         output_limit,
     }
@@ -2161,7 +2171,7 @@ const fn operation_v2(id: u32, input_limit: u32, output_limit: u32) -> Operation
         id,
         codec_version: 1,
         schema_min: 2,
-        schema_max: 2,
+        schema_max: 3,
         input_limit,
         output_limit,
     }
@@ -2244,6 +2254,68 @@ mod tests {
     const ROLLOVER_NAMESPACE: NamespaceId = NamespaceId::from_bytes([31; 16]);
     const ROLLOVER_PREDECESSOR: Digest = Digest::from_bytes([32; 32]);
     const ROLLOVER_SQL: &str = "CREATE TABLE rollover(value BLOB NOT NULL)";
+
+    #[test]
+    fn summary_migration_preserves_ready_epoch_membership_and_summary_bytes() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON")
+            .unwrap();
+        connection.execute_batch(REPOSITORY_MIGRATION).unwrap();
+        connection.execute_batch(REPOSITORY_MIGRATION_V2).unwrap();
+        connection.execute_batch(
+            "INSERT INTO git_projection_epochs(epoch_id, state, source_token, manifest_generation, manifest_etag, journal_state_digest, pack_index_hash, git_validation_digest, head_ref, started_at_ms) VALUES (1, 'ready', 'captured-source', 0, 'etag', 'journal', 'packs', 'validation', X'6d61696e', 1); UPDATE git_projection_state SET ready_epoch = 1 WHERE singleton = 1;"
+        ).unwrap();
+        let oid = [1_u8; 20];
+        connection
+            .execute(
+                "INSERT INTO git_commits VALUES (?1, ?2, ?3, X'', 9, 0, X'', X'', 9, 0, ?4, 0, 6)",
+                rusqlite::params![
+                    oid.as_slice(),
+                    [2_u8; 20].as_slice(),
+                    b"Author".as_slice(),
+                    b"change".as_slice()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO git_epoch_commits VALUES (1, 0, ?1)",
+                [oid.as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO git_commit_parents VALUES (?1, 0, ?2)",
+                rusqlite::params![oid.as_slice(), [3_u8; 20].as_slice()],
+            )
+            .unwrap();
+        connection.execute_batch(REPOSITORY_MIGRATION_V3).unwrap();
+        let actual = connection.query_row(
+            "SELECT ec.commit_oid, c.author_name, c.author_time, c.message_preview, e.source_token FROM git_projection_state s JOIN git_projection_epochs e ON e.epoch_id = s.ready_epoch JOIN git_epoch_commits ec ON ec.epoch_id = e.epoch_id JOIN git_commits c ON c.oid = ec.commit_oid",
+            [],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, String>(4)?)),
+        ).unwrap();
+        let violations = connection
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query_map([], |_| Ok(()))
+            .unwrap()
+            .count();
+        assert_eq!(
+            (actual, violations),
+            (
+                (
+                    oid.to_vec(),
+                    b"Author".to_vec(),
+                    9,
+                    b"change".to_vec(),
+                    "captured-source".to_owned()
+                ),
+                0
+            )
+        );
+    }
 
     #[test]
     fn node_session_parser_accepts_only_nonzero_canonical_hex() {
@@ -2396,10 +2468,15 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "649bd14cf06eb91169510e3828761059fe8b21164cac3044110b2c5fd2160f95"
+            status_hex(
+                first
+                    .module_code(RepositoryModule::NAME)
+                    .unwrap()
+                    .as_bytes()
+            )
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
-        assert_eq!(descriptor["modules"][0]["schema_max"], 2);
+        assert_eq!(descriptor["modules"][0]["schema_max"], 3);
         let operation_ids = |kind| {
             descriptor["modules"][0][kind]
                 .as_array()
@@ -3787,7 +3864,10 @@ mod tests {
             &target,
             CatalogRole::Application,
             registry.module_code(RepositoryModule::NAME).unwrap(),
-            2,
+            registry
+                .current_cell_version(REPOSITORY_NAMESPACE, CatalogRole::Application)
+                .unwrap()
+                .1,
         )
         .unwrap();
         let proof = releases

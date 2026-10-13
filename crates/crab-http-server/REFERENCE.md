@@ -759,16 +759,33 @@ requests and source changes reopen maintenance; unchanged completed epochs are
 not repeatedly imported between scrubs. Cell reconciliation does not preload
 tree rows: tree/blob responses continue through the verified remote Git reader.
 Attribution batches obey both row and serialized-byte limits, preserving raw
-path bytes. The current path-state codec stores each raw component once per
-layer and checks all retained layer bytes against the reader budget before any
-write. Its encoded size improvement and full Next.js idle/load gates require
-qualification; focused fixed-ref tests do not prove production throughput.
+path bytes. Reconciliation streams authenticated path-state nodes, edges and
+summaries in dependency order, without assembling the complete path-state index
+or reading raw Git commits. Each layer's complete hash and physical page closure
+must validate before the scan finishes. Partial ingestion remains a provisional
+epoch; only successful EOF and a matching source permit promotion. Maintenance
+retains the current layer's component dictionary/page audit and a bounded page
+cache, and performs a full streaming hash pass before its page traversal.
+The commit graph still loads eagerly; bounded opening is a separate milestone.
 
-This changes unshipped derived-index encodings and the application migration
-digest. Existing pre-release application Cells need a deliberate rebuild or
-operator migration under a selected release descriptor. Rebuilding application
-Cells loses collaboration data; never perform that implicitly. Qualification
-uses fresh application Cells and preserves canonical Git objects and refs.
+Projection summaries include retained graph ordinals, including commits removed
+by force-push. Foreground revision resolution checks visibility before consulting
+those rows. Their presence never grants access to retained history.
+
+Projection reads and ingestion borrow the runtime-owned Cell under the same
+lifetime policy as collaboration requests. Completing a cold state query must
+not drain the actor and wait for a concurrent importer. Scheduler cleanup takes
+exclusive operation access only when it is immediately available; if another
+operation joined the activation, the bounded runtime retains ownership. Runtime
+pressure eviction and node shutdown close retained actors. Explicit migration
+draining still waits for exclusive access and completes its publication barrier.
+
+Schema migration 3 removes unconsumed Git commit fields and parent rows while
+preserving summary bytes and epoch membership. Earlier migration SQL and digests
+remain unchanged. Upgrade existing application Cells through release maintenance
+under the selected descriptor; do not rebuild Cells and lose collaboration data.
+The full Next.js idle/load gates still require qualification; focused projection
+tests do not establish production throughput.
 
 Root commits compare against an empty tree. Path history follows the exact first-parent path. Commit history with `base` instead returns commits reachable from `rev` but not from `base`, across every parent.
 

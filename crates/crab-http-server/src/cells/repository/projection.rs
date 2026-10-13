@@ -157,19 +157,9 @@ pub(crate) struct RefRow {
 pub(crate) struct CommitRow {
     pub ordinal: u32,
     pub oid: Vec<u8>,
-    pub tree_oid: Vec<u8>,
-    pub parents: Vec<Vec<u8>>,
     pub author_name: Vec<u8>,
-    pub author_email: Vec<u8>,
     pub author_time: i64,
-    pub author_tz_offset_seconds: i32,
-    pub committer_name: Vec<u8>,
-    pub committer_email: Vec<u8>,
-    pub committer_time: i64,
-    pub committer_tz_offset_seconds: i32,
     pub message_preview: Vec<u8>,
-    pub message_truncated: bool,
-    pub encoded_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -662,24 +652,15 @@ fn apply_commits(
     epoch_id: u64,
     rows: &[CommitRow],
 ) -> cellule_runtime::Result<()> {
-    let mut statements = Vec::with_capacity(rows.len().saturating_mul(3));
+    let mut statements = Vec::with_capacity(rows.len().saturating_mul(2));
     for row in rows {
         statements.push(statement(
-            "INSERT OR IGNORE INTO git_commits(oid, tree_oid, author_name, author_email, author_time, author_tz_offset_seconds, committer_name, committer_email, committer_time, committer_tz_offset_seconds, message_preview, message_truncated, encoded_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO git_commits(oid, author_name, author_time, message_preview) VALUES (?, ?, ?, ?)",
             vec![
                 SqlValue::Blob(row.oid.clone()),
-                SqlValue::Blob(row.tree_oid.clone()),
                 SqlValue::Blob(row.author_name.clone()),
-                SqlValue::Blob(row.author_email.clone()),
                 SqlValue::Integer(row.author_time),
-                SqlValue::Integer(i64::from(row.author_tz_offset_seconds)),
-                SqlValue::Blob(row.committer_name.clone()),
-                SqlValue::Blob(row.committer_email.clone()),
-                SqlValue::Integer(row.committer_time),
-                SqlValue::Integer(i64::from(row.committer_tz_offset_seconds)),
                 SqlValue::Blob(row.message_preview.clone()),
-                SqlValue::Integer(i64::from(u8::from(row.message_truncated))),
-                integer(row.encoded_bytes)?,
             ],
         ));
         statements.push(statement(
@@ -690,18 +671,6 @@ fn apply_commits(
                 SqlValue::Blob(row.oid.clone()),
             ],
         ));
-        for (index, parent) in row.parents.iter().enumerate() {
-            statements.push(statement(
-                "INSERT OR REPLACE INTO git_commit_parents(commit_oid, parent_index, parent_oid) VALUES (?, ?, ?)",
-                vec![
-                    SqlValue::Blob(row.oid.clone()),
-                    integer(u64::try_from(index).map_err(|_| {
-                        cellule_runtime::Error::Command("projection parent index overflowed")
-                    })?)?,
-                    SqlValue::Blob(parent.clone()),
-                ],
-            ));
-        }
     }
     execute_statements(context, statements)?;
     Ok(())
@@ -886,10 +855,6 @@ fn collect(context: &CommandContext<'_, '_>) -> cellule_runtime::Result<()> {
                 &format!(
                     "{keep}DELETE FROM git_projection_epochs WHERE epoch_id NOT IN (SELECT epoch_id FROM keep)"
                 ),
-                vec![],
-            ),
-            statement(
-                "DELETE FROM git_commit_parents WHERE commit_oid IN (SELECT commit_oid FROM git_commit_parents WHERE commit_oid NOT IN (SELECT commit_oid FROM git_epoch_commits) LIMIT 256)",
                 vec![],
             ),
             statement(

@@ -28,7 +28,7 @@ Xet files and unified local staging are subsequent workstreams.
 | --- | --- | --- | --- |
 | 1 | Reproducible cold/warm baseline and contracts | Native Git oracle, isolated query/open measurements, process resources, HTTP bytes/classes, index decode counts, history scaling receipts | Implemented; RustFS history-scaling baseline passed; cloud latency cell pending |
 | 2 | Authenticated bounded path-state pages | Equivalence/property tests; malformed hashes, lengths, ordering, routing and allocations rejected; bounded internal directories | Implemented; 23 focused tests, GC retention regression and 1,000/10,000-commit RustFS format qualification passed |
-| 3 | Lazy canonical and projected attribution | Fixed directory page reads only needed pages; branch/force-push/recreation/raw-path/restart E2E proof | Canonical consumer passed 171 owner tests, 60 RustFS scaling samples and raw-path/force-push oracles; projection ingestion and combined restart proof pending |
+| 3 | Lazy canonical and projected attribution | Fixed directory page reads only needed pages; branch/force-push/recreation/raw-path/restart E2E proof | Canonical scaling/transitions passed; streaming Cell ingestion, projected native Git oracle and two process starts passed on RustFS; broader cloud/lifecycle qualification remains open |
 | 4 | Lazy graph lookup and bounded opening | Paged OID/ordinal/parent/summary queries; reachable versus retained proof; tag/shallow/cancellation/cleanup checks | Pending |
 | 5 | Change-point history and first-parent blame | Exact native Git origins under matching semantics; fixed file changes with growing unrelated history; comparison/result cache isolation | Pending |
 | 6 | Indexed historical Xet catalog | Indexed checkpoints and visible deltas; bounded compaction; 10-GiB edits and byte-identical cold historical hydration; protected receive and sibling consumers | Pending |
@@ -247,7 +247,47 @@ descriptor/page reads admitted by the active operation. Cached metadata never
 retains a finished operation's budget or cancellation token. Entry, depth,
 logical-object and response work remains charged for warm queries. Missing
 required pages are corruption, while absent readiness retains indexing status.
-HTTP Cell projection ingestion is still a separate unfinished slice of stage 3.
+HTTP Cell projection ingestion uses the streaming maintenance consumer below.
+
+Projection ingestion now has a streaming implementation. Its full
+maintenance scan verifies layer hashes, authenticated pages and physical coverage
+before EOF, retaining a current-layer dictionary/audit rather than the complete
+index. The importer consumes verified summaries instead of resolving retained
+ordinals through foreground Git visibility. An append-only application migration
+preserves summaries and epoch membership while removing unconsumed commit fields.
+Focused proof: 26 path-state tests, 30 HTTP maintenance tests, 17 projection tests
+and 73 Cell/router/scheduler/release tests pass; three credential-dependent Cell
+tests remain ignored. These slices overlap and their counts must not be summed.
+A cancellation
+negative control reproduced a skipped record in the old scan cursor; the fixed
+cursor advances only after page I/O succeeds. Rewind proof confirms retained
+graph records remain unavailable to foreground attribution after force-push.
+
+Live `stream-projection-r1` published the 1,000-commit fixture through native HTTP
+receive into a dedicated RustFS bucket. An initial attribution response succeeded,
+but that alone does not prove the configured Cell projection was ready: canonical
+attribution is an existing readiness path. Process restart qualification failed
+twice at the verifier's attribution timeout. Instrumentation showed the state
+query finished and then waited to drain a cold activation while background
+ingestion held the Cell operation guard. The second run's metrics showed 30,120
+attribution rows and 192 summaries submitted, zero completed reconciliations and
+projection readiness zero. The fix gives projection work the same runtime-owned
+Cell lifetime as ordinary collaboration requests. Scheduler cleanup releases a
+cold activation only when exclusive operation access is immediately available;
+an active borrower leaves ownership with the bounded runtime. Explicit migration
+draining and node shutdown retain their close/publication barriers.
+
+The subsequent single-repository run completed one reconciliation with all 1,000
+summaries and 105,121 attribution rows. Its selected-source readiness gauge was
+one before and after independent native Git verification of 102 attribution
+entries, author/time/message fields, file bytes, 50 blame lines and 30 sampled
+historical commits. One hundred foreground attribution/metrics polls continued
+during ingestion; the largest combined poll took 2.084 seconds. This includes a
+private metrics subprocess and is not a standalone HTTP latency percentile.
+`process-proof-r3` then passed the same native oracle on two process starts, with
+clean shutdowns. Failed r1/r2 receipts remain preserved. These runs use a local
+debug binary, not a qualified release image; broader CI and cloud gates remain
+separate from this configured-projection correctness proof.
 
 RustFS `lazy-attribution-r1` reused the frozen baseline repositories and native
 Git oracle. Twenty process-isolated samples per history size passed: 60 cold/warm
@@ -265,7 +305,7 @@ Query decode/fetch and latency satisfy the frozen attribution bounds. Process
 RSS includes opening and still grows with unrelated history; this does not
 establish bounded opening or graph access. Provider HTTP evidence covers each
 whole process, separately from its backend query counters. Cloud latency,
-projection ingestion and the later history/catalog/lifecycle gates remain open.
+opening and the later history/catalog/lifecycle gates remain open.
 
 The transition fixture passed both all ten read workloads and complete
 browse/archive verification after deletion/recreation, file/tree replacement,
@@ -276,5 +316,6 @@ existing UTF-8 failure in visibility enumeration; [PR #525](https://github.com/c
 requests OIDs only, matching candidate enumeration. The new regression reproduced
 the old failure before the fix, and all 18 visibility tests plus the original live
 push passed afterward. These transitions qualify canonical reads; configured
-Cell projection, concurrent retained readers and builder restart still need their
-own proof.
+Cell projection has the separate ingestion/restart proof above and owner tests
+cover the same rewind visibility boundary. Concurrent retained readers during
+compaction/GC and broader interrupted-build qualification remain later gates.
