@@ -1,0 +1,602 @@
+//! Authenticated, bounded trees inside one immutable path-state layer.
+use serde::{Deserialize, Serialize};
+
+#[cfg(any(feature = "storage", test))]
+use super::corrupt_at;
+use super::{Result, corruption};
+
+const MAGIC: &[u8; 8] = b"CRABPP01";
+const HEADER: usize = 14;
+pub(super) const TARGET_BYTES: usize = 32 * 1024;
+pub(super) const MAX_BYTES: usize = 2 * 1024 * 1024;
+const MAX_HEIGHT: u8 = 16;
+
+/// Authenticated location and key coverage of one immutable page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathStatePageRef {
+    pub offset: u64,
+    pub bytes: u32,
+    pub hash: [u8; 32],
+    pub height: u8,
+    pub count: u32,
+    pub first: Vec<u8>,
+    pub last: Vec<u8>,
+}
+
+/// Bounded page roots committed by an immutable layer descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathStateLayerPages {
+    pub records: PathStatePageRef,
+    pub nodes: PathStatePageRef,
+    pub names: Option<PathStatePageRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum Kind {
+    Records,
+    Nodes,
+    Children,
+    Names,
+}
+
+impl Kind {
+    pub(super) fn key_bytes(self) -> usize {
+        if self == Self::Names { 32 } else { 4 }
+    }
+}
+
+pub(super) type Rows = Vec<(Vec<u8>, Vec<u8>)>;
+#[cfg(any(feature = "storage", test))]
+#[derive(Debug)]
+pub(super) enum Page {
+    Leaf(Rows),
+    Branch(Vec<PathStatePageRef>),
+}
+
+impl PathStatePageRef {
+    pub(super) fn validate(&self, kind: Kind, source_bytes: u64) -> Result<()> {
+        if self.first.len() != kind.key_bytes()
+            || self.last.len() != kind.key_bytes()
+            || self.first > self.last
+            || self.count == 0
+            || self.height > MAX_HEIGHT
+            || self.bytes as usize > MAX_BYTES
+            || (self.bytes as usize) < HEADER
+            || self
+                .offset
+                .checked_add(u64::from(self.bytes))
+                .is_none_or(|end| end > source_bytes)
+        {
+            return Err(corruption("invalid path-state page reference"));
+        }
+        if matches!(kind, Kind::Records | Kind::Nodes) {
+            let first = integer(&self.first)?;
+            let last = integer(&self.last)?;
+            if last.checked_sub(first).and_then(|span| span.checked_add(1)) != Some(self.count) {
+                return Err(corruption("positional page has incomplete key coverage"));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub(super) struct Writer {
+    pub(super) bytes: Vec<u8>,
+    pages: std::collections::BTreeMap<[u8; 32], PathStatePageRef>,
+}
+
+impl Writer {
+    pub(super) fn tree(&mut self, kind: Kind, rows: Rows) -> Result<PathStatePageRef> {
+        validate_rows(kind, &rows)?;
+        let mut level = Vec::new();
+        let mut pending = Vec::new();
+        let mut size = HEADER;
+        for row in rows {
+            let row_bytes = kind
+                .key_bytes()
+                .checked_add(4)
+                .and_then(|n| n.checked_add(row.1.len()))
+                .ok_or_else(|| corruption("path-state row size overflows"))?;
+            if row_bytes > MAX_BYTES - HEADER {
+                return Err(corruption("path-state row exceeds the page bound"));
+            }
+            if !pending.is_empty() && size + row_bytes > TARGET_BYTES {
+                level.push(self.leaf(kind, std::mem::take(&mut pending))?);
+                size = HEADER;
+            }
+            size += row_bytes;
+            pending.push(row);
+        }
+        if !pending.is_empty() {
+            level.push(self.leaf(kind, pending)?);
+        }
+        let fanout = (TARGET_BYTES - HEADER) / ref_bytes(kind);
+        while level.len() > 1 {
+            let mut parents = Vec::new();
+            for children in level.chunks(fanout) {
+                parents.push(self.branch(kind, children)?);
+            }
+            level = parents;
+        }
+        level
+            .pop()
+            .ok_or_else(|| corruption("empty path-state page tree"))
+    }
+
+    fn leaf(&mut self, kind: Kind, rows: Rows) -> Result<PathStatePageRef> {
+        let first = rows
+            .first()
+            .ok_or_else(|| corruption("empty page"))?
+            .0
+            .clone();
+        let last = rows
+            .last()
+            .ok_or_else(|| corruption("empty page"))?
+            .0
+            .clone();
+        let count =
+            u32::try_from(rows.len()).map_err(|_| corruption("page row count overflows"))?;
+        let mut bytes = header(kind, 0, count);
+        for (key, value) in rows {
+            bytes.extend_from_slice(&key);
+            put_u32(&mut bytes, value.len())?;
+            bytes.extend_from_slice(&value);
+        }
+        self.append(bytes, 0, count, first, last)
+    }
+
+    fn branch(&mut self, kind: Kind, children: &[PathStatePageRef]) -> Result<PathStatePageRef> {
+        let first = children
+            .first()
+            .ok_or_else(|| corruption("empty directory"))?;
+        let last = children
+            .last()
+            .ok_or_else(|| corruption("empty directory"))?;
+        let height = first
+            .height
+            .checked_add(1)
+            .filter(|height| *height <= MAX_HEIGHT)
+            .ok_or_else(|| corruption("page tree is too deep"))?;
+        let count = children.iter().try_fold(0u32, |count, child| {
+            count
+                .checked_add(child.count)
+                .ok_or_else(|| corruption("directory count overflows"))
+        })?;
+        let mut bytes = header(
+            kind,
+            height,
+            u32::try_from(children.len()).map_err(|_| corruption("directory size overflows"))?,
+        );
+        for child in children {
+            encode_ref(&mut bytes, child);
+        }
+        self.append(bytes, height, count, first.first.clone(), last.last.clone())
+    }
+
+    fn append(
+        &mut self,
+        bytes: Vec<u8>,
+        height: u8,
+        count: u32,
+        first: Vec<u8>,
+        last: Vec<u8>,
+    ) -> Result<PathStatePageRef> {
+        if bytes.len() > MAX_BYTES {
+            return Err(corruption("page exceeds its byte bound"));
+        }
+        let hash = *blake3::hash(&bytes).as_bytes();
+        if let Some(reference) = self.pages.get(&hash) {
+            return Ok(reference.clone());
+        }
+        let reference = PathStatePageRef {
+            offset: self.bytes.len() as u64,
+            bytes: bytes.len() as u32,
+            hash,
+            height,
+            count,
+            first,
+            last,
+        };
+        self.bytes.extend_from_slice(&bytes);
+        self.pages.insert(hash, reference.clone());
+        Ok(reference)
+    }
+}
+
+fn header(kind: Kind, height: u8, count: u32) -> Vec<u8> {
+    let mut bytes = MAGIC.to_vec();
+    bytes.extend_from_slice(&[kind as u8, height]);
+    bytes.extend_from_slice(&count.to_le_bytes());
+    bytes
+}
+
+#[cfg(any(feature = "storage", test))]
+pub(super) fn decode(
+    bytes: &[u8],
+    reference: &PathStatePageRef,
+    kind: Kind,
+    source_bytes: u64,
+    path: &str,
+) -> Result<Page> {
+    reference.validate(kind, source_bytes)?;
+    if bytes.len() != reference.bytes as usize
+        || *blake3::hash(bytes).as_bytes() != reference.hash
+        || bytes.get(..8) != Some(MAGIC.as_slice())
+        || bytes.get(8) != Some(&(kind as u8))
+        || bytes.get(9) != Some(&reference.height)
+    {
+        return corrupt_at(path, "path-state page identity or header mismatch");
+    }
+    let mut input = Input::new(&bytes[10..], path);
+    let count = input.u32()? as usize;
+    if count == 0 {
+        return corrupt_at(path, "empty path-state page");
+    }
+    let page = if reference.height == 0 {
+        if count > input.remaining() / (kind.key_bytes() + 4) {
+            return corrupt_at(path, "leaf count exceeds its encoded bytes");
+        }
+        let mut rows = Vec::new();
+        for _ in 0..count {
+            let key = input.take(kind.key_bytes())?.to_vec();
+            let length = input.u32()? as usize;
+            let value = input.take(length)?.to_vec();
+            rows.push((key, value));
+        }
+        validate_rows(kind, &rows)?;
+        if count != reference.count as usize
+            || rows.first().map(|row| &row.0) != Some(&reference.first)
+            || rows.last().map(|row| &row.0) != Some(&reference.last)
+        {
+            return corrupt_at(path, "leaf coverage does not match its reference");
+        }
+        Page::Leaf(rows)
+    } else {
+        if count > input.remaining() / ref_bytes(kind) {
+            return corrupt_at(path, "directory count exceeds its encoded bytes");
+        }
+        let mut children: Vec<PathStatePageRef> = Vec::new();
+        let mut total = 0u32;
+        for _ in 0..count {
+            let child = decode_ref(&mut input, kind)?;
+            child.validate(kind, source_bytes)?;
+            if child.height.checked_add(1) != Some(reference.height)
+                || child
+                    .offset
+                    .checked_add(u64::from(child.bytes))
+                    .is_none_or(|end| end > reference.offset)
+                || children
+                    .last()
+                    .is_some_and(|previous| previous.last >= child.first)
+            {
+                return corrupt_at(path, "invalid page directory routing or ancestry");
+            }
+            if matches!(kind, Kind::Records | Kind::Nodes)
+                && children.last().is_some_and(|previous| {
+                    integer(&previous.last)
+                        .ok()
+                        .and_then(|last| last.checked_add(1))
+                        != integer(&child.first).ok()
+                })
+            {
+                return corrupt_at(path, "positional directory has a key gap");
+            }
+            total = total
+                .checked_add(child.count)
+                .ok_or_else(|| corruption("directory count overflows"))?;
+            children.push(child);
+        }
+        if total != reference.count
+            || children.first().map(|child| &child.first) != Some(&reference.first)
+            || children.last().map(|child| &child.last) != Some(&reference.last)
+        {
+            return corrupt_at(path, "directory coverage does not match its reference");
+        }
+        Page::Branch(children)
+    };
+    input.finish()?;
+    tracing::debug!(target:"crab_metadata::index_decode", index_format="path_state",
+        decoded_bytes=bytes.len() as u64, "index page decoded");
+    Ok(page)
+}
+
+#[cfg(any(feature = "storage", test))]
+pub(super) fn scan(
+    source: &[u8],
+    root: &PathStatePageRef,
+    kind: Kind,
+    path: &str,
+    visited: &mut std::collections::BTreeMap<u64, (Kind, PathStatePageRef)>,
+) -> Result<Rows> {
+    let mut pending = vec![root.clone()];
+    let mut rows = Vec::new();
+    while let Some(reference) = pending.pop() {
+        if let Some((previous_kind, previous)) =
+            visited.insert(reference.offset, (kind, reference.clone()))
+            && (previous_kind != kind || previous != reference)
+        {
+            return corrupt_at(path, "page has conflicting references");
+        }
+        let page = page_bytes(source, &reference, path)?;
+        match decode(page, &reference, kind, source.len() as u64, path)? {
+            Page::Leaf(items) => rows.extend(items),
+            Page::Branch(children) => pending.extend(children.into_iter().rev()),
+        }
+    }
+    if rows.len() != root.count as usize {
+        return corrupt_at(path, "tree row count mismatch");
+    }
+    Ok(rows)
+}
+
+#[cfg(any(feature = "storage", test))]
+pub(super) fn page_bytes<'a>(
+    source: &'a [u8],
+    reference: &PathStatePageRef,
+    path: &str,
+) -> Result<&'a [u8]> {
+    let start = usize::try_from(reference.offset)
+        .map_err(|_| corruption("page offset exceeds address space"))?;
+    let end = start
+        .checked_add(reference.bytes as usize)
+        .ok_or_else(|| corruption("page range overflows"))?;
+    source
+        .get(start..end)
+        .ok_or_else(|| crate::validation::corrupt_object(path, "page range is absent"))
+}
+
+fn validate_rows(kind: Kind, rows: &Rows) -> Result<()> {
+    if rows.is_empty()
+        || rows.iter().any(|row| row.0.len() != kind.key_bytes())
+        || rows.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+    {
+        return Err(corruption("page keys are empty, invalid or unordered"));
+    }
+    if matches!(kind, Kind::Records | Kind::Nodes)
+        && rows.windows(2).any(|pair| {
+            integer(&pair[0].0)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                != integer(&pair[1].0).ok()
+        })
+    {
+        return Err(corruption("positional leaf has a key gap"));
+    }
+    Ok(())
+}
+
+fn integer(key: &[u8]) -> Result<u32> {
+    let bytes = key
+        .try_into()
+        .map_err(|_| corruption("invalid ordinal key"))?;
+    Ok(u32::from_be_bytes(bytes))
+}
+
+fn ref_bytes(kind: Kind) -> usize {
+    49 + 2 * kind.key_bytes()
+}
+
+pub(super) fn encode_ref(bytes: &mut Vec<u8>, reference: &PathStatePageRef) {
+    bytes.extend_from_slice(&reference.offset.to_le_bytes());
+    bytes.extend_from_slice(&reference.bytes.to_le_bytes());
+    bytes.extend_from_slice(&reference.hash);
+    bytes.push(reference.height);
+    bytes.extend_from_slice(&reference.count.to_le_bytes());
+    bytes.extend_from_slice(&reference.first);
+    bytes.extend_from_slice(&reference.last);
+}
+
+#[cfg(any(feature = "storage", test))]
+pub(super) fn decode_ref(input: &mut Input<'_, '_>, kind: Kind) -> Result<PathStatePageRef> {
+    Ok(PathStatePageRef {
+        offset: u64::from_le_bytes(input.array()?),
+        bytes: input.u32()?,
+        hash: input.array()?,
+        height: input.array::<1>()?[0],
+        count: input.u32()?,
+        first: input.take(kind.key_bytes())?.to_vec(),
+        last: input.take(kind.key_bytes())?.to_vec(),
+    })
+}
+
+pub(super) fn put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<()> {
+    bytes.extend_from_slice(
+        &u32::try_from(value)
+            .map_err(|_| corruption("page scalar overflows"))?
+            .to_le_bytes(),
+    );
+    Ok(())
+}
+
+#[cfg(any(feature = "storage", test))]
+pub(super) struct Input<'a, 'p> {
+    bytes: &'a [u8],
+    path: &'p str,
+}
+#[cfg(any(feature = "storage", test))]
+impl<'a, 'p> Input<'a, 'p> {
+    pub(super) fn new(bytes: &'a [u8], path: &'p str) -> Self {
+        Self { bytes, path }
+    }
+    pub(super) fn remaining(&self) -> usize {
+        self.bytes.len()
+    }
+    pub(super) fn take(&mut self, count: usize) -> Result<&'a [u8]> {
+        let (head, tail) = self
+            .bytes
+            .split_at_checked(count)
+            .ok_or_else(|| crate::validation::corrupt_object(self.path, "truncated page row"))?;
+        self.bytes = tail;
+        Ok(head)
+    }
+    pub(super) fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        self.take(N)?
+            .try_into()
+            .map_err(|_| corruption("invalid page scalar"))
+    }
+    pub(super) fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.array()?))
+    }
+    pub(super) fn finish(self) -> Result<()> {
+        if !self.bytes.is_empty() {
+            return corrupt_at(self.path, "page has trailing bytes");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(feature = "storage", test))]
+impl Page {
+    pub(super) fn resident_bytes(&self) -> usize {
+        match self {
+            Self::Leaf(rows) => rows.iter().fold(
+                rows.capacity()
+                    .saturating_mul(std::mem::size_of::<(Vec<u8>, Vec<u8>)>()),
+                |total, (key, value)| {
+                    total
+                        .saturating_add(key.capacity())
+                        .saturating_add(value.capacity())
+                },
+            ),
+            Self::Branch(children) => children.iter().fold(
+                children
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<PathStatePageRef>()),
+                |total, child| {
+                    total
+                        .saturating_add(child.first.capacity())
+                        .saturating_add(child.last.capacity())
+                },
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(count: u32, value_bytes: usize) -> Rows {
+        (0..count)
+            .map(|index| (index.to_be_bytes().to_vec(), vec![7; value_bytes]))
+            .collect()
+    }
+
+    #[test]
+    fn large_trees_page_their_internal_directories() {
+        let expected = rows(20_000, 1000);
+        let mut writer = Writer::default();
+        let root = writer.tree(Kind::Records, expected.clone()).unwrap();
+        let actual = scan(
+            &writer.bytes,
+            &root,
+            Kind::Records,
+            "tree",
+            &mut Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                root.height >= 2,
+                writer
+                    .pages
+                    .values()
+                    .all(|page| page.bytes as usize <= MAX_BYTES),
+                actual == expected
+            ),
+            (true, true, true)
+        );
+    }
+
+    #[test]
+    fn authenticated_directories_reject_overlapping_routing() {
+        let mut writer = Writer::default();
+        let mut root = writer.tree(Kind::Records, rows(100, 1000)).unwrap();
+        let mut body = page_bytes(&writer.bytes, &root, "tree").unwrap().to_vec();
+        let first = body[HEADER..HEADER + ref_bytes(Kind::Records)].to_vec();
+        body[HEADER + ref_bytes(Kind::Records)..HEADER + 2 * ref_bytes(Kind::Records)]
+            .copy_from_slice(&first);
+        root.hash = *blake3::hash(&body).as_bytes();
+        assert!(
+            decode(
+                &body,
+                &root,
+                Kind::Records,
+                writer.bytes.len() as u64,
+                "tree"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn page_counts_cannot_allocate_beyond_encoded_bytes() {
+        let mut writer = Writer::default();
+        let mut root = writer.tree(Kind::Records, rows(3, 48)).unwrap();
+        let mut body = page_bytes(&writer.bytes, &root, "tree").unwrap().to_vec();
+        body[10..14].copy_from_slice(&u32::MAX.to_le_bytes());
+        root.hash = *blake3::hash(&body).as_bytes();
+        assert!(
+            decode(
+                &body,
+                &root,
+                Kind::Records,
+                writer.bytes.len() as u64,
+                "tree"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn page_hash_lengths_and_bounds_are_checked_before_decoding() {
+        let mut writer = Writer::default();
+        let root = writer.tree(Kind::Records, rows(3, 48)).unwrap();
+        let body = page_bytes(&writer.bytes, &root, "tree").unwrap().to_vec();
+        let mut invalid = root.clone();
+        invalid.first = 1u32.to_be_bytes().to_vec();
+        let mut damaged = body.clone();
+        damaged[HEADER] ^= 1;
+        let oversized = PathStatePageRef {
+            bytes: (MAX_BYTES + 1) as u32,
+            ..root.clone()
+        };
+        assert_eq!(
+            (
+                decode(
+                    &body,
+                    &invalid,
+                    Kind::Records,
+                    writer.bytes.len() as u64,
+                    "tree"
+                )
+                .is_err(),
+                decode(
+                    &damaged,
+                    &root,
+                    Kind::Records,
+                    writer.bytes.len() as u64,
+                    "tree"
+                )
+                .is_err(),
+                oversized.validate(Kind::Records, u64::MAX).is_err()
+            ),
+            (true, true, true)
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn ordered_page_trees_round_trip(count in 1u32..1000, value in proptest::collection::vec(proptest::num::u8::ANY, 0..300)) {
+            let expected = (0..count).map(|index| (index.to_be_bytes().to_vec(), value.clone())).collect::<Rows>();
+            let mut writer = Writer::default();
+            let root = writer.tree(Kind::Records, expected.clone()).unwrap();
+            let actual = scan(&writer.bytes, &root, Kind::Records, "tree", &mut Default::default()).unwrap();
+            proptest::prop_assert_eq!(actual, expected);
+        }
+    }
+}

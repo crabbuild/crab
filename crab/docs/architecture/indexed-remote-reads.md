@@ -27,7 +27,7 @@ Xet files and unified local staging are subsequent workstreams.
 | Order | Deliverable | Completion evidence | Current state |
 | --- | --- | --- | --- |
 | 1 | Reproducible cold/warm baseline and contracts | Native Git oracle, isolated query/open measurements, process resources, HTTP bytes/classes, index decode counts, history scaling receipts | Implemented; RustFS history-scaling baseline passed; cloud latency cell pending |
-| 2 | Authenticated bounded path-state pages | Equivalence/property tests; malformed hashes, lengths, ordering, routing and allocations rejected; bounded internal directories | Pending |
+| 2 | Authenticated bounded path-state pages | Equivalence/property tests; malformed hashes, lengths, ordering, routing and allocations rejected; bounded internal directories | Implemented; 23 focused tests, GC retention regression and 1,000/10,000-commit RustFS format qualification passed |
 | 3 | Lazy canonical and projected attribution | Fixed directory page reads only needed pages; branch/force-push/recreation/raw-path/restart E2E proof | Pending |
 | 4 | Lazy graph lookup and bounded opening | Paged OID/ordinal/parent/summary queries; reachable versus retained proof; tag/shallow/cancellation/cleanup checks | Pending |
 | 5 | Change-point history and first-parent blame | Exact native Git origins under matching semantics; fixed file changes with growing unrelated history; comparison/result cache isolation | Pending |
@@ -54,9 +54,10 @@ The backend observer includes reads through `Store::inner()`, including locator
 SST/manifest access. It reports logical backend invocations and consumed bytes;
 provider HTTP retries and listing pages require the separate HTTP meter. Decoder
 observations count verified graph/path-state blocks and their encoded input bytes.
-Current blocks are layers, not individual pages. Do not relabel those bytes as
-network transfer or resident memory. New paged formats must add their decode events
-at the actual decoding boundary.
+The frozen baseline counted layers. The paged path-state format counts individual
+verified pages; the graph still counts layers. Do not relabel decoded bytes as
+network transfer or resident memory. Decode events belong at the actual decoding
+boundary.
 
 The HTTP meter records requests and request/response bytes by bounded object
 class. Capsule/run/checkpoint objects can contain both control and Git payload
@@ -195,3 +196,46 @@ Those files are unchanged by this work. A diagnostic run allowing only
 `unfulfilled-lint-expectations` passes; this is not a strict Clippy pass and no
 source suppression was added. Record the baseline issue separately from new
 format/read correctness gates.
+
+## Paged path-state format
+
+Path-state descriptor version 5 replaces the unreleased whole-layer predecessor.
+Each layer remains one immutable content-addressed object; its descriptor commits
+to record, node and component-name page roots. Pages use a canonical binary
+format with typed keys, authenticated byte ranges, exact key bounds and subtree
+counts. Internal directories are paged as well. Typical pages target 32 KiB;
+a single admitted long component or summary may use a page up to the hard 2 MiB
+bound. Directory keys remain fixed-width regardless of component length.
+
+Commit records and nodes use dense ordinal keys. Wide child collections use
+sorted component ordinals; a paged hash-to-component directory preserves exact
+raw names. Repeated names are encoded once per layer and shared by decoded nodes.
+Writer page deduplication preserves repeated immutable child collections. Unchanged
+trie nodes still refer to retained layers. Existing incremental construction and
+compaction retain their graph/ordinal binding and verified checkpoint behavior.
+
+Full maintenance decoding verifies the complete layer content hash, every page,
+component use and contiguous physical byte coverage. It rejects overlapping,
+conflicting or unreferenced page regions. Lazy reads verify their authenticated
+page chain and selected records against the captured graph. They do not claim
+full validation of unrelated payload entries; maintenance/fsck retain that role.
+A missing required page or malformed routing is an error, never a deduplication
+or attribution miss. Root pages are verified before accepting out-of-range keys.
+
+`PathStateReader` loads the bounded descriptor, groups node/record/name/child
+queries, and reads only dependency pages through the caller's admitted clone of
+the same origin store. It caches verified parsed pages with an 8 MiB accounted-data
+bound and at most 256 cached pages; cache identity includes layer, offset, kind and complete routing metadata.
+Each query admits unique encoded page bytes before consulting cache or launching
+bounded concurrent I/O. Cache locks do not cover network waits. The caller keeps
+its captured graph and authorization boundary; index hits add no ref visibility.
+Graph layer identities also remain pinned: a rebuilt graph with matching scalar
+generation/count/digest fields cannot substitute different positional records.
+
+Pages are ranges within the layer object, so existing GC marking of every retained
+layer object also retains all referenced pages, including resumable construction
+checkpoints. Publication verifies the complete immutable object before publishing
+its descriptor/readiness pointer. No separate page-key scan, new authority object,
+or old-format reader is introduced. Before GC or readiness accepts an index, its
+version and descriptor roots must validate; retired derived indexes are rebuilt
+under existing ownership and CAS rules.

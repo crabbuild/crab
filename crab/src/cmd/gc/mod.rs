@@ -5787,6 +5787,15 @@ mod tests {
         let current_graph_layer = layout.repo_path(&current_graph.descriptor.layers[0].path);
         let current_path_state_descriptor =
             layout.bulk_manifest_path("path-state", &current_path_state_hash);
+        let current_path_state = crab_metadata::path_state::load_path_state_descriptor(
+            store.as_storage(),
+            &layout,
+            &current_path_state_hash,
+            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+        )
+        .await
+        .unwrap();
+        let current_path_state_layer = layout.repo_path(&current_path_state.layers[0].path);
         let current_checkpoint = layout.repo_path(
             &crab_metadata::path_state::path_state_checkpoint_path(&manifest.git_validation_digest),
         );
@@ -5810,6 +5819,7 @@ mod tests {
             current_graph_descriptor.clone(),
             current_graph_layer.clone(),
             current_path_state_descriptor.clone(),
+            current_path_state_layer.clone(),
             current_checkpoint.clone(),
         ];
         let stale_indexes = [
@@ -5864,6 +5874,22 @@ mod tests {
         for path in current_indexes {
             assert!(store.head(&path).await.is_ok());
         }
+        // Authenticated pages live inside the layer marked by both readiness
+        // and construction roots; sweeping other generations must retain them.
+        let reader = crab_metadata::path_state::PathStateReader::load(
+            store.as_storage(),
+            &layout,
+            &current_path_state_hash,
+            &current_graph,
+            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+        )
+        .await
+        .unwrap();
+        let attribution = reader
+            .latest(store.as_storage(), &current_graph, &[3; 20], &[b"file"])
+            .await
+            .unwrap();
+        assert_eq!(attribution[0].oid, [3; 20]);
         for path in stale_indexes {
             let head = store.head(&path).await;
             assert!(
