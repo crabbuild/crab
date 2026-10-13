@@ -18290,10 +18290,12 @@ pub(crate) fn enumerate_visibility_difference(
     maximum: usize,
 ) -> Result<Option<Vec<String>>> {
     let mut command = std::process::Command::new("git");
+    // Visibility needs only object IDs. Optional pathname hints are ambiguous
+    // and can make the text reader reject otherwise valid raw Git paths.
     command
         .arg("--git-dir")
         .arg(git_dir)
-        .args(["rev-list", "--objects"])
+        .args(["rev-list", "--objects", "--no-object-names"])
         .arg(include);
     if let Some(exclude) = exclude {
         command.arg("--not").arg(exclude);
@@ -18335,14 +18337,7 @@ pub(crate) fn enumerate_visibility_difference(
             let _ = child.kill();
             break;
         }
-        let Some(oid) = line.split_whitespace().next() else {
-            operation_error = Some(CrabError::Internal(
-                "git rev-list returned an empty visibility row".to_owned(),
-            ));
-            let _ = child.kill();
-            break;
-        };
-        let oid = match gix_hash::ObjectId::from_hex(oid.as_bytes()) {
+        let oid = match gix_hash::ObjectId::from_hex(line.as_bytes()) {
             Ok(oid) => oid,
             Err(error) => {
                 operation_error = Some(CrabError::Internal(format!(
@@ -22477,6 +22472,73 @@ mod tests {
                 .is_file()
         }));
         drop(fixtures);
+    }
+
+    #[test]
+    fn visibility_and_candidates_preserve_raw_path_reachability() {
+        let _guard = CleanGitEnvGuard::new();
+        let repo = tempfile::tempdir().expect("bare repository");
+        let git = |args: &[&str], input: Option<&[u8]>| {
+            let mut child = Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                .stdin(if input.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn Git");
+            if let Some(input) = input {
+                child.stdin.take().unwrap().write_all(input).unwrap();
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "--bare", "--quiet"], None);
+        let mut entries = Vec::new();
+        let mut expected = Vec::new();
+        for path in [
+            b"raw-\xff".as_slice(),
+            b"space name",
+            b"line\nname",
+            b"tab\tname",
+        ] {
+            let blob = git(&["hash-object", "-w", "--stdin"], Some(path));
+            entries.extend_from_slice(format!("100644 blob {blob}\t").as_bytes());
+            entries.extend_from_slice(path);
+            entries.push(0);
+            expected.push(blob);
+        }
+        let tree = git(&["mktree", "-z"], Some(&entries));
+        let commit = git(&["commit-tree", &tree], Some(b"raw paths\n"));
+        let candidates = enumerate_git_object_candidates_blocking(
+            Some(repo.path().to_path_buf()),
+            vec![commit.clone()],
+            Vec::new(),
+        )
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .map(|oid| oid.to_string())
+        .collect::<Vec<_>>();
+        let visible = enumerate_visibility_difference(repo.path(), &commit, None, 100)
+            .unwrap()
+            .unwrap();
+        expected.extend([tree, commit]);
+        expected.sort_unstable();
+        assert_eq!((candidates, visible), (expected.clone(), expected));
     }
 
     #[test]
