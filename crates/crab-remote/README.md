@@ -78,3 +78,8 @@ this orchestration boundary. The low-level remote Git reader retains its narrow
 Git/storage/metadata dependency boundary. See the
 [indexed-read qualification contract](../../crab/docs/architecture/indexed-remote-reads.md)
 for commands, native Git oracles and cold/warm measurement semantics.
+`qualify_remote <bucket> <prefix> <text-path> graph-pages` measures sampled
+ordinal/parent records and duplicate OID batches through `CommitGraphReader`.
+It verifies the derived graph's captured state and Git identity before reads.
+Control capture remains in the reported opening measurements; this component
+workload does not claim bounded foreground opening or replace ref visibility.

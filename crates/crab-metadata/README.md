@@ -61,6 +61,22 @@ budget before buffering, then admit each layer against its authenticated size
 and the remaining aggregate budget. All bodies still require hash and exact
 length verification; malformed provider sizes cannot bypass the encoded-byte
 ceiling. Decoded index structures require separate memory qualification.
+Capsule browse construction writes split-graph descriptor version 2, with
+authenticated ordinal-record and OID-directory pages and a verified positional
+digest. Its carry rule caps the layer directory at 32 entries even for decreasing
+append batch sizes; internal page directories remain bounded. `CommitGraphReader`
+loads only the descriptor and dependency ranges, preserves duplicate query
+positions and validates selected parent ordering/corrected generations. It does
+not grant ref visibility. Complete maintenance loading verifies OID/record
+agreement, layer hashes, positional digest and physical byte coverage.
+The released manifest producer/consumer path retains version 1 and its exact
+encoding: upstream v1.0.1 through v1.2.4 publish `Manifest::commit_graph_hash` from
+CLI push and read it in the remote helper. Lazy capsule readers reject that
+format; maintenance may rebuild the unreleased eager browse index into pages.
+Path and graph readers share the authenticated page codec and an 8-MiB/256-page
+cache; each cache belongs to one immutable captured layer directory. The current
+foreground graph handshake still materializes reachability and is not yet a
+bounded-opening implementation.
 Path-state descriptor version 5 requires exact-name tree comparison semantics
 and authenticated pages; retired descriptors are rejected.
 Maintenance rebuilds completed indexes and resumable checkpoints through the

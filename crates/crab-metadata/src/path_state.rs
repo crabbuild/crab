@@ -11,10 +11,20 @@ use crate::{
 };
 
 mod codec;
-mod paged;
+use crate::pages as paged;
 #[cfg(feature = "storage")]
 mod reader;
-pub use paged::{PathStateLayerPages, PathStatePageRef};
+pub use crate::PageRef;
+
+/// Bounded page roots committed by an immutable layer descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathStateLayerPages {
+    pub records: PageRef,
+    pub nodes: PageRef,
+    pub names: Option<PageRef>,
+}
+
 #[cfg(feature = "storage")]
 pub use reader::{PathStateItem, PathStateReader, PathStateScan};
 #[cfg(feature = "storage")]
@@ -1118,6 +1128,7 @@ mod tests {
         SplitCommitGraph::new(
             CommitGraphDescriptor {
                 version: 1,
+                commit_ordinal_digest: None,
                 generation: 7,
                 pack_index_hash: "a".repeat(64),
                 git_validation_digest: "b".repeat(64),
@@ -1128,6 +1139,7 @@ mod tests {
                     base_ordinal: 0,
                     commit_count: u32::from(count),
                     bytes: 24,
+                    pages: None,
                 }],
             },
             vec![layer],

@@ -29,7 +29,7 @@ Xet files and unified local staging are subsequent workstreams.
 | 1 | Reproducible cold/warm baseline and contracts | Native Git oracle, isolated query/open measurements, process resources, HTTP bytes/classes, index decode counts, history scaling receipts | Implemented; RustFS history-scaling baseline passed; cloud latency cell pending |
 | 2 | Authenticated bounded path-state pages | Equivalence/property tests; malformed hashes, lengths, ordering, routing and allocations rejected; bounded internal directories | Implemented; 23 focused tests, GC retention regression and 1,000/10,000-commit RustFS format qualification passed |
 | 3 | Lazy canonical and projected attribution | Fixed directory page reads only needed pages; branch/force-push/recreation/raw-path/restart E2E proof | Canonical scaling/transitions passed; streaming Cell ingestion, projected native Git oracle and two process starts passed on RustFS; broader cloud/lifecycle qualification remains open |
-| 4 | Lazy graph lookup and bounded opening | Paged OID/ordinal/parent/summary queries; reachable versus retained proof; tag/shallow/cancellation/cleanup checks | Pending |
+| 4 | Lazy graph lookup and bounded opening | Paged OID/ordinal/parent/summary queries; reachable versus retained proof; tag/shallow/cancellation/cleanup checks | Paged producer/component reader implemented; explicit visibility and bounded foreground opening remain pending |
 | 5 | Change-point history and first-parent blame | Exact native Git origins under matching semantics; fixed file changes with growing unrelated history; comparison/result cache isolation | Pending |
 | 6 | Indexed historical Xet catalog | Indexed checkpoints and visible deltas; bounded compaction; 10-GiB edits and byte-identical cold historical hydration; protected receive and sibling consumers | Pending |
 | 7 | Lifecycle and migration | Interrupted publication/builds, concurrent owners, GC retained roots/readers, stale caches and released-format migration qualification | Pending; also required in every earlier implementation |
@@ -55,7 +55,8 @@ SST/manifest access. It reports logical backend invocations and consumed bytes;
 provider HTTP retries and listing pages require the separate HTTP meter. Decoder
 observations count verified graph/path-state blocks and their encoded input bytes.
 The frozen baseline counted layers. The paged path-state format counts individual
-verified pages; the graph still counts layers. Do not relabel decoded bytes as
+verified pages; paged graphs count verified pages too, while the released eager
+graph format counts layers. Do not relabel decoded bytes as
 network transfer or resident memory. Decode events belong at the actual decoding
 boundary.
 
@@ -173,6 +174,16 @@ bindings and repair paths before changing its published format. File absence
 alone is not proof that every related serialized shape is unshipped.
 
 ## Ownership and consumer coverage
+
+The released graph producer/consumer audit also reads CLI push's
+`load_base_split_commit_graph`, remote-helper manifest loading and the published
+metadata crate manifest at upstream v1.2.4. Both consumers bind the graph to the
+manifest generation, pack index, validation digest and committed roots. Manifest
+maintenance retains its version-1 encoding. Capsule browse has no released graph
+contract and now writes paged descriptor version 2 through its generation owner.
+Public Rust descriptor structs gain optional identity/page fields; workspace
+literal consumers are updated, while version-1 serialization omits the additions.
+Published Rust API versioning remains part of the release gate.
 
 - `crab-metadata`: canonical codecs, index formats, validation and visibility.
 - `crab-storage`: range I/O, retries and backend observation.
@@ -319,3 +330,52 @@ push passed afterward. These transitions qualify canonical reads; configured
 Cell projection has the separate ingestion/restart proof above and owner tests
 cover the same rewind visibility boundary. Concurrent retained readers during
 compaction/GC and broader interrupted-build qualification remain later gates.
+
+## Paged graph producer and component qualification
+
+Capsule browse construction writes authenticated ordinal-record and OID-directory
+pages, with the existing positional digest in its descriptor. Maintenance full
+loading checks that digest, OID/record agreement, parent ordering and corrected
+generations, layer hashes and contiguous physical page coverage. Unchanged layers
+are reused; carries also enforce the 32-layer directory bound for decreasing
+append sizes. Removing this carry reproduces a rejected 33-layer descriptor in
+the regression test; restoring it passes. The source was restored before final
+qualification. Lazy graph loading rejects the released eager format rather than
+falling back to it. The full loader retains that format for the shipped manifest
+protocol and for owner-controlled rebuilding of unshipped derived browse data.
+
+Graph and path-state readers share the page codec and bounded cache. Point and
+batch graph queries retain input duplicates, validate selected OID/ordinal
+agreement and parent generations, and charge unique page bytes before I/O or
+cache lookup. Cancellation may discard a query without advancing persistent
+reader state. Record presence supplies no visibility proof.
+
+Focused proof: 19 graph tests, 21 path-state tests and five shared-codec properties
+pass; a ten-test page filter overlaps those slices. Capsule browse publication
+and non-commit-tag maintenance pass the existing integration test. Metadata
+payload-only compilation and strict storage-feature library Clippy pass; the
+remote qualifier diagnostic Clippy run permits only the existing coordinator
+`unfulfilled-lint-expectations` baseline. Remote-Git test targets compile, Python
+scaling tests pass and architecture guardrails pass. The native verifier rejects
+a deliberately wrong graph tree with Python optimization enabled.
+
+Final-source RustFS `paged-graph-r2` reuses the immutable baseline source fixtures.
+At 100/1,000/10,000 commits, twenty isolated processes per size each compare cold
+and warm sampled ordinal/parent records and duplicate OID batches with native Git.
+All 60 comparisons and separate attribution comparisons pass. Opening captures
+complete current controls and is reported separately; these component measurements
+are not a bounded-opening or release-image qualification.
+
+| Commits | Cold graph component median | Cold p95 | Maximum query backend/decoded bytes | Maximum warm query backend bytes |
+| --- | --- | --- | --- | --- |
+| 100 | 1.916 ms | 6.994 ms | 10,024 | 0 |
+| 1,000 | 18.653 ms | 55.610 ms | 100,237 | 0 |
+| 10,000 | 8.698 ms | 24.208 ms | 166,656 | 0 |
+
+This debug-host run has substantial latency variation, including the 1,000-commit
+cell; deterministic page/work limits are the format proof. Final foreground,
+process-resource, release-image and representative S3 latency gates remain open.
+Receipts, failed negative controls, source hashes and binary hashes remain outside
+the checkout. Stage 4 still requires explicit visible ancestry proof, lazy
+foreground conversion, removal of full positional-digest work and bounded control
+opening. Stages 5–8 remain incomplete.

@@ -2,14 +2,15 @@ use std::collections::BTreeMap;
 #[cfg(any(feature = "storage", test))]
 use std::sync::Arc;
 
-#[cfg(any(feature = "storage", test))]
-use super::paged::Input;
-use super::paged::{self, Kind, PathStateLayerPages, Writer};
+use super::PathStateLayerPages;
 use super::{
     MAX_AUTHOR_BYTES, MAX_MESSAGE_BYTES, MAX_PATH_BYTES, PathStateLayer, Result, corruption,
 };
 #[cfg(any(feature = "storage", test))]
 use super::{PathStateLayerRef, PathStateNode, PathStateNodeRef, PathStateRecord, corrupt_at};
+#[cfg(any(feature = "storage", test))]
+use crate::pages::Input;
+use crate::pages::{self as paged, Kind, Writer};
 
 pub(super) struct EncodedLayer {
     pub(super) bytes: Vec<u8>,
@@ -247,7 +248,7 @@ pub(super) fn decode_node(
     bytes: &[u8],
     source_bytes: u64,
     path: &str,
-) -> Result<(Option<u32>, Option<paged::PathStatePageRef>)> {
+) -> Result<(Option<u32>, Option<paged::PageRef>)> {
     let mut input = Input::new(bytes, path);
     let value = optional(input.u32()?);
     let children = match input.array::<1>()?[0] {

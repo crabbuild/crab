@@ -1,20 +1,34 @@
-//! Authenticated, bounded trees inside one immutable path-state layer.
+//! Authenticated bounded pages shared by immutable metadata indexes.
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "storage")]
+mod cache;
+#[cfg(feature = "storage")]
+pub(crate) use cache::PageCache;
+
+use crate::error::{MetadataError, Result};
 #[cfg(any(feature = "storage", test))]
-use super::corrupt_at;
-use super::{Result, corruption};
+use crate::validation::corrupt_object;
+
+fn corruption(reason: &str) -> MetadataError {
+    crate::validation::corrupt_object("metadata page", reason)
+}
+
+#[cfg(any(feature = "storage", test))]
+fn corrupt_at<T>(path: &str, reason: &str) -> Result<T> {
+    Err(corrupt_object(path, reason))
+}
 
 const MAGIC: &[u8; 8] = b"CRABPP01";
 const HEADER: usize = 14;
-pub(super) const TARGET_BYTES: usize = 32 * 1024;
-pub(super) const MAX_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const TARGET_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_HEIGHT: u8 = 16;
 
 /// Authenticated location and key coverage of one immutable page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PathStatePageRef {
+pub struct PageRef {
     pub offset: u64,
     pub bytes: u32,
     pub hash: [u8; 32],
@@ -24,40 +38,37 @@ pub struct PathStatePageRef {
     pub last: Vec<u8>,
 }
 
-/// Bounded page roots committed by an immutable layer descriptor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PathStateLayerPages {
-    pub records: PathStatePageRef,
-    pub nodes: PathStatePageRef,
-    pub names: Option<PathStatePageRef>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub(super) enum Kind {
+pub(crate) enum Kind {
     Records,
     Nodes,
     Children,
     Names,
+    CommitRecords,
+    CommitOids,
 }
 
 impl Kind {
-    pub(super) fn key_bytes(self) -> usize {
-        if self == Self::Names { 32 } else { 4 }
+    pub(crate) fn key_bytes(self) -> usize {
+        match self {
+            Self::Names => 32,
+            Self::CommitOids => 20,
+            _ => 4,
+        }
     }
 }
 
-pub(super) type Rows = Vec<(Vec<u8>, Vec<u8>)>;
+pub(crate) type Rows = Vec<(Vec<u8>, Vec<u8>)>;
 #[cfg(any(feature = "storage", test))]
 #[derive(Debug)]
-pub(super) enum Page {
+pub(crate) enum Page {
     Leaf(Rows),
-    Branch(Vec<PathStatePageRef>),
+    Branch(Vec<PageRef>),
 }
 
-impl PathStatePageRef {
-    pub(super) fn validate(&self, kind: Kind, source_bytes: u64) -> Result<()> {
+impl PageRef {
+    pub(crate) fn validate(&self, kind: Kind, source_bytes: u64) -> Result<()> {
         if self.first.len() != kind.key_bytes()
             || self.last.len() != kind.key_bytes()
             || self.first > self.last
@@ -70,9 +81,9 @@ impl PathStatePageRef {
                 .checked_add(u64::from(self.bytes))
                 .is_none_or(|end| end > source_bytes)
         {
-            return Err(corruption("invalid path-state page reference"));
+            return Err(corruption("invalid metadata page reference"));
         }
-        if matches!(kind, Kind::Records | Kind::Nodes) {
+        if matches!(kind, Kind::Records | Kind::Nodes | Kind::CommitRecords) {
             let first = integer(&self.first)?;
             let last = integer(&self.last)?;
             if last.checked_sub(first).and_then(|span| span.checked_add(1)) != Some(self.count) {
@@ -84,13 +95,13 @@ impl PathStatePageRef {
 }
 
 #[derive(Default)]
-pub(super) struct Writer {
-    pub(super) bytes: Vec<u8>,
-    pages: std::collections::BTreeMap<[u8; 32], PathStatePageRef>,
+pub(crate) struct Writer {
+    pub(crate) bytes: Vec<u8>,
+    pages: std::collections::BTreeMap<[u8; 32], PageRef>,
 }
 
 impl Writer {
-    pub(super) fn tree(&mut self, kind: Kind, rows: Rows) -> Result<PathStatePageRef> {
+    pub(crate) fn tree(&mut self, kind: Kind, rows: Rows) -> Result<PageRef> {
         validate_rows(kind, &rows)?;
         let mut level = Vec::new();
         let mut pending = Vec::new();
@@ -100,9 +111,9 @@ impl Writer {
                 .key_bytes()
                 .checked_add(4)
                 .and_then(|n| n.checked_add(row.1.len()))
-                .ok_or_else(|| corruption("path-state row size overflows"))?;
+                .ok_or_else(|| corruption("metadata row size overflows"))?;
             if row_bytes > MAX_BYTES - HEADER {
-                return Err(corruption("path-state row exceeds the page bound"));
+                return Err(corruption("metadata row exceeds the page bound"));
             }
             if !pending.is_empty() && size + row_bytes > TARGET_BYTES {
                 level.push(self.leaf(kind, std::mem::take(&mut pending))?);
@@ -124,10 +135,10 @@ impl Writer {
         }
         level
             .pop()
-            .ok_or_else(|| corruption("empty path-state page tree"))
+            .ok_or_else(|| corruption("empty metadata page tree"))
     }
 
-    fn leaf(&mut self, kind: Kind, rows: Rows) -> Result<PathStatePageRef> {
+    fn leaf(&mut self, kind: Kind, rows: Rows) -> Result<PageRef> {
         let first = rows
             .first()
             .ok_or_else(|| corruption("empty page"))?
@@ -149,7 +160,7 @@ impl Writer {
         self.append(bytes, 0, count, first, last)
     }
 
-    fn branch(&mut self, kind: Kind, children: &[PathStatePageRef]) -> Result<PathStatePageRef> {
+    fn branch(&mut self, kind: Kind, children: &[PageRef]) -> Result<PageRef> {
         let first = children
             .first()
             .ok_or_else(|| corruption("empty directory"))?;
@@ -184,7 +195,7 @@ impl Writer {
         count: u32,
         first: Vec<u8>,
         last: Vec<u8>,
-    ) -> Result<PathStatePageRef> {
+    ) -> Result<PageRef> {
         if bytes.len() > MAX_BYTES {
             return Err(corruption("page exceeds its byte bound"));
         }
@@ -192,7 +203,7 @@ impl Writer {
         if let Some(reference) = self.pages.get(&hash) {
             return Ok(reference.clone());
         }
-        let reference = PathStatePageRef {
+        let reference = PageRef {
             offset: self.bytes.len() as u64,
             bytes: bytes.len() as u32,
             hash,
@@ -215,9 +226,9 @@ fn header(kind: Kind, height: u8, count: u32) -> Vec<u8> {
 }
 
 #[cfg(any(feature = "storage", test))]
-pub(super) fn decode(
+pub(crate) fn decode(
     bytes: &[u8],
-    reference: &PathStatePageRef,
+    reference: &PageRef,
     kind: Kind,
     source_bytes: u64,
     path: &str,
@@ -229,12 +240,12 @@ pub(super) fn decode(
         || bytes.get(8) != Some(&(kind as u8))
         || bytes.get(9) != Some(&reference.height)
     {
-        return corrupt_at(path, "path-state page identity or header mismatch");
+        return corrupt_at(path, "metadata page identity or header mismatch");
     }
     let mut input = Input::new(&bytes[10..], path);
     let count = input.u32()? as usize;
     if count == 0 {
-        return corrupt_at(path, "empty path-state page");
+        return corrupt_at(path, "empty metadata page");
     }
     let page = if reference.height == 0 {
         if count > input.remaining() / (kind.key_bytes() + 4) {
@@ -259,7 +270,7 @@ pub(super) fn decode(
         if count > input.remaining() / ref_bytes(kind) {
             return corrupt_at(path, "directory count exceeds its encoded bytes");
         }
-        let mut children: Vec<PathStatePageRef> = Vec::new();
+        let mut children: Vec<PageRef> = Vec::new();
         let mut total = 0u32;
         for _ in 0..count {
             let child = decode_ref(&mut input, kind)?;
@@ -275,7 +286,7 @@ pub(super) fn decode(
             {
                 return corrupt_at(path, "invalid page directory routing or ancestry");
             }
-            if matches!(kind, Kind::Records | Kind::Nodes)
+            if matches!(kind, Kind::Records | Kind::Nodes | Kind::CommitRecords)
                 && children.last().is_some_and(|previous| {
                     integer(&previous.last)
                         .ok()
@@ -299,18 +310,18 @@ pub(super) fn decode(
         Page::Branch(children)
     };
     input.finish()?;
-    tracing::debug!(target:"crab_metadata::index_decode", index_format="path_state",
+    tracing::debug!(target:"crab_metadata::index_decode", index_format=if matches!(kind, Kind::CommitRecords | Kind::CommitOids) { "commit_graph" } else { "path_state" },
         decoded_bytes=bytes.len() as u64, "index page decoded");
     Ok(page)
 }
 
 #[cfg(any(feature = "storage", test))]
-pub(super) fn scan(
+pub(crate) fn scan(
     source: &[u8],
-    root: &PathStatePageRef,
+    root: &PageRef,
     kind: Kind,
     path: &str,
-    visited: &mut std::collections::BTreeMap<u64, (Kind, PathStatePageRef)>,
+    visited: &mut std::collections::BTreeMap<u64, (Kind, PageRef)>,
 ) -> Result<Rows> {
     let mut pending = vec![root.clone()];
     let mut rows = Vec::new();
@@ -334,9 +345,9 @@ pub(super) fn scan(
 }
 
 #[cfg(any(feature = "storage", test))]
-pub(super) fn page_bytes<'a>(
+pub(crate) fn page_bytes<'a>(
     source: &'a [u8],
-    reference: &PathStatePageRef,
+    reference: &PageRef,
     path: &str,
 ) -> Result<&'a [u8]> {
     let start = usize::try_from(reference.offset)
@@ -356,7 +367,7 @@ fn validate_rows(kind: Kind, rows: &Rows) -> Result<()> {
     {
         return Err(corruption("page keys are empty, invalid or unordered"));
     }
-    if matches!(kind, Kind::Records | Kind::Nodes)
+    if matches!(kind, Kind::Records | Kind::Nodes | Kind::CommitRecords)
         && rows.windows(2).any(|pair| {
             integer(&pair[0].0)
                 .ok()
@@ -380,7 +391,7 @@ fn ref_bytes(kind: Kind) -> usize {
     49 + 2 * kind.key_bytes()
 }
 
-pub(super) fn encode_ref(bytes: &mut Vec<u8>, reference: &PathStatePageRef) {
+pub(crate) fn encode_ref(bytes: &mut Vec<u8>, reference: &PageRef) {
     bytes.extend_from_slice(&reference.offset.to_le_bytes());
     bytes.extend_from_slice(&reference.bytes.to_le_bytes());
     bytes.extend_from_slice(&reference.hash);
@@ -391,8 +402,8 @@ pub(super) fn encode_ref(bytes: &mut Vec<u8>, reference: &PathStatePageRef) {
 }
 
 #[cfg(any(feature = "storage", test))]
-pub(super) fn decode_ref(input: &mut Input<'_, '_>, kind: Kind) -> Result<PathStatePageRef> {
-    Ok(PathStatePageRef {
+pub(crate) fn decode_ref(input: &mut Input<'_, '_>, kind: Kind) -> Result<PageRef> {
+    Ok(PageRef {
         offset: u64::from_le_bytes(input.array()?),
         bytes: input.u32()?,
         hash: input.array()?,
@@ -403,7 +414,7 @@ pub(super) fn decode_ref(input: &mut Input<'_, '_>, kind: Kind) -> Result<PathSt
     })
 }
 
-pub(super) fn put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<()> {
+pub(crate) fn put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<()> {
     bytes.extend_from_slice(
         &u32::try_from(value)
             .map_err(|_| corruption("page scalar overflows"))?
@@ -413,19 +424,19 @@ pub(super) fn put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<()> {
 }
 
 #[cfg(any(feature = "storage", test))]
-pub(super) struct Input<'a, 'p> {
+pub(crate) struct Input<'a, 'p> {
     bytes: &'a [u8],
     path: &'p str,
 }
 #[cfg(any(feature = "storage", test))]
 impl<'a, 'p> Input<'a, 'p> {
-    pub(super) fn new(bytes: &'a [u8], path: &'p str) -> Self {
+    pub(crate) fn new(bytes: &'a [u8], path: &'p str) -> Self {
         Self { bytes, path }
     }
-    pub(super) fn remaining(&self) -> usize {
+    pub(crate) fn remaining(&self) -> usize {
         self.bytes.len()
     }
-    pub(super) fn take(&mut self, count: usize) -> Result<&'a [u8]> {
+    pub(crate) fn take(&mut self, count: usize) -> Result<&'a [u8]> {
         let (head, tail) = self
             .bytes
             .split_at_checked(count)
@@ -433,15 +444,15 @@ impl<'a, 'p> Input<'a, 'p> {
         self.bytes = tail;
         Ok(head)
     }
-    pub(super) fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
+    pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
         self.take(N)?
             .try_into()
             .map_err(|_| corruption("invalid page scalar"))
     }
-    pub(super) fn u32(&mut self) -> Result<u32> {
+    pub(crate) fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_le_bytes(self.array()?))
     }
-    pub(super) fn finish(self) -> Result<()> {
+    pub(crate) fn finish(self) -> Result<()> {
         if !self.bytes.is_empty() {
             return corrupt_at(self.path, "page has trailing bytes");
         }
@@ -451,7 +462,7 @@ impl<'a, 'p> Input<'a, 'p> {
 
 #[cfg(any(feature = "storage", test))]
 impl Page {
-    pub(super) fn resident_bytes(&self) -> usize {
+    pub(crate) fn resident_bytes(&self) -> usize {
         match self {
             Self::Leaf(rows) => rows.iter().fold(
                 rows.capacity()
@@ -465,7 +476,7 @@ impl Page {
             Self::Branch(children) => children.iter().fold(
                 children
                     .capacity()
-                    .saturating_mul(std::mem::size_of::<PathStatePageRef>()),
+                    .saturating_mul(std::mem::size_of::<PageRef>()),
                 |total, child| {
                     total
                         .saturating_add(child.first.capacity())
@@ -561,7 +572,7 @@ mod tests {
         invalid.first = 1u32.to_be_bytes().to_vec();
         let mut damaged = body.clone();
         damaged[HEADER] ^= 1;
-        let oversized = PathStatePageRef {
+        let oversized = PageRef {
             bytes: (MAX_BYTES + 1) as u32,
             ..root.clone()
         };

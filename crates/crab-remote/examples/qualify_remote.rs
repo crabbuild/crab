@@ -40,7 +40,11 @@ async fn main() -> Result<()> {
             )
             .into()),
         };
-    if selection != "all" && selection != "build-indexes" && !WORKLOADS.contains(&selection) {
+    if selection != "all"
+        && selection != "build-indexes"
+        && selection != "graph-pages"
+        && !WORKLOADS.contains(&selection)
+    {
         return Err(io::Error::other("unknown qualification operation").into());
     }
     let path = GitPath::new(Bytes::copy_from_slice(path.as_bytes()))?;
@@ -89,6 +93,8 @@ async fn main() -> Result<()> {
             .await;
         runtime.shutdown().await;
         result?;
+    } else if selection == "graph-pages" {
+        qualify_graph_pages(&layout, &path, &counters).await?;
     } else {
         for &name in WORKLOADS
             .iter()
@@ -113,6 +119,106 @@ async fn main() -> Result<()> {
         "{}",
         json!({"kind":"complete", "schema":1, "selection":selection})
     );
+    Ok(())
+}
+
+// This measures the graph paging component, with existing eager control capture
+// reported as opening. It makes no foreground visibility or bounded-opening claim.
+async fn qualify_graph_pages(
+    layout: &StoreLayout<crab_storage::Store>,
+    path: &GitPath,
+    counters: &Measurements,
+) -> Result<()> {
+    use crab_metadata::split_commit_graph::{
+        CommitGraphReader, DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+    };
+    let open = async || -> Result<CommitGraphReader> {
+        let root = crab_metadata::capsule_protocol::load_root(layout).await?;
+        let indexes = crab_metadata::capsule_protocol::load_browse_indexes(layout)
+            .await?
+            .ok_or_else(|| io::Error::other("browse indexes are absent"))?;
+        let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+            layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+            },
+        )
+        .await?;
+        if indexes.state_digest() != view.state_digest() {
+            return Err(io::Error::other("browse index does not match captured authority").into());
+        }
+        let snapshot = view.git_snapshot()?;
+        let reader = CommitGraphReader::load(
+            layout.store(),
+            layout,
+            indexes.commit_graph_hash(),
+            DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+        )
+        .await?;
+        let descriptor = reader.descriptor();
+        if descriptor.generation != snapshot.manifest.generation
+            || descriptor.pack_index_hash != snapshot.manifest.pack_index_hash
+            || descriptor.git_validation_digest != snapshot.manifest.git_validation_digest
+        {
+            return Err(io::Error::other("graph does not match captured Git identity").into());
+        }
+        Ok(reader)
+    };
+    let reader = counters.measure("open", "cold", open()).await?;
+    let count = reader.descriptor().commit_count;
+    if count == 0 {
+        return Err(io::Error::other("graph is empty").into());
+    }
+    let requested = [0, count / 2, count - 1, count / 2];
+    let query =
+        async || -> Result<Value> {
+            let records = reader
+                .records(layout.store(), &requested)
+                .await?
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| io::Error::other("required graph record is absent"))?;
+            let oids = records.iter().map(|record| record.oid).collect::<Vec<_>>();
+            if reader.ordinals(layout.store(), &oids).await?
+                != requested.iter().copied().map(Some).collect::<Vec<_>>()
+            {
+                return Err(io::Error::other("graph OID/ordinal batch differs").into());
+            }
+            let parents = records
+                .iter()
+                .flat_map(|record| record.parents.iter().copied())
+                .collect::<Vec<_>>();
+            let parents = reader
+                .records(layout.store(), &parents)
+                .await?
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| io::Error::other("graph parent is absent"))?;
+            let mut parents = parents.into_iter();
+            let rows = records.iter().zip(requested).map(|(record, ordinal)| {
+            let parent_oids = parents.by_ref().take(record.parents.len())
+                .map(|record| gix_hash::ObjectId::Sha1(record.oid).to_string()).collect::<Vec<_>>();
+            json!({"ordinal": ordinal, "oid": gix_hash::ObjectId::Sha1(record.oid).to_string(),
+                "tree": gix_hash::ObjectId::Sha1(record.tree_oid).to_string(),
+                "parents": parent_oids, "committer_seconds": record.commit_time})
+        }).collect::<Vec<_>>();
+            Ok(json!({"records": rows}))
+        };
+    let cold = counters.measure("graph-pages", "cold", query()).await?;
+    let warm = counters.measure("graph-pages", "warm", query()).await?;
+    if cold != warm {
+        return Err(io::Error::other("cold/warm graph queries differ").into());
+    }
+    println!(
+        "{}",
+        json!({"kind":"result", "operation":"graph-pages", "path":path.as_bytes(), "value":cold})
+    );
+    let reopened = counters.measure("open", "warm", open()).await?;
+    if reopened.descriptor() != reader.descriptor() {
+        return Err(io::Error::other("graph changed during qualification").into());
+    }
     Ok(())
 }
 

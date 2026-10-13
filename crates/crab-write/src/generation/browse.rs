@@ -1,6 +1,7 @@
 //! Build immutable browse indexes from a caller-pinned Git snapshot.
 
 use crab_metadata::capsule_protocol::BrowseIndexes;
+use crab_metadata::split_commit_graph::append_paged_commit_graph;
 
 use super::*;
 
@@ -74,6 +75,7 @@ pub async fn build_graph(
             graph.descriptor.generation == manifest.generation
                 && graph.descriptor.pack_index_hash == manifest.pack_index_hash
                 && graph.descriptor.git_validation_digest == manifest.git_validation_digest
+                && graph.descriptor.commit_ordinal_digest.is_some()
         })
         && old_paths.is_some()
     {
@@ -82,7 +84,9 @@ pub async fn build_graph(
     let roots = commit_roots(repository, manifest, cancel).await?;
     let inputs =
         collect_commit_graph_inputs(repository, old_graph.as_ref(), &roots, cancel).await?;
-    let write = append_split_commit_graph(
+    // Capsule browse has no released eager-graph contract. Its owner rebuilds
+    // paged layers while the shipped manifest graph keeps its existing encoding.
+    let write = append_paged_commit_graph(
         old_graph,
         manifest.generation,
         manifest.pack_index_hash.clone(),

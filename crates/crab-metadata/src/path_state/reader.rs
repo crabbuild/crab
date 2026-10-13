@@ -1,21 +1,17 @@
 //! Lazy lookups bound to an authenticated descriptor; full scans remain maintenance operations.
 use crab_storage::{Store, StoreLayout};
 use futures_util::{StreamExt, TryStreamExt};
-use std::sync::{Mutex, MutexGuard};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
 
-use super::paged::{self, Kind, Page, PathStatePageRef};
 use super::{
     PathStateDescriptor, PathStateNodeRef, PathStateRecord, PathStateSummary, Result, codec,
     corrupt, corruption, validate_path,
 };
+use crate::pages::{self as paged, Kind, Page, PageRef};
 use crate::split_commit_graph::{CommitGraphLayerRef, SplitCommitGraph};
-
-const CACHE_BYTES: usize = 8 * 1024 * 1024;
-const CACHE_PAGES: usize = 256;
 
 #[path = "scan.rs"]
 mod scan;
@@ -29,18 +25,11 @@ pub struct PathStateReader {
     paths: Vec<object_store::path::Path>,
     descriptor_bytes: u64,
     max_bytes: u64,
-    cache: Mutex<Cache>,
-}
-
-#[derive(Debug, Default)]
-struct Cache {
-    pages: BTreeMap<(usize, u64), (Kind, PathStatePageRef, Arc<Page>)>,
-    order: VecDeque<(usize, u64)>,
-    bytes: usize,
+    cache: paged::PageCache,
 }
 
 struct ChildBatch {
-    root: PathStatePageRef,
+    root: PageRef,
     requests: Vec<(usize, u32)>,
 }
 
@@ -78,7 +67,7 @@ impl PathStateReader {
             paths,
             descriptor_bytes,
             max_bytes,
-            cache: Mutex::new(Cache::default()),
+            cache: paged::PageCache::default(),
         })
     }
 
@@ -121,7 +110,7 @@ impl PathStateReader {
         let mut pending = (0..paths.len()).collect::<Vec<_>>();
         while !pending.is_empty() {
             let states = self.nodes(store, &nodes, &pending, &mut work).await?;
-            let mut components = BTreeMap::<usize, Vec<(usize, &[u8], PathStatePageRef)>>::new();
+            let mut components = BTreeMap::<usize, Vec<(usize, &[u8], PageRef)>>::new();
             for (&position, state) in pending.iter().zip(states) {
                 let Some(component) = remaining[position].next() else {
                     continue;
@@ -282,7 +271,7 @@ impl PathStateReader {
         nodes: &[PathStateNodeRef],
         positions: &[usize],
         work: &mut Work,
-    ) -> Result<Vec<(Option<u32>, Option<PathStatePageRef>)>> {
+    ) -> Result<Vec<(Option<u32>, Option<PageRef>)>> {
         let mut grouped = BTreeMap::<usize, Vec<(usize, PathStateNodeRef)>>::new();
         for (output, &position) in positions.iter().enumerate() {
             let node = nodes[position];
@@ -352,7 +341,7 @@ impl PathStateReader {
         &self,
         store: &Store,
         layer: usize,
-        root: &PathStatePageRef,
+        root: &PageRef,
         kind: Kind,
         keys: &[Vec<u8>],
         work: &mut Work,
@@ -408,13 +397,7 @@ impl PathStateReader {
         Ok(results)
     }
 
-    fn charge(
-        &self,
-        layer: usize,
-        reference: &PathStatePageRef,
-        kind: Kind,
-        work: &mut Work,
-    ) -> Result<()> {
+    fn charge(&self, layer: usize, reference: &PageRef, kind: Kind, work: &mut Work) -> Result<()> {
         let source_bytes = self.descriptor.layers[layer].bytes;
         reference.validate(kind, source_bytes)?;
         let key = (layer, reference.offset);
@@ -430,77 +413,24 @@ impl PathStateReader {
         Ok(())
     }
 
-    // Guards cover local cache work only; origin I/O runs after the guard drops.
-    fn cache(&self) -> Result<MutexGuard<'_, Cache>> {
-        self.cache.lock().map_err(|_| {
-            crate::error::MetadataError::Internal("path-state page cache is poisoned".to_owned())
-        })
-    }
-
     async fn page(
         &self,
         store: &Store,
         layer: usize,
-        reference: &PathStatePageRef,
+        reference: &PageRef,
         kind: Kind,
     ) -> Result<Arc<Page>> {
-        let source_bytes = self.descriptor.layers[layer].bytes;
-        let key = (layer, reference.offset);
-        if let Some((previous_kind, previous, page)) = self.cache()?.pages.get(&key) {
-            if *previous_kind != kind || previous != reference {
-                return corrupt("cached page routing metadata changed");
-            }
-            return Ok(page.clone());
-        }
-        let bytes = store
-            .range_get(
+        self.cache
+            .fetch(
+                store,
                 &self.paths[layer],
-                reference.offset..reference.offset + u64::from(reference.bytes),
+                layer,
+                self.descriptor.layers[layer].bytes,
+                reference,
+                kind,
             )
-            .await?;
-        let page = Arc::new(paged::decode(
-            &bytes,
-            reference,
-            kind,
-            source_bytes,
-            self.paths[layer].as_ref(),
-        )?);
-        let weight = page_weight(reference, &page);
-        if weight <= CACHE_BYTES {
-            let mut cache = self.cache()?;
-            if let Some((previous_kind, previous, existing)) = cache.pages.get(&key) {
-                if *previous_kind != kind || previous != reference {
-                    return corrupt("concurrent page routing metadata changed");
-                }
-                return Ok(existing.clone());
-            }
-            while cache.bytes.saturating_add(weight) > CACHE_BYTES
-                || cache.pages.len() >= CACHE_PAGES
-            {
-                let Some(oldest) = cache.order.pop_front() else {
-                    break;
-                };
-                if let Some((_, reference, old)) = cache.pages.remove(&oldest) {
-                    cache.bytes = cache.bytes.saturating_sub(page_weight(&reference, &old));
-                }
-            }
-            cache.bytes += weight;
-            cache.order.push_back(key);
-            cache
-                .pages
-                .insert(key, (kind, reference.clone(), page.clone()));
-        }
-        Ok(page)
+            .await
     }
-}
-
-fn page_weight(reference: &PathStatePageRef, page: &Page) -> usize {
-    page.resident_bytes()
-        .saturating_add(std::mem::size_of::<Page>())
-        .saturating_add(std::mem::size_of::<PathStatePageRef>())
-        .saturating_add(reference.first.capacity())
-        .saturating_add(reference.last.capacity())
-        .saturating_add(128)
 }
 
 fn matches_graph(descriptor: &PathStateDescriptor, graph: &SplitCommitGraph) -> bool {
