@@ -187,6 +187,11 @@ root, perform conditional coordination writes, create and delete an object,
 and observe that deletion. `serve` runs the same preflight before binding its
 listeners. `cells capacity --json` reports the resource-derived Cell admission
 envelope without claiming that the node has met a throughput target.
+The disk envelope retains the larger of 10 GiB or 20% of available disk as a
+reserve, then divides the remainder between local Cell files and temporary
+scratch. Small disks can serve working sets that fit this envelope; admission
+rejects operations that need more capacity and rechecks actual free space.
+There is no fixed 20 GiB working-set minimum.
 
 `cells backup create` snapshots all catalog heads, requires one exact control
 per catalog entry, verifies the selected release and every reachable LTX

@@ -207,7 +207,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert!(matches!(
         rejected,
         Err(crate::Error::Config(
-            "Cell runtime requires at least 20 GiB usable local disk"
+            "Cell runtime has no temporary scratch-disk capacity"
         ))
     ));
     crate::cells::initialize_repository_at(

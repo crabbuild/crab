@@ -67,7 +67,6 @@ const GIB: u64 = 1024 * MIB;
 // The derived budget below reserves 512 MiB for the process and still requires
 // positive Cell, capture, and recovery slots at this floor.
 const MIN_CELL_MEMORY_BYTES: u64 = GIB;
-const MIN_USABLE_CELL_DISK_BYTES: u64 = 20 * GIB;
 const FILE_DESCRIPTOR_RESERVE_MINIMUM: usize = 128;
 const DIRTY_JOB_MEMORY_BYTES: u64 = 64 * MIB;
 const MAX_BLOCKING_JOBS: usize = 16;
@@ -171,11 +170,9 @@ impl CellRuntimeBudget {
         }
         let disk_reserve = (resources.free_disk_bytes / 5).max(10 * GIB);
         let usable_disk = resources.free_disk_bytes.saturating_sub(disk_reserve);
-        if usable_disk < MIN_USABLE_CELL_DISK_BYTES {
-            return Err(crate::Error::Config(
-                "Cell runtime requires at least 20 GiB usable local disk",
-            ));
-        }
+        // Admit the working capacity below; each operation must reserve its
+        // actual bytes. A fixed repository-size floor rejects small serving
+        // workloads even when their files fit without spending the reserve.
         let process_reserve = (resources.memory_bytes / 4).max(512 * MIB);
         let cell_memory = resources.memory_bytes - process_reserve;
         let page_cache_memory = cell_memory.saturating_mul(35) / 100;
@@ -3007,9 +3004,21 @@ mod tests {
     #[test]
     fn cell_runtime_budget_rejects_insufficient_disk() {
         assert!(
-            CellRuntimeBudget::from_resources(local_resources(2 * GIB, 30 * GIB - 1, 10_000))
-                .is_err()
+            CellRuntimeBudget::from_resources(local_resources(2 * GIB, 10 * GIB, 10_000)).is_err()
         );
+    }
+
+    #[test]
+    fn cell_runtime_budget_admits_small_disks_without_spending_the_reserve() {
+        for disk_bytes in [16_000_000_000, 20_000_000_000] {
+            let budget =
+                CellRuntimeBudget::from_resources(local_resources(2 * GIB, disk_bytes, 10_000))
+                    .unwrap();
+            assert!(
+                budget.local_disk().capacity() + budget.scratch_mebibytes as u64 * MIB
+                    <= disk_bytes - budget.disk_reserve_bytes
+            );
+        }
     }
 
     #[test]
