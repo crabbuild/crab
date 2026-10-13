@@ -352,6 +352,7 @@ mod tests {
         };
         let descriptor = CommitGraphDescriptor {
             version: 1,
+            commit_ordinal_digest: None,
             generation: 7,
             pack_index_hash: hash(1),
             git_validation_digest: hash(2),
@@ -362,6 +363,7 @@ mod tests {
                 base_ordinal: 0,
                 commit_count: layer.records.len() as u32,
                 bytes: bytes as u64,
+                pages: None,
             }]
             .into_iter()
             .filter(|layer| layer.commit_count > 0)

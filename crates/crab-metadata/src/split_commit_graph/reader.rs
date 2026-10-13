@@ -1,0 +1,291 @@
+use super::paged::{CommitGraphLayerPages, record};
+use super::*;
+use crate::PageRef;
+use crate::pages::{self, Kind, Page};
+use futures_util::{StreamExt, TryStreamExt};
+use std::collections::BTreeSet;
+
+/// Immutable graph point lookups; record presence does not prove ref visibility.
+#[derive(Debug)]
+pub struct CommitGraphReader {
+    descriptor: CommitGraphDescriptor,
+    paths: Vec<object_store::path::Path>,
+    descriptor_bytes: u64,
+    max_bytes: u64,
+    cache: pages::PageCache,
+}
+
+struct Work {
+    bytes: u64,
+    seen: BTreeSet<(usize, u64)>,
+}
+
+impl CommitGraphReader {
+    /// Load a bounded paged descriptor without fetching graph layers.
+    pub async fn load(
+        store: &Store,
+        layout: &StoreLayout<Store>,
+        hash: &str,
+        max_bytes: u64,
+    ) -> Result<Self> {
+        let (descriptor, descriptor_bytes) =
+            read_split_commit_graph_descriptor(store, layout, hash, max_bytes.min(128 * 1024))
+                .await?;
+        if descriptor.version != PAGED_VERSION {
+            return corrupt("graph is not the capsule paged format");
+        }
+        let paths = descriptor
+            .layers
+            .iter()
+            .map(|layer| layout.repo_path(&layer.path))
+            .collect();
+        Ok(Self {
+            descriptor,
+            paths,
+            descriptor_bytes,
+            max_bytes,
+            cache: pages::PageCache::default(),
+        })
+    }
+
+    /// Return the captured immutable descriptor, including positional identity.
+    #[must_use]
+    pub fn descriptor(&self) -> &CommitGraphDescriptor {
+        &self.descriptor
+    }
+
+    /// Resolve requested OIDs, retaining duplicate input occurrences.
+    ///
+    /// The caller admits request/output counts and supplies an operation-budgeted store.
+    pub async fn ordinals(&self, store: &Store, oids: &[[u8; 20]]) -> Result<Vec<Option<u32>>> {
+        let mut work = self.work();
+        let mut output = vec![None; oids.len()];
+        let keys = oids.iter().map(|oid| oid.to_vec()).collect::<Vec<_>>();
+        for (layer, reference) in self.descriptor.layers.iter().enumerate() {
+            let roots = self.roots(reference)?;
+            let values = self
+                .lookup(
+                    store,
+                    layer,
+                    &roots.oids,
+                    Kind::CommitOids,
+                    &keys,
+                    &mut work,
+                )
+                .await?;
+            for (index, value) in values.into_iter().enumerate() {
+                let Some(value) = value else { continue };
+                let ordinal = u32::from_le_bytes(value.as_slice().try_into().map_err(|_| {
+                    crate::validation::corrupt_object("graph OID", "invalid ordinal value")
+                })?);
+                if ordinal < reference.base_ordinal
+                    || ordinal - reference.base_ordinal >= reference.commit_count
+                    || output[index].is_some()
+                {
+                    return corrupt("graph OID mapping escapes its layer or repeats");
+                }
+                output[index] = Some(ordinal);
+            }
+        }
+        let ordinals = output.iter().flatten().copied().collect::<Vec<_>>();
+        let records = self.raw_records(store, &ordinals, &mut work).await?;
+        let mut records = records.into_iter();
+        for (oid, ordinal) in oids.iter().zip(&output) {
+            if ordinal.is_some()
+                && records
+                    .next()
+                    .flatten()
+                    .is_none_or(|record| record.oid != *oid)
+            {
+                return corrupt("graph OID mapping disagrees with its record");
+            }
+        }
+        Ok(output)
+    }
+
+    /// Resolve records and verify ordered parent edges and corrected generations.
+    ///
+    /// The caller admits request/output counts and supplies an operation-budgeted store.
+    pub async fn records(
+        &self,
+        store: &Store,
+        ordinals: &[u32],
+    ) -> Result<Vec<Option<CommitGraphRecord>>> {
+        let mut work = self.work();
+        let output = self.raw_records(store, ordinals, &mut work).await?;
+        let parent_ids = output
+            .iter()
+            .flatten()
+            .flat_map(|record| record.parents.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let parent_records = self.raw_records(store, &parent_ids, &mut work).await?;
+        let parents = parent_ids
+            .into_iter()
+            .zip(parent_records)
+            .collect::<BTreeMap<_, _>>();
+        for record in output.iter().flatten() {
+            let mut generation = non_negative_time(record.commit_time);
+            for parent in &record.parents {
+                let parent = parents
+                    .get(parent)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| {
+                        crate::validation::corrupt_object(
+                            "graph parents",
+                            "required parent is absent",
+                        )
+                    })?;
+                generation = generation.max(parent.corrected_generation.saturating_add(1));
+            }
+            if generation != record.corrected_generation {
+                return corrupt("graph corrected generation mismatch");
+            }
+        }
+        Ok(output)
+    }
+
+    fn work(&self) -> Work {
+        Work {
+            bytes: self.descriptor_bytes,
+            seen: BTreeSet::new(),
+        }
+    }
+
+    fn roots<'a>(&self, layer: &'a CommitGraphLayerRef) -> Result<&'a CommitGraphLayerPages> {
+        layer
+            .pages
+            .as_ref()
+            .ok_or_else(|| crate::validation::corrupt_object("graph", "paged roots are absent"))
+    }
+
+    async fn raw_records(
+        &self,
+        store: &Store,
+        ordinals: &[u32],
+        work: &mut Work,
+    ) -> Result<Vec<Option<CommitGraphRecord>>> {
+        let mut output = vec![None; ordinals.len()];
+        let mut requests = BTreeMap::<usize, Vec<(usize, Vec<u8>)>>::new();
+        for (index, ordinal) in ordinals.iter().copied().enumerate() {
+            if ordinal >= self.descriptor.commit_count {
+                continue;
+            }
+            let layer = self
+                .descriptor
+                .layers
+                .partition_point(|layer| layer.base_ordinal <= ordinal)
+                .checked_sub(1)
+                .ok_or_else(|| {
+                    crate::validation::corrupt_object("graph", "ordinal has no layer")
+                })?;
+            requests
+                .entry(layer)
+                .or_default()
+                .push((index, ordinal.to_be_bytes().to_vec()));
+        }
+        for (layer, requests) in requests {
+            let keys = requests
+                .iter()
+                .map(|(_, key)| key.clone())
+                .collect::<Vec<_>>();
+            let root = &self.roots(&self.descriptor.layers[layer])?.records;
+            let values = self
+                .lookup(store, layer, root, Kind::CommitRecords, &keys, work)
+                .await?;
+            for ((index, _), value) in requests.into_iter().zip(values) {
+                let value = value.ok_or_else(|| {
+                    crate::validation::corrupt_object("graph", "dense record is absent")
+                })?;
+                output[index] = Some(record(&value, ordinals[index], self.paths[layer].as_ref())?);
+            }
+        }
+        Ok(output)
+    }
+
+    async fn lookup(
+        &self,
+        store: &Store,
+        layer: usize,
+        root: &PageRef,
+        kind: Kind,
+        keys: &[Vec<u8>],
+        work: &mut Work,
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        let mut output = vec![None; keys.len()];
+        if keys.is_empty() {
+            return Ok(output);
+        }
+        let mut pending = vec![(root.clone(), (0..keys.len()).collect::<Vec<_>>())];
+        while !pending.is_empty() {
+            for (reference, _) in &pending {
+                reference.validate(kind, self.descriptor.layers[layer].bytes)?;
+                if work.seen.insert((layer, reference.offset)) {
+                    work.bytes = work
+                        .bytes
+                        .checked_add(u64::from(reference.bytes))
+                        .ok_or_else(|| {
+                            crate::validation::corrupt_object("graph", "query bytes overflow")
+                        })?;
+                    if work.bytes > self.max_bytes {
+                        return corrupt("graph query exceeds byte bound");
+                    }
+                }
+            }
+            let batch = futures_util::stream::iter(std::mem::take(&mut pending))
+                .map(|(reference, positions)| async move {
+                    let page = self
+                        .cache
+                        .fetch(
+                            store,
+                            &self.paths[layer],
+                            layer,
+                            self.descriptor.layers[layer].bytes,
+                            &reference,
+                            kind,
+                        )
+                        .await?;
+                    Ok::<_, MetadataError>((page, positions))
+                })
+                .buffered(4)
+                .try_collect::<Vec<_>>()
+                .await?;
+            for (page, positions) in batch {
+                match page.as_ref() {
+                    Page::Leaf(rows) => {
+                        for position in positions {
+                            if let Ok(index) =
+                                rows.binary_search_by(|(key, _)| key.cmp(&keys[position]))
+                            {
+                                output[position] = Some(rows[index].1.clone())
+                            }
+                        }
+                    }
+                    Page::Branch(children) => {
+                        let mut batches = BTreeMap::<usize, Vec<usize>>::new();
+                        for position in positions {
+                            let index =
+                                children.partition_point(|child| child.last < keys[position]);
+                            if children
+                                .get(index)
+                                .is_some_and(|child| child.first <= keys[position])
+                            {
+                                batches.entry(index).or_default().push(position)
+                            }
+                        }
+                        pending.extend(
+                            batches
+                                .into_iter()
+                                .map(|(index, positions)| (children[index].clone(), positions)),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(output)
+    }
+}
+#[cfg(test)]
+#[path = "paged_tests.rs"]
+mod tests;

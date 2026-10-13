@@ -100,6 +100,20 @@ def verify_queries(source: Path, records: list[dict], revision: str) -> dict:
                 require(item["commit"] == expected, "last-change commit differs")
         elif name == "blame":
             lines_checked += check_line_origins(git, head, path, value["ranges"])
+        elif name == "graph-pages":
+            rows = value["records"]
+            require(len(rows) == 4 and rows[1] == rows[3], "graph batch order/duplicates differ")
+            for item in rows:
+                body = git("cat-file", "commit", item["oid"])
+                headers = body.split(b"\n\n", 1)[0].splitlines()
+                tree = next(line[5:].decode() for line in headers if line.startswith(b"tree "))
+                parents = [line[7:].decode() for line in headers if line.startswith(b"parent ")]
+                committer = next(line for line in headers if line.startswith(b"committer "))
+                require(item["tree"] == tree and item["parents"] == parents
+                        and item["committer_seconds"] == int(committer.rsplit(b" ", 2)[1]),
+                        "graph record differs from native Git")
+        else:
+            raise AssertionError("unverified qualification operation: " + name)
     return {"status":"passed", "head":head, "queries_checked":len(results),
             "blame_lines_checked":lines_checked, "measurements":measurements}
 

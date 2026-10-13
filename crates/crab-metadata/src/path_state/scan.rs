@@ -27,7 +27,7 @@ pub struct PathStateScan<'a> {
     phase: Phase,
     names: Vec<Arc<[u8]>>,
     used: Vec<bool>,
-    audit: BTreeMap<u64, (Kind, PathStatePageRef)>,
+    audit: BTreeMap<u64, (Kind, PageRef)>,
     nodes: Cursor,
     records: Cursor,
     children: Option<(PathStateNodeRef, Cursor)>,
@@ -43,7 +43,7 @@ enum Phase {
 
 #[derive(Default)]
 struct Cursor {
-    pending: Vec<PathStatePageRef>,
+    pending: Vec<PageRef>,
     leaf: Option<Arc<Page>>,
     index: usize,
 }
@@ -276,7 +276,7 @@ impl PathStateScan<'_> {
 }
 
 impl Cursor {
-    fn new(root: PathStatePageRef) -> Self {
+    fn new(root: PageRef) -> Self {
         Self {
             pending: vec![root],
             ..Self::default()
@@ -289,7 +289,7 @@ impl Cursor {
         store: &Store,
         layer: usize,
         kind: Kind,
-        audit: &mut BTreeMap<u64, (Kind, PathStatePageRef)>,
+        audit: &mut BTreeMap<u64, (Kind, PageRef)>,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         loop {
             if let Some(page) = &self.leaf {
