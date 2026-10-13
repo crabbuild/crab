@@ -235,8 +235,17 @@ pages do not replay newer commits. A matching complete graph groups bounded raw
 commit and tree reads for range coalescing without becoming the history authority.
 
 All snapshot constructors use this same graph validation when their supplied
-metadata names an index. They retain path-state metadata for exact attribution;
-a corrupt declared path index, or a missing graph needed to interpret it,
+metadata names an index. Attribution captures the path-state descriptor and
+graph identity, batches path prefixes, and fetches only required authenticated
+pages. Verified page caching is bounded and private to that captured index;
+every invocation wraps the same origin store with its current operation's
+read admission. The cache retains no operation admission or cancellation token.
+Descriptor/page reads obey aggregate request/byte admission, while entry, depth,
+logical-object and response limits also apply to warm queries. Required missing
+pages fail as corruption rather than becoming indexing readiness or path misses.
+A cancelled waiter can abandon shared descriptor initialization; a successful
+initializer retains only immutable metadata, so later operations remain usable.
+A corrupt declared path index, or a missing graph needed to interpret it,
 returns `Corrupt(PathState)` instead of fabricating attribution. A journal
 overlay that changes the Git validation digest discards the base index pointers.
 Absent or superseded indexes cause no index-origin reads. Graph opening obeys

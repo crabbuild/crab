@@ -28,7 +28,7 @@ Xet files and unified local staging are subsequent workstreams.
 | --- | --- | --- | --- |
 | 1 | Reproducible cold/warm baseline and contracts | Native Git oracle, isolated query/open measurements, process resources, HTTP bytes/classes, index decode counts, history scaling receipts | Implemented; RustFS history-scaling baseline passed; cloud latency cell pending |
 | 2 | Authenticated bounded path-state pages | Equivalence/property tests; malformed hashes, lengths, ordering, routing and allocations rejected; bounded internal directories | Implemented; 23 focused tests, GC retention regression and 1,000/10,000-commit RustFS format qualification passed |
-| 3 | Lazy canonical and projected attribution | Fixed directory page reads only needed pages; branch/force-push/recreation/raw-path/restart E2E proof | Pending |
+| 3 | Lazy canonical and projected attribution | Fixed directory page reads only needed pages; branch/force-push/recreation/raw-path/restart E2E proof | Canonical consumer passed 171 owner tests, 60 RustFS scaling samples and raw-path/force-push oracles; projection ingestion and combined restart proof pending |
 | 4 | Lazy graph lookup and bounded opening | Paged OID/ordinal/parent/summary queries; reachable versus retained proof; tag/shallow/cancellation/cleanup checks | Pending |
 | 5 | Change-point history and first-parent blame | Exact native Git origins under matching semantics; fixed file changes with growing unrelated history; comparison/result cache isolation | Pending |
 | 6 | Indexed historical Xet catalog | Indexed checkpoints and visible deltas; bounded compaction; 10-GiB edits and byte-identical cold historical hydration; protected receive and sibling consumers | Pending |
@@ -239,3 +239,42 @@ its descriptor/readiness pointer. No separate page-key scan, new authority objec
 or old-format reader is introduced. Before GC or readiness accepts an index, its
 version and descriptor roots must validate; retired derived indexes are rebuilt
 under existing ownership and CAS rules.
+
+## Canonical attribution qualification
+
+The first lazy foreground consumer uses the same captured graph and origin, with
+descriptor/page reads admitted by the active operation. Cached metadata never
+retains a finished operation's budget or cancellation token. Entry, depth,
+logical-object and response work remains charged for warm queries. Missing
+required pages are corruption, while absent readiness retains indexing status.
+HTTP Cell projection ingestion is still a separate unfinished slice of stage 3.
+
+RustFS `lazy-attribution-r1` reused the frozen baseline repositories and native
+Git oracle. Twenty process-isolated samples per history size passed: 60 cold/warm
+attribution comparisons, with complete browse/archive verification also passing
+at 10,000 commits. The latter checked 102 entries/file bodies, 1,000 requested
+history records and all 50 blame lines.
+
+| Commits | Cold median | Cold p95 | Maximum path-state decoded bytes | Maximum query backend bytes | Median whole-process RSS |
+| --- | --- | --- | --- | --- | --- |
+| 100 | 5.197 ms | 5.713 ms | 13,895 | 18,704 | 21,839,872 |
+| 1,000 | 4.885 ms | 5.787 ms | 14,425 | 50,741 | 28,426,240 |
+| 10,000 | 7.732 ms | 8.305 ms | 77,406 | 105,899 | 107,487,232 |
+
+Query decode/fetch and latency satisfy the frozen attribution bounds. Process
+RSS includes opening and still grows with unrelated history; this does not
+establish bounded opening or graph access. Provider HTTP evidence covers each
+whole process, separately from its backend query counters. Cloud latency,
+projection ingestion and the later history/catalog/lifecycle gates remain open.
+
+The transition fixture passed both all ten read workloads and complete
+browse/archive verification after deletion/recreation, file/tree replacement,
+force-push to a side branch and rewind to the original root. It includes raw-byte
+names in Git objects, independent of filesystem Unicode support, and checked
+300 blame-line origins across six reader runs. Publication first exposed an
+existing UTF-8 failure in visibility enumeration; [PR #525](https://github.com/crabbuild/crab/pull/525)
+requests OIDs only, matching candidate enumeration. The new regression reproduced
+the old failure before the fix, and all 18 visibility tests plus the original live
+push passed afterward. These transitions qualify canonical reads; configured
+Cell projection, concurrent retained readers and builder restart still need their
+own proof.

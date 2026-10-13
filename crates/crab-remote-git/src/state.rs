@@ -8,14 +8,13 @@ use crab_metadata::shallow_closure::ShallowClosureDescriptor;
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
 use tokio::sync::OnceCell;
-use tokio_util::sync::CancellationToken;
 
 use crate::commit_graph::CommitGraphIndex;
 use crate::path_state::PathStateIndex;
 use crate::reader::RemoteGitReader;
 use crate::{
-    CorruptionStage, Error, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
-    RepositoryRefs, Result,
+    CorruptionStage, Error, OperationContext, RemoteGitRuntime, RepositoryIdentity,
+    RepositoryOptions, RepositoryRefs, Result,
 };
 
 /// Immutable repository facts shared by handles and snapshots.
@@ -54,31 +53,39 @@ impl RepositoryState {
 
     pub(crate) async fn path_state(
         &self,
-        cancellation: &CancellationToken,
+        operation: &OperationContext,
     ) -> Result<Option<&Arc<PathStateIndex>>> {
         let Some(hash) = self.path_state_hash.as_deref() else {
             return Ok(None);
         };
+        operation.ensure_active()?;
+        let graph = self.commit_graph.as_ref().ok_or(Error::Corrupt {
+            stage: CorruptionStage::PathState,
+        })?;
+        let store = self
+            .store
+            .clone()
+            .with_read_admission(operation.read_admission());
         let runtime_cancellation = self.runtime.background_cancellation();
-        let index = self
-            .path_state
-            .get_or_try_init(|| async {
-                PathStateIndex::load(
-                    &self.store,
-                    &self.layout,
-                    Some(hash),
-                    self.commit_graph.as_ref(),
-                    self.options.object_limits().max_path_state_bytes,
-                    cancellation,
-                    &runtime_cancellation,
-                )
-                .await?
-                .map(Arc::new)
-                .ok_or(Error::Corrupt {
-                    stage: CorruptionStage::PathState,
-                })
-            })
-            .await?;
+        let load = self.path_state.get_or_try_init(|| async {
+            PathStateIndex::load(
+                &store,
+                &self.layout,
+                hash,
+                graph,
+                self.options.object_limits().max_path_state_bytes,
+                operation.cancellation(),
+                &runtime_cancellation,
+            )
+            .await
+            .map(Arc::new)
+        });
+        let index = tokio::select! {
+            biased;
+            () = operation.cancellation().cancelled() => return Err(Error::Cancelled),
+            () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
+            result = load => result?,
+        };
         Ok(Some(index))
     }
 }

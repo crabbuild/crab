@@ -1163,7 +1163,7 @@ impl RemoteGitSnapshot {
     /// Find the newest first-parent commit that changed each listed directory entry.
     ///
     /// Entries must be immediate children returned by this snapshot. The result
-    /// preserves their order and shares one bounded history walk across all entries.
+    /// preserves their order and batches authenticated path-state page reads.
     pub async fn latest_directory_entry_commits(
         &self,
         directory: &GitPath,
@@ -1185,12 +1185,14 @@ impl RemoteGitSnapshot {
             }
         }
 
-        if let Some(index) = self.repository.path_state(operation.cancellation()).await? {
+        if let Some(index) = self.repository.path_state(operation).await? {
             let paths = entries
                 .iter()
                 .map(|entry| entry.path.clone())
                 .collect::<Vec<_>>();
-            return index.latest(self.commit_oid, &paths);
+            return index
+                .latest(&self.repository.store, self.commit_oid, &paths, operation)
+                .await;
         }
         Err(Error::PathStateIndexing {
             generation: self.repository.generation,
