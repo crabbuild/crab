@@ -2555,6 +2555,8 @@ dependencies = [
  "bytes",
  "crab-git",
  "crab-metadata",
+ "crab-read",
+ "crab-remote",
  "crab-storage",
  "crab-xet",
  "flate2",

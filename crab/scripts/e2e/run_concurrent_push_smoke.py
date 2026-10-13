@@ -88,6 +88,8 @@ class RequestCountingProxy:
         self.operations: dict[str, int] = {}
         self.categories: dict[str, int] = {}
         self.classes: dict[str, int] = {}
+        self.class_request_bytes: dict[str, int] = {}
+        self.class_response_bytes: dict[str, int] = {}
         self.statuses: dict[str, int] = {}
         self.proxy_errors: dict[str, int] = {}
         self.trace_paths = os.environ.get("CRAB_E2E_TRACE_REQUEST_PATHS") == "1"
@@ -530,6 +532,8 @@ class RequestCountingProxy:
             self.operations[operation] = self.operations.get(operation, 0) + 1
             self.categories[category] = self.categories.get(category, 0) + 1
             self.classes[request_class] = self.classes.get(request_class, 0) + 1
+            self.class_request_bytes[request_class] = self.class_request_bytes.get(request_class, 0) + request_bytes
+            self.class_response_bytes[request_class] = self.class_response_bytes.get(request_class, 0) + response_bytes
             self.statuses[status_class] = self.statuses.get(status_class, 0) + 1
             if proxy_error is not None:
                 self.proxy_errors[proxy_error] = self.proxy_errors.get(proxy_error, 0) + 1
@@ -596,6 +600,8 @@ class RequestCountingProxy:
                 "operations": dict(sorted(self.operations.items())),
                 "categories": dict(sorted(self.categories.items())),
                 "classes": dict(sorted(self.classes.items())),
+                "class_request_body_bytes": dict(sorted(self.class_request_bytes.items())),
+                "class_response_body_bytes": dict(sorted(self.class_response_bytes.items())),
                 "statuses": dict(sorted(self.statuses.items())),
                 "proxy_errors": dict(sorted(self.proxy_errors.items())),
             }
@@ -614,7 +620,7 @@ class RequestCountingProxy:
         result: dict[str, Any] = {}
         for key in {"requests", "request_body_bytes", "response_body_bytes"}:
             result[key] = int(after.get(key, 0)) - int(before.get(key, 0))
-        for key in {"methods", "operations", "categories", "classes", "statuses", "proxy_errors"}:
+        for key in {"methods", "operations", "categories", "classes", "statuses", "proxy_errors", "class_request_body_bytes", "class_response_body_bytes"}:
             earlier = before.get(key, {})
             later = after.get(key, {})
             result[key] = {
@@ -702,6 +708,7 @@ def store_category(relative_key: str) -> str:
         return "/".join(parts[:3])
     if len(parts) > 1 and parts[0] in {
         "git_object_catalog_db",
+        "v2",
         "git-visibility",
         "locks",
         "manifests",

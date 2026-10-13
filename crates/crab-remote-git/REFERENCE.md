@@ -290,44 +290,44 @@ the pinned proof cannot confer visibility from unrelated refs.
 
 ### Command-line qualification
 
-`qualify_remote` exercises repository open, snapshot/commit reads, cold and
-warm directory/blob reads, history, path history, compare, diff, blame, and a
-complete archive through one shared runtime:
+`qualify_remote` measures isolated capsule-v2 opening, ref resolution, commit,
+directory, blob, point/batch object, history, attribution and blame queries. Each
+workload gets a fresh runtime and runs cold/warm with opening reported separately:
 
 ```console
 CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-remote-qualification \
   cargo run -p crab-remote-git --release --example qualify_remote -- \
-  <bucket> <repository-prefix> <path-changed-by-head>
+  <bucket> <repository-prefix> <text-path> [operation|all|build-indexes]
 ```
 
 Use a unique target directory for your checkout on the mounted workspace volume.
-
-The example reports elapsed time plus canonical `crab-storage` read attempts
-and bytes for each operation. Those counters include manifest, inventory,
-pack-index, and pack-body reads but exclude SlateDB locator-internal reads, so
-they are useful for regression comparison rather than complete provider
-billing. The example uses an explicit larger archive qualification budget; it
-does not change library or service defaults.
+`build-indexes` explicitly runs state-fenced background maintenance; normal
+queries only consume published indexes and require attribution readiness.
+The JSONL measurements include backend operation outcomes/consumed bytes,
+locator-internal reads and graph/path-state decode counts. Backend invocations
+are distinct from provider HTTP retries; the scaling harness meters HTTP and
+process CPU/peak RSS separately. Oracle records verify Git content hashes and
+complete supported blame origins. Archive qualification remains in
+`qualify_browse`. See the [delivery and measurement contract](../../crab/docs/architecture/indexed-remote-reads.md).
 
 ## Browsing correctness against a real repository
 
 `qualify_browse` emits JSONL evidence using only the remote storage API. It
-paginates 1,000 first-parent commits and the complete HEAD tree, checks 128
+paginates 1,000 first-parent commits and the complete HEAD tree, checks every directory entry attribution and selected file history/blame, reads 128
 spread-out blob paths twice, and streams every HEAD blob through an independent
 Git SHA-1 calculation. Paths and commit messages are emitted as byte arrays.
 The run succeeds only when a final `complete` record is emitted.
 
 A fresh push can precede object-catalog publication.
-Run `crab metadb owner --once` from the uploader repository to advance the
-catalog; repeat owner passes until `action=none` to finish all derived maintenance. The direct reader
-returns `RepositoryIndexing` while locator coverage is absent or stale and does
-not perform this write-side work. See [metadata ownership](../../crab/docs/guides/metadb.md).
+Run the explicit `qualify_remote ... build-indexes` operation after publishing
+the capsule fixture to construct complete browse indexes. The direct reader
+does not perform this write-side work; incomplete attribution remains indexing. See [metadata ownership](../../crab/docs/guides/metadb.md).
 
 Run the built example from an empty directory with the local RustFS environment
 configured as described in the [local development guide](../../crab/docs/guides/local-dev-rustfs.md):
 
 ```console
-/path/to/qualify_browse <bucket> <repository-prefix> > browse.jsonl
+/path/to/qualify_browse <bucket> <repository-prefix> <text-path> > browse.jsonl
 python3 crab/scripts/e2e/verify_remote_browse.py \
   /path/to/read-only/source-repository browse.jsonl --output report.json
 ```

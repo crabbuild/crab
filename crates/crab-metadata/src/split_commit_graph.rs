@@ -759,6 +759,8 @@ pub fn decode_commit_graph_layer(bytes: &[u8], path: &str) -> Result<CommitGraph
     if cursor != bytes.len() || observed_parents != declared_parents {
         return corrupt_at(path, "commit graph parent count does not match header");
     }
+    tracing::debug!(target: "crab_metadata::index_decode", index_format = "commit_graph",
+        decoded_bytes = bytes.len() as u64, "index block decoded");
     Ok(CommitGraphLayer {
         base_ordinal,
         records,

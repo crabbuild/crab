@@ -38,7 +38,16 @@ class MeasuredRunner(AddCommitPushSmoke):
             match = re.search(pattern, stderr)
             if match:
                 self.report.commands[-1]["max_rss_bytes"] = int(match[1]) * (1 if sys.platform == "darwin" else 1024)
-                self.write_report()
+            if sys.platform == "darwin":
+                cpu = re.search(r"([\d.]+) user\s+([\d.]+) sys", stderr)
+                if cpu:
+                    self.report.commands[-1]["cpu_seconds"] = float(cpu[1]) + float(cpu[2])
+            else:
+                user = re.search(r"User time \(seconds\):\s*([\d.]+)", stderr)
+                system = re.search(r"System time \(seconds\):\s*([\d.]+)", stderr)
+                if user and system:
+                    self.report.commands[-1]["cpu_seconds"] = float(user[1]) + float(system[1])
+            self.write_report()
         return result
 
 

@@ -205,6 +205,8 @@ pub(super) fn decode_layer(
     if cursor != bytes.len() {
         return corrupt_at(path, "path-state layer has trailing bytes");
     }
+    tracing::debug!(target: "crab_metadata::index_decode", index_format = "path_state",
+        decoded_bytes = bytes.len() as u64, "index block decoded");
     Ok(PathStateLayer {
         base_ordinal,
         records,
