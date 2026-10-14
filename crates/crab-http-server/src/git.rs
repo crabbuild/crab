@@ -278,7 +278,7 @@ pub(crate) async fn upload_pack(
         }
         "fetch" => {
             let request = wire::parse_fetch(&request.args)?;
-            let visibility = view.git_visibility_index()?;
+            let visibility = view.git_visibility_index().await?;
             let refs = repository
                 .refs()
                 .entries

@@ -23,9 +23,10 @@ pub(crate) struct Descriptor {
     refs: PageRef,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Authenticated scalar edit metadata and opaque added/removed set roots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Edit {
+pub struct VisibilityEditHeader {
     name: String,
     old_oid: Option<String>,
     new_oid: String,
@@ -49,7 +50,7 @@ pub(super) fn encode(delta: &CapsuleVisibilityDelta) -> Result<Bytes> {
     for (name, edit) in &delta.edits {
         let added = objects(&mut writer, &edit.added)?;
         let removed = objects(&mut writer, &edit.removed)?;
-        let row = Edit {
+        let row = VisibilityEditHeader {
             name: name.clone(),
             old_oid: edit.old_oid.clone(),
             new_oid: edit.new_oid.clone(),
@@ -104,7 +105,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<CapsuleVisibilityDelta> {
     let mut edits = BTreeMap::new();
     let mut change_bytes = 0u64;
     for (key, value) in refs {
-        let row = Edit::decode(&key, &value, descriptor.body_bytes)?;
+        let row = VisibilityEditHeader::decode(&key, &value, descriptor.body_bytes)?;
         let count = row.added.as_ref().map_or(0, |root| u64::from(root.count))
             + row.removed.as_ref().map_or(0, |root| u64::from(root.count));
         change_bytes = change_bytes
@@ -223,7 +224,43 @@ impl Descriptor {
     }
 }
 
-impl Edit {
+impl VisibilityEditHeader {
+    /// Return the prior tip used by the edit.
+    pub fn old_oid(&self) -> Option<&str> {
+        self.old_oid.as_deref()
+    }
+    /// Return the edit's new tip.
+    pub fn new_oid(&self) -> &str {
+        &self.new_oid
+    }
+    /// Whether the added set replaces the prior closure.
+    pub fn replaces(&self) -> bool {
+        self.replaces
+    }
+    /// Return the exact authenticated added-set count.
+    pub fn added_count(&self) -> u32 {
+        self.added.as_ref().map_or(0, |root| root.count)
+    }
+    /// Return the exact authenticated removed-set count.
+    pub fn removed_count(&self) -> u32 {
+        self.removed.as_ref().map_or(0, |root| root.count)
+    }
+    /// Compare rooted addition identities without treating locations as identities.
+    pub fn same_additions(&self, other: &Self) -> bool {
+        match (&self.added, &other.added) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                a.hash == b.hash
+                    && a.bytes == b.bytes
+                    && a.height == b.height
+                    && a.count == b.count
+                    && a.first == b.first
+                    && a.last == b.last
+            }
+            _ => false,
+        }
+    }
+
     fn decode(key: &[u8], bytes: &[u8], body_bytes: u64) -> Result<Self> {
         let row: Self = serde_json::from_slice(bytes)
             .map_err(|error| MetadataError::CapsuleVisibilityRecord { source: error })?;
@@ -328,7 +365,7 @@ mod tests {
         let changes = writer
             .tree(Kind::VisibilityChanges, vec![(vec![0x22; 20], vec![])])
             .unwrap();
-        let row = Edit {
+        let row = VisibilityEditHeader {
             name: "refs/heads/main".into(),
             old_oid: Some("1".repeat(40)),
             new_oid: "2".repeat(40),

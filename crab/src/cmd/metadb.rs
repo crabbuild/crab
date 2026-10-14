@@ -1738,7 +1738,7 @@ async fn diagnose_capsule(
         )
         .await?;
         let catalog = view.pointer_catalog()?;
-        view.git_visibility_index()?;
+        view.git_visibility_index().await?;
         // Verification must read layered sources and prove reachable content,
         // not rebuild a complete pack or accept catalog membership as file proof.
         let dependencies = crab_read::capsule_protocol::verify_reachable_dependencies(
@@ -2663,7 +2663,7 @@ async fn run_capsule_rebuild_in(
     )
     .await?;
     let catalog = view.pointer_catalog()?;
-    view.git_visibility_index()?;
+    view.git_visibility_index().await?;
     // Authenticate the complete closure before either a no-op success or a new
     // checkpoint; immutable publication alone does not verify reachable files.
     crab_read::capsule_protocol::verify_reachable_dependencies(

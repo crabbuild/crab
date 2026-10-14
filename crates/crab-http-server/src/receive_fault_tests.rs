@@ -210,7 +210,7 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
                     &cancel,
                     move |_holders, cancel| async move {
                         let view = leased_repo.open_view().await?;
-                        let visibility = view.git_visibility_index()?;
+                        let visibility = view.git_visibility_index().await?;
                         let repository = view
                             .git_repository(
                                 leased_repo.identity.clone(),

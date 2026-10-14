@@ -15,7 +15,7 @@ const VISIBILITY_DELTA_VERSION: u32 = 3;
 mod paged;
 pub(super) use paged::Descriptor as VisibilityPages;
 #[cfg(feature = "storage")]
-pub use paged::{CapsuleVisibilityReader, VisibilityChange};
+pub use paged::{CapsuleVisibilityReader, VisibilityChange, VisibilityEditHeader};
 const VISIBILITY_SNAPSHOT_VERSION: u32 = 3;
 
 /// Ref-keyed reachability changes authenticated by one publication capsule.

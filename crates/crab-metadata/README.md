@@ -223,8 +223,13 @@ Replacement edits must admit their new tip; queried OIDs cannot belong to both
 change sets. These changes alone never authorize a ref or object want.
 The capsule delta's retired JSON shape has no reader or serialization alias;
 retired run prefixes require republishing. Released v1 visibility index and
-manifest/catalog formats are unchanged. Complete repository reconciliation
-still loads visibility; lazy closure reconciliation remains unfinished.
+manifest/catalog formats are unchanged. Git control capture retains explicit
+paged evidence; `visibility_delta` returns an error for unloaded data rather
+than treating it as absence. Scalar header reads and actual-set inspection share
+the pager's encoded-work admission. Complete materialization verifies the captured
+section hash and descriptor, checks canonical delta bytes, and retains immutable
+shared results. `crab-read` owns lazy closure reconciliation; complete metadata
+capture remains available for maintenance and publication.
 
 Payload modules cover manifests, segmented lists, pack metadata, commit-graph
 summaries, ref registries, chunk/file indexes, receipts, transactions, and

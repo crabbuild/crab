@@ -138,7 +138,7 @@ pub(super) async fn verify_capsule_git_candidate(
     .into_iter()
     .map(|(name, reachable)| (name, reachable_object_ids(&reachable)))
     .collect::<BTreeMap<_, _>>();
-    let declared = view.candidate_git_visibility(candidate)?;
+    let declared = view.candidate_git_visibility(candidate).await?;
     if closures != declared {
         return Err(invalid(
             "candidate capsule Git visibility differs from its reachable object closure",

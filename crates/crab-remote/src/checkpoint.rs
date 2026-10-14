@@ -531,7 +531,7 @@ async fn publish_layered_sources(
     CheckpointError,
 > {
     let catalog_digest = source_catalog_digest(&sources)?;
-    let visibility_index = view.git_visibility_index()?;
+    let visibility_index = view.git_visibility_index().await?;
     let member_admission = layered_member_admission(
         &visibility_index,
         &sources,
