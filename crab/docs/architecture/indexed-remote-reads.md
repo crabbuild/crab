@@ -478,3 +478,21 @@ bytes and 62,357,504 median RSS bytes. Synthetic OIDs isolate the builder; these
 are debug component receipts, not native Git integrity, release-image performance
 or whole-publication measurements. Release/provider and broader lifecycle gates
 remain open. Fixtures, source/binary hashes and raw receipts remain external.
+
+## Metadata-first opening: implementation in progress
+
+The existing complete-metadata checkpoint capture is now named
+`open_view_from_root_with_metadata`. HTTP browsing, S3 read views, CLI remote
+reads, index builders and the foreground qualifier use it before and after
+checkpoints. It verifies full visibility, pointer catalogs and transaction/ref
+ordering, rather than substituting the narrower ordinary-fetch footer view.
+Complete body views remain available for embedded-pack and candidate installers.
+Origin-backed installation now handles uncheckpointed metadata source ranges;
+resident complete views retain their existing body installation path.
+
+The initial two focused tests pass snapshot/catalog equivalence, complete
+activation/visibility equivalence and absence of whole-run body GETs. Expanded
+native delta-chain installation, missing-dependency error preservation and
+consumer/real-store qualification remain in progress. No bounded-opening claim
+follows from this payload change: historical control directories, inventories
+and ref/frontier capture still require indexing and scaling proof.

@@ -148,9 +148,8 @@ pub async fn publish_capsule_checkpoint(
         max_capsule_bytes: maximum_bytes,
         max_frontier_bytes: maximum_bytes,
     };
-    let view =
-        crab_read::capsule_protocol::open_view_from_root_for_checkpoint(layout, root, limits)
-            .await?;
+    let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(layout, root, limits)
+        .await?;
     publish_capsule_checkpoint_from_view(layout, &view, threshold, maximum_bytes, cancel).await
 }
 
@@ -167,7 +166,7 @@ pub async fn maintain_capsule_repository(
 ) -> Result<CheckpointOutcome, CheckpointError> {
     check_cancelled(cancel)?;
     let root = crab_write::capsule_protocol::open_root(layout).await?;
-    let view = crab_read::capsule_protocol::open_view_from_root_for_checkpoint(
+    let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(
         layout,
         root,
         crab_read::capsule_protocol::CapsuleReadLimits {

@@ -220,9 +220,18 @@ and hydration consume this same view.
 
 Checkpoints use the layered source directory exclusively. Ordinary fetch uses
 `open_view_from_root_with_layered_control` to keep catalog and visibility bodies
-cold; `open_view_from_root_with_control` loads those bodies for consumers that
-need full authorization or pointer catalogs. These entry points differ in read
+cold; `open_view_from_root_with_control` loads those bodies before the first
+checkpoint for consumers that need embedded pack bytes. These entry points differ in read
 requirements, not storage-format compatibility.
+`open_view_from_root_with_metadata` captures the complete visibility and pointer
+catalog controls while leaving Git pack bodies cold, including before the first
+checkpoint. Browsing and background index builders use this path with the
+origin-backed Git reader. Metadata capture still verifies transaction ordering,
+activations and exact resulting refs; it is not footer-only fetch admission.
+Pack installation from metadata views also requires the origin layout and consumes
+authenticated source ranges. The embedded-pack reader and candidate installers
+retain complete body views. Control directories and ref capture remain separate
+indexing work; this change does not make their historical decoding constant-cost.
 For an ordinary fetch whose admitted capsule frontier totals at most 128 MiB,
 the reader verifies each complete run once and reuses its resident pack and
 index bytes. Larger frontiers retain bounded suffix and range reads; stable

@@ -634,7 +634,7 @@ async fn capsule_generation_owner_sample(
             started,
         ));
     }
-    let view = crab_read::capsule_protocol::open_view_from_root_for_checkpoint(
+    let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(
         layout,
         root,
         crab_read::capsule_protocol::CapsuleReadLimits {

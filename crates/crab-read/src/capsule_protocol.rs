@@ -2001,7 +2001,7 @@ fn order_native_pack_payloads(payloads: Vec<GitPackPayload>) -> Result<Vec<GitPa
     Ok(ordered)
 }
 
-/// Install packs from a view, range-reading only checkpoint pack bodies that
+/// Install packs from a view, range-reading only origin-backed pack bodies that
 /// are not already present in the destination Git object database.
 ///
 /// The layout owns the selected origin; a cache never changes read authority.
@@ -2030,9 +2030,16 @@ pub async fn install_git_packs_from_store(
     {
         return Ok(installed);
     }
-    if let Some(checkpoint) = view.layered_checkpoint() {
+    if view.layered_checkpoint().is_some()
+        || (view.capsules.is_empty() && !view.capsule_run_sources.is_empty())
+    {
+        // Metadata views expose authenticated source ranges before the first
+        // checkpoint too. Installing only resident capsules would drop their packs.
+        let sources = view
+            .layered_checkpoint()
+            .map_or(&[][..], LayeredCheckpoint::sources);
         let paths = install_layered_git_packs_from_store_selected_with_sources(
-            checkpoint.sources(),
+            sources,
             &view.capsule_run_sources,
             &view.capsules,
             router,
@@ -4128,12 +4135,12 @@ pub async fn open_view_from_root_with_layered_control(
     .await
 }
 
-/// Load complete visibility and catalog controls for logical checkpoint publication.
+/// Capture complete visibility and catalog metadata without loading Git pack bodies.
 ///
-/// Unlike ordinary footer-only fetch admission, this orders every visible
-/// transaction and materializes its metadata, including before the first
-/// checkpoint. Layered Git pack bodies remain cold.
-pub async fn open_view_from_root_for_checkpoint(
+/// This orders every visible transaction and verifies its metadata, including
+/// before the first checkpoint. Git reads and installation require the origin
+/// layout; callers needing embedded pack bytes use the complete view instead.
+pub async fn open_view_from_root_with_metadata(
     router: &StoreLayout<Store>,
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     limits: CapsuleReadLimits,
@@ -5557,12 +5564,13 @@ async fn load_run_control(
     router: &StoreLayout<Store>,
     pointer: &CapsulePointer,
 ) -> Result<(CapsuleRunControl, Vec<CapsuleControl>)> {
-    let path = router.capsule_path(pointer.hash());
-    let (control, capsules) =
-        crab_metadata::capsule_protocol::load_capsule_run_control(router, pointer)
-            .await
-            .map_err(|error| corrupt_path(path.to_string(), error.to_string()))?;
-    Ok((control, capsules))
+    match crab_metadata::capsule_protocol::load_capsule_run_control(router, pointer).await {
+        Ok(value) => Ok(value),
+        Err(crab_metadata::error::MetadataError::CorruptObject { path, reason }) => {
+            Err(ReadError::CorruptObject { path, reason })
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn corrupt(path: &object_store::path::Path, reason: impl Into<String>) -> ReadError {
@@ -6228,6 +6236,92 @@ mod tests {
                 StorageOperation::Get,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn metadata_run_control_preserves_missing_dependency_error() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "repositories/test".to_owned());
+        let root = load_root(&router).await.unwrap();
+        let pointer = &root.record().root().capsule_frontier()[0];
+        store
+            .delete(&router.capsule_path(pointer.hash()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            load_run_control(&router, pointer).await,
+            Err(ReadError::Metadata(
+                crab_metadata::error::MetadataError::Storage {
+                    source: crab_storage::StorageError::NotFound { .. }
+                }
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn metadata_view_preserves_complete_state_without_frontier_body_reads() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner).with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let root = load_root(&router).await.unwrap();
+        let complete = open_view_from_root_with_control(&router, root.clone(), TEST_LIMITS)
+            .await
+            .unwrap();
+        observer.observations.lock().unwrap().clear();
+
+        let metadata = open_view_from_root_with_metadata(&router, root, TEST_LIMITS)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            metadata.git_snapshot().unwrap(),
+            complete.git_snapshot().unwrap()
+        );
+        assert_eq!(
+            metadata.pointer_catalog().unwrap(),
+            complete.pointer_catalog().unwrap()
+        );
+        assert!(metadata.capsules().is_empty());
+        let observations = observer.observations.lock().unwrap();
+        assert!(
+            !observations
+                .iter()
+                .any(|read| read.operation == StorageOperation::Get)
+        );
+        assert!(
+            observations
+                .iter()
+                .any(|read| read.operation == StorageOperation::Range)
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_view_preserves_multi_ref_activation_and_visibility() {
+        for committed in [false, true] {
+            let inner = Arc::new(InMemory::new());
+            seed_prepared_multi_ref(inner.clone(), committed, committed).await;
+            let store = Store::new(inner);
+            let router = StoreLayout::new(store, "repositories/test".to_owned());
+            let root = load_root(&router).await.unwrap();
+            let complete = open_view_from_root_with_control(&router, root.clone(), TEST_LIMITS)
+                .await
+                .unwrap();
+            let metadata = open_view_from_root_with_metadata(&router, root, TEST_LIMITS)
+                .await
+                .unwrap();
+            assert_eq!(
+                metadata.git_snapshot().unwrap(),
+                complete.git_snapshot().unwrap()
+            );
+            assert_eq!(
+                metadata.git_visibility_index().unwrap(),
+                complete.git_visibility_index().unwrap()
+            );
+        }
     }
 
     #[tokio::test]

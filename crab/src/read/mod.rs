@@ -569,7 +569,7 @@ impl Inner {
         );
         let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
         Ok(
-            crab_read::capsule_protocol::open_view_from_root_with_control(
+            crab_read::capsule_protocol::open_view_from_root_with_metadata(
                 &layout,
                 root,
                 crab_read::capsule_protocol::CapsuleReadLimits {
