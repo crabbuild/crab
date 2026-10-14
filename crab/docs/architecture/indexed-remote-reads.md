@@ -556,7 +556,9 @@ on the main disk preserve the required 20-GiB Cell capacity check.
 Strict remote-Git library Clippy passes. Strict HTTP Clippy reaches the unchanged
 six coordinator lint expectations described above; the diagnostic run allowing
 only `unfulfilled-lint-expectations` passes without source suppression. The server
-binary builds. Broad CI and final packaged-image proof remain required.
+binary builds. PR #535 head `b5296e22091` passes every non-skipped CI check,
+including native Git versions, Windows/macOS protocol, both image jobs and RustFS
+partial-clone lifecycle. Scheduled fleet qualification was skipped and remains unproved.
 No format, dependency or configuration changes accompany this discovery slice.
 Full ref enumeration remains output-sized, and prefix filtering still captures
 the complete map. Targeted/paged ref capture and remaining control/index scaling
@@ -583,8 +585,22 @@ All 44 upload-pack session tests pass, including capsule discovery without run
 payloads before/after checkpointing, transaction ABA rejection, legacy discovery,
 empty repositories, negotiation and generated-pack admission release. Architecture
 guardrails and workflow YAML parsing pass. The session module is now included in
-Linux, macOS and Windows protocol CI. Native Git lifecycle, build and CI proof
-remain required before this slice can be described as working. Complete ref capture remains output-sized;
+Linux, macOS and Windows protocol CI. Final code commit `f98ca6f0880` builds and
+passes 92 native Git/RustFS lifecycle checks across 323 commands, including
+discovery, clone, incremental fetch, filters, shallow history and hidden-ref
+policy. Source/binary identity and a clean checkout are verified in the external
+`helper-discovery-native-r2` receipts. Shared debug-host timings are not provider
+latency qualification; final CI and packaged-image proof remain required.
+
+Strict CLI Clippy reaches the six unchanged coordinator expectations. Allowing
+only that lint category exposes 604 CLI diagnostics on both base `b5296e22091`
+and final code. Primary source-token comparison, normalized for line positions,
+whitespace and future layout sizes, matches all diagnostics; one moved call's
+span differs only by its binding expression. The one newly introduced match-style
+diagnostic was fixed. These are baseline comparison results, not a strict lint
+pass; no suppression was added to source.
+
+Complete ref capture remains output-sized;
 remaining control/catalog/index opening costs are still stage-4 gates. The
 earlier helper capability probe still captures control metadata when an empty
 local object database needs classic cold-clone pack routing; this slice changes
