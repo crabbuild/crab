@@ -10,24 +10,24 @@ use crate::git_visibility::{
 
 use super::valid_ref_name;
 
-const VISIBILITY_DELTA_VERSION: u32 = 2;
+const VISIBILITY_DELTA_VERSION: u32 = 3;
+
+mod paged;
+pub(super) use paged::Descriptor as VisibilityPages;
+#[cfg(feature = "storage")]
+pub use paged::{CapsuleVisibilityReader, VisibilityChange};
 const VISIBILITY_SNAPSHOT_VERSION: u32 = 3;
 
 /// Ref-keyed reachability changes authenticated by one publication capsule.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapsuleVisibilityDelta {
-    version: u32,
     edits: BTreeMap<String, GitVisibilityEdit>,
 }
 
 impl CapsuleVisibilityDelta {
     /// Build a canonical delta with exactly one reachability edit per changed live ref.
     pub fn new(edits: BTreeMap<String, GitVisibilityEdit>) -> Result<Self> {
-        let delta = Self {
-            version: VISIBILITY_DELTA_VERSION,
-            edits,
-        };
+        let delta = Self { edits };
         delta.validate()?;
         Ok(delta)
     }
@@ -35,24 +35,11 @@ impl CapsuleVisibilityDelta {
     /// Encode this delta for an authenticated capsule section.
     pub fn encode(&self) -> Result<Bytes> {
         self.validate()?;
-        serde_json::to_vec(self).map(Bytes::from).map_err(|source| {
-            MetadataError::Internal(format!(
-                "capsule visibility delta serialization failed: {source}"
-            ))
-        })
+        paged::encode(self)
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
-        let delta: Self =
-            serde_json::from_slice(bytes).map_err(|source| MetadataError::CorruptObject {
-                path: "capsule-protocol visibility delta".to_owned(),
-                reason: format!("visibility delta is invalid JSON: {source}"),
-            })?;
-        delta.validate().map_err(as_corruption)?;
-        if delta.encode()?.as_ref() != bytes {
-            return Err(corrupt("visibility delta is not canonically encoded"));
-        }
-        Ok(delta)
+        paged::decode(bytes)
     }
 
     /// Return the ref-keyed reachability changes.
@@ -62,11 +49,12 @@ impl CapsuleVisibilityDelta {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.version != VISIBILITY_DELTA_VERSION {
-            return Err(contract_error("visibility delta version is unsupported"));
-        }
-        if self.edits.is_empty() {
-            return Err(contract_error("visibility delta must contain an edit"));
+        if self.edits.is_empty()
+            || self.edits.len() > crate::git_visibility::MAX_GIT_VISIBILITY_REFS
+        {
+            return Err(contract_error(
+                "visibility delta ref count is outside its bound",
+            ));
         }
         for (name, edit) in &self.edits {
             if !name.starts_with("refs/") || !valid_ref_name(name) {

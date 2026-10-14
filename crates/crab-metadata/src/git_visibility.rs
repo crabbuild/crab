@@ -18,7 +18,7 @@ pub const GIT_VISIBILITY_INDEX_VERSION: u32 = 1;
 /// Maximum serialized proof accepted from object storage.
 pub const MAX_GIT_VISIBILITY_INDEX_BYTES: u64 = 128 * 1024 * 1024;
 
-const MAX_GIT_VISIBILITY_REFS: usize = 100_000;
+pub(crate) const MAX_GIT_VISIBILITY_REFS: usize = 100_000;
 /// Maximum number of distinct Git objects in one visibility proof dictionary.
 pub const MAX_GIT_VISIBILITY_OBJECTS: u64 = 10_000_000;
 
@@ -2019,7 +2019,7 @@ fn validate_oid(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn decode_oid(value: &str) -> Result<GitVisibilityOid> {
+pub(crate) fn decode_oid(value: &str) -> Result<GitVisibilityOid> {
     validate_oid(value)?;
     let mut decoded = [0u8; 20];
     let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
@@ -2040,7 +2040,7 @@ fn hex_value(value: u8) -> u8 {
     }
 }
 
-fn encode_oid(oid: &GitVisibilityOid) -> String {
+pub(crate) fn encode_oid(oid: &GitVisibilityOid) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(40);
     for byte in oid {

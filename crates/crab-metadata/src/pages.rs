@@ -57,6 +57,8 @@ pub(crate) enum Kind {
     PackSlots = 11,
     RunAdmission = 12,
     RunAdmissionCounts = 13,
+    VisibilityRefs = 14,
+    VisibilityChanges = 15,
 }
 
 impl Kind {
@@ -75,8 +77,8 @@ impl Kind {
 
     pub(crate) fn key_bytes(self) -> usize {
         match self {
-            Self::Names | Self::CommitAncestryNodes => 32,
-            Self::CommitOids | Self::RunAdmission => 20,
+            Self::Names | Self::CommitAncestryNodes | Self::VisibilityRefs => 32,
+            Self::CommitOids | Self::RunAdmission | Self::VisibilityChanges => 20,
             #[cfg(feature = "remote-index")]
             Self::PackInventory => 32,
             #[cfg(feature = "remote-index")]
@@ -342,6 +344,7 @@ pub(crate) fn decode(
         #[cfg(feature = "remote-index")]
         Kind::ObjectLocators | Kind::PackOffsets | Kind::PackInventory | Kind::PackSlots => "git_object_index",
         Kind::RunAdmission | Kind::RunAdmissionCounts => "capsule_admission",
+        Kind::VisibilityRefs | Kind::VisibilityChanges => "capsule_visibility",
         _ => "path_state",
     },
         decoded_bytes=bytes.len() as u64, "index page decoded");

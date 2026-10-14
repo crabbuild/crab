@@ -70,6 +70,8 @@ pub use transaction_record::{
     CapsuleTransactionRecord, CapsuleTransactionStatus, MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
 };
 pub use visibility::{CapsuleVisibilityDelta, CapsuleVisibilitySnapshot};
+#[cfg(feature = "storage")]
+pub use visibility::{CapsuleVisibilityReader, VisibilityChange};
 
 fn valid_ref_name(name: &str) -> bool {
     gix_validate::reference::name_partial(name.as_bytes().as_bstr()).is_ok()

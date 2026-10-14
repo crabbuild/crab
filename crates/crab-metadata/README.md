@@ -169,7 +169,7 @@ capsules and encodes/authenticates the final run once. Run level is the
 `ceil(log2(count))` size class; the authenticated capsule count remains exact.
 Mixed-level carries retain canonical capsule bytes and member ordinals without
 encoding discarded intermediate runs; complete capsule verification remains
-mandatory. The v2 cutover uses CRBRUN01 with footer version 2 and
+mandatory. The v2 cutover uses CRBRUN01 with footer version 3 and
 root/history/ref-head versions 4/3/5; there is no reader fallback to earlier
 run or pointer semantics.
 Runs may contain byte-identical packs from different transactions. Their source
@@ -192,7 +192,7 @@ suffix. Detached large visibility/catalog sections retain their separate bounded
 reads. The unshipped `CRBRUN04`/`CRBRUN05`/`CRBRUN06`/`CRBRUN07` formats are
 rejected, not read through a compatibility path; readers and writers must cut
 over together.
-Run footer and admission version 2 replace their unshipped version-1 shapes.
+Run footer version 3 rejects its retired versions 1/2; admission remains version 2.
 Exact admission uses authenticated OID-to-member pages and dense per-member
 count pages. Their roots are committed by the footer; complete readers verify
 both directories and canonical body bytes before exposing admission. Page kind
@@ -205,6 +205,26 @@ Its paged admission reader returns authenticated misses and preserves request
 order and duplicates; cached and fetched pages share one encoded-work budget.
 Complete inspection still scans both admission trees. Complete visibility and
 catalog decoding and source/ref capture remain separate opening costs.
+
+Visibility delta version 3 replaces flat JSON OID lists with authenticated ref
+headers and separate added/removed OID trees. Ref directories and object sets
+page their internal routing. Empty sets have no root; shared immutable sets may
+reuse pages. Complete delta decoding checks body identity, both sets, edit
+invariants and canonical bytes. The existing visibility proof byte/ref/object
+bounds also admit this encoding and prevent repeated roots from expanding into
+unbounded logical work during complete inspection.
+
+Run footers commit each visibility descriptor, and full control readers compare
+it against the capsule section. Visibility OID tables are always detached from
+the footer. `CapsuleRunControl::visibility_reader` opens authenticated batched
+changes for one captured capsule, preserving duplicates and input order. A
+missing ref, an unchanged OID and a missing/corrupt page have distinct results.
+Replacement edits must admit their new tip; queried OIDs cannot belong to both
+change sets. These changes alone never authorize a ref or object want.
+The capsule delta's retired JSON shape has no reader or serialization alias;
+retired run prefixes require republishing. Released v1 visibility index and
+manifest/catalog formats are unchanged. Complete repository reconciliation
+still loads visibility; lazy closure reconciliation remains unfinished.
 
 Payload modules cover manifests, segmented lists, pack metadata, commit-graph
 summaries, ref registries, chunk/file indexes, receipts, transactions, and

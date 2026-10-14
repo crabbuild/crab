@@ -25,8 +25,8 @@ pub struct Measurements {
     read_bytes: AtomicU64,
     written_bytes: AtomicU64,
     active: AtomicU64,
-    decoded_blocks: [AtomicU64; 4],
-    decoded_bytes: [AtomicU64; 4],
+    decoded_blocks: [AtomicU64; 5],
+    decoded_bytes: [AtomicU64; 5],
 }
 
 #[derive(Clone, Copy)]
@@ -35,8 +35,8 @@ struct Snapshot {
     outcomes: [u64; 9],
     read_bytes: u64,
     written_bytes: u64,
-    decoded_blocks: [u64; 4],
-    decoded_bytes: [u64; 4],
+    decoded_blocks: [u64; 5],
+    decoded_bytes: [u64; 5],
 }
 
 impl StorageObserver for Measurements {
@@ -72,6 +72,7 @@ impl tracing::field::Visit for DecodeEvent {
                 "path_state" => Some(1),
                 "git_object_index" => Some(2),
                 "capsule_admission" => Some(3),
+                "capsule_visibility" => Some(4),
                 _ => None,
             };
         }
@@ -166,6 +167,7 @@ impl Measurements {
             "path_state",
             "git_object_index",
             "capsule_admission",
+            "capsule_visibility",
         ]
         .into_iter()
         .enumerate()
@@ -242,12 +244,13 @@ mod tests {
             tracing::debug!(target:"crab_metadata::index_decode", index_format="path_state", decoded_bytes=123_u64);
             tracing::debug!(target:"crab_metadata::index_decode", index_format="git_object_index", decoded_bytes=67_u64);
             tracing::debug!(target:"crab_metadata::index_decode", index_format="capsule_admission", decoded_bytes=29_u64);
+            tracing::debug!(target:"crab_metadata::index_decode", index_format="capsule_visibility", decoded_bytes=31_u64);
             tracing::debug!(target:"unrelated", index_format="path_state", decoded_bytes=999_u64);
         });
         let snapshot = counters.snapshot();
         assert_eq!(
             (snapshot.decoded_blocks, snapshot.decoded_bytes),
-            ([1, 1, 1, 1], [41, 123, 67, 29])
+            ([1, 1, 1, 1, 1], [41, 123, 67, 29, 31])
         );
     }
 
