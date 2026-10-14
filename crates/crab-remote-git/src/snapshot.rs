@@ -270,6 +270,13 @@ impl RemoteGitSnapshot {
         page: &PageRequest,
         operation: &OperationContext,
     ) -> Result<Page<PathHistoryEntry>> {
+        if !path.is_root()
+            && let Some(index) = self.repository.path_state(operation).await?
+        {
+            return self
+                .indexed_first_parent_path_history(start, path, page, operation, index)
+                .await;
+        }
         if let Some(commit_graph) = self.commit_graph.as_deref() {
             return self
                 .commit_graph_path_history(start, path, page, operation, commit_graph)
@@ -277,6 +284,58 @@ impl RemoteGitSnapshot {
         }
         self.raw_first_parent_path_history(start, path, page, operation, Vec::new())
             .await
+    }
+
+    async fn indexed_first_parent_path_history(
+        &self,
+        start: ObjectId,
+        path: &GitPath,
+        page: &PageRequest,
+        operation: &OperationContext,
+        index: &crate::path_state::PathStateIndex,
+    ) -> Result<Page<PathHistoryEntry>> {
+        let mut items = Vec::new();
+        let mut next = Some(start);
+        let mut visited = HashSet::new();
+        while let Some(start) = next {
+            let Some(changed) = index.last_change(start, path, operation).await? else {
+                break;
+            };
+            if !visited.insert(changed) {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::PathState,
+                });
+            }
+            let commit = path_history_commit(changed, operation).await?;
+            let mut commits = vec![commit.clone()];
+            next = commit.parents.first().copied();
+            if let Some(parent) = next {
+                commits.push(path_history_commit(parent, operation).await?);
+            }
+            if let Some(graph) = self.commit_graph.as_deref()
+                && !graph.parents_match(&commits, operation).await?
+            {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::PathState,
+                });
+            }
+            // Reset markers also cover never-existing descendants. Raw entries
+            // decide whether this candidate actually changed the requested path.
+            let entries = entries_at_trees(&commits, path, operation).await?;
+            if append_path_history_change(
+                &mut items,
+                commit,
+                entries[0].as_ref(),
+                &entries[1..],
+                page,
+                operation,
+            )
+            .await?
+            {
+                return self.first_parent_path_page(path, items, next);
+            }
+        }
+        Ok(Page { items, next: None })
     }
 
     async fn commit_graph_path_history(
@@ -512,7 +571,7 @@ impl RemoteGitSnapshot {
             }
             let mut filled_page = false;
             if traversed >= skip
-                && let Some(kind) = path_change(self, &commit, path, traversal, operation).await?
+                && let Some(kind) = path_change(&commit, path, traversal, operation).await?
             {
                 operation
                     .charge(
@@ -677,8 +736,31 @@ impl RemoteGitSnapshot {
             return Ok(cached.value.as_ref().clone());
         }
         let budget_before = operation.budget_usage().await;
-        let head_commit = operation.read_commit(self.commit_oid).await?;
         let head_blob = read_blame_blob(self, path, operation).await?;
+        let path_index = self.repository.path_state(operation).await?;
+        let head_oid = match &path_index {
+            Some(index) => index
+                .last_change(self.commit_oid, path, operation)
+                .await?
+                .ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PathState,
+                })?,
+            None => self.commit_oid,
+        };
+        let head_commit = if path_index.is_some() {
+            path_history_commit(head_oid, operation).await?
+        } else {
+            operation.read_commit(head_oid).await?
+        };
+        if path_index.is_some() {
+            let entry =
+                entries_at_trees(std::slice::from_ref(&head_commit), path, operation).await?;
+            if entry[0].as_ref().map(|entry| entry.oid) != Some(head_blob.metadata.oid) {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::PathState,
+                });
+            }
+        }
         let mut current_oid = head_blob.metadata.oid;
         let mut current_bytes = head_blob.bytes;
         let current_line_count = line_count(&current_bytes, operation.cancellation())?;
@@ -697,7 +779,7 @@ impl RemoteGitSnapshot {
                     .saturating_mul(mem::size_of::<ObjectId>()),
                 source,
             })?;
-        origins.resize(current_lines.len(), self.commit_oid);
+        origins.resize(current_lines.len(), head_commit.oid);
         let mut tracked = Vec::new();
         tracked
             .try_reserve_exact(current_lines.len())
@@ -715,8 +797,27 @@ impl RemoteGitSnapshot {
         visited.insert(current_commit.oid);
 
         'history: while let Some(parent_oid) = current_commit.parents.first().copied() {
-            let parent_commits =
-                blame_parent_commits(parent_oid, self.commit_graph.as_deref(), operation).await?;
+            let parent_commits = match &path_index {
+                Some(index) => {
+                    let Some(changed) = index.last_change(parent_oid, path, operation).await?
+                    else {
+                        break;
+                    };
+                    let commits = vec![path_history_commit(changed, operation).await?];
+                    if let Some(graph) = self.commit_graph.as_deref()
+                        && !graph.parents_match(&commits, operation).await?
+                    {
+                        return Err(Error::Corrupt {
+                            stage: CorruptionStage::PathState,
+                        });
+                    }
+                    commits
+                }
+                None => {
+                    blame_parent_commits(parent_oid, self.commit_graph.as_deref(), operation)
+                        .await?
+                }
+            };
             for parent_commit in &parent_commits {
                 if !visited.insert(parent_commit.oid) {
                     return Err(Error::Corrupt {
@@ -1743,23 +1844,21 @@ fn blame_ranges(
 }
 
 async fn path_change(
-    snapshot: &RemoteGitSnapshot,
     commit: &Commit,
     path: &GitPath,
     traversal: HistoryTraversal,
     operation: &OperationContext,
 ) -> Result<Option<ChangeKind>> {
-    let current = entry_at_tree(snapshot, commit.tree, commit.oid, path, operation).await?;
     let parent_oids: Vec<ObjectId> = match traversal {
         HistoryTraversal::FirstParent => commit.parents.first().copied().into_iter().collect(),
         HistoryTraversal::AllParents => commit.parents.clone(),
     };
-    let mut parents = Vec::new();
+    let mut commits = vec![commit.clone()];
     for oid in parent_oids {
-        let parent = operation.read_commit(oid).await?;
-        parents.push(entry_at_tree(snapshot, parent.tree, parent.oid, path, operation).await?);
+        commits.push(operation.read_commit(oid).await?);
     }
-    Ok(path_change_kind(current.as_ref(), &parents))
+    let entries = entries_at_trees(&commits, path, operation).await?;
+    Ok(path_change_kind(entries[0].as_ref(), &entries[1..]))
 }
 
 async fn path_history_commit(oid: ObjectId, operation: &OperationContext) -> Result<Commit> {
@@ -1879,8 +1978,9 @@ async fn entries_at_trees(
         for ((index, _), entry) in active.into_iter().zip(entries) {
             trees[index] = match entry {
                 Some(entry) if entry.kind == EntryKind::Tree => Some(entry.oid),
-                Some(entry) => return Err(Error::PathComponentNotTree { actual: entry.kind }),
-                None => None,
+                // Historical descendants are absent when an ancestor was a blob.
+                // Direct entry reads keep their stricter component-kind error.
+                Some(_) | None => None,
             };
         }
         parent = parent.join(component)?;
@@ -2017,24 +2117,6 @@ async fn queue_all_parents(
     });
     pending.extend(ordered.into_iter().rev().map(|(oid, _)| oid));
     Ok(())
-}
-
-async fn entry_at_tree(
-    source: &RemoteGitSnapshot,
-    tree: ObjectId,
-    commit: ObjectId,
-    path: &GitPath,
-    operation: &OperationContext,
-) -> Result<Option<TreeEntry>> {
-    let snapshot = RemoteGitSnapshot {
-        generation: source.generation,
-        pack_index_hash: source.pack_index_hash,
-        commit_oid: commit,
-        root_tree_oid: tree,
-        repository: Arc::clone(&source.repository),
-        commit_graph: source.commit_graph.clone(),
-    };
-    snapshot.entry(path, operation).await
 }
 
 const CPU_CANCELLATION_INTERVAL: usize = 4 * 1024;

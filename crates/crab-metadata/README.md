@@ -103,7 +103,7 @@ cargo build -p crab-metadata --example qualify_graph_build --release --locked
 /usr/bin/time -l "$CARGO_TARGET_DIR/release/examples/qualify_graph_build" branches 8000
 ```
 
-Path-state descriptor version 5 requires exact-name tree comparison semantics
+Path-state descriptor version 6 requires exact-name tree comparison semantics
 and authenticated pages; retired descriptors are rejected.
 Maintenance rebuilds completed indexes and resumable checkpoints through the
 existing conditional publication path. Record, node, component and child pages
@@ -414,9 +414,18 @@ responsibility.
 
 ### Paged path attribution
 
-Unreleased path-state descriptor version 5 authenticates bounded record, node,
+Unreleased path-state descriptor version 6 authenticates bounded record, node,
 component and child pages inside each immutable layer object. Canonical full
 loads validate the complete physical closure; `PathStateReader` resolves selected
 paths through verified ranges and a bounded parsed-page cache. Graph and ordinal
 bindings are retained. GC retains the layer object and therefore every embedded
 page. See the [format and qualification contract](../../crab/docs/architecture/indexed-remote-reads.md#paged-path-state-format).
+
+Path-state nodes retain deletion/type-reset ordinals and historical descendants.
+A reset masks older visible values; it does not mutate prior commit roots.
+`last_change` locates candidate changes for absent paths as well as visible ones.
+A covering reset may nominate a never-existing descendant; raw tree comparison
+must decide whether that candidate actually changed the requested path. Full
+loads, resumable construction, compaction and maintenance scans retain markers.
+The retired unreleased version 5 is rebuilt by existing maintenance, never read
+through an alternate codec.

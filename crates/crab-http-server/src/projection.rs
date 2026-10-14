@@ -501,7 +501,11 @@ async fn project_attribution(
         };
         check_cancelled(cancellation)?;
         let (nodes, edges, roots) = match item {
-            PathStateItem::Node { reference, value } => (
+            // Projection attributes actual visible entries. Retained deletion
+            // history is used by canonical history reads, not visible listing rows.
+            PathStateItem::Node {
+                reference, value, ..
+            } => (
                 Some(projection::AttributionNodeRow {
                     node_hash: node_hash(source, reference.layer, reference.index),
                     last_change_ordinal: value,

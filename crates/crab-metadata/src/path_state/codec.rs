@@ -58,6 +58,7 @@ pub(super) fn encode_layer(layer: &PathStateLayer) -> Result<EncodedLayer> {
             })
             .collect::<Result<Vec<_>>>()?;
         let mut value = node.value.unwrap_or(u32::MAX).to_le_bytes().to_vec();
+        value.extend_from_slice(&node.reset.unwrap_or(u32::MAX).to_le_bytes());
         if rows.is_empty() {
             value.push(0);
         } else {
@@ -166,7 +167,7 @@ pub(super) fn decode_layer(
         path,
         &mut visited,
     )? {
-        let (value, children) = decode_node(&value, reference.bytes, path)?;
+        let (value, reset, children) = decode_node(&value, reference.bytes, path)?;
         let mut entries = BTreeMap::new();
         if let Some(root) = children {
             for (key, value) in paged::scan(bytes, &root, Kind::Children, path, &mut visited)? {
@@ -185,6 +186,7 @@ pub(super) fn decode_layer(
         }
         nodes.push(PathStateNode {
             value,
+            reset,
             children: entries,
         });
     }
@@ -248,9 +250,10 @@ pub(super) fn decode_node(
     bytes: &[u8],
     source_bytes: u64,
     path: &str,
-) -> Result<(Option<u32>, Option<paged::PageRef>)> {
+) -> Result<(Option<u32>, Option<u32>, Option<paged::PageRef>)> {
     let mut input = Input::new(bytes, path);
     let value = optional(input.u32()?);
+    let reset = optional(input.u32()?);
     let children = match input.array::<1>()?[0] {
         0 => None,
         1 => {
@@ -264,7 +267,7 @@ pub(super) fn decode_node(
         _ => return corrupt_at(path, "invalid child-root tag"),
     };
     input.finish()?;
-    Ok((value, children))
+    Ok((value, reset, children))
 }
 
 #[cfg(any(feature = "storage", test))]
@@ -303,10 +306,12 @@ mod tests {
         let name: Arc<[u8]> = Arc::from(b"repeated-component-\xff".as_slice());
         let mut nodes = vec![PathStateNode {
             value: Some(0),
+            reset: None,
             children: BTreeMap::new(),
         }];
         nodes.extend((0..1024).map(|_| PathStateNode {
             value: None,
+            reset: None,
             children: BTreeMap::from([(name.clone(), PathStateNodeRef { layer: 0, index: 0 })]),
         }));
         PathStateLayer {

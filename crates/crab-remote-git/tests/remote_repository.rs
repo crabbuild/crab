@@ -5679,3 +5679,246 @@ async fn storage_telemetry_counts_shared_reads_once_and_excludes_warm_hits() {
     assert_eq!(reads.0.load(Ordering::SeqCst), observed);
     fixture.runtime.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn indexed_path_history_matches_raw_git_changes_and_continuations() {
+    use crab_metadata::path_state::{
+        PathStateInput, PathStateMutation, append_path_state, upload_path_state,
+    };
+    use crab_metadata::split_commit_graph::load_split_commit_graph;
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    crab_metadata::layout_descriptor::ensure_canonical_layout(&fixture.store, &fixture.layout)
+        .await
+        .unwrap();
+    let hash = publish_complete_graph(&fixture, true).await;
+    let graph = load_split_commit_graph(
+        &fixture.store,
+        &fixture.layout,
+        &hash,
+        ObjectLimits::default().max_commit_graph_bytes,
+    )
+    .await
+    .unwrap();
+    let tree = |oid: &str| {
+        let bytes = git(
+            &[
+                "--git-dir",
+                path(&fixture.source_git_dir),
+                "ls-tree",
+                "-r",
+                "-t",
+                "-z",
+                oid,
+            ],
+            None,
+        );
+        bytes
+            .split(|byte| *byte == 0)
+            .filter(|row| !row.is_empty())
+            .map(|row| {
+                let tab = row.iter().position(|byte| *byte == b'\t').unwrap();
+                let fields = std::str::from_utf8(&row[..tab])
+                    .unwrap()
+                    .split(' ')
+                    .collect::<Vec<_>>();
+                (
+                    row[tab + 1..].to_vec(),
+                    (
+                        u32::from_str_radix(fields[0], 8).unwrap(),
+                        fields[2].to_owned(),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let inputs = (0..graph.descriptor.commit_count)
+        .map(|ordinal| {
+            let record = graph.record(ordinal).unwrap();
+            let oid = gix_hash::ObjectId::Sha1(record.oid);
+            let parent = record
+                .parents
+                .first()
+                .map(|parent| graph.record(*parent).unwrap().oid);
+            let before = parent
+                .map(|parent| tree(&gix_hash::ObjectId::Sha1(parent).to_string()))
+                .unwrap_or_default();
+            let after = tree(&oid.to_string());
+            let paths = before
+                .keys()
+                .chain(after.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let mut mutations = paths
+                .into_iter()
+                .filter(|name| before.get(name) != after.get(name))
+                .map(|name| {
+                    let reset = before
+                        .get(&name)
+                        .zip(after.get(&name))
+                        .is_some_and(|(old, new)| old.0 & 0o170000 != new.0 & 0o170000);
+                    PathStateMutation {
+                        present: after.contains_key(&name),
+                        path: name,
+                        reset,
+                    }
+                })
+                .collect::<Vec<_>>();
+            if parent.is_none() {
+                mutations.push(PathStateMutation {
+                    path: Vec::new(),
+                    present: false,
+                    reset: true,
+                });
+            }
+            PathStateInput {
+                oid: record.oid,
+                first_parent: parent,
+                author: Vec::new(),
+                author_seconds: 0,
+                message: Vec::new(),
+                mutations,
+            }
+        })
+        .collect();
+    let write = append_path_state(None, &graph, inputs).unwrap();
+    upload_path_state(
+        &fixture.store,
+        &fixture.layout,
+        &write,
+        crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+    )
+    .await
+    .unwrap();
+    let mut captured =
+        crab_metadata::manifest_store::read_repository_snapshot(&fixture.store, &fixture.layout)
+            .await
+            .unwrap();
+    captured.manifest.commit_graph_hash = Some(hash);
+    captured.manifest.path_state_hash = Some(write.descriptor_hash);
+    let cancel = CancellationToken::new();
+    let indexed_runtime = Arc::new(RemoteGitRuntime::default());
+    let indexed = RemoteGitRepository::from_snapshot(
+        fixture.layout.clone(),
+        &captured,
+        fixture.repository.identity().clone(),
+        indexed_runtime.clone(),
+        RepositoryOptions::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    for (reference, name) in [
+        ("semantic-head", "mode.txt"),
+        ("semantic-head", "old-name.txt"),
+        ("semantic-head", "new-name.txt"),
+        ("semantic-head", "type/never"),
+        ("semantic-head", "never-existed"),
+    ] {
+        let path_value = GitPath::new(name.as_bytes().to_vec()).unwrap();
+        let mut results = Vec::new();
+        for repo in [&fixture.repository, &indexed] {
+            let operation = repo
+                .operation(OperationKind::PathHistory, &cancel)
+                .await
+                .unwrap();
+            let result = async {
+                let snapshot = repo
+                    .snapshot(&Revision::Reference(reference.to_owned()), &operation)
+                    .await?;
+                let mut cursor = None;
+                let mut rows = Vec::new();
+                loop {
+                    let page = snapshot
+                        .path_history(
+                            &path_value,
+                            HistoryTraversal::FirstParent,
+                            &PageRequest::new(1, cursor)?,
+                            &operation,
+                        )
+                        .await?;
+                    rows.extend(
+                        page.items
+                            .into_iter()
+                            .map(|entry| (entry.commit.oid, entry.kind)),
+                    );
+                    cursor = page.next;
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                Ok(rows)
+            }
+            .await;
+            results.push(operation.finish(result).await.unwrap());
+        }
+        assert_eq!(results[0], results[1], "{reference}:{name}");
+        let native = native_oid_lines(
+            &fixture.source_git_dir,
+            &[
+                "log",
+                "--first-parent",
+                "--format=%H",
+                "--no-renames",
+                &fixture.semantic_head_commit.to_string(),
+                "--",
+                name,
+            ],
+        );
+        assert_eq!(
+            results[1].iter().map(|(oid, _)| *oid).collect::<Vec<_>>(),
+            native,
+            "{reference}:{name}"
+        );
+    }
+    for name in ["mode.txt", "text.txt", "type.extra"] {
+        let path_value = GitPath::new(name.as_bytes().to_vec()).unwrap();
+        let mut results = Vec::new();
+        for repo in [&fixture.repository, &indexed] {
+            let operation = repo.operation(OperationKind::Blame, &cancel).await.unwrap();
+            let result = async {
+                let snapshot = repo
+                    .snapshot(&Revision::Reference("semantic-head".to_owned()), &operation)
+                    .await?;
+                snapshot.blame(&path_value, &operation).await
+            }
+            .await;
+            results.push(operation.finish(result).await.unwrap());
+        }
+        assert_eq!(results[0], results[1], "blame:{name}");
+        let native = git(
+            &[
+                "--git-dir",
+                path(&fixture.source_git_dir),
+                "blame",
+                "--first-parent",
+                "--root",
+                "--line-porcelain",
+                &fixture.semantic_head_commit.to_string(),
+                "--",
+                name,
+            ],
+            None,
+        );
+        let expected = native
+            .split(|byte| *byte == b'\n')
+            .filter(|row| !row.starts_with(b"\t"))
+            .filter_map(|row| {
+                let fields = row
+                    .split(|byte| byte.is_ascii_whitespace())
+                    .collect::<Vec<_>>();
+                (fields.len() >= 3
+                    && fields[0].len() == 40
+                    && fields[0].iter().all(u8::is_ascii_hexdigit))
+                .then(|| parse_oid(fields[0]))
+            })
+            .collect::<Vec<_>>();
+        let actual = results[1]
+            .ranges
+            .iter()
+            .flat_map(|range| std::iter::repeat_n(range.commit.oid, range.lines as usize))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "native blame:{name}");
+    }
+    indexed_runtime.shutdown().await;
+    fixture.runtime.shutdown().await;
+}

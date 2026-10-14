@@ -338,3 +338,91 @@ async fn paged_graph_binding_matches_materialized_attribution_without_layer_load
         expected
     );
 }
+
+#[tokio::test]
+async fn deletion_and_reset_candidates_survive_unrelated_commits_and_old_roots() {
+    let graph = super::super::tests::graph_with_commits(6);
+    let mutation = |path: &[u8], present, reset| PathStateMutation {
+        path: path.to_vec(),
+        present,
+        reset,
+    };
+    let inputs = (1..=6)
+        .map(|n| PathStateInput {
+            oid: [n; 20],
+            first_parent: (n > 1).then_some([n - 1; 20]),
+            author: Vec::new(),
+            author_seconds: i64::from(n),
+            message: Vec::new(),
+            mutations: match n {
+                1 => vec![mutation(b"", false, true), mutation(b"foo/a", true, false)],
+                2 => vec![mutation(b"foo", false, false)],
+                3 => vec![
+                    mutation(b"foo", true, true),
+                    mutation(b"foo/b", true, false),
+                ],
+                4 => vec![mutation(b"unrelated", true, false)],
+                5 => vec![mutation(b"foo/b", false, false)],
+                _ => vec![mutation(b"foo", true, true)],
+            },
+        })
+        .collect();
+    let write = append_path_state(None, &graph, inputs).unwrap();
+    let store = Store::new(Arc::new(InMemory::new()));
+    let layout = StoreLayout::new(store.clone(), "change-points".to_owned());
+    upload_path_state(&store, &layout, &write, DEFAULT_MAX_PATH_STATE_BYTES)
+        .await
+        .unwrap();
+    let reader = PathStateReader::load(
+        &store,
+        &layout,
+        &write.descriptor_hash,
+        CommitGraphView::Materialized(&graph),
+        DEFAULT_MAX_PATH_STATE_BYTES,
+    )
+    .await
+    .unwrap();
+    for (commit, expected) in [
+        (1, [1, 1]),
+        (2, [2, 2]),
+        (3, [3, 3]),
+        (4, [3, 3]),
+        (5, [3, 5]),
+        (6, [6, 6]),
+    ] {
+        let actual = reader
+            .last_change(
+                &store,
+                CommitGraphView::Materialized(&graph),
+                &[commit; 20],
+                &[b"foo/a", b"foo/b"],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            actual.into_iter().map(Option::unwrap).collect::<Vec<_>>(),
+            expected.map(|value| [value; 20])
+        );
+    }
+    let visible = reader
+        .latest(
+            &store,
+            CommitGraphView::Materialized(&graph),
+            &[4; 20],
+            &[b"foo/b"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(visible[0].oid, [3; 20]);
+    assert!(
+        reader
+            .latest(
+                &store,
+                CommitGraphView::Materialized(&graph),
+                &[4; 20],
+                &[b"foo/a"]
+            )
+            .await
+            .is_err()
+    );
+}

@@ -982,3 +982,67 @@ remains unresolved. No test, baseline or expected-failure assertion is weakened.
 Checkpoint visibility/catalog decoding, ref/source capture and broader frontier
 amplification remain open. The 10k path-history budget failure, stages 5–8 and
 unified staging remain unresolved; this slice does not complete the initiative.
+
+
+## Path-history and blame change points in progress
+
+The 10,000-commit path-history failure comes from walking every first-parent
+commit despite available path-state attribution. The entry maximum remains
+100,000. First-parent path history now looks up candidate changes, verifies raw
+candidate/parent commits and tree entries, and resumes pagination at the parent.
+Blame uses the same lookup to skip unchanged versions while retaining existing
+line comparisons, mode-only behavior and deletion boundaries. Historical paths
+below a blob ancestor are absent; direct entry lookup retains its component-kind
+error. Root-path and all-parent history retain their traversal policy.
+
+Path-state descriptor version 6 retains deletion/type-reset ordinals and old
+trie descendants. Reset markers mask older visible values without rewriting old
+roots or expanding every deleted subtree. Missing descendants can have covering
+reset candidates, so raw entry comparison remains required before reporting a
+change. The paged reader shares visible attribution and candidate lookup through
+one interpreter. A missing/corrupt advertised page remains an error. Complete
+loads, compaction, resumable prefixes and maintenance scans retain the markers.
+HTTP projection keeps visible-node attribution: its sole caller supplies paths
+from the captured raw directory listing (`crates/crab-http-server/src/api.rs`).
+
+Upstream release tags were rechecked at their peeled commits: v1.0.1 and v1.2.0
+through v1.2.4 contain no path-state source. Unreleased version 5 is rejected;
+existing generation/browse maintenance handles its corrupt/retired descriptor by
+rebuilding, without a second reader codec. Broader lifecycle proof remains open.
+The read-scaling harness now captures source and manifests for metadata, read,
+remote, remote-Git, storage and write owners, alongside binary and fixture proofs.
+
+Proof passes 23 storage/remote-index path-state and seven payload-only tests,
+native-Git history/continuation comparisons, cold indexed/unindexed blame
+comparisons with separate runtimes, every native blame line for mode/content/
+unchanged-file cases, ordinary semantic and four blame regressions, and strict
+metadata/remote-Git Clippy. Four harness tests, frontend build and CLI/HTTP/S3/
+protected-service consumer checks pass. The separate runtimes prevent a shared
+result cache from substituting for indexed execution.
+
+Fresh-prefix RustFS publication, maintenance and all ten queries pass at 100,
+1,000 and 10,000 commits: 87 checks / 64 commands. The original failed 10k report
+remains retained. Final-source replay passes 123 processes: all ten queries per
+history and twenty cold/warm path-history plus twenty blame samples per history.
+Receipts match the current Rust source hashes, native Git results and completed
+backend operations. Warm query origin reads remain zero. Cold read bytes are:
+
+| Commits | Path history | Blame |
+| --- | ---: | ---: |
+| 100 | 133,757 | 133,772 |
+| 1,000 | 728,954 | 728,968 |
+| 10,000 | 4,691,860 | 4,708,972 |
+
+The raw commit walk is eliminated for indexed exact paths. Cold page/range
+amplification remains visible in these measurements and needs further tuning;
+these are local debug/RustFS observations, not representative-provider targets.
+CLI link build passes before publication. This is not complete stage-5
+proof: comparison caching and the complete parity matrix remain outstanding,
+alongside stage-4 opening/lifecycle/provider gaps and later stages. First-parent
+blame remains a bounded supported subset; Git's automatic whole-file rename
+following is a separate requirement ([Git blame documentation](https://git-scm.com/docs/git-blame)).
+
+PR #549 CI now also reports a container Compose recovery/cluster qualification
+failure. The failed log is retained; cause remains unresolved and no assertion
+or baseline has been weakened. This work has not landed and the goal remains
+active.

@@ -72,6 +72,37 @@ impl PathStateReader {
         start: &[u8; 20],
         paths: &[&[u8]],
     ) -> Result<Vec<PathStateSummary>> {
+        self.summaries(store, graph, start, paths, true)
+            .await?
+            .into_iter()
+            .map(|summary| summary.ok_or_else(|| corruption("visible path has no attribution")))
+            .collect()
+    }
+
+    /// Locate last path changes, including deletion and covering type resets.
+    pub async fn last_change(
+        &self,
+        store: &Store,
+        graph: CommitGraphView<'_>,
+        start: &[u8; 20],
+        paths: &[&[u8]],
+    ) -> Result<Vec<Option<[u8; 20]>>> {
+        Ok(self
+            .summaries(store, graph, start, paths, false)
+            .await?
+            .into_iter()
+            .map(|summary| summary.map(|summary| summary.oid))
+            .collect())
+    }
+
+    async fn summaries(
+        &self,
+        store: &Store,
+        graph: CommitGraphView<'_>,
+        start: &[u8; 20],
+        paths: &[&[u8]],
+        visible: bool,
+    ) -> Result<Vec<Option<PathStateSummary>>> {
         // Scalars can match two rebuilt graphs with different ordinals. The
         // immutable layer identities pin the ordering verified during load.
         if !matches_graph(&self.descriptor, graph) || self.graph_layers != graph.descriptor().layers
@@ -99,6 +130,8 @@ impl PathStateReader {
             .await?
             .remove(0);
         let mut nodes = vec![start.root; paths.len()];
+        let mut resets = vec![None; paths.len()];
+        let mut found = vec![true; paths.len()];
         let mut remaining = paths
             .iter()
             .map(|path| path.split(|byte| *byte == b'/'))
@@ -108,12 +141,14 @@ impl PathStateReader {
             let states = self.nodes(store, &nodes, &pending, &mut work).await?;
             let mut components = BTreeMap::<usize, Vec<(usize, &[u8], PageRef)>>::new();
             for (&position, state) in pending.iter().zip(states) {
+                resets[position] = resets[position].max(state.1);
                 let Some(component) = remaining[position].next() else {
                     continue;
                 };
-                let children = state
-                    .1
-                    .ok_or_else(|| corruption("visible path is absent from its trie"))?;
+                let Some(children) = state.2 else {
+                    found[position] = false;
+                    continue;
+                };
                 components
                     .entry(nodes[position].layer as usize)
                     .or_default()
@@ -146,7 +181,10 @@ impl PathStateReader {
                 for ((position, component, root), (key, value)) in
                     requests.into_iter().zip(keys.into_iter().zip(values))
                 {
-                    let value = value.ok_or_else(|| corruption("visible component is absent"))?;
+                    let Some(value) = value else {
+                        found[position] = false;
+                        continue;
+                    };
                     let (ordinal, name) =
                         codec::decode_name(&key, &value, self.paths[layer].as_ref())?;
                     if name != component || ordinal >= names.count {
@@ -186,7 +224,10 @@ impl PathStateReader {
                     )
                     .await?;
                 for ((position, _), value) in batch.requests.into_iter().zip(values) {
-                    let value = value.ok_or_else(|| corruption("visible child is absent"))?;
+                    let Some(value) = value else {
+                        found[position] = false;
+                        continue;
+                    };
                     let child = codec::decode_child(&value, self.paths[layer].as_ref())?;
                     self.validate_node(child, Some(nodes[position]))?;
                     nodes[position] = child;
@@ -194,29 +235,59 @@ impl PathStateReader {
                 }
             }
         }
-        let positions = (0..paths.len()).collect::<Vec<_>>();
+        let positions = (0..paths.len())
+            .filter(|position| found[*position])
+            .collect::<Vec<_>>();
         let states = self.nodes(store, &nodes, &positions, &mut work).await?;
-        let ordinals = states
-            .into_iter()
-            .map(|(value, _)| {
-                value
-                    .filter(|ordinal| *ordinal <= start_ordinal)
-                    .ok_or_else(|| {
-                        corruption("path attribution is absent or points to a future commit")
-                    })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(self
-            .records(store, graph, &ordinals, &mut work)
+        let mut ordinals = resets.clone();
+        for (position, (value, reset, _)) in positions.into_iter().zip(states) {
+            let reset = resets[position].max(reset);
+            ordinals[position] = if visible {
+                value.filter(|value| reset.is_none_or(|reset| *value >= reset))
+            } else {
+                value.max(reset)
+            };
+        }
+        if visible {
+            for (ordinal, found) in ordinals.iter_mut().zip(found) {
+                if !found {
+                    *ordinal = None;
+                }
+                if ordinal.is_none() {
+                    return corrupt("visible path is absent from its trie");
+                }
+            }
+        }
+        if ordinals
+            .iter()
+            .flatten()
+            .any(|ordinal| *ordinal > start_ordinal)
+        {
+            return corrupt("path attribution points to a future commit");
+        }
+        let requested = ordinals.iter().flatten().copied().collect::<Vec<_>>();
+        let mut records = self
+            .records(store, graph, &requested, &mut work)
             .await?
+            .into_iter();
+        ordinals
             .into_iter()
-            .map(|record| PathStateSummary {
-                oid: record.oid,
-                author: record.author,
-                author_seconds: record.author_seconds,
-                message: record.message,
+            .map(|ordinal| {
+                ordinal
+                    .map(|_| {
+                        let record = records
+                            .next()
+                            .ok_or_else(|| corruption("path summary is missing"))?;
+                        Ok(PathStateSummary {
+                            oid: record.oid,
+                            author: record.author,
+                            author_seconds: record.author_seconds,
+                            message: record.message,
+                        })
+                    })
+                    .transpose()
             })
-            .collect())
+            .collect()
     }
 
     async fn records(
@@ -291,7 +362,7 @@ impl PathStateReader {
         nodes: &[PathStateNodeRef],
         positions: &[usize],
         work: &mut PageWork,
-    ) -> Result<Vec<(Option<u32>, Option<PageRef>)>> {
+    ) -> Result<Vec<(Option<u32>, Option<u32>, Option<PageRef>)>> {
         let mut grouped = BTreeMap::<usize, Vec<(usize, PathStateNodeRef)>>::new();
         for (output, &position) in positions.iter().enumerate() {
             let node = nodes[position];
@@ -326,7 +397,9 @@ impl PathStateReader {
                 let node = codec::decode_node(&value, reference.bytes, self.paths[layer].as_ref())?;
                 if node
                     .0
-                    .is_some_and(|ordinal| ordinal >= self.descriptor.commit_count)
+                    .into_iter()
+                    .chain(node.1)
+                    .any(|ordinal| ordinal >= self.descriptor.commit_count)
                 {
                     return corrupt("node attribution is out of bounds");
                 }
