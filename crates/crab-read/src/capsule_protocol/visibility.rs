@@ -1,7 +1,7 @@
 //! Captured visibility closure layers; physical presence never grants membership.
 use super::*;
 use crab_metadata::capsule_protocol::{
-    CapsuleVisibilityReader, VisibilityChange, VisibilityEditHeader,
+    CapsuleVisibilityReader, LayeredVisibilityReader, VisibilityChange, VisibilityEditHeader,
 };
 use crab_metadata::git_visibility::{GitVisibilityIndex, MAX_GIT_VISIBILITY_OBJECTS};
 
@@ -38,9 +38,48 @@ struct Layer {
     edit: Option<(Arc<CapsuleVisibilityReader>, String, VisibilityEditHeader)>,
 }
 
+enum Initial {
+    Complete(GitVisibilityIndex),
+    Paged(Arc<LayeredVisibilityReader>),
+}
+
+impl Initial {
+    fn count(&self) -> u64 {
+        match self {
+            Self::Complete(index) => index.objects().len() as u64,
+            Self::Paged(reader) => reader.object_count(),
+        }
+    }
+    async fn contains(&self, store: &Store, name: &str, oids: &[[u8; 20]]) -> Result<Vec<bool>> {
+        match self {
+            Self::Complete(index) => Ok(oids
+                .iter()
+                .map(|oid| index.contains_in_ref(name, oid))
+                .collect()),
+            Self::Paged(reader) => {
+                reader
+                    .contains_in_ref(store, name, oids)
+                    .await?
+                    .ok_or_else(|| {
+                        corrupt_path("checkpoint visibility", "captured initial ref is absent")
+                    })
+            }
+        }
+    }
+    async fn dictionary(&self, store: &Store, oids: &[[u8; 20]]) -> Result<Vec<bool>> {
+        match self {
+            Self::Complete(index) => Ok(oids
+                .iter()
+                .map(|oid| index.objects().binary_search(oid).is_ok())
+                .collect()),
+            Self::Paged(reader) => Ok(reader.dictionary_contains(store, oids).await?),
+        }
+    }
+}
+
 pub(super) struct Visibility {
     store: Store,
-    initial: GitVisibilityIndex,
+    initial: Initial,
     layers: Vec<Layer>,
     refs: BTreeMap<String, usize>,
     dictionary: BTreeSet<[u8; 20]>,
@@ -62,9 +101,32 @@ impl Visibility {
         initial: GitVisibilityIndex,
         names: impl Iterator<Item = String>,
     ) -> Self {
+        let names = names
+            .filter(|name| initial.contains_ref(name))
+            .collect::<Vec<_>>();
+        Self::seed(store, Initial::Complete(initial), names)
+    }
+
+    pub(super) async fn from_checkpoint(
+        store: Store,
+        reader: Arc<LayeredVisibilityReader>,
+        names: impl Iterator<Item = String>,
+    ) -> Result<Self> {
+        let names = names.collect::<Vec<_>>();
+        let borrowed = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let present = reader.refs_present(&store, &borrowed).await?;
+        let names = names
+            .into_iter()
+            .zip(present)
+            .filter_map(|(name, present)| present.then_some(name))
+            .collect();
+        Ok(Self::seed(store, Initial::Paged(reader), names))
+    }
+
+    fn seed(store: Store, initial: Initial, names: Vec<String>) -> Self {
         let mut layers = Vec::new();
         let mut refs = BTreeMap::new();
-        for name in names.filter(|name| initial.contains_ref(name)) {
+        for name in names {
             refs.insert(name.clone(), layers.len());
             layers.push(Layer {
                 parent: None,
@@ -72,7 +134,7 @@ impl Visibility {
                 edit: None,
             });
         }
-        let dictionary_count = initial.objects().len() as u64;
+        let dictionary_count = initial.count();
         Self {
             store,
             initial,
@@ -93,8 +155,13 @@ impl Visibility {
                 corrupt_path("capsule Git visibility", "closure parent is invalid")
             })?;
             if let Some(name) = &layer.initial_ref {
-                for position in pending {
-                    result[position] = self.initial.contains_in_ref(name, &oids[position]);
+                let keys = pending
+                    .iter()
+                    .map(|position| oids[*position])
+                    .collect::<Vec<_>>();
+                let present = self.initial.contains(&self.store, name, &keys).await?;
+                for (position, present) in pending.into_iter().zip(present) {
+                    result[position] = present;
                 }
                 break;
             }
@@ -129,12 +196,10 @@ impl Visibility {
     }
 
     async fn dictionary_contains(&self, oids: &[[u8; 20]]) -> Result<Vec<bool>> {
-        let mut result = oids
-            .iter()
-            .map(|oid| {
-                self.initial.objects().binary_search(oid).is_ok() || self.dictionary.contains(oid)
-            })
-            .collect::<Vec<_>>();
+        let mut result = self.initial.dictionary(&self.store, oids).await?;
+        for (present, oid) in result.iter_mut().zip(oids) {
+            *present |= self.dictionary.contains(oid);
+        }
         for (reader, name, _) in &self.dictionary_roots {
             let positions = result
                 .iter()

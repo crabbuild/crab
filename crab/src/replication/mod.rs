@@ -8122,7 +8122,7 @@ async fn apply_active_active_repair_action(
                     },
                 )
                 .await?;
-                let mut catalog = view.pointer_catalog()?;
+                let mut catalog = view.pointer_catalog().await?;
                 if let Some(delta) =
                     crab_write::capsule_protocol::coordinated_pointer_catalog_delta(
                         &target_layout,

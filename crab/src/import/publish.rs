@@ -804,6 +804,7 @@ mod tests {
         );
         let catalog = view
             .pointer_catalog()
+            .await
             .expect("decode imported pointer catalog");
         for entry in &e2e.staged_entries {
             let EntryState::Staged { file_hash } = entry.state else {

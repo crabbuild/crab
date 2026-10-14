@@ -187,7 +187,7 @@ impl CheckpointPointer {
         object_count: u64,
     ) -> Result<Self> {
         let pointer = Self {
-            format: 5,
+            format: super::layered::CHECKPOINT_VERSION,
             hash: hash.into(),
             size,
             control_offset,
@@ -926,7 +926,7 @@ pub(super) fn validate_capsule_pointer(pointer: &CapsulePointer) -> Result<()> {
 }
 
 pub(super) fn validate_checkpoint_pointer(pointer: &CheckpointPointer) -> Result<()> {
-    if pointer.format != 5 {
+    if pointer.format != super::layered::CHECKPOINT_VERSION {
         return Err(contract_error("checkpoint format is unsupported"));
     }
     validate_content_hash(
@@ -1330,9 +1330,9 @@ mod tests {
     fn root_rejects_retired_or_implicit_checkpoint_formats() {
         let record = checkpointed_record();
         let payload = serde_json::to_string(record.root()).unwrap();
-        assert_eq!(payload.matches("\"format\":5,").count(), 1);
-        for replacement in ["", "\"format\":3,", "\"format\":4,"] {
-            let payload = payload.replace("\"format\":5,", replacement);
+        assert_eq!(payload.matches("\"format\":6,").count(), 1);
+        for replacement in ["", "\"format\":3,", "\"format\":4,", "\"format\":5,"] {
+            let payload = payload.replace("\"format\":6,", replacement);
             // Recompute the envelope digest so only format admission can fail.
             let mut bytes = ROOT_MAGIC.to_vec();
             bytes.extend_from_slice(&ROOT_VERSION.to_be_bytes());

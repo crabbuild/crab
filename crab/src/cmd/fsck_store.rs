@@ -133,7 +133,7 @@ impl StoreChecker {
             },
         )
         .await?;
-        let catalog = view.pointer_catalog()?;
+        let catalog = view.pointer_catalog().await?;
         verify_capsule_history(&layout, view.root().root()).await?;
         Ok(Self {
             store,
@@ -2211,7 +2211,7 @@ mod tests {
             view.root().root().generation(),
             view.root().digest(),
             vec![layer.source_descriptor().unwrap()],
-            view.pointer_catalog().unwrap(),
+            view.pointer_catalog().await.unwrap(),
             None,
         )
         .unwrap();

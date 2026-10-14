@@ -1094,7 +1094,7 @@ async fn capsule_repository_roots(
     )
     .await?;
     let root_digest = view.state_digest();
-    let catalog = view.pointer_catalog()?;
+    let catalog = view.pointer_catalog().await?;
     Ok(Some(CapsuleRepositoryRoots {
         root_digest,
         shard_hashes: catalog.shards().keys().cloned().collect(),

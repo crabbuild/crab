@@ -1,5 +1,14 @@
 # Capsule Publication Protocol
 
+Current development checkpoint format is `CRBCKP06`: visibility dictionaries,
+ref closures and transitions use authenticated pages rooted in the footer.
+Git views load those pages lazily; explicit catalog access remains a complete
+async bulk read. See [indexed remote reads](../architecture/indexed-remote-reads.md#checkpoint-visibility-pages-in-progress)
+for proof and remaining gates. `CRBCKP05` records below describe the preceding
+format and its historical qualification; they do not qualify v6. Readers reject
+retired v5 pointers, and fresh-prefix v6 live qualification remains pending.
+
+
 ## Document metadata
 
 | Field | Value |
@@ -13,7 +22,7 @@
 
 ### Implementation status
 
-The implemented checkpoint is metadata-only `CRBCKP05`. Its ordered source
+The implemented checkpoint is metadata-only `CRBCKP06`. Its ordered source
 directory binds immutable `CRBRUN01` capsule runs and `CRBPKL01` pack layers;
 canonical xorbs and shards remain external. The [stable layered-pack
 design](capsule-layered-packs.md) is the detailed read, maintenance, and
@@ -64,8 +73,8 @@ The hard-cutover implementation is wired to the user-facing ordinary Git path:
   or ref-head CAS according to the authority being changed;
 - `crab-read::capsule_protocol` loads the root and its bounded capsule frontier
   concurrently, verifying every size, content, transaction, and base binding;
-- checkpoint format `CRBCKP05` binds the immutable source directory, pointer
-  catalog, compact ordinal visibility, and bounded transition evidence.
+- checkpoint format `CRBCKP06` binds the immutable source directory, pointer
+  catalog, paged visibility closures, and bounded transition evidence.
   Ordinary incremental reads authenticate its footer range without transferring
   the complete visibility body or stable pack bodies. Selected source ranges
   retain Git pack checksum, entry CRC/delta, and reconstructed-object checks;

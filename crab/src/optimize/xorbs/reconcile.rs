@@ -1136,7 +1136,7 @@ async fn finalize_capsule(
             },
         )
         .await?;
-        let current = view.pointer_catalog()?;
+        let current = view.pointer_catalog().await?;
         verify_capsule_sources(&current, mapping)?;
         let (shard_hashes, selected_files) = capsule_selection(&current)?;
         let plan = build_plan(
@@ -2516,7 +2516,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let replacement = view.pointer_catalog().unwrap();
+        let replacement = view.pointer_catalog().await.unwrap();
         assert!(!replacement.xorbs().contains_key(&source.hash.hex()));
         assert!(replacement.xorbs().contains_key(&destination_a.hash.hex()));
         assert!(replacement.xorbs().contains_key(&destination_b.hash.hex()));

@@ -614,7 +614,7 @@ async fn restore_history(
         let previous_generation = view.root().root().generation();
         let (refs_added, refs_updated, refs_deleted) =
             ref_change_counts(view.refs(), verified.segment.refs());
-        let current_catalog = view.pointer_catalog()?;
+        let current_catalog = view.pointer_catalog().await?;
         // Keep both catalogs: history may use a recipe no longer in the current
         // view, while newer content must remain available after a rollback.
         let mut restored_catalog = verified.checkpoint.pointer_catalog()?;
@@ -674,22 +674,13 @@ async fn restore_history(
         .await?;
 
         let restore = async {
-            let checkpoint = match verified.checkpoint.visibility_ordinal_snapshot()? {
-                Some(visibility) => LayeredCheckpoint::build_with_ordinal_visibility(
-                    fenced.record().root().generation(),
-                    fenced.record().digest(),
-                    verified.checkpoint.sources().to_vec(),
-                    restored_catalog,
-                    Some(visibility),
-                )?,
-                None => LayeredCheckpoint::build(
-                    fenced.record().root().generation(),
-                    fenced.record().digest(),
-                    verified.checkpoint.sources().to_vec(),
-                    restored_catalog,
-                    verified.checkpoint.visibility_snapshot()?,
-                )?,
-            };
+            let checkpoint = LayeredCheckpoint::build(
+                fenced.record().root().generation(),
+                fenced.record().digest(),
+                verified.checkpoint.sources().to_vec(),
+                restored_catalog,
+                verified.checkpoint.visibility_ordinal_snapshot()?,
+            )?;
             check_cancelled(cancel)?;
             crab_write::capsule_protocol::restore_checkpoint(
                 layout,

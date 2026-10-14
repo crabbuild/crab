@@ -76,10 +76,11 @@ pub struct CapsuleRepositoryView {
     root: crab_metadata::capsule_protocol::RootSnapshot,
     browse_indexes: Option<crab_metadata::capsule_protocol::BrowseIndexes>,
     checkpoint: Option<LayeredCheckpoint>,
+    checkpoint_visibility: Option<Arc<crab_metadata::capsule_protocol::LayeredVisibilityReader>>,
     capsules: Vec<Capsule>,
     capsule_controls: Vec<CapsuleControl>,
     tip_bound_transitions: CapsuleTipBoundTransitions,
-    visibility_store: Option<Store>,
+    metadata_layout: Option<StoreLayout<Store>>,
     tip_bound_controls: Vec<CapsuleControl>,
     refs: BTreeMap<String, String>,
     peeled_refs: BTreeMap<String, String>,
@@ -365,11 +366,11 @@ impl CapsuleRepositoryView {
     /// must not use a partial chain as an authorization proof.
     pub async fn tip_bound_transitions(&self) -> Result<CapsuleTipBoundTransitions> {
         let mut transitions = self.tip_bound_transitions.clone();
-        if let Some(store) = &self.visibility_store {
+        if let Some(layout) = &self.metadata_layout {
             let controls = try_join_all(
                 self.tip_bound_controls
                     .iter()
-                    .map(|control| control.materialize_visibility(store)),
+                    .map(|control| control.materialize_visibility(layout.store())),
             )
             .await?;
             for (name, values) in build_tip_bound_transitions(&[], &controls)? {
@@ -738,11 +739,24 @@ impl CapsuleRepositoryView {
     }
 
     /// Materialize the complete generation-pinned external pointer catalog.
-    pub fn pointer_catalog(&self) -> Result<PointerCatalog> {
-        let mut catalog = match self.checkpoint.as_ref() {
-            Some(checkpoint) => checkpoint.pointer_catalog()?,
-            None => PointerCatalog::new(),
-        };
+    pub async fn pointer_catalog(&self) -> Result<PointerCatalog> {
+        let mut catalog =
+            match self.checkpoint.as_ref() {
+                Some(checkpoint) if checkpoint.is_control_only() => {
+                    let layout = self.metadata_layout.as_ref().ok_or_else(|| {
+                        ReadError::internal("catalog materialization has no captured origin")
+                    })?;
+                    let pointer =
+                        self.root.record().root().checkpoint().ok_or_else(|| {
+                            ReadError::internal("captured checkpoint has no pointer")
+                        })?;
+                    crab_metadata::capsule_protocol::load_layered_checkpoint(layout, pointer)
+                        .await?
+                        .pointer_catalog()?
+                }
+                Some(checkpoint) => checkpoint.pointer_catalog()?,
+                None => PointerCatalog::new(),
+            };
         for capsule in &self.capsules {
             if let Some(delta) = capsule.pointer_catalog_delta()? {
                 catalog.apply(&delta)?;
@@ -1239,14 +1253,25 @@ impl CapsuleRepositoryView {
     pub async fn git_visibility_index(
         &self,
     ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
-        let mut index = visibility_index_for_checkpoint(self.checkpoint.as_ref())?;
+        let mut index = match (&self.checkpoint_visibility, &self.metadata_layout) {
+            (Some(reader), Some(layout)) => {
+                let snapshot = reader.materialize(layout.store()).await?;
+                snapshot.to_index(
+                    0,
+                    &"0".repeat(64),
+                    &"0".repeat(64),
+                    snapshot.catalog_digest(),
+                )?
+            }
+            _ => visibility_index_for_checkpoint(self.checkpoint.as_ref())?,
+        };
 
         for capsule in &self.capsules {
             apply_capsule_visibility_index(capsule, &mut index)?;
         }
         for capsule in &self.capsule_controls {
-            let complete = match &self.visibility_store {
-                Some(store) => capsule.materialize_visibility(store).await?,
+            let complete = match &self.metadata_layout {
+                Some(layout) => capsule.materialize_visibility(layout.store()).await?,
                 None => capsule.clone(),
             };
             apply_capsule_control_visibility_index(&complete, &mut index)?;
@@ -1544,7 +1569,7 @@ pub async fn verify_reachable_dependencies(
     if cancellation.is_cancelled() {
         return Err(ReadError::Cancelled);
     }
-    let catalog = view.pointer_catalog()?;
+    let catalog = view.pointer_catalog().await?;
     let mut sources = BTreeMap::new();
     for source in view
         .layered_checkpoint()
@@ -4255,10 +4280,11 @@ pub fn compacted_view_from_checkpoint(
         root: snapshot,
         browse_indexes: None,
         checkpoint: Some(checkpoint),
+        checkpoint_visibility: None,
         capsules: Vec::new(),
         capsule_controls: Vec::new(),
         tip_bound_transitions,
-        visibility_store: None,
+        metadata_layout: None,
         tip_bound_controls: Vec::new(),
         visible_ref_transactions: BTreeMap::new(),
         ref_capsule_counts: BTreeMap::new(),
@@ -4567,10 +4593,11 @@ async fn assemble_view(
         root: snapshot,
         browse_indexes: None,
         checkpoint,
+        checkpoint_visibility: None,
         capsules: root_capsules,
         capsule_controls: Vec::new(),
         tip_bound_transitions,
-        visibility_store: None,
+        metadata_layout: None,
         tip_bound_controls: Vec::new(),
         refs,
         peeled_refs,
@@ -4605,7 +4632,7 @@ async fn assemble_layered_control_view(
     admit_frontier(&pointers, limits)?;
     let checkpoint = match snapshot.record().root().checkpoint() {
         Some(pointer) => {
-            let checkpoint = if footer_only {
+            let checkpoint = if !matches!(read, ControlRead::Complete) {
                 load_layered_checkpoint_control(router, pointer, limits).await?
             } else {
                 load_layered_checkpoint(router, pointer, limits).await?
@@ -4815,10 +4842,11 @@ async fn assemble_layered_control_view(
             root: snapshot,
             browse_indexes: None,
             checkpoint,
+            checkpoint_visibility: None,
             capsules: Vec::new(),
             capsule_controls: Vec::new(),
             tip_bound_transitions,
-            visibility_store: None,
+            metadata_layout: None,
             tip_bound_controls: Vec::new(),
             refs: expected_refs,
             peeled_refs: expected_peeled,
@@ -4854,15 +4882,36 @@ async fn assemble_layered_control_view(
             }
         }
     }
-    let initial = visibility_index_for_checkpoint(checkpoint.as_ref())?;
-    let mut visibility = if matches!(read, ControlRead::Git) {
-        visibility::Reconciliation::Paged(Box::new(visibility::Visibility::new(
-            router.store().clone(),
-            initial,
-            snapshot.record().root().refs().keys().cloned(),
-        )))
+    let checkpoint_visibility = if matches!(read, ControlRead::Git) {
+        checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.visibility_reader(router, limits.max_capsule_bytes))
+            .transpose()?
+            .flatten()
+            .map(Arc::new)
     } else {
-        visibility::Reconciliation::Complete(initial)
+        None
+    };
+    let mut visibility = if matches!(read, ControlRead::Git) {
+        let names = snapshot.record().root().refs().keys().cloned();
+        let initial = match &checkpoint_visibility {
+            Some(reader) => {
+                visibility::Visibility::from_checkpoint(
+                    router.store().clone(),
+                    reader.clone(),
+                    names,
+                )
+                .await?
+            }
+            None => visibility::Visibility::new(
+                router.store().clone(),
+                visibility_index_for_checkpoint(None)?,
+                names,
+            ),
+        };
+        visibility::Reconciliation::Paged(Box::new(initial))
+    } else {
+        visibility::Reconciliation::Complete(visibility_index_for_checkpoint(checkpoint.as_ref())?)
     };
     for capsule in &root_capsules {
         visibility.apply(capsule).await?;
@@ -4889,10 +4938,11 @@ async fn assemble_layered_control_view(
         root: snapshot,
         browse_indexes: None,
         checkpoint,
+        checkpoint_visibility,
         capsules: Vec::new(),
         capsule_controls: root_capsules,
         tip_bound_transitions,
-        visibility_store: matches!(read, ControlRead::Git).then(|| router.store().clone()),
+        metadata_layout: matches!(read, ControlRead::Git).then(|| router.clone()),
         tip_bound_controls: if matches!(read, ControlRead::Git) {
             all_capsule_controls
         } else {
@@ -5739,8 +5789,8 @@ mod tests {
     use bytes::Bytes;
     use crab_metadata::capsule_protocol::{
         CapsuleGitPack, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
-        CapsuleVisibilityDelta, CapsuleVisibilitySnapshot, CheckpointPointer, HistorySegment,
-        HistorySegmentState, PackLayer, PackRange, RepositoryRoot,
+        CapsuleVisibilityDelta, CheckpointPointer, HistorySegment, HistorySegmentState, PackLayer,
+        PackRange, RepositoryRoot,
     };
     use crab_metadata::git_visibility::GitVisibilityEdit;
     use crab_storage::{StorageObservation, StorageObserver, StorageOperation, StorageOutcome};
@@ -6422,8 +6472,8 @@ mod tests {
             complete.git_snapshot().unwrap()
         );
         assert_eq!(
-            metadata.pointer_catalog().unwrap(),
-            complete.pointer_catalog().unwrap()
+            metadata.pointer_catalog().await.unwrap(),
+            complete.pointer_catalog().await.unwrap()
         );
         assert!(metadata.capsules().is_empty());
         let observations = observer.observations.lock().unwrap();
@@ -6456,12 +6506,12 @@ mod tests {
                 (
                     git.git_snapshot().unwrap(),
                     git.git_visibility_index().await.unwrap(),
-                    git.pointer_catalog().unwrap()
+                    git.pointer_catalog().await.unwrap()
                 ),
                 (
                     complete.git_snapshot().unwrap(),
                     complete.git_visibility_index().await.unwrap(),
-                    complete.pointer_catalog().unwrap()
+                    complete.pointer_catalog().await.unwrap()
                 )
             );
         }
@@ -6524,12 +6574,7 @@ mod tests {
 
     #[tokio::test]
     async fn layered_control_view_range_reads_checkpoint_suffix_without_pack_body() {
-        for visibility in [
-            None,
-            Some(
-                CapsuleVisibilitySnapshot::from_index(&visibility_index(BTreeMap::new())).unwrap(),
-            ),
-        ] {
+        for include_visibility in [false, true] {
             let inner = Arc::new(InMemory::new());
             seed_one_capsule(inner.clone(), None).await;
             let seed_store = Store::new(inner.clone());
@@ -6554,6 +6599,17 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            let source = layer.source_descriptor().unwrap();
+            let visibility = include_visibility.then(|| {
+                crab_metadata::capsule_protocol::LayeredVisibilitySnapshot::from_index(
+                    &visibility_index(BTreeMap::new()),
+                    &crab_metadata::capsule_protocol::source_catalog_digest(std::slice::from_ref(
+                        &source,
+                    ))
+                    .unwrap(),
+                )
+                .unwrap()
+            });
             let checkpoint = LayeredCheckpoint::build(
                 current.record().root().generation(),
                 current.record().digest(),

@@ -391,7 +391,7 @@ async fn enumerate_capsule_sources(
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
     cancel: &CancellationToken,
 ) -> Result<Vec<SourceXorbMeta>> {
-    let catalog = view.pointer_catalog()?;
+    let catalog = view.pointer_catalog().await?;
     let selected_shards = catalog
         .files()
         .values()

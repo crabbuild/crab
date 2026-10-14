@@ -531,7 +531,7 @@ impl Inner {
             &self.cancel,
         )
         .await?;
-        let catalog = view.pointer_catalog()?;
+        let catalog = view.pointer_catalog().await?;
         let file_index_lookup =
             crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
                 read_layout,

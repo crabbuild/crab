@@ -479,7 +479,7 @@ pub async fn check_capsule_read_replica_readiness(
     }
 
     let mut stats = ReadinessProbeStats::default();
-    let catalog = replica.pointer_catalog()?;
+    let catalog = replica.pointer_catalog().await?;
     if let Some(reason) =
         capsule_pointer_object_gap(replica_router, &catalog, &mut stats, options).await?
     {

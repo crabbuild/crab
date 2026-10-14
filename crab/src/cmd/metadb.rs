@@ -1737,7 +1737,7 @@ async fn diagnose_capsule(
             },
         )
         .await?;
-        let catalog = view.pointer_catalog()?;
+        let catalog = view.pointer_catalog().await?;
         view.git_visibility_index().await?;
         // Verification must read layered sources and prove reachable content,
         // not rebuild a complete pack or accept catalog membership as file proof.
@@ -2662,7 +2662,7 @@ async fn run_capsule_rebuild_in(
         },
     )
     .await?;
-    let catalog = view.pointer_catalog()?;
+    let catalog = view.pointer_catalog().await?;
     view.git_visibility_index().await?;
     // Authenticate the complete closure before either a no-op success or a new
     // checkpoint; immutable publication alone does not verify reachable files.
@@ -2862,7 +2862,7 @@ async fn verify_capsule_file_index(
     )
     .await?;
     Ok(capsule_file_index_matches(
-        &view.pointer_catalog()?,
+        &view.pointer_catalog().await?,
         entries,
     ))
 }

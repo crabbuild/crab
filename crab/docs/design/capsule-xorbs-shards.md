@@ -1,5 +1,14 @@
 # Protocol v2 Xorb and Shard Integration
 
+Current development checkpoint format is `CRBCKP06`: visibility dictionaries,
+ref closures and transitions use authenticated pages rooted in the footer.
+Git views load those pages lazily; explicit catalog access remains a complete
+async bulk read. See [indexed remote reads](../architecture/indexed-remote-reads.md#checkpoint-visibility-pages-in-progress)
+for proof and remaining gates. `CRBCKP05` records below describe the preceding
+format and its historical qualification; they do not qualify v6. Readers reject
+retired v5 pointers, and fresh-prefix v6 live qualification remains pending.
+
+
 ## Document metadata
 
 | Field | Value |

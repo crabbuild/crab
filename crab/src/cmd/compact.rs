@@ -237,7 +237,7 @@ async fn run_capsule_compact_inner(
             ..CompactOutcome::default()
         });
     }
-    let catalog = view.pointer_catalog()?;
+    let catalog = view.pointer_catalog().await?;
     let source_hashes = catalog
         .files()
         .values()
@@ -1394,7 +1394,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let compacted = view.pointer_catalog().unwrap();
+        let compacted = view.pointer_catalog().await.unwrap();
         assert_eq!(compacted.shards().len(), 1);
         assert_eq!(
             compacted

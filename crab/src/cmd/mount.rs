@@ -2087,7 +2087,7 @@ async fn resolve_mount_read_context_from_remote_url(
             )
             .await
             .ok()?;
-            let catalog = view.pointer_catalog().ok()?;
+            let catalog = view.pointer_catalog().await.ok()?;
             Some(
                 crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
                     read_layout.clone(),

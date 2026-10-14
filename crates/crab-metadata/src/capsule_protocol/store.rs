@@ -299,7 +299,7 @@ pub async fn load_layered_checkpoint(
     router: &StoreLayout<Store>,
     pointer: &super::CheckpointPointer,
 ) -> Result<LayeredCheckpoint> {
-    if pointer.format() != 5 {
+    if pointer.format() != super::layered::CHECKPOINT_VERSION {
         return Err(corrupt(
             &router.capsule_checkpoint_path(pointer.hash()),
             "checkpoint pointer does not name the layered checkpoint format",
@@ -325,7 +325,7 @@ pub async fn load_layered_checkpoint_control(
     router: &StoreLayout<Store>,
     pointer: &super::CheckpointPointer,
 ) -> Result<LayeredCheckpoint> {
-    if pointer.format() != 5 {
+    if pointer.format() != super::layered::CHECKPOINT_VERSION {
         return Err(corrupt(
             &router.capsule_checkpoint_path(pointer.hash()),
             "checkpoint pointer does not name the layered checkpoint format",

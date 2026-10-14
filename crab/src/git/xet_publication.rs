@@ -65,7 +65,7 @@ pub(crate) async fn prepare_delta(
         },
     )
     .await?;
-    let base_catalog = view.pointer_catalog()?;
+    let base_catalog = view.pointer_catalog().await?;
 
     let mut pointer_sizes = BTreeMap::<MerkleHash, u64>::new();
     for pointer in pointers {
