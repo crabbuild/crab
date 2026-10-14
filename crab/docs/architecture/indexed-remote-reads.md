@@ -848,3 +848,18 @@ reports 585 existing diagnostics versus 586 before this slice, with no additions
 The invocation permits existing `unfulfilled_lint_expectations`; it is not a
 strict full CLI lint pass. Native candidate success/fault qualification and
 current 10-GiB/release/provider measurements remain pending.
+
+
+The zero-size export shortcut also bypassed source validation. A native Git
+fixture containing an LFS pointer declaring zero size against a valid nonempty
+LFS object reproduces empty publication. Export now verifies every zero-size
+source through the selected snapshot before its empty PUT. The regression
+checks the preserved integrity diagnostic and absence of a target object.
+The shared fixture retains the public reader owner for explicit shutdown.
+
+Final narrow qualification passes 36 tests: 13 read, eight export, five download,
+nine canonical LFS stream and one detached-hash session test. Stream contracts
+cover response framing, digest rejection, validator identity and no receipt
+writes. The final CLI Clippy comparison remains 585 versus 586 diagnostics,
+with no new warnings. Native candidate proof is still pending; the previous
+forced-termination receipt is a baseline failure.

@@ -432,6 +432,17 @@ async fn export_one(
     force: bool,
 ) -> Result<ExportFileResult> {
     if item.entry.size == 0 {
+        // A zero-size entry may be an external pointer. Metadata alone does
+        // not prove its declared hash or body; verify before publishing.
+        let bytes = snapshot
+            .write_to_writer(&item.entry.path, std::io::sink())
+            .await?;
+        if bytes != 0 {
+            return Err(CrabError::CorruptObject {
+                path: item.entry.path,
+                reason: format!("exported {bytes} byte(s), expected 0"),
+            });
+        }
         if force {
             store.put_overwrite(&item.object_path, Bytes::new()).await?;
         } else {
@@ -814,6 +825,28 @@ where
 #[allow(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn zero_size_export_verifies_pointer_dependencies_before_publishing() {
+        let (reader, snapshot, _, _, _, _directory) =
+            crate::read::test_support::lfs_snapshot(0).await;
+        let entry = snapshot.entry_for_path("file.lfs").await.unwrap();
+        assert_eq!(entry.size, 0);
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let object_path = ObjectPath::from("exported");
+        let item = PlannedExport {
+            entry,
+            object_path: object_path.clone(),
+            conflicts: false,
+        };
+        let result = export_one(&snapshot, &store, item, false).await;
+        reader.shutdown().await;
+        assert!(matches!(result, Err(CrabError::CorruptObject { .. })));
+        assert!(matches!(
+            store.head(&object_path).await,
+            Err(CrabError::NotFound { .. })
+        ));
+    }
 
     #[test]
     fn positional_repo_and_paths_parse() {
