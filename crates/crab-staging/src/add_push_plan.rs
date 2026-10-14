@@ -44,6 +44,9 @@ pub struct AddPushPlanSummary {
 /// Looks up already-uploaded chunk placements for staged chunks.
 #[async_trait]
 pub trait ExistingChunkLookup: Send + Sync {
+    // async_trait injects bare must_use; a diagnostic message avoids conflicting
+    // lint expectations across supported Clippy versions.
+    #[must_use = "await the lookup before deciding which chunks to prepare"]
     async fn lookup_existing_candidates(
         &self,
         chunks: &[(MerkleHash, u64)],
@@ -53,6 +56,7 @@ pub trait ExistingChunkLookup: Send + Sync {
 /// Adds local prepared-xorb candidates to the staging cache.
 #[async_trait]
 pub trait LocalXorbCandidateLookup: Send + Sync {
+    #[must_use = "await candidate loading before preparing the push plan"]
     async fn load_candidates(
         &self,
         prepared_cache: &mut PreparedXorbCache,
