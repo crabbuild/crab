@@ -1,6 +1,6 @@
 # Unified staging design and implementation plan
 
-Status: implemented locally; focused tests and small RustFS qualification passed; 10 GiB qualification and final review pending. Implementation source baseline: `bb590b78f58`, including the large-file fixes in PR #521. This plan is a follow-up to that PR.
+Status: implemented in draft PR #529; focused tests and the cache-adjusted RustFS smoke passed. Both final 10 GiB qualification directions, workspace CI and final review remain pending. Implementation source baseline: `bb590b78f58`, including the large-file fixes in PR #521. This plan is a follow-up to that PR.
 
 Unify native `crab add` and Git clean beneath their input adapters. One staging module should own content hashing, chunking, authority selection, bounded payload preparation, recipe recording, durability and rollback. File validation, Git framing and Git-index publication remain with their respective callers.
 
@@ -26,7 +26,7 @@ flowchart TD
   R --> G[Clean retention and pointer response]
 ```
 
-Today, native streaming prepares xorbs directly; changed-content Git clean writes provisional segments through its own batching and adoption lifecycle. Sharing only `Read`, the chunker, or a utility function would leave that duplication intact. The useful seam is the entire staging session. Its two concrete adapters provide leverage through shared correctness and locality through one lifecycle implementation.
+At the baseline, native streaming prepared xorbs directly, while changed-content Git clean wrote provisional segments through its own batching and adoption lifecycle. Sharing only `Read`, the chunker, or a utility function would leave that duplication intact. The implemented seam is the entire staging session: two input adapters share one ownership and durability lifecycle.
 
 ## Evidence and ownership map
 
@@ -264,10 +264,19 @@ implementation.
 
 Local evidence so far: 233 staging tests passed (one manual RSS test ignored),
 strict staging Clippy passed, the final release build passed, and final RustFS
-smoke passed 133 checks across five committed versions. Large final-candidate
-qualification and default-feature CI remain pending. An earlier candidate
+smoke passed 133 checks across five committed versions. The implementation
+before the cache adjustment also passed the full 10 GiB workload: 133 checks,
+five versions and ten historical SHA comparisons after source/cache removal.
+Both cache-adjusted 10 GiB directions and final workspace CI remain pending. An earlier candidate
 passed the four-version 10 GiB workload with 120 checks; it is supplementary
 evidence, not final-revision qualification.
+
+Default-feature CI passed all 4,321 Crab library tests, 233 staging tests and
+584 VFS tests. Its only failed target was five clean integration fixtures that
+used the removed no-op writer. They now attach real staging through the
+filter's blocking/runtime bridge and verify restored bytes after reopening;
+all 16 integration tests pass locally, including rejection without an owner.
+No pointer/hash assertions were weakened and no no-op production path was restored.
 
 The broad minimal-feature Crab suite passed 4,162 tests and exposed 12 failures.
 One was related: staging admission masked an already parse-rejected atomic push;
@@ -300,4 +309,11 @@ Full input reads and hashing remain necessary for stream verification. Changed c
 
 Complete only when both adapters use the shared module, old clean lifecycle code is deleted, sibling contracts pass, the dedicated workload proves byte-identical history, and measured disk accounting shows no full-size copy on path switches. Include `git diff --numstat` in review; explain any net non-test growth through ownership correctness or remove unnecessary abstractions.
 
-After these gates, prioritize the dominant measured remaining cost: first hash/CDC/replay CPU versus storage writes, then small-file/index overhead for large codebases, then cold reconstruction throughput. Qualify real S3 latency, retries and interrupted uploads separately before calling the full remote production-ready. Review whether this remains the best fix by checking that complexity was actually removed from both callers, not relocated behind a larger interface.
+After these gates, prioritize the measured remaining costs:
+
+1. Authority-index and lease-transfer I/O. The 10 GiB run before the cache adjustment spent 213.5 s in initial authority lookup/recording, versus 12.3 s in CDC and 5.9 s in hashing. Measure the final cache-adjusted runs before choosing further batching or query changes; preserve atomic retention and durability checkpoints.
+2. Cold reconstruction throughput. The earlier full-size candidate needed 432–542 s to hydrate each 20 GiB version with a fresh, 2 GiB cache. Profile range reads, decompression, cache writes and output writes independently before changing concurrency or cache policy.
+3. Small-file/index overhead for large codebases, using a real repository qualification alongside the 5,000-file synthetic case.
+4. Real S3 latency, retries and interrupted-upload recovery before calling the full remote production-ready.
+
+Review whether this remains the best fix by checking that complexity was actually removed from both callers, not relocated behind a larger interface. Performance numbers above are individual diagnostic/qualification receipts, not controlled percentage speedup claims.

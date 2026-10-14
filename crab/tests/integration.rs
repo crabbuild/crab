@@ -31,6 +31,57 @@ use crab::storage::store::Store;
 use crab::storage::{RetryPolicy, retry};
 use crab_types::pointer::{Pointer, is_pointer};
 
+async fn clean_staged_files(
+    ctx: AppContext,
+    root: &std::path::Path,
+    files: &[(&str, Vec<u8>)],
+) -> Vec<Vec<u8>> {
+    let staging_root = root.join(".crab/staging");
+    let staging = Arc::new(
+        crab_staging::StagingArea::open(staging_root.clone())
+            .await
+            .unwrap(),
+    );
+    let worker_staging = Arc::clone(&staging);
+    let handle = tokio::runtime::Handle::current();
+    let inputs = files
+        .iter()
+        .map(|(path, content)| ((*path).to_owned(), content.clone()))
+        .collect::<Vec<_>>();
+    // Match the filter's blocking adapter and attach its real payload owner.
+    // A pointer-only fixture cannot prove the data survives session shutdown.
+    let pointers = tokio::task::spawn_blocking(move || {
+        let mut session = CleanSession::new(ctx);
+        session.set_staging(worker_staging, handle);
+        inputs
+            .into_iter()
+            .map(|(path, content)| session.clean_file(&path, content))
+            .collect::<Result<Vec<_>, CrabError>>()
+    })
+    .await
+    .unwrap()
+    .expect("clean with an attached staging owner");
+    drop(staging);
+    let reopened = crab_staging::StagingArea::open(staging_root).await.unwrap();
+    for ((path, expected), pointer) in files.iter().zip(&pointers) {
+        let pointer = Pointer::parse(pointer).unwrap();
+        let hash = crab_xet::hash::MerkleHash::from(pointer.file_hash);
+        let mut restored = Vec::new();
+        for chunk in reopened.chunks_for_file(&hash).unwrap() {
+            restored.extend_from_slice(&reopened.get_chunk(&chunk).await.unwrap().unwrap());
+        }
+        assert_eq!(&restored, expected, "{path} reconstructs after reopen");
+    }
+    pointers
+}
+
+#[test]
+fn unknown_clean_content_requires_a_staging_owner() {
+    let mut session = CleanSession::new(AppContext::default());
+    let result = session.clean_file("unknown.bin", b"unknown content".to_vec());
+    assert!(matches!(result, Err(CrabError::StagingLocked { .. })));
+}
+
 // --- 35.1: Happy-path integration on LocalFileSystem ---
 
 /// Full pipeline: init → track → clean → verify pointer is valid.
@@ -68,11 +119,10 @@ async fn happy_path_init_track_clean_pointer_roundtrip() {
 
     // Step 3: clean — process a file through the clean filter
     let ctx = AppContext::default();
-    let mut session = CleanSession::new(ctx);
     let test_content = b"Hello, this is test content for the clean filter integration test.";
-    let pointer_bytes = session
-        .clean_file("test.bin", test_content.to_vec())
-        .expect("clean should succeed");
+    let pointer_bytes = clean_staged_files(ctx, dir.path(), &[("test.bin", test_content.to_vec())])
+        .await
+        .remove(0);
 
     // Step 4: verify the pointer is valid
     assert!(
@@ -138,20 +188,22 @@ fn untrack_removes_pattern_preserves_others() {
 }
 
 /// Clean produces different pointers for different content.
-#[test]
-fn clean_different_content_different_pointers() {
+#[tokio::test]
+async fn clean_different_content_different_pointers() {
+    let dir = tempfile::tempdir().unwrap();
     let ctx = AppContext::default();
-    let mut session = CleanSession::new(ctx);
+    let pointers = clean_staged_files(
+        ctx,
+        dir.path(),
+        &[
+            ("a.bin", b"content-alpha".to_vec()),
+            ("b.bin", b"content-beta".to_vec()),
+        ],
+    )
+    .await;
 
-    let p1 = session
-        .clean_file("a.bin", b"content-alpha".to_vec())
-        .unwrap();
-    let p2 = session
-        .clean_file("b.bin", b"content-beta".to_vec())
-        .unwrap();
-
-    let ptr1 = Pointer::parse(&p1).unwrap();
-    let ptr2 = Pointer::parse(&p2).unwrap();
+    let ptr1 = Pointer::parse(&pointers[0]).unwrap();
+    let ptr2 = Pointer::parse(&pointers[1]).unwrap();
 
     assert_ne!(
         ptr1.file_hash, ptr2.file_hash,
@@ -160,17 +212,21 @@ fn clean_different_content_different_pointers() {
 }
 
 /// Clean produces identical pointers for identical content (dedup property).
-#[test]
-fn clean_identical_content_same_pointer() {
+#[tokio::test]
+async fn clean_identical_content_same_pointer() {
+    let dir = tempfile::tempdir().unwrap();
     let ctx = AppContext::default();
-    let mut session = CleanSession::new(ctx);
 
     let content = b"identical content for dedup test";
-    let p1 = session.clean_file("a.bin", content.to_vec()).unwrap();
-    let p2 = session.clean_file("b.bin", content.to_vec()).unwrap();
+    let pointers = clean_staged_files(
+        ctx,
+        dir.path(),
+        &[("a.bin", content.to_vec()), ("b.bin", content.to_vec())],
+    )
+    .await;
 
-    let ptr1 = Pointer::parse(&p1).unwrap();
-    let ptr2 = Pointer::parse(&p2).unwrap();
+    let ptr1 = Pointer::parse(&pointers[0]).unwrap();
+    let ptr2 = Pointer::parse(&pointers[1]).unwrap();
 
     assert_eq!(
         ptr1.file_hash, ptr2.file_hash,
@@ -578,8 +634,10 @@ fn retry_classification_covers_key_variants() {
 
 /// Both perf-enabled and perf-disabled clean sessions produce valid pointers
 /// with identical file hashes for the same content.
-#[test]
-fn interop_v1_perf_roundtrip_clean_produces_same_hash() {
+#[tokio::test]
+async fn interop_v1_perf_roundtrip_clean_produces_same_hash() {
+    let perf_dir = tempfile::tempdir().unwrap();
+    let v1_dir = tempfile::tempdir().unwrap();
     // Perf-enabled config (default).
     let perf_config = Config {
         perf: EngineConfig {
@@ -589,7 +647,6 @@ fn interop_v1_perf_roundtrip_clean_produces_same_hash() {
         ..Config::default()
     };
     let perf_ctx = AppContext::new(perf_config, CancellationToken::new());
-    let mut perf_session = CleanSession::new(perf_ctx);
 
     // Perf-disabled config (v1 baseline).
     let v1_config = Config {
@@ -600,16 +657,20 @@ fn interop_v1_perf_roundtrip_clean_produces_same_hash() {
         ..Config::default()
     };
     let v1_ctx = AppContext::new(v1_config, CancellationToken::new());
-    let mut v1_session = CleanSession::new(v1_ctx);
 
     let content = b"interop test content - same bytes, different perf flags";
 
-    let perf_pointer_bytes = perf_session
-        .clean_file("interop.bin", content.to_vec())
-        .expect("perf-enabled clean should succeed");
-    let v1_pointer_bytes = v1_session
-        .clean_file("interop.bin", content.to_vec())
-        .expect("perf-disabled clean should succeed");
+    let perf_pointer_bytes = clean_staged_files(
+        perf_ctx,
+        perf_dir.path(),
+        &[("interop.bin", content.to_vec())],
+    )
+    .await
+    .remove(0);
+    let v1_pointer_bytes =
+        clean_staged_files(v1_ctx, v1_dir.path(), &[("interop.bin", content.to_vec())])
+            .await
+            .remove(0);
 
     // Both must produce valid pointers.
     assert!(
@@ -631,8 +692,8 @@ fn interop_v1_perf_roundtrip_clean_produces_same_hash() {
 
 /// Perf flags toggled on/off: all EngineConfig combinations produce valid
 /// pointers for the same content.
-#[test]
-fn interop_all_perf_flag_combinations_produce_valid_pointers() {
+#[tokio::test]
+async fn interop_all_perf_flag_combinations_produce_valid_pointers() {
     let content = b"flag-combination test content for interop verification";
     let expected_hash: [u8; 32] = *blake3::hash(content).as_bytes();
 
@@ -660,16 +721,15 @@ fn interop_all_perf_flag_combinations_produce_valid_pointers() {
     ];
 
     for (i, engine_config) in configs.into_iter().enumerate() {
+        let dir = tempfile::tempdir().unwrap();
         let config = Config {
             perf: engine_config,
             ..Config::default()
         };
         let ctx = AppContext::new(config, CancellationToken::new());
-        let mut session = CleanSession::new(ctx);
-
-        let pointer_bytes = session
-            .clean_file("combo.bin", content.to_vec())
-            .unwrap_or_else(|e| panic!("config combo {i} failed: {e}"));
+        let pointer_bytes = clean_staged_files(ctx, dir.path(), &[("combo.bin", content.to_vec())])
+            .await
+            .remove(0);
 
         assert!(
             is_pointer(&pointer_bytes),

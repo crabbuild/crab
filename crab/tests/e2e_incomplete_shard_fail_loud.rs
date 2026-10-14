@@ -325,9 +325,7 @@ fn publish_staged_recipe(
         .expect("publish staged recipe");
 }
 
-/// Populate a fresh on-disk staging area with `(file_hash, chunks)`
-/// and reopen it read-only. Mirrors the batch-staging path the real
-/// clean filter uses via `BackgroundChunkStager::checkpoint`.
+/// Populate segment-backed staging and reopen it read-only for push validation.
 async fn populate_staging(
     staging_root: &Path,
     file_hash: [u8; 32],
@@ -344,10 +342,8 @@ async fn populate_staging(
             .pre_register_file(&file_merkle, file_size)
             .expect("pre-register");
 
-        // Stage the chunks in small batches to match what the clean
-        // filter does; `stage_chunks_batch`'s chunk_index_offset keeps
-        // consecutive batches from colliding on the
-        // `(file_hash, chunk_index)` UNIQUE constraint.
+        // Keep offsets contiguous across batches so this segment-backed
+        // fixture exercises complete reconstruction terms during push.
         const BATCH: usize = 512;
         let mut offset: u64 = 0;
         for group in chunks.chunks(BATCH) {
