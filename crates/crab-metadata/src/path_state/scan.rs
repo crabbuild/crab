@@ -11,6 +11,7 @@ pub enum PathStateItem {
     Node {
         reference: PathStateNodeRef,
         value: Option<u32>,
+        reset: Option<u32>,
     },
     Edge {
         parent: PathStateNodeRef,
@@ -200,10 +201,12 @@ impl PathStateScan<'_> {
                             index: integer(&key)?,
                         };
                         self.reader.validate_node(node, None)?;
-                        let (value, children) =
+                        let (value, reset, children) =
                             codec::decode_node(&value, reference.bytes, path.as_ref())?;
                         if value
-                            .is_some_and(|ordinal| ordinal >= self.reader.descriptor.commit_count)
+                            .into_iter()
+                            .chain(reset)
+                            .any(|ordinal| ordinal >= self.reader.descriptor.commit_count)
                         {
                             return corrupt("node attribution is out of bounds");
                         }
@@ -211,6 +214,7 @@ impl PathStateScan<'_> {
                         return Ok(Some(PathStateItem::Node {
                             reference: node,
                             value,
+                            reset,
                         }));
                     }
                     self.phase = Phase::Records;
@@ -409,13 +413,18 @@ mod tests {
             .collect::<Vec<_>>();
         while let Some(item) = scan.next().await.unwrap() {
             match item {
-                PathStateItem::Node { reference, value } => {
+                PathStateItem::Node {
+                    reference,
+                    value,
+                    reset,
+                } => {
                     assert_eq!(
                         reference.index as usize,
                         layers[reference.layer as usize].nodes.len()
                     );
                     layers[reference.layer as usize].nodes.push(PathStateNode {
                         value,
+                        reset,
                         children: BTreeMap::new(),
                     });
                 }

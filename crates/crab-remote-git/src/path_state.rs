@@ -19,6 +19,38 @@ pub(crate) struct PathStateIndex {
 }
 
 impl PathStateIndex {
+    pub(crate) async fn last_change(
+        &self,
+        commit: ObjectId,
+        path: &GitPath,
+        operation: &OperationContext,
+    ) -> Result<Option<ObjectId>> {
+        operation.ensure_active()?;
+        let ObjectId::Sha1(commit) = commit else {
+            return Err(Error::UnsupportedObjectFormat);
+        };
+        operation.charge(BudgetDimension::LogicalObjects, 1).await?;
+        operation.charge(BudgetDimension::Entries, 1).await?;
+        operation
+            .charge(BudgetDimension::Depth, path.components().count() as u64)
+            .await?;
+        let store = operation.metadata_store();
+        let summary = operation
+            .read_metadata(self.index.last_change(
+                &store,
+                self.commit_graph.view(),
+                &commit,
+                &[path.as_bytes()],
+            ))
+            .await
+            .map_err(|error| match error {
+                Error::Metadata(source) => metadata_error(source),
+                error => error,
+            })?;
+        operation.ensure_active()?;
+        Ok(summary.into_iter().next().flatten().map(ObjectId::Sha1))
+    }
+
     pub(crate) async fn load(
         store: &Store,
         layout: &StoreLayout<Store>,

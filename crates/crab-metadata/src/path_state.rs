@@ -41,7 +41,7 @@ pub use storage::{
 
 // Whole-layer predecessors are unreleased derived data. Rebuild them before
 // publishing paged readiness, retaining the exact tree-comparison semantics.
-const DESCRIPTOR_VERSION: u32 = 5;
+const DESCRIPTOR_VERSION: u32 = 6;
 const MAX_DESCRIPTOR_BYTES: u64 = 128 * 1024;
 const MAX_AUTHOR_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -60,7 +60,7 @@ pub struct PathStateMutation {
     pub path: Vec<u8>,
     /// The path exists after this commit and receives this commit's ordinal.
     pub present: bool,
-    /// Existing descendants are discarded before applying this mutation.
+    /// Existing descendants become absent unless recreated by this commit.
     pub reset: bool,
 }
 
@@ -106,6 +106,8 @@ pub struct PathStateRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathStateNode {
     pub value: Option<u32>,
+    /// Last deletion or type reset covering this path and its descendants.
+    pub reset: Option<u32>,
     pub children: BTreeMap<Arc<[u8]>, PathStateNodeRef>,
 }
 
@@ -301,14 +303,19 @@ impl PathStateIndex {
 
     fn lookup(&self, root: PathStateNodeRef, path: &[u8]) -> Result<Option<u32>> {
         let mut current = root;
+        let mut reset = None;
         for component in path.split(|byte| *byte == b'/') {
             let node = self.node(current)?;
+            reset = reset.max(node.reset);
             let Some(next) = node.children.get(component) else {
                 return Ok(None);
             };
             current = *next;
         }
-        Ok(self.node(current)?.value)
+        Ok(self
+            .node(current)?
+            .value
+            .filter(|value| reset.is_none_or(|reset| *value >= reset)))
     }
 
     fn node(&self, reference: PathStateNodeRef) -> Result<&PathStateNode> {
@@ -540,6 +547,7 @@ fn copy_compacted_node(
     };
     nodes.push(PathStateNode {
         value: node.value,
+        reset: node.reset,
         children,
     });
     remapped.insert(source, reference);
@@ -578,6 +586,7 @@ fn node_from_parts<'a>(
 #[derive(Debug, Default)]
 struct WorkingNode {
     value: Option<u32>,
+    reset: Option<u32>,
     children: BTreeMap<Arc<[u8]>, WorkingChild>,
 }
 
@@ -591,6 +600,7 @@ impl WorkingNode {
     fn from_node(node: &PathStateNode) -> Self {
         Self {
             value: node.value,
+            reset: node.reset,
             children: node
                 .children
                 .iter()
@@ -610,7 +620,7 @@ fn apply_mutation(
 ) -> Result<()> {
     if mutation.path.is_empty() {
         if mutation.reset {
-            root.children.clear();
+            root.reset = Some(ordinal);
         }
         root.value = mutation.present.then_some(ordinal);
         return Ok(());
@@ -643,16 +653,14 @@ fn apply_components(
         .first()
         .ok_or_else(|| corruption("path-state mutation has no component"))?;
     if components.len() == 1 {
-        if !mutation.present {
-            node.children.remove(*name);
-            return Ok(());
+        let mut child =
+            take_working_child(node.children.remove(*name), base, nodes, layer_ordinal)?;
+        // Retain deletion/reset history without walking every old descendant.
+        // The reset ordinal masks old visible values, while old roots stay immutable.
+        if mutation.reset || !mutation.present {
+            child.reset = Some(ordinal);
         }
-        let mut child = if mutation.reset {
-            WorkingNode::default()
-        } else {
-            take_working_child(node.children.remove(*name), base, nodes, layer_ordinal)?
-        };
-        child.value = Some(ordinal);
+        child.value = mutation.present.then_some(ordinal);
         node.children
             .insert(Arc::from(*name), WorkingChild::Owned(Box::new(child)));
         return Ok(());
@@ -711,6 +719,7 @@ fn freeze_node(
         .map_err(|_| corruption("path-state layer has too many nodes"))?;
     nodes.push(PathStateNode {
         value: node.value,
+        reset: node.reset,
         children,
     });
     Ok(PathStateNodeRef {
@@ -777,7 +786,9 @@ fn validate_descriptor(descriptor: &PathStateDescriptor, layers: &[PathStateLaye
         for (node_index, node) in layer.nodes.iter().enumerate() {
             if node
                 .value
-                .is_some_and(|value| value >= descriptor.commit_count)
+                .into_iter()
+                .chain(node.reset)
+                .any(|value| value >= descriptor.commit_count)
                 || node.children.len() > MAX_CHILDREN_PER_NODE
             {
                 return corrupt("path-state node exceeds its limits");

@@ -238,3 +238,12 @@ duplicates. Each verified index probes the smaller side, avoiding a complete
 request-set scan per small frontier member or an index scan per point read.
 Self-contained matches remain preferred over external deltas. This bounds CPU
 lookup work; it does not change source-range admission or reduce origin requests.
+
+First-parent path history and blame use captured path-state change points when
+an index is available. History verifies each candidate against raw first-parent
+commit/tree entries, including deletion, mode changes and covering type resets.
+Continuations resume from the candidate's parent without rewalking unrelated
+commits. Blame preserves line comparison and deletion boundaries while jumping
+between relevant versions. Root-path and all-parent history retain their existing
+raw traversal; index absence retains the ordinary Git read path. Missing or
+corrupt advertised pages are errors, not a reason to switch traversal.

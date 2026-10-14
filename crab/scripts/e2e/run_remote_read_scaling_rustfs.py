@@ -76,16 +76,19 @@ class ReadScalingRunner(AddCommitPushSmoke):
         self.report.artifacts["qualifier_sha256"] = sha256_file(self.args.qualifier)
         source_root = self.artifacts / "qualified-source"
         source_root.mkdir()
-        inputs = (
-            "Cargo.lock", "crates/crab-remote/Cargo.toml",
-            "crates/crab-remote/examples/qualify_remote.rs",
-            "crates/crab-remote/examples/support/mod.rs",
-            "crates/crab-metadata/src/path_state/codec.rs",
-            "crates/crab-metadata/src/split_commit_graph.rs",
+        source_prefixes = (
+            "crates/crab-metadata/", "crates/crab-read/", "crates/crab-remote/",
+            "crates/crab-remote-git/", "crates/crab-storage/", "crates/crab-write/",
+        )
+        tracked = subprocess.check_output(["git", "ls-files", "--", *source_prefixes],
+                                          cwd=REPO_ROOT, text=True).splitlines()
+        inputs = [name for name in tracked if name.endswith((".rs", "/Cargo.toml"))]
+        inputs.extend((
+            "Cargo.lock", "Cargo.toml",
             "crab/scripts/e2e/run_remote_read_scaling_rustfs.py",
             "crab/scripts/e2e/run_concurrent_push_smoke.py",
             "crab/scripts/e2e/verify_remote_browse.py",
-        )
+        ))
         hashes = {}
         for relative in inputs:
             target = source_root / relative
