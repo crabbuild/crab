@@ -1617,3 +1617,48 @@ requirements stay open. PR #553's guardrail failure is verified from its complet
 job log: the pack-layout inventory still requires the removed direct installer in
 `crab/src/read/mod.rs`. That inventory is unchanged and its prior approval request
 remains pending.
+
+
+## Decode admission survives abandoned waiters
+
+Source `4dfb4ed6eba` moves existing blocking Git decode admission into one private
+runtime owner. All six admitted call sites use it: point/batch reconstruction,
+packed-entry inflation and inspection, individual index parsing for embedded and
+standalone sources, and coalesced index windows. Previously each waiter held its
+permit outside the blocking task. Dropping that future detached the task while
+freeing its slot, allowing later callers to exceed configured decode concurrency.
+Queued and running workers now retain their slots until completion or unwind;
+runtime task tracking retains the shutdown join obligation. Cancellation before
+admission and cooperative kernel cancellation preserve their existing policies.
+The generic tracked comparison/sort path and separate response-pack producer
+admission are unchanged. Production Rust shrinks by seven lines; the growth is
+four lifecycle regressions. No public types, storage formats or config change.
+
+The negative control extracts the existing caller sequence without fixing its
+ownership: a started, channel-blocked worker survives its aborted waiter, while
+the semaphore incorrectly reports one available slot at a configured limit of
+one. The same regression passes after moving the permit into the tracked worker.
+Additional cases cover a detached worker still queued behind a one-thread blocking
+pool, cancellation while waiting for a slot, and panic cleanup with a preserved
+typed join error. The locked Tokio 1.53.1 contracts confirm that dropping a join
+handle detaches work, started blocking work cannot be aborted, and dropping an
+owned semaphore permit releases admission; tokio-util 0.7.18 retains task-tracker
+tokens until blocking jobs finish.
+
+Proof: 18 runtime cases pass with serial harness scheduling, 48 reader/index
+cases and 20 real-Git delta/budget/cancellation/shutdown cases pass. The final
+abandonment and reader checks are repeated after lint cleanup. Selected strict
+Clippy, formatting and publication-enabled qualifier build pass.
+`decode-worker-admission-native-r1` qualifies clean source at 100/1k/10k commits,
+20 cold/warm pairs each. Native Git validates the results, physical request/byte/
+decode counters match the frozen preceding run, and semantic failure cleanup
+leaves zero active backend operations.
+
+The broad parallel runtime run and an isolated repeat fail the pre-existing
+1-ms negative-cache expiry test before its immediate cache-hit assertion; a
+serial runtime run passes. Its test, insertion and lookup functions are byte
+identical to freshly fetched `origin/main` (`cc2e4e25f46`). Neither the test nor
+cache implementation is modified. Failed receipts are preserved; the serial pass
+does not establish that timing test is stable. Broad CI, the pending pack-layout
+inventory approval, representative provider latency, 10-GiB history scaling and
+later delivery gates remain open.
