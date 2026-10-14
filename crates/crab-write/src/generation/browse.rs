@@ -167,12 +167,19 @@ pub async fn build_path_state(
         let write = append_path_state(base, &graph, inputs)?;
         upload_path_state(store, layout, &write, limits.max_path_state_bytes).await?;
         if write.commit_count() == graph.descriptor.commit_count {
-            return BrowseIndexes::new(
+            let complete = BrowseIndexes::new(
                 snapshot.manifest_etag.clone(),
                 graph_hash.to_owned(),
                 Some(write.descriptor_hash),
-            )
-            .map_err(Into::into);
+            )?;
+            // Path completion must retain already verified physical readiness;
+            // replacing the record would otherwise send reads back to whole indexes.
+            return match indexes.object_index_hash() {
+                Some(hash) => complete
+                    .with_object_index(hash.to_owned())
+                    .map_err(Into::into),
+                None => Ok(complete),
+            };
         }
         publish_path_state_checkpoint(
             store,

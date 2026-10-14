@@ -3250,9 +3250,11 @@ async fn sweep_capsule_objects(
     let history_prefix = layout.repo_path("v2/history/");
     let path_state_prefix = layout.repo_path("metadata/path-state/");
     let commit_graph_prefix = layout.repo_path("metadata/commit-graph/");
+    let object_index_prefix = layout.repo_path("metadata/git-object-index/");
     let manifests_prefix = layout.repo_path("manifests/");
     let path_state_descriptor_prefix = layout.repo_path("manifests/path-state-");
     let commit_graph_descriptor_prefix = layout.repo_path("manifests/commit-graph-");
+    let object_index_descriptor_prefix = layout.repo_path("manifests/git-object-index-");
     let (
         capsules,
         checkpoints,
@@ -3260,6 +3262,7 @@ async fn sweep_capsule_objects(
         history,
         path_state_objects,
         commit_graph_objects,
+        object_index_objects,
         manifests,
     ) = tokio::try_join!(
         store.list_prefix(&capsule_prefix),
@@ -3268,15 +3271,18 @@ async fn sweep_capsule_objects(
         store.list_prefix(&history_prefix),
         store.list_prefix(&path_state_prefix),
         store.list_prefix(&commit_graph_prefix),
+        store.list_prefix(&object_index_prefix),
         store.list_prefix(&manifests_prefix),
     )?;
     let derived_index_objects = path_state_objects
         .into_iter()
         .chain(commit_graph_objects)
+        .chain(object_index_objects)
         .chain(manifests.into_iter().filter(|object| {
             let key = object.location.as_ref();
             key.starts_with(path_state_descriptor_prefix.as_ref())
                 || key.starts_with(commit_graph_descriptor_prefix.as_ref())
+                || key.starts_with(object_index_descriptor_prefix.as_ref())
         }))
         .collect::<Vec<_>>();
     let derived_index_keys = derived_index_objects
@@ -3401,6 +3407,26 @@ async fn mark_derived_index_objects(
                 .iter()
                 .map(|layer| layout.repo_path(&layer.path).to_string()),
         );
+
+        if let Some(hash) = indexes.object_index_hash() {
+            let index = crab_metadata::git_object_locator::PagedGitObjectIndex::load(
+                store,
+                layout,
+                hash,
+                state_digest,
+                manifest,
+                crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+            )
+            .await?;
+            // Every authenticated physical page lives in this immutable body.
+            // Retain it with readiness so pruning cannot strand future delta reads.
+            reachable.insert(
+                layout
+                    .bulk_manifest_path("git-object-index", hash)
+                    .to_string(),
+            );
+            reachable.insert(index.body_path().to_string());
+        }
 
         if let Some(path_state_hash) = indexes.path_state_hash() {
             let path_state_path = layout.bulk_manifest_path("path-state", path_state_hash);
@@ -5681,6 +5707,10 @@ mod tests {
     #[tokio::test]
     async fn capsule_protocol_gc_retains_current_indexes_and_collects_stale_index_generations() {
         use crab_metadata::capsule_protocol::BrowseIndexes;
+        use crab_metadata::git_object_locator::{
+            GitObjectLocation, GitObjectLocator, GitPackInventoryEntry, PagedGitObjectIndex,
+            PagedGitObjectIndexWrite,
+        };
         use crab_metadata::path_state::publish_path_state_checkpoint;
         use object_store::memory::InMemory;
         use std::sync::Arc;
@@ -5698,9 +5728,61 @@ mod tests {
                 .unwrap();
         let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
         manifest.generation = root.record().root().generation();
-        manifest.pack_index_hash = "1".repeat(64);
+        let pack_id = crab_xet::hash::MerkleHash::from([8; 32]);
+        let inventory = GitPackInventoryEntry {
+            pack_id,
+            object_count: 1,
+            pack_size: 42,
+        };
+        let pack_index_hash = |generation| {
+            crab_metadata::manifests::compact_pack_index(
+                generation,
+                &[crab_metadata::manifests::PackManifestEntry {
+                    pack_id: pack_id.to_string(),
+                    content_hash: pack_id.to_string(),
+                    size: 42,
+                    object_count: 1,
+                    ref_tips: Vec::new(),
+                }],
+            )
+            .unwrap()
+            .0
+        };
+        manifest.pack_index_hash = pack_index_hash(manifest.generation);
         manifest.seal_git_validation();
         let state_digest = "a".repeat(64);
+        let physical_entries = [(
+            [7; 20],
+            GitObjectLocator {
+                ordinal: 0,
+                pack_id,
+                location: GitObjectLocation {
+                    pack_offset: 12,
+                    entry_len: 10,
+                    crc32: 0,
+                },
+                metadata: Default::default(),
+            },
+        )];
+        let physical = PagedGitObjectIndexWrite::build(
+            &state_digest,
+            &manifest,
+            &[inventory],
+            &physical_entries,
+        )
+        .unwrap();
+        let physical_hash = physical.upload(store.as_storage(), &layout).await.unwrap();
+        let physical_reader = PagedGitObjectIndex::load(
+            store.as_storage(),
+            &layout,
+            &physical_hash,
+            &state_digest,
+            &manifest,
+            128 * 1024,
+        )
+        .await
+        .unwrap();
+        let physical_body = physical_reader.body_path().clone();
         let (current_graph_hash, current_path_state_hash, current_graph, current_count) =
             write_browse_indexes(
                 store.as_storage(),
@@ -5726,6 +5808,8 @@ mod tests {
         for path_state in [None, Some(current_path_state_hash.clone())] {
             let indexes =
                 BrowseIndexes::new(state_digest.clone(), current_graph_hash.clone(), path_state)
+                    .unwrap()
+                    .with_object_index(physical_hash.clone())
                     .unwrap();
             let index_path = layout.capsule_browse_indexes_path();
             let bytes = indexes.encode().unwrap();
@@ -5760,6 +5844,34 @@ mod tests {
         }
 
         let stale_git_validation_digest = "f".repeat(64);
+        let mut stale_manifest = manifest.clone();
+        stale_manifest.generation += 1;
+        stale_manifest.pack_index_hash = pack_index_hash(stale_manifest.generation);
+        stale_manifest.git_validation_digest = stale_git_validation_digest.clone();
+        let stale_physical = PagedGitObjectIndexWrite::build(
+            &"f".repeat(64),
+            &stale_manifest,
+            &[inventory],
+            &physical_entries,
+        )
+        .unwrap();
+        let stale_physical_hash = stale_physical
+            .upload(store.as_storage(), &layout)
+            .await
+            .unwrap();
+        let stale_physical_reader = PagedGitObjectIndex::load(
+            store.as_storage(),
+            &layout,
+            &stale_physical_hash,
+            &"f".repeat(64),
+            &stale_manifest,
+            128 * 1024,
+        )
+        .await
+        .unwrap();
+        // Rebinding unchanged physical entries shares the immutable body; an
+        // obsolete descriptor must not make that current body's pages collectible.
+        assert_eq!(stale_physical_reader.body_path(), &physical_body);
         let (stale_graph_hash, stale_path_state_hash, stale_graph, stale_count) =
             write_browse_indexes(
                 store.as_storage(),
@@ -5816,6 +5928,8 @@ mod tests {
             &crab_metadata::path_state::path_state_checkpoint_path(&stale_git_validation_digest),
         );
         let current_indexes = [
+            layout.bulk_manifest_path("git-object-index", &physical_hash),
+            physical_body,
             current_graph_descriptor.clone(),
             current_graph_layer.clone(),
             current_path_state_descriptor.clone(),
@@ -5823,6 +5937,7 @@ mod tests {
             current_checkpoint.clone(),
         ];
         let stale_indexes = [
+            layout.bulk_manifest_path("git-object-index", &stale_physical_hash),
             stale_graph_descriptor.clone(),
             stale_graph_layer.clone(),
             stale_path_state_descriptor.clone(),
@@ -5895,6 +6010,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(attribution[0].oid, [3; 20]);
+        // Open afresh after sweeping: a cached page would conceal accidental deletion.
+        let physical_reader = PagedGitObjectIndex::load(
+            store.as_storage(),
+            &layout,
+            &physical_hash,
+            &state_digest,
+            &manifest,
+            128 * 1024,
+        )
+        .await
+        .unwrap();
+        let locations = physical_reader
+            .lookup(
+                store.as_storage(),
+                &[[7; 20]],
+                &std::collections::HashMap::from([(pack_id, inventory)]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(locations, vec![Some(physical_entries[0].1)]);
         for path in stale_indexes {
             let head = store.head(&path).await;
             assert!(
@@ -5903,7 +6038,7 @@ mod tests {
             );
         }
         assert_eq!(outcome.packs_deleted, 0);
-        assert_eq!(outcome.derived_index_objects_deleted, 5);
+        assert_eq!(outcome.derived_index_objects_deleted, 6);
     }
 
     #[tokio::test]

@@ -390,3 +390,36 @@ fn generation_zero_ref_head_snapshots_can_build_physical_indexes() {
         PagedGitObjectIndexWrite::build(&"c".repeat(64), &manifest, &inventory, &entries).is_ok()
     );
 }
+
+#[tokio::test]
+async fn physical_index_attachment_binds_origin_prefixes_and_captured_state() {
+    let (manifest, inventory, entries) = inputs(10);
+    let state = "c".repeat(64);
+    let store = Store::new(Arc::new(InMemory::new()));
+    let layout = StoreLayout::new(store.clone(), "bound-origin".to_owned());
+    let write = PagedGitObjectIndexWrite::build(&state, &manifest, &inventory, &entries).unwrap();
+    let hash = write.upload(&store, &layout).await.unwrap();
+    let reader = PagedGitObjectIndex::load(&store, &layout, &hash, &state, &manifest, 128 * 1024)
+        .await
+        .unwrap();
+    let foreign = StoreLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        "bound-origin".to_owned(),
+    );
+    let prefix = StoreLayout::new(store.clone(), "other-repository".to_owned());
+    let global = StoreLayout::with_global_prefix(
+        store,
+        "bound-origin".to_owned(),
+        "other-global".to_owned(),
+    );
+    assert_eq!(
+        [
+            reader.matches_binding(&layout, &state, &manifest),
+            reader.matches_binding(&foreign, &state, &manifest),
+            reader.matches_binding(&prefix, &state, &manifest),
+            reader.matches_binding(&global, &state, &manifest),
+            reader.matches_binding(&layout, &"d".repeat(64), &manifest)
+        ],
+        [true, false, false, false, false]
+    );
+}

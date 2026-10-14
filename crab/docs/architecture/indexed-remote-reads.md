@@ -532,40 +532,70 @@ release/provider performance. Full pack-index reads still scale with repository
 objects, and control opening still scales with history. Source/binary hashes,
 the earlier failure, raw receipts and checked summaries remain external.
 
-## Paged physical object lookup: implementation in progress
+## Paged physical object lookup: runtime qualification
 
-The measured 10k cold-resolution query reads an 844,460-byte pack-index range to
-locate its 148-byte commit entry. A new component indexes OID-to-placement,
-pack-offset-to-OID and pack-inventory bindings through authenticated pages. The
-reverse direction is required for offset deltas; paging only OID lookup would
-leave reconstruction with a hidden full-index read. Physical aliases retain all
-source offsets while primary lookup prefers a self-contained encoding. Logical
-facts must agree across aliases; catalog ordinals and ref visibility remain the
-existing owners' contracts.
+The measured 10k cold-resolution query previously read an 844,460-byte pack-index
+range to locate its 148-byte commit. Physical lookup now uses authenticated
+OID-to-placement, pack-offset-to-OID and pack-inventory pages. Offset lookup is
+required for delta reconstruction; paging only OIDs would retain a hidden full
+reverse-index read. Every physical alias remains represented. Primary placement
+prefers a self-contained encoding; logical facts agree across aliases while
+encoding-specific delta-base facts remain attached to their own placement.
 
-Graph, path-state and object lookup now share one admitted page-traversal engine.
-The component run passes nine tests, including bounded 10k lookup, duplicate
-positions, corruption, snapshot/inventory binding, warm encoded-work admission,
-input-order canonicalization and a re-signed inconsistent-directory test. Removing
-OID/offset agreement makes that regression fail; source is restored. The first
-negative-control invocation selected zero tests and is not qualification; the
-corrected invocation runs the complete test name and rejects the forged result.
-Shared consumers pass 21 path-state and 27 graph tests, strict metadata Clippy and
-payload-only compilation. The per-ref publication contract permits generation
-zero after a push; the new descriptor now accepts that captured generation.
-Its added regression passes alongside the other eight component tests.
+The capsule owner constructs complete physical coverage from authenticated source
+sidecars, admits encoded output before upload, and verifies full readback before
+publishing readiness. Path completion retains that descriptor hash. Maintenance
+can repair missing or corrupt derived bytes; provider/authentication failures
+propagate. Foreground readers bind the descriptor to captured state, transport and
+storage prefixes, use operation-admitted stores, and return definitive misses
+without probing whole indexes. Catalog ordinals and visible-ref authority remain
+with their existing owners. GC retains the descriptor and its immutable page
+body; stale descriptors can be collected while a shared current body survives.
 
-Traversal now admits four concurrent page reads for every consumer; path-state
-previously admitted sixteen and graph lookup already admitted four. Correctness
-tests cover the shared mechanics, but cold/warm latency must be requalified before
-claiming this concurrency change is performance-neutral. Object-page decode
-counts are recorded separately by the existing qualification observer.
+Browse-readiness version 3 replaces the unshipped version 2 record. No release tag
+contains the introducing browse-record commit. Normal readers reject retired
+records; the elected maintenance owner rebuilds them under the observed CAS token.
+The released manifest protocol and its object-catalog lookup remain unchanged.
 
-This component is not yet wired to foreground lookup or production readiness.
-Publication must construct it from verified complete physical sources, verify
-complete readback, and bind its descriptor to the captured state. Runtime OID and
-physical-offset consumers must use it with operation admission and cancellation;
-GC must trace its descriptor/body from retained readiness roots. Native Git and
-real-store qualifications, build/storage amplification and source API release
-qualification remain mandatory before declaring this slice complete. Outer
-control/inventory/ref opening and stages 5–8 remain open.
+Focused proof includes 10 metadata component tests, five runtime regressions,
+three browse-record tests, two publication-fence tests, the CLI error-source test
+and the GC sweep regression. The offset-delta runtime fixture contains no IDX/REV
+sidecars and reconstructs exact verified bytes. Removing OID/offset agreement
+fails the forged-directory regression; the initial zero-test negative-control run
+is excluded. Existing shared consumers pass 21 path-state and 27 graph tests; the
+qualification observer passes two tests. Strict Clippy passes for the four touched
+orchestration/read crates with `--no-deps`. The broader invocation fails six
+pre-existing coordination lint expectations unchanged from the PR base. CLI test
+compilation, HTTP/auth-server/SDK checks and both qualification-tool builds pass.
+A strict CLI-wide invocation reports 605 lint errors; JSON diagnostics contain no
+primary error span on modified CLI lines compared with the stacked base. This is
+not a clean CLI-wide lint result. The missing CLI conversion for the new error
+variant was found by wider build and CI proof, then corrected with source-chain
+coverage.
+
+The local RustFS run completes 121 native-Git query processes and three maintenance
+passes. Each fixed resolve/attribution cell contains 20 cold and 20 warm samples;
+the 100-commit fixture additionally checks all ten supported qualification queries.
+Every measured operation finishes with zero active backend operations. Source and
+binary hashes, native oracles, request traces and checked receipts remain external.
+
+| History | Cold resolve bytes | Cold attribution bytes | Resolve p95, ms | Attribution p95, ms | Physical body bytes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 100 | 46,175 | 103,428 | 10.205 | 104.636 | 91,522 |
+| 1,000 | 68,117 | 483,280 | 12.756 | 110.685 | 676,936 |
+| 10,000 | 87,518 | 392,549 | 72.424 | 145.501 | 6,530,830 |
+
+Warm fixed queries read zero backend bytes. At 10k, cold resolution falls from
+844,608 to 87,518 bytes and attribution from 985,949 to 392,549 bytes. The fixed
+queries stay below the frozen 512 KiB decoded / 1 MiB transferred limits. These are
+shared-host debug timings on local RustFS, not representative S3/release latency.
+The traversal change from sixteen to four concurrent path-page reads is included
+in these measured fixed-directory cells; other workloads remain unqualified.
+
+Maintenance takes 2.345 / 5.080 / 22.581 seconds and peaks at 34.5 / 53.7 / 245.6 MiB
+process RSS in these fixtures. The 10k physical body is 7.73 times the old pack-index
+range. That storage amplification remains an optimization gate: dictionary/row
+compaction and batch-request behavior must be measured before calling the design
+fully efficient. Outer control/ref/inventory opening, the complete stage-4 edge
+matrix, old-reader lifecycle, representative provider and source-API release gates
+remain open. Stages 5–8 and the separate unified-staging workstream are not complete.

@@ -4,7 +4,11 @@
 snapshot under renewed generation ownership and GC fences, reuses the shared
 Git index builders, and publishes `v2/browse-indexes` only after checking a fresh
 root and visible ref positions. Conditional record publication cannot overwrite
-a newer maintenance result; readers independently reject a stale binding.
+a newer maintenance result; readers independently reject a stale binding. Physical
+OID and pack-offset pages are built from authenticated complete source sidecars,
+verified in full before readiness, and carried through final path publication.
+The elected owner repairs missing/corrupt derived physical pages; foreground
+reads propagate those failures rather than probing whole pack indexes.
 Ordinary push/clone/fetch do not load this derived record.
 
 Internal orchestration shared by Crab SDK, CLI, HTTP, and managed-service

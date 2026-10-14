@@ -1,5 +1,6 @@
 //! Immutable physical placement indexes; callers retain ref visibility and origin verification.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use crab_storage::{Store, StoreLayout};
@@ -41,11 +42,19 @@ pub struct PagedGitObjectIndex {
     descriptor: Descriptor,
     descriptor_bytes: u64,
     path: object_store::path::Path,
+    origin: Arc<dyn object_store::ObjectStore>,
+    global_prefix: String,
     maximum: u64,
     cache: PageCache,
 }
 
 impl PagedGitObjectIndexWrite {
+    /// Return encoded physical-page bytes for maintenance admission before upload.
+    #[must_use]
+    pub fn body_bytes(&self) -> u64 {
+        self.descriptor.body_bytes
+    }
+
     /// Build from every verified packed entry in the captured capsule inventory.
     ///
     /// Entries cover each pack without holes; this index does not assign catalog ordinals.
@@ -253,9 +262,34 @@ impl PagedGitObjectIndex {
             descriptor,
             descriptor_bytes: bytes.len() as u64,
             path,
+            origin: Arc::clone(layout.store().inner()),
+            global_prefix: layout.global_prefix().to_owned(),
             maximum,
             cache: PageCache::default(),
         })
+    }
+
+    /// Check captured state and in-process origin before attaching lookup to a repository.
+    #[must_use]
+    pub fn matches_binding(
+        &self,
+        layout: &StoreLayout<Store>,
+        state_digest: &str,
+        manifest: &Manifest,
+    ) -> bool {
+        Arc::ptr_eq(&self.origin, layout.store().inner())
+            && self.global_prefix == layout.global_prefix()
+            && self.path == body_path(layout, &self.descriptor.body_hash)
+            && self.descriptor.state_digest == state_digest
+            && self.descriptor.generation == manifest.generation
+            && self.descriptor.pack_index_hash == manifest.pack_index_hash
+            && self.descriptor.git_validation_digest == manifest.git_validation_digest
+    }
+
+    /// Return the immutable body containing every page for retained-root GC.
+    #[must_use]
+    pub fn body_path(&self) -> &object_store::path::Path {
+        &self.path
     }
 
     /// Resolve OIDs against the captured physical inventory, preserving duplicates and misses.

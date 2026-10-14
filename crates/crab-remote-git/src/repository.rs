@@ -421,6 +421,7 @@ impl RemoteGitRepository {
         RepositoryOptions::new(options.object_limits(), options.operation_limits())?;
         check_cancelled(cancellation)?;
         check_cancelled(&runtime.background_cancellation())?;
+        lookup_sources.validate_object_index(&layout, snapshot)?;
         let entries = snapshot
             .journal
             .packs
