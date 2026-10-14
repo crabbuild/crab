@@ -4,11 +4,15 @@
 
 pub mod selection;
 
+mod lfs;
 mod remote;
 use remote::RemoteSnapshot;
 
 #[cfg(test)]
 pub(crate) mod test_support;
+
+#[cfg(test)]
+mod lfs_tests;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,7 +31,7 @@ use crate::git::url::{Cloud, CrabUrl, ObjectUrl, UrlForm};
 use crate::storage::{StoreLayout, resolve_object_url_store};
 use crab_cache_store::CachingStore;
 use crab_git::lfs_pointer::LfsPointer;
-use crab_lfs::LfsObjectStore;
+use crab_lfs::LfsReadSession;
 use crab_types::pointer::Pointer;
 
 const DEFAULT_REV: &str = "HEAD";
@@ -124,6 +128,7 @@ struct RemoteContext {
     router: StoreLayout,
     hydrator: Arc<HydrationRuntime>,
     git_runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+    lfs_reads: LfsReadSession,
 }
 
 /// A repository snapshot pinned to a resolved commit.
@@ -238,9 +243,12 @@ impl RepositoryReader {
         })
     }
 
-    /// Drain remote Git operations before the command's Tokio runtime exits.
+    /// Drain remote Git operations and LFS verification before Tokio exits.
+    ///
+    /// Finish or drop materialization futures before closing their verification session.
     pub async fn shutdown(&self) {
         if let Some(remote) = self.inner.remote.get() {
+            remote.lfs_reads.close().await;
             remote.git_runtime.shutdown().await;
         }
     }
@@ -381,15 +389,7 @@ impl SnapshotReader {
         if !blob_bytes.is_empty()
             && let Ok(lfs_ptr) = LfsPointer::parse(&blob_bytes)
         {
-            let remote = self.repo.inner.remote().await?;
-            let lfs_store = LfsObjectStore::new(
-                remote.caching_store.origin().clone(),
-                remote.router.repo_prefix(),
-            );
-            let content = lfs_store.get(&lfs_ptr.oid).await?;
-            verify_lfs_content(path, &lfs_ptr, &content)?;
-            tokio::fs::write(dest, &content).await?;
-            return Ok(content.len() as u64);
+            return self.download_lfs_to_path(path, &lfs_ptr, dest).await;
         }
 
         tokio::fs::write(dest, &blob_bytes).await?;
@@ -423,20 +423,7 @@ impl SnapshotReader {
         if !blob_bytes.is_empty()
             && let Ok(lfs_ptr) = LfsPointer::parse(&blob_bytes)
         {
-            let remote = self.repo.inner.remote().await?;
-            let lfs_store = LfsObjectStore::new(
-                remote.caching_store.origin().clone(),
-                remote.router.repo_prefix(),
-            );
-            let object_path = lfs_store.object_path_for(&lfs_ptr.oid);
-            let mut verifier = Sha256Tap::new(writer);
-            let bytes = remote
-                .caching_store
-                .origin()
-                .stream_to_writer(&object_path, &mut verifier)
-                .await?;
-            verifier.verify(path, &lfs_ptr, bytes)?;
-            return Ok(bytes);
+            return self.write_lfs_to_writer(path, &lfs_ptr, writer).await;
         }
 
         write_blob_to_writer(writer, &blob_bytes)
@@ -509,6 +496,7 @@ impl Inner {
                         router,
                         hydrator: Arc::new(hydrator),
                         git_runtime: Arc::new(crab_remote_git::RemoteGitRuntime::default()),
+                        lfs_reads: LfsReadSession::default(),
                     }))
                 })
             })
@@ -895,23 +883,6 @@ fn cache_key_for(input: &str) -> String {
     blake3::hash(input.as_bytes()).to_hex().to_string()
 }
 
-fn verify_lfs_content(path: &str, pointer: &LfsPointer, content: &[u8]) -> Result<()> {
-    use sha2::Digest as _;
-
-    let actual: [u8; 32] = sha2::Sha256::digest(content).into();
-    if actual != pointer.oid {
-        return Err(CrabError::CorruptObject {
-            path: path.to_owned(),
-            reason: format!(
-                "LFS object sha256 mismatch: pointer declares {}, got {}",
-                hex_encode(&pointer.oid),
-                hex_encode(&actual),
-            ),
-        });
-    }
-    Ok(())
-}
-
 fn write_blob_to_writer<W>(mut writer: W, blob: &[u8]) -> Result<u64>
 where
     W: std::io::Write,
@@ -921,71 +892,6 @@ where
     }
     writer.flush()?;
     Ok(blob.len() as u64)
-}
-
-struct Sha256Tap<W> {
-    writer: W,
-    hasher: sha2::Sha256,
-}
-
-impl<W> Sha256Tap<W> {
-    fn new(writer: W) -> Self {
-        use sha2::Digest as _;
-
-        Self {
-            writer,
-            hasher: sha2::Sha256::new(),
-        }
-    }
-}
-
-impl<W> Sha256Tap<W>
-where
-    W: std::io::Write,
-{
-    fn verify(mut self, path: &str, pointer: &LfsPointer, bytes: u64) -> Result<()> {
-        use sha2::Digest as _;
-
-        self.writer.flush()?;
-        if bytes != pointer.size {
-            return Err(CrabError::CorruptObject {
-                path: path.to_owned(),
-                reason: format!(
-                    "LFS object size mismatch: pointer declares {}, got {bytes}",
-                    pointer.size,
-                ),
-            });
-        }
-
-        let actual: [u8; 32] = self.hasher.finalize().into();
-        if actual != pointer.oid {
-            return Err(CrabError::CorruptObject {
-                path: path.to_owned(),
-                reason: format!(
-                    "LFS object sha256 mismatch: pointer declares {}, got {}",
-                    hex_encode(&pointer.oid),
-                    hex_encode(&actual),
-                ),
-            });
-        }
-        Ok(())
-    }
-}
-
-impl<W> std::io::Write for Sha256Tap<W>
-where
-    W: std::io::Write,
-{
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.writer.write_all(buf)?;
-        use sha2::Digest as _;
-        self.hasher.update(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
-    }
 }
 
 fn hex_encode(bytes: &[u8; 32]) -> String {

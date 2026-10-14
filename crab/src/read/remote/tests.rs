@@ -168,6 +168,7 @@ async fn fixture() -> (RepositoryReader, Arc<ReadBytes>, tempfile::TempDir, Stri
                 router,
                 hydrator: Arc::new(hydrator),
                 git_runtime: Arc::new(RemoteGitRuntime::default()),
+                lfs_reads: crab_lfs::LfsReadSession::default(),
             }))
             .is_ok()
     );

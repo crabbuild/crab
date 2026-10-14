@@ -39,7 +39,9 @@ class MarkerProxy(http.server.BaseHTTPRequestHandler):
             self.send_error(413, "qualification fixture exceeded body bound")
             return
         body = self.rfile.read(length)
-        connection = http.client.HTTPConnection("127.0.0.1", 9000, timeout=30)
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", getattr(self.server, "backend_port", 9000), timeout=30
+        )
         try:
             connection.request(self.command, self.path, body=body,
                                headers=dict(self.headers.items()))
@@ -64,12 +66,15 @@ class MarkerProxy(http.server.BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             if self.command != "HEAD":
-                self.wfile.write(data)
+                self.forward_body(path, data)
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
             connection.close()
             self.close_connection = True
+
+    def forward_body(self, _path, data):
+        self.wfile.write(data)
 
     do_GET = forward
     do_HEAD = forward

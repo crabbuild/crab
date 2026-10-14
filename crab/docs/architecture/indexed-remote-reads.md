@@ -809,3 +809,42 @@ qualified slice, with no additions/removals. Its invocation permits the existing
 `unfulfilled_lint_expectations` category; no source suppressions are added.
 The isolated Linux image lacks Clippy, so it supplies compilation/runtime proof
 only. Full CLI strict lint and cross-platform CI remain open.
+
+
+## Verified CLI LFS streams in qualification
+
+PR #539 now passes all 15 non-skipped CI checks, including native Git 2.40,
+macOS/Windows protocol, RustFS lifecycle and both image jobs. The scheduled
+fleet/owner-loss job remains skipped. This closes its process-runner gates,
+without claiming complete stage-4 opening or later stages.
+
+The LFS materialization audit finds a separate cancellation gap. The original
+CLI path collects the entire LFS body before writing, and its export verifier
+does not observe cancellation while waiting for source bytes. A native-Git and
+controlled-storage regression times out after cancellation before headers. A
+real CLI replay through the existing RustFS HTTP proxy additionally requires
+SIGKILL after SIGTERM and leaves a temporary download file. These are retained
+pre-fix receipts, not passing qualification.
+
+Both CLI LFS paths now use `LfsObjectStore::get_stream_with_session`, with
+cancellation during response setup and each body read. File output stays in a
+private sibling temporary path until verified EOF; pending filesystem writes
+are flushed before cleanup or publication. A reader-owned `LfsReadSession`
+drains admitted blocking hash work before Tokio exits. Materialization futures
+must finish/drop before shutdown. No full-body CLI collection or duplicate
+SHA-256 verifier remains.
+
+Released v1.2.4 selective reads report LFS integrity through `CorruptObject`;
+the adapter retains that diagnostic while shared LFS owns SHA-256, size and
+response framing. Storage and worker errors retain their existing typed sources.
+SDK delivery already uses the same verified-stream/session contract. HTTP/S3
+streams already use the canonical streaming verifier in their longer-lived
+server runtime; this CLI ownership change does not alter those consumers.
+
+All 13 read tests pass, including four header/body cancellation cases across
+file/writer output, private streaming progress, corrupt-content destination
+preservation and unchanged remote range/visibility bounds. CLI library Clippy
+reports 585 existing diagnostics versus 586 before this slice, with no additions.
+The invocation permits existing `unfulfilled_lint_expectations`; it is not a
+strict full CLI lint pass. Native candidate success/fault qualification and
+current 10-GiB/release/provider measurements remain pending.
