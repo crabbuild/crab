@@ -675,41 +675,38 @@ where
 {
     let mut cold_clone_pack = None;
     let mut fetch_snapshot = None;
-    let (refs, mut discovery_packs, capsule_refs) = match capsule_root {
-        Some(root) => {
-            let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
-            let view = tokio::select! {
-                biased;
-                () = cancellation.cancelled() => return Err(CrabError::Cancelled),
-                result = crab_read::capsule_protocol::open_ref_view_from_root(&layout, root) => result?,
-            };
-            let maximum = upload_pack_repository_options()
-                .map_err(remote_error)?
-                .operation_limits()
-                .max_entries;
-            let actual = view.refs().len() as u64;
-            if actual > maximum {
-                return Err(remote_error(RemoteGitError::LimitExceeded {
-                    limit: "snapshot entries",
-                    actual,
-                    maximum,
-                }));
-            }
-            let refs = RepositoryRefs::from_ref_state(view.head(), view.refs(), view.peeled_refs())
-                .map_err(remote_error)?;
-            (refs, Vec::new(), Some(view))
+    let (refs, mut discovery_packs, capsule_refs) = if let Some(root) = capsule_root {
+        let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
+        let view = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+            result = crab_read::capsule_protocol::open_ref_view_from_root(&layout, root) => result?,
+        };
+        let maximum = upload_pack_repository_options()
+            .map_err(remote_error)?
+            .operation_limits()
+            .max_entries;
+        let actual = view.refs().len() as u64;
+        if actual > maximum {
+            return Err(remote_error(RemoteGitError::LimitExceeded {
+                limit: "snapshot entries",
+                actual,
+                maximum,
+            }));
         }
-        None => {
-            let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
-            let snapshot = tokio::select! {
-                biased;
-                () = cancellation.cancelled() => return Err(CrabError::Cancelled),
-                result = crab_metadata::manifest_store::read_repository_snapshot(store, &layout) => result?,
-            };
-            let manifest = snapshot.materialized_manifest();
-            let refs = RepositoryRefs::try_from(&manifest).map_err(remote_error)?;
-            (refs, snapshot.journal.packs, None)
-        }
+        let refs = RepositoryRefs::from_ref_state(view.head(), view.refs(), view.peeled_refs())
+            .map_err(remote_error)?;
+        (refs, Vec::new(), Some(view))
+    } else {
+        let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
+        let snapshot = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+            result = crab_metadata::manifest_store::read_repository_snapshot(store, &layout) => result?,
+        };
+        let manifest = snapshot.materialized_manifest();
+        let refs = RepositoryRefs::try_from(&manifest).map_err(remote_error)?;
+        (refs, snapshot.journal.packs, None)
     };
     let visible_ref_names = visible_ref_names(&refs, hidden_ref_patterns)?;
     // Discovery reads canonical metadata, even if payloads or derived indexes
