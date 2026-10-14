@@ -1699,3 +1699,43 @@ this fix does not erase them or establish a provider latency guarantee.
 The pending pack-layout inventory approval, representative S3 qualification,
 10-GiB history scaling, broader CI and remaining history/catalog/staging/lifecycle
 and blame requirements stay open.
+
+## Prepared reuse retains payloads before recipe sealing
+
+The unified-staging inventory exposed a reproducible ownership gap in
+`Index::claim_prepared_chunks`. A direct-stream preparation could select an
+existing prepared Xorb without retaining it. Rolling back the original recipe
+then removed the canonical placement and physical body before the incoming
+recipe sealed. The negative control returned `ChunkNotFound` from a real staged
+payload read; its receipt is `prepared-reuse-retention-negative.log`.
+
+Selection now inserts the existing `preparation_payloads` pin in the same
+SQLite transaction, once per distinct Xorb in the bounded claim batch. Existing
+recipe sealing, finalization, abort, replacement and retirement paths already
+respect this ownership table. No schema, public API, chunk precedence, format,
+dependency version or configuration changes. Production growth is thirteen
+lines at the owner boundary; tests cover actual payload survival and release.
+
+The regression streams real bytes through CDC and the prepared-Xorb writer,
+selects them for another preparation, and rolls back their original recipe.
+Both abort and seal/publish/release branches verify byte-identical reads while
+owned and absence after final retirement. A separate transaction regression
+injects an insertion failure and a later size conflict; neither leaves pins,
+and the insertion error retains its typed SQLite cause. The pinned rusqlite
+0.34.0 transaction implementation defaults to rollback on drop.
+
+Proof: 35 focused prepared-payload cases and 29 streaming lifecycle cases pass;
+the existing manual 128-MiB RSS case remains ignored. Selected formatting and
+all-targets staging Clippy pass with the repository CI exception for unfulfilled
+lint expectations. The unrestricted Clippy attempt fails only on two unchanged
+`double_must_use` expectations in `add_push_plan.rs`; its failed receipt remains
+preserved. No lint annotations or gate inventories are changed in this slice.
+
+This slice is a prerequisite, not completion of unified staging. Segment-backed
+reuse needs separate retention, lookup and compaction proof: claims consult
+`chunk_payloads`, while ordinary readers still consult committed/pending
+occurrence rows. Git-clean retains its separate streaming implementation.
+Unifying ingestion requires preserving every occurrence, native rollback and
+clean flush-before-pointer ordering, followed by the alternating 10-GiB
+multi-edit/push/read qualification. Representative S3 qualification and the
+remaining indexed history/catalog/lifecycle/blame gates remain open.

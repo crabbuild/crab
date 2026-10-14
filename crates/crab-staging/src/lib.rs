@@ -4816,6 +4816,111 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn prepared_reuse_survives_original_rollback_until_new_owner_retires() {
+        for publish in [false, true] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("first.bin");
+            let content = b"prepared reuse lifetime".repeat(64 * 1024);
+            std::fs::write(&path, &content).expect("source file");
+            let staging = StagingArea::open(tmp.path().join("staging"))
+                .await
+                .expect("staging");
+            let first = stream::stage_file_streaming(
+                &path,
+                tmp.path(),
+                &staging,
+                stream::StreamStageProgress {
+                    xorb_builder: Some(stream::StreamStageXorbBuilder::new(
+                        1,
+                        crab_xet::xorb::builder::XorbBuilder::new,
+                    )),
+                    ..stream::StreamStageProgress::default()
+                },
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("first prepared recipe");
+            let terms = staging
+                .recipe_page(&first.recipe, 0)
+                .expect("recipe page")
+                .chunks;
+            let chunks = terms
+                .iter()
+                .map(|term| (term.chunk_hash, term.len))
+                .collect::<Vec<_>>();
+            let preparation = staging
+                .create_add_preparation()
+                .expect("reusing preparation");
+            let batch = staging.create_batch().expect("reusing batch");
+            staging
+                .attach_add_preparation_batch(&preparation, &batch)
+                .expect("attach batch");
+            staging
+                .append_recipe_recording_terms(&batch, 0, 0, &chunks)
+                .expect("record occurrences");
+            let claims = staging
+                .claim_prepared_chunks(&preparation, &batch, &chunks)
+                .expect("claim reusable bytes");
+            staging
+                .rollback_batch(&first.batch_id)
+                .expect("retire original recipe");
+            let hashes = chunks.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+            let retained = staging.get_chunks_batch(&hashes).await;
+            let sealed_retained = if publish {
+                let file_hash = first.recipe.file_hash();
+                staging
+                    .pre_register_file(&file_hash, first.recipe.file_size())
+                    .expect("register reused file");
+                staging
+                    .record_verified_recipe_lease(&batch, Path::new("second.bin"), &first.recipe)
+                    .expect("seal reused recipe");
+                staging
+                    .finalize_add_preparation(&preparation)
+                    .expect("transfer preparation ownership");
+                staging
+                    .mark_batch_published(&batch)
+                    .expect("publish reused recipe");
+                let sealed = staging
+                    .get_chunks_batch(&hashes)
+                    .await
+                    .expect("published reused bytes");
+                let unchanged = sealed == *retained.as_ref().expect("retained reusable bytes");
+                staging
+                    .release_published_path(Path::new("second.bin"), &file_hash)
+                    .expect("release published owner");
+                unchanged
+            } else {
+                staging
+                    .abort_add_preparation(&preparation)
+                    .expect("abort reusing preparation");
+                true
+            };
+            let retired = staging
+                .get_chunk(&hashes[0])
+                .await
+                .expect("read after retirement");
+            staging.close().await.expect("close staging");
+            let expected = terms
+                .iter()
+                .map(|term| &content[term.offset as usize..(term.offset + term.len) as usize])
+                .collect::<Vec<_>>();
+            assert!(
+                claims
+                    .iter()
+                    .all(|claim| matches!(claim, index::PreparedChunkClaim::Prepared(_)))
+                    && retained
+                        .expect("reused payload must survive original rollback")
+                        .iter()
+                        .map(|(_, bytes)| bytes.as_ref())
+                        .collect::<Vec<_>>()
+                        == expected
+                    && sealed_retained
+                    && retired.is_none()
+            );
+        }
+    }
+
     fn prepared_plan_for_first_chunk(
         file_hash: MerkleHash,
         total_bytes: u64,

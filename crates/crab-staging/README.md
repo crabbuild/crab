@@ -49,6 +49,12 @@ failure rolls back the batch; an unlink failure leaves an orphan for recovery,
 not a missing live payload. This shares one cleanup path across publication,
 rollback and push, avoiding repeated per-file commits and inventory scans.
 
+A direct-stream preparation retains each reused prepared Xorb in the same
+transaction that selects its locator. The original recipe can then retire
+without deleting bytes needed by the unsealed recording. Sealing transfers
+retention to recipe leases; abort releases preparation retention and reclaims
+only bodies with no other owner. Selection failures roll back these pins.
+
 ## Recovery contract
 
 Opening writable staging runs recovery before creating or reusing its writer.

@@ -2479,6 +2479,11 @@ impl Index {
             }
         }
 
+        let mut retained_xorbs = HashSet::new();
+        let mut retain_payload = tx.prepare_cached(
+            "INSERT OR IGNORE INTO preparation_payloads (preparation_id, xorb_hash)
+             VALUES (?1, ?2)",
+        )?;
         let mut out = Vec::with_capacity(chunks.len());
         for (chunk_hash, size) in chunks {
             if let Some(locator) = prepared.get(chunk_hash) {
@@ -2488,6 +2493,13 @@ impl Index {
                         crab_xet::hash::MerkleHash::from(*chunk_hash).hex(),
                         locator.size
                     )));
+                }
+                // The incoming recipe is not sealed yet. Pin reused bytes in
+                // this transaction so retiring their old recipe cannot remove
+                // them before this preparation transfers or releases ownership.
+                if retained_xorbs.insert(locator.xorb_hash) {
+                    retain_payload
+                        .execute(params![preparation_id, locator.xorb_hash.as_slice()])?;
                 }
                 out.push(PreparedChunkClaim::Prepared(*locator));
                 continue;
@@ -2530,6 +2542,7 @@ impl Index {
             claims.insert(*chunk_hash, (preparation_id.to_owned(), *size));
             out.push(PreparedChunkClaim::Claimed);
         }
+        drop(retain_payload);
         tx.commit().map_err(|error| {
             StagingError::Internal(format!("failed to commit prepared claim batch: {error}"))
         })?;
@@ -9054,6 +9067,49 @@ mod tests {
             idx.finalize_add_preparation("preparation-a"),
             "has no sealed recipe lease",
         );
+    }
+
+    #[test]
+    fn failed_prepared_reuse_claim_does_not_leave_retention() {
+        for insertion_failure in [false, true] {
+            let idx = open_in_memory();
+            idx.insert_add_preparation("reuse").expect("preparation");
+            idx.insert_batch("reuse-batch").expect("batch");
+            idx.attach_add_preparation_batch("reuse", "reuse-batch")
+                .expect("attach");
+            let xorb = test_hash(0xA1);
+            idx.conn.execute("INSERT INTO prepared_payloads (xorb_hash, payload_hash, bytes) VALUES (?1, ?2, 16)", params![xorb.as_slice(), test_hash(0xA2).as_slice()]).expect("prepared payload");
+            for (position, chunk) in [test_hash(0xA3), test_hash(0xA4)].iter().enumerate() {
+                idx.conn.execute("INSERT INTO prepared_payload_chunks (xorb_hash, chunk_index, chunk_hash, uncompressed_size) VALUES (?1, ?2, ?3, 8)", params![xorb.as_slice(), position, chunk.as_slice()]).expect("prepared placement");
+            }
+            if insertion_failure {
+                idx.conn.execute_batch("CREATE TEMP TRIGGER reject_reuse_retention BEFORE INSERT ON preparation_payloads BEGIN SELECT RAISE(ABORT, 'retention failure'); END;").expect("failure injection");
+            }
+            let error = idx
+                .claim_prepared_chunks(
+                    "reuse",
+                    "reuse-batch",
+                    &[(test_hash(0xA3), 8), (test_hash(0xA4), 9)],
+                )
+                .expect_err("claim fails");
+            let leases: i64 = idx
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM preparation_payloads WHERE preparation_id = 'reuse'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("retention count");
+            let expected_error = if insertion_failure {
+                matches!(error, StagingError::Io(ref source) if source.get_ref().is_some_and(|source| source.is::<rusqlite::Error>()))
+            } else {
+                matches!(error, StagingError::StagingCorrupt(_))
+            };
+            assert!(
+                expected_error && leases == 0,
+                "failed claim must roll back retention and preserve the cause"
+            );
+        }
     }
 
     #[test]
