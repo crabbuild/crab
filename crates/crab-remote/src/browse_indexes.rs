@@ -4,7 +4,7 @@ use std::{sync::Arc, time::Duration};
 
 use crab_metadata::capsule_protocol::{BrowseIndexes, MAX_BROWSE_INDEXES_BYTES, load_root};
 use crab_read::capsule_protocol::{
-    CapsuleReadLimits, open_view_from_root_with_control, read_activity_from_root,
+    CapsuleReadLimits, open_view_from_root_with_metadata, read_activity_from_root,
 };
 use crab_remote_git::{RemoteGitRuntime, RepositoryIdentity, RepositoryOptions};
 use crab_storage::{ETag, StorageError, Store, StoreLayout};
@@ -51,7 +51,7 @@ pub async fn ensure(
                 max_capsule_bytes: max_bytes,
                 max_frontier_bytes: max_bytes,
             };
-            let view = open_view_from_root_with_control(layout, root, limits).await?;
+            let view = open_view_from_root_with_metadata(layout, root, limits).await?;
             let snapshot = view.git_snapshot()?;
             if snapshot.manifest.refs.is_empty() {
                 return Ok(());

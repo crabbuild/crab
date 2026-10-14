@@ -340,7 +340,7 @@ impl ReadViewCache {
         }
         match crab_metadata::capsule_protocol::load_root(&repository.layout).await {
             Ok(root) => {
-                let capsule = crab_read::capsule_protocol::open_view_from_root_with_control(
+                let capsule = crab_read::capsule_protocol::open_view_from_root_with_metadata(
                     &repository.layout,
                     root,
                     crab_read::capsule_protocol::CapsuleReadLimits {
