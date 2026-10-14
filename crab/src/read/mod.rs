@@ -4,6 +4,9 @@
 
 pub mod selection;
 
+mod remote;
+use remote::RemoteSnapshot;
+
 #[cfg(test)]
 pub(crate) mod test_support;
 
@@ -114,13 +117,13 @@ struct Inner {
     work_dir: Option<PathBuf>,
     cancel: CancellationToken,
     remote: OnceCell<Arc<RemoteContext>>,
-    remote_git_dir: OnceCell<Arc<PathBuf>>,
 }
 
 struct RemoteContext {
     caching_store: CachingStore,
     router: StoreLayout,
     hydrator: Arc<HydrationRuntime>,
+    git_runtime: Arc<crab_remote_git::RemoteGitRuntime>,
 }
 
 /// A repository snapshot pinned to a resolved commit.
@@ -129,8 +132,14 @@ pub struct SnapshotReader {
     repo: RepositoryReader,
     requested_revision: String,
     resolved_revision: String,
-    git_dir: PathBuf,
+    source: SnapshotSource,
     file_index_lookup: Option<crab_metadata::file_index_lookup::SharedFileIndexLookup>,
+}
+
+#[derive(Clone)]
+enum SnapshotSource {
+    Local(PathBuf),
+    Remote(Arc<RemoteSnapshot>),
 }
 
 /// Materialization strategy for an entry selected from a snapshot.
@@ -204,7 +213,7 @@ impl RepositoryReader {
     pub async fn snapshot(&self, revision: Option<&str>) -> Result<SnapshotReader> {
         check_cancelled(&self.inner.cancel)?;
         let requested = revision.unwrap_or(DEFAULT_REV).to_owned();
-        let (resolved_revision, git_dir, file_index_lookup) = match self.inner.git_dir.as_ref() {
+        let (resolved_revision, source, file_index_lookup) = match self.inner.git_dir.as_ref() {
             Some(git_dir) => {
                 let git_dir_for_task = git_dir.clone();
                 let requested_for_task = requested.clone();
@@ -215,18 +224,25 @@ impl RepositoryReader {
                 .map_err(|join_err| {
                     CrabError::Internal(format!("resolve revision task failed: {join_err}"))
                 })??;
-                (resolved, git_dir.clone(), None)
+                (resolved, SnapshotSource::Local(git_dir.clone()), None)
             }
-            None => self.inner.remote_snapshot_git_dir(&requested).await?,
+            None => self.inner.remote_snapshot(&requested).await?,
         };
 
         Ok(SnapshotReader {
             repo: self.clone(),
             requested_revision: requested,
             resolved_revision,
-            git_dir,
+            source,
             file_index_lookup,
         })
+    }
+
+    /// Drain remote Git operations before the command's Tokio runtime exits.
+    pub async fn shutdown(&self) {
+        if let Some(remote) = self.inner.remote.get() {
+            remote.git_runtime.shutdown().await;
+        }
     }
 
     pub(crate) async fn snapshot_owned(self, revision: Option<String>) -> Result<SnapshotReader> {
@@ -259,7 +275,6 @@ impl RepositoryReader {
                         work_dir: None,
                         cancel: options.cancel,
                         remote: OnceCell::new(),
-                        remote_git_dir: OnceCell::new(),
                     }),
                 });
             }
@@ -281,7 +296,6 @@ impl RepositoryReader {
                 work_dir,
                 cancel: options.cancel,
                 remote: OnceCell::new(),
-                remote_git_dir: OnceCell::new(),
             }),
         })
     }
@@ -301,7 +315,6 @@ impl RepositoryReader {
                 work_dir: None,
                 cancel: options.cancel,
                 remote: OnceCell::new(),
-                remote_git_dir: OnceCell::new(),
             }),
         })
     }
@@ -322,15 +335,8 @@ impl SnapshotReader {
 
     /// Return metadata for one exact file path.
     pub async fn entry_for_path(&self, path: &str) -> Result<DownloadEntry> {
-        let git_dir = self.git_dir.clone();
-        let commit = self.resolved_revision.clone();
-        let path_owned = path.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let blob = read_blob_at_commit(&git_dir, &commit, &path_owned)?;
-            classify_blob_bytes(&path_owned, &blob)
-        })
-        .await
-        .map_err(|join_err| CrabError::Internal(format!("entry stat task failed: {join_err}")))?
+        let blob = self.blob_bytes(path).await?;
+        classify_blob_bytes(path, &blob)
     }
 
     pub(crate) async fn entry_for_path_owned(self, path: String) -> Result<DownloadEntry> {
@@ -339,11 +345,16 @@ impl SnapshotReader {
 
     /// List all materializable file entries in the snapshot.
     pub async fn list_entries(&self) -> Result<Vec<DownloadEntry>> {
-        let git_dir = self.git_dir.clone();
-        let commit = self.resolved_revision.clone();
-        tokio::task::spawn_blocking(move || list_entries_blocking(&git_dir, &commit))
-            .await
-            .map_err(|join_err| CrabError::Internal(format!("tree walk task failed: {join_err}")))?
+        match &self.source {
+            SnapshotSource::Local(git_dir) => {
+                let git_dir = git_dir.clone();
+                let commit = self.resolved_revision.clone();
+                tokio::task::spawn_blocking(move || list_entries_blocking(&git_dir, &commit))
+                    .await
+                    .map_err(|error| CrabError::Io(std::io::Error::other(error)))?
+            }
+            SnapshotSource::Remote(remote) => remote.list_entries(&self.repo.inner.cancel).await,
+        }
     }
 
     /// Materialize one repo-relative file into `dest`.
@@ -352,26 +363,19 @@ impl SnapshotReader {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let git_dir = self.git_dir.clone();
-        let commit = self.resolved_revision.clone();
-        let path_owned = path.to_owned();
-        let blob_bytes = tokio::task::spawn_blocking(move || {
-            read_blob_at_commit(&git_dir, &commit, &path_owned)
-        })
-        .await
-        .map_err(|join_err| CrabError::Internal(format!("blob-load task failed: {join_err}")))??;
+        let blob_bytes = self.blob_bytes(path).await?;
 
         if let Ok(ptr) = Pointer::parse(&blob_bytes) {
             let remote = self.repo.inner.remote().await?;
-            return match self.file_index_lookup.as_ref() {
-                Some(lookup) => {
-                    remote
-                        .hydrator
-                        .reconstruct_to_path_with_lookup(&ptr, dest, lookup)
-                        .await
-                }
-                None => remote.hydrator.reconstruct_to_path(&ptr, dest).await,
-            };
+            return remote
+                .hydrator
+                .reconstruct_to_path_with(
+                    &ptr,
+                    dest,
+                    self.file_index_lookup.as_ref(),
+                    &self.repo.inner.cancel,
+                )
+                .await;
         }
 
         if !blob_bytes.is_empty()
@@ -401,26 +405,19 @@ impl SnapshotReader {
     where
         W: std::io::Write + Send + 'static,
     {
-        let git_dir = self.git_dir.clone();
-        let commit = self.resolved_revision.clone();
-        let path_owned = path.to_owned();
-        let blob_bytes = tokio::task::spawn_blocking(move || {
-            read_blob_at_commit(&git_dir, &commit, &path_owned)
-        })
-        .await
-        .map_err(|join_err| CrabError::Internal(format!("blob-load task failed: {join_err}")))??;
+        let blob_bytes = self.blob_bytes(path).await?;
 
         if let Ok(ptr) = Pointer::parse(&blob_bytes) {
             let remote = self.repo.inner.remote().await?;
-            return match self.file_index_lookup.as_ref() {
-                Some(lookup) => {
-                    remote
-                        .hydrator
-                        .reconstruct_to_writer_with_lookup(&ptr, writer, lookup)
-                        .await
-                }
-                None => remote.hydrator.reconstruct_to_writer(&ptr, writer).await,
-            };
+            return remote
+                .hydrator
+                .reconstruct_to_writer_with(
+                    &ptr,
+                    writer,
+                    self.file_index_lookup.as_ref(),
+                    &self.repo.inner.cancel,
+                )
+                .await;
         }
 
         if !blob_bytes.is_empty()
@@ -443,6 +440,23 @@ impl SnapshotReader {
         }
 
         write_blob_to_writer(writer, &blob_bytes)
+    }
+    async fn blob_bytes(&self, path: &str) -> Result<bytes::Bytes> {
+        check_cancelled(&self.repo.inner.cancel)?;
+        match &self.source {
+            SnapshotSource::Local(git_dir) => {
+                let git_dir = git_dir.clone();
+                let commit = self.resolved_revision.clone();
+                let path = path.to_owned();
+                tokio::task::spawn_blocking(move || read_blob_at_commit(&git_dir, &commit, &path))
+                    .await
+                    .map_err(|error| CrabError::Io(std::io::Error::other(error)))?
+                    .map(Into::into)
+            }
+            SnapshotSource::Remote(remote) => {
+                remote.blob_bytes(path, &self.repo.inner.cancel).await
+            }
+        }
     }
 }
 
@@ -491,18 +505,19 @@ impl Inner {
                     caching_store,
                     router,
                     hydrator: Arc::new(hydrator),
+                    git_runtime: Arc::new(crab_remote_git::RemoteGitRuntime::default()),
                 }))
             })
             .await?;
         Ok(Arc::clone(ctx))
     }
 
-    async fn remote_snapshot_git_dir(
+    async fn remote_snapshot(
         &self,
         rev: &str,
     ) -> Result<(
         String,
-        PathBuf,
+        SnapshotSource,
         Option<crab_metadata::file_index_lookup::SharedFileIndexLookup>,
     )> {
         let remote = self.remote().await?;
@@ -511,46 +526,35 @@ impl Inner {
             .ok_or_else(|| CrabError::NotFound {
                 path: format!("revision:{rev}"),
             })?;
-        let git_dir = self.remote_git_dir().await?;
         let maximum = if self.config.uploadpack_max_egress_bytes == 0 {
             u64::MAX
         } else {
             self.config.uploadpack_max_egress_bytes
         };
-        let read_layout = crab_storage::StoreLayout::with_global_prefix(
-            remote.router.store().as_storage().clone(),
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            remote.caching_store.origin().clone(),
             remote.router.repo_prefix().to_owned(),
             remote.router.global_prefix().to_owned(),
         );
-        crab_read::capsule_protocol::install_git_packs_from_store(
+        let snapshot = RemoteSnapshot::open(
             &view,
-            &read_layout,
-            &git_dir,
+            layout.clone(),
+            Arc::clone(&remote.git_runtime),
             maximum,
-            Some(&remote.caching_store),
+            &resolved,
             &self.cancel,
         )
         .await?;
+        let resolved = snapshot.commit_oid().to_string();
         let catalog = view.pointer_catalog()?;
-        let file_index_lookup =
-            crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
-                read_layout,
-                &catalog,
-            )?;
-        Ok((resolved, git_dir, Some(file_index_lookup)))
-    }
-
-    async fn remote_git_dir(&self) -> Result<PathBuf> {
-        let git_dir = self
-            .remote_git_dir
-            .get_or_try_init(|| async {
-                let git_dir = self.cache.root().join("git");
-                let pack_dir = git_dir.join("objects").join("pack");
-                tokio::fs::create_dir_all(&pack_dir).await?;
-                Ok::<_, CrabError>(Arc::new(git_dir))
-            })
-            .await?;
-        Ok((**git_dir).clone())
+        let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+            layout, &catalog,
+        )?;
+        Ok((
+            resolved,
+            SnapshotSource::Remote(Arc::new(snapshot)),
+            Some(lookup),
+        ))
     }
 
     async fn read_remote_capsule_view(

@@ -1101,7 +1101,7 @@ impl From<crab_read::ReadError> for CrabError {
             crab_read::ReadError::CacheStore(source) => Self::from(source),
             crab_read::ReadError::Storage(source) => Self::from(source),
             crab_read::ReadError::Metadata(source) => Self::from(source),
-            crab_read::ReadError::RemoteGit(source) => Self::Protocol(source.to_string()),
+            error @ crab_read::ReadError::RemoteGit(_) => Self::Read(ReadFailure(error)),
             crab_read::ReadError::GitWalk(source) => Self::from(source),
             crab_read::ReadError::Lfs(source) => Self::from(source),
             crab_read::ReadError::Xet(source) => Self::from(source),

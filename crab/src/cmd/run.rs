@@ -4612,82 +4612,89 @@ async fn try_pull_missing_deps(
             return Ok(Vec::new());
         }
     };
-    let snapshot = match reader.snapshot_owned(Some("HEAD".to_owned())).await {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            warn!(
-                stage = %stage_name,
-                error = %error,
-                "pull: unable to resolve HEAD for missing dependencies"
-            );
-            return Ok(Vec::new());
-        }
-    };
+    // Finish semantic work before draining the shared Git runtime, including
+    // early errors and dropped parallel file operations.
+    let result = async {
+        let snapshot = match reader.clone().snapshot_owned(Some("HEAD".to_owned())).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                warn!(
+                    stage = %stage_name,
+                    error = %error,
+                    "pull: unable to resolve HEAD for missing dependencies"
+                );
+                return Ok(Vec::new());
+            }
+        };
 
-    let mut pulled = Vec::with_capacity(missing.len());
-    for (declared_path, destination, repo_path) in missing {
-        let entry = match snapshot
-            .clone()
-            .entry_for_path_owned(repo_path.clone())
-            .await
-        {
-            Ok(entry) => entry,
-            Err(error) => {
+        let mut pulled = Vec::with_capacity(missing.len());
+        for (declared_path, destination, repo_path) in missing {
+            let entry = match snapshot
+                .clone()
+                .entry_for_path_owned(repo_path.clone())
+                .await
+            {
+                Ok(entry) => entry,
+                Err(error) => {
+                    warn!(
+                        stage = %stage_name,
+                        dep = %declared_path.display(),
+                        error = %error,
+                        "pull: dependency is not available in the Crab snapshot"
+                    );
+                    continue;
+                }
+            };
+            let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+            tokio::fs::create_dir_all(parent).await?;
+            let temp = tempfile::Builder::new()
+                .prefix(".crab-pull-")
+                .tempfile_in(parent)?
+                .into_temp_path();
+            let temp_path = temp.to_path_buf();
+            let bytes = match snapshot
+                .clone()
+                .download_to_path_owned(repo_path.clone(), temp_path.clone())
+                .await
+            {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    warn!(
+                        stage = %stage_name,
+                        dep = %declared_path.display(),
+                        error = %error,
+                        "pull: dependency hydration failed"
+                    );
+                    continue;
+                }
+            };
+            if bytes != entry.size {
                 warn!(
                     stage = %stage_name,
                     dep = %declared_path.display(),
-                    error = %error,
-                    "pull: dependency is not available in the Crab snapshot"
+                    expected = entry.size,
+                    actual = bytes,
+                    "pull: dependency hydration returned an unexpected size"
                 );
                 continue;
             }
-        };
-        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-        tokio::fs::create_dir_all(parent).await?;
-        let temp = tempfile::Builder::new()
-            .prefix(".crab-pull-")
-            .tempfile_in(parent)?
-            .into_temp_path();
-        let temp_path = temp.to_path_buf();
-        let bytes = match snapshot
-            .clone()
-            .download_to_path_owned(repo_path.clone(), temp_path.clone())
-            .await
-        {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                warn!(
-                    stage = %stage_name,
-                    dep = %declared_path.display(),
-                    error = %error,
-                    "pull: dependency hydration failed"
-                );
-                continue;
+            match temp.persist_noclobber(&destination) {
+                Ok(()) => pulled.push(declared_path),
+                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Another parallel stage may have hydrated the same dep
+                    // between our existence check and the rename.
+                    drop(error.path);
+                    pulled.push(declared_path);
+                }
+                Err(error) => return Err(CrabError::Io(error.error)),
             }
-        };
-        if bytes != entry.size {
-            warn!(
-                stage = %stage_name,
-                dep = %declared_path.display(),
-                expected = entry.size,
-                actual = bytes,
-                "pull: dependency hydration returned an unexpected size"
-            );
-            continue;
         }
-        match temp.persist_noclobber(&destination) {
-            Ok(()) => pulled.push(declared_path),
-            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Another parallel stage may have hydrated the same dep
-                // between our existence check and the rename.
-                drop(error.path);
-                pulled.push(declared_path);
-            }
-            Err(error) => return Err(CrabError::Io(error.error)),
-        }
+
+        Ok(pulled)
     }
-
-    Ok(pulled)
+    .await;
+    reader.shutdown().await;
+    result
 }
 
 fn emit_miss_explanation(

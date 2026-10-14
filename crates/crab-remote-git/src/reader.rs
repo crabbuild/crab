@@ -712,6 +712,25 @@ impl RemoteGitReader {
                 });
             }
             let locator = self.locate(session, current, budget, cancellation).await?;
+            // Published locator facts already describe the fully resolved
+            // object. Fetching its packed body again defeats metadata-only reads;
+            // content reads still perform their independent CRC and OID checks.
+            if let (Some(kind), Some(size)) = (locator.metadata.kind, locator.metadata.logical_size)
+            {
+                let kind = match kind {
+                    crab_metadata::git_object_locator::GitObjectKind::Commit => {
+                        gix_object::Kind::Commit
+                    }
+                    crab_metadata::git_object_locator::GitObjectKind::Tree => {
+                        gix_object::Kind::Tree
+                    }
+                    crab_metadata::git_object_locator::GitObjectKind::Blob => {
+                        gix_object::Kind::Blob
+                    }
+                    crab_metadata::git_object_locator::GitObjectKind::Tag => gix_object::Kind::Tag,
+                };
+                break (kind, size);
+            }
             let descriptor = self
                 .inspect_packed_entry(current, locator, budget, cancellation)
                 .await?;
@@ -3968,6 +3987,69 @@ mod tests {
         )
         .expect_err("object ID mismatch must fail");
         assert!(matches!(error, Error::ObjectIdMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn proven_object_metadata_does_not_fetch_or_authorize_missing_payload() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).unwrap();
+        let pack_id = MerkleHash::from([1; 32]);
+        let oid = gix_hash::ObjectId::from([2; 20]);
+        let locator = GitObjectLocator {
+            ordinal: 0,
+            pack_id,
+            location: GitObjectLocation {
+                pack_offset: 12,
+                entry_len: 100,
+                crc32: 0,
+            },
+            metadata: crab_metadata::git_object_locator::GitObjectMetadata {
+                kind: Some(crab_metadata::git_object_locator::GitObjectKind::Blob),
+                logical_size: Some(2 * 1024 * 1024),
+                delta_base_oid: None,
+            },
+        };
+        let sources = SnapshotLookupSources::default()
+            .with_inline_locators(HashMap::from([([2; 20], locator)]));
+        let reader = Arc::new(
+            RemoteGitReader::from_pinned_with_preferred_pack_indexes(
+                Store::new(Arc::new(InMemory::new())),
+                "repository",
+                [GitPackInventoryEntry {
+                    pack_id,
+                    object_count: 1,
+                    pack_size: 1024,
+                }],
+                sources,
+                ReaderLimits::default(),
+                runtime.clone(),
+                identity,
+                1,
+            )
+            .unwrap(),
+        );
+        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime.clone());
+        let session = GitObjectLocatorSession::without_catalog();
+        let cancellation = CancellationToken::new();
+        let metadata = reader
+            .read_metadata_with_session(&session, oid, &budget, &cancellation)
+            .await
+            .unwrap();
+        assert_eq!(
+            (metadata.kind, metadata.size),
+            (gix_object::Kind::Blob, 2 * 1024 * 1024)
+        );
+        assert_eq!(
+            budget.usage().await.amount(BudgetDimension::FetchedBytes),
+            0
+        );
+        assert!(
+            reader
+                .read_with_session(&session, oid, &budget, &cancellation)
+                .await
+                .is_err()
+        );
+        runtime.shutdown().await;
     }
 
     #[tokio::test]

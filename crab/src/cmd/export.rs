@@ -192,80 +192,87 @@ pub async fn run_export(args: &ExportArgs, cancel: &CancellationToken) -> Result
         },
     )
     .await?;
-    let snapshot = reader.snapshot(args.revision.as_deref()).await?;
-    let target = resolve_object_url_store(&target_url, &config, "push", cancel).await?;
+    // Finish semantic work before draining the shared Git runtime, including
+    // early errors and dropped parallel file operations.
+    let result = async {
+        let snapshot = reader.snapshot(args.revision.as_deref()).await?;
+        let target = resolve_object_url_store(&target_url, &config, "push", cancel).await?;
 
-    let selected = select_snapshot_entries(
-        &snapshot,
-        SnapshotSelection {
-            paths: &paths,
-            include: &args.include,
-            exclude: &args.exclude,
-            empty: EmptySelection::All,
-            origin: "export",
-        },
-    )
-    .await?;
-    if selected.is_empty() {
-        return Err(CrabError::NotFound {
-            path: "export selection matched no files".to_owned(),
-        });
-    }
-
-    let mut plan = plan_exports(&target, selected)?;
-    if !args.force {
-        preflight_conflicts(&target.store, &mut plan).await?;
-    }
-
-    let bytes_planned = plan
-        .iter()
-        .map(|item| item.entry.size)
-        .fold(0u64, u64::saturating_add);
-    let mut jsonl = match args.output_mode() {
-        OutputMode::Jsonl => Some(JsonlStream::new(
-            EXPORT_EVENT_SCHEMA,
-            EXPORT_VERSION,
-            std::io::stdout(),
-        )),
-        OutputMode::Text | OutputMode::Json => None,
-    };
-
-    emit_plan_event(args, &repo, &snapshot, &plan, bytes_planned, jsonl.as_mut());
-    if args.output_mode() == OutputMode::Text && !args.quiet {
-        eprintln!(
-            "export: {} file(s), {} byte(s) selected from {}@{}",
-            plan.len(),
-            bytes_planned,
-            repo,
-            snapshot.resolved_revision()
-        );
-    }
-
-    let results = if args.dry_run {
-        dry_run_results(&plan, jsonl.as_mut())
-    } else if let Some(conflict) = plan.iter().find(|item| item.conflicts) {
-        let result = file_result(conflict, ExportFileStatus::WouldConflict);
-        emit_file_event(&result, jsonl.as_mut());
-        return Err(CrabError::CasConflict {
-            path: result.object_path,
-            expected_etag: None,
-        });
-    } else {
-        export_entries(
+        let selected = select_snapshot_entries(
             &snapshot,
-            &target.store,
-            plan,
-            jobs,
-            args.force,
-            cancel,
-            jsonl.as_mut(),
+            SnapshotSelection {
+                paths: &paths,
+                include: &args.include,
+                exclude: &args.exclude,
+                empty: EmptySelection::All,
+                origin: "export",
+            },
         )
-        .await?
-    };
+        .await?;
+        if selected.is_empty() {
+            return Err(CrabError::NotFound {
+                path: "export selection matched no files".to_owned(),
+            });
+        }
 
-    let summary = build_summary(args, repo, &snapshot, results, bytes_planned, start);
-    emit_summary(args, &summary, jsonl.as_mut())?;
-    Ok(summary)
+        let mut plan = plan_exports(&target, selected)?;
+        if !args.force {
+            preflight_conflicts(&target.store, &mut plan).await?;
+        }
+
+        let bytes_planned = plan
+            .iter()
+            .map(|item| item.entry.size)
+            .fold(0u64, u64::saturating_add);
+        let mut jsonl = match args.output_mode() {
+            OutputMode::Jsonl => Some(JsonlStream::new(
+                EXPORT_EVENT_SCHEMA,
+                EXPORT_VERSION,
+                std::io::stdout(),
+            )),
+            OutputMode::Text | OutputMode::Json => None,
+        };
+
+        emit_plan_event(args, &repo, &snapshot, &plan, bytes_planned, jsonl.as_mut());
+        if args.output_mode() == OutputMode::Text && !args.quiet {
+            eprintln!(
+                "export: {} file(s), {} byte(s) selected from {}@{}",
+                plan.len(),
+                bytes_planned,
+                repo,
+                snapshot.resolved_revision()
+            );
+        }
+
+        let results = if args.dry_run {
+            dry_run_results(&plan, jsonl.as_mut())
+        } else if let Some(conflict) = plan.iter().find(|item| item.conflicts) {
+            let result = file_result(conflict, ExportFileStatus::WouldConflict);
+            emit_file_event(&result, jsonl.as_mut());
+            return Err(CrabError::CasConflict {
+                path: result.object_path,
+                expected_etag: None,
+            });
+        } else {
+            export_entries(
+                &snapshot,
+                &target.store,
+                plan,
+                jobs,
+                args.force,
+                cancel,
+                jsonl.as_mut(),
+            )
+            .await?
+        };
+
+        let summary = build_summary(args, repo, &snapshot, results, bytes_planned, start);
+        emit_summary(args, &summary, jsonl.as_mut())?;
+        Ok(summary)
+    }
+    .await;
+    reader.shutdown().await;
+    result
 }
 
 fn resolve_source_and_paths(args: &ExportArgs) -> Result<(String, Vec<String>)> {
@@ -380,30 +387,42 @@ async fn export_entries(
     let semaphore = Arc::new(Semaphore::new(jobs));
     let mut futures = futures_util::stream::FuturesUnordered::new();
 
-    for item in entries {
-        check_cancelled(cancel)?;
-        let permit = Arc::clone(&semaphore)
-            .acquire_owned()
-            .await
-            .map_err(|e| CrabError::Internal(format!("export semaphore closed: {e}")))?;
-        let snapshot = snapshot.clone();
-        let store = store.clone();
-        futures.push(tokio::spawn(async move {
-            let _permit = permit;
-            export_one(&snapshot, &store, item, force).await
-        }));
-    }
+    let result = async {
+        for item in entries {
+            check_cancelled(cancel)?;
+            let permit = Arc::clone(&semaphore)
+                .acquire_owned()
+                .await
+                .map_err(|e| CrabError::Internal(format!("export semaphore closed: {e}")))?;
+            let snapshot = snapshot.clone();
+            let store = store.clone();
+            futures.push(tokio::spawn(async move {
+                let _permit = permit;
+                export_one(&snapshot, &store, item, force).await
+            }));
+        }
 
-    let mut results = Vec::new();
-    while let Some(joined) = futures.next().await {
-        check_cancelled(cancel)?;
-        let result = joined
-            .map_err(|join_err| CrabError::Internal(format!("export task failed: {join_err}")))??;
-        emit_file_event(&result, jsonl.as_deref_mut());
-        results.push(result);
+        let mut results = Vec::new();
+        while let Some(joined) = futures.next().await {
+            check_cancelled(cancel)?;
+            let result = joined.map_err(|join_err| {
+                CrabError::Internal(format!("export task failed: {join_err}"))
+            })??;
+            emit_file_event(&result, jsonl.as_deref_mut());
+            results.push(result);
+        }
+        results.sort_by(|left, right| left.repo_path.cmp(&right.repo_path));
+        Ok(results)
     }
-    results.sort_by(|left, right| left.repo_path.cmp(&right.repo_path));
-    Ok(results)
+    .await;
+    // A failed file or cancellation must not detach already-started writes.
+    // Drain them while Tokio and the snapshot's read runtimes remain alive.
+    while let Some(joined) = futures.next().await {
+        if let Err(error) = joined {
+            tracing::warn!(%error, "file transfer task failed while draining");
+        }
+    }
+    result
 }
 
 async fn export_one(

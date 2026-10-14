@@ -605,3 +605,45 @@ remaining control/catalog/index opening costs are still stage-4 gates. The
 earlier helper capability probe still captures control metadata when an empty
 local object database needs classic cold-clone pack routing; this slice changes
 terminal upload-pack admission and does not remove that separate probe.
+
+## Selective CLI range reads in qualification
+
+Remote `RepositoryReader` snapshots now use the shared verified Git range reader
+instead of installing every captured pack into a local Git object database.
+Local repositories retain their native ODB path. Remote commit selection uses
+current-ref reachability; retained physical objects alone cannot select a commit.
+Plain files, Crab pointers and LFS pointers keep their materialization adapters,
+with captured catalog lookup for Crab recipes. Explicit reads retain the existing
+egress configuration and the shared transfer profile's repository coverage.
+
+Download, export and workflow dependency pulls drain the remote Git runtime on
+success and error. Download/export also await already-started file tasks before
+returning an error. Pointer reconstruction receives the reader's cancellation
+token, and Git operations finalize their semantic result before locator closure.
+Remote Git diagnostics retain their source chain while preserving the existing
+protocol error classification.
+
+The library check passes. Three focused tests pass: a selected file reads under
+256 KiB despite a stored unrelated 2-MiB blob, retained commits are rejected, and
+cancellation prevents further storage reads. Listing fails the same byte bound:
+the metadata reader fetches the large packed entry to verify CRC when publication
+has not supplied its uncompressed size. The failing receipt is retained; the test
+bound is unchanged.
+
+The shared reader now consumes already-proven locator kind/size metadata without
+fetching payloads. Its focused test passes and confirms that a subsequent content
+read still rejects unavailable bytes. Capsule publication currently supplies kind
+but no size, so authenticated size publication remains required to fix listing;
+skipping entry integrity checks is not an acceptable substitute. Pointer,
+publication/concurrency, native command and lifecycle qualification also remain
+required. This implementation is not yet claimed as working. Full control/catalog
+decoding and native index sidecar scans remain separate stage-4 opening costs.
+
+PR publication checks for this slice: workspace formatting and the locked CLI
+binary build pass. Cargo-confirmed focused tests report 26 passed and one failed:
+read/selection tests 9 passed plus the existing listing byte-bound failure,
+download tests 5 passed, export tests 7 passed, error-source/diagnostic tests
+4 passed, and proven locator metadata test 1 passed. The debug linker emits its
+existing compact-unwind section-size warning. Broad lint/CI and native remote
+CLI end-to-end qualification remain pending. Publish this slice as a draft;
+these results do not establish stage-4 completion or readiness to merge.

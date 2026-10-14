@@ -167,154 +167,161 @@ pub async fn run_download(
         },
     )
     .await?;
-    let snapshot = reader.snapshot(args.revision.as_deref()).await?;
+    // Finish semantic work before draining the shared Git runtime, including
+    // early errors and dropped parallel file operations.
+    let result = async {
+        let snapshot = reader.snapshot(args.revision.as_deref()).await?;
 
-    let destination_root = destination_root(args, &reader, snapshot.resolved_revision());
-    let local_metadata_path = args
-        .local_dir
-        .as_ref()
-        .map(|dir| dir.join(".cache").join("crab").join("downloads-v1.json"));
-    let mut metadata = match local_metadata_path.as_deref() {
-        Some(path) if !args.dry_run => read_local_metadata(path)?,
-        _ => LocalDownloadMetadata::default(),
-    };
+        let destination_root = destination_root(args, &reader, snapshot.resolved_revision());
+        let local_metadata_path = args
+            .local_dir
+            .as_ref()
+            .map(|dir| dir.join(".cache").join("crab").join("downloads-v1.json"));
+        let mut metadata = match local_metadata_path.as_deref() {
+            Some(path) if !args.dry_run => read_local_metadata(path)?,
+            _ => LocalDownloadMetadata::default(),
+        };
 
-    let selected = select_entries(&snapshot, args).await?;
-    if selected.is_empty() {
-        return Err(CrabError::NotFound {
-            path: "download selection matched no files".to_owned(),
-        });
-    }
+        let selected = select_entries(&snapshot, args).await?;
+        if selected.is_empty() {
+            return Err(CrabError::NotFound {
+                path: "download selection matched no files".to_owned(),
+            });
+        }
 
-    let mut plan = Vec::with_capacity(selected.len());
-    for entry in selected {
-        let local_path = destination_for(&destination_root, &entry.path)?;
-        let is_fresh = !args.force_download
-            && destination_is_fresh(
-                &local_path,
-                &entry,
+        let mut plan = Vec::with_capacity(selected.len());
+        for entry in selected {
+            let local_path = destination_for(&destination_root, &entry.path)?;
+            let is_fresh = !args.force_download
+                && destination_is_fresh(
+                    &local_path,
+                    &entry,
+                    &args.repo,
+                    snapshot.resolved_revision(),
+                    args.local_dir.is_some(),
+                    &metadata,
+                );
+            plan.push(PlannedDownload {
+                entry,
+                local_path,
+                is_fresh,
+            });
+        }
+        let entries_by_path: BTreeMap<String, DownloadEntry> = plan
+            .iter()
+            .map(|item| (item.entry.path.clone(), item.entry.clone()))
+            .collect();
+
+        let bytes_planned = plan
+            .iter()
+            .map(|item| item.entry.size)
+            .fold(0u64, u64::saturating_add);
+        let mut jsonl = match args.mode {
+            OutputMode::Jsonl => Some(JsonlStream::new(
+                DOWNLOAD_EVENT_SCHEMA,
+                DOWNLOAD_VERSION,
+                std::io::stdout(),
+            )),
+            OutputMode::Text | OutputMode::Json => None,
+        };
+
+        emit_plan_event(
+            args,
+            &snapshot,
+            &destination_root,
+            &plan,
+            bytes_planned,
+            jsonl.as_mut(),
+        );
+        if args.mode == OutputMode::Text && !args.quiet {
+            eprintln!(
+                "download: {} file(s), {} byte(s) selected from {}@{}",
+                plan.len(),
+                bytes_planned,
+                args.repo,
+                snapshot.resolved_revision()
+            );
+        }
+
+        let mut results = Vec::with_capacity(plan.len());
+        let mut to_download = Vec::new();
+        for item in plan {
+            if args.dry_run {
+                let status = if item.is_fresh {
+                    DownloadFileStatus::WouldSkip
+                } else {
+                    DownloadFileStatus::WouldDownload
+                };
+                let result = file_result(&item, status);
+                emit_file_event(&result, jsonl.as_mut());
+                results.push(result);
+            } else if item.is_fresh {
+                let result = file_result(&item, DownloadFileStatus::Skipped);
+                emit_file_event(&result, jsonl.as_mut());
+                results.push(result);
+            } else {
+                to_download.push(item);
+            }
+        }
+
+        let downloaded =
+            download_entries(&snapshot, to_download, max_workers, cancel, jsonl.as_mut()).await?;
+        results.extend(downloaded);
+        results.sort_by(|left, right| left.repo_path.cmp(&right.repo_path));
+
+        if !args.dry_run && args.local_dir.is_some() {
+            update_metadata_from_results(
+                &mut metadata,
                 &args.repo,
                 snapshot.resolved_revision(),
-                args.local_dir.is_some(),
-                &metadata,
+                &results,
+                &entries_by_path,
             );
-        plan.push(PlannedDownload {
-            entry,
-            local_path,
-            is_fresh,
-        });
-    }
-    let entries_by_path: BTreeMap<String, DownloadEntry> = plan
-        .iter()
-        .map(|item| (item.entry.path.clone(), item.entry.clone()))
-        .collect();
+            if let Some(path) = local_metadata_path.as_deref() {
+                write_local_metadata(path, &metadata)?;
+            }
+        }
 
-    let bytes_planned = plan
-        .iter()
-        .map(|item| item.entry.size)
-        .fold(0u64, u64::saturating_add);
-    let mut jsonl = match args.mode {
-        OutputMode::Jsonl => Some(JsonlStream::new(
-            DOWNLOAD_EVENT_SCHEMA,
-            DOWNLOAD_VERSION,
-            std::io::stdout(),
-        )),
-        OutputMode::Text | OutputMode::Json => None,
-    };
+        let files_downloaded = results
+            .iter()
+            .filter(|result| result.status == DownloadFileStatus::Downloaded)
+            .count() as u64;
+        let files_skipped = results
+            .iter()
+            .filter(|result| {
+                matches!(
+                    result.status,
+                    DownloadFileStatus::Skipped | DownloadFileStatus::WouldSkip
+                )
+            })
+            .count() as u64;
+        let bytes_downloaded = results
+            .iter()
+            .filter(|result| result.status == DownloadFileStatus::Downloaded)
+            .map(|result| result.bytes)
+            .fold(0u64, u64::saturating_add);
 
-    emit_plan_event(
-        args,
-        &snapshot,
-        &destination_root,
-        &plan,
-        bytes_planned,
-        jsonl.as_mut(),
-    );
-    if args.mode == OutputMode::Text && !args.quiet {
-        eprintln!(
-            "download: {} file(s), {} byte(s) selected from {}@{}",
-            plan.len(),
+        let summary = DownloadSummary {
+            repo: args.repo.clone(),
+            requested_revision: snapshot.requested_revision().to_owned(),
+            resolved_revision: snapshot.resolved_revision().to_owned(),
+            destination_root: destination_root.display().to_string(),
+            files_planned: results.len() as u64,
+            files_downloaded,
+            files_skipped,
             bytes_planned,
-            args.repo,
-            snapshot.resolved_revision()
-        );
+            bytes_downloaded,
+            dry_run: args.dry_run,
+            files: results,
+            duration_ms: start.elapsed().as_millis() as u64,
+        };
+
+        emit_summary(args, &summary, jsonl.as_mut())?;
+        Ok(summary)
     }
-
-    let mut results = Vec::with_capacity(plan.len());
-    let mut to_download = Vec::new();
-    for item in plan {
-        if args.dry_run {
-            let status = if item.is_fresh {
-                DownloadFileStatus::WouldSkip
-            } else {
-                DownloadFileStatus::WouldDownload
-            };
-            let result = file_result(&item, status);
-            emit_file_event(&result, jsonl.as_mut());
-            results.push(result);
-        } else if item.is_fresh {
-            let result = file_result(&item, DownloadFileStatus::Skipped);
-            emit_file_event(&result, jsonl.as_mut());
-            results.push(result);
-        } else {
-            to_download.push(item);
-        }
-    }
-
-    let downloaded =
-        download_entries(&snapshot, to_download, max_workers, cancel, jsonl.as_mut()).await?;
-    results.extend(downloaded);
-    results.sort_by(|left, right| left.repo_path.cmp(&right.repo_path));
-
-    if !args.dry_run && args.local_dir.is_some() {
-        update_metadata_from_results(
-            &mut metadata,
-            &args.repo,
-            snapshot.resolved_revision(),
-            &results,
-            &entries_by_path,
-        );
-        if let Some(path) = local_metadata_path.as_deref() {
-            write_local_metadata(path, &metadata)?;
-        }
-    }
-
-    let files_downloaded = results
-        .iter()
-        .filter(|result| result.status == DownloadFileStatus::Downloaded)
-        .count() as u64;
-    let files_skipped = results
-        .iter()
-        .filter(|result| {
-            matches!(
-                result.status,
-                DownloadFileStatus::Skipped | DownloadFileStatus::WouldSkip
-            )
-        })
-        .count() as u64;
-    let bytes_downloaded = results
-        .iter()
-        .filter(|result| result.status == DownloadFileStatus::Downloaded)
-        .map(|result| result.bytes)
-        .fold(0u64, u64::saturating_add);
-
-    let summary = DownloadSummary {
-        repo: args.repo.clone(),
-        requested_revision: snapshot.requested_revision().to_owned(),
-        resolved_revision: snapshot.resolved_revision().to_owned(),
-        destination_root: destination_root.display().to_string(),
-        files_planned: results.len() as u64,
-        files_downloaded,
-        files_skipped,
-        bytes_planned,
-        bytes_downloaded,
-        dry_run: args.dry_run,
-        files: results,
-        duration_ms: start.elapsed().as_millis() as u64,
-    };
-
-    emit_summary(args, &summary, jsonl.as_mut())?;
-    Ok(summary)
+    .await;
+    reader.shutdown().await;
+    result
 }
 
 fn validate_selector_args(args: &DownloadArgs) -> Result<()> {
@@ -411,29 +418,40 @@ async fn download_entries(
     let semaphore = Arc::new(Semaphore::new(max_workers));
     let mut futures = futures_util::stream::FuturesUnordered::new();
 
-    for item in entries {
-        check_cancelled(cancel)?;
-        let permit = Arc::clone(&semaphore)
-            .acquire_owned()
-            .await
-            .map_err(|e| CrabError::Internal(format!("download semaphore closed: {e}")))?;
-        let snapshot = snapshot.clone();
-        futures.push(tokio::spawn(async move {
-            let _permit = permit;
-            materialize_one(&snapshot, item).await
-        }));
-    }
+    let result = async {
+        for item in entries {
+            check_cancelled(cancel)?;
+            let permit = Arc::clone(&semaphore)
+                .acquire_owned()
+                .await
+                .map_err(|e| CrabError::Internal(format!("download semaphore closed: {e}")))?;
+            let snapshot = snapshot.clone();
+            futures.push(tokio::spawn(async move {
+                let _permit = permit;
+                materialize_one(&snapshot, item).await
+            }));
+        }
 
-    let mut results = Vec::new();
-    while let Some(joined) = futures.next().await {
-        check_cancelled(cancel)?;
-        let result = joined.map_err(|join_err| {
-            CrabError::Internal(format!("download task failed: {join_err}"))
-        })??;
-        emit_file_event(&result, jsonl.as_deref_mut());
-        results.push(result);
+        let mut results = Vec::new();
+        while let Some(joined) = futures.next().await {
+            check_cancelled(cancel)?;
+            let result = joined.map_err(|join_err| {
+                CrabError::Internal(format!("download task failed: {join_err}"))
+            })??;
+            emit_file_event(&result, jsonl.as_deref_mut());
+            results.push(result);
+        }
+        Ok(results)
     }
-    Ok(results)
+    .await;
+    // A failed file or cancellation must not detach already-started writes.
+    // Drain them while Tokio and the snapshot's read runtimes remain alive.
+    while let Some(joined) = futures.next().await {
+        if let Err(error) = joined {
+            tracing::warn!(%error, "file transfer task failed while draining");
+        }
+    }
+    result
 }
 
 async fn materialize_one(

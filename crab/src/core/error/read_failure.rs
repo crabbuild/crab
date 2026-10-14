@@ -34,6 +34,12 @@ impl ReadFailure {
             if let Some(error) = error.downcast_ref::<CrabError>() {
                 return diagnostic(Cause::Product(error));
             }
+            if let Some(error) = error.downcast_ref::<crab_remote_git::Error>() {
+                // Keep the existing protocol diagnostic while retaining the typed
+                // remote error and any storage/close causes in the original chain.
+                let product = CrabError::Protocol(error.to_string());
+                return diagnostic(Cause::Product(&product));
+            }
             if let Some(crab_cache_store::CacheStoreError::OriginIntegrity { path, source }) =
                 error.downcast_ref::<crab_cache_store::CacheStoreError>()
             {
@@ -372,6 +378,25 @@ mod tests {
             },
             StorageError::Internal("invariant failed".into()),
         ]
+    }
+
+    #[test]
+    fn remote_git_failure_retains_source_and_protocol_diagnostics() {
+        let source = crab_remote_git::Error::Revision {
+            reason: crab_remote_git::RevisionError::NotReachable,
+        };
+        let expected = CrabError::Protocol(source.to_string());
+        let actual = CrabError::from(ReadError::RemoteGit(source));
+        assert_eq!(actual.to_string(), expected.to_string());
+        assert_eq!(actual.code(), expected.code());
+        assert_eq!(actual.category(), expected.category());
+        let mut source: Option<&(dyn Error + 'static)> = Some(&actual);
+        let mut preserved = false;
+        while let Some(error) = source {
+            preserved |= error.is::<crab_remote_git::Error>();
+            source = error.source();
+        }
+        assert!(preserved);
     }
 
     #[test]
