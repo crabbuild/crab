@@ -136,6 +136,14 @@ impl CommitGraphIndex {
         oid: ObjectId,
         operation: &OperationContext,
     ) -> Result<bool> {
+        operation.ensure_active()?;
+        // Opening verifies and sorts these captured commit roots. A root is
+        // already visible; rereading its ancestor set adds no authority proof.
+        if self.roots.binary_search(&oid).is_ok() {
+            operation.charge(BudgetDimension::Entries, 1).await?;
+            operation.ensure_active()?;
+            return Ok(true);
+        }
         Ok(self
             .reachable_from_roots(&[oid], &self.roots, operation)
             .await?[0])

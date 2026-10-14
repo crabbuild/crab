@@ -477,12 +477,18 @@ async fn snapshot_read_indexes_cancel_inflight_dependency_pages() {
             .unwrap();
             let result = async {
                 if dependency == "commit-graph" {
+                    // Caller-supplied batch roots still require ancestry pages;
+                    // a verified captured tip no longer needs an in-flight read.
                     return repository
                         .state
                         .commit_graph
                         .as_ref()
                         .unwrap()
-                        .is_reachable(ObjectId::Sha1([0x11; 20]), &operation)
+                        .reachable_from_roots(
+                            &[ObjectId::Sha1([0x11; 20])],
+                            &[ObjectId::Sha1([0x11; 20])],
+                            &operation,
+                        )
                         .await
                         .map(|_| ());
                 }
@@ -560,6 +566,75 @@ async fn released_manifest_graph_remains_usable_for_metadata_membership() {
             .unwrap(),
         Some(vec![true, false, true])
     );
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn captured_tip_membership_avoids_ancestry_reads_and_retains_admission() {
+    let fixture = open_fixture(1, None).await;
+    let snapshot = snapshot_with_read_indexes(&fixture, true).await;
+    let requests = Arc::new(AtomicUsize::new(0));
+    let observed = requests.clone();
+    let store = fixture
+        .store
+        .clone()
+        .with_read_request_observer(Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let cancel = CancellationToken::new();
+    let repository = RemoteGitRepository::from_snapshot(
+        StoreLayout::new(store, "org/repo".into()),
+        &snapshot,
+        RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+        runtime.clone(),
+        RepositoryOptions::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    requests.store(0, Ordering::SeqCst);
+    let graph = repository.state.commit_graph.as_ref().unwrap();
+    let operation = repository
+        .operation_with_limits(
+            crate::OperationKind::Resolve,
+            &cancel,
+            OperationLimits {
+                max_entries: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        graph
+            .is_reachable(ObjectId::Sha1([0x11; 20]), &operation)
+            .await
+            .unwrap()
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        graph
+            .is_reachable(ObjectId::Sha1([0x11; 20]), &operation)
+            .await,
+        Err(Error::LimitExceeded {
+            limit: "entries",
+            ..
+        })
+    ));
+    operation.finish(Ok(())).await.unwrap();
+    let operation = repository
+        .operation(crate::OperationKind::Resolve, &cancel)
+        .await
+        .unwrap();
+    cancel.cancel();
+    assert!(matches!(
+        graph
+            .is_reachable(ObjectId::Sha1([0x11; 20]), &operation)
+            .await,
+        Err(Error::Cancelled)
+    ));
+    let _ = operation.finish(Ok(())).await;
     runtime.shutdown().await;
 }
 
