@@ -919,3 +919,66 @@ hashes match the receipts and remain external. One sample per query establishes
 publication/read smoke, not the final 20-sample performance cells. Complete
 repository opening still materializes visibility and catalog state. This format/lookup work does not yet satisfy bounded
 opening, the remaining stage-4 gates, the 10k path-history gate or stages 5–8.
+
+
+## Lazy frontier visibility reconciliation
+
+Git control capture now keeps explicit paged visibility evidence. Scalar ref edit
+headers are authenticated in batches and matched to the unique transaction edits;
+unloaded evidence is never treated as absence. Complete and paged controls share
+one ref-ordering loop, retaining expected-old links, activation and predecessor
+ordering, exact final refs and peeled refs, and uncommitted/deleted-ref checks.
+
+The read owner represents closures as immutable parent/edit layers. A new ref
+selects the same first visible inherited base as complete reconciliation. Moving
+the source ref later cannot change that captured parent. Prior tips and removals
+are checked through membership lookup; removed OIDs cannot also be added. The
+historical dictionary retains removed objects without making them visible.
+An initial authenticated added root supplies its exact dictionary count; equal
+roots add no objects. Differing actual additions are read and checked against
+the retained dictionary, preserving its existing maximum. Actual edit work can
+still be large; unrelated historical closures remain cold in the initial case.
+
+Bulk `git_visibility_index`, `candidate_git_visibility` and `tip_bound_transitions`
+are asynchronous and materialize the same captured controls only on request.
+Immutable section hashes, descriptors and canonical bytes are checked before
+bulk visibility is exposed. Tip-bound planning retains its complete captured
+transition source, independent of the controls still needed for current refs.
+CLI, HTTP, protected-service and checkpoint callers await that proof. Diagnostic
+formatting excludes the captured credential-bearing transport. The wire format
+is unchanged from the preceding visibility-format slice.
+
+Focused proof passes 46 capsule-read tests, 38 checkpoint integration tests,
+86 payload-only and 94 storage/remote-index capsule tests, strict metadata/read
+Clippy and CLI/HTTP/S3/protected-service consumer checks after a frontend build.
+The 10k-OID regression opens below 64 KiB while leaving complete visibility
+unloaded. Layer tests match complete edits, preserve inherited bases and reject
+removals outside the prior closure. Replacing ref membership with dictionary
+presence makes the exact retained-invisible-object test fail; restored source
+passes. Final-source RustFS replay passes 41 qualifier processes: all ten queries
+at 100 commits and 20 cold/warm resolve samples per 100/1,000-commit history.
+Warm resolve backend bytes remain zero, and receipts match the qualified source.
+Opening bytes change from 31,888/121,857 to 31,292/79,065 at 100/1,000 commits.
+These are local debug observations, not a representative-provider latency target.
+
+Final-source isolated `make install` passes for CLI/FUSE/NFS/cache-server and the
+Git helper. A fresh-prefix smoke using that CLI passes 39 checks and 26 commands:
+real Crab push, index maintenance and all ten supported-query/native-Git checks
+at 100 commits. Shared-consumer tests pass 21 path-state, 27 graph and 78 object-
+locator tests (one existing ignored test), plus 27 cross-surface paged tests.
+
+The fresh 10,000-commit corpus publishes successfully, but its full query run
+fails path-history admission: 100,010 entries exceed the 100,000-entry maximum.
+That failed report is retained. Separate final-source resolve and attribution
+qualification passes 20 samples each against the same corpus; opening reads
+81,743 bytes and warm query backend bytes remain zero. Source hashes match both
+replay receipts. These targeted results do not turn the full-query failure into
+a pass. Receipts remain on the mounted qualification volume, outside the PR.
+
+Parent PR #547 CI remains failed after attempt 2. The original effect-delivery
+cancellation reservation failure passes on retry; an activity-lease-expiry test
+then leaves 74,168 local-disk bytes reserved after shutdown. The cleanup cause
+remains unresolved. No test, baseline or expected-failure assertion is weakened.
+Checkpoint visibility/catalog decoding, ref/source capture and broader frontier
+amplification remain open. The 10k path-history budget failure, stages 5–8 and
+unified staging remain unresolved; this slice does not complete the initiative.

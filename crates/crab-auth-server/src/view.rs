@@ -1355,6 +1355,7 @@ mod tests {
         );
         assert!(
             view.git_visibility_index()
+                .await
                 .unwrap()
                 .contains_hex_in_ref("refs/heads/main", expected.trim())
         );

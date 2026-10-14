@@ -76,8 +76,8 @@ async fn maintenance_reuses_committed_checkpoint_without_reloading_authority() {
     let after = view(&layout).await;
     assert_eq!(after.refs(), before.refs());
     assert_eq!(
-        after.git_visibility_index().unwrap().ref_closures(),
-        before.git_visibility_index().unwrap().ref_closures()
+        after.git_visibility_index().await.unwrap().ref_closures(),
+        before.git_visibility_index().await.unwrap().ref_closures()
     );
     assert_eq!(after.git_pack_count(), 1);
     assert_eq!(
@@ -898,8 +898,8 @@ async fn logical_checkpoint_does_not_read_or_replace_pack_sources() {
     );
     assert_eq!(after.refs(), before.refs());
     assert_eq!(
-        after.git_visibility_index().unwrap().ref_closures(),
-        before.git_visibility_index().unwrap().ref_closures()
+        after.git_visibility_index().await.unwrap().ref_closures(),
+        before.git_visibility_index().await.unwrap().ref_closures()
     );
 }
 
@@ -920,7 +920,12 @@ async fn first_checkpoint_opens_its_frontier_from_authenticated_controls() {
     let after = view(&layout).await;
     assert_eq!(after.layered_checkpoint().unwrap().sources().len(), 2);
     assert_eq!(
-        after.git_visibility_index().unwrap().ref_closures().len(),
+        after
+            .git_visibility_index()
+            .await
+            .unwrap()
+            .ref_closures()
+            .len(),
         2
     );
 }
@@ -1131,8 +1136,8 @@ async fn first_checkpoint_rolls_up_only_the_suffix_required_by_the_source_limit(
     );
     assert_eq!(after.refs(), before.refs());
     assert_eq!(
-        after.git_visibility_index().unwrap().ref_closures(),
-        before.git_visibility_index().unwrap().ref_closures()
+        after.git_visibility_index().await.unwrap().ref_closures(),
+        before.git_visibility_index().await.unwrap().ref_closures()
     );
 }
 
@@ -1257,8 +1262,8 @@ async fn duplicate_suffix_pack_does_not_change_stable_member_positions() {
     let after = view(&layout).await;
     assert_eq!(after.layered_checkpoint().unwrap().sources()[0], prefix);
     assert_eq!(
-        after.git_visibility_index().unwrap().ref_closures(),
-        before.git_visibility_index().unwrap().ref_closures()
+        after.git_visibility_index().await.unwrap().ref_closures(),
+        before.git_visibility_index().await.unwrap().ref_closures()
     );
     verify_git_blobs(
         &layout,
@@ -1296,8 +1301,8 @@ async fn duplicate_only_suffix_can_be_consolidated() {
     assert_eq!(after.layered_checkpoint().unwrap().sources().len(), 1);
     assert_eq!(after.refs(), before.refs());
     assert_eq!(
-        after.git_visibility_index().unwrap().ref_closures(),
-        before.git_visibility_index().unwrap().ref_closures()
+        after.git_visibility_index().await.unwrap().ref_closures(),
+        before.git_visibility_index().await.unwrap().ref_closures()
     );
     verify_git_blobs(
         &layout,
@@ -1356,7 +1361,7 @@ async fn layered_inventory_includes_new_frontier_in_complete_and_control_views()
     let old_packs = checkpointed.git_pack_count();
     let old_bytes = checkpointed.git_pack_bytes().unwrap();
     let old_objects = checkpointed.git_object_count().unwrap();
-    let old_visibility = checkpointed.git_visibility_index().unwrap();
+    let old_visibility = checkpointed.git_visibility_index().await.unwrap();
     let (_, new_pack) = blob_pack(b"late");
     publish_blob(&layout, "late").await;
     let root = crab_write::capsule_protocol::open_root(&layout)
@@ -1375,7 +1380,11 @@ async fn layered_inventory_includes_new_frontier_in_complete_and_control_views()
         );
         assert_eq!(current.git_object_count().unwrap(), old_objects + 1);
         assert_ne!(
-            current.git_visibility_index().unwrap().pack_index_hash,
+            current
+                .git_visibility_index()
+                .await
+                .unwrap()
+                .pack_index_hash,
             old_visibility.pack_index_hash
         );
     }

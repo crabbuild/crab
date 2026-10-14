@@ -18,6 +18,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{ReadError, Result};
 
+mod visibility;
+
 const LAYERED_SIDECAR_COALESCE_GAP_BYTES: u64 = 64 * 1024;
 const LAYERED_SIDECAR_MAX_EXTRA_BYTES: u64 = 4 * 1024 * 1024;
 const LAYERED_SIDECAR_MAX_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
@@ -69,7 +71,7 @@ pub struct CapsuleDependencyProof {
 }
 
 /// One authenticated repository root and every post-checkpoint capsule it names.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CapsuleRepositoryView {
     root: crab_metadata::capsule_protocol::RootSnapshot,
     browse_indexes: Option<crab_metadata::capsule_protocol::BrowseIndexes>,
@@ -77,6 +79,8 @@ pub struct CapsuleRepositoryView {
     capsules: Vec<Capsule>,
     capsule_controls: Vec<CapsuleControl>,
     tip_bound_transitions: CapsuleTipBoundTransitions,
+    visibility_store: Option<Store>,
+    tip_bound_controls: Vec<CapsuleControl>,
     refs: BTreeMap<String, String>,
     peeled_refs: BTreeMap<String, String>,
     visible_ref_transactions: BTreeMap<String, String>,
@@ -87,6 +91,18 @@ pub struct CapsuleRepositoryView {
     capsule_run_indexes: BTreeMap<String, Vec<PackRange>>,
     capsule_run_member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
     frontier_object_admission: BTreeMap<[u8; 20], Vec<String>>,
+}
+
+impl std::fmt::Debug for CapsuleRepositoryView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Captured transports may contain credentials; diagnostics expose identity only.
+        formatter
+            .debug_struct("CapsuleRepositoryView")
+            .field("root_digest", &self.root.record().digest())
+            .field("ref_count", &self.refs.len())
+            .field("frontier_count", &self.capsule_run_pointers.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// One complete layered Git pack that can be copied directly to a clone.
@@ -347,9 +363,20 @@ impl CapsuleRepositoryView {
     /// This is used only to avoid re-walking a known ref update. The returned
     /// transitions remain bound to the loaded root and controls; a consumer
     /// must not use a partial chain as an authorization proof.
-    #[must_use]
-    pub fn tip_bound_transitions(&self) -> &CapsuleTipBoundTransitions {
-        &self.tip_bound_transitions
+    pub async fn tip_bound_transitions(&self) -> Result<CapsuleTipBoundTransitions> {
+        let mut transitions = self.tip_bound_transitions.clone();
+        if let Some(store) = &self.visibility_store {
+            let controls = try_join_all(
+                self.tip_bound_controls
+                    .iter()
+                    .map(|control| control.materialize_visibility(store)),
+            )
+            .await?;
+            for (name, values) in build_tip_bound_transitions(&[], &controls)? {
+                transitions.entry(name).or_default().extend(values);
+            }
+        }
+        Ok(transitions)
     }
 
     /// Admit the complete layered cold-clone pack set for this exact view.
@@ -1206,7 +1233,7 @@ impl CapsuleRepositoryView {
     }
 
     /// Materialize the complete view-bound Git visibility proof.
-    pub fn git_visibility_index(
+    pub async fn git_visibility_index(
         &self,
     ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
         let mut index = visibility_index_for_checkpoint(self.checkpoint.as_ref())?;
@@ -1215,7 +1242,11 @@ impl CapsuleRepositoryView {
             apply_capsule_visibility_index(capsule, &mut index)?;
         }
         for capsule in &self.capsule_controls {
-            apply_capsule_control_visibility_index(capsule, &mut index)?;
+            let complete = match &self.visibility_store {
+                Some(store) => capsule.materialize_visibility(store).await?,
+                None => capsule.clone(),
+            };
+            apply_capsule_control_visibility_index(&complete, &mut index)?;
         }
 
         let packs = self.git_pack_manifest_entries()?;
@@ -1245,11 +1276,11 @@ impl CapsuleRepositoryView {
     }
 
     /// Materialize visibility after one candidate capsule without publishing it.
-    pub fn candidate_git_visibility(
+    pub async fn candidate_git_visibility(
         &self,
         candidate: &Capsule,
     ) -> Result<BTreeMap<String, Vec<String>>> {
-        let mut index = self.git_visibility_index()?;
+        let mut index = self.git_visibility_index().await?;
         if !capsule_is_ready(candidate, &self.refs, &index)? {
             return Err(corrupt_path(
                 "candidate capsule Git visibility",
@@ -1473,7 +1504,7 @@ fn build_tip_bound_transitions(
         if !seen_transactions.insert(capsule.transaction_id().to_owned()) {
             continue;
         }
-        if let Some(delta) = capsule.visibility_delta() {
+        if let Some(delta) = capsule.visibility_delta()? {
             append_tip_bound_transitions(&mut transitions, capsule.transaction(), delta)?;
         }
     }
@@ -4224,6 +4255,8 @@ pub fn compacted_view_from_checkpoint(
         capsules: Vec::new(),
         capsule_controls: Vec::new(),
         tip_bound_transitions,
+        visibility_store: None,
+        tip_bound_controls: Vec::new(),
         visible_ref_transactions: BTreeMap::new(),
         ref_capsule_counts: BTreeMap::new(),
         capsule_run_pointers: Vec::new(),
@@ -4534,6 +4567,8 @@ async fn assemble_view(
         capsules: root_capsules,
         capsule_controls: Vec::new(),
         tip_bound_transitions,
+        visibility_store: None,
+        tip_bound_controls: Vec::new(),
         refs,
         peeled_refs,
         visible_ref_transactions,
@@ -4624,11 +4659,13 @@ async fn assemble_layered_control_view(
             checkpoint.visibility_transitions(),
         )?;
     }
-    for (ref_name, transitions) in build_tip_bound_transitions(&[], &all_capsule_controls)? {
-        tip_bound_transitions
-            .entry(ref_name)
-            .or_default()
-            .extend(transitions);
+    if !matches!(read, ControlRead::Git) {
+        for (ref_name, transitions) in build_tip_bound_transitions(&[], &all_capsule_controls)? {
+            tip_bound_transitions
+                .entry(ref_name)
+                .or_default()
+                .extend(transitions);
+        }
     }
     let mut capsule_run_sources = Vec::new();
     let mut capsule_run_indexes = BTreeMap::new();
@@ -4668,7 +4705,7 @@ async fn assemble_layered_control_view(
             }
             for capsule in capsules {
                 if !matches!(read, ControlRead::Git)
-                    && let Some(visibility) = capsule.visibility_delta()
+                    && let Some(visibility) = capsule.visibility_delta()?
                 {
                     extend_frontier_object_admission(
                         &mut frontier_object_admission,
@@ -4778,6 +4815,8 @@ async fn assemble_layered_control_view(
             capsules: Vec::new(),
             capsule_controls: Vec::new(),
             tip_bound_transitions,
+            visibility_store: None,
+            tip_bound_controls: Vec::new(),
             refs: expected_refs,
             peeled_refs: expected_peeled,
             visible_ref_transactions,
@@ -4812,19 +4851,27 @@ async fn assemble_layered_control_view(
             }
         }
     }
-    let mut visibility_index = visibility_index_for_checkpoint(checkpoint.as_ref())?;
+    let initial = visibility_index_for_checkpoint(checkpoint.as_ref())?;
+    let mut visibility = if matches!(read, ControlRead::Git) {
+        visibility::Reconciliation::Paged(Box::new(visibility::Visibility::new(
+            router.store().clone(),
+            initial,
+            snapshot.record().root().refs().keys().cloned(),
+        )))
+    } else {
+        visibility::Reconciliation::Complete(initial)
+    };
     for capsule in &root_capsules {
-        if capsule.visibility_delta().is_some() {
-            apply_capsule_control_visibility_index(capsule, &mut visibility_index)?;
-        }
+        visibility.apply(capsule).await?;
     }
     let ordered = order_ref_controls(
         snapshot.record().root().refs(),
         snapshot.record().root().peeled_refs(),
-        visibility_index,
+        visibility,
         &transaction_predecessors,
         journal_capsules,
-    )?;
+    )
+    .await?;
     for capsule in &ordered {
         apply_control_refs(capsule, &mut refs, &mut peeled_refs)?;
     }
@@ -4842,6 +4889,12 @@ async fn assemble_layered_control_view(
         capsules: Vec::new(),
         capsule_controls: root_capsules,
         tip_bound_transitions,
+        visibility_store: matches!(read, ControlRead::Git).then(|| router.store().clone()),
+        tip_bound_controls: if matches!(read, ControlRead::Git) {
+            all_capsule_controls
+        } else {
+            Vec::new()
+        },
         refs,
         peeled_refs,
         visible_ref_transactions,
@@ -5288,10 +5341,10 @@ fn order_ref_capsules(
     Ok(ordered)
 }
 
-fn order_ref_controls(
+async fn order_ref_controls(
     base_refs: &BTreeMap<String, String>,
     base_peeled: &BTreeMap<String, String>,
-    mut visibility: crab_metadata::git_visibility::GitVisibilityIndex,
+    mut visibility: visibility::Reconciliation,
     predecessors: &BTreeMap<String, BTreeSet<String>>,
     mut pending: BTreeMap<String, CapsuleControl>,
 ) -> Result<Vec<CapsuleControl>> {
@@ -5301,39 +5354,34 @@ fn order_ref_controls(
     let mut applied = BTreeSet::new();
     let mut ordered = Vec::with_capacity(pending.len());
     while !pending.is_empty() {
-        let ready = pending
-            .iter()
-            .find_map(|(id, capsule)| {
-                if predecessors
-                    .get(capsule.transaction_id())
-                    .is_some_and(|required| {
-                        required.iter().any(|transaction_id| {
-                            tracked.contains(transaction_id) && !applied.contains(transaction_id)
-                        })
-                    })
-                {
-                    return None;
-                }
-                match control_is_ready(capsule, &refs, &visibility) {
-                    Ok(true) => Some(Ok(id.clone())),
-                    Ok(false) => None,
-                    Err(error) => Some(Err(error)),
-                }
-            })
-            .transpose()?;
-        let Some(ready) = ready else {
-            return Err(corrupt_path(
+        let mut ready = None;
+        for (id, capsule) in &pending {
+            if predecessors
+                .get(capsule.transaction_id())
+                .is_some_and(|required| {
+                    required
+                        .iter()
+                        .any(|id| tracked.contains(id) && !applied.contains(id))
+                })
+            {
+                continue;
+            }
+            if visibility.ready(capsule, &refs).await? {
+                ready = Some(id.clone());
+                break;
+            }
+        }
+        let id = ready.ok_or_else(|| {
+            corrupt_path(
                 "capsule-protocol ref heads",
                 "capsule ref history is cyclic or does not extend the compacted root",
-            ));
-        };
+            )
+        })?;
         let capsule = pending
-            .remove(&ready)
+            .remove(&id)
             .ok_or_else(|| ReadError::internal("ready capsule control disappeared"))?;
         apply_control_refs(&capsule, &mut refs, &mut peeled)?;
-        if capsule.visibility_delta().is_some() {
-            apply_capsule_control_visibility_index(&capsule, &mut visibility)?;
-        }
+        visibility.apply(&capsule).await?;
         applied.insert(capsule.transaction_id().to_owned());
         ordered.push(capsule);
     }
@@ -5347,7 +5395,7 @@ fn control_is_ready(
 ) -> Result<bool> {
     visibility_is_ready(
         capsule.transaction(),
-        capsule.visibility_delta(),
+        capsule.visibility_delta()?,
         refs,
         visibility_index,
     )
@@ -5476,7 +5524,7 @@ fn apply_capsule_control_visibility_index(
     capsule: &CapsuleControl,
     index: &mut crab_metadata::git_visibility::GitVisibilityIndex,
 ) -> Result<()> {
-    apply_transaction_visibility_index(capsule.transaction(), capsule.visibility_delta(), index)
+    apply_transaction_visibility_index(capsule.transaction(), capsule.visibility_delta()?, index)
 }
 
 fn apply_transaction_visibility_index(
@@ -6404,12 +6452,12 @@ mod tests {
             assert_eq!(
                 (
                     git.git_snapshot().unwrap(),
-                    git.git_visibility_index().unwrap(),
+                    git.git_visibility_index().await.unwrap(),
                     git.pointer_catalog().unwrap()
                 ),
                 (
                     complete.git_snapshot().unwrap(),
-                    complete.git_visibility_index().unwrap(),
+                    complete.git_visibility_index().await.unwrap(),
                     complete.pointer_catalog().unwrap()
                 )
             );
@@ -6435,8 +6483,8 @@ mod tests {
                 complete.git_snapshot().unwrap()
             );
             assert_eq!(
-                metadata.git_visibility_index().unwrap(),
-                complete.git_visibility_index().unwrap()
+                metadata.git_visibility_index().await.unwrap(),
+                complete.git_visibility_index().await.unwrap()
             );
         }
     }
@@ -6666,7 +6714,15 @@ mod tests {
                 .is_some()
         );
         assert_eq!(capsules.len(), 1);
-        assert_eq!(capsules[0].visibility_delta().unwrap().edits().len(), 1);
+        assert_eq!(
+            capsules[0]
+                .visibility_delta()
+                .unwrap()
+                .unwrap()
+                .edits()
+                .len(),
+            1
+        );
         let operations = observer
             .observations
             .lock()
@@ -7127,7 +7183,7 @@ mod tests {
         )
         .unwrap();
 
-        let actual = view.candidate_git_visibility(&candidate).unwrap();
+        let actual = view.candidate_git_visibility(&candidate).await.unwrap();
 
         assert_eq!(
             actual,

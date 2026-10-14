@@ -3129,14 +3129,14 @@ async fn fetch_capsule_incremental_packs(
             &repository,
             &visible_ref_names,
             &request,
-            Some(view.tip_bound_transitions()),
+            Some(&view.tip_bound_transitions().await?),
             cancel,
         )
         .await
     } else {
         crab_read::plan_upload_pack(
             &repository,
-            &view.git_visibility_index()?,
+            &view.git_visibility_index().await?,
             &visible_ref_names,
             &request,
             cancel,
@@ -3582,7 +3582,7 @@ async fn fetch_capsule_constrained_pack(
         ..Default::default()
     };
     let repository = capsule_git_repository(&view, store, router, config, runtime, cancel).await?;
-    let visibility = view.git_visibility_index()?;
+    let visibility = view.git_visibility_index().await?;
     let plan =
         crab_read::plan_upload_pack(&repository, &visibility, &visible_refs, &request, cancel)
             .await?;
@@ -3735,7 +3735,7 @@ async fn fetch_capsule_promisor_objects(
         filtered_promisor,
     )?;
     let repository = capsule_git_repository(&view, store, router, config, runtime, cancel).await?;
-    let visibility = view.git_visibility_index()?;
+    let visibility = view.git_visibility_index().await?;
     let request = crab_read::UploadPackRequest {
         wants,
         filter: crab_read::UploadPackFilter::None,
@@ -5400,7 +5400,7 @@ mod tests {
             )
             .await
             .expect("open bounded capsule reader");
-        let visibility = view.git_visibility_index().expect("visibility proof");
+        let visibility = view.git_visibility_index().await.expect("visibility proof");
         let refs = ["refs/heads/main".to_owned()];
         let plan = crab_read::plan_upload_pack(
             &repository,

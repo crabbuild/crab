@@ -18,6 +18,9 @@ pub struct CapsuleVisibilityReader {
     offset: u64,
     descriptor: Descriptor,
     maximum: u64,
+    length: u64,
+    hash: String,
+    complete: std::sync::OnceLock<std::sync::Arc<CapsuleVisibilityDelta>>,
     cache: PageCache,
 }
 
@@ -39,8 +42,147 @@ impl CapsuleVisibilityReader {
             offset: range.offset(),
             descriptor,
             maximum,
+            length: range.length(),
+            hash: range.blake3().to_owned(),
+            complete: std::sync::OnceLock::new(),
             cache: PageCache::default(),
         })
+    }
+
+    /// Return the exact number of ref headers advertised by this captured descriptor.
+    pub fn ref_count(&self) -> u32 {
+        self.descriptor.refs.count
+    }
+
+    /// Read only scalar edit metadata, preserving requested ref order and authenticated misses.
+    pub async fn headers(
+        &self,
+        store: &Store,
+        names: &[&str],
+    ) -> Result<Vec<Option<VisibilityEditHeader>>> {
+        let mut work = PageWork {
+            maximum: self.maximum,
+            bytes: 0,
+            seen: BTreeSet::new(),
+        };
+        self.read_headers(store, names, &mut work).await
+    }
+
+    async fn read_headers(
+        &self,
+        store: &Store,
+        names: &[&str],
+        work: &mut PageWork,
+    ) -> Result<Vec<Option<VisibilityEditHeader>>> {
+        if names
+            .iter()
+            .any(|name| !name.starts_with("refs/") || !valid_ref_name(name))
+        {
+            return Err(contract_error("visibility lookup ref name is invalid"));
+        }
+        let keys = names
+            .iter()
+            .map(|name| blake3::hash(name.as_bytes()).as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        self.rows(
+            store,
+            &self.descriptor.refs,
+            Kind::VisibilityRefs,
+            &keys,
+            work,
+        )
+        .await?
+        .into_iter()
+        .zip(keys)
+        .zip(names)
+        .map(|((value, key), name)| {
+            let row = value
+                .map(|bytes| VisibilityEditHeader::decode(&key, &bytes, self.descriptor.body_bytes))
+                .transpose()?;
+            if row.as_ref().is_some_and(|row| row.name != *name) {
+                return Err(corrupt("visibility lookup ref hash collides"));
+            }
+            Ok(row)
+        })
+        .collect()
+    }
+
+    /// Inspect one actual edit set through bounded authenticated pages.
+    pub async fn objects(
+        &self,
+        store: &Store,
+        name: &str,
+        direction: VisibilityChange,
+    ) -> Result<Vec<[u8; 20]>> {
+        let mut work = PageWork {
+            maximum: self.maximum,
+            bytes: 0,
+            seen: BTreeSet::new(),
+        };
+        let row = self
+            .read_headers(store, &[name], &mut work)
+            .await?
+            .pop()
+            .flatten()
+            .ok_or_else(|| corrupt("required visibility ref is absent"))?;
+        let root = match direction {
+            VisibilityChange::Added => row.added,
+            VisibilityChange::Removed => row.removed,
+        };
+        let Some(root) = root else {
+            return Ok(Vec::new());
+        };
+        let end = self
+            .offset
+            .checked_add(self.descriptor.body_bytes)
+            .ok_or_else(|| corrupt("visibility body span overflows"))?;
+        self.cache
+            .scan(
+                store,
+                &self.path,
+                0,
+                self.offset..end,
+                &root,
+                Kind::VisibilityChanges,
+                &mut work,
+            )
+            .await?
+            .into_iter()
+            .map(|(oid, value)| {
+                if !value.is_empty() {
+                    return Err(corrupt("visibility object row has unexpected payload"));
+                }
+                oid.try_into()
+                    .map_err(|_| corrupt("visibility OID has invalid length"))
+            })
+            .collect()
+    }
+
+    /// Authenticate and materialize the complete captured delta for bulk inspection.
+    pub async fn materialize(
+        &self,
+        store: &Store,
+    ) -> Result<std::sync::Arc<CapsuleVisibilityDelta>> {
+        if self.length > self.maximum {
+            return Err(corrupt("complete visibility exceeds its byte limit"));
+        }
+        if let Some(delta) = self.complete.get() {
+            return Ok(delta.clone());
+        }
+        let end = self
+            .offset
+            .checked_add(self.length)
+            .ok_or_else(|| corrupt("visibility source span overflows"))?;
+        let bytes = store.range_get(&self.path, self.offset..end).await?;
+        if blake3::hash(&bytes).to_hex().as_str() != self.hash
+            || Descriptor::decode(&bytes)? != self.descriptor
+        {
+            return Err(corrupt(
+                "visibility section differs from its captured descriptor",
+            ));
+        }
+        let delta = std::sync::Arc::new(CapsuleVisibilityDelta::decode(&bytes)?);
+        Ok(self.complete.get_or_init(|| delta).clone())
     }
 
     /// Return requested changes in input order, or an authenticated absent-ref result.
@@ -74,7 +216,7 @@ impl CapsuleVisibilityReader {
         let Some(value) = rows.remove(0) else {
             return Ok(None);
         };
-        let row = Edit::decode(&key, &value, self.descriptor.body_bytes)?;
+        let row = VisibilityEditHeader::decode(&key, &value, self.descriptor.body_bytes)?;
         if row.name != ref_name {
             return Err(corrupt("visibility lookup ref hash collides"));
         }
@@ -142,6 +284,17 @@ impl CapsuleVisibilityReader {
             .await
     }
 }
+
+impl PartialEq for CapsuleVisibilityReader {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.offset == other.offset
+            && self.length == other.length
+            && self.hash == other.hash
+            && self.descriptor == other.descriptor
+    }
+}
+impl Eq for CapsuleVisibilityReader {}
 
 #[cfg(test)]
 mod tests {

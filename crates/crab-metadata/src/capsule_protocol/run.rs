@@ -128,9 +128,16 @@ pub struct CapsuleControl {
     transaction_id: String,
     base_root_digest: String,
     transaction: CapsuleTransaction,
-    visibility: Option<CapsuleVisibilityDelta>,
+    visibility: Option<ControlVisibility>,
     catalog: Option<PointerCatalog>,
     git_packs: Vec<PackMemberDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ControlVisibility {
+    Complete(std::sync::Arc<CapsuleVisibilityDelta>),
+    #[cfg(feature = "storage")]
+    Paged(std::sync::Arc<super::visibility::CapsuleVisibilityReader>),
 }
 
 impl CapsuleRunControl {
@@ -522,6 +529,57 @@ impl CapsuleRunControl {
         &self,
         external_controls: &std::collections::BTreeMap<(String, CapsuleSectionKind), Bytes>,
     ) -> Result<Vec<CapsuleControl>> {
+        self.materialize_controls(external_controls, |location| {
+            let visibility_bytes = external_controls
+                .get(&(location.hash.clone(), CapsuleSectionKind::VisibilityDelta))
+                .cloned();
+            if visibility_bytes
+                .as_ref()
+                .map(|bytes| super::visibility::VisibilityPages::decode(bytes))
+                .transpose()?
+                != location.visibility_pages
+            {
+                return Err(corrupt(
+                    "visibility page descriptor differs from its run footer",
+                ));
+            }
+            let delta = visibility_bytes
+                .as_ref()
+                .map(|bytes| CapsuleVisibilityDelta::decode(bytes))
+                .transpose()?;
+            verify_control_section(
+                location.visibility.as_ref(),
+                visibility_bytes.as_ref(),
+                "visibility",
+            )?;
+            Ok(delta.map(|delta| ControlVisibility::Complete(std::sync::Arc::new(delta))))
+        })
+    }
+
+    #[cfg(feature = "storage")]
+    pub(crate) fn materialize_capsules_with_paged_visibility(
+        &self,
+        layout: &crab_storage::StoreLayout<crab_storage::Store>,
+        external_controls: &std::collections::BTreeMap<(String, CapsuleSectionKind), Bytes>,
+    ) -> Result<Vec<CapsuleControl>> {
+        self.materialize_controls(external_controls, |location| {
+            self.visibility_reader(
+                layout,
+                &location.hash,
+                crate::git_visibility::MAX_GIT_VISIBILITY_INDEX_BYTES,
+            )
+            .map(|reader| {
+                reader.map(|reader| ControlVisibility::Paged(std::sync::Arc::new(reader)))
+            })
+        })
+    }
+
+    #[cfg(any(feature = "storage", test))]
+    fn materialize_controls(
+        &self,
+        external_controls: &std::collections::BTreeMap<(String, CapsuleSectionKind), Bytes>,
+        visibility: impl Fn(&CapsuleControlLocation) -> Result<Option<ControlVisibility>>,
+    ) -> Result<Vec<CapsuleControl>> {
         self.capsules
             .iter()
             .map(|location| {
@@ -530,29 +588,12 @@ impl CapsuleRunControl {
                     Some(&location.transaction_bytes),
                     "transaction",
                 )?;
-                let visibility_bytes = external_controls
-                    .get(&(location.hash.clone(), CapsuleSectionKind::VisibilityDelta))
-                    .cloned();
-                if visibility_bytes
-                    .as_ref()
-                    .map(|bytes| super::visibility::VisibilityPages::decode(bytes))
-                    .transpose()?
-                    != location.visibility_pages
-                {
-                    return Err(corrupt(
-                        "visibility page descriptor differs from its run footer",
-                    ));
-                }
+                let visibility = visibility(location)?;
                 let catalog_bytes = location.catalog_bytes.clone().or_else(|| {
                     external_controls
                         .get(&(location.hash.clone(), CapsuleSectionKind::CatalogDelta))
                         .cloned()
                 });
-                verify_control_section(
-                    location.visibility.as_ref(),
-                    visibility_bytes.as_ref(),
-                    "visibility",
-                )?;
                 verify_control_section(
                     location.catalog.as_ref(),
                     catalog_bytes.as_ref(),
@@ -564,10 +605,6 @@ impl CapsuleRunControl {
                 {
                     return Err(corrupt("capsule run transaction does not match its footer"));
                 }
-                let visibility = visibility_bytes
-                    .as_ref()
-                    .map(|bytes| CapsuleVisibilityDelta::decode(bytes))
-                    .transpose()?;
                 let catalog = catalog_bytes
                     .as_ref()
                     .map(|bytes| PointerCatalog::decode_delta(bytes))
@@ -610,9 +647,44 @@ impl CapsuleControl {
         &self.transaction
     }
 
-    /// Return the visibility delta, when present.
-    pub fn visibility_delta(&self) -> Option<&CapsuleVisibilityDelta> {
-        self.visibility.as_ref()
+    /// Return already materialized visibility, distinguishing cold data from absence.
+    pub fn visibility_delta(&self) -> Result<Option<&CapsuleVisibilityDelta>> {
+        match &self.visibility {
+            None => Ok(None),
+            Some(ControlVisibility::Complete(delta)) => Ok(Some(delta)),
+            #[cfg(feature = "storage")]
+            Some(ControlVisibility::Paged(_)) => Err(corrupt(
+                "visibility is paged; complete inspection must materialize it",
+            )),
+        }
+    }
+
+    /// Whether this control advertises visibility evidence, loaded or paged.
+    pub fn has_visibility(&self) -> bool {
+        self.visibility.is_some()
+    }
+
+    #[cfg(feature = "storage")]
+    /// Return captured paged evidence without materializing its OID sets.
+    pub fn paged_visibility(
+        &self,
+    ) -> Option<&std::sync::Arc<super::visibility::CapsuleVisibilityReader>> {
+        match &self.visibility {
+            Some(ControlVisibility::Paged(reader)) => Some(reader),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "storage")]
+    /// Materialize captured visibility for bulk operations without recapturing ref state.
+    pub async fn materialize_visibility(&self, store: &crab_storage::Store) -> Result<Self> {
+        let mut control = self.clone();
+        if let Some(ControlVisibility::Paged(reader)) = &self.visibility {
+            control.visibility = Some(ControlVisibility::Complete(
+                reader.materialize(store).await?,
+            ));
+        }
+        Ok(control)
     }
 
     /// Return the pointer catalog delta, when present.
@@ -2001,7 +2073,15 @@ mod tests {
                 section,
             )]))
             .unwrap();
-        assert_eq!(controls[0].visibility_delta().unwrap().edits().len(), 1);
+        assert_eq!(
+            controls[0]
+                .visibility_delta()
+                .unwrap()
+                .unwrap()
+                .edits()
+                .len(),
+            1
+        );
         assert_eq!(run.verified_controls().unwrap().1, controls);
     }
 }

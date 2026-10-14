@@ -1441,10 +1441,10 @@ async fn open_capsule_repository_from_root(
     let identity = RepositoryIdentity::new(provider, prefix.to_owned(), 1).map_err(remote_error)?;
     let proof = if tip_bound {
         UploadPackVisibilityProof::TipBound {
-            transitions: Arc::new(view.tip_bound_transitions().clone()),
+            transitions: Arc::new(view.tip_bound_transitions().await?),
         }
     } else {
-        UploadPackVisibilityProof::Materialized(view.git_visibility_index()?)
+        UploadPackVisibilityProof::Materialized(view.git_visibility_index().await?)
     };
     let repository = view
         .git_repository_from_store(

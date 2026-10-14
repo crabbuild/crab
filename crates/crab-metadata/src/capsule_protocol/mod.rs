@@ -71,7 +71,7 @@ pub use transaction_record::{
 };
 pub use visibility::{CapsuleVisibilityDelta, CapsuleVisibilitySnapshot};
 #[cfg(feature = "storage")]
-pub use visibility::{CapsuleVisibilityReader, VisibilityChange};
+pub use visibility::{CapsuleVisibilityReader, VisibilityChange, VisibilityEditHeader};
 
 fn valid_ref_name(name: &str) -> bool {
     gix_validate::reference::name_partial(name.as_bytes().as_bstr()).is_ok()

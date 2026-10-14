@@ -24,6 +24,21 @@ pub(crate) struct PageWork {
     pub(crate) seen: BTreeSet<(usize, u64)>,
 }
 
+impl PageWork {
+    fn admit(&mut self, layer: usize, offset: u64, reference: &PageRef) -> Result<()> {
+        if self.seen.insert((layer, offset)) {
+            self.bytes = self
+                .bytes
+                .checked_add(u64::from(reference.bytes))
+                .ok_or_else(|| corruption("query byte count overflows"))?;
+            if self.bytes > self.maximum {
+                return Err(corruption("metadata query exceeds its byte limit"));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl PageCache {
     #[expect(
         clippy::too_many_arguments,
@@ -55,15 +70,7 @@ impl PageCache {
         while !pending.is_empty() {
             for (reference, _) in &pending {
                 reference.validate(kind, source_bytes)?;
-                if work.seen.insert((layer, source.start + reference.offset)) {
-                    work.bytes = work
-                        .bytes
-                        .checked_add(u64::from(reference.bytes))
-                        .ok_or_else(|| corruption("query byte count overflows"))?;
-                    if work.bytes > work.maximum {
-                        return Err(corruption("metadata query exceeds its byte limit"));
-                    }
-                }
+                work.admit(layer, source.start + reference.offset, reference)?;
             }
             // Charge the entire wave before starting I/O, including warm pages.
             let pages = futures_util::stream::iter(std::mem::take(&mut pending))
@@ -112,6 +119,51 @@ impl PageCache {
             }
         }
         Ok(results)
+    }
+
+    pub(crate) async fn scan(
+        &self,
+        store: &Store,
+        path: &object_store::path::Path,
+        layer: usize,
+        source: std::ops::Range<u64>,
+        root: &PageRef,
+        kind: Kind,
+        work: &mut PageWork,
+    ) -> Result<Rows> {
+        let source_bytes = source
+            .end
+            .checked_sub(source.start)
+            .ok_or_else(|| corruption("invalid page source range"))?;
+        let mut pending = vec![root.clone()];
+        let mut rows = Vec::new();
+        while !pending.is_empty() {
+            for reference in &pending {
+                reference.validate(kind, source_bytes)?;
+                work.admit(layer, source.start + reference.offset, reference)?;
+            }
+            let pages = futures_util::stream::iter(std::mem::take(&mut pending))
+                .map(|reference| {
+                    let source = source.clone();
+                    async move {
+                        self.fetch(store, path, layer, source, &reference, kind)
+                            .await
+                    }
+                })
+                .buffered(4)
+                .try_collect::<Vec<_>>()
+                .await?;
+            for page in pages {
+                match page.as_ref() {
+                    Page::Leaf(values) => rows.extend(values.iter().cloned()),
+                    Page::Branch(children) => pending.extend(children.iter().cloned()),
+                }
+            }
+        }
+        if rows.len() != root.count as usize || rows.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(corruption("scanned tree coverage is invalid"));
+        }
+        Ok(rows)
     }
 
     // Guards protect local cache work only, never origin I/O.

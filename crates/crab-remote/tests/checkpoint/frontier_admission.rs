@@ -101,6 +101,7 @@ async fn frontier_delta_base_placement_does_not_probe_unrelated_member_indexes()
     assert!(
         complete
             .git_visibility_index()
+            .await
             .unwrap()
             .ref_closures()
             .values()

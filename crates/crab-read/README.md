@@ -37,17 +37,24 @@ Replica selection reports readiness, generations, fallbacks, and routing
 choices so callers can distinguish an unavailable replica from a corrupt
 object.
 
-`capsule_protocol::open_git_view_from_root` captures complete refs, visibility
-and pointer catalogs without materializing run OID admission. It validates
+`capsule_protocol::open_git_view_from_root` captures complete refs and pointer
+catalogs while keeping frontier visibility and run OID admission paged. It validates
 authenticated member counts and omits placement-hint dictionaries. CLI reads,
 HTTP browse/projection and S3 gateway reads use this view. Physical lookup uses
 the captured index; unindexed reads retain their existing pack-index path.
 Maintenance and writers requiring exact admission sets continue using the
-complete metadata entry point. Visibility, catalog and source/ref enumeration
-are still eager; this entry point does not establish bounded repository opening.
+complete metadata entry point. Checkpoint visibility, catalog and source/ref
+enumeration are still eager; total bounded opening remains unqualified.
 Full-capsule and control-only views share borrowed visibility readiness/application
 checks. Canonical transaction decoding guarantees unique ref names; matched-row
 counts reject extra evidence without copying the per-object edit lists.
+Full and paged controls use one ref-ordering loop. Paged closure layers preserve
+the inherited base when its source ref later moves, and dictionary retention
+never supplies visibility for a new ref. Initial rooted additions use their
+authenticated count; differing actual delta additions/removals remain admitted
+work. `git_visibility_index`, `candidate_git_visibility` and
+`tip_bound_transitions` asynchronously materialize captured controls only when
+bulk inspection needs them. They do not recapture refs or switch origins.
 
 `ShardHydrator` provides memory, file, and half-open byte-range reconstruction.
 Before full-file reconstruction it checks that the pointer's shard terms are
@@ -237,8 +244,8 @@ checkpoint for consumers that need embedded pack bytes. These entry points diffe
 requirements, not storage-format compatibility.
 `open_view_from_root_with_metadata` captures the complete visibility and pointer
 catalog controls while leaving Git pack bodies cold, including before the first
-checkpoint. Browsing and background index builders use this path with the
-origin-backed Git reader. Metadata capture still verifies transaction ordering,
+checkpoint. Background index builders use this complete path; browsing uses the
+Git view with the origin-backed Git reader. Metadata capture still verifies transaction ordering,
 activations and exact resulting refs; it is not footer-only fetch admission.
 Pack installation from metadata views also requires the origin layout and consumes
 authenticated source ranges. The embedded-pack reader and candidate installers
