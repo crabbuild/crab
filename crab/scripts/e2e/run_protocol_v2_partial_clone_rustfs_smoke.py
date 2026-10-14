@@ -1427,6 +1427,115 @@ class ProtocolV2PartialCloneSmoke:
                         not any(item.is_file() for item in destination.rglob(".crab-export-tmp/*")),
                     )
 
+    def remote_cli_fault_checks(self) -> None:
+        """Keep LFS source cancellation and integrity faults on the real CLI path."""
+        if os.name == "nt" or self.args.backend != "rustfs":
+            return
+        import http.server
+        import importlib.util
+        import threading
+        from urllib.parse import urlsplit
+
+        endpoint = urlsplit(self.args.endpoint_url)
+        if endpoint.scheme != "http" or endpoint.hostname is None:
+            raise SmokeError("CLI fault qualification requires a plain HTTP RustFS endpoint")
+        spec = importlib.util.spec_from_file_location(
+            "materialization_proxy", Path(__file__).with_name("run_mirror_receipt_rustfs_smoke.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class FaultProxy(module.MarkerProxy):
+            def forward(self):
+                # Retain each request's witness. An earlier blocked request may
+                # finish after the next case starts and must not signal its event.
+                self.phase = self.server.phase
+                self.entered = self.server.entered
+                self.release = self.server.release
+                if self.command == "GET" and "/lfs/objects/" in self.path and self.phase == "headers":
+                    self.entered.set()
+                    self.release.wait(30)
+                super().forward()
+
+            def forward_body(self, path, data):
+                if self.command == "GET" and "/lfs/objects/" in path:
+                    if self.phase == "body":
+                        self.wfile.write(data[:65536])
+                        self.wfile.flush()
+                        self.entered.set()
+                        self.release.wait(30)
+                        data = data[65536:]
+                    elif self.phase == "corrupt":
+                        data = data[:-1] + bytes([data[-1] ^ 1])
+                self.wfile.write(data)
+
+            do_GET = forward
+            do_HEAD = forward
+            do_PUT = forward
+            do_POST = forward
+            do_DELETE = forward
+
+        root = self.run_root / "remote-cli-faults"
+        root.mkdir()
+        proxy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FaultProxy)
+        proxy.daemon_threads = True
+        proxy.backend_host = endpoint.hostname
+        proxy.backend_port = endpoint.port or 80
+        proxy.marker_prefix = "/unarmed/"
+        proxy.marker_writes = []
+        proxy.armed = False
+        worker = threading.Thread(target=proxy.serve_forever, daemon=True)
+        worker.start()
+        fault_endpoint = f"http://127.0.0.1:{proxy.server_port}"
+        try:
+            for command in ("download", "export"):
+                for phase in ("headers", "body", "corrupt"):
+                    proxy.phase = phase
+                    proxy.entered = threading.Event()
+                    proxy.release = threading.Event()
+                    entered, release = proxy.entered, proxy.release
+                    destination = root / f"{command}-{phase}"
+                    destination.mkdir()
+                    final = destination / "lfs-pointer.bin"
+                    original = b"existing destination"
+                    final.write_bytes(original)
+                    args = [str(self.crab_bin), command, self.remote_url, "lfs-pointer.bin",
+                            "--revision", "fixture/lfs-pointers", "--cache-dir",
+                            str(root / f"{command}-{phase}-cache"), "--json"]
+                    args.extend(["--local-dir", str(destination), "--force-download"]
+                                if command == "download" else ["--to", destination.as_uri(), "--force"])
+
+                    def cancel_source(process):
+                        deadline = time.monotonic() + 30
+                        while not entered.wait(0.05):
+                            if process.poll() is not None:
+                                return
+                            if time.monotonic() >= deadline:
+                                raise SmokeError("CLI did not reach the LFS source fault")
+                        process.send_signal(signal.SIGTERM)
+
+                    try:
+                        result = self.run_cmd(
+                            f"remote CLI {command} LFS {phase} fault", args, self.run_root,
+                            check=False, timeout=60,
+                            on_started=cancel_source if phase != "corrupt" else None,
+                            extra_env={"AWS_ENDPOINT_URL": fault_endpoint, "AWS_ENDPOINT_URL_S3": fault_endpoint},
+                        )
+                        output = self.command_outputs[result["stdout_log"]].lower()
+                        expected_error = "cancel" in output if phase != "corrupt" else ("corrupt" in output or "integrity" in output)
+                        self.check(f"remote-cli-{command}-lfs-{phase}-reports-error",
+                                   result["exit_code"] != 0 and expected_error)
+                        self.check(f"remote-cli-{command}-lfs-{phase}-preserves-destination",
+                                   final.read_bytes() == original)
+                        self.check(f"remote-cli-{command}-lfs-{phase}-cleans-temporary-output",
+                                   not any(path.is_file() and path != final for path in destination.rglob("*")))
+                    finally:
+                        release.set()
+        finally:
+            proxy.shutdown()
+            proxy.server_close()
+            worker.join(timeout=5)
+
     def pointer_fixture_checks(self, lfs_oid: str) -> None:
         """Qualify Crab and Git LFS pointer blobs as distinct Git content."""
         if self.crab_pointer_bytes is None or self.lfs_pointer_bytes is None:
@@ -3958,6 +4067,7 @@ class ProtocolV2PartialCloneSmoke:
         self.performance_fixtures()
         self.pointer_fixture_checks(lfs_oid)
         self.remote_cli_materialization_checks()
+        self.remote_cli_fault_checks()
         self.clone_shallow()
         self.store_snapshot("after-shallow-lifecycle")
         filtered_baseline = self.storage_telemetry()

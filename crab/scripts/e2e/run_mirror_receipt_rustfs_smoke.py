@@ -40,7 +40,8 @@ class MarkerProxy(http.server.BaseHTTPRequestHandler):
             return
         body = self.rfile.read(length)
         connection = http.client.HTTPConnection(
-            "127.0.0.1", getattr(self.server, "backend_port", 9000), timeout=30
+            getattr(self.server, "backend_host", "127.0.0.1"),
+            getattr(self.server, "backend_port", 9000), timeout=30
         )
         try:
             connection.request(self.command, self.path, body=body,

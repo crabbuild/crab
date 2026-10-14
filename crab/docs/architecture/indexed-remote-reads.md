@@ -863,3 +863,22 @@ cover response framing, digest rejection, validator identity and no receipt
 writes. The final CLI Clippy comparison remains 585 versus 586 diagnostics,
 with no new warnings. Native candidate proof is still pending; the previous
 forced-termination receipt is a baseline failure.
+
+
+The clean-source locked CLI build at `59304d9d350` passes. Six fresh-cache
+healthy download/export commands retain byte-identical plain, Crab and LFS
+content without installing a Git ODB. All six native LFS fault cases pass: both
+commands observe header/body cancellation without SIGKILL, reject corrupted
+content, preserve the original destination and leave no temporary output files.
+The first fault run had an export readiness event contaminated by an earlier
+request; immutable request-scoped witnesses remove that fixture race, and the
+full replay passes. The earlier failed receipt is retained.
+
+The existing qualification runner now includes the same six cases and 18 checks
+on plain-HTTP RustFS POSIX runs. Its direct invocation passes all 18 checks
+against the qualified binary and the existing read-only fixture. Windows token
+contracts and external S3 performance use their separate gates; these signal
+injections are not claimed there. Production source still matches the clean
+qualified revision; subsequent harness/documentation changes do not alter it.
+Full new-head CI, current 10-GiB read qualification, remaining bounded control
+opening and stages 5–8 still require work.
