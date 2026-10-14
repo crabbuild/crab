@@ -1662,3 +1662,40 @@ cache implementation is modified. Failed receipts are preserved; the serial pass
 does not establish that timing test is stable. Broad CI, the pending pack-layout
 inventory approval, representative provider latency, 10-GiB history scaling and
 later delivery gates remain open.
+
+
+## Cache expiry is validated after lock acquisition
+
+Source `19295690f83` fixes a deterministic negative-cache expiry violation.
+The old lookup captured time before acquiring its mutex. A blocked lookup could
+therefore return an exact miss after its TTL had expired, suppressing ordinary
+object lookup longer than configured. The lookup now samples time after lock
+acquisition. Process-local negative and manifest cache timestamps use Tokio's
+monotonic Instant; without paused test time it wraps the standard monotonic clock.
+No public type, cache key, default TTL, dependency version or stored format changes.
+Controlled-clock support is enabled only on the existing Tokio development
+dependency. Cargo.lock is unchanged.
+
+The negative control holds the real cache mutex, polls the lookup into waiting,
+advances the clock to its exact deadline, then releases the mutex. The old ordering
+reports a hit and fails; the corrected ordering rejects it. The manifest sibling
+already sampled expiry after locking, and corresponding lock-wait and exact-boundary
+cases preserve that contract. The existing generation/expiry regression keeps its
+1-ms TTL and now checks exactly 1 ms instead of sleeping 5 ms. This preserves and
+strengthens its property; no expiry expectation or TTL is widened. A real physical
+index/pack fixture seeds an older miss and proves that expiration restores verified
+OFS reconstruction with the expected bytes and no pack-sidecar fallback.
+
+Proof: 21 runtime, 49 reader/index, 32 repository and 13 real-Git cache integration
+cases pass. Twenty default-parallel runtime runs pass all 420 case executions,
+including the formerly scheduler-sensitive expiry assertion. Selected strict
+Clippy, formatting and publication-enabled qualifier build pass.
+`cache-expiry-native-r1` qualifies clean source with 20 cold/warm pairs at each of
+100/1k/10k commits. Native Git results and frozen physical request/byte/decode
+counters match. Semantic error cleanup retains its error outcome and leaves zero
+active backend work. The preceding failed real-clock receipts remain recorded;
+this fix does not erase them or establish a provider latency guarantee.
+
+The pending pack-layout inventory approval, representative S3 qualification,
+10-GiB history scaling, broader CI and remaining history/catalog/staging/lifecycle
+and blame requirements stay open.
