@@ -1576,3 +1576,44 @@ disables bytecode writes and records a clean checkout.
 This establishes shared reconstruction and local correctness, not a causal latency
 speedup. The original failed latency run, representative S3 qualification, full
 10 GiB history scaling, and the remaining stage acceptance gates stay open.
+
+
+## Explicit async API and exposed-type version boundary
+
+The known synchronous-to-asynchronous public API break now declares version
+0.2.0 for `crab-remote-git`. The tagged `ReadError::RemoteGit`,
+`WriteError::RemoteGit` and `prepare::Error::{Remote,Close}` surfaces expose that
+dependency's concrete types, so `crab-read`, `crab-write` and `crab-remote` also
+declare 0.2.0. Workspace dependencies pin all four versions exactly. The lockfile
+changes only these four package versions; dependency sources and resolved
+third-party versions stay unchanged. SDK public values and error categories hide
+these concrete types, so its package remains 0.1.0.
+
+Release-policy validation allows library API versions to differ from the product
+version while requiring every workspace consumer to pin the declared library
+version. It still requires published libraries to be publishable, private crates
+to remain private/version 0.1.0, and shipped binary packages to match the product.
+SDK packaging reads archive versions from Cargo metadata instead of assuming all
+libraries are 0.1.0. Migration documentation requires awaiting graph membership;
+no blocking shim or extra stored-format reader is introduced.
+
+`remote-git-api-package-r2` qualifies clean source `a1507f2bbaa`: all 18 normalized
+library archives are produced, all four external SDK profiles compile, and all
+five existing negative probes fail with their required diagnostics. A separate
+external probe using those archives rejects the old synchronous membership call
+with an expected-result/found-future type error. Its awaited replacement and the
+three exposed error conversions compile. The consumer manifest, source and lock
+are restored afterward. Ten architecture-policy regressions pass; actual Cargo
+metadata passes the revised version policy. The migrated CLI consumer compiles
+with its minimal features; that parent surface emits 18 existing feature-related
+warnings, so this is compile proof, not a CLI-wide clean-lint claim. Ten repository
+index tests retain released version-1 membership, lazy pages, corruption rejection
+and cancellation/deadline cleanup behavior.
+
+This versions and packages the known async API boundary; it does not publish any
+crate or establish the entire initiative's final release gate. Representative S3,
+10-GiB history scaling, broad CI, and the remaining lifecycle/format/semantics
+requirements stay open. PR #553's guardrail failure is verified from its completed
+job log: the pack-layout inventory still requires the removed direct installer in
+`crab/src/read/mod.rs`. That inventory is unchanged and its prior approval request
+remains pending.
