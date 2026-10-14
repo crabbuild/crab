@@ -925,3 +925,14 @@ and first Crab hydration still materializes the complete catalog. Bounded
 visibility/control opening, paged historical Xet lookup, current 10-GiB reads,
 provider latency and stages 5–8 remain unqualified. No format or release contract
 changes in this slice.
+
+The clean-source locked default-feature CLI build at `1393945ace6` passes all
+six fresh-cache RustFS download/export commands with byte identity and no
+installed Git ODB. Six LFS header/body cancellation/corruption cases preserve
+existing output and leave no temporary files, without forced termination.
+The initial functional replay generated Python bytecode; disabling bytecode
+writes gives another passing, clean-source replay. Detailed source/binary-bound
+receipts remain external. Fixtures are plain 20 B, Crab 16 KiB and LFS 8 MiB;
+they do not qualify 10-GiB reads or S3 latency. Subsequent documentation edits
+leave the qualified production source unchanged. PR #540 passes all 13
+non-skipped CI checks and is ready for review; nothing is merged.
