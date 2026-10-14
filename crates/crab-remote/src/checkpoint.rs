@@ -201,7 +201,7 @@ pub async fn maintain_capsule_repository_from_view(
         publish_checkpoint_with_catalog(
             layout,
             view,
-            view.pointer_catalog()?,
+            view.pointer_catalog().await?,
             maximum_bytes,
             cancel,
         )
@@ -295,7 +295,7 @@ pub async fn repack_capsule_repository_from_view(
                 view,
                 consolidation.sources,
                 member_oids,
-                view.pointer_catalog()?,
+                view.pointer_catalog().await?,
                 maximum_bytes,
                 cancel,
             )
@@ -311,7 +311,7 @@ pub async fn repack_capsule_repository_from_view(
             publication = publish_checkpoint_with_catalog(
                 layout,
                 view,
-                view.pointer_catalog()?,
+                view.pointer_catalog().await?,
                 maximum_bytes,
                 cancel,
             )
@@ -353,7 +353,7 @@ pub async fn publish_capsule_checkpoint_from_view(
     if view.capsule_count()? < u64::from(threshold) {
         return Ok(CheckpointOutcome::default());
     }
-    let catalog = view.pointer_catalog()?;
+    let catalog = view.pointer_catalog().await?;
     publish_capsule_checkpoint_with_catalog_from_view(layout, view, catalog, maximum_bytes, cancel)
         .await
 }
@@ -543,14 +543,13 @@ async fn publish_layered_sources(
         &catalog_digest,
         member_admission,
     )?;
-    let checkpoint =
-        crab_metadata::capsule_protocol::LayeredCheckpoint::build_with_ordinal_visibility(
-            view.root().root().generation(),
-            view.root().digest(),
-            sources,
-            catalog,
-            Some(visibility),
-        )?;
+    let checkpoint = crab_metadata::capsule_protocol::LayeredCheckpoint::build(
+        view.root().root().generation(),
+        view.root().digest(),
+        sources,
+        catalog,
+        Some(visibility),
+    )?;
     if checkpoint.bytes().len() as u64 > maximum_bytes && maximum_bytes > 0 {
         return Err(CheckpointError::OutputLimit {
             maximum: maximum_bytes,

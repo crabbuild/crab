@@ -3190,10 +3190,6 @@ mod tests {
             )]),
         )
         .unwrap();
-        let visibility = crab_metadata::capsule_protocol::CapsuleVisibilitySnapshot::from_index(
-            &visibility_index,
-        )
-        .unwrap();
         let pack = CapsuleGitPack::new(
             Bytes::from_static(b"RESTORED PACK"),
             Bytes::from_static(b"restored index"),
@@ -3207,6 +3203,12 @@ mod tests {
             .unwrap()
             .source_descriptor()
             .unwrap();
+        let visibility = crab_metadata::capsule_protocol::LayeredVisibilitySnapshot::from_index(
+            &visibility_index,
+            &crab_metadata::capsule_protocol::source_catalog_digest(std::slice::from_ref(&source))
+                .unwrap(),
+        )
+        .unwrap();
         let mut restored_catalog = crab_metadata::capsule_protocol::PointerCatalog::new();
         restored_catalog
             .insert_xorb(
@@ -3251,7 +3253,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(restored.record().root().checkpoint().unwrap().format(), 5);
+        assert_eq!(restored.record().root().checkpoint().unwrap().format(), 6);
         assert_eq!(
             restored.record().root().generation(),
             fenced.record().root().generation() + 1

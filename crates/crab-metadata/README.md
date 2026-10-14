@@ -130,18 +130,16 @@ Current file lookup selects the protocol from the root alone: only an absent
 v2 root permits v1 lookup. A missing v2 dependency remains an error, and failed
 shared-session initialization can retry after that dependency is repaired.
 
-Layered checkpoint visibility decoding is shared by readers and recovery.
-Checkpoint pointers require an explicit format 5 (`CRBCKP05`). Root, history
-and ref-head decoding reject retired or missing formats; there is no embedded
-checkpoint decoder. The separately released v1 manifest protocol is unchanged.
-Ordinal proofs must match the ordered source-catalog digest before becoming a
-Git visibility index; the existing full-object encoding preserves the same
-caller-supplied Git identity. A missing proof remains distinct from an empty
-ref set, so recovery can reject it explicitly.
-Checkpoint ordinal decoding validates source/member positions against that
-checkpoint's own inventory, before newer frontier sources are appended. Indexed
-opening can then avoid decoding the complete proof again for placement hints;
-unindexed readers retain the admission map they actually consume.
+Layered checkpoint visibility uses authenticated dictionary, ref-closure and
+transition pages, shared by readers and recovery. Checkpoint pointers require
+explicit format 6 (`CRBCKP06`); retired or missing formats are rejected. No
+release tag contains this layered format; the released v1 protocol is unchanged.
+Footer roots bind the visibility section, retained-object count and ordered
+source-catalog digest. `LayeredVisibilityReader` loads only pages needed for
+requested ref membership; dictionary retention never authorizes visibility.
+Loaded source/member positions are checked against checkpoint-owned sources,
+before newer frontier sources are appended. Explicit bulk materialization
+verifies the complete section hash and canonical encoding against captured roots.
 Footer-only checkpoints have control offset zero when both optional catalog and
 visibility sections are absent. The storage reader accepts that canonical range
 while retaining footer-hash, pointer identity, source and size validation.

@@ -29,6 +29,8 @@ pub use history::{
     HistorySegment, HistorySegmentPointer, HistorySegmentState, MAX_HISTORY_CHAIN_BYTES,
     MAX_HISTORY_CHAIN_SEGMENTS, MAX_HISTORY_SEGMENT_BYTES,
 };
+#[cfg(feature = "storage")]
+pub use layered::LayeredVisibilityReader;
 pub use layered::{
     LayeredCheckpoint, LayeredObjectMember, LayeredVisibilitySnapshot, PackLayer,
     PackMemberDescriptor, PackRange, PackSourceDescriptor, PackSourceKind, source_catalog_digest,
@@ -69,7 +71,7 @@ pub use transaction::{CapsuleRefEdit, CapsuleTransaction};
 pub use transaction_record::{
     CapsuleTransactionRecord, CapsuleTransactionStatus, MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
 };
-pub use visibility::{CapsuleVisibilityDelta, CapsuleVisibilitySnapshot};
+pub use visibility::CapsuleVisibilityDelta;
 #[cfg(feature = "storage")]
 pub use visibility::{CapsuleVisibilityReader, VisibilityChange, VisibilityEditHeader};
 

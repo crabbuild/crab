@@ -1699,7 +1699,7 @@ mod tests {
                 .map_err(|error| invalid(error.to_string()))?,
             lfs_pointer
         );
-        let source_catalog = source_view.pointer_catalog()?;
+        let source_catalog = source_view.pointer_catalog().await?;
         assert!(
             source_catalog
                 .files()

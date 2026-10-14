@@ -837,7 +837,7 @@ impl Prepared {
                 "Capsule view differs from the prepared repository version",
             ));
         }
-        let base_catalog = view.pointer_catalog()?;
+        let base_catalog = view.pointer_catalog().await?;
         let prepared_files = self
             .content
             .as_ref()

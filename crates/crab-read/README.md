@@ -440,3 +440,12 @@ The shared runtime defaults to 128 MiB of decoded-output admission. Compressed
 fetch buffers and cache I/O coexist with that output, so this is not a total RSS
 cap. Explicit caller buffer budgets remain supported. Large-file qualification
 tracks physical memory separately from this admission limit.
+
+## Captured capsule catalogs and visibility
+
+Git views capture footer-rooted checkpoint visibility readers and load requested
+membership pages separately from retained-object presence. Complete visibility
+inspection is an explicit async operation. `CapsuleRepositoryView::pointer_catalog`
+is also async: hydration, publication and maintenance materialize the complete
+catalog from the captured checkpoint when its body was omitted during opening.
+Catalog indexing and bounded historical Xet lookup remain separate work.

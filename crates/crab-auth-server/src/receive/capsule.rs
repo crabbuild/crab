@@ -360,7 +360,7 @@ pub(super) async fn verify_capsule_candidate(
                 if prepared_root != plan.base_root_digest {
                     return Err(conflict("capsule base root differs from prepare record"));
                 }
-                let mut catalog = source_view.pointer_catalog()?;
+                let mut catalog = source_view.pointer_catalog().await?;
                 if let Some(delta) = candidate.pointer_catalog_delta()? {
                     catalog.apply(&delta)?;
                 }
@@ -396,7 +396,7 @@ pub(super) async fn verify_capsule_candidate(
                 }
                 validate_ref_heads(&prepare.view_ref_updates, filtered_view.refs())?;
                 let candidate_delta = candidate.pointer_catalog_delta()?.unwrap_or_default();
-                let mut candidate_catalog = filtered_view.pointer_catalog()?;
+                let mut candidate_catalog = filtered_view.pointer_catalog().await?;
                 candidate_catalog.apply(&candidate_delta)?;
                 let materialized = materialize_capsule_source_push(
                     ctx.router(),
@@ -409,7 +409,7 @@ pub(super) async fn verify_capsule_candidate(
                     MAX_PROTECTED_CAPSULE_BYTES,
                 )
                 .await?;
-                let source_catalog = source_view.pointer_catalog()?;
+                let source_catalog = source_view.pointer_catalog().await?;
                 let delta = source_pointer_delta(
                     &source_catalog,
                     &candidate_catalog,

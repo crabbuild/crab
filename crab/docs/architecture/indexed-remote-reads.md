@@ -1126,3 +1126,48 @@ wire lazy initial reconciliation and explicit bulk materialization. Retained
 but invisible OIDs must stay separate from ref membership. Footer/source/ref
 inventory costs, historical Xet catalog paging, comparison caching, lifecycle
 and provider proof and fuller blame semantics remain incomplete.
+
+
+## Checkpoint visibility pages in progress
+
+The new canonical checkpoint format is 6 (`CRBCKP06`). A local release-tag audit
+checked all 19 tags; none contains the layered checkpoint module. The released
+v1 manifest reader is unchanged. Retired v5 checkpoint pointers are rejected
+explicitly; existing v5 qualification prefixes must not be used for v6 proof.
+No foreground v5 decoder or full-scan codec fallback is added.
+
+The implementation replaces the flat ordinal-body codec with authenticated
+dictionary, ref-closure and transition pages. Footer roots bind the body region,
+retained-object count and source-catalog digest. Normal Git capture loads the
+footer and initial ref headers; reconciliation queries dictionary retention and
+actual ref membership separately. Explicit bulk inspection verifies the entire
+section against those captured roots and its canonical encoding. Source/member
+bounds are checked by both producer and reader against checkpoint sources.
+
+The obsolete flat snapshot type, decoder, builder branch and encoding-ratio test
+are removed. Canonical membership and incremental-history behavior remain in
+the checkpoint tests. Recovery uses the same builder and pointer format.
+
+CLI hydration also consumes Git views, so the shared view's `pointer_catalog`
+API is now asynchronous. It explicitly materializes the captured checkpoint
+when required; Git opening does not fetch that body. Publication, hydration,
+protected receive, replication and maintenance callers await that canonical API.
+Full catalog materialization still exists as the explicit bulk operation;
+normal historical Xet lookups remain a later, incomplete gate.
+
+Current proof: targeted capsule suites pass for metadata (96), read (46), and
+write (22). Metadata includes four lazy-reader tests: a 50k-object lookup within
+128 KiB despite a body over 2 MiB, retained-but-invisible denial, warm zero origin
+reads, full-materialization parity, and corrupted/missing page failure. Shared
+read/write/remote compile checks, the CLI link build, protected-receive all-target
+compile check and 84 payload-only capsule tests pass. Strict owner-crate
+Clippy passes with `--no-deps --all-targets` for metadata/read/write/remote. Format-specific
+fixtures use v6 without changing their epoch/visibility assertions. These are
+focused proofs, not fresh-prefix RustFS or end-to-end v6 qualification.
+
+Before marking this draft ready: finish live scope-wide API consumer proof;
+exercise checkpoint plus later ref edits, corruption, cancellation, physical
+index absence and explicit catalog materialization; run fresh-prefix RustFS
+qualification with frozen native Git fixtures and 20 cold/warm samples. Source
+inventory/ref capture, comparison caches, catalog indexing, lifecycle/provider
+qualification, unified staging and fuller blame remain incomplete.

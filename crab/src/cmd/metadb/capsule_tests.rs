@@ -109,7 +109,7 @@ async fn layered_diagnosis_and_rebuild_verify_nonempty_repository_without_rewrit
         .await
         .unwrap();
     let before = root.record().digest().to_owned();
-    assert_eq!(root.record().root().checkpoint().unwrap().format(), 5);
+    assert_eq!(root.record().root().checkpoint().unwrap().format(), 6);
     let diagnosis = diagnose_capsule(&layout, root.clone(), DbSelector::Both, true, &cancel)
         .await
         .unwrap();

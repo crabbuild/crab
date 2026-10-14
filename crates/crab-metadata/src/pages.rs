@@ -59,6 +59,10 @@ pub(crate) enum Kind {
     RunAdmissionCounts = 13,
     VisibilityRefs = 14,
     VisibilityChanges = 15,
+    CheckpointObjects = 16,
+    CheckpointTransitions = 17,
+    CheckpointRefs = 18,
+    CheckpointSets = 19,
 }
 
 impl Kind {
@@ -68,7 +72,8 @@ impl Kind {
             | Self::Nodes
             | Self::CommitRecords
             | Self::CommitAncestryRoots
-            | Self::RunAdmissionCounts => true,
+            | Self::RunAdmissionCounts
+            | Self::CheckpointTransitions => true,
             #[cfg(feature = "remote-index")]
             Self::PackSlots => true,
             _ => false,
@@ -77,8 +82,15 @@ impl Kind {
 
     pub(crate) fn key_bytes(self) -> usize {
         match self {
-            Self::Names | Self::CommitAncestryNodes | Self::VisibilityRefs => 32,
-            Self::CommitOids | Self::RunAdmission | Self::VisibilityChanges => 20,
+            Self::Names
+            | Self::CommitAncestryNodes
+            | Self::VisibilityRefs
+            | Self::CheckpointRefs => 32,
+            Self::CommitOids
+            | Self::RunAdmission
+            | Self::VisibilityChanges
+            | Self::CheckpointObjects
+            | Self::CheckpointSets => 20,
             #[cfg(feature = "remote-index")]
             Self::PackInventory => 32,
             #[cfg(feature = "remote-index")]
@@ -345,6 +357,7 @@ pub(crate) fn decode(
         Kind::ObjectLocators | Kind::PackOffsets | Kind::PackInventory | Kind::PackSlots => "git_object_index",
         Kind::RunAdmission | Kind::RunAdmissionCounts => "capsule_admission",
         Kind::VisibilityRefs | Kind::VisibilityChanges => "capsule_visibility",
+        Kind::CheckpointObjects | Kind::CheckpointRefs | Kind::CheckpointSets | Kind::CheckpointTransitions => "checkpoint_visibility_pages",
         _ => "path_state",
     },
         decoded_bytes=bytes.len() as u64, "index page decoded");
