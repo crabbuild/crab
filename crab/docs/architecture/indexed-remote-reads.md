@@ -531,3 +531,41 @@ shared debug host, within its frozen relative bound; these timings do not establ
 release/provider performance. Full pack-index reads still scale with repository
 objects, and control opening still scales with history. Source/binary hashes,
 the earlier failure, raw receipts and checked summaries remain external.
+
+## Paged physical object lookup: implementation in progress
+
+The measured 10k cold-resolution query reads an 844,460-byte pack-index range to
+locate its 148-byte commit entry. A new component indexes OID-to-placement,
+pack-offset-to-OID and pack-inventory bindings through authenticated pages. The
+reverse direction is required for offset deltas; paging only OID lookup would
+leave reconstruction with a hidden full-index read. Physical aliases retain all
+source offsets while primary lookup prefers a self-contained encoding. Logical
+facts must agree across aliases; catalog ordinals and ref visibility remain the
+existing owners' contracts.
+
+Graph, path-state and object lookup now share one admitted page-traversal engine.
+The component run passes nine tests, including bounded 10k lookup, duplicate
+positions, corruption, snapshot/inventory binding, warm encoded-work admission,
+input-order canonicalization and a re-signed inconsistent-directory test. Removing
+OID/offset agreement makes that regression fail; source is restored. The first
+negative-control invocation selected zero tests and is not qualification; the
+corrected invocation runs the complete test name and rejects the forged result.
+Shared consumers pass 21 path-state and 27 graph tests, strict metadata Clippy and
+payload-only compilation. The per-ref publication contract permits generation
+zero after a push; the new descriptor now accepts that captured generation.
+Its added regression passes alongside the other eight component tests.
+
+Traversal now admits four concurrent page reads for every consumer; path-state
+previously admitted sixteen and graph lookup already admitted four. Correctness
+tests cover the shared mechanics, but cold/warm latency must be requalified before
+claiming this concurrency change is performance-neutral. Object-page decode
+counts are recorded separately by the existing qualification observer.
+
+This component is not yet wired to foreground lookup or production readiness.
+Publication must construct it from verified complete physical sources, verify
+complete readback, and bind its descriptor to the captured state. Runtime OID and
+physical-offset consumers must use it with operation admission and cancellation;
+GC must trace its descriptor/body from retained readiness roots. Native Git and
+real-store qualifications, build/storage amplification and source API release
+qualification remain mandatory before declaring this slice complete. Outer
+control/inventory/ref opening and stages 5–8 remain open.

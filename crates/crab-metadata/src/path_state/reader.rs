@@ -1,6 +1,5 @@
 //! Lazy lookups bound to an authenticated descriptor; full scans remain maintenance operations.
 use crab_storage::{Store, StoreLayout};
-use futures_util::{StreamExt, TryStreamExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -10,7 +9,7 @@ use super::{
     PathStateDescriptor, PathStateNodeRef, PathStateRecord, PathStateSummary, Result, codec,
     corrupt, corruption, validate_path,
 };
-use crate::pages::{self as paged, Kind, Page, PageRef};
+use crate::pages::{self as paged, Kind, Page, PageRef, PageWork};
 use crate::split_commit_graph::{CommitGraphLayerRef, CommitGraphView, SplitCommitGraph};
 
 #[path = "scan.rs"]
@@ -31,12 +30,6 @@ pub struct PathStateReader {
 struct ChildBatch {
     root: PageRef,
     requests: Vec<(usize, u32)>,
-}
-
-struct Work {
-    maximum: u64,
-    bytes: u64,
-    seen: BTreeSet<(usize, u64)>,
 }
 
 impl PathStateReader {
@@ -96,7 +89,7 @@ impl PathStateReader {
             .await?
             .remove(0)
             .ok_or_else(|| corruption("start commit is absent from graph"))?;
-        let mut work = Work {
+        let mut work = PageWork {
             maximum: self.max_bytes,
             bytes: self.descriptor_bytes,
             seen: BTreeSet::new(),
@@ -138,7 +131,17 @@ impl PathStateReader {
                     .map(|(_, name, _)| blake3::hash(name).as_bytes().to_vec())
                     .collect::<Vec<_>>();
                 let values = self
-                    .lookup(store, layer, names, Kind::Names, &keys, &mut work)
+                    .cache
+                    .lookup(
+                        store,
+                        &self.paths[layer],
+                        layer,
+                        self.descriptor.layers[layer].bytes,
+                        names,
+                        Kind::Names,
+                        &keys,
+                        &mut work,
+                    )
                     .await?;
                 for ((position, component, root), (key, value)) in
                     requests.into_iter().zip(keys.into_iter().zip(values))
@@ -170,7 +173,17 @@ impl PathStateReader {
                     .map(|(_, ordinal)| ordinal.to_be_bytes().to_vec())
                     .collect::<Vec<_>>();
                 let values = self
-                    .lookup(store, layer, &batch.root, Kind::Children, &keys, &mut work)
+                    .cache
+                    .lookup(
+                        store,
+                        &self.paths[layer],
+                        layer,
+                        self.descriptor.layers[layer].bytes,
+                        &batch.root,
+                        Kind::Children,
+                        &keys,
+                        &mut work,
+                    )
                     .await?;
                 for ((position, _), value) in batch.requests.into_iter().zip(values) {
                     let value = value.ok_or_else(|| corruption("visible child is absent"))?;
@@ -211,7 +224,7 @@ impl PathStateReader {
         store: &Store,
         graph: CommitGraphView<'_>,
         ordinals: &[u32],
-        work: &mut Work,
+        work: &mut PageWork,
     ) -> Result<Vec<PathStateRecord>> {
         let mut grouped = BTreeMap::<usize, Vec<(usize, u32)>>::new();
         for (position, &ordinal) in ordinals.iter().enumerate() {
@@ -236,9 +249,12 @@ impl PathStateReader {
                 .map(|(_, ordinal)| (ordinal - reference.base_ordinal).to_be_bytes().to_vec())
                 .collect::<Vec<_>>();
             let values = self
+                .cache
                 .lookup(
                     store,
+                    &self.paths[layer],
                     layer,
+                    self.descriptor.layers[layer].bytes,
                     &reference.pages.records,
                     Kind::Records,
                     &keys,
@@ -274,7 +290,7 @@ impl PathStateReader {
         store: &Store,
         nodes: &[PathStateNodeRef],
         positions: &[usize],
-        work: &mut Work,
+        work: &mut PageWork,
     ) -> Result<Vec<(Option<u32>, Option<PageRef>)>> {
         let mut grouped = BTreeMap::<usize, Vec<(usize, PathStateNodeRef)>>::new();
         for (output, &position) in positions.iter().enumerate() {
@@ -293,9 +309,12 @@ impl PathStateReader {
                 .map(|(_, node)| node.index.to_be_bytes().to_vec())
                 .collect::<Vec<_>>();
             let values = self
+                .cache
                 .lookup(
                     store,
+                    &self.paths[layer],
                     layer,
+                    self.descriptor.layers[layer].bytes,
                     &reference.pages.nodes,
                     Kind::Nodes,
                     &keys,
@@ -337,82 +356,6 @@ impl PathStateReader {
             })
         {
             return corrupt("node reference is out of bounds or cyclic");
-        }
-        Ok(())
-    }
-
-    async fn lookup(
-        &self,
-        store: &Store,
-        layer: usize,
-        root: &PageRef,
-        kind: Kind,
-        keys: &[Vec<u8>],
-        work: &mut Work,
-    ) -> Result<Vec<Option<Vec<u8>>>> {
-        if keys.iter().any(|key| key.len() != kind.key_bytes()) {
-            return corrupt("invalid lookup key");
-        }
-        let mut pending = vec![(root.clone(), (0..keys.len()).collect::<Vec<_>>())];
-        let mut results = vec![None; keys.len()];
-        while !pending.is_empty() {
-            let wave = std::mem::take(&mut pending);
-            for (reference, _) in &wave {
-                self.charge(layer, reference, kind, work)?;
-            }
-            let pages = futures_util::stream::iter(wave.into_iter().map(
-                |(reference, positions)| async move {
-                    let page = self.page(store, layer, &reference, kind).await?;
-                    Ok::<_, crate::error::MetadataError>((page, positions))
-                },
-            ))
-            .buffer_unordered(16)
-            .try_collect::<Vec<_>>()
-            .await?;
-            for (page, positions) in pages {
-                match page.as_ref() {
-                    Page::Leaf(rows) => {
-                        for position in positions {
-                            if let Ok(index) =
-                                rows.binary_search_by(|row| row.0.cmp(&keys[position]))
-                            {
-                                results[position] = Some(rows[index].1.clone());
-                            }
-                        }
-                    }
-                    Page::Branch(children) => {
-                        let mut batches = BTreeMap::<usize, Vec<usize>>::new();
-                        for position in positions {
-                            let key = &keys[position];
-                            let index = children.partition_point(|child| child.last < *key);
-                            if children.get(index).is_some_and(|child| child.first <= *key) {
-                                batches.entry(index).or_default().push(position);
-                            }
-                        }
-                        pending.extend(
-                            batches
-                                .into_iter()
-                                .map(|(index, positions)| (children[index].clone(), positions)),
-                        );
-                    }
-                }
-            }
-        }
-        Ok(results)
-    }
-
-    fn charge(&self, layer: usize, reference: &PageRef, kind: Kind, work: &mut Work) -> Result<()> {
-        let source_bytes = self.descriptor.layers[layer].bytes;
-        reference.validate(kind, source_bytes)?;
-        let key = (layer, reference.offset);
-        if work.seen.insert(key) {
-            work.bytes = work
-                .bytes
-                .checked_add(u64::from(reference.bytes))
-                .ok_or_else(|| corruption("query byte count overflows"))?;
-            if work.bytes > work.maximum {
-                return corrupt("path-state query exceeds its byte limit");
-            }
         }
         Ok(())
     }
