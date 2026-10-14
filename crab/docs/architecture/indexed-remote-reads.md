@@ -1269,10 +1269,23 @@ contract tests pass, including caller/shutdown/deadline cancellation of graph
 and path pages. Strict Clippy passes for both changed owner crates with
 `--all-targets --no-deps -D warnings` and the publication feature.
 
-The dedicated RustFS comparison run uses cache-enabled and disabled queries at
+The dedicated RustFS comparison run passes cache-enabled and disabled queries at
 100, 1,000 and 10,000 commits, with 20 process samples per cell and native Git
-line-origin checks on ten successive snapshots. At 100 commits, all 20 paired
-samples pass; cold comparison misses fall from 192 to 21 with 171 hits. The
-larger cells remain running, so the complete acceptance gate and latency
-conclusions remain pending. External receipts live in
-`blame-comparison-live-r2`; hosted S3 latency qualification is still outstanding.
+line-origin checks on ten successive snapshots. All 120 processes pass 60,040
+native line-origin comparisons. Cold comparison misses fall from 192 to 21 at
+100 commits and from 191 to 20 at both larger sizes, with 171 hits per query.
+Warm queries read zero origin bytes and all measured backend work drains.
+
+Cold query p50/p95 milliseconds, disabled versus enabled:
+
+| Commits | Disabled | Enabled |
+| --- | --- | --- |
+| 100 | 693.9 / 1130.4 | 578.0 / 748.4 |
+| 1,000 | 2953.3 / 4075.9 | 2925.3 / 4214.2 |
+| 10,000 | 2418.9 / 2922.5 | 2235.7 / 2665.1 |
+
+These debug processes share RustFS with the large-file qualification. The
+deterministic work reduction is established; the mixed latency results do not
+establish a production latency target. External receipts, binary fingerprint
+and source hashes live in `blame-comparison-live-r2`. Hosted S3 latency
+qualification remains outstanding.
