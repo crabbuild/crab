@@ -1344,6 +1344,19 @@ Makefile installation is building for fresh-prefix RustFS qualification; the
 older installed binary remains pinned to the active 10 GiB run. No full stage-6
 or live page-catalog feature claim yet.
 
+The Make-generated full-feature artifact now passes the separate
+`pointer-pages-live-fuse-r1` RustFS qualification: 96 commands and 71 checks.
+Both native add/push and Git-clean/helper push pass initial publication,
+fresh-cache checkpoint clone/hydration, alternate-path edits after checkpointing,
+a second checkpoint, exact edited/duplicate hashes and deep remote integrity.
+The captured checkpoint bodies contain `CRBPCP01`. The test pins the artifact
+SHA-256 `10fa04219b2099cc1940f39225500c8e27c7c52b62e424c936c8df77278504b1`
+and verifies unchanged Rust/manifest fingerprints. Its version metadata names
+the dirty build's base `0ac1c27d4c8`; this is not a clean-head release receipt.
+The final installed no-FUSE binary is still building and needs separate proof.
+This establishes the new format's live integration for these workflows; full
+catalog scans, run aggregation and the remaining stage-6 gates remain unfinished.
+
 Run aggregation must retain capsule membership, not just merge every physical
 catalog into one map. `assemble_layered_control_view` trims each ref's run history
 after its compacted transaction, deduplicates root transactions and applies only
