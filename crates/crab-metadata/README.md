@@ -191,9 +191,15 @@ suffix. Detached large visibility/catalog sections retain their separate bounded
 reads. The unshipped `CRBRUN04`/`CRBRUN05`/`CRBRUN06`/`CRBRUN07` formats are
 rejected, not read through a compatibility path; readers and writers must cut
 over together.
-The version reset retains the latest run layout, including 500-capsule rollups,
-pooled indexes and exact admission. Repositories containing retired runs must
-be republished into a fresh repository prefix; no automatic migration is provided.
+Run footer and admission version 2 replace their unshipped version-1 shapes.
+Exact admission uses authenticated OID-to-member pages and dense per-member
+count pages. Their roots are committed by the footer; complete readers verify
+both directories and canonical body bytes before exposing admission. Page kind
+codes are explicit, so payload-only and storage-enabled producers share one wire
+format. The layout retains 500-capsule rollups and pooled indexes. Repositories
+containing retired runs must be republished into a fresh repository prefix;
+no automatic migration is provided. Control-suffix reads currently still load the
+complete admission; lazy admission/visibility opening remains unfinished.
 
 Payload modules cover manifests, segmented lists, pack metadata, commit-graph
 summaries, ref registries, chunk/file indexes, receipts, transactions, and

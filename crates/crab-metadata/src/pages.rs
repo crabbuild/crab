@@ -7,14 +7,12 @@ mod cache;
 pub(crate) use cache::{PageCache, PageWork};
 
 use crate::error::{MetadataError, Result};
-#[cfg(any(feature = "storage", test))]
 use crate::validation::corrupt_object;
 
 fn corruption(reason: &str) -> MetadataError {
     crate::validation::corrupt_object("metadata page", reason)
 }
 
-#[cfg(any(feature = "storage", test))]
 fn corrupt_at<T>(path: &str, reason: &str) -> Result<T> {
     Err(corrupt_object(path, reason))
 }
@@ -41,28 +39,34 @@ pub struct PageRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum Kind {
-    Records,
-    Nodes,
-    Children,
-    Names,
-    CommitRecords,
-    CommitOids,
-    CommitAncestryRoots,
-    CommitAncestryNodes,
+    Records = 0,
+    Nodes = 1,
+    Children = 2,
+    Names = 3,
+    CommitRecords = 4,
+    CommitOids = 5,
+    CommitAncestryRoots = 6,
+    CommitAncestryNodes = 7,
     #[cfg(feature = "remote-index")]
-    ObjectLocators,
+    ObjectLocators = 8,
     #[cfg(feature = "remote-index")]
-    PackOffsets,
+    PackOffsets = 9,
     #[cfg(feature = "remote-index")]
-    PackInventory,
+    PackInventory = 10,
     #[cfg(feature = "remote-index")]
-    PackSlots,
+    PackSlots = 11,
+    RunAdmission = 12,
+    RunAdmissionCounts = 13,
 }
 
 impl Kind {
     fn is_positional(self) -> bool {
         match self {
-            Self::Records | Self::Nodes | Self::CommitRecords | Self::CommitAncestryRoots => true,
+            Self::Records
+            | Self::Nodes
+            | Self::CommitRecords
+            | Self::CommitAncestryRoots
+            | Self::RunAdmissionCounts => true,
             #[cfg(feature = "remote-index")]
             Self::PackSlots => true,
             _ => false,
@@ -72,7 +76,7 @@ impl Kind {
     pub(crate) fn key_bytes(self) -> usize {
         match self {
             Self::Names | Self::CommitAncestryNodes => 32,
-            Self::CommitOids => 20,
+            Self::CommitOids | Self::RunAdmission => 20,
             #[cfg(feature = "remote-index")]
             Self::PackInventory => 32,
             #[cfg(feature = "remote-index")]
@@ -85,7 +89,6 @@ impl Kind {
 }
 
 pub(crate) type Rows = Vec<(Vec<u8>, Vec<u8>)>;
-#[cfg(any(feature = "storage", test))]
 #[derive(Debug)]
 pub(crate) enum Page {
     Leaf(Rows),
@@ -250,7 +253,6 @@ fn header(kind: Kind, height: u8, count: u32) -> Vec<u8> {
     bytes
 }
 
-#[cfg(any(feature = "storage", test))]
 pub(crate) fn decode(
     bytes: &[u8],
     reference: &PageRef,
@@ -339,13 +341,13 @@ pub(crate) fn decode(
         Kind::CommitRecords | Kind::CommitOids | Kind::CommitAncestryRoots | Kind::CommitAncestryNodes => "commit_graph",
         #[cfg(feature = "remote-index")]
         Kind::ObjectLocators | Kind::PackOffsets | Kind::PackInventory | Kind::PackSlots => "git_object_index",
+        Kind::RunAdmission | Kind::RunAdmissionCounts => "capsule_admission",
         _ => "path_state",
     },
         decoded_bytes=bytes.len() as u64, "index page decoded");
     Ok(page)
 }
 
-#[cfg(any(feature = "storage", test))]
 pub(crate) fn scan(
     source: &[u8],
     root: &PageRef,
@@ -374,7 +376,6 @@ pub(crate) fn scan(
     Ok(rows)
 }
 
-#[cfg(any(feature = "storage", test))]
 pub(crate) fn page_bytes<'a>(
     source: &'a [u8],
     reference: &PageRef,
@@ -431,7 +432,6 @@ pub(crate) fn encode_ref(bytes: &mut Vec<u8>, reference: &PageRef) {
     bytes.extend_from_slice(&reference.last);
 }
 
-#[cfg(any(feature = "storage", test))]
 pub(crate) fn decode_ref(input: &mut Input<'_, '_>, kind: Kind) -> Result<PageRef> {
     Ok(PageRef {
         offset: u64::from_le_bytes(input.array()?),
@@ -453,12 +453,10 @@ pub(crate) fn put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(feature = "storage", test))]
 pub(crate) struct Input<'a, 'p> {
     bytes: &'a [u8],
     path: &'p str,
 }
-#[cfg(any(feature = "storage", test))]
 impl<'a, 'p> Input<'a, 'p> {
     pub(crate) fn new(bytes: &'a [u8], path: &'p str) -> Self {
         Self { bytes, path }
@@ -490,7 +488,7 @@ impl<'a, 'p> Input<'a, 'p> {
     }
 }
 
-#[cfg(any(feature = "storage", test))]
+#[cfg(feature = "storage")]
 impl Page {
     pub(crate) fn resident_bytes(&self) -> usize {
         match self {
