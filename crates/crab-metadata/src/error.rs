@@ -32,6 +32,12 @@ pub enum MetadataError {
         #[source]
         source: serde_json::Error,
     },
+    /// A pointer catalog page descriptor could not be encoded or decoded.
+    #[error("pointer catalog record encoding is invalid")]
+    PointerCatalogRecord {
+        #[source]
+        source: serde_json::Error,
+    },
     /// A file lookup could not acquire process-wide execution capacity.
     #[cfg(feature = "file-index-reader")]
     #[error("file lookup admission closed")]

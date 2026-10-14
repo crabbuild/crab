@@ -54,6 +54,14 @@ remain in canonical external xorbs and shards. The primary surfaces are
 `crates/crab-metadata/src/capsule_protocol/`,
 `crab/src/git/capsule_push.rs`, and the shared file-index lookup.
 
+Catalog sections now use the development `CRBPCP01` paged encoding rather than
+one JSON map. File/shard/xorb directories, reverse chunk placements and nested
+dependency lists are authenticated independently. Complete readers still
+materialize these sections; foreground batched lookup, checkpoint/run descriptor
+capture and bounded delta compaction remain the next implementation slices.
+No released tag in the 19-tag audit contains the retired catalog codec, so this
+development format rejects it without a compatibility reader.
+
 ## 2. Goals
 
 The implementation MUST:
