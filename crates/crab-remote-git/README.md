@@ -247,3 +247,10 @@ commits. Blame preserves line comparison and deletion boundaries while jumping
 between relevant versions. Root-path and all-parent history retain their existing
 raw traversal; index absence retains the ordinary Git read path. Missing or
 corrupt advertised pages are errors, not a reason to switch traversal.
+
+Snapshot constructors treat supplied graph readiness as required metadata: a
+missing, corrupt or retired advertised graph fails opening. Index absence still
+permits ordinary raw reads. The manifest-based `open` retains its release-tagged
+optional-graph policy; cancellation and admission failures are never suppressed.
+Operation finalization normalizes wrapped cancellation only when its own scope
+was interrupted, preserving real failures and typed locator-close errors.
