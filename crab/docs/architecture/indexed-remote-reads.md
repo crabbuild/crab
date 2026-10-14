@@ -1250,6 +1250,26 @@ add and Git clean. It checks pointer staging, incremental upload, fresh-cache
 historical hydration and integrity after removing source authority. Results are
 pending; earlier v5 or small-file receipts do not qualify this run.
 
+The four publications in `large-v6-live-r1` have now passed. These are single
+release-binary observations sharing RustFS with other qualification/build work,
+not 20-sample performance cells:
+
+| Version / add path | Add seconds | Push seconds | New xorb bytes |
+| --- | --- | --- | --- |
+| 0 / native | 460.4 | 359.7 | 10,744,916,848 |
+| 1 / Git clean | 808.4 | 6.7 | 2,216,724 |
+| 2 / native | 156.9 | 6.7 | 2,133,870 |
+| 3 / Git clean | 498.5 | 8.9 | 2,215,428 |
+
+After version 1 staging, segments retain 10,739,857,220 bytes alongside
+10,744,916,848 bytes in prepared push plans. This reproduces the duplicate local
+payload problem when switching staging paths; efficient incremental remote
+uploads do not establish unified local staging. Source authority and source
+cache have been removed. Version 0 cold hydration of both 10 GiB files completes
+in 604.4 seconds and both SHA-256 checks pass. Versions 1–3 cold reconstruction
+and final deep remote integrity remain running. These receipts qualify the
+frozen v6 binary, not the new paged pointer-catalog encoding.
+
 
 ### Blame comparison cache
 
