@@ -243,3 +243,12 @@ duplicates. Each verified index probes the smaller side, avoiding a complete
 request-set scan per small frontier member or an index scan per point read.
 Self-contained matches remain preferred over external deltas. This bounds CPU
 lookup work; it does not change source-range admission or reduce origin requests.
+
+Point and batch delta reconstruction share one bounded materializer. Point
+reads gather the dependency chain through the existing packed-entry flights,
+then apply the deltas in one tracked CPU task. Already charged entry inflation
+is not charged again; reconstructed results consume the remaining aggregate
+inflated-byte budget before allocation. Batch reads retain their coalesced
+compressed-entry acquisition. Non-delta point reads return directly after the
+packed flight verifies them. Both paths verify reconstructed OIDs, retain
+verified dependencies, and enforce delta depth and cancellation.

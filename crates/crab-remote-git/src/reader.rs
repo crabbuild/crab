@@ -132,12 +132,6 @@ struct CoalescedRange {
     entries: Vec<CoalescedRangeEntry>,
 }
 
-struct DeltaReadState {
-    max_object_bytes: u64,
-    remaining_depth: usize,
-    ancestors: HashSet<gix_hash::ObjectId>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RemoteGitObjectMetadata {
     /// Object ID whose packed entry was inspected.
@@ -701,11 +695,7 @@ impl RemoteGitReader {
                 session,
                 requested,
                 locator,
-                DeltaReadState {
-                    max_object_bytes: self.limits.max_object_bytes,
-                    remaining_depth: self.limits.max_delta_depth,
-                    ancestors: HashSet::new(),
-                },
+                self.limits.max_object_bytes,
                 budget,
                 cancellation,
             )
@@ -830,14 +820,9 @@ impl RemoteGitReader {
             session,
             requested,
             locator,
-            DeltaReadState {
-                max_object_bytes: self
-                    .limits
-                    .max_object_bytes
-                    .max(crab_git::MAX_LFS_POINTER_SIZE as u64),
-                remaining_depth: self.limits.max_delta_depth,
-                ancestors: HashSet::new(),
-            },
+            self.limits
+                .max_object_bytes
+                .max(crab_git::MAX_LFS_POINTER_SIZE as u64),
             budget,
             cancellation,
         )
@@ -1614,12 +1599,26 @@ impl RemoteGitReader {
             }
         }
 
-        let mut resolver = PackedEntryResolver::new(
-            entries,
+        let resolver = PackedEntryResolver::new(
+            entries
+                .into_iter()
+                .map(|(oid, entry)| (oid, MaterializationEntry::Compressed(entry)))
+                .collect(),
             self.limits.max_object_bytes,
             self.limits.max_inflated_entry_bytes,
             self.limits.max_delta_depth,
         );
+        self.resolve_materialization(resolver, requested, budget, cancellation)
+            .await
+    }
+
+    async fn resolve_materialization(
+        self: &Arc<Self>,
+        mut resolver: PackedEntryResolver,
+        requested: &[gix_hash::ObjectId],
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<GitObject>> {
         let mut objects = Vec::with_capacity(requested.len());
         for requested_chunk in requested.chunks(MATERIALIZE_CHUNK_SIZE) {
             check_cancelled(cancellation)?;
@@ -1627,13 +1626,15 @@ impl RemoteGitReader {
             let token = cancellation.clone();
             let max_inflated = budget.remaining(BudgetDimension::InflatedBytes).await;
             let decode_permit = self.runtime.decode_permit(cancellation).await?;
-            let (next_resolver, result) = tokio::task::spawn_blocking(move || {
-                let mut resolver = resolver;
-                let result = resolver.resolve_many(&requested_chunk, max_inflated, &token);
-                (resolver, result)
-            })
-            .await
-            .map_err(|source| Error::DecodeTask { source })?;
+            let (next_resolver, result) = self
+                .runtime
+                .spawn_blocking(move || {
+                    let mut resolver = resolver;
+                    let result = resolver.resolve_many(&requested_chunk, max_inflated, &token);
+                    (resolver, result)
+                })
+                .await
+                .map_err(|source| Error::DecodeTask { source })?;
             drop(decode_permit);
             resolver = next_resolver;
             let (mut chunk_objects, inflated_bytes) = result?;
@@ -1642,8 +1643,8 @@ impl RemoteGitReader {
                 .await?;
             objects.append(&mut chunk_objects);
         }
-        // Retain verified dependencies as well as requested objects. Later
-        // batches often use an earlier delta base, just like the single reader.
+        // Retain verified dependencies as well as requested objects so later
+        // point reads and batches can reuse an earlier delta base.
         for object in resolver.objects.values() {
             let key =
                 crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, object.oid);
@@ -1658,138 +1659,93 @@ impl RemoteGitReader {
         self: &Arc<Self>,
         session: &GitObjectLocatorSession,
         requested: gix_hash::ObjectId,
-        locator: GitObjectLocator,
-        mut delta: DeltaReadState,
+        mut locator: GitObjectLocator,
+        max_object_bytes: u64,
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<GitObject> {
-        if !delta.ancestors.insert(requested) {
-            return Err(Error::Corrupt {
-                stage: CorruptionStage::Delta,
-            });
-        }
-        let packed = self
-            .read_packed_entry(
-                requested,
-                locator,
-                delta.max_object_bytes,
-                budget,
-                cancellation,
-            )
-            .await?;
-        self.resolve_packed_entry(
-            session,
-            requested,
-            locator,
-            packed,
-            delta,
-            budget,
-            cancellation,
-        )
-        .await
-    }
-
-    async fn resolve_packed_entry(
-        self: &Arc<Self>,
-        session: &GitObjectLocatorSession,
-        requested: gix_hash::ObjectId,
-        locator: GitObjectLocator,
-        packed: PackedEntry,
-        delta: DeltaReadState,
-        budget: &OperationBudget,
-        cancellation: &CancellationToken,
-    ) -> Result<GitObject> {
-        let max_object_bytes = delta.max_object_bytes;
-        if let Some(kind) = packed.header.as_kind() {
-            verify_object(requested, kind, &packed.inflated)?;
-            return Ok(GitObject {
-                oid: requested,
-                kind,
-                data: packed.inflated,
-            });
-        }
-        if delta.remaining_depth == 0 {
-            return Err(Error::LimitExceeded {
-                limit: "delta depth",
-                actual: 1,
-                maximum: 0,
-            });
-        }
-        let base_oid = match packed.header {
-            Header::RefDelta { base_id } => base_id,
-            Header::OfsDelta { base_distance } => {
-                let base_offset =
-                    Header::verified_base_pack_offset(locator.location.pack_offset, base_distance)
-                        .ok_or(Error::Corrupt {
-                            stage: CorruptionStage::Delta,
-                        })?;
-                self.oid_at_pack_offset(locator.pack_id, base_offset, budget, cancellation)
-                    .await?
-            }
-            Header::Commit | Header::Tree | Header::Blob | Header::Tag => {
-                return Err(Error::InternalInvariant {
-                    invariant: "base pack entry reached delta resolution",
+        let mut entries = HashMap::new();
+        let mut cached = HashMap::new();
+        let mut current = requested;
+        let mut depth = 0usize;
+        loop {
+            check_cancelled(cancellation)?;
+            if entries.contains_key(&current) {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::Delta,
                 });
             }
-        };
-        if base_oid == requested {
-            return Err(Error::Corrupt {
-                stage: CorruptionStage::Delta,
-            });
+            // Packed flights retain CRC checks and per-waiter byte admission.
+            // Their inflation is already charged; materialization charges only new results.
+            let packed = self
+                .read_packed_entry(current, locator, max_object_bytes, budget, cancellation)
+                .await?;
+            // A non-delta entry was fully verified by the packed flight. Keep
+            // that fast path free of a second blocking task.
+            if entries.is_empty()
+                && let Some(kind) = packed.header.as_kind()
+            {
+                return Ok(GitObject {
+                    oid: requested,
+                    kind,
+                    data: packed.inflated,
+                });
+            }
+            let base_oid = match packed.header {
+                Header::RefDelta { base_id } => Some(base_id),
+                Header::OfsDelta { base_distance } => {
+                    let offset = Header::verified_base_pack_offset(
+                        locator.location.pack_offset,
+                        base_distance,
+                    )
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::Delta,
+                    })?;
+                    Some(
+                        self.oid_at_pack_offset(locator.pack_id, offset, budget, cancellation)
+                            .await?,
+                    )
+                }
+                Header::Commit | Header::Tree | Header::Blob | Header::Tag => None,
+            };
+            if base_oid.is_some() && depth >= self.limits.max_delta_depth {
+                return Err(Error::LimitExceeded {
+                    limit: "delta depth",
+                    actual: depth.saturating_add(1) as u64,
+                    maximum: self.limits.max_delta_depth as u64,
+                });
+            }
+            entries.insert(current, MaterializationEntry::Inflated { packed, base_oid });
+            let Some(base_oid) = base_oid else { break };
+            if entries.contains_key(&base_oid) {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::Delta,
+                });
+            }
+            let key =
+                crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, base_oid);
+            if let Some(object) = self.verified_cached_object(&key, max_object_bytes).await? {
+                cached.insert(base_oid, object.as_ref().clone());
+                break;
+            }
+            current = base_oid;
+            depth = depth.saturating_add(1);
+            locator = self.locate(session, current, budget, cancellation).await?;
         }
-        let base_key =
-            crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, base_oid);
-        let base = if let Some(base) = self
-            .verified_cached_object(&base_key, max_object_bytes)
+        let mut resolver = PackedEntryResolver::new(
+            entries,
+            max_object_bytes,
+            self.limits.max_inflated_entry_bytes,
+            self.limits.max_delta_depth,
+        );
+        resolver.objects = cached;
+        self.resolve_materialization(resolver, &[requested], budget, cancellation)
             .await?
-        {
-            base
-        } else {
-            let base_locator = self.locate(session, base_oid, budget, cancellation).await?;
-            let base = Box::pin(self.read_from_locator(
-                session,
-                base_oid,
-                base_locator,
-                DeltaReadState {
-                    remaining_depth: delta.remaining_depth - 1,
-                    ..delta
-                },
-                budget,
-                cancellation,
-            ))
-            .await?;
-            self.runtime
-                .insert_object(base_key, Arc::new(base.clone()))
-                .await;
-            Arc::new(base)
-        };
-        let maximum = usize_limit(max_object_bytes, "decoded object bytes")?;
-        let token = cancellation.clone();
-        let instructions = packed.inflated;
-        let base_data = base.data.clone();
-        let result_size = delta::parse(&instructions, maximum)
-            .map_err(|error| map_delta_error(error, requested))?
-            .result_size;
-        budget
-            .charge(BudgetDimension::InflatedBytes, result_size as u64)
-            .await?;
-        let decode_permit = self.runtime.decode_permit(cancellation).await?;
-        let data = self
-            .runtime
-            .spawn_blocking(move || {
-                let parsed = delta::parse(&instructions, maximum)?;
-                delta::apply(&base_data, parsed, || token.is_cancelled())
+            .into_iter()
+            .next()
+            .ok_or(Error::InternalInvariant {
+                invariant: "single materialization returned no object",
             })
-            .await
-            .map_err(|source| Error::DecodeTask { source })?
-            .map_err(|error| map_delta_error(error, requested))?;
-        drop(decode_permit);
-        verify_object(requested, base.kind, &data)?;
-        Ok(GitObject {
-            oid: requested,
-            kind: base.kind,
-            data: Bytes::from(data),
-        })
     }
 
     async fn read_coalesced_range(
@@ -3368,8 +3324,17 @@ fn collect_missing_delta_bases(
     )
 }
 
+#[derive(Clone)]
+enum MaterializationEntry {
+    Compressed(RemoteGitPackedEntry),
+    Inflated {
+        packed: PackedEntry,
+        base_oid: Option<gix_hash::ObjectId>,
+    },
+}
+
 struct PackedEntryResolver {
-    entries: HashMap<gix_hash::ObjectId, RemoteGitPackedEntry>,
+    entries: HashMap<gix_hash::ObjectId, MaterializationEntry>,
     objects: HashMap<gix_hash::ObjectId, GitObject>,
     resolving: HashSet<gix_hash::ObjectId>,
     max_object_bytes: u64,
@@ -3379,7 +3344,7 @@ struct PackedEntryResolver {
 
 impl PackedEntryResolver {
     fn new(
-        entries: HashMap<gix_hash::ObjectId, RemoteGitPackedEntry>,
+        entries: HashMap<gix_hash::ObjectId, MaterializationEntry>,
         max_object_bytes: u64,
         max_inflated_entry_bytes: u64,
         max_delta_depth: usize,
@@ -3440,16 +3405,25 @@ impl PackedEntryResolver {
             .get(&oid)
             .cloned()
             .ok_or(Error::ObjectNotFound { oid })?;
-        let entry_bytes = entry.decompressed_size;
-        ensure_inflated_budget(inflated_bytes, entry_bytes, max_inflated_bytes)?;
-        let packed = inflate_entry(
-            oid,
-            entry.pack_offset,
-            entry.bytes,
-            self.max_inflated_entry_bytes,
-            self.max_object_bytes,
-            cancellation,
-        )?;
+        let (packed, base_oid, entry_bytes) = match entry {
+            MaterializationEntry::Compressed(entry) => {
+                ensure_inflated_budget(
+                    inflated_bytes,
+                    entry.decompressed_size,
+                    max_inflated_bytes,
+                )?;
+                let packed = inflate_entry(
+                    oid,
+                    entry.pack_offset,
+                    entry.bytes,
+                    self.max_inflated_entry_bytes,
+                    self.max_object_bytes,
+                    cancellation,
+                )?;
+                (packed, entry.base_oid, entry.decompressed_size)
+            }
+            MaterializationEntry::Inflated { packed, base_oid } => (packed, base_oid, 0),
+        };
         let mut added_bytes = entry_bytes;
         let object = if let Some(kind) = packed.header.as_kind() {
             verify_object(oid, kind, &packed.inflated)?;
@@ -3466,7 +3440,7 @@ impl PackedEntryResolver {
                     maximum: self.max_delta_depth as u64,
                 });
             }
-            let base_oid = entry.base_oid.ok_or(Error::Corrupt {
+            let base_oid = base_oid.ok_or(Error::Corrupt {
                 stage: CorruptionStage::Delta,
             })?;
             let (base, base_bytes) = self.resolve(
@@ -3561,6 +3535,7 @@ fn order_completed_objects(
     Ok(ordered)
 }
 
+#[derive(Clone)]
 pub(crate) struct PackedEntry {
     pub(crate) header: Header,
     pub(crate) inflated: Bytes,
@@ -4101,6 +4076,171 @@ mod tests {
     use object_store::memory::InMemory;
 
     use super::*;
+
+    fn materialization_chain(compressed: bool) -> (PackedEntryResolver, [gix_hash::ObjectId; 3]) {
+        use std::io::Write as _;
+
+        let contents: [&[u8]; 3] = [b"hello", b"hello!", b"hello!!"];
+        let oids = contents.map(|data| {
+            gix_object::compute_hash(gix_hash::Kind::Sha1, gix_object::Kind::Blob, data)
+                .expect("fixture hash")
+        });
+        let programs: [&[u8]; 3] = [
+            b"hello",
+            &[5, 6, 0x90, 5, 1, b'!'],
+            &[6, 7, 0x90, 6, 1, b'!'],
+        ];
+        let entries = (0usize..3)
+            .map(|index| {
+                let base_oid = index.checked_sub(1).map(|base| oids[base]);
+                let header = base_oid.map_or(Header::Blob, |base_id| Header::RefDelta { base_id });
+                let data = programs[index];
+                let entry = if compressed {
+                    let mut bytes = Vec::new();
+                    header
+                        .write_to(data.len() as u64, &mut bytes)
+                        .expect("header");
+                    let mut encoder =
+                        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                    encoder.write_all(data).expect("zlib input");
+                    bytes.extend(encoder.finish().expect("zlib output"));
+                    MaterializationEntry::Compressed(RemoteGitPackedEntry {
+                        oid: oids[index],
+                        header,
+                        header_size: header.size(data.len() as u64),
+                        pack_offset: 12,
+                        decompressed_size: data.len() as u64,
+                        base_oid,
+                        bytes: Bytes::from(bytes),
+                    })
+                } else {
+                    MaterializationEntry::Inflated {
+                        packed: PackedEntry {
+                            header,
+                            inflated: Bytes::copy_from_slice(data),
+                        },
+                        base_oid,
+                    }
+                };
+                (oids[index], entry)
+            })
+            .collect();
+        (PackedEntryResolver::new(entries, 64, 64, 2), oids)
+    }
+
+    #[test]
+    fn materialization_charges_each_allocation_once_and_reuses_cached_bases() {
+        for compressed in [false, true] {
+            for cached_base in [false, true] {
+                let (mut resolver, oids) = materialization_chain(compressed);
+                if cached_base {
+                    resolver.objects.insert(
+                        oids[0],
+                        GitObject {
+                            oid: oids[0],
+                            kind: gix_object::Kind::Blob,
+                            data: Bytes::from_static(b"hello"),
+                        },
+                    );
+                }
+                let maximum = 13
+                    + if compressed {
+                        if cached_base { 12 } else { 17 }
+                    } else {
+                        0
+                    };
+                let (objects, charged) = resolver
+                    .resolve_many(
+                        &[oids[2], oids[1], oids[2]],
+                        maximum,
+                        &CancellationToken::new(),
+                    )
+                    .expect("exact allocation budget");
+                assert_eq!(
+                    (
+                        objects
+                            .iter()
+                            .map(|object| object.data.as_ref())
+                            .collect::<Vec<_>>(),
+                        charged
+                    ),
+                    (
+                        vec![
+                            b"hello!!".as_slice(),
+                            b"hello!".as_slice(),
+                            b"hello!!".as_slice()
+                        ],
+                        maximum
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn materialization_rejects_result_allocation_before_exceeding_budget() {
+        for compressed in [false, true] {
+            let (mut resolver, oids) = materialization_chain(compressed);
+            let maximum = if compressed { 29 } else { 12 };
+            let error = resolver
+                .resolve_many(&[oids[2]], maximum, &CancellationToken::new())
+                .expect_err("one byte below chain allocation");
+            assert!(matches!(
+                error,
+                Error::LimitExceeded {
+                    limit: "inflated bytes",
+                    actual,
+                    maximum: admitted,
+                } if actual == maximum + 1 && admitted == maximum
+            ));
+        }
+    }
+
+    #[test]
+    fn materialization_rejects_excess_depth() {
+        for compressed in [false, true] {
+            let (mut resolver, oids) = materialization_chain(compressed);
+            resolver.max_delta_depth = 1;
+            assert!(matches!(
+                resolver.resolve_many(&[oids[2]], 64, &CancellationToken::new()),
+                Err(Error::LimitExceeded {
+                    limit: "delta depth",
+                    actual: 2,
+                    maximum: 1
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn materialization_rejects_cycles() {
+        for compressed in [false, true] {
+            let (mut resolver, oids) = materialization_chain(compressed);
+            match resolver.entries.get_mut(&oids[1]).expect("delta") {
+                MaterializationEntry::Compressed(entry) => entry.base_oid = Some(oids[2]),
+                MaterializationEntry::Inflated { base_oid, .. } => *base_oid = Some(oids[2]),
+            }
+            assert!(matches!(
+                resolver.resolve_many(&[oids[2]], 64, &CancellationToken::new()),
+                Err(Error::Corrupt {
+                    stage: CorruptionStage::Delta
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn materialization_honors_cancellation() {
+        for compressed in [false, true] {
+            let (mut resolver, oids) = materialization_chain(compressed);
+            let cancellation = CancellationToken::new();
+            cancellation.cancel();
+            assert!(matches!(
+                resolver.resolve_many(&[oids[2]], 64, &cancellation),
+                Err(Error::Cancelled)
+            ));
+        }
+    }
 
     #[test]
     fn rejects_reconstructed_bytes_with_wrong_object_id() {
