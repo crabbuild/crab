@@ -93,7 +93,12 @@ Tokio thread to imitate the old synchronous call.
 The crate-version boundary does not change stored graph formats or require a
 repository rewrite. Released version-1 graphs retain full validation; paged
 capsule graphs retain authenticated dependency reads. Existing CLI callers
-already await this method. The workspace pins 0.2 exactly, while SDK package
+already await this method. `crab-read`, `crab-write` and `crab-remote` also move
+to 0.2 because tagged public error variants expose these dependency types.
+Update their exact requirements together; passing a 0.1 remote Git error into
+a 0.2 wrapper is not a compatible conversion. The SDK's public values and error
+categories hide those concrete types and remain version 0.1.
+The workspace pins the affected libraries to 0.2 exactly, while SDK package
 qualification discovers each library's declared version from Cargo metadata.
 Cargo treats a change in the leftmost nonzero version component as incompatible;
 see the [Cargo SemVer contract](https://doc.rust-lang.org/cargo/reference/semver.html#change-categories).

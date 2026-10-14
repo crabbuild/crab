@@ -1,5 +1,10 @@
 # crab-read
 
+Version 0.2 follows the remote Git API's breaking version boundary because this
+crate exposes its dependency's typed errors. Update exact dependency requirements
+alongside `crab-remote-git`; see the [migration guide](../crab-remote-git/REFERENCE.md#migrating-from-01-to-02).
+
+
 `crab-read` is Crab's canonical read and hydration orchestration layer. It
 turns a Git/Xet pointer into verified bytes by combining manifest metadata,
 replica selection, cache-aware storage, shard coverage checks, and Xet file

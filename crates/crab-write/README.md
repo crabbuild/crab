@@ -1,5 +1,10 @@
 # crab-write
 
+Version 0.2 follows the remote Git API's breaking version boundary because this
+crate exposes its dependency's typed errors. Update exact dependency requirements
+alongside `crab-remote-git`; see the [migration guide](../crab-remote-git/REFERENCE.md#migrating-from-01-to-02).
+
+
 Shared Git publication mechanics for Crab. This crate owns catalog publication,
 ref-journal commit and compaction extracted from CLI push, reader repair and generation-owner
 paths. Those CLI callers use these implementations; HTTP receive can compose it without depending

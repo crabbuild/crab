@@ -1,5 +1,10 @@
 # crab-remote
 
+Version 0.2 follows the remote Git API's breaking version boundary because this
+crate exposes its dependency's typed errors. Update exact dependency requirements
+alongside `crab-remote-git`; see the [migration guide](../crab-remote-git/REFERENCE.md#migrating-from-01-to-02).
+
+
 `browse_indexes::ensure` is optional background v2 indexing. It captures a
 snapshot under renewed generation ownership and GC fences, reuses the shared
 Git index builders, and publishes `v2/browse-indexes` only after checking a fresh
