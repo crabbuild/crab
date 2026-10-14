@@ -78,6 +78,14 @@ Git object content hashes, page order/continuation, first-parent history and eve
 blame line. Tree attribution is compared with native Git path history. Verification
 remains enabled under `python -O`.
 
+`qualify_remote` also emits `kind: "phase"` timing rows inside measured queries.
+Admission, snapshot setup and cleanup are timed for every query; tree-based
+queries also time directory listing, and attribution times its indexed lookup.
+These clocks leave the enclosing storage/decode counters untouched and preserve
+typed errors through operation cleanup. Phase rows contain only operation/cache/
+phase labels, elapsed time and outcome. Their durations are diagnostic components
+of the parent query, not additional queries or a substitute for its total cost.
+
 ## Reproducible qualification
 
 Use the existing per-checkout target on the mounted workspace volume; set it on

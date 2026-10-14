@@ -1,9 +1,10 @@
 //! Measure isolated cold/warm capsule reads and emit independent-oracle evidence.
 mod support;
 
+use std::future::Future;
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use crab_remote_git::{
@@ -370,14 +371,14 @@ async fn qualify(
         .measure(
             name,
             "cold",
-            query(name, &repository, &revision, path, &cancel),
+            query(name, "cold", &repository, &revision, path, &cancel),
         )
         .await?;
     let warm = counters
         .measure(
             name,
             "warm",
-            query(name, &repository, &revision, path, &cancel),
+            query(name, "warm", &repository, &revision, path, &cancel),
         )
         .await?;
     if cold != warm {
@@ -402,6 +403,7 @@ async fn qualify(
 
 async fn query(
     name: &str,
+    cache: &str,
     repository: &RemoteGitRepository,
     revision: &Revision,
     path: &GitPath,
@@ -417,10 +419,12 @@ async fn query(
         "blame" => OperationKind::Blame,
         _ => OperationKind::Content,
     };
-    let operation = repository.operation(kind, cancel).await?;
+    let operation = phase(name, cache, "admission", repository.operation(kind, cancel)).await?;
     // Keep every failure inside the semantic result until the locator closes.
     let result = async {
-        let snapshot = repository.snapshot(revision, &operation).await?;
+        let snapshot = phase(
+            name, cache, "snapshot", repository.snapshot(revision, &operation),
+        ).await?;
         match name {
             "resolve" => {
                 // Ref resolution alone bypasses ancestor membership. Resolve the
@@ -465,7 +469,7 @@ async fn query(
                 })).collect::<Vec<_>>()}))
             }
             _ => {
-                let page = snapshot.list_directory(&GitPath::root(), &PageRequest::new(100, None)?, &operation).await?;
+                let page = phase(name, cache, "directory", snapshot.list_directory(&GitPath::root(), &PageRequest::new(100, None)?, &operation)).await?;
                 match name {
                     "tree" => Ok(json!({"entries":page.items.iter().map(|entry| json!({
                         "path":entry.path.as_bytes(), "oid":entry.oid.to_string(), "mode":entry.mode.raw(),
@@ -479,7 +483,7 @@ async fn query(
                         })).collect::<Vec<_>>()}))
                     }
                     "attribution" => {
-                        let commits = snapshot.latest_directory_entry_commits(&GitPath::root(), &page.items, &operation).await?;
+                        let commits = phase(name, cache, "attribution", snapshot.latest_directory_entry_commits(&GitPath::root(), &page.items, &operation)).await?;
                         Ok(json!({"entries":page.items.iter().zip(commits).map(|(entry, commit)| json!({
                             "path":entry.path.as_bytes(), "oid":entry.oid.to_string(), "commit":commit.oid.to_string(),
                         })).collect::<Vec<_>>()}))
@@ -489,5 +493,26 @@ async fn query(
             }
         }
     }.await;
-    Ok(operation.finish(result).await?)
+    Ok(phase(name, cache, "cleanup", operation.finish(result)).await?)
+}
+
+// Phase clocks preserve the enclosing measurement's counters and include
+// cleanup. Printing only operation labels keeps paths and content out of timing rows.
+async fn phase<T>(
+    name: &str,
+    cache: &str,
+    step: &str,
+    future: impl Future<Output = crab_remote_git::Result<T>>,
+) -> crab_remote_git::Result<T> {
+    let started = Instant::now();
+    let result = future.await;
+    println!(
+        "{}",
+        json!({
+            "kind":"phase", "schema":1, "operation":name, "cache":cache,
+            "phase":step, "elapsed_us":started.elapsed().as_micros(),
+            "outcome":if result.is_ok() { "ok" } else { "error" },
+        })
+    );
+    result
 }
