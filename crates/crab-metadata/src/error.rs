@@ -26,6 +26,12 @@ pub enum MetadataError {
         #[source]
         source: serde_json::Error,
     },
+    /// A capsule visibility page descriptor or edit record could not be encoded or decoded.
+    #[error("capsule visibility record encoding is invalid")]
+    CapsuleVisibilityRecord {
+        #[source]
+        source: serde_json::Error,
+    },
     /// A file lookup could not acquire process-wide execution capacity.
     #[cfg(feature = "file-index-reader")]
     #[error("file lookup admission closed")]

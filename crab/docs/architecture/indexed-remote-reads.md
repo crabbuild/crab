@@ -869,3 +869,53 @@ failure. Path history still visits unrelated commits/trees and needs the planned
 change-point traversal; absent/deleted paths require explicit change records
 because the current path-state trie drops deleted children. Limits were not raised
 and no baseline or expected-failure file was changed.
+
+
+## Paged visibility delta format and lookup work in progress
+
+Capsule visibility delta version 3 replaces flat JSON OID lists with a paged
+ref directory and separately authenticated added/removed OID sets. The shared
+pager uses explicit kind codes 14/15. Empty sets have no root, and identical
+sets may share immutable pages. Existing visibility byte/ref/object bounds
+admit the format; complete decoding also charges logical OID references so
+shared roots cannot expand into unbounded repeated output. Complete inspection
+authenticates the body, validates edit invariants and reconstructs canonical
+bytes. Retired delta JSON has no serialization alias or fallback reader.
+
+Run footer version 3 commits each visibility descriptor. Visibility pages always
+remain in their capsule section; the previous small-table footer copy is removed.
+Full control readers compare descriptors against the original sections before
+exposing edits. Catalog's existing bounded inline/detached policy is unchanged.
+The stored visibility snapshot, released v1 proof formats, root pointers and
+manifest/catalog contracts are unchanged. Upstream release refs still match the
+recorded audit and none contains capsule-protocol code. Retired run prefixes
+must be republished; no automatic migration is provided.
+
+`CapsuleRunControl::visibility_reader` captures the descriptor and embedded body
+span for one authenticated capsule. Batched OID changes preserve duplicates and
+order. Absent refs, absent changes and missing/corrupt pages remain distinct.
+Replacement edits must admit their new tip; an OID in both loaded sets is an
+error. Warm pages retain their encoded-work charge, and the smallest budget
+fails before I/O. Visibility changes alone never authorize a want: prior closure
+and ref reconciliation remain separate required proofs.
+
+Focused proof passes 86 payload-only capsule tests, 94 storage/remote-index
+capsule tests, all 36 read-side capsule tests, strict metadata Clippy, both
+qualifier builds, observer tests and HTTP/S3 consumer checks after the frontend
+build. A 10k-OID lookup opens its footer below 4 KiB, stays below a 128 KiB
+query budget, returns verified misses, reads zero warm backend bytes and rejects
+corruption. Separate tests cover removed/unchanged OIDs, empty edits, shared
+roots, wide ref directories, normalized edit properties and re-signed overlap.
+Removing canonical byte comparison makes the exact authenticated-unclaimed-byte
+negative control fail; restored source passes. The retired footer-version test
+now rejects version 2 and allows the new version 3; the existing detached-control
+assertion is unchanged.
+
+Final-source isolated `make install` passes for CLI/FUSE/NFS/cache-server and the
+Git helper. Fresh-prefix RustFS qualification passes 63 checks and 45 commands:
+real Crab pushes publish 100/1,000-commit fixtures, both index-maintenance processes
+finish, and all 20 supported-query/native-Git comparisons pass. Source/binary
+hashes match the receipts and remain external. One sample per query establishes
+publication/read smoke, not the final 20-sample performance cells. Complete
+repository opening still materializes visibility and catalog state. This format/lookup work does not yet satisfy bounded
+opening, the remaining stage-4 gates, the 10k path-history gate or stages 5–8.

@@ -391,3 +391,146 @@ async fn git_control_keeps_oid_admission_cold_and_paged_queries_obey_budgets() {
         (true, true, true),
     );
 }
+
+#[tokio::test]
+async fn visibility_lookup_keeps_oid_pages_cold_until_requested() {
+    use crate::capsule_protocol::{
+        CapsulePointer, CapsuleSection, CapsuleVisibilityDelta, VisibilityChange,
+    };
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let read_bytes = Arc::new(AtomicU64::new(0));
+    let observed = read_bytes.clone();
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_read_byte_observer(Arc::new(move |bytes| {
+            observed.fetch_add(bytes, Ordering::Relaxed);
+        }));
+    let layout = StoreLayout::new(store, "repositories/paged-visibility".into());
+    let oids = (0u32..10000)
+        .map(|index| {
+            let mut oid = [0; 20];
+            oid[..4].copy_from_slice(&index.to_be_bytes());
+            oid
+        })
+        .collect::<Vec<_>>();
+    let objects = oids
+        .iter()
+        .map(crate::git_visibility::encode_oid)
+        .collect::<Vec<_>>();
+    let tip = objects[7000].clone();
+    let transaction = CapsuleTransaction::new(
+        &"1".repeat(64),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/main",
+            None,
+            Some(tip.clone()),
+            None,
+        )],
+    )
+    .unwrap();
+    let delta = CapsuleVisibilityDelta::new(BTreeMap::from([(
+        "refs/heads/main".into(),
+        crate::git_visibility::GitVisibilityEdit::from_replacement_objects(None, tip, objects),
+    )]))
+    .unwrap();
+    let capsule = Capsule::build(
+        &transaction,
+        vec![],
+        vec![CapsuleSection::new(
+            CapsuleSectionKind::VisibilityDelta,
+            delta.encode().unwrap(),
+        )],
+    )
+    .unwrap();
+    let run = CapsuleRun::leaf(capsule.clone()).unwrap();
+    layout
+        .store()
+        .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+        .await
+        .unwrap();
+    let pointer = CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )
+    .unwrap();
+    let footer = layout
+        .store()
+        .range_get(
+            &layout.capsule_path(run.hash()),
+            pointer.control_offset()..pointer.size(),
+        )
+        .await
+        .unwrap();
+    let control = CapsuleRunControl::decode_footer(footer, &pointer).unwrap();
+    assert!(read_bytes.swap(0, Ordering::Relaxed) < 4096);
+    let reader = control
+        .visibility_reader(&layout, capsule.hash(), 128 * 1024)
+        .unwrap()
+        .unwrap();
+    let requested = [oids[9999], oids[0], oids[9999], [0xff; 20]];
+    let expected = Some(vec![
+        Some(VisibilityChange::Added),
+        Some(VisibilityChange::Added),
+        Some(VisibilityChange::Added),
+        None,
+    ]);
+    assert_eq!(
+        reader
+            .lookup(layout.store(), "refs/heads/main", &requested)
+            .await
+            .unwrap(),
+        expected
+    );
+    assert!(read_bytes.swap(0, Ordering::Relaxed) < 128 * 1024);
+    assert_eq!(
+        reader
+            .lookup(layout.store(), "refs/heads/main", &requested)
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        reader
+            .lookup(layout.store(), "refs/heads/missing", &requested)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(read_bytes.swap(0, Ordering::Relaxed), 0);
+    let limited = control
+        .visibility_reader(&layout, capsule.hash(), 1)
+        .unwrap()
+        .unwrap();
+    assert!(
+        limited
+            .lookup(layout.store(), "refs/heads/main", &requested)
+            .await
+            .is_err()
+    );
+    assert_eq!(read_bytes.load(Ordering::Relaxed), 0);
+    let mut damaged = run.bytes().to_vec();
+    damaged[control.capsule_locations()[0]
+        .visibility()
+        .unwrap()
+        .offset() as usize] ^= 1;
+    layout
+        .store()
+        .put_overwrite(&layout.capsule_path(run.hash()), damaged.into())
+        .await
+        .unwrap();
+    let fresh = control
+        .visibility_reader(&layout, capsule.hash(), 128 * 1024)
+        .unwrap()
+        .unwrap();
+    assert!(
+        fresh
+            .lookup(layout.store(), "refs/heads/main", &[oids[0]])
+            .await
+            .is_err()
+    );
+}

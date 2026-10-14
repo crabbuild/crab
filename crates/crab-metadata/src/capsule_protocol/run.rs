@@ -11,7 +11,7 @@ use crate::error::{MetadataError, Result};
 use crate::validation::validate_content_hash;
 
 const RUN_MAGIC: &[u8; 8] = b"CRBRUN01";
-const RUN_VERSION: u32 = 2;
+const RUN_VERSION: u32 = 3;
 const RUN_TRAILER_BYTES: usize = 8 + 32 + RUN_MAGIC.len();
 pub(super) const MAX_RUN_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INLINE_RUN_CONTROL_SECTION_BYTES: usize = 512 * 1024;
@@ -54,8 +54,7 @@ struct RunSectionLocation {
 #[serde(deny_unknown_fields)]
 struct RunControlSections {
     transaction: Vec<u8>,
-    #[serde(default)]
-    visibility: Option<Vec<u8>>,
+    visibility_pages: Option<super::visibility::VisibilityPages>,
     #[serde(default)]
     catalog: Option<Vec<u8>>,
 }
@@ -117,7 +116,7 @@ pub struct CapsuleControlLocation {
     visibility: Option<PackRange>,
     catalog: Option<PackRange>,
     transaction_bytes: Bytes,
-    visibility_bytes: Option<Bytes>,
+    visibility_pages: Option<super::visibility::VisibilityPages>,
     catalog_bytes: Option<Bytes>,
 }
 
@@ -297,17 +296,20 @@ impl CapsuleRunControl {
                 Some(&transaction_bytes),
                 "transaction",
             )?;
-            let visibility_bytes = location.control.visibility.clone().map(Bytes::from);
             let visibility_range = location
                 .visibility
                 .as_ref()
                 .map(|range| PackRange::from_parts(range.offset, range.length, range.hash.clone()))
                 .transpose()?;
-            verify_embedded_control_section(
-                visibility_range.as_ref(),
-                visibility_bytes.as_ref(),
-                "visibility",
-            )?;
+            match (&visibility_range, &location.control.visibility_pages) {
+                (Some(range), Some(pages)) => pages.validate_region(range.length())?,
+                (None, None) => {}
+                _ => {
+                    return Err(corrupt(
+                        "visibility section and page descriptor presence differs",
+                    ));
+                }
+            }
             let catalog_bytes = location.control.catalog.clone().map(Bytes::from);
             let catalog_range = location
                 .catalog
@@ -327,7 +329,7 @@ impl CapsuleRunControl {
                 visibility: visibility_range,
                 catalog: catalog_range,
                 transaction_bytes,
-                visibility_bytes,
+                visibility_pages: location.control.visibility_pages.clone(),
                 catalog_bytes,
             });
             expected_offset = location
@@ -435,6 +437,37 @@ impl CapsuleRunControl {
             .transpose()
     }
 
+    #[cfg(feature = "storage")]
+    /// Open visibility changes for one captured capsule without reading its OID table.
+    ///
+    /// An absent section returns `None`; a capsule absent from this run is an error.
+    pub fn visibility_reader(
+        &self,
+        layout: &crab_storage::StoreLayout<crab_storage::Store>,
+        capsule_hash: &str,
+        maximum: u64,
+    ) -> Result<Option<super::visibility::CapsuleVisibilityReader>> {
+        let location = self
+            .capsules
+            .iter()
+            .find(|location| location.hash == capsule_hash)
+            .ok_or_else(|| corrupt("visibility capsule is absent from its run"))?;
+        match (&location.visibility, &location.visibility_pages) {
+            (Some(range), Some(pages)) => super::visibility::CapsuleVisibilityReader::new(
+                layout,
+                &self.hash,
+                range,
+                pages.clone(),
+                maximum,
+            )
+            .map(Some),
+            (None, None) => Ok(None),
+            _ => Err(corrupt(
+                "visibility section and page descriptor presence differs",
+            )),
+        }
+    }
+
     /// Return the run's authenticated capsule controls.
     #[must_use]
     pub fn capsule_locations(&self) -> &[CapsuleControlLocation] {
@@ -497,11 +530,19 @@ impl CapsuleRunControl {
                     Some(&location.transaction_bytes),
                     "transaction",
                 )?;
-                let visibility_bytes = location.visibility_bytes.clone().or_else(|| {
-                    external_controls
-                        .get(&(location.hash.clone(), CapsuleSectionKind::VisibilityDelta))
-                        .cloned()
-                });
+                let visibility_bytes = external_controls
+                    .get(&(location.hash.clone(), CapsuleSectionKind::VisibilityDelta))
+                    .cloned();
+                if visibility_bytes
+                    .as_ref()
+                    .map(|bytes| super::visibility::VisibilityPages::decode(bytes))
+                    .transpose()?
+                    != location.visibility_pages
+                {
+                    return Err(corrupt(
+                        "visibility page descriptor differs from its run footer",
+                    ));
+                }
                 let catalog_bytes = location.catalog_bytes.clone().or_else(|| {
                     external_controls
                         .get(&(location.hash.clone(), CapsuleSectionKind::CatalogDelta))
@@ -628,7 +669,6 @@ impl CapsuleControlLocation {
     ) -> impl Iterator<Item = (String, CapsuleSectionKind, PackRange)> + '_ {
         self.visibility
             .as_ref()
-            .filter(|_| self.visibility_bytes.is_none())
             .map(|range| {
                 (
                     self.hash.clone(),
@@ -725,10 +765,12 @@ impl CapsuleRun {
             let visibility =
                 section_location(capsule, offset, CapsuleSectionKind::VisibilityDelta)?;
             let catalog = section_location(capsule, offset, CapsuleSectionKind::CatalogDelta)?;
-            let inline_visibility =
+            // OID pages stay in the capsule section; only their authenticated
+            // descriptor belongs in the footer, independent of current table size.
+            let visibility_pages =
                 section_bytes_for_kind(capsule, CapsuleSectionKind::VisibilityDelta)?
-                    .filter(|bytes| bytes.len() <= MAX_INLINE_RUN_CONTROL_SECTION_BYTES)
-                    .map(|bytes| bytes.to_vec());
+                    .map(|bytes| super::visibility::VisibilityPages::decode(&bytes))
+                    .transpose()?;
             let inline_catalog = section_bytes_for_kind(capsule, CapsuleSectionKind::CatalogDelta)?
                 .filter(|bytes| bytes.len() <= MAX_INLINE_RUN_CONTROL_SECTION_BYTES)
                 .map(|bytes| bytes.to_vec());
@@ -743,7 +785,7 @@ impl CapsuleRun {
                 catalog,
                 control: RunControlSections {
                     transaction: capsule.section_bytes(0)?.to_vec(),
-                    visibility: inline_visibility,
+                    visibility_pages,
                     catalog: inline_catalog,
                 },
             });
@@ -824,44 +866,27 @@ impl CapsuleRun {
                 break footer_bytes;
             }
 
-            let mut largest = None;
-            for (index, location) in locations.iter().enumerate() {
-                for (kind, bytes) in [
-                    (
-                        CapsuleSectionKind::VisibilityDelta,
-                        location.control.visibility.as_ref(),
-                    ),
-                    (
-                        CapsuleSectionKind::CatalogDelta,
-                        location.control.catalog.as_ref(),
-                    ),
-                ] {
-                    if let Some(bytes) = bytes
-                        && largest
-                            .as_ref()
-                            .is_none_or(|(_, _, length)| *length < bytes.len())
-                    {
-                        largest = Some((index, kind, bytes.len()));
-                    }
-                }
-            }
-            let Some((index, kind, _)) = largest else {
+            let largest = locations
+                .iter()
+                .enumerate()
+                .filter_map(|(index, location)| {
+                    location
+                        .control
+                        .catalog
+                        .as_ref()
+                        .map(|bytes| (index, bytes.len()))
+                })
+                .max_by_key(|(_, length)| *length);
+            let Some((index, _)) = largest else {
                 return Err(contract_error(format!(
                     "capsule run footer exceeds {MAX_RUN_FOOTER_BYTES} bytes"
                 )));
             };
-            let location = locations
+            locations
                 .get_mut(index)
-                .ok_or_else(|| contract_error("capsule run control disappeared"))?;
-            match kind {
-                CapsuleSectionKind::VisibilityDelta => location.control.visibility = None,
-                CapsuleSectionKind::CatalogDelta => location.control.catalog = None,
-                _ => {
-                    return Err(contract_error(
-                        "capsule run selected a non-detachable control section",
-                    ));
-                }
-            }
+                .ok_or_else(|| contract_error("capsule run control disappeared"))?
+                .control
+                .catalog = None;
         };
         let footer_length = u64::try_from(footer_bytes.len())
             .map_err(|_| contract_error("capsule run footer length cannot be represented"))?;
@@ -1325,12 +1350,16 @@ fn validate_control_bundle(capsule: &Capsule, location: &RunCapsuleLocation) -> 
         .transpose()?;
     verify_control_section(visibility_range.as_ref(), visibility.as_ref(), "visibility")?;
     verify_control_section(catalog_range.as_ref(), catalog.as_ref(), "catalog")?;
-    let embedded_visibility = location.control.visibility.clone().map(Bytes::from);
-    verify_embedded_control_section(
-        visibility_range.as_ref(),
-        embedded_visibility.as_ref(),
-        "visibility",
-    )?;
+    if visibility
+        .as_ref()
+        .map(|bytes| super::visibility::VisibilityPages::decode(bytes))
+        .transpose()?
+        != location.control.visibility_pages
+    {
+        return Err(corrupt(
+            "visibility page descriptor differs from its capsule",
+        ));
+    }
     let embedded_catalog = location.control.catalog.clone().map(Bytes::from);
     verify_embedded_control_section(catalog_range.as_ref(), embedded_catalog.as_ref(), "catalog")?;
     Ok(())
@@ -1735,7 +1764,7 @@ mod tests {
     #[test]
     fn unsupported_run_footer_versions_are_rejected() {
         let run = CapsuleRun::leaf(capsule('1', '2')).unwrap();
-        for version in [0, 1, 3, 4, 5, 6, 7] {
+        for version in [0, 1, 2, 4, 5, 6, 7] {
             let mut footer = run.footer.clone();
             footer.version = version;
             let footer = serde_json::to_vec(&footer).unwrap();
