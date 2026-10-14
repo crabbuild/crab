@@ -16,7 +16,7 @@ pub use paged::CommitGraphLayerPages;
 #[cfg(feature = "storage")]
 mod reader;
 #[cfg(feature = "storage")]
-pub use reader::CommitGraphReader;
+pub use reader::{CommitGraphReader, CommitGraphView};
 
 const PAGED_VERSION: u32 = 3;
 const MAX_PAGED_LAYERS: usize = 32;

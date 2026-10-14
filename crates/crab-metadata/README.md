@@ -81,9 +81,26 @@ encoding: upstream v1.0.1 through v1.2.4 publish `Manifest::commit_graph_hash` f
 CLI push and read it in the remote helper. Lazy capsule readers reject that
 format; maintenance may rebuild the unreleased eager browse index into pages.
 Path and graph readers share the authenticated page codec and an 8-MiB/256-page
-cache; each cache belongs to one immutable captured layer directory. The current
-foreground graph handshake still materializes reachability and is not yet a
-bounded-opening implementation.
+cache; each cache belongs to one immutable captured layer directory.
+`CommitGraphView` supplies the same positional queries to complete maintenance
+graphs and immutable paged readers. Path-state opening binds the paged descriptor's
+verified positional digest; queried records are checked through batched graph reads.
+It does not hash the complete paged graph during foreground opening. The outer
+capsule/ref-control capture remains a separate bounded-opening qualification gate.
+
+`qualify_graph_build` measures paged graph construction on the ancestry-growth
+fixtures: linear, eight branches, criss-cross merges and disconnected commits.
+Run each shape at 1k/2k/4k/8k commits under `/usr/bin/time -l`; repeat samples to
+compare process CPU, RSS, complete encoded index bytes and ancestry-node counts.
+Its synthetic OIDs measure builder cost, not Git object integrity or publication.
+Keep results separate from real-store maintenance and foreground qualification.
+For example, after selecting the checkout's external Cargo target:
+
+```sh
+cargo build -p crab-metadata --example qualify_graph_build --release --locked
+/usr/bin/time -l "$CARGO_TARGET_DIR/release/examples/qualify_graph_build" branches 8000
+```
+
 Path-state descriptor version 5 requires exact-name tree comparison semantics
 and authenticated pages; retired descriptors are rejected.
 Maintenance rebuilds completed indexes and resumable checkpoints through the

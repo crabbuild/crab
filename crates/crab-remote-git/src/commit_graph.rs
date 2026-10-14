@@ -1,27 +1,39 @@
 use std::collections::{HashMap, HashSet};
 
-use crab_metadata::split_commit_graph::{SplitCommitGraph, load_split_commit_graph};
+use crab_metadata::split_commit_graph::{
+    CommitGraphReader, CommitGraphRecord, CommitGraphView, SplitCommitGraph,
+    load_split_commit_graph, load_split_commit_graph_descriptor,
+};
 use crab_storage::{Store, StoreLayout};
 use gix_hash::ObjectId;
 use tokio_util::sync::CancellationToken;
 
-use crate::{BudgetDimension, CorruptionStage, Error, RemoteGitRuntime, Result};
+use crate::{BudgetDimension, CorruptionStage, Error, OperationContext, RemoteGitRuntime, Result};
 
-/// Validated, generation-bound acceleration data for raw commit traversal.
+#[derive(Debug)]
+enum Graph {
+    Manifest(SplitCommitGraph),
+    Capsule(CommitGraphReader),
+}
+
+/// Validated positional graph bound to captured ref roots, never physical retention.
 #[derive(Debug)]
 pub(crate) struct CommitGraphIndex {
-    graph: SplitCommitGraph,
-    pinned_reachable: Vec<bool>,
+    graph: Graph,
+    roots: Vec<ObjectId>,
 }
 
 impl CommitGraphIndex {
-    pub(crate) const fn graph(&self) -> &SplitCommitGraph {
-        &self.graph
+    pub(crate) fn view(&self) -> CommitGraphView<'_> {
+        match &self.graph {
+            Graph::Manifest(graph) => CommitGraphView::Materialized(graph),
+            Graph::Capsule(graph) => CommitGraphView::Paged(graph),
+        }
     }
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "graph loading validates manifest identity and two cancellation scopes"
+        reason = "graph loading binds captured state and operation admission"
     )]
     pub(crate) async fn load(
         store: &Store,
@@ -34,512 +46,256 @@ impl CommitGraphIndex {
         max_bytes: u64,
         cancellation: &CancellationToken,
         runtime: &RemoteGitRuntime,
-        budget: &crate::budget::OperationBudget,
-        operation: &crate::OperationContext,
+        operation: &OperationContext,
     ) -> Result<Self> {
         let runtime_cancellation = runtime.background_cancellation();
         let graph = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(Error::Cancelled),
             () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
-            result = load_split_commit_graph(store, layout, content_hash, max_bytes) => result?,
+            result = async {
+                let descriptor = load_split_commit_graph_descriptor(store, layout, content_hash, max_bytes).await?;
+                // Release-tagged manifest graph v1 needs complete validation. Capsule
+                // graphs use authenticated pages; corruption cannot select the old reader.
+                if descriptor.version == 1 {
+                    load_split_commit_graph(store, layout, content_hash, max_bytes).await.map(Graph::Manifest)
+                } else {
+                    CommitGraphReader::load(store, layout, content_hash, max_bytes).await.map(Graph::Capsule)
+                }
+            } => result?,
         };
-        if graph.descriptor.generation != expected_generation
-            || graph.descriptor.pack_index_hash != expected_pack_index_hash
-            || graph.descriptor.git_validation_digest != expected_validation_digest
+        let mut index = Self {
+            graph,
+            roots: Vec::new(),
+        };
+        let view = index.view();
+        let descriptor = view.descriptor();
+        if descriptor.generation != expected_generation
+            || descriptor.pack_index_hash != expected_pack_index_hash
+            || descriptor.git_validation_digest != expected_validation_digest
         {
-            return Err(Error::Corrupt {
-                stage: CorruptionStage::CommitGraph,
-            });
+            return Err(corrupt());
         }
-        let roots = crate::repository::resolved_commit_roots(refs, Some(&graph), operation).await?;
-        if roots
-            .iter()
-            .any(|root| sha1_bytes(*root).is_none_or(|root| !graph.contains(&root)))
-        {
-            return Err(Error::Corrupt {
-                stage: CorruptionStage::CommitGraph,
-            });
+        let roots = crate::repository::resolved_commit_roots(refs, Some(view), operation).await?;
+        let ordinals = index.ordinals(&roots, operation).await?;
+        if ordinals.iter().any(Option::is_none) {
+            return Err(corrupt());
         }
-        // One byte per ordinal is bounded by the verified graph byte limit.
-        // Charge before allocation; reuse this proof only for this pinned ref set.
-        budget
-            .charge(
-                BudgetDimension::InflatedBytes,
-                u64::from(graph.descriptor.commit_count),
-            )
+        index.roots = roots;
+        Ok(index)
+    }
+
+    pub(crate) async fn ordinals(
+        &self,
+        oids: &[ObjectId],
+        operation: &OperationContext,
+    ) -> Result<Vec<Option<u32>>> {
+        operation.ensure_active()?;
+        operation
+            .charge(BudgetDimension::Entries, oids.len() as u64)
             .await?;
-        let permit = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(Error::Cancelled),
-            () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
-            permit = runtime.decode_permit(cancellation) => permit?,
-        };
-        let cancellation = cancellation.clone();
-        runtime
-            .spawn_blocking(move || {
-                let _permit = permit;
-                let pinned_reachable =
-                    pinned_reachability(&graph, &roots, &cancellation, &runtime_cancellation)?;
-                Ok(Self {
-                    graph,
-                    pinned_reachable,
+        let mut positions = Vec::new();
+        let mut keys = Vec::new();
+        for (position, oid) in oids.iter().enumerate() {
+            if let ObjectId::Sha1(bytes) = oid {
+                positions.push(position);
+                keys.push(*bytes);
+            }
+        }
+        let store = operation.metadata_store();
+        let ordinals = operation
+            .read_metadata(self.view().ordinals(&store, &keys))
+            .await?;
+        operation.ensure_active()?;
+        let mut output = vec![None; oids.len()];
+        for (position, ordinal) in positions.into_iter().zip(ordinals) {
+            output[position] = ordinal;
+        }
+        Ok(output)
+    }
+
+    async fn records(
+        &self,
+        ordinals: &[u32],
+        operation: &OperationContext,
+    ) -> Result<Vec<Option<CommitGraphRecord>>> {
+        operation.ensure_active()?;
+        operation
+            .charge(BudgetDimension::Entries, ordinals.len() as u64)
+            .await?;
+        let store = operation.metadata_store();
+        let records = operation
+            .read_metadata(self.view().records(&store, ordinals))
+            .await?;
+        operation.ensure_active()?;
+        Ok(records)
+    }
+
+    pub(crate) async fn is_reachable(
+        &self,
+        oid: ObjectId,
+        operation: &OperationContext,
+    ) -> Result<bool> {
+        Ok(self
+            .reachable_from_roots(&[oid], &self.roots, operation)
+            .await?[0])
+    }
+
+    pub(crate) async fn parents_match(
+        &self,
+        commits: &[crate::Commit],
+        operation: &OperationContext,
+    ) -> Result<bool> {
+        let oids = commits.iter().map(|commit| commit.oid).collect::<Vec<_>>();
+        let ordinals = self.ordinals(&oids, operation).await?;
+        if ordinals.iter().any(Option::is_none) {
+            return Ok(false);
+        }
+        let ordinals = ordinals.into_iter().flatten().collect::<Vec<_>>();
+        let records = self.records(&ordinals, operation).await?;
+        let parent_ordinals = records
+            .iter()
+            .flatten()
+            .flat_map(|record| record.parents.iter().copied())
+            .collect::<Vec<_>>();
+        let parents = self.records(&parent_ordinals, operation).await?;
+        let parents = parent_ordinals
+            .into_iter()
+            .zip(parents)
+            .collect::<HashMap<_, _>>();
+        Ok(records.iter().zip(commits).all(|(record, commit)| {
+            record.as_ref().is_some_and(|record| {
+                record.parents.len() == commit.parents.len()
+                    && record
+                        .parents
+                        .iter()
+                        .zip(&commit.parents)
+                        .all(|(ordinal, raw)| {
+                            parents
+                                .get(ordinal)
+                                .and_then(Option::as_ref)
+                                .is_some_and(|parent| ObjectId::Sha1(parent.oid) == *raw)
+                        })
+            })
+        }))
+    }
+
+    pub(crate) async fn generations(
+        &self,
+        oids: &[ObjectId],
+        operation: &OperationContext,
+    ) -> Result<Vec<Option<u64>>> {
+        let ordinals = self.ordinals(oids, operation).await?;
+        let ids = ordinals.iter().flatten().copied().collect::<Vec<_>>();
+        let records = self.records(&ids, operation).await?;
+        let mut records = records.into_iter();
+        Ok(ordinals
+            .into_iter()
+            .map(|ordinal| {
+                ordinal.and_then(|_| {
+                    records
+                        .next()
+                        .flatten()
+                        .map(|record| record.corrected_generation)
                 })
             })
-            .await
-            .map_err(|source| Error::DecodeTask { source })?
+            .collect())
     }
 
-    pub(crate) fn is_reachable(&self, oid: ObjectId) -> bool {
-        sha1_bytes(oid)
-            .and_then(|oid| self.graph.ordinal(&oid))
-            .and_then(|ordinal| self.pinned_reachable.get(ordinal as usize))
-            .copied()
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn parents_match(&self, oid: ObjectId, raw_parents: &[ObjectId]) -> bool {
-        let Some(ordinal) = sha1_bytes(oid).and_then(|oid| self.graph.ordinal(&oid)) else {
-            return false;
-        };
-        let Some(record) = self.graph.record(ordinal) else {
-            return false;
-        };
-        record.parents.len() == raw_parents.len()
-            && record.parents.iter().zip(raw_parents).all(|(parent, raw)| {
-                self.graph
-                    .record(*parent)
-                    .is_some_and(|record| ObjectId::Sha1(record.oid) == *raw)
-            })
-    }
-
-    pub(crate) fn generation(&self, oid: &ObjectId) -> Option<u64> {
-        let ordinal = self.graph.ordinal(&sha1_bytes(*oid)?)?;
-        self.graph
-            .record(ordinal)
-            .map(|entry| entry.corrected_generation)
-    }
-
-    pub(crate) fn first_parent_chain(
+    pub(crate) async fn first_parent_chain(
         &self,
         start: ObjectId,
         maximum: usize,
-    ) -> Option<Vec<ObjectId>> {
-        let mut ordinal = self.graph.ordinal(&sha1_bytes(start)?)?;
+        operation: &OperationContext,
+    ) -> Result<Option<Vec<ObjectId>>> {
+        let Some(mut ordinal) = self.ordinals(&[start], operation).await?[0] else {
+            return Ok(None);
+        };
         let mut chain = Vec::new();
         for _ in 0..maximum {
-            let record = self.graph.record(ordinal)?;
+            let record = self
+                .records(&[ordinal], operation)
+                .await?
+                .remove(0)
+                .ok_or_else(corrupt)?;
             chain.push(ObjectId::Sha1(record.oid));
             let Some(parent) = record.parents.first().copied() else {
                 break;
             };
             ordinal = parent;
         }
-        Some(chain)
+        Ok(Some(chain))
     }
 
-    pub(crate) fn reachable_from_roots(
+    pub(crate) async fn reachable_from_roots(
         &self,
         candidates: &[ObjectId],
         roots: &[ObjectId],
-        cancellation: &CancellationToken,
+        operation: &OperationContext,
     ) -> Result<Vec<bool>> {
-        if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        let mut reachable = vec![false; candidates.len()];
-        let mut candidates_by_ordinal = HashMap::<u32, Vec<usize>>::new();
-        for (index, candidate) in candidates.iter().enumerate() {
-            if let Some(ordinal) = sha1_bytes(*candidate).and_then(|oid| self.graph.ordinal(&oid)) {
-                candidates_by_ordinal
-                    .entry(ordinal)
-                    .or_default()
-                    .push(index);
-            }
-        }
-        if candidates_by_ordinal.is_empty() {
-            return Ok(reachable);
-        }
-        let mut pending = roots
+        let ordinals = self.ordinals(candidates, operation).await?;
+        let roots = self.ordinals(roots, operation).await?;
+        let mut output = vec![false; candidates.len()];
+        let positions = ordinals
             .iter()
-            .filter_map(|root| sha1_bytes(*root).and_then(|oid| self.graph.ordinal(&oid)))
+            .enumerate()
+            .filter_map(|(position, ordinal)| ordinal.map(|ordinal| (position, ordinal)))
             .collect::<Vec<_>>();
-        let mut visited = HashSet::new();
-        while let Some(ordinal) = pending.pop() {
-            if !visited.insert(ordinal) {
-                continue;
-            }
-            if visited.len().is_multiple_of(1024) && cancellation.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            if let Some(indices) = candidates_by_ordinal.remove(&ordinal) {
-                for index in indices {
-                    reachable[index] = true;
+        let requested = positions
+            .iter()
+            .map(|(_, ordinal)| *ordinal)
+            .collect::<Vec<_>>();
+        match &self.graph {
+            Graph::Capsule(graph) => {
+                for root in roots.into_iter().flatten() {
+                    operation.ensure_active()?;
+                    let store = operation.metadata_store();
+                    let membership = operation
+                        .read_metadata(graph.ancestry_membership(&store, root, &requested))
+                        .await?;
+                    for ((position, _), present) in positions.iter().zip(membership) {
+                        output[*position] |= present;
+                    }
                 }
-                if candidates_by_ordinal.is_empty() {
-                    break;
+            }
+            Graph::Manifest(graph) => {
+                let mut pending = roots.into_iter().flatten().collect::<Vec<_>>();
+                let mut visited = HashSet::new();
+                let mut requested = positions.into_iter().fold(
+                    HashMap::<u32, Vec<usize>>::new(),
+                    |mut grouped, (position, ordinal)| {
+                        grouped.entry(ordinal).or_default().push(position);
+                        grouped
+                    },
+                );
+                while !requested.is_empty()
+                    && let Some(ordinal) = pending.pop()
+                {
+                    operation.ensure_active()?;
+                    if visited.contains(&ordinal) {
+                        continue;
+                    }
+                    // Released graph proofs do not consume raw-history reads.
+                    // Admit metadata work before growing the visited set.
+                    operation.charge(BudgetDimension::Entries, 1).await?;
+                    visited.insert(ordinal);
+                    if let Some(positions) = requested.remove(&ordinal) {
+                        for position in positions {
+                            output[position] = true;
+                        }
+                    }
+                    let record = graph.record(ordinal).ok_or_else(corrupt)?;
+                    pending.extend(record.parents.iter().copied());
                 }
             }
-            let record = self.graph.record(ordinal).ok_or(Error::Corrupt {
-                stage: CorruptionStage::CommitGraph,
-            })?;
-            pending.extend(record.parents.iter().copied());
         }
-        Ok(reachable)
+        operation.ensure_active()?;
+        Ok(output)
     }
 }
 
-fn pinned_reachability(
-    graph: &SplitCommitGraph,
-    roots: &[ObjectId],
-    cancellation: &CancellationToken,
-    runtime_cancellation: &CancellationToken,
-) -> Result<Vec<bool>> {
-    if cancellation.is_cancelled() || runtime_cancellation.is_cancelled() {
-        return Err(Error::Cancelled);
-    }
-    let count = graph.descriptor.commit_count as usize;
-    let mut reachable = Vec::new();
-    reachable
-        .try_reserve_exact(count)
-        .map_err(|source| Error::Allocation {
-            requested: count,
-            source,
-        })?;
-    reachable.resize(count, false);
-    for root in roots {
-        let ordinal = sha1_bytes(*root)
-            .and_then(|oid| graph.ordinal(&oid))
-            .ok_or(Error::Corrupt {
-                stage: CorruptionStage::CommitGraph,
-            })?;
-        reachable[ordinal as usize] = true;
-    }
-    // The metadata codec proves every parent ordinal precedes its child.
-    // A descending pass visits each edge once, without a per-query history walk.
-    for ordinal in (0..graph.descriptor.commit_count).rev() {
-        if ordinal.is_multiple_of(1024)
-            && (cancellation.is_cancelled() || runtime_cancellation.is_cancelled())
-        {
-            return Err(Error::Cancelled);
-        }
-        if !reachable[ordinal as usize] {
-            continue;
-        }
-        let record = graph.record(ordinal).ok_or(Error::Corrupt {
-            stage: CorruptionStage::CommitGraph,
-        })?;
-        for parent in &record.parents {
-            reachable[*parent as usize] = true;
-        }
-    }
-    if cancellation.is_cancelled() || runtime_cancellation.is_cancelled() {
-        return Err(Error::Cancelled);
-    }
-    Ok(reachable)
-}
-
-fn sha1_bytes(oid: ObjectId) -> Option<[u8; 20]> {
-    match oid {
-        ObjectId::Sha1(bytes) => Some(bytes),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crab_metadata::split_commit_graph::{
-        CommitGraphDescriptor, CommitGraphLayer, CommitGraphLayerRef, CommitGraphRecord,
-        SplitCommitGraph, commit_graph_layer_path,
-    };
-
-    use super::*;
-
-    fn oid(value: u8) -> [u8; 20] {
-        [value; 20]
-    }
-
-    fn hash(value: u8) -> String {
-        format!("{value:02x}").repeat(32)
-    }
-
-    #[test]
-    fn pinned_membership_covers_both_merge_parents_but_excludes_retained_history() {
-        let graph = graph(vec![
-            CommitGraphRecord {
-                oid: oid(1),
-                tree_oid: oid(101),
-                commit_time: 10,
-                corrected_generation: 10,
-                parents: vec![],
-            },
-            CommitGraphRecord {
-                oid: oid(2),
-                tree_oid: oid(102),
-                commit_time: 20,
-                corrected_generation: 20,
-                parents: vec![0],
-            },
-            CommitGraphRecord {
-                oid: oid(3),
-                tree_oid: oid(103),
-                commit_time: 20,
-                corrected_generation: 20,
-                parents: vec![0],
-            },
-            CommitGraphRecord {
-                oid: oid(4),
-                tree_oid: oid(104),
-                commit_time: 30,
-                corrected_generation: 30,
-                parents: vec![1, 2],
-            },
-            CommitGraphRecord {
-                oid: oid(5),
-                tree_oid: oid(105),
-                commit_time: 20,
-                corrected_generation: 20,
-                parents: vec![0],
-            },
-        ]);
-        let cancellation = CancellationToken::new();
-        let runtime_cancellation = CancellationToken::new();
-        let pinned_reachable = pinned_reachability(
-            &graph,
-            &[ObjectId::Sha1(oid(4))],
-            &cancellation,
-            &runtime_cancellation,
-        )
-        .unwrap();
-        let index = CommitGraphIndex {
-            graph,
-            pinned_reachable,
-        };
-        assert_eq!(
-            (1..=6)
-                .map(|value| index.is_reachable(ObjectId::Sha1(oid(value))))
-                .collect::<Vec<_>>(),
-            vec![true, true, true, true, false, false]
-        );
-    }
-
-    #[test]
-    fn pinned_membership_honors_caller_and_runtime_cancellation_even_for_empty_graph() {
-        for runtime_cancelled in [false, true] {
-            let cancellation = CancellationToken::new();
-            let runtime_cancellation = CancellationToken::new();
-            if runtime_cancelled {
-                runtime_cancellation.cancel();
-            } else {
-                cancellation.cancel();
-            }
-            assert!(matches!(
-                pinned_reachability(&graph(vec![]), &[], &cancellation, &runtime_cancellation),
-                Err(Error::Cancelled)
-            ));
-        }
-    }
-
-    fn graph(records: Vec<CommitGraphRecord>) -> SplitCommitGraph {
-        let bytes = 24
-            + records
-                .iter()
-                .map(|record| 60 + record.parents.len() * 4)
-                .sum::<usize>();
-        let layer = CommitGraphLayer {
-            base_ordinal: 0,
-            records,
-        };
-        let descriptor = CommitGraphDescriptor {
-            version: 1,
-            commit_ordinal_digest: None,
-            generation: 7,
-            pack_index_hash: hash(1),
-            git_validation_digest: hash(2),
-            commit_count: layer.records.len() as u32,
-            layers: vec![CommitGraphLayerRef {
-                hash: hash(3),
-                path: commit_graph_layer_path(&hash(3)),
-                base_ordinal: 0,
-                commit_count: layer.records.len() as u32,
-                bytes: bytes as u64,
-                pages: None,
-            }]
-            .into_iter()
-            .filter(|layer| layer.commit_count > 0)
-            .collect(),
-        };
-        SplitCommitGraph::new(
-            descriptor,
-            vec![layer]
-                .into_iter()
-                .filter(|layer| !layer.records.is_empty())
-                .collect(),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn positional_parents_match_raw_commit_order() {
-        let index = CommitGraphIndex {
-            pinned_reachable: Vec::new(),
-            graph: graph(vec![
-                CommitGraphRecord {
-                    oid: oid(1),
-                    tree_oid: oid(101),
-                    commit_time: 10,
-                    corrected_generation: 10,
-                    parents: vec![],
-                },
-                CommitGraphRecord {
-                    oid: oid(2),
-                    tree_oid: oid(102),
-                    commit_time: 20,
-                    corrected_generation: 20,
-                    parents: vec![0],
-                },
-            ]),
-        };
-        assert!(index.parents_match(ObjectId::Sha1(oid(2)), &[ObjectId::Sha1(oid(1))]));
-        assert_eq!(index.generation(&ObjectId::Sha1(oid(2))), Some(20));
-    }
-
-    #[test]
-    fn missing_commit_cannot_validate_raw_parents() {
-        let index = CommitGraphIndex {
-            pinned_reachable: Vec::new(),
-            graph: graph(vec![CommitGraphRecord {
-                oid: oid(1),
-                tree_oid: oid(101),
-                commit_time: 10,
-                corrected_generation: 10,
-                parents: vec![],
-            }]),
-        };
-        assert!(!index.parents_match(ObjectId::Sha1(oid(2)), &[]));
-    }
-
-    #[test]
-    fn first_parent_chain_is_bounded_and_positional() {
-        let index = CommitGraphIndex {
-            pinned_reachable: Vec::new(),
-            graph: graph(vec![
-                CommitGraphRecord {
-                    oid: oid(1),
-                    tree_oid: oid(101),
-                    commit_time: 10,
-                    corrected_generation: 10,
-                    parents: vec![],
-                },
-                CommitGraphRecord {
-                    oid: oid(2),
-                    tree_oid: oid(102),
-                    commit_time: 20,
-                    corrected_generation: 20,
-                    parents: vec![0],
-                },
-                CommitGraphRecord {
-                    oid: oid(3),
-                    tree_oid: oid(103),
-                    commit_time: 30,
-                    corrected_generation: 30,
-                    parents: vec![1, 0],
-                },
-            ]),
-        };
-
-        assert_eq!(
-            index.first_parent_chain(ObjectId::Sha1(oid(3)), 2),
-            Some(vec![ObjectId::Sha1(oid(3)), ObjectId::Sha1(oid(2))])
-        );
-        assert_eq!(
-            index.first_parent_chain(ObjectId::Sha1(oid(2)), 8),
-            Some(vec![ObjectId::Sha1(oid(2)), ObjectId::Sha1(oid(1))])
-        );
-        assert_eq!(
-            index.first_parent_chain(ObjectId::Sha1(oid(3)), 0),
-            Some(Vec::new())
-        );
-        assert_eq!(index.first_parent_chain(ObjectId::Sha1(oid(9)), 1), None);
-    }
-
-    #[test]
-    fn reachable_from_roots_preserves_duplicates_and_rejects_other_history() {
-        let index = CommitGraphIndex {
-            pinned_reachable: Vec::new(),
-            graph: graph(vec![
-                CommitGraphRecord {
-                    oid: oid(1),
-                    tree_oid: oid(101),
-                    commit_time: 10,
-                    corrected_generation: 10,
-                    parents: vec![],
-                },
-                CommitGraphRecord {
-                    oid: oid(2),
-                    tree_oid: oid(102),
-                    commit_time: 20,
-                    corrected_generation: 20,
-                    parents: vec![0],
-                },
-                CommitGraphRecord {
-                    oid: oid(3),
-                    tree_oid: oid(103),
-                    commit_time: 30,
-                    corrected_generation: 30,
-                    parents: vec![1],
-                },
-                CommitGraphRecord {
-                    oid: oid(4),
-                    tree_oid: oid(104),
-                    commit_time: 20,
-                    corrected_generation: 20,
-                    parents: vec![0],
-                },
-            ]),
-        };
-        let candidates = [
-            ObjectId::Sha1(oid(1)),
-            ObjectId::Sha1(oid(2)),
-            ObjectId::Sha1(oid(4)),
-            ObjectId::Sha1(oid(9)),
-            ObjectId::Sha1(oid(1)),
-        ];
-
-        assert_eq!(
-            index
-                .reachable_from_roots(
-                    &candidates,
-                    &[ObjectId::Sha1(oid(3))],
-                    &CancellationToken::new(),
-                )
-                .expect("reachability"),
-            vec![true, true, false, false, true]
-        );
-    }
-
-    #[test]
-    fn reachable_from_roots_honors_cancellation_before_work() {
-        let index = CommitGraphIndex {
-            pinned_reachable: Vec::new(),
-            graph: graph(vec![CommitGraphRecord {
-                oid: oid(1),
-                tree_oid: oid(101),
-                commit_time: 10,
-                corrected_generation: 10,
-                parents: vec![],
-            }]),
-        };
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
-
-        assert!(matches!(
-            index.reachable_from_roots(
-                &[ObjectId::Sha1(oid(1))],
-                &[ObjectId::Sha1(oid(1))],
-                &cancellation,
-            ),
-            Err(Error::Cancelled)
-        ));
+fn corrupt() -> Error {
+    Error::Corrupt {
+        stage: CorruptionStage::CommitGraph,
     }
 }

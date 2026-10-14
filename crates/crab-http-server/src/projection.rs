@@ -445,7 +445,7 @@ async fn build_epoch_contents(
         store,
         layout,
         path_hash,
-        &graph,
+        crab_metadata::split_commit_graph::CommitGraphView::Materialized(&graph),
         options.object_limits().max_path_state_bytes,
     )
     .await

@@ -209,6 +209,30 @@ impl OperationContext {
         &self.budget
     }
 
+    pub(crate) fn metadata_store(&self) -> crab_storage::Store {
+        self.state
+            .store
+            .clone()
+            .with_read_admission(self.read_admission())
+    }
+
+    pub(crate) async fn read_metadata<T>(
+        &self,
+        read: impl std::future::Future<Output = crab_metadata::error::Result<T>>,
+    ) -> Result<T> {
+        self.ensure_active()?;
+        let result = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => {
+                self.ensure_active()?;
+                return Err(Error::Cancelled);
+            }
+            result = read => result?,
+        };
+        self.ensure_active()?;
+        Ok(result)
+    }
+
     pub(crate) async fn open_pack_transfer(
         state: Arc<RepositoryState>,
         cancellation: &CancellationToken,

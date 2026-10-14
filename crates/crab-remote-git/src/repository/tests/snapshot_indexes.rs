@@ -2,13 +2,14 @@ use super::*;
 
 async fn snapshot_with_read_indexes(
     fixture: &OpenFixture,
+    paged: bool,
 ) -> crab_metadata::manifest_store::RepositorySnapshot {
     use crab_metadata::path_state::{
         PathStateInput, PathStateMutation, append_path_state, upload_path_state,
     };
     use crab_metadata::split_commit_graph::{
-        CommitGraphInput, append_split_commit_graph, load_split_commit_graph,
-        upload_split_commit_graph,
+        CommitGraphInput, append_paged_commit_graph, append_split_commit_graph,
+        load_split_commit_graph, upload_split_commit_graph,
     };
 
     crab_metadata::layout_descriptor::ensure_canonical_layout(&fixture.store, &fixture.layout)
@@ -19,7 +20,12 @@ async fn snapshot_with_read_indexes(
             .await
             .unwrap();
     let manifest = &mut snapshot.manifest;
-    let graph = append_split_commit_graph(
+    let append = if paged {
+        append_paged_commit_graph
+    } else {
+        append_split_commit_graph
+    };
+    let graph = append(
         None,
         manifest.generation,
         manifest.pack_index_hash.clone(),
@@ -78,7 +84,13 @@ async fn snapshot_with_read_indexes(
 #[tokio::test]
 async fn snapshot_read_indexes_supply_exact_attribution_without_manifest_or_catalog() {
     let fixture = open_fixture(1, None).await;
-    let snapshot = snapshot_with_read_indexes(&fixture).await;
+    let snapshot = snapshot_with_read_indexes(&fixture, true).await;
+    // Full maintenance reads are valid during construction. Foreground opening
+    // and attribution must succeed when only graph-page ranges are admitted.
+    fixture
+        .backend
+        .reject_graph_layer_bodies
+        .store(true, Ordering::SeqCst);
     fixture
         .store
         .delete(&fixture.layout.manifest_path())
@@ -156,7 +168,7 @@ async fn snapshot_read_indexes_supply_exact_attribution_without_manifest_or_cata
 #[tokio::test]
 async fn snapshot_read_indexes_skip_origin_when_absent_or_superseded() {
     let fixture = open_fixture(1, None).await;
-    let indexed = snapshot_with_read_indexes(&fixture).await;
+    let indexed = snapshot_with_read_indexes(&fixture, true).await;
     let runtime = Arc::new(RemoteGitRuntime::default());
     for absent in [false, true] {
         let mut snapshot = indexed.clone();
@@ -197,7 +209,7 @@ async fn snapshot_read_indexes_skip_origin_when_absent_or_superseded() {
 #[tokio::test]
 async fn snapshot_read_indexes_do_not_hide_exhausted_request_or_byte_budgets() {
     let fixture = open_fixture(1, None).await;
-    let snapshot = snapshot_with_read_indexes(&fixture).await;
+    let snapshot = snapshot_with_read_indexes(&fixture, true).await;
     for limits in [
         OperationLimits {
             max_storage_requests: 1,
@@ -227,7 +239,7 @@ async fn snapshot_read_indexes_do_not_hide_exhausted_request_or_byte_budgets() {
 async fn snapshot_read_indexes_fail_attribution_when_declared_metadata_is_corrupt() {
     for kind in ["commit-graph", "path-state"] {
         let fixture = open_fixture(1, None).await;
-        let snapshot = snapshot_with_read_indexes(&fixture).await;
+        let snapshot = snapshot_with_read_indexes(&fixture, true).await;
         let hash = match kind {
             "commit-graph" => snapshot.manifest.commit_graph_hash.as_deref().unwrap(),
             _ => snapshot.manifest.path_state_hash.as_deref().unwrap(),
@@ -273,7 +285,7 @@ async fn snapshot_read_indexes_fail_attribution_when_declared_metadata_is_corrup
 async fn snapshot_read_indexes_drain_on_cancellation_shutdown_and_deadline() {
     for mode in ["caller", "shutdown", "deadline"] {
         let fixture = open_fixture(1, None).await;
-        let snapshot = snapshot_with_read_indexes(&fixture).await;
+        let snapshot = snapshot_with_read_indexes(&fixture, true).await;
         fixture
             .backend
             .block_path_containing("manifests/commit-graph-");
@@ -333,7 +345,7 @@ async fn snapshot_read_indexes_drain_on_cancellation_shutdown_and_deadline() {
 async fn snapshot_read_indexes_admit_descriptor_pages_and_warm_semantic_results() {
     for mode in ["descriptor", "page", "warm"] {
         let fixture = open_fixture(1, None).await;
-        let snapshot = snapshot_with_read_indexes(&fixture).await;
+        let snapshot = snapshot_with_read_indexes(&fixture, true).await;
         let runtime = Arc::new(RemoteGitRuntime::default());
         let cancel = CancellationToken::new();
         let repository = RemoteGitRepository::from_snapshot(
@@ -420,9 +432,12 @@ async fn snapshot_read_indexes_admit_descriptor_pages_and_warm_semantic_results(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_read_indexes_cancel_inflight_dependency_pages() {
-    for mode in ["caller", "shutdown", "deadline"] {
+    for (mode, dependency) in ["caller", "shutdown", "deadline"]
+        .into_iter()
+        .flat_map(|mode| ["path-state", "commit-graph"].map(|dependency| (mode, dependency)))
+    {
         let fixture = open_fixture(1, None).await;
-        let snapshot = snapshot_with_read_indexes(&fixture).await;
+        let snapshot = snapshot_with_read_indexes(&fixture, true).await;
         let runtime = Arc::new(RemoteGitRuntime::default());
         let cancel = CancellationToken::new();
         let repository = RemoteGitRepository::from_snapshot(
@@ -437,7 +452,11 @@ async fn snapshot_read_indexes_cancel_inflight_dependency_pages() {
         .unwrap();
         fixture
             .backend
-            .block_path_containing("metadata/path-state/layers/");
+            .block_path_containing(if dependency == "path-state" {
+                "metadata/path-state/layers/"
+            } else {
+                "metadata/commit-graph/layers/"
+            });
         let worker_cancel = cancel.clone();
         let worker = tokio::spawn(async move {
             let limits = OperationLimits {
@@ -457,6 +476,16 @@ async fn snapshot_read_indexes_cancel_inflight_dependency_pages() {
             .await
             .unwrap();
             let result = async {
+                if dependency == "commit-graph" {
+                    return repository
+                        .state
+                        .commit_graph
+                        .as_ref()
+                        .unwrap()
+                        .is_reachable(ObjectId::Sha1([0x11; 20]), &operation)
+                        .await
+                        .map(|_| ());
+                }
                 let index = repository.state.path_state(&operation).await?.unwrap();
                 index
                     .latest(
@@ -466,6 +495,7 @@ async fn snapshot_read_indexes_cancel_inflight_dependency_pages() {
                         &operation,
                     )
                     .await
+                    .map(|_| ())
             }
             .await;
             operation.finish(result).await
@@ -493,8 +523,143 @@ async fn snapshot_read_indexes_cancel_inflight_dependency_pages() {
                 "deadline" => matches!(result, Err(Error::Timeout { .. })),
                 _ => matches!(result, Err(Error::Cancelled)),
             },
-            "{mode}: {result:?}"
+            "{mode}/{dependency}: {result:?}"
         );
         runtime.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn released_manifest_graph_remains_usable_for_metadata_membership() {
+    let fixture = open_fixture(1, None).await;
+    let snapshot = snapshot_with_read_indexes(&fixture, false).await;
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let cancel = CancellationToken::new();
+    let repository = RemoteGitRepository::from_snapshot(
+        fixture.layout.clone(),
+        &snapshot,
+        RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+        runtime.clone(),
+        RepositoryOptions::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repository
+            .commits_reachable_from(
+                &[
+                    ObjectId::Sha1([0x11; 20]),
+                    ObjectId::Sha1([0x99; 20]),
+                    ObjectId::Sha1([0x11; 20])
+                ],
+                &[ObjectId::Sha1([0x11; 20])],
+                &cancel,
+            )
+            .await
+            .unwrap(),
+        Some(vec![true, false, true])
+    );
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn paged_graph_queries_preserve_merge_parents_and_exclude_retained_history() {
+    use crab_metadata::split_commit_graph::{
+        CommitGraphInput, append_paged_commit_graph, upload_split_commit_graph,
+    };
+    let fixture = open_fixture(1, None).await;
+    let mut snapshot = snapshot_with_read_indexes(&fixture, true).await;
+    let input = |value: u8, parents: &[u8]| CommitGraphInput {
+        oid: [value; 20],
+        tree_oid: [0x22; 20],
+        commit_time: i64::from(value),
+        parents: parents.iter().map(|parent| [*parent; 20]).collect(),
+    };
+    let graph = append_paged_commit_graph(
+        None,
+        snapshot.manifest.generation,
+        snapshot.manifest.pack_index_hash.clone(),
+        snapshot.manifest.git_validation_digest.clone(),
+        &[[0x11; 20], [4; 20]],
+        vec![
+            input(1, &[]),
+            input(2, &[1]),
+            input(3, &[1]),
+            input(0x11, &[2, 3]),
+            input(4, &[1]),
+        ],
+    )
+    .unwrap()
+    .unwrap();
+    upload_split_commit_graph(&fixture.store, &fixture.layout, &graph)
+        .await
+        .unwrap();
+    snapshot.manifest.commit_graph_hash = Some(graph.descriptor_hash);
+    snapshot.manifest.path_state_hash = None;
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let cancel = CancellationToken::new();
+    let repository = RemoteGitRepository::from_snapshot(
+        fixture.layout.clone(),
+        &snapshot,
+        RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+        runtime.clone(),
+        RepositoryOptions::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    let operation = repository
+        .operation(crate::OperationKind::Resolve, &cancel)
+        .await
+        .unwrap();
+    let result = async {
+        let graph = repository.state.commit_graph.as_ref().unwrap();
+        assert!(matches!(
+            graph.view(),
+            crab_metadata::split_commit_graph::CommitGraphView::Paged(_)
+        ));
+        let candidates = [1, 2, 3, 4, 0x11, 99, 2].map(|value| ObjectId::Sha1([value; 20]));
+        assert_eq!(
+            graph
+                .reachable_from_roots(&candidates, &[ObjectId::Sha1([0x11; 20])], &operation)
+                .await?,
+            vec![true, true, true, false, true, false, true]
+        );
+        assert!(
+            !graph
+                .is_reachable(ObjectId::Sha1([4; 20]), &operation)
+                .await?
+        );
+        assert!(matches!(
+            repository
+                .resolve(&Revision::Commit(ObjectId::Sha1([4; 20])), &operation)
+                .await,
+            Err(Error::Revision {
+                reason: RevisionError::NotReachable
+            })
+        ));
+        assert_eq!(
+            graph
+                .reachable_from_roots(&candidates, &[ObjectId::Sha1([1; 20])], &operation)
+                .await?,
+            vec![true, false, false, false, false, false, false]
+        );
+        assert_eq!(
+            graph
+                .first_parent_chain(ObjectId::Sha1([0x11; 20]), 2, &operation)
+                .await?,
+            Some(vec![ObjectId::Sha1([0x11; 20]), ObjectId::Sha1([2; 20])])
+        );
+        assert!(
+            graph
+                .first_parent_chain(ObjectId::Sha1([99; 20]), 2, &operation)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+    .await;
+    operation.finish(result).await.unwrap();
+    runtime.shutdown().await;
 }

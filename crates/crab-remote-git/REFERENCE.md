@@ -224,7 +224,7 @@ diff, blame, archive, storage, inflation, and response work have independent
 aggregate limits.
 
 History remains authoritative over verified raw commit objects. When the
-manifest names an immutable split commit graph, open bounds the complete graph
+released manifest names a version-1 split commit graph, open bounds the complete graph
 to 128 MiB, verifies every descriptor and layer Blake3 identity, validates
 stable ordinals, parent closure, corrected generations, and the exact manifest
 generation/pack/digest tuple. A snapshot uses it only while each positional
@@ -233,6 +233,16 @@ acceleration falls back to raw parent order and can never hide a reachable
 commit. First-parent path cursors carry the next verified raw parent, so later
 pages do not replay newer commits. A matching complete graph groups bounded raw
 commit and tree reads for range coalescing without becoming the history authority.
+
+Capsule browse graph version 3 uses descriptor and dependency-page reads instead
+of loading the complete graph. Its captured ref roots authorize exact ancestor-set
+queries; physically retained records do not grant visibility. OID, parent and
+generation access is batched and asynchronous. Required page corruption fails
+explicitly. Path-state binds the immutable descriptor's verified positional digest
+and validates consumed records through the graph reader. Complete recurrence and
+physical coverage validation remain the publication/maintenance owner's obligation.
+This removes the graph bitmap and full positional hashing from capsule foreground
+reads; outer capsule control capture is a separate remaining opening cost.
 
 All snapshot constructors use this same graph validation when their supplied
 metadata names an index. Attribution captures the path-state descriptor and

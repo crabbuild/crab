@@ -329,7 +329,14 @@ async fn query(
     let result = async {
         let snapshot = repository.snapshot(revision, &operation).await?;
         match name {
-            "resolve" => Ok(json!({"commit":snapshot.commit_oid().to_string()})),
+            "resolve" => {
+                // Ref resolution alone bypasses ancestor membership. Resolve the
+                // same immutable OID through the foreground visibility boundary.
+                let resolved = repository
+                    .resolve(&Revision::Commit(snapshot.commit_oid()), &operation)
+                    .await?;
+                Ok(json!({"commit":resolved.commit.to_string()}))
+            }
             "commit" => {
                 let commit = snapshot.commit(&operation).await?;
                 Ok(json!({"oid":commit.oid.to_string(), "tree":commit.tree.to_string(),

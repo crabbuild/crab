@@ -29,7 +29,7 @@ Xet files and unified local staging are subsequent workstreams.
 | 1 | Reproducible cold/warm baseline and contracts | Native Git oracle, isolated query/open measurements, process resources, HTTP bytes/classes, index decode counts, history scaling receipts | Implemented; RustFS history-scaling baseline passed; cloud latency cell pending |
 | 2 | Authenticated bounded path-state pages | Equivalence/property tests; malformed hashes, lengths, ordering, routing and allocations rejected; bounded internal directories | Implemented; 23 focused tests, GC retention regression and 1,000/10,000-commit RustFS format qualification passed |
 | 3 | Lazy canonical and projected attribution | Fixed directory page reads only needed pages; branch/force-push/recreation/raw-path/restart E2E proof | Canonical scaling/transitions passed; streaming Cell ingestion, projected native Git oracle and two process starts passed on RustFS; broader cloud/lifecycle qualification remains open |
-| 4 | Lazy graph lookup and bounded opening | Paged OID/ordinal/parent/summary queries; reachable versus retained proof; tag/shallow/cancellation/cleanup checks | Paged producer and authenticated ancestor-set component qualified; foreground conversion and bounded opening remain pending |
+| 4 | Lazy graph lookup and bounded opening | Paged OID/ordinal/parent/summary queries; reachable versus retained proof; tag/shallow/cancellation/cleanup checks | Foreground graph/path integration qualified on RustFS; bounded control opening, broader shallow/lifecycle and release/cloud qualification remain pending |
 | 5 | Change-point history and first-parent blame | Exact native Git origins under matching semantics; fixed file changes with growing unrelated history; comparison/result cache isolation | Pending |
 | 6 | Indexed historical Xet catalog | Indexed checkpoints and visible deltas; bounded compaction; 10-GiB edits and byte-identical cold historical hydration; protected receive and sibling consumers | Pending |
 | 7 | Lifecycle and migration | Interrupted publication/builds, concurrent owners, GC retained roots/readers, stale caches and released-format migration qualification | Pending; also required in every earlier implementation |
@@ -425,3 +425,56 @@ checks pass 27 graph/ancestry tests, 21 path-state tests, capsule browse publica
 integration, payload-only compilation, strict metadata library Clippy, qualifier
 diagnostic Clippy and architecture guardrails. The negative-control source is
 restored; final source/binary hashes and receipts are retained externally.
+
+## Foreground graph integration
+
+Capsule foreground handles now retain the paged graph reader and captured ref
+roots. OID resolution, ordered parent validation, generation lookup and membership
+are asynchronous and use the operation's admitted store and cancellation. Path-state
+binds the paged descriptor's positional identity and validates consumed records
+through batched graph reads, without recomputing the complete ordinal digest.
+The released manifest format still receives full graph validation; its membership
+work charges metadata entries rather than the raw-history budget.
+
+The final-source repository-index run passes nine tests, including rejection of full
+graph-layer body reads, admission on warm results and dependency-page cancellation.
+The retained-OID public resolution check passes. The shallow-fetch caller is now
+async, and the native Git tag fixture passes for both formats.
+The resolve qualifier now checks full-OID visibility
+after obtaining the selected ref's commit; older resolve timings therefore measure
+less work and are not direct comparisons for this expanded workload. Four Python
+oracle regressions and architecture guardrails pass. Real-store foreground scaling,
+build-cost and consumer qualification are recorded below. Broad CI remains
+required; this is not a completed stage-4 gate. Outer control opening and later
+history/catalog/lifecycle/blame stages remain open.
+
+Release audit: the synchronous `commits_reachable_from` introduced at
+`acf0408de89` is reachable from v1.0.1 and v1.2.0 through v1.2.4. Its conversion
+to asynchronous I/O is a Rust source API change; callers now await the proof.
+The current crate still declares 0.1.0. A breaking crate-version transition and
+consumer migration remain required before publication; the passing architecture
+version-alignment check is not proof of that migration. Version-1 stored graphs
+retain complete validation and native protocol consumers use the async proof.
+
+`foreground-graph-r1` passes 20 isolated cold/warm attribution comparisons at
+each of 100/1k/10k commits and a full-OID resolution comparison at each size.
+Native Git verifies all results. At 10k, query reads reach at most 138,597 bytes
+and decoded graph/path pages reach at most 110,104 bytes. Graph opening decodes
+at most 35,764 bytes; the outer opening still downloads up to 6,094,562 bytes.
+Cold attribution p95 is 45.792 / 31.149 / 54.412 ms on the shared debug host.
+These pass the frozen local fixture bounds but are not release/cloud latency
+qualification or direct comparisons with earlier release-binary receipts.
+Final-source checks pass nine repository-index tests, the native Git tag/retention
+fixture for both formats, 22 path-state tests, four Python oracle tests and
+architecture guardrails. The qualifier builds with real consumer dependencies.
+Strict metadata/remote-Git library Clippy and the CLI binary consumer check pass.
+Build-qualifier Clippy also passes. No dependency or lockfile changes were needed.
+
+`graph-build-cpu-r1` records 20 samples for each of four graph shapes at
+1k/2k/4k/8k commits: 320 component builds. At the two largest sizes, process CPU
+growth stays at most 2.358x and complete encoded index growth at most 2.179x per
+doubling. The 8k criss-cross fixture uses 1.29 median CPU seconds, 7,228,939 encoded
+bytes and 62,357,504 median RSS bytes. Synthetic OIDs isolate the builder; these
+are debug component receipts, not native Git integrity, release-image performance
+or whole-publication measurements. Release/provider and broader lifecycle gates
+remain open. Fixtures, source/binary hashes and raw receipts remain external.
