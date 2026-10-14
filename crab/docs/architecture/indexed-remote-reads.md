@@ -1383,6 +1383,51 @@ replacement, deletion/recreation and matching rejection of invalid edits. At
 exercise nonzero sibling prefixes and duplicate inputs. Publisher-to-reader
 integration preserves refs, transaction positions, Git snapshot and catalog after
 checkpointing and a later update, eliminating the complete checkpoint GET.
-Pre-checkpoint activation matches complete opening. Native final-source and HTTP
-receipts are recorded separately when available. Full initiative/release gates,
+Pre-checkpoint activation matches complete opening. Full initiative/release gates,
 10-GiB qualification, Xet catalog paging and later blame/staging work remain open.
+
+Final-source qualification at `9a08da540463` passes 285 focused metadata/read/
+consumer tests, 14 CLI read tests and one HTTP browse test. Locked CLI/qualifier
+and HTTP builds pass. The retained CLI was rebuilt after committing so its
+embedded Git revision matches the clean source; the earlier retained binary's
+parent revision failed the existing provenance check. Qualification does not
+count that failed provenance run as clean-source proof.
+
+RustFS query replay preserves byte identity for ordinary text and a 1-MiB binary
+after checkpoint and browse-index publication. Canonical resolve opening reads
+17,419 B; cold/warm queries read 2,127 B and zero bytes, with backend work drained
+at each boundary. These are small-fixture observations, not final tail-latency
+or history-scaling qualification.
+
+Required dictionary and closure pages are corrupted independently while keeping
+the authenticated footer intact. Download, export and canonical ref resolution
+fail with an explicit page-integrity error. Pre-existing output and its file
+inventory stay unchanged. Exact checkpoint restoration is verified byte-for-byte;
+retry reconstructs the file, matches the native source tip and drains backend
+work. A separate replay stalls the required closure range before headers and
+inside its body. SIGTERM makes both CLI commands report cancellation and exit
+without a forced kill or destination/temp-file changes.
+
+The existing protocol harness publishes a fresh checkpointed fixture with Crab
+and LFS pointers. Its read-only clean-source replay passes all six cold CLI
+materializations: ordinary Git content, a 16-KiB Crab payload and an 8-MiB LFS
+payload through download and export. Bytes match exactly, no local Git object
+database is installed, and export temporaries drain. This verifies first hydration
+from the detached catalog without establishing historical-catalog or 10-GiB work
+bounds.
+
+A dedicated live HTTP process passes the existing native tree/commit/blob/diff,
+historical-read and error oracles with attribution checking disabled. Independent
+attribution checks compare all three displayed paths' OIDs, authors, timestamps
+and first-line summaries against native Git, including after exact-source Cell
+projection readiness. The process shuts down successfully. The unchanged live
+attribution verifier instead expects complete message previews, including a
+trailing newline. That conflicts with `CommitSummary`'s first-line contract and
+`path_state_inputs`' canonical producer; its one-line oracle correction awaits
+explicit approval. Do not describe the unchanged full attribution verifier as
+passing.
+
+Current PR CI confirms the inherited architecture guard still requires the
+retired pack-installer delegation in `crab/src/read/mod.rs`. Its inventory
+correction remains subject to the earlier explicit-approval request. No guard,
+baseline, dependency or lockfile change is included in this proof update.
