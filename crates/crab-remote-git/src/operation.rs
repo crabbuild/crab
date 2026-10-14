@@ -412,12 +412,15 @@ impl OperationContext {
     /// ```
     pub async fn finish<T>(mut self, operation: Result<T>) -> Result<T> {
         let timed_out = tokio::time::Instant::now() >= self.deadline;
+        let interrupted = timed_out || self.cancellation.is_cancelled();
         self.deadline_stop.cancel();
         let operation = match operation {
             Ok(_) if timed_out => Err(Error::Timeout {
                 operation: "repository operation",
             }),
-            Err(error) if timed_out => Err(error.after_interruption(true)),
+            // Admission may return wrapped cancellation before a read's outer
+            // select observes it. Preserve real failures and report scope reason.
+            Err(error) if interrupted => Err(error.after_interruption(timed_out)),
             result => result,
         };
         let close = match self.session.take() {
@@ -1452,6 +1455,51 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+
+    #[tokio::test]
+    async fn finish_normalizes_admission_cancellation_after_read_returns() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let runtime = Arc::new(crate::RemoteGitRuntime::default());
+        let state = Arc::new(crate::state::RepositoryState {
+            store: store.clone(),
+            layout: StoreLayout::new(store, "cancel-finish".to_owned()),
+            runtime: runtime.clone(),
+            identity: crate::RepositoryIdentity::new("memory", "cancel-finish", 1).unwrap(),
+            options: crate::RepositoryOptions::default(),
+            generation: 1,
+            pack_index_hash: Arc::from("a".repeat(64)),
+            git_validation_digest: Arc::from("b".repeat(64)),
+            manifest_etag: "etag".to_owned(),
+            shard_index_hash: Arc::from(""),
+            catalog_identity: None,
+            lookup_catalog_identity: None,
+            inventory: HashMap::new(),
+            refs: crate::RepositoryRefs::default(),
+            reader: None,
+            commit_graph: None,
+            path_state_hash: None,
+            path_state: tokio::sync::OnceCell::new(),
+            shallow_closure: None,
+        });
+        let cancel = CancellationToken::new();
+        let operation =
+            OperationContext::open_pack_transfer(state, &cancel, crate::OperationLimits::default())
+                .await
+                .unwrap();
+        let returned: Result<()> = Err(Error::Metadata(
+            crab_metadata::error::MetadataError::Storage {
+                source: crab_storage::StorageError::ReadRejected {
+                    source: Box::new(Error::Cancelled),
+                },
+            },
+        ));
+        cancel.cancel();
+        assert!(matches!(
+            operation.finish(returned).await,
+            Err(Error::Cancelled)
+        ));
+        runtime.shutdown().await;
+    }
 
     #[tokio::test]
     async fn pack_transfer_operation_does_not_open_the_catalog() {
