@@ -838,3 +838,34 @@ reconciliation remain eager. The unindexed pack-index path remains existing prod
 behavior. HTTP/S3 service E2E, 10k version-2 scaling and representative-provider
 latency qualification are still missing for this slice. Stages 5–8 and unified
 native/Git staging remain separate work. The PR stays draft and is not merged.
+
+### Shared visibility checks and 10k qualification
+
+Full-capsule and control-only readiness/application now share borrowed checks.
+The old four implementations cloned entire added/removed OID lists to remove ref
+keys from a temporary map. Canonical transaction encoding/decoding already proves
+unique refs, so counting matched borrowed rows preserves rejection of uncommitted
+evidence. Ref-tip matching, deletion checks, cross-ref base readiness and prior
+closure validation remain unchanged. The production refactor removes 74 lines;
+complete JSON visibility decoding remains eager.
+
+All 36 capsule-read tests and strict all-target read Clippy pass. A new paired
+full/control regression rejects extra/missing evidence, deleted-ref evidence and
+wrong old/new tips. Removing the unmatched-row guard makes its exact test fail;
+restoring the source passes the suite. Both qualifier builds pass. Final-source
+RustFS replay passes 121 qualifier processes: all ten queries at 100 commits,
+plus 20 cold/warm resolve and attribution samples at each of 100/1,000/10,000
+commits. Warm query backend bytes are zero; source hashes match the receipts.
+Opening bytes are 78,142/471,334/1,341,201, with one admission count page decoded
+at every history size. These shared-host debug results do not establish a
+representative-provider latency target or bounded total opening.
+
+The fresh 10k fixture was published through the format slice's isolated installed
+CLI; the read qualifier contains the current lazy-opening source. The complete
+ten-query 10k qualification **fails** at path history: tree traversal charges
+100,010 entries against the unchanged 100,000-entry budget. The failed report is
+retained outside the checkout. Resolve/attribution proof does not override that
+failure. Path history still visits unrelated commits/trees and needs the planned
+change-point traversal; absent/deleted paths require explicit change records
+because the current path-state trie drops deleted children. Limits were not raised
+and no baseline or expected-failure file was changed.
