@@ -1739,3 +1739,71 @@ Unifying ingestion requires preserving every occurrence, native rollback and
 clean flush-before-pointer ordering, followed by the alternating 10-GiB
 multi-edit/push/read qualification. Representative S3 qualification and the
 remaining indexed history/catalog/lifecycle/blame gates remain open.
+
+## Segment reuse has independent payload ownership
+
+The sibling audit reproduced `ChunkNotFound` after a direct-stream recording
+selected segment-backed chunks and their original recipe rolled back. It also
+found stale canonical locators after compaction: the previous compactor moved
+file occurrence rows while leaving `chunk_payloads` at the original position.
+The negative receipt is `segment-reuse-negative.log`.
+
+Segment point/batch reads, deduplication and registration now share canonical
+payload inventory. Cleanup retains inventory while any raw occurrence, recording
+term or sealed recipe owns the chunk. Recordings therefore survive original-file
+retirement before sealing, without copying segment bytes or fabricating file
+occurrences. Batch rollback releases its recording retention. Sealed recipes keep
+all ordered occurrences, including repeats, independently of physical deduplication.
+
+Compaction counts and copies each retained physical payload once, moves inventory
+and committed/pending locators in one transaction, and retires the old segment
+registry entry before unlink. Output allocation is provisional within that
+transaction; failures cannot publish a second current segment. Durable output
+installation precedes locator transfer. Exclusive-open recovery removes orphan
+compaction bodies only when neither registry nor canonical inventory references
+them; a referenced unregistered body fails as corruption and remains intact.
+Current-segment recovery includes retained recipe payload boundaries. Segment
+handles are captured with locators before releasing the owner lock, so compaction
+and reader-pool eviction cannot invalidate captured reads. No synchronous guard
+crosses an await. Abandoned cleanup preserves writer-to-index lock ordering.
+
+Release inspection confirms staging layout v1 and the old compactor in v1.2.4.
+Layout v2 repairs stale inventory from the committed/pending locators released
+readers used, with committed precedence, then updates admission atomically.
+Both writable and shared handles can perform this metadata-only upgrade under
+their existing SQLite serialization contract. Old binaries reject v2 admission.
+Tables, index inventories, payload encoding and public Rust APIs are unchanged.
+Upgrade failures retain v1 admission and old locators; missing retained segment
+dependencies fail explicitly. Normal v2 opening does not repeat the migration
+scan. Migration cannot reconstruct bytes already deleted by an older binary.
+
+The released corrupt-prepared-plan repair contract still uses surviving segment
+occurrences. Coalesced planning preserves that source preference with batched hash
+lookups, while prepared-only source groups stay bounded to one Xorb. Canonical
+inventory retention is not confused with the presence of those old occurrence
+rows. The stricter recipe-page occurrence proof used by product plan repair is
+unchanged; it is not a new permissive fallback or a claim of unified ingestion.
+
+Real file cases cover recording versus sealed reuse, current versus compacted
+segments, original rollback, ordered repeated chunks, captured reads after pool
+eviction/unlink, close/reopen and final release. SQLite cases cover two recording
+owners, incomplete transfer rollback, writable/shared released-shape upgrade and
+early/late upgrade failure with typed causes. A real failed-compaction case checks
+one current segment, byte-identical recovery and orphan cleanup. The existing
+compaction property fixture follows the changed private transaction API; its
+read assertions are preserved. Failed receipts remain recorded.
+
+Proof: the final staging run passes 233 cases with the existing manual RSS case
+ignored. Selected formatting and all-targets Clippy pass with the repository's
+existing unfulfilled-expectation exception. Seven product push-plan cases pass,
+including corrupt-body segment repair, stale remote placements, global dedup and
+prepared reuse without rereading. The minimal CLI consumer profile emits its
+existing disabled-feature warnings; this is not a clean CLI-wide lint claim.
+Production code before test modules shrinks by 146 lines across the three changed
+Rust modules. Public dependency manifests, lockfiles and gate inventories are
+unchanged. Broader CI and real-provider performance qualification remain required.
+
+Unified byte ingestion, native/Git-clean crossover publication policy and the
+10-GiB alternating multi-edit/push/read grid remain required. Representative S3
+qualification, pending pack-layout gate approval and the remaining indexed
+history/catalog/lifecycle/blame gates also remain open.

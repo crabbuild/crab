@@ -18,8 +18,8 @@ type StoredRecipeMetadata = (i64, i64, Vec<u8>, i64, Vec<u8>, String);
 type StoredRecipeWithHashRow = (Vec<u8>, i64, i64, Vec<u8>, i64, Vec<u8>, String, Vec<u8>);
 type ResidualAuthorityRow = (i64, Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
 
-/// Canonical pre-release on-disk layout contract.
-const LAYOUT_VERSION: &str = "1";
+/// Version 2 makes segment payload inventory authoritative for reads and lifetime.
+const LAYOUT_VERSION: &str = "2";
 const PUBLISHED_RECIPE_LOOKUP_BATCH_SIZE: usize = 512;
 
 const CANONICAL_TABLES: &[&str] = &[
@@ -281,9 +281,9 @@ fn nonnegative_count(field: &str, value: i64) -> Result<u64> {
 }
 
 fn retired_staging_schema() -> StagingError {
-    StagingError::StagingCorrupt(
-        "staging schema is not canonical v1; remove .crab/staging and restage".to_owned(),
-    )
+    StagingError::StagingCorrupt(format!(
+        "staging schema is not canonical v{LAYOUT_VERSION}; remove .crab/staging and restage"
+    ))
 }
 
 fn sqlite_i64(field: &str, value: u64) -> Result<i64> {
@@ -497,7 +497,7 @@ impl Index {
     /// Open (or create) the staging index at `path`.
     ///
     /// Enables WAL mode, `PRAGMA synchronous = NORMAL`, and foreign key
-    /// enforcement. Initializes a fresh canonical v1 schema or rejects any
+    /// enforcement. Initializes or upgrades the canonical schema, rejecting any
     /// other shape with an explicit restage instruction.
     ///
     /// # Errors
@@ -580,6 +580,7 @@ impl Index {
     fn open_canonical_schema(&mut self) -> Result<()> {
         let existing_tables = self.application_objects("table")?;
         let fresh = existing_tables.is_empty();
+        let mut needs_payload_upgrade = false;
         if !fresh {
             if existing_tables
                 .iter()
@@ -644,12 +645,17 @@ impl Index {
                 .map_err(|e| {
                     StagingError::Internal(format!("failed to read staging layout version: {e}"))
                 })?;
-            if version.as_deref() != Some(LAYOUT_VERSION) {
-                return Err(retired_staging_schema());
+            match version.as_deref() {
+                Some("1") => needs_payload_upgrade = true,
+                Some(LAYOUT_VERSION) => {}
+                _ => return Err(retired_staging_schema()),
             }
         }
 
         self.initialize_schema()?;
+        if needs_payload_upgrade {
+            self.upgrade_segment_payload_authority()?;
+        }
         if fresh {
             self.conn
                 .execute(
@@ -664,6 +670,52 @@ impl Index {
                 "initialized canonical staging schema"
             );
         }
+        Ok(())
+    }
+
+    fn upgrade_segment_payload_authority(&self) -> Result<()> {
+        // Released v1 compaction moved occurrence rows without updating payload
+        // inventory. Repair from the locators v1 readers actually used, then
+        // change admission atomically so an old writer cannot recreate the gap.
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE chunk_payloads AS payload
+             SET (segment_id, segment_offset) = (
+                 SELECT candidate.segment_id, candidate.segment_offset FROM (
+                     SELECT segment_id, segment_offset, size, 0 AS priority, rowid
+                     FROM chunks WHERE chunk_hash = payload.chunk_hash
+                     UNION ALL
+                     SELECT segment_id, segment_offset, size, 1 AS priority, rowid
+                     FROM pending_chunks WHERE chunk_hash = payload.chunk_hash
+                 ) AS candidate
+                 JOIN segments USING (segment_id)
+                 WHERE candidate.size = payload.size
+                 ORDER BY candidate.priority, candidate.rowid LIMIT 1
+             )
+             WHERE EXISTS (SELECT 1 FROM chunks JOIN segments USING (segment_id)
+                           WHERE chunk_hash = payload.chunk_hash AND size = payload.size)
+                OR EXISTS (SELECT 1 FROM pending_chunks JOIN segments USING (segment_id)
+                           WHERE chunk_hash = payload.chunk_hash AND size = payload.size)",
+            [],
+        )?;
+        Self::prune_unowned_segment_payloads(&tx)?;
+        let missing_segment: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunk_payloads AS payload
+                           WHERE NOT EXISTS (SELECT 1 FROM segments
+                                             WHERE segments.segment_id = payload.segment_id))",
+            [],
+            |row| row.get(0),
+        )?;
+        if missing_segment {
+            return Err(StagingError::StagingCorrupt(
+                "released payload inventory references a missing segment".to_owned(),
+            ));
+        }
+        tx.execute(
+            "UPDATE staging_meta SET value = ?1 WHERE key = 'layout_version'",
+            params![LAYOUT_VERSION],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1369,33 +1421,12 @@ impl Index {
         Ok(count as u64)
     }
 
-    /// Look up a chunk by hash, returning its locator if staged.
-    ///
-    /// Single index lookup on `chunks_by_hash`. Returns `None` if the
-    /// chunk is not in the committed `chunks` table.
-    ///
-    /// # Errors
-    ///
-    /// Look up a chunk by hash, returning its locator if staged.
-    ///
-    /// Checks the committed `chunks` table first, falling back to
-    /// `pending_chunks`. Post-`flush_pending` rows still live in
-    /// `pending_chunks`, so `locate` must check both tables to stay
-    /// consistent with `locate_batch` and `get_chunk`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StagingError::Internal`] on SQLite failure.
+    /// Resolve a segment payload independently of file occurrence ownership.
     pub fn locate(&self, chunk_hash: &[u8; 32]) -> Result<Option<ChunkLocator>> {
-        let hash_slice: &[u8] = chunk_hash;
-        let committed = self
-            .conn
+        self.conn
             .query_row(
-                "SELECT segment_id, segment_offset, size
-                 FROM chunks
-                 WHERE chunk_hash = ?1
-                 LIMIT 1",
-                params![hash_slice],
+                "SELECT segment_id, segment_offset, size FROM chunk_payloads WHERE chunk_hash = ?1",
+                params![chunk_hash.as_slice()],
                 |row| {
                     Ok(ChunkLocator {
                         segment_id: row.get(0)?,
@@ -1405,13 +1436,7 @@ impl Index {
                 },
             )
             .optional()
-            .map_err(|e| StagingError::Internal(format!("failed to locate chunk: {e}")))?;
-
-        if committed.is_some() {
-            return Ok(committed);
-        }
-
-        self.locate_pending(chunk_hash)
+            .map_err(StagingError::from)
     }
 
     /// Return the byte offset one past the last committed record for a
@@ -1469,9 +1494,14 @@ impl Index {
         let offset: Option<i64> = self
             .conn
             .query_row(
-                "SELECT MAX(segment_offset + size + 8)
-                 FROM chunks
-                 WHERE segment_id = ?1",
+                "SELECT MAX(boundary) FROM (
+                     SELECT segment_offset + size + 8 AS boundary FROM chunks WHERE segment_id = ?1
+                     UNION ALL
+                     SELECT payload.segment_offset + payload.size + 8
+                     FROM chunk_payloads AS payload WHERE payload.segment_id = ?1
+                       AND EXISTS (SELECT 1 FROM recipe_payload_leases AS lease
+                                   WHERE lease.chunk_hash = payload.chunk_hash)
+                 )",
                 params![segment_id],
                 |row| row.get(0),
             )
@@ -1535,6 +1565,7 @@ impl Index {
                  LEFT JOIN pending_chunks p ON p.segment_id = s.segment_id
                  WHERE s.live_chunk_count = 0
                    AND s.sealed_at IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM chunk_payloads AS payload WHERE payload.segment_id = s.segment_id)
                  GROUP BY s.segment_id
                  HAVING COUNT(p.rowid) = 0",
             )
@@ -1574,7 +1605,7 @@ impl Index {
                         COALESCE(p.n, 0) AS pending_chunks
                  FROM segments s
                  LEFT JOIN (
-                     SELECT segment_id, COUNT(*) AS n FROM chunks GROUP BY segment_id
+                     SELECT segment_id, COUNT(*) AS n FROM chunk_payloads GROUP BY segment_id
                  ) c ON c.segment_id = s.segment_id
                  LEFT JOIN (
                      SELECT segment_id, COUNT(*) AS n FROM pending_chunks GROUP BY segment_id
@@ -1654,7 +1685,8 @@ impl Index {
                  ) p ON p.segment_id = s.segment_id
                  WHERE s.segment_id != ?1
                    AND COALESCE(c.n, 0) = 0
-                   AND COALESCE(p.n, 0) = 0",
+                   AND COALESCE(p.n, 0) = 0
+                   AND NOT EXISTS (SELECT 1 FROM chunk_payloads AS payload WHERE payload.segment_id = s.segment_id)",
             )
             .map_err(|e| {
                 StagingError::Internal(format!("failed to prepare abandoned query: {e}"))
@@ -1746,17 +1778,22 @@ impl Index {
     ///
     /// Returns [`StagingError::Internal`] on SQLite failure.
     pub fn delete_orphan_pending_rows(&self) -> Result<u64> {
-        let n = self
-            .conn
-            .execute(
-                "DELETE FROM pending_chunks
-                 WHERE segment_id NOT IN (SELECT segment_id FROM segments)",
-                [],
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("failed to delete orphan pending rows: {e}"))
-            })?;
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "DELETE FROM pending_chunks WHERE segment_id NOT IN (SELECT segment_id FROM segments)",
+            [],
+        )?;
+        Self::prune_unowned_segment_payloads(&tx)?;
+        tx.commit()?;
         Ok(n as u64)
+    }
+
+    pub fn segment_has_payloads(&self, segment_id: u64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunk_payloads WHERE segment_id = ?1)",
+            params![segment_id],
+            |row| row.get(0),
+        )?)
     }
 
     /// Mark a segment as sealed with the current timestamp.
@@ -1862,10 +1899,7 @@ impl Index {
             .conn
             .query_row(
                 "SELECT EXISTS(
-                    SELECT 1 FROM chunks WHERE chunk_hash = ?1
-                    UNION ALL
-                    SELECT 1 FROM pending_chunks WHERE chunk_hash = ?1
-                    LIMIT 1
+                    SELECT 1 FROM chunk_payloads WHERE chunk_hash = ?1
                 )",
                 params![hash_slice],
                 |row| row.get(0),
@@ -5726,6 +5760,7 @@ impl Index {
         )
         .map_err(|e| StagingError::Internal(format!("failed to delete staging batch: {e}")))?;
 
+        Self::prune_unowned_segment_payloads(&tx)?;
         let unleased = unowned_file_hashes(&tx, file_hashes)?;
         tx.commit()
             .map_err(|e| StagingError::Internal(format!("failed to commit batch rollback: {e}")))?;
@@ -5937,6 +5972,22 @@ impl Index {
         })
     }
 
+    fn prune_unowned_segment_payloads(conn: &Connection) -> Result<()> {
+        // Occurrences and recording terms retain bytes independently of their
+        // original file rows. Materialize recording hashes once so cleanup does
+        // not rescan a growing in-flight recipe for each inventory entry.
+        conn.execute(
+            "DELETE FROM chunk_payloads
+             WHERE NOT EXISTS (SELECT 1 FROM recipe_payload_leases AS lease
+                               WHERE lease.chunk_hash = chunk_payloads.chunk_hash)
+               AND NOT EXISTS (SELECT 1 FROM chunks WHERE chunks.chunk_hash = chunk_payloads.chunk_hash)
+               AND NOT EXISTS (SELECT 1 FROM pending_chunks WHERE pending_chunks.chunk_hash = chunk_payloads.chunk_hash)
+               AND chunk_hash NOT IN (SELECT chunk_hash FROM recipe_recording_terms)",
+            [],
+        )?;
+        Ok(())
+    }
+
     /// Atomically remove files and their chunk rows, then reclaim unowned payload inventory.
     ///
     /// Returns per-file retirement stats and prepared bodies eligible for unlinking.
@@ -5988,25 +6039,7 @@ impl Index {
                 .map_err(|e| StagingError::Internal(format!("failed to delete file_path: {e}")))?;
         }
 
-        tx.execute(
-            "DELETE FROM chunk_payloads
-             WHERE NOT EXISTS (
-                       SELECT 1 FROM recipe_payload_leases
-                       WHERE recipe_payload_leases.chunk_hash = chunk_payloads.chunk_hash
-                   )
-               AND NOT EXISTS (
-                       SELECT 1 FROM chunks
-                       WHERE chunks.chunk_hash = chunk_payloads.chunk_hash
-                   )
-               AND NOT EXISTS (
-                       SELECT 1 FROM pending_chunks
-                       WHERE pending_chunks.chunk_hash = chunk_payloads.chunk_hash
-                   )",
-            [],
-        )
-        .map_err(|e| {
-            StagingError::Internal(format!("failed to delete unleased chunk payloads: {e}"))
-        })?;
+        Self::prune_unowned_segment_payloads(&tx)?;
 
         let reclaimable_payloads = {
             let mut statement = tx
@@ -6090,6 +6123,7 @@ impl Index {
             StagingError::Internal(format!("failed to begin chunk retirement: {e}"))
         })?;
         let stats = Self::delete_chunks_for_file_in(&tx, file_hash)?;
+        Self::prune_unowned_segment_payloads(&tx)?;
         tx.commit().map_err(|e| {
             StagingError::Internal(format!("failed to commit chunk retirement: {e}"))
         })?;
@@ -7415,8 +7449,8 @@ impl Index {
 
     /// Insert chunk rows for a file, linking them to their segment locators.
     ///
-    /// For each `(chunk_hash, size)` pair, looks up the locator from
-    /// `chunks` (preferred) or `pending_chunks` and inserts into `chunks`.
+    /// For each `(chunk_hash, size)` pair, resolves canonical payload authority
+    /// and inserts one committed occurrence into `chunks`.
     /// Removes old chunk rows for this file first and keeps
     /// `live_chunk_count` in sync with the replacement.
     ///
@@ -7495,15 +7529,9 @@ impl Index {
         {
             let mut locate_stmt = tx
                 .prepare_cached(
-                    "SELECT segment_id, segment_offset, size FROM chunks WHERE chunk_hash = ?1 LIMIT 1",
+                    "SELECT segment_id, segment_offset, size FROM chunk_payloads WHERE chunk_hash = ?1",
                 )
                 .map_err(|e| StagingError::Internal(format!("prepare locate: {e}")))?;
-
-            let mut locate_pending_stmt = tx
-                .prepare_cached(
-                    "SELECT segment_id, segment_offset, size FROM pending_chunks WHERE chunk_hash = ?1 LIMIT 1",
-                )
-                .map_err(|e| StagingError::Internal(format!("prepare locate pending: {e}")))?;
 
             let mut insert_stmt = tx
                 .prepare_cached(
@@ -7514,7 +7542,6 @@ impl Index {
 
             for (idx, (chunk_hash, size)) in chunks.iter().enumerate() {
                 let ch: &[u8] = chunk_hash;
-                // Try committed chunks first, then pending.
                 let locator: Option<(u64, u64, i64)> = locate_stmt
                     .query_row(params![ch], |row| {
                         Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -7522,21 +7549,15 @@ impl Index {
                     .optional()
                     .map_err(|e| StagingError::Internal(format!("locate chunk: {e}")))?;
 
-                let (seg_id, seg_offset, _stored_size) = if let Some(loc) = locator {
-                    loc
-                } else {
-                    locate_pending_stmt
-                        .query_row(params![ch], |row| {
-                            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                        })
-                        .optional()
-                        .map_err(|e| StagingError::Internal(format!("locate pending chunk: {e}")))?
-                        .ok_or_else(|| {
-                            StagingError::Internal(
-                                "chunk not found in chunks or pending_chunks".into(),
-                            )
-                        })?
-                };
+                let (seg_id, seg_offset, stored_size) =
+                    locator.ok_or_else(|| StagingError::ChunkNotFound {
+                        hash: crab_xet::hash::MerkleHash::from(*chunk_hash).hex(),
+                    })?;
+                if nonnegative_count("registered chunk size", stored_size)? != *size {
+                    return Err(StagingError::StagingCorrupt(
+                        "registered chunk size does not match its payload".to_owned(),
+                    ));
+                }
 
                 insert_stmt
                     .execute(params![
@@ -7590,6 +7611,7 @@ impl Index {
             }
         }
 
+        Self::prune_unowned_segment_payloads(&tx)?;
         tx.commit().map_err(|e| {
             StagingError::Internal(format!("failed to commit insert_chunks_for_file tx: {e}"))
         })?;
@@ -7652,41 +7674,29 @@ impl Index {
     ///
     /// Returns [`StagingError::Internal`] on SQLite failure.
     pub fn delete_pending_for_segment(&self, segment_id: u64) -> Result<u64> {
-        let n = self
-            .conn
-            .execute(
-                "DELETE FROM pending_chunks WHERE segment_id = ?1",
-                params![segment_id],
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to delete pending chunks for segment {segment_id}: {e}"
-                ))
-            })?;
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "DELETE FROM pending_chunks WHERE segment_id = ?1",
+            params![segment_id],
+        )?;
+        Self::prune_unowned_segment_payloads(&tx)?;
+        tx.commit()?;
         Ok(n as u64)
     }
 
-    /// Delete pending rows whose framed record crosses a recovered boundary.
-    ///
-    /// Used by recovery to discard rows whose payload or framing was truncated,
-    /// while preserving rows fully contained within the valid range.
+    /// Discard pending locators and payload inventory beyond the recovered boundary.
     pub fn delete_pending_beyond_offset(&self, segment_id: u64, max_offset: u64) -> Result<()> {
-        #[expect(clippy::cast_possible_wrap, reason = "offset fits in i64")]
-        let max_offset_i64 = max_offset as i64;
-        self.conn
-            .execute(
-                "DELETE FROM pending_chunks
-                 WHERE segment_id = ?1
-                   AND (segment_offset < 0
-                        OR size < 0
-                        OR segment_offset + size + 8 > ?2)",
-                params![segment_id, max_offset_i64],
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to delete pending chunks crossing offset {max_offset} for segment {segment_id}: {e}"
-                ))
-            })?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM pending_chunks WHERE segment_id = ?1
+             AND (segment_offset < 0 OR size < 0 OR segment_offset + size + 8 > ?2)",
+            params![
+                segment_id,
+                sqlite_i64("recovered segment boundary", max_offset)?
+            ],
+        )?;
+        Self::prune_unowned_segment_payloads(&tx)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -7695,6 +7705,7 @@ impl Index {
     /// # Errors
     ///
     /// Returns [`StagingError::Internal`] on SQLite failure.
+    #[cfg(test)]
     pub fn locate_pending(&self, chunk_hash: &[u8; 32]) -> Result<Option<ChunkLocator>> {
         let hash_slice: &[u8] = chunk_hash;
         self.conn
@@ -7716,135 +7727,44 @@ impl Index {
             .map_err(|e| StagingError::Internal(format!("failed to locate pending chunk: {e}")))
     }
 
-    /// Batch locator lookup across `chunks` and `pending_chunks`.
-    ///
-    /// Issues bounded `WHERE chunk_hash IN (?, ?, ...)` queries per table
-    /// instead of one round-trip per hash. Returns locators in the same
-    /// order as `hashes`, with `None` for chunks absent from both tables.
-    ///
-    /// Committed rows in `chunks` take precedence over pending rows for
-    /// the same hash — matching the fallback order in `get_chunk`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StagingError::Internal`] on SQLite failure.
+    /// Resolve requested segment payloads in bounded batches, preserving order and repeats.
     pub fn locate_batch(&self, hashes: &[[u8; 32]]) -> Result<Vec<Option<ChunkLocator>>> {
-        if hashes.is_empty() {
-            return Ok(Vec::new());
+        let mut positions = HashMap::<[u8; 32], Vec<usize>>::with_capacity(hashes.len());
+        for (position, hash) in hashes.iter().enumerate() {
+            positions.entry(*hash).or_default().push(position);
         }
-
-        // Bucket input indices by chunk_hash. Duplicate hashes in the
-        // input all get the same locator.
-        let mut index_by_hash: std::collections::HashMap<[u8; 32], Vec<usize>> =
-            std::collections::HashMap::with_capacity(hashes.len());
-        for (i, h) in hashes.iter().enumerate() {
-            index_by_hash.entry(*h).or_default().push(i);
-        }
-
-        let unique_hashes = index_by_hash.keys().copied().collect::<Vec<_>>();
-        let mut out: Vec<Option<ChunkLocator>> = vec![None; hashes.len()];
-        const LOCATE_QUERY_BATCH: usize = 400;
-
-        // Query committed chunks first.
-        for hash_batch in unique_hashes.chunks(LOCATE_QUERY_BATCH) {
-            let placeholders = vec!["?"; hash_batch.len()].join(",");
+        let unique = positions.keys().copied().collect::<Vec<_>>();
+        let mut out = vec![None; hashes.len()];
+        for batch in unique.chunks(400) {
+            let placeholders = vec!["?"; batch.len()].join(",");
             let sql = format!(
                 "SELECT chunk_hash, segment_id, segment_offset, size
-                 FROM chunks
-                 WHERE chunk_hash IN ({placeholders})"
+                               FROM chunk_payloads WHERE chunk_hash IN ({placeholders})"
             );
-            let mut stmt = self
-                .conn
-                .prepare(&sql)
-                .map_err(|e| StagingError::Internal(format!("prepare locate_batch: {e}")))?;
-            let rows = stmt
-                .query_map(
-                    params_from_iter(hash_batch.iter().map(|h| h.as_slice())),
-                    |row| {
-                        let blob: Vec<u8> = row.get(0)?;
-                        let seg_id: u64 = row.get(1)?;
-                        let offset: u64 = row.get(2)?;
-                        let length: u32 = row.get(3)?;
-                        Ok((blob, seg_id, offset, length))
-                    },
-                )
-                .map_err(|e| StagingError::Internal(format!("query locate_batch: {e}")))?;
-
+            let mut statement = self.conn.prepare_cached(&sql)?;
+            let rows = statement.query_map(
+                params_from_iter(batch.iter().map(|hash| hash.as_slice())),
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        ChunkLocator {
+                            segment_id: row.get(1)?,
+                            offset: row.get(2)?,
+                            length: row.get(3)?,
+                        },
+                    ))
+                },
+            )?;
             for row in rows {
-                let (blob, seg_id, offset, length) =
-                    row.map_err(|e| StagingError::Internal(format!("read locate_batch row: {e}")))?;
-                if blob.len() != 32 {
-                    continue;
-                }
-                let mut h = [0u8; 32];
-                h.copy_from_slice(&blob);
-                if let Some(indices) = index_by_hash.get(&h) {
-                    let loc = ChunkLocator {
-                        segment_id: seg_id,
-                        offset,
-                        length,
-                    };
-                    for &i in indices {
-                        out[i] = Some(loc);
+                let (hash, locator) = row?;
+                let hash = decode_hash_blob("segment payload hash", hash)?;
+                if let Some(indices) = positions.get(&hash) {
+                    for &position in indices {
+                        out[position] = Some(locator);
                     }
                 }
             }
         }
-
-        // Query pending chunks for hashes still missing.
-        let missing_hashes: Vec<[u8; 32]> = index_by_hash
-            .iter()
-            .filter(|(_, indices)| indices.iter().any(|&i| out[i].is_none()))
-            .map(|(h, _)| *h)
-            .collect();
-
-        for hash_batch in missing_hashes.chunks(LOCATE_QUERY_BATCH) {
-            let pending_placeholders = vec!["?"; hash_batch.len()].join(",");
-            let sql = format!(
-                "SELECT chunk_hash, segment_id, segment_offset, size
-                 FROM pending_chunks
-                 WHERE chunk_hash IN ({pending_placeholders})"
-            );
-            let mut stmt = self.conn.prepare(&sql).map_err(|e| {
-                StagingError::Internal(format!("prepare locate_batch pending: {e}"))
-            })?;
-            let rows = stmt
-                .query_map(
-                    params_from_iter(hash_batch.iter().map(|h| h.as_slice())),
-                    |row| {
-                        let blob: Vec<u8> = row.get(0)?;
-                        let seg_id: u64 = row.get(1)?;
-                        let offset: u64 = row.get(2)?;
-                        let length: u32 = row.get(3)?;
-                        Ok((blob, seg_id, offset, length))
-                    },
-                )
-                .map_err(|e| StagingError::Internal(format!("query locate_batch pending: {e}")))?;
-
-            for row in rows {
-                let (blob, seg_id, offset, length) = row.map_err(|e| {
-                    StagingError::Internal(format!("read locate_batch pending row: {e}"))
-                })?;
-                if blob.len() != 32 {
-                    continue;
-                }
-                let mut h = [0u8; 32];
-                h.copy_from_slice(&blob);
-                if let Some(indices) = index_by_hash.get(&h) {
-                    let loc = ChunkLocator {
-                        segment_id: seg_id,
-                        offset,
-                        length,
-                    };
-                    for &i in indices {
-                        if out[i].is_none() {
-                            out[i] = Some(loc);
-                        }
-                    }
-                }
-            }
-        }
-
         Ok(out)
     }
 
@@ -7967,6 +7887,27 @@ impl Index {
             .collect::<Vec<_>>();
         let segment_locators = self.locate_batch(&hashes)?;
         let prepared_locators = self.locate_prepared_batch(&hashes)?;
+        // Released push-plan repair repacks from surviving segment occurrences
+        // when a prepared body is corrupt. Preserve that preference; otherwise
+        // use prepared source groups without mistaking retained inventory for rows.
+        let mut occurrence_backed = HashSet::new();
+        for batch in hashes.chunks(400) {
+            let placeholders = (1..=batch.len())
+                .map(|position| format!("?{position}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut statement = self.conn.prepare_cached(&format!(
+                "SELECT chunk_hash FROM chunks WHERE chunk_hash IN ({placeholders})
+                 UNION SELECT chunk_hash FROM pending_chunks WHERE chunk_hash IN ({placeholders})"
+            ))?;
+            let rows = statement.query_map(
+                params_from_iter(batch.iter().map(|hash| hash.as_slice())),
+                |row| row.get::<_, Vec<u8>>(0),
+            )?;
+            for row in rows {
+                occurrence_backed.insert(decode_hash_blob("segment occurrence hash", row?)?);
+            }
+        }
         let tx = self.conn.unchecked_transaction().map_err(|error| {
             StagingError::Internal(format!(
                 "failed to begin coalesced residual request append: {error}"
@@ -7992,7 +7933,9 @@ impl Index {
             for (((sequence, hash, expected_size, context), segment), prepared) in
                 requests.iter().zip(segment_locators).zip(prepared_locators)
             {
-                if let Some(locator) = segment {
+                if let Some(locator) = segment
+                    && (prepared.is_none() || occurrence_backed.contains(hash))
+                {
                     let actual_size = u64::from(locator.length);
                     if actual_size != *expected_size {
                         return Err(StagingError::StagingCorrupt(format!(
@@ -8337,83 +8280,19 @@ impl Index {
         Ok(())
     }
 
-    /// Classify requested chunk occurrences by existing payload locator or absence.
-    ///
-    /// Committed locators take precedence over pending locators. Every requested
-    /// occurrence is retained, including repeated hashes and cross-file reuse.
+    /// Classify every requested occurrence through the canonical segment payload inventory.
     pub fn batch_dedup_check(&self, hashes: &[(usize, [u8; 32])]) -> Result<BatchDedupResult> {
-        let mut indices_by_hash: std::collections::HashMap<[u8; 32], Vec<usize>> =
-            std::collections::HashMap::with_capacity(hashes.len());
-        for (index, hash) in hashes {
-            indices_by_hash.entry(*hash).or_default().push(*index);
-        }
-        let mut existing_by_hash = std::collections::HashMap::<[u8; 32], ChunkLocator>::new();
-
-        // Membership is recorded separately for every occurrence. Computing an
-        // unused per-file membership flag here made each reused chunk scan the
-        // growing destination file, turning repeated-file ingestion quadratic.
-        for table in ["chunks", "pending_chunks"] {
-            let missing = indices_by_hash
-                .keys()
-                .filter(|hash| !existing_by_hash.contains_key(*hash))
-                .copied()
-                .collect::<Vec<_>>();
-            for batch in missing.chunks(400) {
-                let placeholders = vec!["?"; batch.len()].join(",");
-                let sql = format!(
-                    "SELECT picked.chunk_hash, c.segment_id, c.segment_offset, c.size
-                     FROM (
-                         SELECT chunk_hash, MIN(rowid) AS picked_rowid
-                         FROM {table}
-                         WHERE chunk_hash IN ({placeholders})
-                         GROUP BY chunk_hash
-                     ) picked
-                     INNER JOIN {table} c ON c.rowid = picked.picked_rowid"
-                );
-                let mut statement = self.conn.prepare(&sql).map_err(|error| {
-                    StagingError::Internal(format!("prepare {table} dedup lookup: {error}"))
-                })?;
-                let rows = statement
-                    .query_map(
-                        params_from_iter(batch.iter().map(|hash| hash.as_slice())),
-                        |row| {
-                            Ok((
-                                row.get::<_, Vec<u8>>(0)?,
-                                ChunkLocator {
-                                    segment_id: row.get(1)?,
-                                    offset: row.get(2)?,
-                                    length: row.get(3)?,
-                                },
-                            ))
-                        },
-                    )
-                    .map_err(|error| {
-                        StagingError::Internal(format!("query {table} dedup lookup: {error}"))
-                    })?;
-                for row in rows {
-                    let (blob, locator) = row.map_err(|error| {
-                        StagingError::Internal(format!("read {table} dedup locator: {error}"))
-                    })?;
-                    let mut hash = [0; 32];
-                    if blob.len() == 32 {
-                        hash.copy_from_slice(&blob);
-                    }
-                    existing_by_hash.insert(hash, locator);
-                }
-            }
-        }
-
-        let new_indices = hashes
-            .iter()
-            .filter_map(|(index, hash)| (!existing_by_hash.contains_key(hash)).then_some(*index))
-            .collect();
+        let requested = hashes.iter().map(|(_, hash)| *hash).collect::<Vec<_>>();
+        let locators = self.locate_batch(&requested)?;
         let mut existing = Vec::new();
-        for (hash, locator) in existing_by_hash {
-            if let Some(indices) = indices_by_hash.get(&hash) {
-                existing.extend(indices.iter().map(|index| (*index, hash, locator)));
+        let mut missing = Vec::new();
+        for ((position, hash), locator) in hashes.iter().zip(locators) {
+            match locator {
+                Some(locator) => existing.push((*position, *hash, locator)),
+                None => missing.push(*position),
             }
         }
-        Ok((existing, new_indices))
+        Ok((existing, missing))
     }
 
     /// Return sealed segment ids whose dead-byte ratio exceeds `dead_ratio`.
@@ -8426,7 +8305,7 @@ impl Index {
     ///
     /// Returns [`StagingError::Internal`] on SQLite failure.
     pub fn compaction_candidates(&self, dead_ratio: f64) -> Result<Vec<u64>> {
-        // Compute live_bytes per segment from the chunks table, then
+        // Count each retained physical payload once, then
         // compare against segments.size_bytes.
         let mut stmt = self
             .conn
@@ -8435,7 +8314,7 @@ impl Index {
                  FROM segments s
                  LEFT JOIN (
                      SELECT segment_id, SUM(size + 8) AS live_bytes
-                     FROM chunks
+                     FROM chunk_payloads
                      GROUP BY segment_id
                  ) c ON s.segment_id = c.segment_id
                  WHERE s.sealed_at IS NOT NULL
@@ -8460,162 +8339,104 @@ impl Index {
         Ok(ids)
     }
 
-    /// Return live chunks for a segment, ordered by segment offset.
-    ///
-    /// Each tuple is `(chunk_hash, file_hash, chunk_index, size, segment_offset)`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StagingError::Internal`] on SQLite failure.
-    #[expect(
-        clippy::type_complexity,
-        reason = "tuple matches the design's specified return shape"
-    )]
+    /// Return canonical segment payloads once each, ordered by physical offset.
     pub fn live_chunks_for_segment(
         &self,
         segment_id: u64,
-    ) -> Result<Vec<([u8; 32], [u8; 32], i64, i64, u64)>> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT chunk_hash, file_hash, chunk_index, size, segment_offset
-                 FROM chunks
-                 WHERE segment_id = ?1
-                 ORDER BY segment_offset ASC",
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to prepare live_chunks query for segment {segment_id}: {e}"
-                ))
-            })?;
-
-        let rows = stmt
-            .query_map(params![segment_id], |row| {
-                let ch_blob: Vec<u8> = row.get(0)?;
-                let fh_blob: Vec<u8> = row.get(1)?;
-                let mut ch = [0u8; 32];
-                let mut fh = [0u8; 32];
-                if ch_blob.len() == 32 {
-                    ch.copy_from_slice(&ch_blob);
-                }
-                if fh_blob.len() == 32 {
-                    fh.copy_from_slice(&fh_blob);
-                }
-                Ok((
-                    ch,
-                    fh,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, u64>(4)?,
-                ))
-            })
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to query live chunks for segment {segment_id}: {e}"
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to collect live chunks for segment {segment_id}: {e}"
-                ))
-            })?;
-
-        Ok(rows)
+    ) -> Result<Vec<([u8; 32], ChunkLocator)>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT chunk_hash, segment_id, segment_offset, size FROM chunk_payloads
+             WHERE segment_id = ?1 ORDER BY segment_offset",
+        )?;
+        let rows = statement.query_map(params![segment_id], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                ChunkLocator {
+                    segment_id: row.get(1)?,
+                    offset: row.get(2)?,
+                    length: row.get(3)?,
+                },
+            ))
+        })?;
+        rows.map(|row| {
+            let (hash, locator) = row?;
+            Ok((decode_hash_blob("compacted chunk hash", hash)?, locator))
+        })
+        .collect()
     }
 
-    /// Atomically swap chunk locators from an old segment to a new one.
-    ///
-    /// In a single transaction: updates each chunk's `segment_id` and
-    /// `segment_offset`, inserts the new segment row, and zeroes the old
-    /// segment's `live_chunk_count` (marking it for sweep).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StagingError::Internal`] on SQLite failure.
-    #[expect(clippy::cast_possible_wrap, reason = "sizes fit in i64 for SQLite")]
+    /// Reserve compaction output without committing an extra current segment.
+    pub fn begin_compaction(&self) -> Result<(rusqlite::Transaction<'_>, u64)> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("INSERT INTO segments (size_bytes) VALUES (0)", [])?;
+        let id = nonnegative_count("compaction segment id", tx.last_insert_rowid())?;
+        Ok((tx, id))
+    }
+
+    /// Move physical authority and all segment occurrence locators together.
     pub fn swap_locators(
-        &self,
+        tx: rusqlite::Transaction<'_>,
         old_segment_id: u64,
         new_segment_id: u64,
         new_size_bytes: u64,
-        updates: &[([u8; 32], [u8; 32], i64, u64)], // (chunk_hash, file_hash, chunk_index, new_offset)
+        updates: &[([u8; 32], u64)],
     ) -> Result<()> {
-        let tx = self.conn.unchecked_transaction().map_err(|e| {
-            StagingError::Internal(format!("failed to begin swap_locators tx: {e}"))
-        })?;
-
-        // Update each chunk's locator to point at the new segment.
-        {
-            let mut stmt = tx
-                .prepare_cached(
-                    "UPDATE chunks
-                     SET segment_id = ?1, segment_offset = ?2
-                     WHERE chunk_hash = ?3 AND file_hash = ?4 AND chunk_index = ?5",
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to prepare swap update: {e}"))
-                })?;
-
-            for (chunk_hash, file_hash, chunk_index, new_offset) in updates {
-                let ch: &[u8] = chunk_hash;
-                let fh: &[u8] = file_hash;
-                stmt.execute(params![
+        for (chunk_hash, new_offset) in updates {
+            let moved = tx.execute(
+                "UPDATE chunk_payloads SET segment_id = ?1, segment_offset = ?2
+                 WHERE chunk_hash = ?3 AND segment_id = ?4",
+                params![
                     new_segment_id,
-                    *new_offset as i64,
-                    ch,
-                    fh,
-                    chunk_index,
-                ])
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to swap locator for chunk: {e}"))
-                })?;
+                    sqlite_i64("compacted record offset", *new_offset)?,
+                    chunk_hash.as_slice(),
+                    old_segment_id
+                ],
+            )?;
+            if moved != 1 {
+                return Err(StagingError::StagingCorrupt(
+                    "compaction lost canonical payload authority".to_owned(),
+                ));
+            }
+            for table in ["chunks", "pending_chunks"] {
+                tx.execute(
+                    &format!(
+                        "UPDATE {table} SET segment_id = ?1, segment_offset = ?2
+                              WHERE chunk_hash = ?3 AND segment_id = ?4"
+                    ),
+                    params![
+                        new_segment_id,
+                        sqlite_i64("compacted record offset", *new_offset)?,
+                        chunk_hash.as_slice(),
+                        old_segment_id
+                    ],
+                )?;
             }
         }
-
-        // Insert the new segment as sealed.
-        let chunk_count = updates.len() as i64;
+        let remaining: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunk_payloads WHERE segment_id = ?1)",
+            params![old_segment_id],
+            |row| row.get(0),
+        )?;
+        if remaining {
+            return Err(StagingError::StagingCorrupt(
+                "compaction did not cover every retained payload".to_owned(),
+            ));
+        }
         tx.execute(
-            "UPDATE segments
-             SET sealed_at = datetime('now'),
-                 size_bytes = ?1,
-                 chunk_count = ?2,
-                 live_chunk_count = ?3
-             WHERE segment_id = ?4",
+            "UPDATE segments SET sealed_at = datetime('now'), size_bytes = ?1, chunk_count = ?2,
+             live_chunk_count = (SELECT COUNT(*) FROM chunks WHERE segment_id = ?3)
+             WHERE segment_id = ?3",
             params![
-                new_size_bytes as i64,
-                chunk_count,
-                chunk_count,
+                sqlite_i64("compacted segment bytes", new_size_bytes)?,
+                updates.len(),
                 new_segment_id
             ],
-        )
-        .map_err(|e| {
-            StagingError::Internal(format!(
-                "failed to update new segment {new_segment_id}: {e}"
-            ))
-        })?;
-
-        // Zero out the old segment's live_chunk_count so it becomes a sweep candidate.
+        )?;
         tx.execute(
-            "UPDATE segments SET live_chunk_count = 0 WHERE segment_id = ?1",
+            "DELETE FROM segments WHERE segment_id = ?1",
             params![old_segment_id],
-        )
-        .map_err(|e| {
-            StagingError::Internal(format!(
-                "failed to zero live_chunk_count for old segment {old_segment_id}: {e}"
-            ))
-        })?;
-
-        tx.commit().map_err(|e| {
-            StagingError::Internal(format!("failed to commit swap_locators tx: {e}"))
-        })?;
-
-        debug!(
-            old_segment_id,
-            new_segment_id,
-            chunks = updates.len(),
-            "swapped locators"
-        );
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -9479,6 +9300,167 @@ mod tests {
     }
 
     #[test]
+    fn segment_recording_retention_releases_only_after_last_batch() {
+        let idx = open_in_memory();
+        let file = test_hash(0xB1);
+        let chunk = test_hash(0xB2);
+        let segment = idx.allocate_segment_id().expect("segment");
+        insert_test_file(&idx, &file, 8);
+        idx.insert_pending(&[PendingRow {
+            chunk_hash: chunk,
+            file_hash: file,
+            chunk_index: 0,
+            size: 8,
+            segment_id: segment,
+            segment_offset: 0,
+        }])
+        .expect("payload");
+        for batch in ["first", "second"] {
+            idx.insert_batch(batch).expect("batch");
+            idx.append_recipe_recording_terms(batch, 0, 0, &[(chunk.into(), 8)])
+                .expect("record");
+        }
+        idx.remove_files(&[file]).expect("retire original");
+        idx.rollback_batch("first").expect("retire first recording");
+        let retained = idx.locate(&chunk).expect("lookup retained");
+        idx.rollback_batch("second")
+            .expect("retire second recording");
+        assert!(retained.is_some() && idx.locate(&chunk).expect("lookup retired").is_none());
+    }
+
+    #[test]
+    fn incomplete_compaction_rolls_back_inventory_and_occurrences() {
+        let idx = open_in_memory();
+        let file = test_hash(0xB3);
+        let old = idx.allocate_segment_id().expect("old segment");
+        insert_test_file(&idx, &file, 16);
+        let chunks = [test_hash(0xB4), test_hash(0xB5)];
+        for (position, hash) in chunks.iter().enumerate() {
+            idx.insert_pending(&[PendingRow {
+                chunk_hash: *hash,
+                file_hash: file,
+                chunk_index: position as i64,
+                size: 8,
+                segment_id: old,
+                segment_offset: position as u64 * 16,
+            }])
+            .expect("payload");
+        }
+        let before = idx.locate_batch(&chunks).expect("before");
+        let (transaction, new) = idx.begin_compaction().expect("reserve output");
+        let error = Index::swap_locators(transaction, old, new, 16, &[(chunks[0], 0)])
+            .expect_err("partial coverage");
+        let pending_segment: u64 = idx
+            .conn
+            .query_row(
+                "SELECT segment_id FROM pending_chunks WHERE chunk_hash = ?1",
+                params![chunks[0].as_slice()],
+                |row| row.get(0),
+            )
+            .expect("occurrence");
+        assert!(
+            matches!(error, StagingError::StagingCorrupt(_))
+                && idx.locate_batch(&chunks).expect("after") == before
+                && pending_segment == old
+        );
+    }
+
+    #[test]
+    fn released_compaction_inventory_upgrades_on_writable_and_shared_open() {
+        for shared in [false, true] {
+            let temp = tempfile::NamedTempFile::new().expect("database");
+            let idx = Index::open(temp.path()).expect("index");
+            insert_test_recipe_lease(&idx, "source", b"source", 0xB6, 0xB7);
+            let chunk = test_hash(0xB7);
+            let old = idx
+                .locate(&chunk)
+                .expect("old locator")
+                .expect("payload")
+                .segment_id;
+            let new = idx.allocate_segment_id().expect("new segment");
+            // The released compactor updated chunks, then removed the old
+            // segment, leaving payload inventory at its original locator.
+            idx.conn
+                .execute(
+                    "UPDATE chunks SET segment_id = ?1, segment_offset = 16 WHERE chunk_hash = ?2",
+                    params![new, chunk.as_slice()],
+                )
+                .expect("released relocation");
+            idx.drop_segment(old).expect("released retirement");
+            idx.conn
+                .execute(
+                    "UPDATE staging_meta SET value = '1' WHERE key = 'layout_version'",
+                    [],
+                )
+                .expect("released admission");
+            drop(idx);
+            let reopened = if shared {
+                Index::open_readonly(temp.path())
+            } else {
+                Index::open(temp.path())
+            }
+            .expect("upgrade");
+            let locator = reopened
+                .locate(&chunk)
+                .expect("repaired locator")
+                .expect("payload");
+            let version: String = reopened
+                .conn
+                .query_row(
+                    "SELECT value FROM staging_meta WHERE key = 'layout_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("admission");
+            assert!(locator.segment_id == new && locator.offset == 16 && version == LAYOUT_VERSION);
+        }
+    }
+
+    #[test]
+    fn failed_inventory_upgrade_preserves_released_admission_and_locator() {
+        for fail_late in [false, true] {
+            let idx = open_in_memory();
+            insert_test_recipe_lease(&idx, "source", b"source", 0xB8, 0xB9);
+            let chunk = test_hash(0xB9);
+            let before = idx.locate(&chunk).expect("before");
+            idx.conn
+                .execute(
+                    "UPDATE chunks SET segment_offset = 16 WHERE chunk_hash = ?1",
+                    params![chunk.as_slice()],
+                )
+                .expect("released relocation");
+            idx.conn
+                .execute(
+                    "UPDATE staging_meta SET value = '1' WHERE key = 'layout_version'",
+                    [],
+                )
+                .expect("released admission");
+            let table = if fail_late {
+                "staging_meta"
+            } else {
+                "chunk_payloads"
+            };
+            idx.conn.execute_batch(&format!("CREATE TEMP TRIGGER reject_upgrade BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT, 'upgrade failure'); END;")).expect("inject failure");
+            let error = idx
+                .upgrade_segment_payload_authority()
+                .expect_err("upgrade fails");
+            let version: String = idx
+                .conn
+                .query_row(
+                    "SELECT value FROM staging_meta WHERE key = 'layout_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("admission");
+            assert!(
+                matches!(error, StagingError::Io(ref source) if source.get_ref().is_some_and(|source| source.is::<rusqlite::Error>()))
+                    && version == "1"
+                    && idx.locate(&chunk).expect("after") == before
+            );
+        }
+    }
+
+    #[test]
     fn canonical_schema_reopens_without_change() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let path = tmp.path();
@@ -9509,7 +9491,7 @@ mod tests {
             .expect("drop chunk lease index");
         drop(idx);
 
-        assert_staging_corrupt_contains(Index::open(path), "canonical v1");
+        assert_staging_corrupt_contains(Index::open(path), "canonical v2");
     }
 
     #[test]
@@ -9535,7 +9517,7 @@ mod tests {
             .expect("install retired publication table");
         drop(idx);
 
-        assert_staging_corrupt_contains(Index::open(path), "canonical v1");
+        assert_staging_corrupt_contains(Index::open(path), "canonical v2");
     }
 
     #[test]
@@ -9552,7 +9534,7 @@ mod tests {
             .expect("install retired remote authority table");
         drop(idx);
 
-        assert_staging_corrupt_contains(Index::open(path), "canonical v1");
+        assert_staging_corrupt_contains(Index::open(path), "canonical v2");
     }
 
     #[test]
@@ -10104,7 +10086,7 @@ mod tests {
                 .expect("create retired schema");
         }
 
-        assert_staging_corrupt_contains(Index::open(&path), "canonical v1");
+        assert_staging_corrupt_contains(Index::open(&path), "canonical v2");
 
         let connection = Connection::open(&path).expect("reopen retired db");
         let tables: Vec<String> = connection

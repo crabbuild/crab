@@ -225,7 +225,7 @@ async fn run_compaction_test(
             continue;
         }
 
-        let new_seg_id = index.allocate_segment_id().expect("alloc new");
+        let (transaction, new_seg_id) = index.begin_compaction().expect("reserve output");
         let old_reader = SegmentReader::open(
             &segments_dir.join(format!("{old_seg_id:016x}.seg")),
             *old_seg_id,
@@ -245,17 +245,13 @@ async fn run_compaction_test(
         let mut new_offset: u64 = 0;
         let mut updates = Vec::new();
 
-        for (chunk_hash, file_hash, chunk_index, size, old_offset) in &live_chunks {
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "size bounded by segment cap"
-            )]
-            let length = *size as u32;
-            let data = old_reader.read(*old_offset, length).expect("read");
+        for (chunk_hash, locator) in &live_chunks {
+            let data = old_reader
+                .read(locator.offset, locator.length)
+                .expect("read");
             let record = segment::encode_record(&data);
             std::io::Write::write_all(&mut new_file, &record).expect("write");
-            updates.push((*chunk_hash, *file_hash, *chunk_index, new_offset));
+            updates.push((*chunk_hash, new_offset));
             new_offset += record.len() as u64;
         }
 
@@ -263,13 +259,11 @@ async fn run_compaction_test(
         drop(new_file);
         fs::rename(&tmp_path, &new_seg_path).expect("rename");
 
-        index
-            .swap_locators(*old_seg_id, new_seg_id, new_offset, &updates)
+        Index::swap_locators(transaction, *old_seg_id, new_seg_id, new_offset, &updates)
             .expect("swap");
 
         let old_path = segments_dir.join(format!("{old_seg_id:016x}.seg"));
         let _ = fs::remove_file(&old_path);
-        index.drop_segment(*old_seg_id).expect("drop old");
     }
 
     // Wait for concurrent readers.

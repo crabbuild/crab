@@ -55,6 +55,26 @@ without deleting bytes needed by the unsealed recording. Sealing transfers
 retention to recipe leases; abort releases preparation retention and reclaims
 only bodies with no other owner. Selection failures roll back these pins.
 
+Segment payload inventory is also independent of file occurrence rows. An
+in-flight recipe recording or sealed recipe retains reused segment bytes when
+the original file retires. Reads and deduplication use that inventory; recipes
+preserve every ordered occurrence separately. Batch rollback releases recording
+retention, and cleanup removes inventory only after the last owner retires.
+
+Compaction copies each retained payload once, then atomically moves inventory
+and all committed/pending occurrence locators. Output reservation remains in
+that transaction until the new body is durable. Readers capture file handles
+with their locators, so unlink and reader-pool eviction cannot invalidate an
+already captured segment read. Recovery reclaims unindexed compaction bodies
+only after checking both segment registry and canonical payload ownership.
+
+Staging layout v2 upgrades the released v1 layout transactionally on writable
+or shared open. It repairs inventory using the locators v1 readers used, then
+changes admission in the same transaction; old writers reject v2. Tables,
+indexes and payload encoding stay unchanged. Missing segment dependencies fail
+the upgrade without changing admission. The repair runs once, not on every v2
+open; it cannot recover payload bytes already deleted by an older binary.
+
 ## Recovery contract
 
 Opening writable staging runs recovery before creating or reusing its writer.
