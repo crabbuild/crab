@@ -13,6 +13,10 @@ const PATH: &str = "layered visibility pages";
 mod reader;
 #[cfg(feature = "storage")]
 pub use reader::LayeredVisibilityReader;
+#[cfg(feature = "storage")]
+mod state;
+#[cfg(feature = "storage")]
+pub use state::PagedGitVisibility;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +33,27 @@ pub(crate) struct Directory {
 struct Closure {
     count: u32,
     root: Option<PageRef>,
+}
+
+impl Closure {
+    #[cfg(feature = "storage")]
+    fn validate(&self, object_count: u32, source_bytes: u64) -> Result<()> {
+        if self.count > object_count || (self.count == 0) != self.root.is_none() {
+            return Err(corrupt("visibility closure count is invalid"));
+        }
+        if let Some(root) = &self.root {
+            root.validate(Kind::VisibilityClosures, source_bytes)?;
+            let blocks = object_count.div_ceil(BLOCK_BITS);
+            if root.count > self.count
+                || root.count > blocks
+                || scalar(&root.last)? >= blocks
+                || self.count > root.count.saturating_mul(BLOCK_BITS)
+            {
+                return Err(corrupt("visibility closure block coverage is invalid"));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,31 +327,7 @@ fn positions(
         let start = scalar(&key)?
             .checked_mul(BLOCK_BITS)
             .ok_or_else(|| corrupt("visibility block overflows"))?;
-        let positions: Vec<u16> = match value.first() {
-            Some(0)
-                if value.len() > 1 && value.len() <= BLOCK_BYTES + 1 && value.len() % 2 == 1 =>
-            {
-                value[1..]
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|bytes| u16::from_be_bytes(*bytes))
-                    .collect()
-            }
-            Some(1) if value.len() == BLOCK_BYTES + 1 => value[1..]
-                .iter()
-                .enumerate()
-                .flat_map(|(index, byte)| {
-                    (0..8).filter_map(move |bit| {
-                        (byte & (1 << bit) != 0).then_some((index * 8 + bit) as u16)
-                    })
-                })
-                .collect(),
-            _ => return Err(corrupt("visibility block encoding is invalid")),
-        };
-        if positions.is_empty() || positions.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(corrupt("visibility block positions are empty or unordered"));
-        }
+        let positions = block_positions(&value)?;
         for position in positions {
             if u32::from(position) >= BLOCK_BITS {
                 return Err(corrupt("visibility block position is out of bounds"));
@@ -344,6 +345,41 @@ fn positions(
         return Err(corrupt("visibility closure has incomplete coverage"));
     }
     Ok(output)
+}
+
+fn block_positions(value: &[u8]) -> Result<Vec<u16>> {
+    let positions: Vec<u16> = match value.first() {
+        Some(0) if value.len() > 1 && value.len() <= BLOCK_BYTES + 1 && value.len() % 2 == 1 => {
+            value[1..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|bytes| u16::from_be_bytes(*bytes))
+                .collect()
+        }
+        Some(1) if value.len() == BLOCK_BYTES + 1 => value[1..]
+            .iter()
+            .enumerate()
+            .flat_map(|(index, byte)| {
+                (0..8).filter_map(move |bit| {
+                    (byte & (1 << bit) != 0).then_some((index * 8 + bit) as u16)
+                })
+            })
+            .collect(),
+        _ => return Err(corrupt("visibility block encoding is invalid")),
+    };
+    if positions.is_empty()
+        || positions.windows(2).any(|pair| pair[0] >= pair[1])
+        || positions
+            .last()
+            .is_some_and(|position| u32::from(*position) >= BLOCK_BITS)
+        || value[0] == 1 && positions.len() * 2 <= BLOCK_BYTES
+    {
+        return Err(corrupt(
+            "visibility block positions are empty, unordered or noncanonical",
+        ));
+    }
+    Ok(positions)
 }
 
 fn restore_transitions(

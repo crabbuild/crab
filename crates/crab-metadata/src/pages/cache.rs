@@ -41,6 +41,40 @@ impl PageCache {
         keys: &[Vec<u8>],
         work: &mut PageWork,
     ) -> Result<Vec<Option<Vec<u8>>>> {
+        Ok(self
+            .lookup_ranked(
+                store,
+                path,
+                layer,
+                source_offset,
+                source_bytes,
+                root,
+                kind,
+                keys,
+                work,
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.map(|(_, value)| value))
+            .collect())
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "page lookup binds routing, origin and caller-owned aggregate admission"
+    )]
+    pub(crate) async fn lookup_ranked(
+        &self,
+        store: &Store,
+        path: &object_store::path::Path,
+        layer: usize,
+        source_offset: u64,
+        source_bytes: u64,
+        root: &PageRef,
+        kind: Kind,
+        keys: &[Vec<u8>],
+        work: &mut PageWork,
+    ) -> Result<Vec<Option<(u32, Vec<u8>)>>> {
         if keys.iter().any(|key| key.len() != kind.key_bytes()) {
             return Err(corruption("invalid lookup key"));
         }
@@ -48,23 +82,14 @@ impl PageCache {
         if keys.is_empty() {
             return Ok(results);
         }
-        let mut pending = vec![(root.clone(), (0..keys.len()).collect::<Vec<_>>())];
+        let mut pending = vec![(root.clone(), 0u32, (0..keys.len()).collect::<Vec<_>>())];
         while !pending.is_empty() {
-            for (reference, _) in &pending {
-                reference.validate(kind, source_bytes)?;
-                if work.seen.insert((layer, reference.offset)) {
-                    work.bytes = work
-                        .bytes
-                        .checked_add(u64::from(reference.bytes))
-                        .ok_or_else(|| corruption("query byte count overflows"))?;
-                    if work.bytes > work.maximum {
-                        return Err(corruption("metadata query exceeds its byte limit"));
-                    }
-                }
+            for (reference, _, _) in &pending {
+                work.admit(layer, reference, kind, source_bytes)?;
             }
             // Charge the entire wave before starting I/O, including warm pages.
             let pages = futures_util::stream::iter(std::mem::take(&mut pending))
-                .map(|(reference, positions)| async move {
+                .map(|(reference, rank, positions)| async move {
                     let page = self
                         .fetch(
                             store,
@@ -76,19 +101,22 @@ impl PageCache {
                             kind,
                         )
                         .await?;
-                    Ok::<_, MetadataError>((page, positions))
+                    Ok::<_, MetadataError>((page, rank, positions))
                 })
                 .buffer_unordered(4)
                 .try_collect::<Vec<_>>()
                 .await?;
-            for (page, positions) in pages {
+            for (page, rank, positions) in pages {
                 match page.as_ref() {
                     Page::Leaf(rows) => {
                         for position in positions {
                             if let Ok(index) =
                                 rows.binary_search_by(|row| row.0.cmp(&keys[position]))
                             {
-                                results[position] = Some(rows[index].1.clone());
+                                let ordinal = rank
+                                    .checked_add(index as u32)
+                                    .ok_or_else(|| corruption("page rank overflows"))?;
+                                results[position] = Some((ordinal, rows[index].1.clone()));
                             }
                         }
                     }
@@ -104,16 +132,62 @@ impl PageCache {
                                 batches.entry(index).or_default().push(position);
                             }
                         }
-                        pending.extend(
-                            batches
-                                .into_iter()
-                                .map(|(index, positions)| (children[index].clone(), positions)),
-                        );
+                        let mut child_rank = rank;
+                        for (index, child) in children.iter().enumerate() {
+                            if let Some(positions) = batches.remove(&index) {
+                                pending.push((child.clone(), child_rank, positions));
+                            }
+                            child_rank = child_rank
+                                .checked_add(child.count)
+                                .ok_or_else(|| corruption("page rank overflows"))?;
+                        }
                     }
                 }
             }
         }
         Ok(results)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "complete ref enumeration binds the same routing and byte admission as point reads"
+    )]
+    pub(crate) async fn scan(
+        &self,
+        store: &Store,
+        path: &object_store::path::Path,
+        layer: usize,
+        source_offset: u64,
+        source_bytes: u64,
+        root: &PageRef,
+        kind: Kind,
+        work: &mut PageWork,
+    ) -> Result<Rows> {
+        let mut pending = vec![root.clone()];
+        let mut rows = Vec::new();
+        while let Some(reference) = pending.pop() {
+            work.admit(layer, &reference, kind, source_bytes)?;
+            match self
+                .fetch(
+                    store,
+                    path,
+                    layer,
+                    source_offset,
+                    source_bytes,
+                    &reference,
+                    kind,
+                )
+                .await?
+                .as_ref()
+            {
+                Page::Leaf(items) => rows.extend(items.iter().cloned()),
+                Page::Branch(children) => pending.extend(children.iter().rev().cloned()),
+            }
+        }
+        if rows.len() != root.count as usize {
+            return Err(corruption("tree row count mismatch"));
+        }
+        Ok(rows)
     }
 
     // Guards protect local cache work only, never origin I/O.
@@ -180,6 +254,31 @@ impl PageCache {
                 .insert(key, (kind, reference.clone(), page.clone()));
         }
         Ok(page)
+    }
+}
+
+impl PageWork {
+    fn admit(
+        &mut self,
+        layer: usize,
+        reference: &PageRef,
+        kind: Kind,
+        source_bytes: u64,
+    ) -> Result<()> {
+        reference.validate(kind, source_bytes)?;
+        let key = (layer, reference.offset);
+        if !self.seen.contains(&key) {
+            let bytes = self
+                .bytes
+                .checked_add(u64::from(reference.bytes))
+                .ok_or_else(|| corruption("query byte count overflows"))?;
+            if bytes > self.maximum {
+                return Err(corruption("metadata query exceeds its byte limit"));
+            }
+            self.bytes = bytes;
+            self.seen.insert(key);
+        }
+        Ok(())
     }
 }
 

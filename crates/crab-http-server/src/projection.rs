@@ -788,9 +788,9 @@ pub(crate) async fn open_view(
     let root = crab_metadata::capsule_protocol::load_root(layout)
         .await
         .map_err(metadata_error)?;
-    // Origin-backed readers need complete visibility controls, while Git pack
-    // bodies remain in their authenticated sources for bounded range reads.
-    let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(
+    // Paged closure proofs validate captured ref controls; historical visibility
+    // and Git pack bodies remain in immutable sources for selected reads.
+    let view = crab_read::capsule_protocol::open_view_from_root_with_paged_visibility(
         layout,
         root,
         crab_read::capsule_protocol::CapsuleReadLimits {

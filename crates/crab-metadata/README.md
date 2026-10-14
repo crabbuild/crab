@@ -150,8 +150,13 @@ inspection also checks that the section directory matches the footer.
 duplicates, checks actual source/member bounds and charges warm pages against
 the query byte limit. Each reader owns its immutable directory and bounded
 cache. Physical admission selects packs for an already authorized request;
-it does not grant ref visibility. Normal opening still materializes the proof
-for ref-edit ordering; replacing that validation remains a separate gate.
+it does not grant ref visibility. `PagedGitVisibility` applies declared ref edits
+through selected dictionary ranks and closure blocks. It retains lexical base
+inheritance, immutable borrowed closure state, removals, replacement and global
+dictionary limits. Normal query opening captures catalog ranges separately;
+maintenance retains complete visibility decoding. Unclaimed/missing visibility
+remains distinct from a complete proof; captured-root graph authorization still
+belongs to the Git read boundary.
 No release tag contains the layered-checkpoint module introduced at
 `5e28f2a8beff`. The unreleased `CRBVORD1` ordinal stream is rejected rather than
 read through a fallback. Existing development repositories using that stream

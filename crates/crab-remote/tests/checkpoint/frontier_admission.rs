@@ -2,6 +2,65 @@ use super::*;
 use object_store::ObjectStoreExt;
 
 #[tokio::test]
+async fn paged_open_preserves_checkpoint_and_later_ref_controls() {
+    let (layout, observations) = fixture().await;
+    let checkpointed = checkpoint(&layout).await;
+    publish_blob(&layout, "later").await;
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    observations.0.lock().unwrap().clear();
+    let complete = crab_read::capsule_protocol::open_view_from_root_with_metadata(
+        &layout,
+        root.clone(),
+        LIMITS,
+    )
+    .await
+    .unwrap();
+    let complete_gets = observations
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|read| read.operation == StorageOperation::Get)
+        .count();
+    observations.0.lock().unwrap().clear();
+    let paged = crab_read::capsule_protocol::open_view_from_root_with_paged_visibility(
+        &layout, root, LIMITS,
+    )
+    .await
+    .unwrap();
+    assert_eq!(paged.refs(), complete.refs());
+    assert_eq!(
+        paged.visible_ref_transactions(),
+        complete.visible_ref_transactions()
+    );
+    assert_eq!(
+        paged.git_snapshot().unwrap(),
+        complete.git_snapshot().unwrap()
+    );
+    assert_eq!(
+        paged.pointer_catalog().unwrap(),
+        complete.pointer_catalog().unwrap()
+    );
+    assert!(checkpointed.layered_checkpoint().is_some());
+    assert!(paged.layered_checkpoint().unwrap().is_control_only());
+    let paged_gets = observations
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|read| read.operation == StorageOperation::Get)
+        .count();
+    assert_eq!(paged_gets + 1, complete_gets);
+    let catalog = paged.into_pointer_catalog_source().unwrap();
+    assert_eq!(
+        catalog.materialize().unwrap(),
+        complete.pointer_catalog().unwrap()
+    );
+}
+
+#[tokio::test]
 async fn footer_only_fetch_selection_uses_authenticated_checkpoint_pages() {
     let (layout, observations) = fixture().await;
     let complete = checkpoint(&layout).await;

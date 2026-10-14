@@ -333,10 +333,12 @@ pub async fn load_layered_checkpoint_control(
     }
     // A checkpoint without catalog or visibility sections is entirely footer.
     // Its valid control range starts at zero; only an empty range is invalid.
-    if pointer.control_size() == 0 {
+    if pointer.control_size() == 0
+        || pointer.control_size() > super::layered::MAX_CHECKPOINT_CONTROL_BYTES
+    {
         return Err(corrupt(
             &router.capsule_checkpoint_path(pointer.hash()),
-            "layered checkpoint pointer does not name a control suffix",
+            "layered checkpoint pointer does not name a bounded control suffix",
         ));
     }
     let path = router.capsule_checkpoint_path(pointer.hash());
@@ -356,6 +358,34 @@ pub async fn load_layered_checkpoint_control(
             &path,
             "layered checkpoint control does not match its authenticated pointer",
         ));
+    }
+    Ok(checkpoint)
+}
+
+/// Capture the authenticated catalog and footer while leaving visibility pages cold.
+pub async fn load_layered_checkpoint_for_visibility(
+    router: &StoreLayout<Store>,
+    pointer: &super::CheckpointPointer,
+    maximum: u64,
+) -> Result<LayeredCheckpoint> {
+    if pointer.control_size() > maximum {
+        return Err(corrupt(
+            &router.capsule_checkpoint_path(pointer.hash()),
+            "checkpoint control exceeds its byte limit",
+        ));
+    }
+    let mut checkpoint = load_layered_checkpoint_control(router, pointer).await?;
+    checkpoint.require_paged_visibility()?;
+    if let Some(range) = checkpoint.catalog_range()? {
+        if range.end - range.start > maximum - pointer.control_size() {
+            return Err(corrupt(
+                &router.capsule_checkpoint_path(pointer.hash()),
+                "checkpoint catalog exceeds its captured byte limit",
+            ));
+        }
+        let path = router.capsule_checkpoint_path(pointer.hash());
+        let bytes = router.store().range_get(&path, range).await?;
+        checkpoint.capture_catalog(bytes)?;
     }
     Ok(checkpoint)
 }

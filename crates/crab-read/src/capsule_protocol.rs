@@ -18,6 +18,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{ReadError, Result};
 
+#[path = "capsule_protocol/paged_visibility.rs"]
+mod paged_visibility;
+
 const LAYERED_SIDECAR_COALESCE_GAP_BYTES: u64 = 64 * 1024;
 const LAYERED_SIDECAR_MAX_EXTRA_BYTES: u64 = 4 * 1024 * 1024;
 const LAYERED_SIDECAR_MAX_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
@@ -4184,7 +4187,15 @@ pub async fn open_view_from_root_for_repack(
         )
         .await;
     }
-    assemble_layered_control_view(router, snapshot, limits, heads, active, false).await
+    assemble_layered_control_view(
+        router,
+        snapshot,
+        limits,
+        heads,
+        active,
+        ControlViewRead::Complete,
+    )
+    .await
 }
 
 /// Load complete checkpoint catalog/visibility metadata and frontier controls.
@@ -4321,7 +4332,15 @@ pub async fn open_view_from_root_with_metadata(
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
     let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    assemble_layered_control_view(router, snapshot, limits, heads, active, false).await
+    assemble_layered_control_view(
+        router,
+        snapshot,
+        limits,
+        heads,
+        active,
+        ControlViewRead::Complete,
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4329,6 +4348,33 @@ enum CheckpointLoad {
     Complete,
     Control,
     LayeredControl,
+}
+
+#[derive(Clone, Copy)]
+enum ControlViewRead {
+    Complete,
+    Footer,
+    Paged,
+}
+
+/// Open captured refs using paged closure validation and authenticated catalog ranges.
+///
+/// Complete historical visibility inspection remains with maintenance readers.
+pub async fn open_view_from_root_with_paged_visibility(
+    router: &StoreLayout<Store>,
+    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
+    limits: CapsuleReadLimits,
+) -> Result<CapsuleRepositoryView> {
+    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    assemble_layered_control_view(
+        router,
+        snapshot,
+        limits,
+        heads,
+        active,
+        ControlViewRead::Paged,
+    )
+    .await
 }
 
 async fn assemble_view(
@@ -4349,7 +4395,11 @@ async fn assemble_view(
             limits,
             heads,
             active,
-            matches!(checkpoint_load, CheckpointLoad::LayeredControl),
+            if matches!(checkpoint_load, CheckpointLoad::LayeredControl) {
+                ControlViewRead::Footer
+            } else {
+                ControlViewRead::Complete
+            },
         )
         .await;
     }
@@ -4573,7 +4623,7 @@ async fn assemble_layered_control_view(
     limits: CapsuleReadLimits,
     heads: Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
     active: BTreeSet<String>,
-    footer_only: bool,
+    read: ControlViewRead,
 ) -> Result<CapsuleRepositoryView> {
     let mut refs = snapshot.record().root().refs().clone();
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
@@ -4586,10 +4636,27 @@ async fn assemble_layered_control_view(
     admit_frontier(&pointers, limits)?;
     let checkpoint = match snapshot.record().root().checkpoint() {
         Some(pointer) => {
-            let checkpoint = if footer_only {
-                load_layered_checkpoint_control(router, pointer, limits).await?
-            } else {
-                load_layered_checkpoint(router, pointer, limits).await?
+            let checkpoint = match read {
+                ControlViewRead::Footer => {
+                    load_layered_checkpoint_control(router, pointer, limits).await?
+                }
+                ControlViewRead::Complete => {
+                    load_layered_checkpoint(router, pointer, limits).await?
+                }
+                ControlViewRead::Paged => {
+                    if pointer.control_size() > limits.max_capsule_bytes {
+                        return Err(ReadError::CapsuleReadLimit {
+                            resource: "layered checkpoint control bytes",
+                            maximum: limits.max_capsule_bytes,
+                        });
+                    }
+                    crab_metadata::capsule_protocol::load_layered_checkpoint_for_visibility(
+                        router,
+                        pointer,
+                        limits.max_capsule_bytes,
+                    )
+                    .await?
+                }
             };
             Some(checkpoint)
         }
@@ -4597,7 +4664,7 @@ async fn assemble_layered_control_view(
     };
     // Retain complete small frontiers for pack-index and entry reads. Larger
     // frontiers keep bounded suffix/range reads instead of resident pack bodies.
-    let inline_frontier = footer_only
+    let inline_frontier = matches!(read, ControlViewRead::Footer)
         && pointers
             .iter()
             .try_fold(0_u64, |total, pointer| total.checked_add(pointer.size()))
@@ -4782,7 +4849,7 @@ async fn assemble_layered_control_view(
             }
         }
     }
-    if footer_only {
+    if matches!(read, ControlViewRead::Footer) {
         return Ok(CapsuleRepositoryView {
             root: snapshot,
             browse_indexes: None,
@@ -4824,19 +4891,32 @@ async fn assemble_layered_control_view(
             }
         }
     }
-    let mut visibility_index = visibility_index_for_checkpoint(checkpoint.as_ref())?;
-    for capsule in &root_capsules {
-        if capsule.visibility_delta().is_some() {
-            apply_capsule_control_visibility_index(capsule, &mut visibility_index)?;
+    let ordered = if matches!(read, ControlViewRead::Paged) {
+        paged_visibility::ordered(
+            router,
+            checkpoint.as_ref(),
+            snapshot.record(),
+            &root_capsules,
+            &transaction_predecessors,
+            journal_capsules,
+            limits,
+        )
+        .await?
+    } else {
+        let mut visibility_index = visibility_index_for_checkpoint(checkpoint.as_ref())?;
+        for capsule in &root_capsules {
+            if capsule.visibility_delta().is_some() {
+                apply_capsule_control_visibility_index(capsule, &mut visibility_index)?;
+            }
         }
-    }
-    let ordered = order_ref_controls(
-        snapshot.record().root().refs(),
-        snapshot.record().root().peeled_refs(),
-        visibility_index,
-        &transaction_predecessors,
-        journal_capsules,
-    )?;
+        order_ref_controls(
+            snapshot.record().root().refs(),
+            snapshot.record().root().peeled_refs(),
+            visibility_index,
+            &transaction_predecessors,
+            journal_capsules,
+        )?
+    };
     for capsule in &ordered {
         apply_control_refs(capsule, &mut refs, &mut peeled_refs)?;
     }
@@ -5355,20 +5435,41 @@ fn order_ref_controls(
 fn control_is_ready(
     capsule: &CapsuleControl,
     refs: &BTreeMap<String, String>,
-    visibility_index: &crab_metadata::git_visibility::GitVisibilityIndex,
+    visibility: &crab_metadata::git_visibility::GitVisibilityIndex,
 ) -> Result<bool> {
+    Ok(
+        control_readiness_bases(capsule, refs, |name| visibility.contains_ref(name))?.is_some_and(
+            |bases| {
+                bases
+                    .into_iter()
+                    .all(|oid| visibility.contains_hex_in_any_ref(oid))
+            },
+        ),
+    )
+}
+
+fn control_readiness_bases<'a>(
+    capsule: &'a CapsuleControl,
+    refs: &BTreeMap<String, String>,
+    contains_ref: impl Fn(&str) -> bool,
+) -> Result<Option<Vec<&'a str>>> {
     let transaction = capsule.transaction();
     if transaction
         .edits()
         .iter()
         .any(|edit| refs.get(edit.ref_name()).map(String::as_str) != edit.expected_old())
     {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(delta) = capsule.visibility_delta() else {
-        return Ok(true);
+        return Ok(Some(Vec::new()));
     };
-    let mut evidence = delta.edits().clone();
+    let mut evidence = delta
+        .edits()
+        .iter()
+        .map(|(name, edit)| (name.as_str(), edit))
+        .collect::<BTreeMap<_, _>>();
+    let mut bases = Vec::new();
     for edit in transaction.edits() {
         let Some(new_oid) = edit.new_oid() else {
             if evidence.remove(edit.ref_name()).is_some() {
@@ -5400,8 +5501,8 @@ fn control_is_ready(
                         "visibility evidence does not match the expected old ref",
                     ));
                 }
-                if !visibility_index.contains_ref(edit.ref_name()) {
-                    return Ok(false);
+                if !contains_ref(edit.ref_name()) {
+                    return Ok(None);
                 }
             }
             None if visibility.replaces => {}
@@ -5409,9 +5510,7 @@ fn control_is_ready(
                 let Some(old_oid) = visibility.old_oid.as_deref() else {
                     continue;
                 };
-                if !visibility_index.contains_hex_in_any_ref(old_oid) {
-                    return Ok(false);
-                }
+                bases.push(old_oid);
             }
         }
     }
@@ -5421,7 +5520,7 @@ fn control_is_ready(
             "visibility evidence contains an uncommitted ref",
         ));
     }
-    Ok(true)
+    Ok(Some(bases))
 }
 
 fn apply_control_refs(
@@ -5535,9 +5634,35 @@ fn apply_capsule_control_visibility_index(
     capsule: &CapsuleControl,
     index: &mut crab_metadata::git_visibility::GitVisibilityIndex,
 ) -> Result<()> {
+    for (name, visibility) in control_visibility_edits(capsule)? {
+        match visibility {
+            Some(edit) => index.apply_ref_edit(name.to_owned(), edit)?,
+            None => index.remove_ref(name),
+        }
+    }
+    Ok(())
+}
+
+fn control_visibility_edits(
+    capsule: &CapsuleControl,
+) -> Result<
+    Vec<(
+        &str,
+        Option<&crab_metadata::git_visibility::GitVisibilityEdit>,
+    )>,
+> {
     let transaction = capsule.transaction();
     let delta = capsule.visibility_delta();
-    let mut evidence = delta.map(|delta| delta.edits().clone()).unwrap_or_default();
+    let mut evidence = delta
+        .map(|delta| {
+            delta
+                .edits()
+                .iter()
+                .map(|(name, edit)| (name.as_str(), edit))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut edits = Vec::new();
     for edit in transaction.edits() {
         let Some(new_oid) = edit.new_oid() else {
             if evidence.remove(edit.ref_name()).is_some() {
@@ -5546,7 +5671,7 @@ fn apply_capsule_control_visibility_index(
                     "deleted ref has visibility evidence",
                 ));
             }
-            index.remove_ref(edit.ref_name());
+            edits.push((edit.ref_name(), None));
             continue;
         };
         let visibility = evidence.remove(edit.ref_name()).ok_or_else(|| {
@@ -5569,7 +5694,8 @@ fn apply_capsule_control_visibility_index(
                 "visibility evidence does not match the expected old ref",
             ));
         }
-        index.apply_ref_edit(edit.ref_name().to_owned(), &visibility)?;
+        visibility.validate()?;
+        edits.push((edit.ref_name(), Some(visibility)));
     }
     if !evidence.is_empty() {
         return Err(corrupt_path(
@@ -5577,7 +5703,7 @@ fn apply_capsule_control_visibility_index(
             "visibility evidence contains an uncommitted ref",
         ));
     }
-    Ok(())
+    Ok(edits)
 }
 
 fn apply_capsule_visibility_index(
@@ -6534,6 +6660,30 @@ mod tests {
             deltas: vec![delta, conflicting],
         };
         assert!(captured.materialize().is_err());
+    }
+
+    #[tokio::test]
+    async fn paged_open_preserves_pre_checkpoint_activation_state() {
+        for committed in [false, true] {
+            let inner = Arc::new(InMemory::new());
+            seed_prepared_multi_ref(inner.clone(), committed, committed).await;
+            let router = StoreLayout::new(Store::new(inner), "repositories/test".into());
+            let root = load_root(&router).await.unwrap();
+            let complete = open_view_from_root_with_metadata(&router, root.clone(), TEST_LIMITS)
+                .await
+                .unwrap();
+            let paged = open_view_from_root_with_paged_visibility(&router, root, TEST_LIMITS)
+                .await
+                .unwrap();
+            assert_eq!(
+                paged.git_snapshot().unwrap(),
+                complete.git_snapshot().unwrap()
+            );
+            assert_eq!(
+                paged.visible_ref_transactions(),
+                complete.visible_ref_transactions()
+            );
+        }
     }
 
     #[tokio::test]

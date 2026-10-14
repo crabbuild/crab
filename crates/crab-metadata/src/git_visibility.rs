@@ -2019,7 +2019,7 @@ fn validate_oid(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn decode_oid(value: &str) -> Result<GitVisibilityOid> {
+pub(crate) fn decode_oid(value: &str) -> Result<GitVisibilityOid> {
     validate_oid(value)?;
     let mut decoded = [0u8; 20];
     let (pairs, remainder) = value.as_bytes().as_chunks::<2>();

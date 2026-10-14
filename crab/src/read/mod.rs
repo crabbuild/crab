@@ -559,7 +559,7 @@ impl Inner {
         );
         let capture = async {
             let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
-            let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(
+            let view = crab_read::capsule_protocol::open_view_from_root_with_paged_visibility(
                 &layout,
                 root,
                 crab_read::capsule_protocol::CapsuleReadLimits {

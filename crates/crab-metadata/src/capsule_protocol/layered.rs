@@ -17,12 +17,14 @@ const LAYER_MAGIC: &[u8; 8] = b"CRBPKL01";
 const LAYER_VERSION: u32 = 1;
 const TRAILER_BYTES: usize = 8 + 32 + 8;
 const MAX_CHECKPOINT_FOOTER_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_CHECKPOINT_CONTROL_BYTES: u64 =
+    (MAX_CHECKPOINT_FOOTER_BYTES + TRAILER_BYTES) as u64;
 const MAX_LAYER_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PHYSICAL_SOURCES: usize = 64;
 const MAX_SOURCE_MEMBERS: usize = 512;
 mod visibility_pages;
 #[cfg(feature = "storage")]
-pub use visibility_pages::LayeredVisibilityReader;
+pub use visibility_pages::{LayeredVisibilityReader, PagedGitVisibility};
 const MAX_LAYERED_VISIBILITY_BYTES: usize = 128 * 1024 * 1024;
 const MAX_LAYERED_VISIBILITY_REFS: usize = 100_000;
 const MAX_LAYERED_VISIBILITY_TRANSITIONS: usize = 1_000_000;
@@ -941,6 +943,7 @@ pub struct LayeredCheckpoint {
     object_size: u64,
     control_offset: u64,
     control_only: bool,
+    captured_catalog: Option<Bytes>,
 }
 
 impl LayeredCheckpoint {
@@ -1104,6 +1107,7 @@ impl LayeredCheckpoint {
             object_size,
             control_offset,
             control_only: false,
+            captured_catalog: None,
         })
     }
 
@@ -1164,6 +1168,7 @@ impl LayeredCheckpoint {
             object_size,
             control_offset: footer_start,
             control_only: true,
+            captured_catalog: None,
         })
     }
 
@@ -1189,6 +1194,16 @@ impl LayeredCheckpoint {
     #[must_use]
     pub const fn is_control_only(&self) -> bool {
         self.control_only
+    }
+
+    /// Return captured control and catalog bytes admitted before page queries.
+    #[must_use]
+    pub fn captured_metadata_bytes(&self) -> u64 {
+        self.control_size()
+            + self
+                .captured_catalog
+                .as_ref()
+                .map_or(0, |bytes| bytes.len() as u64)
     }
 
     /// Verify every identity field of the root's authenticated checkpoint pointer.
@@ -1298,6 +1313,56 @@ impl LayeredCheckpoint {
         self.section(CapsuleSectionKind::CatalogDelta)
     }
 
+    #[cfg(feature = "storage")]
+    pub(crate) fn catalog_range(&self) -> Result<Option<std::ops::Range<u64>>> {
+        self.footer
+            .sections
+            .iter()
+            .find(|section| section.kind == CapsuleSectionKind::CatalogDelta)
+            .map(|section| {
+                section
+                    .offset
+                    .checked_add(section.length)
+                    .map(|end| section.offset..end)
+                    .ok_or_else(|| corrupt("checkpoint catalog range overflows"))
+            })
+            .transpose()
+    }
+
+    #[cfg(feature = "storage")]
+    pub(crate) fn capture_catalog(&mut self, bytes: Bytes) -> Result<()> {
+        let section = self
+            .footer
+            .sections
+            .iter()
+            .find(|section| section.kind == CapsuleSectionKind::CatalogDelta)
+            .ok_or_else(|| corrupt("checkpoint has no catalog section"))?;
+        if bytes.len() as u64 != section.length
+            || blake3::hash(&bytes).to_hex().as_str() != section.blake3
+        {
+            return Err(corrupt(
+                "checkpoint catalog does not match its authenticated section",
+            ));
+        }
+        self.captured_catalog = Some(bytes);
+        Ok(())
+    }
+
+    #[cfg(feature = "storage")]
+    pub(crate) fn require_paged_visibility(&self) -> Result<()> {
+        if self
+            .footer
+            .sections
+            .iter()
+            .any(|section| section.kind == CapsuleSectionKind::VisibilitySnapshot)
+        {
+            return Err(corrupt(
+                "checkpoint visibility is not the paged ordinal format",
+            ));
+        }
+        Ok(())
+    }
+
     /// Decode the complete visibility snapshot compacted by this checkpoint.
     pub fn visibility_snapshot(
         &self,
@@ -1380,11 +1445,6 @@ impl LayeredCheckpoint {
     }
 
     fn section(&self, kind: CapsuleSectionKind) -> Result<Option<Bytes>> {
-        if self.control_only {
-            return Err(corrupt(
-                "layered checkpoint section is unavailable in a control-only view",
-            ));
-        }
         let matches = self
             .footer
             .sections
@@ -1396,6 +1456,16 @@ impl LayeredCheckpoint {
         };
         if matches.next().is_some() {
             return Err(corrupt("layered checkpoint repeats a control section"));
+        }
+        if self.control_only {
+            if kind == CapsuleSectionKind::CatalogDelta
+                && let Some(bytes) = &self.captured_catalog
+            {
+                return Ok(Some(bytes.clone()));
+            }
+            return Err(corrupt(
+                "layered checkpoint section is unavailable in a control-only view",
+            ));
         }
         let start = usize::try_from(section.offset)
             .map_err(|_| corrupt("layered checkpoint section offset overflowed"))?;

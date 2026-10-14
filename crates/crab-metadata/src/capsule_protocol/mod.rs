@@ -29,13 +29,13 @@ pub use history::{
     HistorySegment, HistorySegmentPointer, HistorySegmentState, MAX_HISTORY_CHAIN_BYTES,
     MAX_HISTORY_CHAIN_SEGMENTS, MAX_HISTORY_SEGMENT_BYTES,
 };
-#[cfg(feature = "storage")]
-pub use layered::LayeredVisibilityReader;
 pub use layered::{
     LayeredCheckpoint, LayeredObjectMember, LayeredVisibilitySnapshot, PackLayer,
     PackMemberDescriptor, PackRange, PackSourceDescriptor, PackSourceKind, source_catalog_digest,
     visibility_object_set_digest,
 };
+#[cfg(feature = "storage")]
+pub use layered::{LayeredVisibilityReader, PagedGitVisibility};
 #[cfg(feature = "storage")]
 pub use plan::{
     CapsulePlanReceipt, ensure_capsule_plan_unattempted, prepare_capsule_plan,
@@ -62,7 +62,8 @@ pub use run::{
 pub use store::{
     RootSnapshot, create_root, load_capsule_run, load_capsule_run_control, load_history_chain,
     load_history_segment, load_layered_checkpoint, load_layered_checkpoint_control,
-    load_pointer_catalog, load_pointer_catalog_from_root, load_root,
+    load_layered_checkpoint_for_visibility, load_pointer_catalog, load_pointer_catalog_from_root,
+    load_root,
 };
 pub use transaction::{CapsuleRefEdit, CapsuleTransaction};
 pub use transaction_record::{

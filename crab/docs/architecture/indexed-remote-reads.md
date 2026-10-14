@@ -1339,3 +1339,50 @@ Rust 1.99 CI caught the parent's constant-size `chunks_exact` lint. The codec
 now uses fixed-array chunks, with all 21 codec checks and strict metadata Clippy
 passing. This correction is published in parent PR #544 before the reader
 rebase. Documentation-only evidence edits leave the qualified source unchanged.
+
+## Lazy closure validation in query opening
+
+Canonical CLI reads and HTTP browse/projection ingestion use
+`open_view_from_root_with_paged_visibility`. It captures the authenticated
+checkpoint footer and catalog range, reads ref descriptors and validates declared
+visibility edits through selected OID ranks and closure blocks. It does not decode
+the complete object dictionary or historical transition streams. Complete
+metadata inspection stays available to checkpoint maintenance, protected receive
+and native Git planning; their callers require materialized visibility.
+
+The shared page traversal derives dictionary rank from authenticated child
+counts. Publication builds and verifies canonical pages from the complete
+visibility index; maintenance continues full coverage and canonical-byte
+validation. Query reads validate loaded routing/counts and closure blocks,
+including sparse/bitmap canonical form and tail bounds. Required missing or
+corrupt pages remain errors. Ref descriptor enumeration retains its legitimate
+ref-count cost; immutable history roots are admitted but not decoded.
+
+`PagedGitVisibility` retains the materialized index's edit rules: first lexical
+matching base at ref creation, old-tip membership before replacement, exact
+removal membership, new-tip coverage and the global dictionary ceiling. Ref
+creation snapshots borrowed changes through immutable sharing; later edits cannot
+change that inherited state. Validation completes before state mutation.
+Transaction expected-old links, activation and predecessor order retain their
+existing owners. Materialized and paged controls share evidence-shape validation.
+Absent visibility evidence stays absent; object authorization remains with the
+captured-root graph/read boundary rather than physical placement.
+
+Catalog capture checks authenticated length/hash and is admitted before I/O.
+Catalog bytes detach without retaining the historical visibility backing object;
+first Crab hydration retains canonical catalog precedence and conflict checks.
+This does not page the historical Xet catalog: its captured byte cost remains
+until that workstream is implemented. Query page admission subtracts captured
+control/catalog bytes, while immutable object size alone no longer rejects a
+small visibility query. All checkpoint control loaders also enforce the format's
+footer-size ceiling before issuing a range request.
+
+Focused comparison covers inheritance, later edits to the borrowed ref, removals,
+replacement, deletion/recreation and matching rejection of invalid edits. At
+10,000 and 100,000 OIDs, a fixed edit reads below 128 KiB. Dictionary-rank tests
+exercise nonzero sibling prefixes and duplicate inputs. Publisher-to-reader
+integration preserves refs, transaction positions, Git snapshot and catalog after
+checkpointing and a later update, eliminating the complete checkpoint GET.
+Pre-checkpoint activation matches complete opening. Native final-source and HTTP
+receipts are recorded separately when available. Full initiative/release gates,
+10-GiB qualification, Xet catalog paging and later blame/staging work remain open.
