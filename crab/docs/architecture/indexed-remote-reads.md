@@ -680,3 +680,47 @@ The two runs are on a shared host rather than a controlled paired release build;
 the cause is not established. Repeated authenticated dictionary joins and page
 traversal need profiling, followed by controlled provider/release qualification.
 This is an unresolved performance gate; smaller index bytes do not close it.
+
+
+## Remove redundant compact-directory traversal
+
+Offset-delta lookup previously read pack ID → slot, then slot → pack, then the
+same pack ID → slot again. The first forward row is already authenticated and
+checked against captured inventory. Both lookup directions now share one typed
+slot-row reader; offset lookup joins its original forward row directly to that
+reverse row. The reverse pack identity check remains mandatory. OID lookup still
+checks both directions, and all reads retain the same aggregate work admission.
+This changes no stored bytes, descriptor version, public API or configuration.
+
+A stronger re-signed-directory test redirects a pack to another existing valid
+slot with equal size/count. Point and offset lookup reject it. Removing only the
+reverse identity comparison makes offset lookup accept another pack's object;
+the exact one-test negative control fails and restored source passes. All 15
+physical-index tests, five runtime regressions, metadata strict Clippy and both
+qualification-tool builds pass. Temporary probes are removed from source.
+
+Twenty interleaved in-memory samples of 1,000 warm joins compare the actual new
+helper with the redundant third traversal. Median times are 35.700 versus
+40.805 ms (12.5% lower); the optimized path is faster in 14/20 pairs. Its p95 is
+156.667 versus 108.873 ms, so the noisy shared-host experiment does not establish
+an improved latency tail or a completed end-to-end performance gate. Other
+worktree compilers were observed using CPU during diagnosis. Earlier preliminary
+prototype timings are not substituted for this production-helper measurement.
+
+The remaining opening audit identifies a distinct boundary:
+`open_view_from_root_with_metadata` → `assemble_layered_control_view` loads the
+complete checkpoint, then constructs its visibility index to order ref controls.
+`control_is_ready` checks new-branch base membership in that index; the complete
+capsule sibling applies the same rule. Footer-only fetch deliberately has a
+narrower admission contract. Bounded opening therefore needs authenticated
+visibility/catalog lookups and transaction reconciliation, not a silent switch
+to the fetch loader. Existing metadata-view tests cover snapshot equivalence,
+multi-ref activation and missing dependencies; those invariants must remain in
+the next implementation slice. This audit does not close the opening gate.
+
+The optimized binary's RustFS run passes the full ten-query native oracle at
+100 commits and all 20 cold/warm resolve/attribution samples at 100 and 1,000
+commits. Warm queries read zero backend bytes and completed operations retain no
+active backend work. The 10k history sampling remains in progress; source/binary
+hashes and completed receipts are retained externally. This partial observation
+is not recorded as a completed 121-process qualification.

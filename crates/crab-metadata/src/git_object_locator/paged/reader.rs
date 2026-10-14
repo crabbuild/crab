@@ -342,19 +342,14 @@ impl PagedGitObjectIndex {
             .await
     }
 
-    async fn packs_for_slots(
+    async fn slot_packs(
         &self,
         store: &Store,
         slots: &[u32],
         inventory: &HashMap<MerkleHash, GitPackInventoryEntry>,
         work: &mut PageWork,
-    ) -> Result<HashMap<u32, GitPackInventoryEntry>> {
-        let slots = slots
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
+    ) -> Result<BTreeMap<u32, GitPackInventoryEntry>> {
+        let slots = slots.iter().copied().collect::<BTreeSet<_>>();
         let keys = slots
             .iter()
             .map(|slot| slot.to_be_bytes().to_vec())
@@ -362,24 +357,32 @@ impl PagedGitObjectIndex {
         let rows = self
             .lookup_rows(store, &self.descriptor.slots, Kind::PackSlots, &keys, work)
             .await?;
-        let mut packs = HashMap::new();
-        for (slot, row) in slots.iter().zip(rows) {
-            let row = row.ok_or_else(|| corruption("required pack slot is absent"))?;
-            let pack = decode_pack(&row)?;
-            if inventory.get(&pack.pack_id) != Some(&pack) {
-                return bad("pack slot differs from captured inventory");
-            }
-            packs.insert(*slot, pack);
-        }
-        let keys = slots
-            .iter()
-            .map(|slot| {
-                packs
-                    .get(slot)
-                    .map(|pack| <[u8; 32]>::from(pack.pack_id).to_vec())
-                    .ok_or_else(|| corruption("pack slot result is absent"))
+        slots
+            .into_iter()
+            .zip(rows)
+            .map(|(slot, row)| {
+                let row = row.ok_or_else(|| corruption("required pack slot is absent"))?;
+                let pack = decode_pack(&row)?;
+                if inventory.get(&pack.pack_id) != Some(&pack) {
+                    return bad("pack slot differs from captured inventory");
+                }
+                Ok((slot, pack))
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect()
+    }
+
+    async fn packs_for_slots(
+        &self,
+        store: &Store,
+        slots: &[u32],
+        inventory: &HashMap<MerkleHash, GitPackInventoryEntry>,
+        work: &mut PageWork,
+    ) -> Result<BTreeMap<u32, GitPackInventoryEntry>> {
+        let packs = self.slot_packs(store, slots, inventory, work).await?;
+        let keys = packs
+            .values()
+            .map(|pack| <[u8; 32]>::from(pack.pack_id).to_vec())
+            .collect::<Vec<_>>();
         let rows = self
             .lookup_rows(
                 store,
@@ -389,12 +392,9 @@ impl PagedGitObjectIndex {
                 work,
             )
             .await?;
-        for (slot, row) in slots.into_iter().zip(rows) {
-            let pack = *packs
-                .get(&slot)
-                .ok_or_else(|| corruption("pack slot result is absent"))?;
+        for ((slot, pack), row) in packs.iter().zip(rows) {
             let row = row.ok_or_else(|| corruption("required pack binding is absent"))?;
-            if decode_binding(pack.pack_id, &row)? != (slot, pack) {
+            if decode_binding(pack.pack_id, &row)? != (*slot, *pack) {
                 return bad("pack directories disagree");
             }
         }
@@ -433,7 +433,9 @@ impl PagedGitObjectIndex {
                 Ok(slot)
             })
             .collect::<Result<Vec<_>>>()?;
-        let packs = self.packs_for_slots(store, &slots, inventory, work).await?;
+        // The forward binding is already authenticated above. Read its reverse once;
+        // repeating the forward traversal adds work for every offset-delta base.
+        let packs = self.slot_packs(store, &slots, inventory, work).await?;
         for (id, slot) in ids.iter().zip(&slots) {
             if packs.get(slot).is_none_or(|pack| pack.pack_id != *id) {
                 return bad("pack directories disagree");

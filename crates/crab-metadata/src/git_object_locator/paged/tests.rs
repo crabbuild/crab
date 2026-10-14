@@ -492,8 +492,33 @@ fn pack_slots_are_canonical_under_inventory_and_entry_permutations() {
 }
 
 #[tokio::test]
-async fn resigned_pack_directories_must_agree_before_point_lookup() {
-    let (manifest, inventory, entries) = inputs(10);
+async fn resigned_pack_binding_cannot_redirect_reads_to_another_pack() {
+    let (mut manifest, mut inventory, mut entries) = inputs(10);
+    let mut second_pack = inventory[0];
+    second_pack.pack_id = MerkleHash::from([4; 32]);
+    inventory.push(second_pack);
+    let second_entries = entries
+        .iter()
+        .enumerate()
+        .map(|(index, (_, locator))| {
+            let mut locator = *locator;
+            locator.pack_id = second_pack.pack_id;
+            (oid(10 + index as u32), locator)
+        })
+        .collect::<Vec<_>>();
+    entries.extend(second_entries);
+    let mut packs = inventory
+        .iter()
+        .map(|pack| crate::manifests::PackManifestEntry {
+            pack_id: pack.pack_id.to_string(),
+            size: pack.pack_size,
+            content_hash: pack.pack_id.to_string(),
+            ref_tips: Vec::new(),
+            object_count: pack.object_count,
+        })
+        .collect::<Vec<_>>();
+    packs.sort_unstable_by(|left, right| left.pack_id.cmp(&right.pack_id));
+    manifest.pack_index_hash = crate::manifests::compact_pack_index(1, &packs).unwrap().0;
     let mut write =
         PagedGitObjectIndexWrite::build(&"c".repeat(64), &manifest, &inventory, &entries).unwrap();
     let mut audit = BTreeMap::new();
@@ -529,7 +554,9 @@ async fn resigned_pack_directories_must_agree_before_point_lookup() {
         &mut audit,
     )
     .unwrap();
-    packs[0].1 = encode_binding(1, inventory[0]);
+    // Both slots and inventories are valid. Only the binding redirects this pack;
+    // dropping the reverse-ID check would return the other pack's object.
+    packs[1].1 = encode_binding(0, inventory[1]);
     let (body, [objects, offsets, packs, slots]) =
         encode_trees(objects, offsets, packs, slots).unwrap();
     write.descriptor.body_hash = blake3::hash(&body).to_hex().to_string();
@@ -558,13 +585,17 @@ async fn resigned_pack_directories_must_agree_before_point_lookup() {
         .collect();
     assert_eq!(
         (
-            reader.lookup(&store, &[oid(0)], &inventory).await.is_err(),
+            reader.lookup(&store, &[oid(10)], &inventory).await.is_err(),
+            reader
+                .oids_at_offsets(&store, &[(second_pack.pack_id, 12)], &inventory)
+                .await
+                .is_err(),
             reader
                 .verify_complete(&store, &manifest, 128 * 1024)
                 .await
                 .is_err()
         ),
-        (true, true)
+        (true, true, true)
     );
 }
 
