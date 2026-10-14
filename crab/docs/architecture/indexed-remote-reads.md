@@ -1243,12 +1243,12 @@ rebuild, the same retained OID fails with `Revision { reason: NotReachable }` an
 zero active backend operations. This checks the reader's visibility boundary,
 separately from Git-helper upload-pack's default want policy.
 
-The existing large-file harness is running against the isolated Makefile-installed
+The existing large-file harness passed against the isolated Makefile-installed
 v6 binary in a fresh RustFS bucket. It uses two actual 10 GiB files with
 deterministic entropy, 5,000 code files and four versions, alternating native
 add and Git clean. It checks pointer staging, incremental upload, fresh-cache
-historical hydration and integrity after removing source authority. Results are
-pending; earlier v5 or small-file receipts do not qualify this run.
+historical hydration and integrity after removing source authority. All 49 checks
+pass; earlier v5 or small-file receipts are separate evidence.
 
 The four publications in `large-v6-live-r1` have now passed. These are single
 release-binary observations sharing RustFS with other qualification/build work,
@@ -1265,10 +1265,13 @@ After version 1 staging, segments retain 10,739,857,220 bytes alongside
 10,744,916,848 bytes in prepared push plans. This reproduces the duplicate local
 payload problem when switching staging paths; efficient incremental remote
 uploads do not establish unified local staging. Source authority and source
-cache have been removed. Version 0 cold hydration of both 10 GiB files completes
-in 604.4 seconds and both SHA-256 checks pass. Versions 1–3 cold reconstruction
-and final deep remote integrity remain running. These receipts qualify the
-frozen v6 binary, not the new paged pointer-catalog encoding.
+cache were removed before reconstruction. Cold hydration of both 10 GiB files
+takes 604.4 / 549.4 / 488.0 / 502.8 seconds for versions 0–3. All eight SHA-256
+checks pass. Strict native Git fsck and deep remote integrity pass, with zero
+errors and repair failures. The binary fingerprint remains unchanged. Receipts
+live under `qualification-large-v6/large-v6-live-r1`; the report records the
+binary, source revision, source patch and harness fingerprints. These receipts
+qualify the frozen v6 binary, not the new paged pointer-catalog encoding.
 
 
 ### Blame comparison cache
