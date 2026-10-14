@@ -475,6 +475,28 @@ impl RemoteGitRuntime {
         self.tasks.spawn_blocking(task)
     }
 
+    pub(crate) async fn decode<F, T>(&self, cancellation: &CancellationToken, task: F) -> Result<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let permit = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            permit = Arc::clone(&self.decode).acquire_owned() => {
+                permit.map_err(|_| Error::Cancelled)?
+            }
+        };
+        // A dropped waiter detaches its blocking task. Keep the slot with the
+        // queued/running worker so abandonment cannot exceed decode admission.
+        self.spawn_blocking(move || {
+            let _permit = permit;
+            task()
+        })
+        .await
+        .map_err(|source| Error::DecodeTask { source })
+    }
+
     pub(crate) async fn origin_permit(
         &self,
         cancellation: &CancellationToken,
@@ -483,17 +505,6 @@ impl RemoteGitRuntime {
             biased;
             () = cancellation.cancelled() => Err(Error::Cancelled),
             permit = Arc::clone(&self.origin).acquire_owned() => permit.map_err(|_| Error::Cancelled),
-        }
-    }
-
-    pub(crate) async fn decode_permit(
-        &self,
-        cancellation: &CancellationToken,
-    ) -> Result<OwnedSemaphorePermit> {
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => Err(Error::Cancelled),
-            permit = Arc::clone(&self.decode).acquire_owned() => permit.map_err(|_| Error::Cancelled),
         }
     }
 
@@ -1688,6 +1699,140 @@ mod tests {
         assert!(second.await.expect("second joins").is_ok());
         assert_eq!(started.load(Ordering::SeqCst), 2);
         runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn abandoning_decode_keeps_admission_until_worker_exits() {
+        let runtime = Arc::new(
+            RemoteGitRuntime::new(
+                RuntimeOptions {
+                    max_decode_concurrency: 1,
+                    ..RuntimeOptions::default()
+                },
+                Arc::new(crate::NoopMetrics),
+            )
+            .expect("runtime"),
+        );
+        let (entered_sender, entered_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let work_runtime = runtime.clone();
+        let waiter = tokio::spawn(async move {
+            work_runtime
+                .decode(&CancellationToken::new(), move || {
+                    entered_sender.send(()).expect("signal started worker");
+                    release_receiver.recv().expect("release worker");
+                })
+                .await
+        });
+        entered_receiver.await.expect("worker started");
+        waiter.abort();
+        let _ = waiter.await;
+        let available_while_running = runtime.decode.available_permits();
+        release_sender.send(()).expect("release abandoned worker");
+        tokio::time::timeout(Duration::from_secs(1), runtime.shutdown())
+            .await
+            .expect("drain worker");
+        assert_eq!(
+            available_while_running, 0,
+            "an abandoned live worker must retain its decode slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_decode_admission_does_not_start_work() {
+        let runtime = RemoteGitRuntime::default();
+        let held = runtime
+            .decode
+            .clone()
+            .acquire_many_owned(runtime.options.max_decode_concurrency as u32)
+            .await
+            .expect("occupy decode admission");
+        let cancellation = CancellationToken::new();
+        let started = Arc::new(AtomicBool::new(false));
+        let work_started = started.clone();
+        let mut decode = Box::pin(runtime.decode(&cancellation, move || {
+            work_started.store(true, Ordering::SeqCst);
+        }));
+        let waiting = futures_util::poll!(decode.as_mut()).is_pending();
+        cancellation.cancel();
+        let result = decode.await;
+        drop(held);
+        runtime.shutdown().await;
+        assert!(
+            waiting && matches!(result, Err(Error::Cancelled)) && !started.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn panicking_decode_releases_admission_and_preserves_join_error() {
+        let runtime = RemoteGitRuntime::new(
+            RuntimeOptions {
+                max_decode_concurrency: 1,
+                ..RuntimeOptions::default()
+            },
+            Arc::new(crate::NoopMetrics),
+        )
+        .expect("runtime");
+        let result = runtime
+            .decode(&CancellationToken::new(), || panic!("worker failure"))
+            .await;
+        runtime.shutdown().await;
+        assert!(
+            matches!(result, Err(Error::DecodeTask { source }) if source.is_panic())
+                && runtime.decode.available_permits() == 1
+        );
+    }
+
+    #[test]
+    fn abandoning_queued_decode_retains_admission_until_queue_drains() {
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("executor");
+        executor.block_on(async {
+            let runtime = Arc::new(
+                RemoteGitRuntime::new(
+                    RuntimeOptions {
+                        max_decode_concurrency: 1,
+                        ..RuntimeOptions::default()
+                    },
+                    Arc::new(crate::NoopMetrics),
+                )
+                .expect("runtime"),
+            );
+            let (entered_sender, entered_receiver) = tokio::sync::oneshot::channel();
+            let (release_sender, release_receiver) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                entered_sender.send(()).expect("blocker entered");
+                release_receiver.recv().expect("release blocker");
+            });
+            entered_receiver.await.expect("blocking pool occupied");
+            let work_runtime = runtime.clone();
+            let waiter =
+                tokio::spawn(
+                    async move { work_runtime.decode(&CancellationToken::new(), || ()).await },
+                );
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while runtime.tasks.is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("decode queued");
+            waiter.abort();
+            let _ = waiter.await;
+            let available_while_queued = runtime.decode.available_permits();
+            release_sender.send(()).expect("release blocking pool");
+            blocker.await.expect("blocker joined");
+            tokio::time::timeout(Duration::from_secs(1), runtime.shutdown())
+                .await
+                .expect("queued decode drained");
+            assert_eq!(
+                available_while_queued, 0,
+                "queued detached work must retain admission"
+            );
+        });
     }
 
     #[tokio::test]

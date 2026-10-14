@@ -240,28 +240,25 @@ impl RemoteGitReader {
                         let index = copy_lazy_sidecar(&bytes, window.range.start, &range)?;
                         inputs.push((entry, index, metadata));
                     }
-                    let permit = runtime.decode_permit(&cancellation).await?;
-                    let indexes = runtime
-                        .spawn_blocking(move || {
+                    let token = cancellation.clone();
+                    runtime
+                        .decode(&cancellation, move || {
                             inputs
                                 .into_iter()
                                 .map(|(entry, index, metadata)| {
-                                    check_cancelled(&cancellation)?;
+                                    check_cancelled(&token)?;
                                     let parsed = parse_pack_index(
                                         entry.pack_id,
                                         entry,
                                         index,
                                         metadata,
-                                        &cancellation,
+                                        &token,
                                     )?;
                                     Ok((entry.pack_id, Arc::new(parsed)))
                                 })
                                 .collect::<Result<PackIndexes>>()
                         })
-                        .await
-                        .map_err(|source| Error::DecodeTask { source })?;
-                    drop(permit);
-                    indexes
+                        .await?
                 },
             )
             .await

@@ -149,6 +149,14 @@ bounded. Cached blame results remain subject to the current operation's
 logical, traversal, history, blame, and response limits; a warm result cannot
 bypass a stricter caller budget.
 
+Blocking Git decode admission belongs to the queued or running worker. Dropping
+its waiting read detaches the task; it keeps its slot until completion or unwind.
+Point and batch materialization, entry inspection/inflation, and individual and
+coalesced index parsing share that owner. Cancellation can stop admission and
+remains cooperative inside kernels; started blocking work is not force-aborted.
+Runtime shutdown retains the join obligation. General tracked comparison/sorting
+work and response-pack producer admission retain their separate policies.
+
 Shared base/index reads recheck their caches after admission: a caller that
 missed before a previous producer finished must reuse its verified result.
 Index-size producers publish their cache entry before retiring the shared task.

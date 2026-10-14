@@ -1625,17 +1625,14 @@ impl RemoteGitReader {
             let requested_chunk = requested_chunk.to_vec();
             let token = cancellation.clone();
             let max_inflated = budget.remaining(BudgetDimension::InflatedBytes).await;
-            let decode_permit = self.runtime.decode_permit(cancellation).await?;
             let (next_resolver, result) = self
                 .runtime
-                .spawn_blocking(move || {
+                .decode(cancellation, move || {
                     let mut resolver = resolver;
                     let result = resolver.resolve_many(&requested_chunk, max_inflated, &token);
                     (resolver, result)
                 })
-                .await
-                .map_err(|source| Error::DecodeTask { source })?;
-            drop(decode_permit);
+                .await?;
             resolver = next_resolver;
             let (mut chunk_objects, inflated_bytes) = result?;
             budget
@@ -1966,10 +1963,9 @@ impl RemoteGitReader {
                     shared_budget
                         .charge(BudgetDimension::InflatedBytes, inflated_bytes)
                         .await?;
-                    let decode_permit = work_runtime.decode_permit(&shared_cancellation).await?;
                     let decode_cancellation = shared_cancellation.clone();
                     let packed = work_runtime
-                        .spawn_blocking(move || {
+                        .decode(&shared_cancellation, move || {
                             inflate_entry(
                                 oid,
                                 pack_offset,
@@ -1979,9 +1975,7 @@ impl RemoteGitReader {
                                 &decode_cancellation,
                             )
                         })
-                        .await
-                        .map_err(|source| Error::DecodeTask { source })??;
-                    drop(decode_permit);
+                        .await??;
                     if let Some(kind) = packed.header.as_kind() {
                         verify_object(oid, kind, &packed.inflated)?;
                         work_runtime
@@ -2033,16 +2027,13 @@ impl RemoteGitReader {
                 .charge(BudgetDimension::InflatedBytes, entry.decompressed_size)
                 .await?;
         }
-        let decode_permit = self.runtime.decode_permit(cancellation).await?;
         let token = cancellation.clone();
         let descriptor = self
             .runtime
-            .spawn_blocking(move || {
+            .decode(cancellation, move || {
                 inspect_entry(oid, pack_id, pack_offset, bytes, max_inflated, &token)
             })
-            .await
-            .map_err(|source| Error::DecodeTask { source })??;
-        drop(decode_permit);
+            .await??;
         Ok(descriptor)
     }
 
@@ -2258,10 +2249,9 @@ impl RemoteGitReader {
                                 });
                             }
                         }
-                        let decode_permit = runtime.decode_permit(&shared_cancellation).await?;
                         let token = shared_cancellation.clone();
                         let index = runtime
-                            .spawn_blocking(move || {
+                            .decode(&shared_cancellation, move || {
                                 parse_pack_index(
                                     pack_id,
                                     inventory,
@@ -2270,9 +2260,7 @@ impl RemoteGitReader {
                                     &token,
                                 )
                             })
-                            .await
-                            .map_err(|source| Error::DecodeTask { source })??;
-                        drop(decode_permit);
+                            .await??;
                         Ok(index)
                     },
                 )
@@ -2374,15 +2362,12 @@ impl RemoteGitReader {
                         };
                     drop(origin_permit);
                     check_cancelled(&shared_cancellation)?;
-                    let decode_permit = work_runtime.decode_permit(&shared_cancellation).await?;
                     let token = shared_cancellation.clone();
                     let index = work_runtime
-                        .spawn_blocking(move || {
+                        .decode(&shared_cancellation, move || {
                             parse_pack_index(pack_id, inventory, bytes, kind_metadata, &token)
                         })
-                        .await
-                        .map_err(|source| Error::DecodeTask { source })??;
-                    drop(decode_permit);
+                        .await??;
                     Ok(index)
                 },
             )
