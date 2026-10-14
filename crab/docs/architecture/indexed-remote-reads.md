@@ -1156,7 +1156,7 @@ Full catalog materialization still exists as the explicit bulk operation;
 normal historical Xet lookups remain a later, incomplete gate.
 
 Current proof: targeted capsule suites pass for metadata (96), read (46), and
-write (22). Metadata includes four lazy-reader tests: a 50k-object lookup within
+write (22); the added captured-catalog regression brings read to 47. Metadata includes four lazy-reader tests: a 50k-object lookup within
 128 KiB despite a body over 2 MiB, retained-but-invisible denial, warm zero origin
 reads, full-materialization parity, and corrupted/missing page failure. Shared
 read/write/remote compile checks, the CLI link build, protected-receive all-target
@@ -1165,9 +1165,37 @@ Clippy passes with `--no-deps --all-targets` for metadata/read/write/remote. For
 fixtures use v6 without changing their epoch/visibility assertions. These are
 focused proofs, not fresh-prefix RustFS or end-to-end v6 qualification.
 
-Before marking this draft ready: finish live scope-wide API consumer proof;
-exercise checkpoint plus later ref edits, corruption, cancellation, physical
-index absence and explicit catalog materialization; run fresh-prefix RustFS
-qualification with frozen native Git fixtures and 20 cold/warm samples. Source
+Fresh-prefix RustFS proof passed under
+`checkpoint-pages-fresh-live-r1` outside the checkout. Native push published
+unchanged Git fixtures, then the actual checkpoint publisher and index builder
+ran before comparison. All three cells (100, 1,000 and 10,000 commits) pass 20 cold/warm samples for
+resolve, file history and blame, plus all ten query oracles. The 189 processes
+include six maintenance runs and prove 210 native query comparisons and 3,150
+blame-line origins. Every measured operation drains backend work; warm history
+and blame queries read zero origin bytes.
+
+| Commits | v5 opening bytes | v6 opening bytes | v6 checkpoint page bytes | Complete proof decodes |
+| --- | ---: | ---: | ---: | ---: |
+| 100 | 29,255 | 20,588 | 504 | 0 |
+| 1,000 | 119,259 | 45,456 | 499 | 0 |
+| 10,000 | 771,540 | 46,376 | 499 | 0 |
+
+Opening performs 12/13/14 backend operations in these fixed-ref/source fixtures.
+These results establish no bound across independently growing refs or source
+inventories. Loopback RustFS latency is not representative hosted-S3 latency.
+
+The v6 checkpoint plus a subsequent native add/commit/push passes all ten native
+Git query comparisons. Removing only the physical-index readiness field also
+passes, then the exact readiness record is restored. Tampering with its retained
+dictionary page fails capture with a page-integrity error and zero active
+backend operations; restoring the object restores native Git parity. A focused
+catalog regression passes: a captured Git view materializes its original
+catalog after the mutable root changes. Qualification now counts checkpoint
+visibility page decoding separately from complete proof decoding.
+
+Before marking this draft ready: finish tagged-ref, force-push, cancellation,
+Git-helper fetch/hydration and live lifecycle qualification; independently grow
+ref count, source inventory and uncompacted history. The standard Makefile
+installer is building current helpers into an isolated workspace prefix. Source
 inventory/ref capture, comparison caches, catalog indexing, lifecycle/provider
 qualification, unified staging and fuller blame remain incomplete.

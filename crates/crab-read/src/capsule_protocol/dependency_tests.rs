@@ -325,3 +325,149 @@ async fn catalog_file_proof_cancellation_interrupts_pending_shard_read() {
         Err(ReadError::Cancelled),
     ));
 }
+
+#[tokio::test]
+async fn git_view_catalog_materialization_uses_the_captured_checkpoint_after_root_changes() {
+    use crab_metadata::capsule_protocol::{
+        CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction, HistorySegment, HistorySegmentState,
+        LayeredVisibilitySnapshot, PackLayer, RepositoryRoot, source_catalog_digest,
+    };
+    use crab_metadata::git_visibility::GitVisibilityIndex;
+
+    let (layout, catalog, _workspace, refs) = fixture("valid").await;
+    let initial =
+        RootRecord::encode(RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap())
+            .unwrap();
+    let pack = CapsuleGitPack::new(
+        Bytes::from_static(b"pack"),
+        Bytes::from_static(b"index"),
+        Bytes::from_static(b"reverse"),
+        Bytes::from_static(b"locator"),
+        "2".repeat(40),
+        1,
+    )
+    .unwrap();
+    let transaction = CapsuleTransaction::new(
+        initial.digest(),
+        vec![CapsuleRefEdit::new(
+            "refs/tags/file",
+            None,
+            refs.get("refs/tags/file").cloned(),
+            None,
+        )],
+    )
+    .unwrap();
+    let run =
+        CapsuleRun::leaf(Capsule::build(&transaction, vec![pack.clone()], Vec::new()).unwrap())
+            .unwrap();
+    let run_pointer = CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )
+    .unwrap();
+    let initial = RootRecord::encode(
+        initial
+            .root()
+            .advance(
+                initial.digest(),
+                refs.clone(),
+                BTreeMap::new(),
+                vec![run_pointer],
+                &transaction.id().unwrap(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let layer = PackLayer::build(&pack).unwrap();
+    let source = layer.source_descriptor().unwrap();
+    let visibility = LayeredVisibilitySnapshot::from_index(
+        &GitVisibilityIndex::new(
+            1,
+            "0".repeat(64),
+            "0".repeat(64),
+            refs.into_iter()
+                .map(|(name, oid)| (name, vec![oid]))
+                .collect(),
+        )
+        .unwrap(),
+        &source_catalog_digest(std::slice::from_ref(&source)).unwrap(),
+    )
+    .unwrap();
+    let checkpoint = LayeredCheckpoint::build(
+        initial.root().generation(),
+        initial.digest(),
+        vec![source],
+        catalog.clone(),
+        Some(visibility),
+    )
+    .unwrap();
+    let pointer = CheckpointPointer::new_layered(
+        checkpoint.hash(),
+        checkpoint.bytes().len() as u64,
+        checkpoint.control_offset(),
+        checkpoint.control_size(),
+        checkpoint.footer_hash(),
+        checkpoint.covered_generation(),
+        checkpoint.covered_root_digest(),
+        checkpoint.pack_count().unwrap(),
+        checkpoint.object_count().unwrap(),
+    )
+    .unwrap();
+    let history = HistorySegment::build(
+        pointer.clone(),
+        None,
+        HistorySegmentState::new(
+            initial.root().refs().clone(),
+            initial.root().peeled_refs().clone(),
+            initial.root().head().to_owned(),
+            initial.root().compacted_ref_transactions().clone(),
+            initial.root().capsule_frontier().to_vec(),
+        ),
+    )
+    .unwrap();
+    let root = RootRecord::encode(
+        initial
+            .root()
+            .install_checkpoint(initial.digest(), pointer, Some(history.pointer().unwrap()))
+            .unwrap(),
+    )
+    .unwrap();
+    layout
+        .store()
+        .put(
+            &layout.capsule_checkpoint_path(checkpoint.hash()),
+            checkpoint.bytes().clone(),
+        )
+        .await
+        .unwrap();
+    layout
+        .store()
+        .put(&layout.capsule_root_path(), root.bytes().clone())
+        .await
+        .unwrap();
+    let view = open_git_view_from_root(
+        &layout,
+        load_root(&layout).await.unwrap(),
+        CapsuleReadLimits {
+            max_capsule_bytes: 1024 * 1024,
+            max_frontier_bytes: 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(view.layered_checkpoint().unwrap().is_control_only());
+    // The bulk read must follow the captured pointer rather than recapturing a
+    // mutable root; otherwise hydration could silently select a different recipe.
+    layout
+        .store()
+        .put_overwrite(&layout.capsule_root_path(), initial.bytes().clone())
+        .await
+        .unwrap();
+    assert_eq!(view.pointer_catalog().await.unwrap(), catalog);
+}
