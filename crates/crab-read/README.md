@@ -48,7 +48,11 @@ enumeration are still eager; total bounded opening remains unqualified.
 Full-capsule and control-only views share borrowed visibility readiness/application
 checks. Canonical transaction decoding guarantees unique ref names; matched-row
 counts reject extra evidence without copying the per-object edit lists.
-Full and paged controls use one ref-ordering loop. Paged closure layers preserve
+Full and paged controls use one ref-ordering loop and preserve capsule identity
+across compaction origins: logical pack metadata is
+capsule-relative, while transport ranges stay on the captured run. Shared
+transactions deduplicate without discarding conflicting content evidence.
+Paged closure layers preserve
 the inherited base when its source ref later moves, and dictionary retention
 never supplies visibility for a new ref. Initial rooted additions use their
 authenticated count; differing actual delta additions/removals remain admitted

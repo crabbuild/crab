@@ -1377,3 +1377,43 @@ run, overlapping multi-ref transactions and incomparable ref histories, besides
 the fixed-recipe/increasing-history request and decode bounds. Root frontiers
 allow eight runs, ref frontiers 64 and each run 512 capsules; reading each
 capsule separately would retain excessive lookup amplification.
+
+### Shared capsule identity across compaction origins
+
+The catalog-source audit found a prerequisite defect in the unmerged capsule
+stack. The same multi-ref capsule can be retained as a leaf for one ref and
+inside a compacted run for another. Control construction copied the entire
+run's pack directory into every capsule and compared visibility readers using
+their physical origins. Complete reads deduplicated identical capsule bytes;
+metadata and paged Git views instead reported conflicting transaction content.
+
+`compacted-origin-live-r1` reproduces this through real Git and RustFS: publish
+one atomic main/feature update, then 31 feature updates to trigger the existing
+32-way run compaction. The feature tip publishes and deep remote fsck passes,
+but `metadb owner --once` fails with `CRAB-E0020` at ref-head reconciliation.
+The focused Rust regression fails with the same conflict before the fix.
+
+The correction assigns only each capsule's own pack members, normalizes their
+logical ranges to capsule-relative coordinates and leaves transport ranges on
+the run. Control equality retains capsule/transaction/catalog/pack evidence and
+the authenticated visibility section hash, length and page roots, excluding
+visibility materialization and transport origin. This also removes repeated
+whole-run pack-directory clones. No serialized format or migration changes.
+
+The regression passes after the change, checking complete, metadata and paged
+Git views, pack counts/bytes and snapshot parity. A contradictory capsule that
+claims the same transaction remains rejected in all three views. All 103
+storage-enabled metadata capsule tests and 48 read capsule tests pass; strict
+owner-crate Clippy passes with storage and remote-index enabled.
+
+`capsule-origin-fixed-live-r1` uses the rebuilt `qualify_remote` executable
+(SHA-256 `969b82482c3b1431bce044423e1953624860a33cd57c94d334bebbb13cdc798c`)
+against that same real Git/RustFS repository. Canonical browse-index maintenance
+now publishes physical and path-attribution readiness. Ten operations, each cold
+and warm, match native Git for the captured main tip: revision, commit, tree,
+blob, object point/batch, history, path history, tree attribution and every blame
+line. All measured backend operations drain before completion. Receipts live
+outside the checkout under `capsule-origin-fixed-live-r1/` in the dedicated
+qualification directory. The qualifier exercises the shared metadata reader
+used by maintenance; a newly installed CLI `metadb owner` invocation and broader
+CI remain pending. No indexed-catalog performance claim follows from this fix.

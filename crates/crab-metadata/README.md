@@ -46,6 +46,14 @@ Catalog readers resolve only ref heads in that root's authority epoch, before
 loading multi-ref activation records. Restore can leave retired heads in storage;
 their checkpoint positions and dependencies must not enter the restored catalog.
 Current-epoch activation and checkpoint-chain errors still fail closed.
+Run controls retain each capsule's own pack directory in capsule-relative
+coordinates. The run directory keeps physical transport coordinates separately.
+Logical capsule equality compares authenticated visibility section identities
+and page roots rather than cache state or transport origin. Identical shared
+capsules can therefore appear in differently compacted ref frontiers without
+inflating pack counts or appearing to conflict; differing payload commitments
+remain rejected.
+
 External pointer catalogs use `CRBPCP01` authenticated pages. A bounded descriptor
 commits file, shard, xorb and reverse-chunk directories; nested shard closures and
 ordered xorb chunk lists are paged too. Keys preserve canonical lowercase Xet hex

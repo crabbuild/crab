@@ -110,6 +110,7 @@ pub struct CapsuleRunControl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapsuleControlLocation {
     hash: String,
+    capsule_range: std::ops::Range<u64>,
     transaction_id: String,
     base_root_digest: String,
     transaction: PackRange,
@@ -122,23 +123,41 @@ pub struct CapsuleControlLocation {
 
 /// Transaction and metadata sections needed to validate a run without reading
 /// its Git/file payload sections.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CapsuleControl {
     hash: String,
     transaction_id: String,
     base_root_digest: String,
     transaction: CapsuleTransaction,
     visibility: Option<ControlVisibility>,
+    visibility_identity: Option<(u64, String, super::visibility::VisibilityPages)>,
     catalog: Option<PointerCatalog>,
     git_packs: Vec<PackMemberDescriptor>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum ControlVisibility {
     Complete(std::sync::Arc<CapsuleVisibilityDelta>),
     #[cfg(feature = "storage")]
     Paged(std::sync::Arc<super::visibility::CapsuleVisibilityReader>),
 }
+
+impl PartialEq for CapsuleControl {
+    fn eq(&self, other: &Self) -> bool {
+        // Transport origins and visibility materialization are not capsule
+        // identity. Compare the authenticated section commitment and roots so
+        // compaction can relocate bytes without hiding conflicting evidence.
+        self.hash == other.hash
+            && self.transaction_id == other.transaction_id
+            && self.base_root_digest == other.base_root_digest
+            && self.transaction == other.transaction
+            && self.visibility_identity == other.visibility_identity
+            && self.catalog == other.catalog
+            && self.git_packs == other.git_packs
+    }
+}
+
+impl Eq for CapsuleControl {}
 
 impl CapsuleRunControl {
     /// Decode complete control and admission bytes from the authenticated suffix.
@@ -330,6 +349,11 @@ impl CapsuleRunControl {
             )?;
             controls.push(CapsuleControlLocation {
                 hash: location.hash.clone(),
+                capsule_range: location.offset
+                    ..location
+                        .offset
+                        .checked_add(location.length)
+                        .ok_or_else(|| corrupt("capsule run range overflowed"))?,
                 transaction_id: location.transaction_id.clone(),
                 base_root_digest: location.base_root_digest.clone(),
                 transaction: transaction_range,
@@ -580,9 +604,11 @@ impl CapsuleRunControl {
         external_controls: &std::collections::BTreeMap<(String, CapsuleSectionKind), Bytes>,
         visibility: impl Fn(&CapsuleControlLocation) -> Result<Option<ControlVisibility>>,
     ) -> Result<Vec<CapsuleControl>> {
+        let pack_directories = self.capsule_pack_directories()?;
         self.capsules
             .iter()
-            .map(|location| {
+            .zip(pack_directories)
+            .map(|(location, git_packs)| {
                 verify_control_section(
                     Some(&location.transaction),
                     Some(&location.transaction_bytes),
@@ -615,11 +641,58 @@ impl CapsuleRunControl {
                     base_root_digest: location.base_root_digest.clone(),
                     transaction,
                     visibility,
+                    visibility_identity: location
+                        .visibility
+                        .as_ref()
+                        .zip(location.visibility_pages.as_ref())
+                        .map(|(section, pages)| {
+                            (section.length(), section.blake3().to_owned(), pages.clone())
+                        }),
                     catalog,
-                    git_packs: self.git_packs.clone(),
+                    git_packs,
                 })
             })
             .collect()
+    }
+
+    #[cfg(any(feature = "storage", test))]
+    fn capsule_pack_directories(&self) -> Result<Vec<Vec<PackMemberDescriptor>>> {
+        let mut directories = vec![Vec::new(); self.capsules.len()];
+        for member in &self.git_packs {
+            let position = self
+                .capsules
+                .partition_point(|capsule| capsule.capsule_range.end <= member.pack().offset());
+            let capsule = self
+                .capsules
+                .get(position)
+                .ok_or_else(|| corrupt("Git pack has no owning capsule"))?;
+            let relative = |section: &PackRange| -> Result<PackRange> {
+                let offset = section
+                    .offset()
+                    .checked_sub(capsule.capsule_range.start)
+                    .ok_or_else(|| corrupt("Git section starts before its owning capsule"))?;
+                if section
+                    .offset()
+                    .checked_add(section.length())
+                    .is_none_or(|end| end > capsule.capsule_range.end)
+                {
+                    return Err(corrupt("Git section escapes its owning capsule"));
+                }
+                PackRange::from_parts(offset, section.length(), section.blake3().to_owned())
+            };
+            // Physical run descriptors stay run-relative. Logical controls own
+            // only their capsule's members, normalized to its immutable bytes.
+            directories[position].push(PackMemberDescriptor::new(
+                relative(member.pack())?,
+                relative(member.index())?,
+                relative(member.reverse_index())?,
+                relative(member.locator())?,
+                member.git_checksum(),
+                member.object_count(),
+                member.external_delta_bases().to_vec(),
+            )?);
+        }
+        Ok(directories)
     }
 }
 
@@ -692,7 +765,7 @@ impl CapsuleControl {
         self.catalog.as_ref()
     }
 
-    /// Return the authenticated pack directory for this capsule.
+    /// Return this capsule's authenticated pack directory with capsule-relative ranges.
     pub fn git_packs(&self) -> &[PackMemberDescriptor] {
         &self.git_packs
     }

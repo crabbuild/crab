@@ -6518,6 +6518,169 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metadata_views_deduplicate_shared_capsules_across_compacted_origins() {
+        for conflicting in [false, true] {
+            let inner = Arc::new(InMemory::new());
+            seed_prepared_multi_ref(inner.clone(), true, true).await;
+            let store = Store::new(inner);
+            let router = StoreLayout::new(store.clone(), "repositories/test".to_owned());
+            let root = load_root(&router).await.unwrap();
+            let (heads, active) = capture_ref_heads(&router, root.record().root())
+                .await
+                .unwrap();
+            let feature = heads
+                .iter()
+                .find(|head| head.ref_name() == "refs/heads/feature")
+                .unwrap();
+            let first_pointer = &feature.visible(&active).frontier()[0];
+            let first = crab_metadata::capsule_protocol::load_capsule_run(&router, first_pointer)
+                .await
+                .unwrap();
+            let transaction = CapsuleTransaction::new(
+                root.record().digest(),
+                vec![CapsuleRefEdit::new(
+                    "refs/heads/feature",
+                    Some("3".repeat(40)),
+                    Some("6".repeat(40)),
+                    None,
+                )],
+            )
+            .unwrap();
+            let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+                "refs/heads/feature".to_owned(),
+                GitVisibilityEdit::from_delta_objects(
+                    Some("3".repeat(40)),
+                    "6".repeat(40),
+                    vec!["6".repeat(40)],
+                    vec!["3".repeat(40)],
+                ),
+            )]))
+            .unwrap();
+            let second = CapsuleRun::leaf(
+                Capsule::build(
+                    &transaction,
+                    vec![
+                        CapsuleGitPack::new(
+                            Bytes::from_static(b"PACK next feature metadata fixture"),
+                            Bytes::from_static(b"index"),
+                            Bytes::from_static(b"reverse"),
+                            Bytes::from_static(b"locator"),
+                            "7".repeat(40),
+                            1,
+                        )
+                        .unwrap(),
+                    ],
+                    vec![CapsuleSection::new(
+                        CapsuleSectionKind::VisibilityDelta,
+                        visibility.encode().unwrap(),
+                    )],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let first = if conflicting {
+                let capsule = &first.capsules()[0];
+                CapsuleRun::leaf(
+                    Capsule::build(
+                        &capsule.transaction().unwrap(),
+                        Vec::new(),
+                        vec![CapsuleSection::new(
+                            CapsuleSectionKind::VisibilityDelta,
+                            capsule
+                                .visibility_delta()
+                                .unwrap()
+                                .unwrap()
+                                .encode()
+                                .unwrap(),
+                        )],
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+            } else {
+                first
+            };
+            let compacted = CapsuleRun::compact(vec![first, second]).unwrap();
+            store
+                .put(
+                    &router.capsule_path(compacted.hash()),
+                    compacted.bytes().clone(),
+                )
+                .await
+                .unwrap();
+            let pointer = CapsulePointer::new(
+                compacted.hash(),
+                compacted.bytes().len() as u64,
+                compacted.control_offset(),
+                compacted.control_size(),
+                compacted.footer_hash(),
+                compacted.level(),
+                compacted.transaction_ids(),
+                compacted.newest_base_root_digest(),
+            )
+            .unwrap();
+            let next = feature
+                .successor_state(
+                    &active,
+                    Some("6".repeat(40)),
+                    None,
+                    transaction.id().unwrap(),
+                    vec![pointer],
+                )
+                .unwrap();
+            store
+                .put_overwrite(
+                    &router.capsule_ref_head_path(
+                        &crab_metadata::capsule_protocol::capsule_ref_name_key(
+                            "refs/heads/feature",
+                        ),
+                    ),
+                    feature.commit(next).unwrap().encode().unwrap(),
+                )
+                .await
+                .unwrap();
+
+            // Main retains the shared leaf; feature now contains that exact capsule
+            // at a different physical origin. Compaction cannot change its identity.
+            let complete =
+                open_view_from_root_with_control(&router, root.clone(), TEST_LIMITS).await;
+            let others = [
+                open_view_from_root_with_metadata(&router, root.clone(), TEST_LIMITS).await,
+                open_git_view_from_root(&router, root, TEST_LIMITS).await,
+            ];
+            if conflicting {
+                for view in std::iter::once(complete).chain(others) {
+                    assert!(
+                        matches!(view, Err(ReadError::CorruptObject { path, reason })
+                    if path == "capsule-protocol ref heads"
+                    && reason == "transaction identity names conflicting capsules")
+                    );
+                }
+            } else {
+                let complete = complete.unwrap();
+                assert_eq!(complete.refs()["refs/heads/feature"], "6".repeat(40));
+                for view in others {
+                    let view = view.unwrap();
+                    assert_eq!(
+                        (
+                            view.refs(),
+                            view.git_pack_count(),
+                            view.git_pack_bytes().unwrap(),
+                            view.git_snapshot().unwrap()
+                        ),
+                        (
+                            complete.refs(),
+                            complete.git_pack_count(),
+                            complete.git_pack_bytes().unwrap(),
+                            complete.git_snapshot().unwrap()
+                        )
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn metadata_view_preserves_multi_ref_activation_and_visibility() {
         for committed in [false, true] {
             let inner = Arc::new(InMemory::new());
