@@ -794,3 +794,18 @@ SHA-256-bound canonical runner source and passes the same two descendant cases.
 That probe has a small error/cancellation boundary driver; it is not full Linux
 CLI or Windows qualification. Native CLI cancellation, full cross-platform CI
 and the earlier Git 2.40 hook-marker failure still require current proof.
+
+
+The locked CLI build at `3b1e6426a83` passes. Its clean-source native cancellation
+replay passes all three checks across seven commands: cache ownership stays
+held during the real upload-pack hook, the stop marker exists before Crab
+returns cancellation, and subsequent cache cleaning succeeds without changing
+remote refs. Cancellation returns exit 10 in 358 ms. The existing qualification
+harness and prior read-only fixture are reused with an isolated Git config;
+native Git is 2.50.1. This does not resolve the Git 2.40 CI gate by inference.
+
+CLI library Clippy emits the same 586 existing diagnostics as the preceding
+qualified slice, with no additions/removals. Its invocation permits the existing
+`unfulfilled_lint_expectations` category; no source suppressions are added.
+The isolated Linux image lacks Clippy, so it supplies compilation/runtime proof
+only. Full CLI strict lint and cross-platform CI remain open.
