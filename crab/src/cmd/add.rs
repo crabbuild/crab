@@ -6294,14 +6294,14 @@ mod tests {
                 let staging = StagingAreaReadOnly::open(root).await.unwrap();
                 let result = reconcile_publication_intents(&staging, &repo).await;
                 (
-                    result.expect_err("live Git index writer must block retirement"),
+                    result.unwrap_err(),
                     staging.unresolved_publication_intents().unwrap().len(),
                     staging.get_chunk(&compute_data_hash(data)).await.unwrap(),
                 )
             } else {
                 let result = reconcile_publication_intents_writer(&staging, &repo);
                 let state = (
-                    result.expect_err("live Git index writer must block retirement"),
+                    result.unwrap_err(),
                     staging.unresolved_publication_intents().unwrap().len(),
                     staging.get_chunk(&compute_data_hash(data)).await.unwrap(),
                 );
@@ -6396,7 +6396,7 @@ mod tests {
             }
         })
         .await
-        .expect("Git must reach the controlled clean boundary");
+        .unwrap();
         let blocked = reconcile_publication_intents(&staging, repo)
             .await
             .unwrap_err();
@@ -6417,7 +6417,7 @@ mod tests {
             }
         })
         .await
-        .expect("Git must install its pointer");
+        .unwrap();
         assert!(status.success(), "Git index installation failed");
         reconcile_publication_intents(&staging, repo).await.unwrap();
         assert!(

@@ -1855,6 +1855,12 @@ No schema, path encoding, intent format or dependency changes are required.
 The regressions cover both exclusive and shared staging handles. A real Git
 child pauses inside a controlled clean filter: recovery must retain the recipe
 and payload until Git finishes installing its pointer, then publish on retry.
-The test releases its filter and reaps Git on exit. Final validation results
-remain pending. This fixes the recovery boundary; routing Crab's clean stream
-through shared ingestion and deferring its recipe publication remain required.
+The test releases its filter and reaps Git on exit. Two publication-focused
+runs each pass 26 tests, including both handle variants and the real Git child.
+The production Clippy contract from `.github/workflows/rust.yml` passes with
+the minimal consumer profile and existing warnings. The broader all-test
+invocation fails on existing test lint debt; new test `expect` calls were
+corrected without changing assertions or adding suppressions. Both successful
+and failed receipts remain retained. This fixes the recovery boundary; routing
+Crab's clean stream through shared ingestion and deferring its recipe
+publication remain required.
