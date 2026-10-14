@@ -1902,3 +1902,28 @@ This remains draft work. New-path 10-GiB multi-edit/push/reconstruction, represe
 S3 performance, Git termination and abandoned-handoff reconciliation/reclamation,
 full failure injection and broad CI remain required. The concurrent 10-GiB run is
 pinned to the older segment-lifecycle binary and cannot qualify these changes.
+
+The final expanded local clean consumer run passes 57 tests. The six-version
+crossover exercises both native/Git orders, an unchanged transition, middle/tail
+edits, append and truncation. It compares physical prepared-body names and sizes
+on the unchanged transition and bounds retained physical growth for small edits,
+besides reconstructing every ordered recipe exactly. Staging passes 238 tests
+with one existing manual RSS test ignored. Packet/push/publication and lint
+receipts remain pending; these local cases do not establish the 10-GiB gate.
+
+CI on `ffcc26edd0d` fails the existing pack-layout architecture assertion in
+`crab/src/read/mod.rs`, requiring the retired direct installer symbol. The failing
+job is `116161095860` in run `38654549030`. The previously proposed gate update
+remains pending approval; no baseline or gate inventory has been changed.
+
+The follow-up real-staging malformed-input case passes: a complete changed payload
+without Git's terminal flush returns the original typed EOF error, retains the
+prior prepared recipe and leaves exactly its original batch/lease ownership.
+Both the temporary prepared-prefix pin and reader attempt are released. This
+adds failure proof through the production adapter, rather than only a mocked
+stager or packet reader. Two packet tests, one delegated push-admission test,
+seven prepared-plan tests and 26 publication tests also pass. Staging all-targets
+Clippy passes with the existing unfulfilled-expectation exception. The minimal
+product consumer passes the CI correctness/suspicious lint profile with existing
+warning debt; strict full-CLI lint cleanliness is not claimed. No production Rust
+changes accompany this follow-up test.

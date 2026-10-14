@@ -35,7 +35,7 @@ Trace one path: `crab/src/cmd/add.rs` (`close_staging_before_indexing`) →
   Source: `crates/crab-staging/src/index.rs`.
 - Segment payload lifetime follows canonical inventory, including recording and
   sealed recipe owners. Compaction transfers inventory and occurrence locators
-  together; reads capture handles before releasing locator ownership. Layout v2
+  together; reads capture handles before releasing locator ownership. Layout v3
   upgrades released v1 locators transactionally before admission.
   Sources: `crates/crab-staging/src/index.rs`, `crates/crab-staging/src/lib.rs`.
 - Recovery distinguishes confirmed absence from filesystem lookup errors; only absence permits dropping pending locators. It rejects missing/undersized sealed segments; current-segment truncation and index cleanup must agree on the surviving durable data.

@@ -5165,6 +5165,71 @@ mod tests {
     }
 
     #[test]
+    fn failed_packet_input_preserves_prepared_version_and_releases_attempt_leases() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.bin");
+        let original = vec![0x71; 3 * 1024 * 1024];
+        std::fs::write(&path, &original).unwrap();
+        let staging = Arc::new(
+            rt.block_on(StagingArea::open(tmp.path().join("staging")))
+                .unwrap(),
+        );
+        let prepared = rt
+            .block_on(crab_staging::stream::stage_file_streaming(
+                &path,
+                tmp.path(),
+                &staging,
+                crab_staging::stream::StreamStageProgress {
+                    xorb_builder: Some(crab_staging::stream::StreamStageXorbBuilder::new(
+                        1,
+                        crab_xet::xorb::builder::XorbBuilder::new,
+                    )),
+                    ..crab_staging::stream::StreamStageProgress::default()
+                },
+                &tokio_util::sync::CancellationToken::new(),
+            ))
+            .unwrap();
+        let before = staging.lifecycle_health().unwrap();
+        let mut session = CleanSession::with_deps(
+            AppContext::default(),
+            Box::new(NoopFileIndexChecker),
+            Box::new(StagingChunkStager::new(
+                staging.clone(),
+                rt.handle().clone(),
+            )),
+            &[],
+            u64::MAX,
+            DEFAULT_CHUNK_BUFFER_CAP,
+        );
+        let mut changed = original;
+        changed[0] ^= 0x7f;
+        let mut framed = frame_as_pktlines(&changed);
+        // A complete payload without Git's flush is not a complete request.
+        // The prepared prefix pin and reader attempt must both roll back.
+        framed.truncate(framed.len() - 4);
+        let mut reader = crate::git::filter_process::PktLineReader::from_slice(&framed);
+        let result = session.clean_stream("model.bin", &mut reader);
+        drop(session);
+        let after = staging.lifecycle_health().unwrap();
+        assert!(
+            matches!(result, Err(CrabError::Io(ref error))
+                if error.kind() == std::io::ErrorKind::UnexpectedEof)
+                && staging
+                    .unpublished_local_recipe_for_path(Path::new("model.bin"))
+                    .unwrap()
+                    == Some(prepared.recipe)
+                && before.path_leases == after.path_leases
+                && before.open_batches_without_publication
+                    == after.open_batches_without_publication
+                && staging.stats().unwrap().total_staged_bytes == 0,
+            "failed framing must retain the original owner and release only attempt ownership"
+        );
+        rt.block_on(Arc::try_unwrap(staging).ok().unwrap().close())
+            .unwrap();
+    }
+
+    #[test]
     fn clean_stream_promotes_unpublished_prepared_recipe_without_segment_rewrite() {
         use crate::git::filter_process::PktLineReader;
 
