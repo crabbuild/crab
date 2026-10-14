@@ -534,6 +534,242 @@ release/provider performance. Full pack-index reads still scale with repository
 objects, and control opening still scales with history. Source/binary hashes,
 the earlier failure, raw receipts and checked summaries remain external.
 
+## Paged physical object lookup: runtime qualification
+
+The measured 10k cold-resolution query previously read an 844,460-byte pack-index
+range to locate its 148-byte commit. Physical lookup now uses authenticated
+OID-to-placement, pack-offset-to-OID and pack-inventory pages. Offset lookup is
+required for delta reconstruction; paging only OIDs would retain a hidden full
+reverse-index read. Every physical alias remains represented. Primary placement
+prefers a self-contained encoding; logical facts agree across aliases while
+encoding-specific delta-base facts remain attached to their own placement.
+
+The capsule owner constructs complete physical coverage from authenticated source
+sidecars, admits encoded output before upload, and verifies full readback before
+publishing readiness. Path completion retains that descriptor hash. Maintenance
+can repair missing or corrupt derived bytes; provider/authentication failures
+propagate. Foreground readers bind the descriptor to captured state, transport and
+storage prefixes, use operation-admitted stores, and return definitive misses
+without probing whole indexes. Catalog ordinals and visible-ref authority remain
+with their existing owners. GC retains the descriptor and its immutable page
+body; stale descriptors can be collected while a shared current body survives.
+
+Browse-readiness version 3 replaces the unshipped version 2 record. No release tag
+contains the introducing browse-record commit. Normal readers reject retired
+records; the elected maintenance owner rebuilds them under the observed CAS token.
+The released manifest protocol and its object-catalog lookup remain unchanged.
+
+Focused proof includes 10 metadata component tests, five runtime regressions,
+three browse-record tests, two publication-fence tests, the CLI error-source test
+and the GC sweep regression. The offset-delta runtime fixture contains no IDX/REV
+sidecars and reconstructs exact verified bytes. Removing OID/offset agreement
+fails the forged-directory regression; the initial zero-test negative-control run
+is excluded. Existing shared consumers pass 21 path-state and 27 graph tests; the
+qualification observer passes two tests. Strict Clippy passes for the four touched
+orchestration/read crates with `--no-deps`. The broader invocation fails six
+pre-existing coordination lint expectations unchanged from the PR base. CLI test
+compilation, HTTP/auth-server/SDK checks and both qualification-tool builds pass.
+A strict CLI-wide invocation reports 605 lint errors; JSON diagnostics contain no
+primary error span on modified CLI lines compared with the stacked base. This is
+not a clean CLI-wide lint result. The missing CLI conversion for the new error
+variant was found by wider build and CI proof, then corrected with source-chain
+coverage.
+
+The local RustFS run completes 121 native-Git query processes and three maintenance
+passes. Each fixed resolve/attribution cell contains 20 cold and 20 warm samples;
+the 100-commit fixture additionally checks all ten supported qualification queries.
+Every measured operation finishes with zero active backend operations. Source and
+binary hashes, native oracles, request traces and checked receipts remain external.
+
+| History | Cold resolve bytes | Cold attribution bytes | Resolve p95, ms | Attribution p95, ms | Physical body bytes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 100 | 46,175 | 103,428 | 10.205 | 104.636 | 91,522 |
+| 1,000 | 68,117 | 483,280 | 12.756 | 110.685 | 676,936 |
+| 10,000 | 87,518 | 392,549 | 72.424 | 145.501 | 6,530,830 |
+
+Warm fixed queries read zero backend bytes. At 10k, cold resolution falls from
+844,608 to 87,518 bytes and attribution from 985,949 to 392,549 bytes. The fixed
+queries stay below the frozen 512 KiB decoded / 1 MiB transferred limits. These are
+shared-host debug timings on local RustFS, not representative S3/release latency.
+The traversal change from sixteen to four concurrent path-page reads is included
+in these measured fixed-directory cells; other workloads remain unqualified.
+
+Maintenance takes 2.345 / 5.080 / 22.581 seconds and peaks at 34.5 / 53.7 / 245.6 MiB
+process RSS in these fixtures. The 10k physical body is 7.73 times the old pack-index
+range. That storage amplification remains an optimization gate: dictionary/row
+compaction and batch-request behavior must be measured before calling the design
+fully efficient. Outer control/ref/inventory opening, the complete stage-4 edge
+matrix, old-reader lifecycle, representative provider and source-API release gates
+remain open. Stages 5–8 and the separate unified-staging workstream are not complete.
+
+## Compact physical-directory format
+
+Unreleased physical descriptor version 2 replaces version 1. OID rows contain a
+pack-slot/offset pointer and logical facts. Packed-entry ranges, CRCs and delta
+base facts occur only in physical offset rows. Metadata stores presence flags and
+only fields that are present; known zero sizes and all-zero base IDs retain their
+presence, rather than becoming missing facts. The existing metadata codec validates
+flags and object-kind codes after compact decoding.
+
+| Directory | Key bytes | Value |
+| --- | ---: | --- |
+| OID → placement | 20 | slot (4), offset (8), present logical facts |
+| Physical offset → entry | 12 | OID (20), length (8), CRC (4), present physical metadata |
+| Pack ID → slot | 32 | slot (4), count (8), size (8) |
+| Slot → pack | 4 | pack ID (32), count (8), size (8) |
+
+Slots are canonical in encoded pack-hash order. Both dictionary directions are
+authenticated and joined against the caller's pinned inventory; queries do not
+scan the entire dictionary to translate a pack ID. Slot pages use the shared dense
+positional coverage checks. Full verification reconstructs all four directories
+and compares canonical descriptor and body bytes. Point reads cross-check OID
+pointers with the physical entry's OID; offset reads also verify the primary
+placement and compatible logical facts without moving delta-base facts between
+aliases. All nested reads share one encoded-work budget.
+
+Normal readers reject retired physical descriptors; the elected maintenance
+owner rebuilds them into version 2 before publishing the new hash. No release tag
+contains the version-1 implementation. Readiness remains version 3; graph, path,
+released catalog formats and reference authorization retain their existing rules.
+The reader and row codec now have separate modules to keep construction, I/O and
+wire validation inspectable. Fifteen component tests cover compact-field presence,
+truncation/reserved flags, dictionary disagreement, pack/entry permutations and
+retired-format rejection alongside the original coverage and binding tests. The
+exact forged-pointer negative control fails when OID agreement is removed and
+passes after source restoration. The five runtime, 21 path, 27 graph and shared-body
+GC regressions pass; metadata Clippy and payload/storage feature checks pass.
+
+Compact-format RustFS proof completes 301 native-Git query processes and three
+maintenance passes. Resolve, attribution, object-point, object-batch and blob
+cells each have 20 cold and 20 warm samples at 100/1,000/10,000 commits. Warm queries
+read zero backend bytes. Maintenance recognizes old physical descriptors and
+rebuilds current readiness before these query comparisons. Earlier timing and
+storage receipts above describe the prior format.
+
+| History | Prior body bytes | Compact body bytes | Reduction |
+| --- | ---: | ---: | ---: |
+| 100 | 91,522 | 37,216 | 59.34% |
+| 1,000 | 676,936 | 275,663 | 59.28% |
+| 10,000 | 6,530,830 | 2,658,423 | 59.29% |
+
+The 10k body is now 3.15 times the old 844,460-byte Git index, down from 7.73 times.
+Cold fixed-query traffic is 37,365 / 66,534 / 72,285 bytes for resolve and
+61,880 / 273,003 / 377,318 bytes for attribution. Compact dictionaries introduce
+an extra authenticated join on larger fixtures: resolve uses 5 / 7 / 7 requests;
+attribution uses 61 / 50 / 26. These costs remain part of provider/batch qualification,
+not a claim that every workload improves. Construction, storage and layout changes
+add verification responsibilities for both dictionary directions; they do not add
+new configuration or runtime dependencies.
+
+The correctness run overlapped a local CLI build. An overlapping timing-only attempt
+is explicitly excluded; final timing comes from a later run without those tasks.
+Source/binary hashes, checked summaries, migration results and traces remain
+external. Opening, the full edge/lifecycle matrix, representative S3/release proof
+and subsequent initiative stages remain open.
+
+The separate timing run completes 120 additional native-Git comparisons with 20
+samples per cold/warm cell. Its cold p95 measurements are:
+
+| History | Resolve p95, ms | Attribution p95, ms |
+| --- | ---: | ---: |
+| 100 | 15.634 | 297.608 |
+| 1,000 | 15.245 | 509.871 |
+| 10,000 | 123.526 | 182.518 |
+
+These timings regress against the prior-format local run despite lower transfer
+and storage. In particular, the 1k attribution p95 rises from 110.685 to 509.871 ms.
+The two runs are on a shared host rather than a controlled paired release build;
+the cause is not established. Repeated authenticated dictionary joins and page
+traversal need profiling, followed by controlled provider/release qualification.
+This is an unresolved performance gate; smaller index bytes do not close it.
+
+
+## Remove redundant compact-directory traversal
+
+Offset-delta lookup previously read pack ID → slot, then slot → pack, then the
+same pack ID → slot again. The first forward row is already authenticated and
+checked against captured inventory. Both lookup directions now share one typed
+slot-row reader; offset lookup joins its original forward row directly to that
+reverse row. The reverse pack identity check remains mandatory. OID lookup still
+checks both directions, and all reads retain the same aggregate work admission.
+This changes no stored bytes, descriptor version, public API or configuration.
+
+A stronger re-signed-directory test redirects a pack to another existing valid
+slot with equal size/count. Point and offset lookup reject it. Removing only the
+reverse identity comparison makes offset lookup accept another pack's object;
+the exact one-test negative control fails and restored source passes. All 15
+physical-index tests, five runtime regressions, metadata strict Clippy and both
+qualification-tool builds pass. Temporary probes are removed from source.
+
+Twenty interleaved in-memory samples of 1,000 warm joins compare the actual new
+helper with the redundant third traversal. Median times are 35.700 versus
+40.805 ms (12.5% lower); the optimized path is faster in 14/20 pairs. Its p95 is
+156.667 versus 108.873 ms, so the noisy shared-host experiment does not establish
+an improved latency tail or a completed end-to-end performance gate. Other
+worktree compilers were observed using CPU during diagnosis. Earlier preliminary
+prototype timings are not substituted for this production-helper measurement.
+
+The remaining opening audit identifies a distinct boundary:
+`open_view_from_root_with_metadata` → `assemble_layered_control_view` loads the
+complete checkpoint, then constructs its visibility index to order ref controls.
+`control_is_ready` checks new-branch base membership in that index; the complete
+capsule sibling applies the same rule. Footer-only fetch deliberately has a
+narrower admission contract. Bounded opening therefore needs authenticated
+visibility/catalog lookups and transaction reconciliation, not a silent switch
+to the fetch loader. Existing metadata-view tests cover snapshot equivalence,
+multi-ref activation and missing dependencies; those invariants must remain in
+the next implementation slice. This audit does not close the opening gate.
+
+The dictionary-join binary at `d68a9177915` completes all 121 RustFS native-Git
+query processes: all ten queries at 100 commits and 20 cold/warm resolve and
+attribution samples at 100/1,000/10,000 commits. Warm queries read zero backend
+bytes, and measured operations finish with zero active backend work. Exact source
+and binary hashes, native results and independently checked summaries are external.
+
+| History | Resolve p95, ms | Attribution p95, ms | Maximum attribution decoded bytes |
+| --- | ---: | ---: | ---: |
+| 100 | 18.843 | 398.433 | 51,111 |
+| 1,000 | 30.370 | 163.718 | 232,194 |
+| 10,000 | 32.646 | 871.628 | 345,933 |
+
+The fixed-query byte bounds pass. These noisy shared-host debug timings do not
+close the latency gate. Opening still reads 2,183,801 bytes at 10k and process
+memory/CPU grow with history; correctness proof is not bounded-opening proof.
+
+
+## Indexed opening without redundant placement hints
+
+`git_repository_from_store` previously copied every ordinal admission into an
+intermediate OID vector and built another per-object placement dictionary even
+when a complete physical index was attached. `lookup_batch_for_read` returns from
+that index before consulting any placement hints. Opening now borrows ordinal
+admission directly and retains hint dictionaries only for unindexed reads.
+Source/member range checks, hash parsing and capsule-run admission/count validation
+remain unconditional. Ref reconciliation, visibility proofs, catalog ordinals,
+thin-pack client-base authorization and reconstruction checks are unchanged.
+The refactor removes nine production lines and adds no format/config/API surface.
+
+Two metadata-view equivalence/activation tests, five runtime regressions and the
+unindexed admitted-source lookup test pass. Read-library strict Clippy and both
+qualification-tool builds pass. The final-source RustFS replay passes 61 native-Git
+processes: all ten queries at 100 commits plus 20 cold/warm opening and resolve
+samples at 100/1,000/10,000 commits. Warm resolve queries read zero backend bytes;
+measurements finish with no active backend work. Source/binary receipts and checked
+summaries remain external.
+
+| History | Cold open median / p95, ms | Opening backend bytes | Process median RSS, bytes | Process median CPU, s |
+| --- | --- | ---: | ---: | ---: |
+| 100 | 41.672 / 51.923 | 89,134 | 32,931,840 | 0.070 |
+| 1,000 | 141.332 / 164.715 | 557,942 | 36,544,512 | 0.225 |
+| 10,000 | 675.488 / 747.510 | 2,183,801 | 61,693,952 | 1.050 |
+
+The previous dictionary-join resolve cells used 78,217,216 bytes median RSS and
+1.23 s median process CPU at 10k; this replay uses 61,693,952 bytes and 1.05 s.
+These are shared-host debug observations, not a controlled release/provider
+latency result. Metadata transfer is unchanged. Complete visibility decoding,
+transaction reconciliation and source/ref inventory capture still scale; this
+cleanup does not satisfy bounded opening or finish stage 4.
+
 ## HTTP ref-only discovery
 
 HTTP protocol-v2 `ls-refs` now captures only transaction-consistent ref authority.
@@ -936,3 +1172,40 @@ receipts remain external. Fixtures are plain 20 B, Crab 16 KiB and LFS 8 MiB;
 they do not qualify 10-GiB reads or S3 latency. Subsequent documentation edits
 leave the qualified production source unchanged. PR #540 passes all 13
 non-skipped CI checks and is ready for review; nothing is merged.
+
+
+## Physical paging and selective CLI integration
+
+The indexed reader integration combines the physical paging series at
+`2d7f7e241da` with logical-size metadata, process cleanup, verified LFS delivery
+and captured Xet catalog initialization. The origin-backed locator extractor
+uses the canonical v3 metadata decoder, retaining logical size and zero values
+when building compact physical pages. Existing CRC/OID verification, catalog
+ordinals and ref visibility retain their separate owners.
+
+CLI snapshot opening now loads published browse readiness and attaches it only
+to its matching captured state. Previously this caller never loaded readiness,
+so maintenance could publish physical pages without the selective CLI using
+them. Header/control/readiness waits observe the reader's cancellation token.
+The shared record and index APIs remain canonical; no read-side maintenance or
+index-error fallback is introduced. HTTP projection and qualification already
+use the same captured-view attachment.
+
+Focused integrated checks pass 205 tests: 20 CLI read, 15 physical index, five
+runtime index, 35 capsule reader, 22 path, 27 graph, two publication-fence,
+78 minimal metadata and one GC shared-body regression. New CLI cases exercise
+real index construction/publication, zero/large sizes without unrelated payload
+scanning, physically retained commit rejection, deferred Crab hydration and
+missing required physical pages. Removing index attachment makes the precise
+missing-page test fail; restoring source makes it pass. A featureless publication
+test invocation ran zero tests and is excluded; its publication-enabled replay
+runs both tests. Shared reader, remote-index metadata and runtime strict Clippy
+pass. Default CLI lint retains the parent's diagnostic identities (numeric
+sizes/line references normalized), with no additions.
+
+The original RustFS fixture is unchanged. A fresh task namespace receives its
+objects for integrated maintenance and selective-read qualification. Native
+binary-bound receipts and new-head CI are recorded when complete. Importing an
+existing paging implementation does not close its latency, visibility/control
+opening, release or lifecycle gates. Full visibility still loads during normal
+opening; stages 5–8 and current 10-GiB/provider qualification remain unfinished.

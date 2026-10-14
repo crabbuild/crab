@@ -557,9 +557,9 @@ impl Inner {
             remote.router.repo_prefix().to_owned(),
             remote.router.global_prefix().to_owned(),
         );
-        let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
-        Ok(
-            crab_read::capsule_protocol::open_view_from_root_with_metadata(
+        let capture = async {
+            let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
+            let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(
                 &layout,
                 root,
                 crab_read::capsule_protocol::CapsuleReadLimits {
@@ -567,8 +567,17 @@ impl Inner {
                     max_frontier_bytes: maximum,
                 },
             )
-            .await?,
-        )
+            .await?;
+            let indexes = crab_metadata::capsule_protocol::load_browse_indexes(&layout).await?;
+            // The readiness record is advisory. The captured view rejects a
+            // newer/stale state before graph or physical pages can be attached.
+            Ok(view.with_browse_indexes(indexes))
+        };
+        tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => Err(CrabError::Cancelled),
+            result = capture => result,
+        }
     }
 }
 

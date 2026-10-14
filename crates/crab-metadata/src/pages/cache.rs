@@ -1,7 +1,8 @@
 //! Each cache belongs to one captured immutable layer directory.
 use super::*;
 use crab_storage::Store;
-use std::collections::{BTreeMap, VecDeque};
+use futures_util::{StreamExt, TryStreamExt};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 const CACHE_BYTES: usize = 8 * 1024 * 1024;
@@ -17,7 +18,95 @@ struct State {
     bytes: usize,
 }
 
+pub(crate) struct PageWork {
+    pub(crate) maximum: u64,
+    pub(crate) bytes: u64,
+    pub(crate) seen: BTreeSet<(usize, u64)>,
+}
+
 impl PageCache {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "page lookup binds routing, origin and caller-owned aggregate admission"
+    )]
+    pub(crate) async fn lookup(
+        &self,
+        store: &Store,
+        path: &object_store::path::Path,
+        layer: usize,
+        source_bytes: u64,
+        root: &PageRef,
+        kind: Kind,
+        keys: &[Vec<u8>],
+        work: &mut PageWork,
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        if keys.iter().any(|key| key.len() != kind.key_bytes()) {
+            return Err(corruption("invalid lookup key"));
+        }
+        let mut results = vec![None; keys.len()];
+        if keys.is_empty() {
+            return Ok(results);
+        }
+        let mut pending = vec![(root.clone(), (0..keys.len()).collect::<Vec<_>>())];
+        while !pending.is_empty() {
+            for (reference, _) in &pending {
+                reference.validate(kind, source_bytes)?;
+                if work.seen.insert((layer, reference.offset)) {
+                    work.bytes = work
+                        .bytes
+                        .checked_add(u64::from(reference.bytes))
+                        .ok_or_else(|| corruption("query byte count overflows"))?;
+                    if work.bytes > work.maximum {
+                        return Err(corruption("metadata query exceeds its byte limit"));
+                    }
+                }
+            }
+            // Charge the entire wave before starting I/O, including warm pages.
+            let pages = futures_util::stream::iter(std::mem::take(&mut pending))
+                .map(|(reference, positions)| async move {
+                    let page = self
+                        .fetch(store, path, layer, source_bytes, &reference, kind)
+                        .await?;
+                    Ok::<_, MetadataError>((page, positions))
+                })
+                .buffer_unordered(4)
+                .try_collect::<Vec<_>>()
+                .await?;
+            for (page, positions) in pages {
+                match page.as_ref() {
+                    Page::Leaf(rows) => {
+                        for position in positions {
+                            if let Ok(index) =
+                                rows.binary_search_by(|row| row.0.cmp(&keys[position]))
+                            {
+                                results[position] = Some(rows[index].1.clone());
+                            }
+                        }
+                    }
+                    Page::Branch(children) => {
+                        let mut batches = BTreeMap::<usize, Vec<usize>>::new();
+                        for position in positions {
+                            let index =
+                                children.partition_point(|child| child.last < keys[position]);
+                            if children
+                                .get(index)
+                                .is_some_and(|child| child.first <= keys[position])
+                            {
+                                batches.entry(index).or_default().push(position);
+                            }
+                        }
+                        pending.extend(
+                            batches
+                                .into_iter()
+                                .map(|(index, positions)| (children[index].clone(), positions)),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
     // Guards protect local cache work only, never origin I/O.
     fn state(&self) -> Result<MutexGuard<'_, State>> {
         self.0

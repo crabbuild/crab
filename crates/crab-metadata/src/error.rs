@@ -21,6 +21,11 @@ pub enum MetadataError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("Git object index record encoding is invalid")]
+    GitObjectIndexRecord {
+        #[source]
+        source: serde_json::Error,
+    },
     /// A file lookup could not acquire process-wide execution capacity.
     #[cfg(feature = "file-index-reader")]
     #[error("file lookup admission closed")]

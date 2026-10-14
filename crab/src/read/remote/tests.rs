@@ -21,11 +21,12 @@ impl StorageObserver for ReadBytes {
 }
 
 async fn fixture() -> (RepositoryReader, Arc<ReadBytes>, tempfile::TempDir, String) {
-    fixture_with_content(None).await
+    fixture_with_content(None, false).await
 }
 
 async fn fixture_with_content(
     content: Option<Bytes>,
+    indexed: bool,
 ) -> (RepositoryReader, Arc<ReadBytes>, tempfile::TempDir, String) {
     let directory = tempfile::tempdir().unwrap();
     let observer = Arc::new(ReadBytes::default());
@@ -60,11 +61,18 @@ async fn fixture_with_content(
     } else {
         None
     };
+    if indexed {
+        objects.push((gix_object::Kind::Blob, Vec::new()));
+    }
     let ids = objects
         .iter()
         .map(|(kind, data)| crab_remote::objects::object_id(*kind, data).unwrap())
         .collect::<Vec<_>>();
     let mut tree = Vec::new();
+    if indexed {
+        tree.extend_from_slice(b"100644 empty.bin\0");
+        tree.extend_from_slice(ids.last().unwrap().as_bytes());
+    }
     if catalog.is_some() {
         tree.extend_from_slice(b"100644 file.crab\0");
         tree.extend_from_slice(ids[3].as_bytes());
@@ -201,6 +209,28 @@ async fn fixture_with_content(
             }))
             .is_ok()
     );
+    if indexed {
+        let context = reader.inner.remote().await.unwrap();
+        let bucket = layout.store().bucket_identity();
+        let identity = RepositoryIdentity::new(
+            format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container),
+            layout.repo_prefix(),
+            1,
+        )
+        .unwrap();
+        let ready = crab_remote::browse_indexes::ensure(
+            &layout,
+            &identity,
+            context.git_runtime.clone(),
+            crab_read::upload_pack_repository_options().unwrap(),
+            8 * 1024 * 1024,
+            &reader.inner.cancel,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(ready.object_index_hash().is_some());
+    }
     observer.0.store(0, Ordering::Relaxed);
     (reader, observer, directory, dangling_oid.to_string())
 }
@@ -241,6 +271,95 @@ async fn listing_keeps_regular_files_and_omits_symlinks() {
 }
 
 #[tokio::test]
+async fn indexed_listing_preserves_zero_and_large_logical_sizes_without_payload_scans() {
+    let (reader, bytes, _, _) = fixture_with_content(None, true).await;
+    let snapshot = reader.snapshot(None).await.unwrap();
+    let entries = snapshot.list_entries().await.unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (&*entry.path, entry.size))
+            .collect::<Vec<_>>(),
+        vec![
+            ("empty.bin", 0),
+            ("unrelated.bin", 2 * 1024 * 1024),
+            ("wanted.txt", 13)
+        ]
+    );
+    assert!(bytes.0.load(Ordering::Relaxed) < 256 * 1024);
+    assert!(!reader.cache_dir().join("git").exists());
+    reader.shutdown().await;
+}
+
+#[tokio::test]
+async fn indexed_physical_presence_does_not_authorize_retained_commits() {
+    let (reader, _, _, retained) = fixture_with_content(None, true).await;
+    let view = reader.inner.read_remote_capsule_view().await.unwrap();
+    assert!(view.browse_indexes().unwrap().object_index_hash().is_some());
+    let result = reader.snapshot(Some(&retained)).await;
+    let error = result.err().unwrap();
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    let mut rejected = false;
+    while let Some(source) = cause {
+        rejected |= matches!(
+            source.downcast_ref::<crab_remote_git::Error>(),
+            Some(crab_remote_git::Error::Revision {
+                reason: crab_remote_git::RevisionError::NotReachable
+            })
+        );
+        cause = source.source();
+    }
+    assert!(rejected, "{error:?}");
+    reader.shutdown().await;
+}
+
+#[tokio::test]
+async fn indexed_crab_hydration_keeps_catalog_initialization_lazy() {
+    let content = Bytes::from_static(b"indexed captured Crab content\n");
+    let (reader, _, directory, _) = fixture_with_content(Some(content.clone()), true).await;
+    let snapshot = reader.snapshot(None).await.unwrap();
+    let crate::read::SnapshotSource::Remote(remote) = &snapshot.source else {
+        panic!("expected remote snapshot");
+    };
+    snapshot.list_entries().await.unwrap();
+    assert!(remote.file_index_lookup.get().is_none());
+    let dest = directory.path().join("indexed-crab.txt");
+    snapshot.download_to_path("file.crab", &dest).await.unwrap();
+    assert_eq!(std::fs::read(dest).unwrap(), content);
+    assert!(remote.file_index_lookup.get().is_some());
+    reader.shutdown().await;
+}
+
+#[tokio::test]
+async fn missing_ready_physical_pages_fail_without_unindexed_fallback() {
+    use crab_metadata::git_object_locator::PagedGitObjectIndex;
+    let (reader, _, _, _) = fixture_with_content(None, true).await;
+    let view = reader.inner.read_remote_capsule_view().await.unwrap();
+    let context = reader.inner.remote().await.unwrap();
+    let layout = StoreLayout::with_global_prefix(
+        context.caching_store.origin().clone(),
+        context.router.repo_prefix().to_owned(),
+        context.router.global_prefix().to_owned(),
+    );
+    let snapshot = view.git_snapshot().unwrap();
+    let hash = view.browse_indexes().unwrap().object_index_hash().unwrap();
+    let index = PagedGitObjectIndex::load(
+        layout.store(),
+        &layout,
+        hash,
+        &snapshot.manifest_etag,
+        &snapshot.manifest,
+        8 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
+    layout.store().delete(index.body_path()).await.unwrap();
+    let result = reader.snapshot(None).await;
+    assert!(result.is_err());
+    reader.shutdown().await;
+}
+
+#[tokio::test]
 async fn retained_commit_is_not_selected_by_physical_presence() {
     let (reader, _, _, retained) = fixture().await;
     let result = reader.snapshot(Some(&retained)).await;
@@ -277,7 +396,7 @@ async fn cancellation_stops_selected_reads_before_storage() {
 #[tokio::test]
 async fn git_selection_keeps_xet_catalog_cold_until_hydration() {
     let content = Bytes::from_static(b"captured Crab content\n");
-    let (reader, _, directory, _) = fixture_with_content(Some(content.clone())).await;
+    let (reader, _, directory, _) = fixture_with_content(Some(content.clone()), false).await;
     let snapshot = reader.snapshot(None).await.unwrap();
     let crate::read::SnapshotSource::Remote(remote) = &snapshot.source else {
         panic!("expected remote snapshot");
@@ -313,7 +432,7 @@ async fn git_selection_keeps_xet_catalog_cold_until_hydration() {
 async fn first_hydration_uses_catalog_captured_before_publication() {
     use crab_metadata::capsule_protocol::{FileCatalogEntry, PointerCatalog, ShardCatalogEntry};
     let content = Bytes::from_static(b"captured before later catalog binding\n");
-    let (reader, _, directory, _) = fixture_with_content(Some(content.clone())).await;
+    let (reader, _, directory, _) = fixture_with_content(Some(content.clone()), false).await;
     let snapshot = reader.snapshot(None).await.unwrap();
     let crate::read::SnapshotSource::Remote(remote) = &snapshot.source else {
         panic!("expected remote snapshot");

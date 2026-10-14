@@ -36,6 +36,12 @@ identity, integrity and admission checks; a journal ref change discards stale
 base indexes even when its generation is unchanged. Snapshots without indexes
 make no additional index requests. Publication of capsule-bound browse indexes
 is a separate maintenance responsibility, not part of opening or pushing.
+Captured physical indexes resolve both OIDs and offset-delta bases through
+authenticated pages. Snapshot opening checks their state, origin and prefixes;
+queries retain storage admission, encoded-work limits and cancellation. Complete
+index misses are definitive. Physical placement never assigns catalog ordinals
+or authorizes ref visibility; ordinary unindexed snapshots retain their existing
+pack-index inspection path until background readiness is published.
 Capsule graphs retain an immutable paged reader and captured commit roots;
 membership reads exact ancestor sets rather than allocating a full reachability
 bitmap. A full commit ID matching a verified captured root reuses that visibility

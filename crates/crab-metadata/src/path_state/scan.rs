@@ -1,4 +1,5 @@
 use super::*;
+use futures_util::StreamExt;
 
 /// One verified record, node or edge emitted in dependency order.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,9 +1,11 @@
 //! Generation-bound Git object catalog for object-store range reads.
 
 mod format;
+mod paged;
 mod reader;
 mod writer;
 
+pub use paged::{PagedGitObjectIndex, PagedGitObjectIndexWrite};
 pub use reader::{GitObjectLocatorSession, GitObjectLookup};
 pub use writer::{GitObjectLocatorWriter, LocatorSweepStats, LocatorWriteStats};
 

@@ -629,6 +629,83 @@ impl CapsuleRepositoryView {
         self
     }
 
+    /// Construct complete physical lookup pages from the captured source inventory.
+    ///
+    /// The caller holds generation/GC ownership and validates full readback before readiness.
+    pub async fn build_object_index(
+        &self,
+        layout: &StoreLayout<Store>,
+        max_bytes: u64,
+        cancel: &CancellationToken,
+    ) -> Result<crab_metadata::git_object_locator::PagedGitObjectIndexWrite> {
+        let sources = self
+            .layered_checkpoint()
+            .into_iter()
+            .flat_map(|checkpoint| checkpoint.sources())
+            .chain(self.capsule_run_sources.iter());
+        let mut seen = BTreeMap::new();
+        let mut members = Vec::new();
+        let mut inventory = Vec::new();
+        for source in sources {
+            let source_path = match source.kind() {
+                PackSourceKind::CapsuleRun => layout.capsule_path(source.object_hash()),
+                PackSourceKind::PackLayer => layout.capsule_pack_layer_path(source.object_hash()),
+            };
+            for member in source.members() {
+                let pack_id = crab_xet::hash::MerkleHash::from_hex(member.pack().blake3())
+                    .map_err(|error| corrupt_path("capsule Git pack", error.to_string()))?;
+                if let Some(previous) = seen.insert(pack_id, member.clone()) {
+                    if !previous.has_same_content(member) {
+                        return Err(corrupt_path(
+                            "capsule Git pack",
+                            "sources disagree about one pack identity",
+                        ));
+                    }
+                    continue;
+                }
+                inventory.push(crab_metadata::git_object_locator::GitPackInventoryEntry {
+                    pack_id,
+                    object_count: member.object_count(),
+                    pack_size: member.pack().length(),
+                });
+                members.push(LayeredMemberRead {
+                    source_path: source_path.clone(),
+                    source_size: source.object_size(),
+                    source_bytes: None,
+                    pack_id,
+                    member: member.clone(),
+                });
+            }
+        }
+        let entries = physical_locators_for_members(&members, layout, max_bytes, cancel).await?;
+        let snapshot = self.git_snapshot()?;
+        let worker_cancel = cancel.clone();
+        let write = tokio::task::spawn_blocking(move || {
+            if worker_cancel.is_cancelled() {
+                return Err(ReadError::Cancelled);
+            }
+            crab_metadata::git_object_locator::PagedGitObjectIndexWrite::build(
+                &snapshot.manifest_etag,
+                &snapshot.manifest,
+                &inventory,
+                &entries,
+            )
+            .map_err(Into::into)
+        })
+        .await
+        .map_err(|error| ReadError::Io(std::io::Error::other(error)))??;
+        if cancel.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
+        if max_bytes > 0 && write.body_bytes() > max_bytes {
+            return Err(ReadError::CapsuleReadLimit {
+                resource: "physical Git index output",
+                maximum: max_bytes,
+            });
+        }
+        Ok(write)
+    }
+
     /// Capture the exact Git state for derived indexes without reading or writing v1 metadata.
     ///
     /// The synthetic ETag binds visible per-ref positions, not only the root.
@@ -853,6 +930,22 @@ impl CapsuleRepositoryView {
         if cancellation.is_cancelled() {
             return Err(ReadError::Cancelled);
         }
+        let snapshot = self.git_snapshot()?;
+        let object_index = match self
+            .browse_indexes
+            .as_ref()
+            .and_then(|indexes| indexes.object_index_hash())
+        {
+            Some(hash) => Some(tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(ReadError::Cancelled),
+                result = crab_metadata::git_object_locator::PagedGitObjectIndex::load(
+                    layout.store(), &layout, hash, &snapshot.manifest_etag, &snapshot.manifest,
+                    options.object_limits().max_pack_index_bytes,
+                ) => result?,
+            }),
+            None => None,
+        };
         let checkpoint = self.layered_checkpoint();
         if checkpoint.is_none() && max_input_bytes > 0 && self.git_pack_bytes()? > max_input_bytes {
             return Err(ReadError::CapsuleReadLimit {
@@ -883,30 +976,16 @@ impl CapsuleRepositoryView {
         // The footer still authenticates source descriptors and frontier
         // admission, while the complete ordinal join is only available to
         // maintenance/strict readers that loaded the full checkpoint.
-        let preferred_object_admission = if let Some(checkpoint) = checkpoint
+        // A ready physical index resolves every placement before hint paths run.
+        // Keep validating source/member admission, but avoid a second OID dictionary.
+        let mut preferred_object_admission_by_oid =
+            object_index.is_none().then(std::collections::HashMap::new);
+        if let Some(checkpoint) = checkpoint
             && !checkpoint.is_control_only()
+            && let Some(snapshot) = checkpoint.visibility_ordinal_snapshot()?
+            && let Some(admission) = snapshot.member_admission()
         {
-            checkpoint
-                .visibility_ordinal_snapshot()?
-                .and_then(|snapshot| {
-                    snapshot.member_admission().map(|admission| {
-                        snapshot
-                            .objects()
-                            .iter()
-                            .zip(admission)
-                            .map(|(oid, member)| (*oid, *member))
-                            .collect::<Vec<_>>()
-                    })
-                })
-        } else {
-            None
-        };
-        let mut preferred_object_admission_by_oid: std::collections::HashMap<
-            [u8; 20],
-            Vec<crab_xet::hash::MerkleHash>,
-        > = std::collections::HashMap::new();
-        if let Some(admission) = preferred_object_admission.as_ref() {
-            for (oid, member) in admission {
+            for (oid, member) in snapshot.objects().iter().zip(admission) {
                 let source = sources
                     .get(usize::from(member.source_index()))
                     .ok_or_else(|| {
@@ -920,19 +999,20 @@ impl CapsuleRepositoryView {
                     })?;
                 let pack_id = crab_xet::hash::MerkleHash::from_hex(pack.pack().blake3())
                     .map_err(|error| corrupt_path("layered visibility", error.to_string()))?;
-                preferred_object_admission_by_oid
-                    .entry(*oid)
-                    .or_default()
-                    .push(pack_id);
+                if let Some(admission) = preferred_object_admission_by_oid.as_mut() {
+                    admission.entry(*oid).or_insert_with(Vec::new).push(pack_id);
+                }
             }
         }
         for (oid, pack_ids) in self.frontier_object_admission() {
-            let entry = preferred_object_admission_by_oid.entry(*oid).or_default();
             for pack_id in pack_ids {
                 let pack_id = crab_xet::hash::MerkleHash::from_hex(pack_id)
                     .map_err(|error| corrupt_path("frontier admission", error.to_string()))?;
-                if !entry.contains(&pack_id) {
-                    entry.push(pack_id);
+                if let Some(admission) = preferred_object_admission_by_oid.as_mut() {
+                    let entry = admission.entry(*oid).or_insert_with(Vec::new);
+                    if !entry.contains(&pack_id) {
+                        entry.push(pack_id);
+                    }
                 }
             }
         }
@@ -942,15 +1022,18 @@ impl CapsuleRepositoryView {
         for (pack_id, object_ids) in capsule_run_member_oids_by_pack(self)? {
             let pack_id = crab_xet::hash::MerkleHash::from_hex(&pack_id)
                 .map_err(|error| corrupt_path("capsule run admission", error.to_string()))?;
-            for oid in object_ids {
-                let entry = preferred_object_admission_by_oid.entry(oid).or_default();
-                if !entry.contains(&pack_id) {
-                    entry.push(pack_id);
+            if let Some(admission) = preferred_object_admission_by_oid.as_mut() {
+                for oid in object_ids {
+                    let entry = admission.entry(oid).or_insert_with(Vec::new);
+                    if !entry.contains(&pack_id) {
+                        entry.push(pack_id);
+                    }
                 }
             }
         }
         let admitted_pack_ids = preferred_object_admission_by_oid
-            .values()
+            .iter()
+            .flat_map(|admission| admission.values())
             .flat_map(|pack_ids| pack_ids.iter().map(ToString::to_string))
             .collect::<BTreeSet<_>>();
         let frontier_pack_ids = self
@@ -1006,70 +1089,14 @@ impl CapsuleRepositoryView {
                 all_members.push(member_read);
             }
         }
-        if checkpoint.is_some_and(|value| !value.is_control_only()) && !all_members.is_empty() {
-            // A complete layered checkpoint authenticates a kind-bearing
-            // locator range for every member. Load those compact sidecars as
-            // one coalesced window per source so filtered planning can use
-            // OID/kind locators instead of issuing one object read per OID.
-            let payload_members = all_members
-                .iter()
-                .cloned()
-                .map(|member| LayeredPayloadMemberRead {
-                    member,
-                    complete_local: false,
-                })
-                .collect::<Vec<_>>();
-            let selected_members = (0..payload_members.len()).collect::<BTreeSet<_>>();
-            let windows = plan_layered_payload_windows_for_members(
-                &payload_members,
-                &selected_members,
-                LayeredPayloadWindowMode::Sidecars,
-            )?;
-            let window_bytes = windows.iter().try_fold(0_u64, |total, window| {
-                total
-                    .checked_add(window.range.end.saturating_sub(window.range.start))
-                    .ok_or_else(|| corrupt_path("capsule Git locator", "sidecar bytes overflowed"))
-            })?;
-            if max_input_bytes > 0 && window_bytes > max_input_bytes {
-                return Err(ReadError::CapsuleReadLimit {
-                    resource: "layered Git locator sidecars",
-                    maximum: max_input_bytes,
-                });
-            }
-            let (fetched_windows, _) =
-                fetch_layered_payload_windows(layout.store(), &windows).await?;
-            for (member_index, member_read) in all_members.iter().enumerate() {
-                let window_index = payload_window_for_member(&windows, member_index)?;
-                let body = fetched_windows
-                    .get(&window_index)
-                    .ok_or_else(|| corrupt_path("capsule Git locator", "sidecar window missing"))?;
-                let window = windows
-                    .get(window_index)
-                    .ok_or_else(|| corrupt_path("capsule Git locator", "sidecar window missing"))?;
-                let index =
-                    layered_range_bytes(body, window.range.start, member_read.member.index())?;
-                let reverse_index = layered_range_bytes(
-                    body,
-                    window.range.start,
-                    member_read.member.reverse_index(),
-                )?;
-                let locator =
-                    layered_range_bytes(body, window.range.start, member_read.member.locator())?;
-                let pack_id = member_read.pack_id;
-                let index_path = workspace.path().join(format!("{pack_id}-layered.idx"));
-                let reverse_path = workspace.path().join(format!("{pack_id}-layered.rev"));
-                std::fs::write(&index_path, &index)?;
-                std::fs::write(&reverse_path, &reverse_index)?;
-                inline_locators.extend(inline_locators_for_pack(
-                    member_read.member.object_count(),
-                    member_read.member.git_checksum(),
-                    pack_id,
-                    &index_path,
-                    &reverse_path,
-                    &locator,
-                    member_read.member.pack().length(),
-                )?);
-            }
+        if object_index.is_none()
+            && checkpoint.is_some_and(|value| !value.is_control_only())
+            && !all_members.is_empty()
+        {
+            inline_locators.extend(
+                physical_locators_for_members(&all_members, &layout, max_input_bytes, cancellation)
+                    .await?,
+            );
         }
         // Complete bounded frontiers reuse authenticated resident bytes;
         // checkpoint and larger-frontier sources stay lazy. Captured runs may
@@ -1198,14 +1225,17 @@ impl CapsuleRepositoryView {
                 );
             }
         }
-        let snapshot = self.git_snapshot()?;
         let mut lookup_sources = crab_remote_git::SnapshotLookupSources::default()
             .with_inline_locators(inline_locators)
             .with_pack_sources(pack_sources)
             .with_preferred_pack_indexes(preferred_pack_indexes);
-        if !preferred_object_admission_by_oid.is_empty() {
-            lookup_sources =
-                lookup_sources.with_preferred_object_admission(preferred_object_admission_by_oid);
+        if let Some(index) = object_index {
+            lookup_sources = lookup_sources.with_object_index(index);
+        }
+        if let Some(admission) = preferred_object_admission_by_oid
+            && !admission.is_empty()
+        {
+            lookup_sources = lookup_sources.with_preferred_object_admission(admission);
         }
         crab_remote_git::RemoteGitRepository::from_snapshot_with_lookup_sources(
             layout,
@@ -3743,6 +3773,91 @@ fn layered_range_bytes(
     // copying every pack and sidecar range into a second allocation. The
     // installer still writes immutable files and validates every sidecar.
     Ok(body.slice(start_usize..end_usize))
+}
+
+async fn physical_locators_for_members(
+    members: &[LayeredMemberRead],
+    layout: &StoreLayout<Store>,
+    max_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<
+    Vec<(
+        [u8; 20],
+        crab_metadata::git_object_locator::GitObjectLocator,
+    )>,
+> {
+    let payload_members = members
+        .iter()
+        .cloned()
+        .map(|member| LayeredPayloadMemberRead {
+            member,
+            complete_local: false,
+        })
+        .collect::<Vec<_>>();
+    let selected = (0..members.len()).collect::<BTreeSet<_>>();
+    let windows = plan_layered_payload_windows_for_members(
+        &payload_members,
+        &selected,
+        LayeredPayloadWindowMode::Sidecars,
+    )?;
+    let bytes = windows.iter().try_fold(0_u64, |total, window| {
+        total
+            .checked_add(window.range.end - window.range.start)
+            .ok_or_else(|| corrupt_path("capsule Git locator", "sidecar bytes overflowed"))
+    })?;
+    if max_bytes > 0 && bytes > max_bytes {
+        return Err(ReadError::CapsuleReadLimit {
+            resource: "layered Git locator sidecars",
+            maximum: max_bytes,
+        });
+    }
+    let (fetched, _) = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(ReadError::Cancelled),
+        result = fetch_layered_payload_windows(layout.store(), &windows) => result?,
+    };
+    let members = members.to_vec();
+    let cancel = cancel.clone();
+    // The worker owns its fetched bytes and scratch files through parsing.
+    // Cancellation cannot release caller scratch paths while gix still maps them.
+    tokio::task::spawn_blocking(move || {
+        let workspace = tempfile::tempdir()?;
+        let mut entries = Vec::new();
+        for (position, member) in members.iter().enumerate() {
+            if cancel.is_cancelled() {
+                return Err(ReadError::Cancelled);
+            }
+            let window_index = payload_window_for_member(&windows, position)?;
+            let window = &windows[window_index];
+            let body = fetched
+                .get(&window_index)
+                .ok_or_else(|| corrupt_path("capsule Git locator", "sidecar window missing"))?;
+            let index = layered_range_bytes(body, window.range.start, member.member.index())?;
+            let reverse =
+                layered_range_bytes(body, window.range.start, member.member.reverse_index())?;
+            let locator = layered_range_bytes(body, window.range.start, member.member.locator())?;
+            let index_path = workspace
+                .path()
+                .join(format!("{}-layered.idx", member.pack_id));
+            let reverse_path = workspace
+                .path()
+                .join(format!("{}-layered.rev", member.pack_id));
+            std::fs::write(&index_path, &index)?;
+            std::fs::write(&reverse_path, &reverse)?;
+            entries.extend(inline_locators_for_pack(
+                member.member.object_count(),
+                member.member.git_checksum(),
+                member.pack_id,
+                &index_path,
+                &reverse_path,
+                &locator,
+                member.member.pack().length(),
+            )?);
+        }
+        Ok(entries)
+    })
+    .await
+    .map_err(|error| ReadError::Io(std::io::Error::other(error)))?
 }
 
 fn inline_locators_for_pack(

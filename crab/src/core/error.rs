@@ -2046,6 +2046,7 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             | crab_metadata::error::MetadataError::CapsuleContract { .. }
             | crab_metadata::error::MetadataError::PathStateSize { .. }
             | crab_metadata::error::MetadataError::BrowseIndexRecord { .. }
+            | crab_metadata::error::MetadataError::GitObjectIndexRecord { .. }
             | crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. }
             | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }
             | crab_metadata::error::MetadataError::ManifestCommitUncertain { .. }) => {
@@ -4016,6 +4017,19 @@ mod tests {
             .expect("CLI conversion must preserve the task failure");
 
         assert!(source.is_panic());
+    }
+
+    #[test]
+    fn physical_index_json_source_survives_cli_conversion() {
+        use std::error::Error;
+
+        let source = serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err();
+        let error =
+            CrabError::from(crab_metadata::error::MetadataError::GitObjectIndexRecord { source });
+        assert!(
+            std::iter::successors(error.source(), |source| (*source).source())
+                .any(|source| source.downcast_ref::<serde_json::Error>().is_some())
+        );
     }
 
     #[test]
