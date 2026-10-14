@@ -245,8 +245,10 @@ fn positions(
                 if value.len() > 1 && value.len() <= BLOCK_BYTES + 1 && value.len() % 2 == 1 =>
             {
                 value[1..]
-                    .chunks_exact(2)
-                    .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|bytes| u16::from_be_bytes(*bytes))
                     .collect()
             }
             Some(1) if value.len() == BLOCK_BYTES + 1 => value[1..]
