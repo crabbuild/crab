@@ -246,8 +246,8 @@ async fn descriptors_cannot_cross_captured_git_states() {
     );
 }
 
-#[test]
-fn object_aliases_prefer_full_encodings_and_keep_every_physical_offset() {
+#[tokio::test]
+async fn object_aliases_prefer_full_encodings_and_keep_every_physical_offset() {
     let (mut manifest, mut inventory, mut entries) = inputs(1);
     entries[0].1.metadata.delta_base_oid = Some(oid(0));
     let mut full = entries[0].1;
@@ -274,17 +274,32 @@ fn object_aliases_prefer_full_encodings_and_keep_every_physical_offset() {
     manifest.pack_index_hash = crate::manifests::compact_pack_index(1, &packs).unwrap().0;
     let write =
         PagedGitObjectIndexWrite::build(&"c".repeat(64), &manifest, &inventory, &entries).unwrap();
-    let mut audit = BTreeMap::new();
-    let rows = crate::pages::scan(
-        &write.body,
-        &write.descriptor.objects,
-        Kind::ObjectLocators,
-        "test index",
-        &mut audit,
+    let store = Store::new(Arc::new(InMemory::new()));
+    let layout = StoreLayout::new(store.clone(), "alias-index".to_owned());
+    let hash = write.upload(&store, &layout).await.unwrap();
+    let reader = PagedGitObjectIndex::load(
+        &store,
+        &layout,
+        &hash,
+        &"c".repeat(64),
+        &manifest,
+        128 * 1024,
     )
+    .await
     .unwrap();
-    let selected = decode_locator(&rows[0].1).unwrap();
-    assert_eq!((selected, write.descriptor.offsets.count), (full, 2));
+    let inventory = inventory
+        .into_iter()
+        .map(|pack| (pack.pack_id, pack))
+        .collect();
+    let selected = reader.lookup(&store, &[oid(0)], &inventory).await.unwrap();
+    reader
+        .verify_complete(&store, &manifest, 128 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        (selected, write.descriptor.offsets.count),
+        (vec![Some(full)], 2)
+    );
 }
 
 proptest::proptest! {
@@ -330,15 +345,26 @@ async fn resigned_oid_locations_must_agree_with_the_physical_offset_directory() 
         &mut audit,
     )
     .unwrap();
+    let slots = crate::pages::scan(
+        &write.body,
+        &write.descriptor.slots,
+        Kind::PackSlots,
+        "test index",
+        &mut audit,
+    )
+    .unwrap();
+    let pointer = decode_pointer(&objects[0].1).unwrap();
     let mut forged = entries[0].1;
     forged.location.pack_offset = entries[1].1.location.pack_offset;
-    objects[0].1 = encode_locator(forged);
-    let (body, objects, offsets, packs) = encode_trees(objects, offsets, packs).unwrap();
+    objects[0].1 = encode_pointer(pointer.slot, forged);
+    let (body, [objects, offsets, packs, slots]) =
+        encode_trees(objects, offsets, packs, slots).unwrap();
     write.descriptor.body_hash = blake3::hash(&body).to_hex().to_string();
     write.descriptor.body_bytes = body.len() as u64;
     write.descriptor.objects = objects;
     write.descriptor.offsets = offsets;
     write.descriptor.packs = packs;
+    write.descriptor.slots = slots;
     write.body = body.into();
     let store = Store::new(Arc::new(InMemory::new()));
     let layout = StoreLayout::new(store.clone(), "forged-object-index".into());
@@ -422,4 +448,156 @@ async fn physical_index_attachment_binds_origin_prefixes_and_captured_state() {
         ],
         [true, false, false, false, false]
     );
+}
+
+#[test]
+fn pack_slots_are_canonical_under_inventory_and_entry_permutations() {
+    let (mut manifest, _, one) = inputs(1);
+    let mut inventory = Vec::new();
+    let mut entries = Vec::new();
+    for (index, bytes) in [[3; 32], [0xff; 32], [0x55; 32]].into_iter().enumerate() {
+        let pack_id = MerkleHash::from(bytes);
+        inventory.push(GitPackInventoryEntry {
+            pack_id,
+            object_count: 1,
+            pack_size: 42,
+        });
+        let mut locator = one[0].1;
+        locator.pack_id = pack_id;
+        locator.metadata.logical_size = Some(index as u64);
+        entries.push((oid(index as u32), locator));
+    }
+    let mut packs = inventory
+        .iter()
+        .map(|pack| crate::manifests::PackManifestEntry {
+            pack_id: pack.pack_id.to_string(),
+            size: pack.pack_size,
+            content_hash: pack.pack_id.to_string(),
+            ref_tips: Vec::new(),
+            object_count: pack.object_count,
+        })
+        .collect::<Vec<_>>();
+    packs.sort_unstable_by(|a, b| a.pack_id.cmp(&b.pack_id));
+    manifest.pack_index_hash = crate::manifests::compact_pack_index(1, &packs).unwrap().0;
+    let first =
+        PagedGitObjectIndexWrite::build(&"c".repeat(64), &manifest, &inventory, &entries).unwrap();
+    inventory.reverse();
+    entries.rotate_left(1);
+    let second =
+        PagedGitObjectIndexWrite::build(&"c".repeat(64), &manifest, &inventory, &entries).unwrap();
+    assert_eq!(
+        (first.descriptor, first.body),
+        (second.descriptor, second.body)
+    );
+}
+
+#[tokio::test]
+async fn resigned_pack_directories_must_agree_before_point_lookup() {
+    let (manifest, inventory, entries) = inputs(10);
+    let mut write =
+        PagedGitObjectIndexWrite::build(&"c".repeat(64), &manifest, &inventory, &entries).unwrap();
+    let mut audit = BTreeMap::new();
+    let objects = crate::pages::scan(
+        &write.body,
+        &write.descriptor.objects,
+        Kind::ObjectLocators,
+        "test",
+        &mut audit,
+    )
+    .unwrap();
+    let offsets = crate::pages::scan(
+        &write.body,
+        &write.descriptor.offsets,
+        Kind::PackOffsets,
+        "test",
+        &mut audit,
+    )
+    .unwrap();
+    let mut packs = crate::pages::scan(
+        &write.body,
+        &write.descriptor.packs,
+        Kind::PackInventory,
+        "test",
+        &mut audit,
+    )
+    .unwrap();
+    let slots = crate::pages::scan(
+        &write.body,
+        &write.descriptor.slots,
+        Kind::PackSlots,
+        "test",
+        &mut audit,
+    )
+    .unwrap();
+    packs[0].1 = encode_binding(1, inventory[0]);
+    let (body, [objects, offsets, packs, slots]) =
+        encode_trees(objects, offsets, packs, slots).unwrap();
+    write.descriptor.body_hash = blake3::hash(&body).to_hex().to_string();
+    write.descriptor.body_bytes = body.len() as u64;
+    write.descriptor.objects = objects;
+    write.descriptor.offsets = offsets;
+    write.descriptor.packs = packs;
+    write.descriptor.slots = slots;
+    write.body = body.into();
+    let store = Store::new(Arc::new(InMemory::new()));
+    let layout = StoreLayout::new(store.clone(), "forged-pack-slot".to_owned());
+    let hash = write.upload(&store, &layout).await.unwrap();
+    let reader = PagedGitObjectIndex::load(
+        &store,
+        &layout,
+        &hash,
+        &"c".repeat(64),
+        &manifest,
+        128 * 1024,
+    )
+    .await
+    .unwrap();
+    let inventory = inventory
+        .into_iter()
+        .map(|pack| (pack.pack_id, pack))
+        .collect();
+    assert_eq!(
+        (
+            reader.lookup(&store, &[oid(0)], &inventory).await.is_err(),
+            reader
+                .verify_complete(&store, &manifest, 128 * 1024)
+                .await
+                .is_err()
+        ),
+        (true, true)
+    );
+}
+
+#[tokio::test]
+async fn retired_physical_descriptor_shape_is_rejected_before_body_lookup() {
+    let (manifest, inventory, entries) = inputs(1);
+    let write =
+        PagedGitObjectIndexWrite::build(&"c".repeat(64), &manifest, &inventory, &entries).unwrap();
+    let mut descriptor = serde_json::to_value(&write.descriptor).unwrap();
+    descriptor["version"] = serde_json::json!(1);
+    descriptor.as_object_mut().unwrap().remove("slots");
+    let bytes = serde_json::to_vec(&descriptor).unwrap();
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let store = Store::new(Arc::new(InMemory::new()));
+    let layout = StoreLayout::new(store.clone(), "retired-physical-index".to_owned());
+    store
+        .put(
+            &layout.bulk_manifest_path("git-object-index", &hash),
+            Bytes::from(bytes),
+        )
+        .await
+        .unwrap();
+    // No body is stored: retirement must be recognized from the authenticated descriptor.
+    assert!(matches!(
+        PagedGitObjectIndex::load(
+            &store,
+            &layout,
+            &hash,
+            &"c".repeat(64),
+            &manifest,
+            128 * 1024
+        )
+        .await,
+        Err(crate::error::MetadataError::GitObjectIndexRecord { .. })
+    ));
 }

@@ -599,3 +599,84 @@ compaction and batch-request behavior must be measured before calling the design
 fully efficient. Outer control/ref/inventory opening, the complete stage-4 edge
 matrix, old-reader lifecycle, representative provider and source-API release gates
 remain open. Stages 5–8 and the separate unified-staging workstream are not complete.
+
+## Compact physical-directory format
+
+Unreleased physical descriptor version 2 replaces version 1. OID rows contain a
+pack-slot/offset pointer and logical facts. Packed-entry ranges, CRCs and delta
+base facts occur only in physical offset rows. Metadata stores presence flags and
+only fields that are present; known zero sizes and all-zero base IDs retain their
+presence, rather than becoming missing facts. The existing metadata codec validates
+flags and object-kind codes after compact decoding.
+
+| Directory | Key bytes | Value |
+| --- | ---: | --- |
+| OID → placement | 20 | slot (4), offset (8), present logical facts |
+| Physical offset → entry | 12 | OID (20), length (8), CRC (4), present physical metadata |
+| Pack ID → slot | 32 | slot (4), count (8), size (8) |
+| Slot → pack | 4 | pack ID (32), count (8), size (8) |
+
+Slots are canonical in encoded pack-hash order. Both dictionary directions are
+authenticated and joined against the caller's pinned inventory; queries do not
+scan the entire dictionary to translate a pack ID. Slot pages use the shared dense
+positional coverage checks. Full verification reconstructs all four directories
+and compares canonical descriptor and body bytes. Point reads cross-check OID
+pointers with the physical entry's OID; offset reads also verify the primary
+placement and compatible logical facts without moving delta-base facts between
+aliases. All nested reads share one encoded-work budget.
+
+Normal readers reject retired physical descriptors; the elected maintenance
+owner rebuilds them into version 2 before publishing the new hash. No release tag
+contains the version-1 implementation. Readiness remains version 3; graph, path,
+released catalog formats and reference authorization retain their existing rules.
+The reader and row codec now have separate modules to keep construction, I/O and
+wire validation inspectable. Fifteen component tests cover compact-field presence,
+truncation/reserved flags, dictionary disagreement, pack/entry permutations and
+retired-format rejection alongside the original coverage and binding tests. The
+exact forged-pointer negative control fails when OID agreement is removed and
+passes after source restoration. The five runtime, 21 path, 27 graph and shared-body
+GC regressions pass; metadata Clippy and payload/storage feature checks pass.
+
+Compact-format RustFS proof completes 301 native-Git query processes and three
+maintenance passes. Resolve, attribution, object-point, object-batch and blob
+cells each have 20 cold and 20 warm samples at 100/1,000/10,000 commits. Warm queries
+read zero backend bytes. Maintenance recognizes old physical descriptors and
+rebuilds current readiness before these query comparisons. Earlier timing and
+storage receipts above describe the prior format.
+
+| History | Prior body bytes | Compact body bytes | Reduction |
+| --- | ---: | ---: | ---: |
+| 100 | 91,522 | 37,216 | 59.34% |
+| 1,000 | 676,936 | 275,663 | 59.28% |
+| 10,000 | 6,530,830 | 2,658,423 | 59.29% |
+
+The 10k body is now 3.15 times the old 844,460-byte Git index, down from 7.73 times.
+Cold fixed-query traffic is 37,365 / 66,534 / 72,285 bytes for resolve and
+61,880 / 273,003 / 377,318 bytes for attribution. Compact dictionaries introduce
+an extra authenticated join on larger fixtures: resolve uses 5 / 7 / 7 requests;
+attribution uses 61 / 50 / 26. These costs remain part of provider/batch qualification,
+not a claim that every workload improves. Construction, storage and layout changes
+add verification responsibilities for both dictionary directions; they do not add
+new configuration or runtime dependencies.
+
+The correctness run overlapped a local CLI build. An overlapping timing-only attempt
+is explicitly excluded; final timing comes from a later run without those tasks.
+Source/binary hashes, checked summaries, migration results and traces remain
+external. Opening, the full edge/lifecycle matrix, representative S3/release proof
+and subsequent initiative stages remain open.
+
+The separate timing run completes 120 additional native-Git comparisons with 20
+samples per cold/warm cell. Its cold p95 measurements are:
+
+| History | Resolve p95, ms | Attribution p95, ms |
+| --- | ---: | ---: |
+| 100 | 15.634 | 297.608 |
+| 1,000 | 15.245 | 509.871 |
+| 10,000 | 123.526 | 182.518 |
+
+These timings regress against the prior-format local run despite lower transfer
+and storage. In particular, the 1k attribution p95 rises from 110.685 to 509.871 ms.
+The two runs are on a shared host rather than a controlled paired release build;
+the cause is not established. Repeated authenticated dictionary joins and page
+traversal need profiling, followed by controlled provider/release qualification.
+This is an unresolved performance gate; smaller index bytes do not close it.

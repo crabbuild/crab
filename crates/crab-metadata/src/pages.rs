@@ -55,9 +55,20 @@ pub(crate) enum Kind {
     PackOffsets,
     #[cfg(feature = "remote-index")]
     PackInventory,
+    #[cfg(feature = "remote-index")]
+    PackSlots,
 }
 
 impl Kind {
+    fn is_positional(self) -> bool {
+        match self {
+            Self::Records | Self::Nodes | Self::CommitRecords | Self::CommitAncestryRoots => true,
+            #[cfg(feature = "remote-index")]
+            Self::PackSlots => true,
+            _ => false,
+        }
+    }
+
     pub(crate) fn key_bytes(self) -> usize {
         match self {
             Self::Names | Self::CommitAncestryNodes => 32,
@@ -67,7 +78,7 @@ impl Kind {
             #[cfg(feature = "remote-index")]
             Self::ObjectLocators => 20,
             #[cfg(feature = "remote-index")]
-            Self::PackOffsets => 40,
+            Self::PackOffsets => 12,
             _ => 4,
         }
     }
@@ -97,10 +108,7 @@ impl PageRef {
         {
             return Err(corruption("invalid metadata page reference"));
         }
-        if matches!(
-            kind,
-            Kind::Records | Kind::Nodes | Kind::CommitRecords | Kind::CommitAncestryRoots
-        ) {
+        if kind.is_positional() {
             let first = integer(&self.first)?;
             let last = integer(&self.last)?;
             if last.checked_sub(first).and_then(|span| span.checked_add(1)) != Some(self.count) {
@@ -303,15 +311,14 @@ pub(crate) fn decode(
             {
                 return corrupt_at(path, "invalid page directory routing or ancestry");
             }
-            if matches!(
-                kind,
-                Kind::Records | Kind::Nodes | Kind::CommitRecords | Kind::CommitAncestryRoots
-            ) && children.last().is_some_and(|previous| {
-                integer(&previous.last)
-                    .ok()
-                    .and_then(|last| last.checked_add(1))
-                    != integer(&child.first).ok()
-            }) {
+            if kind.is_positional()
+                && children.last().is_some_and(|previous| {
+                    integer(&previous.last)
+                        .ok()
+                        .and_then(|last| last.checked_add(1))
+                        != integer(&child.first).ok()
+                })
+            {
                 return corrupt_at(path, "positional directory has a key gap");
             }
             total = total
@@ -331,7 +338,7 @@ pub(crate) fn decode(
     tracing::debug!(target:"crab_metadata::index_decode", index_format=match kind {
         Kind::CommitRecords | Kind::CommitOids | Kind::CommitAncestryRoots | Kind::CommitAncestryNodes => "commit_graph",
         #[cfg(feature = "remote-index")]
-        Kind::ObjectLocators | Kind::PackOffsets | Kind::PackInventory => "git_object_index",
+        Kind::ObjectLocators | Kind::PackOffsets | Kind::PackInventory | Kind::PackSlots => "git_object_index",
         _ => "path_state",
     },
         decoded_bytes=bytes.len() as u64, "index page decoded");
@@ -390,15 +397,14 @@ fn validate_rows(kind: Kind, rows: &Rows) -> Result<()> {
     {
         return Err(corruption("page keys are empty, invalid or unordered"));
     }
-    if matches!(
-        kind,
-        Kind::Records | Kind::Nodes | Kind::CommitRecords | Kind::CommitAncestryRoots
-    ) && rows.windows(2).any(|pair| {
-        integer(&pair[0].0)
-            .ok()
-            .and_then(|value| value.checked_add(1))
-            != integer(&pair[1].0).ok()
-    }) {
+    if kind.is_positional()
+        && rows.windows(2).any(|pair| {
+            integer(&pair[0].0)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                != integer(&pair[1].0).ok()
+        })
+    {
         return Err(corruption("positional leaf has a key gap"));
     }
     Ok(())
