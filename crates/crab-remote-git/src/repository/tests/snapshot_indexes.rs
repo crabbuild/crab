@@ -236,49 +236,78 @@ async fn snapshot_read_indexes_do_not_hide_exhausted_request_or_byte_budgets() {
 }
 
 #[tokio::test]
-async fn snapshot_read_indexes_fail_attribution_when_declared_metadata_is_corrupt() {
-    for kind in ["commit-graph", "path-state"] {
-        let fixture = open_fixture(1, None).await;
-        let snapshot = snapshot_with_read_indexes(&fixture, true).await;
-        let hash = match kind {
-            "commit-graph" => snapshot.manifest.commit_graph_hash.as_deref().unwrap(),
-            _ => snapshot.manifest.path_state_hash.as_deref().unwrap(),
-        };
-        // Bypass immutable-write protection only to inject corrupt origin bytes.
-        fixture
-            .backend
-            .inner
-            .put(
-                &fixture.layout.bulk_manifest_path(kind, hash),
-                Bytes::from_static(b"corrupt").into(),
-            )
-            .await
-            .unwrap();
-        let runtime = Arc::new(RemoteGitRuntime::default());
-        let cancel = CancellationToken::new();
-        let repository = RemoteGitRepository::from_snapshot(
-            fixture.layout.clone(),
-            &snapshot,
-            RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
-            runtime.clone(),
-            RepositoryOptions::default(),
-            &cancel,
+async fn captured_corrupt_graph_fails_opening_instead_of_raw_traversal() {
+    let fixture = open_fixture(1, None).await;
+    let snapshot = snapshot_with_read_indexes(&fixture, true).await;
+    let hash = snapshot.manifest.commit_graph_hash.as_deref().unwrap();
+    fixture
+        .backend
+        .inner
+        .put(
+            &fixture.layout.bulk_manifest_path("commit-graph", hash),
+            Bytes::from_static(b"corrupt").into(),
         )
         .await
         .unwrap();
-        let operation = repository
-            .operation(crate::OperationKind::History, &cancel)
-            .await
-            .unwrap();
-        let result = repository.state.path_state(&operation).await.map(|_| ());
-        assert!(matches!(
-            operation.finish(result).await,
-            Err(Error::Corrupt {
-                stage: crate::CorruptionStage::PathState
-            })
-        ));
-        runtime.shutdown().await;
-    }
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let result = RemoteGitRepository::from_snapshot(
+        fixture.layout.clone(),
+        &snapshot,
+        RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+        runtime.clone(),
+        RepositoryOptions::default(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(Error::Metadata(
+            crab_metadata::error::MetadataError::Storage {
+                source: crab_storage::StorageError::CorruptObject { .. }
+            }
+        ))
+    ));
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn captured_corrupt_path_state_fails_attribution() {
+    let fixture = open_fixture(1, None).await;
+    let snapshot = snapshot_with_read_indexes(&fixture, true).await;
+    let hash = snapshot.manifest.path_state_hash.as_deref().unwrap();
+    fixture
+        .backend
+        .inner
+        .put(
+            &fixture.layout.bulk_manifest_path("path-state", hash),
+            Bytes::from_static(b"corrupt").into(),
+        )
+        .await
+        .unwrap();
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let cancel = CancellationToken::new();
+    let repository = RemoteGitRepository::from_snapshot(
+        fixture.layout.clone(),
+        &snapshot,
+        RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+        runtime.clone(),
+        RepositoryOptions::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    let operation = repository
+        .operation(crate::OperationKind::History, &cancel)
+        .await
+        .unwrap();
+    let result = repository.state.path_state(&operation).await.map(|_| ());
+    assert!(matches!(
+        operation.finish(result).await,
+        Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PathState
+        })
+    ));
+    runtime.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

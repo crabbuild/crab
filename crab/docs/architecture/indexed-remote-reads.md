@@ -1046,3 +1046,33 @@ PR #549 CI now also reports a container Compose recovery/cluster qualification
 failure. The failed log is retained; cause remains unresolved and no assertion
 or baseline has been weakened. This work has not landed and the goal remains
 active.
+
+
+## Captured graph failures and rejected page-size experiment
+
+Captured snapshot graph readiness is required when supplied. Previously the
+snapshot opener inherited the manifest opener's suppression of graph failures,
+which could silently replace indexed reads with raw traversal. All snapshot
+constructors now share required graph loading; missing, corrupt or retired
+advertised metadata fails opening. Absent readiness still permits raw reads.
+
+The manifest opener retains its released optional-graph policy. Upstream v1.2.4
+(`b4d5fd361f9a1a43fdd468dc604901d2c61006f0`) suppresses optional graph errors
+while propagating cancellation and admission rejection. Released snapshot
+constructors did not load graph indexes. Explicit graph attachment remains
+required. Separate tests cover graph opening failure and lazy path corruption;
+maintenance tests prove rejected retired graph/physical descriptors are rebuilt
+from authoritative sources before derived reads resume.
+
+A 4 KiB derived-leaf experiment completed 186 source-matched RustFS processes
+across 100/1,000/10,000 commits, including twenty cold/warm samples each for
+resolve, history and blame. Native Git comparisons passed, operations drained,
+and warm queries reread no origin bytes. At 10k, history query bytes fell from
+4,691,860 to 1,909,743, but requests rose from 696 to 958. Median cold history
+latency was 4926.67 ms versus the prior 1,779.36 ms; blame was 4832.20 ms versus
+3,036.64 ms. These local debug timings are not representative-S3 targets.
+The page-size policy is rejected: no experimental codec versions or leaf
+limits are published. Receipts remain in the dedicated qualification volume.
+
+Checkpoint visibility/catalog opening, comparison caching, provider/lifecycle
+proof and later stages remain incomplete. The initiative remains active.

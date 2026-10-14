@@ -480,7 +480,14 @@ impl RemoteGitRepository {
             }),
             generated_pack_lease_provider: None,
         }
-        .with_optional_commit_graph(manifest.commit_graph_hash.as_deref(), cancellation, None)
+        // Snapshot callers supplied captured readiness. Ignoring its failure
+        // would silently replace indexed reads with an unrelated raw traversal.
+        .with_graph(
+            manifest.commit_graph_hash.as_deref(),
+            cancellation,
+            None,
+            false,
+        )
         .await
     }
 
@@ -732,10 +739,11 @@ impl RemoteGitRepository {
                     state: Arc::new(state),
                     generated_pack_lease_provider: None,
                 }
-                .with_optional_commit_graph(
+                .with_graph(
                     manifest.commit_graph_hash.as_deref(),
                     cancellation,
                     Some(budget),
+                    true,
                 )
                 .await;
             }
@@ -1243,16 +1251,17 @@ impl RemoteGitRepository {
         })
     }
 
-    async fn with_optional_commit_graph(
+    async fn with_graph(
         mut self,
         content_hash: Option<&str>,
         cancellation: &CancellationToken,
         budget: Option<crate::budget::OperationBudget>,
+        optional: bool,
     ) -> Result<Self> {
         let Some(content_hash) = content_hash else {
             return Ok(self);
         };
-        let graph = load_commit_graph(&self, content_hash, cancellation, budget, true).await?;
+        let graph = load_commit_graph(&self, content_hash, cancellation, budget, optional).await?;
         Arc::get_mut(&mut self.state)
             .ok_or(Error::InternalInvariant {
                 invariant: "new repository state was shared before graph attachment",

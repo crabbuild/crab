@@ -1825,3 +1825,88 @@ async fn incremental_install_enforces_byte_budget_before_pack_payload_reads() {
         assert_eq!(actual.stdout, expected);
     }
 }
+
+#[tokio::test]
+async fn maintenance_rebuilds_retired_advertised_indexes_before_opening_derived_reads() {
+    use crab_metadata::capsule_protocol::load_browse_indexes;
+    let (layout, _) = fixture().await;
+    let runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
+    let identity = crab_remote_git::RepositoryIdentity::new("memory", "retirement", 1).unwrap();
+    let cancel = CancellationToken::new();
+    let build = || {
+        crab_remote::browse_indexes::ensure(
+            &layout,
+            &identity,
+            runtime.clone(),
+            crab_remote_git::RepositoryOptions::default(),
+            LIMIT,
+            &cancel,
+        )
+    };
+    let original = build().await.unwrap().unwrap();
+    for (field, family, hash, version) in [
+        (
+            "commit_graph_hash",
+            "commit-graph",
+            original.commit_graph_hash(),
+            2,
+        ),
+        (
+            "object_index_hash",
+            "git-object-index",
+            original.object_index_hash().unwrap(),
+            1,
+        ),
+    ] {
+        let (bytes, _) = layout
+            .store()
+            .get_with_etag_bounded(&layout.bulk_manifest_path(family, hash), LIMIT)
+            .await
+            .unwrap();
+        let mut descriptor: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        descriptor["version"] = serde_json::json!(version);
+        let bytes = serde_json::to_vec(&descriptor).unwrap();
+        let retired_hash = blake3::hash(&bytes).to_hex().to_string();
+        layout
+            .store()
+            .put_overwrite(
+                &layout.bulk_manifest_path(family, &retired_hash),
+                bytes.into(),
+            )
+            .await
+            .unwrap();
+        let mut advertised: serde_json::Value =
+            serde_json::from_slice(&original.encode().unwrap()).unwrap();
+        advertised[field] = serde_json::json!(retired_hash);
+        layout
+            .store()
+            .put_overwrite(
+                &layout.capsule_browse_indexes_path(),
+                serde_json::to_vec(&advertised).unwrap().into(),
+            )
+            .await
+            .unwrap();
+        let captured = view(&layout)
+            .await
+            .with_browse_indexes(load_browse_indexes(&layout).await.unwrap());
+        assert!(
+            captured
+                .git_repository_from_store(
+                    layout.clone(),
+                    identity.clone(),
+                    runtime.clone(),
+                    crab_remote_git::RepositoryOptions::default(),
+                    LIMIT,
+                    &cancel
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(build().await.unwrap().unwrap(), original);
+        assert_eq!(
+            load_browse_indexes(&layout).await.unwrap(),
+            Some(original.clone())
+        );
+    }
+    runtime.shutdown().await;
+}
