@@ -157,6 +157,13 @@ remains cooperative inside kernels; started blocking work is not force-aborted.
 Runtime shutdown retains the join obligation. General tracked comparison/sorting
 work and response-pack producer admission retain their separate policies.
 
+Timed process caches use Tokio's monotonic clock. Expiry is checked after cache
+lock acquisition, and an entry is expired at its exact deadline. Waiting for a
+negative-cache lock cannot prolong an exact miss. Manifest cache hits still
+require authoritative ETag revalidation during repository opening. Controlled
+clock support is a development dependency only; production TTLs and cache keys
+are unchanged.
+
 Shared base/index reads recheck their caches after admission: a caller that
 missed before a previous producer finished must reuse its verified result.
 Index-size producers publish their cache entry before retiring the shared task.

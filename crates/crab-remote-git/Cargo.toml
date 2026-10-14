@@ -41,5 +41,5 @@ crab-metadata = { workspace = true, features = ["remote-index", "storage"] }
 object_store = { workspace = true }
 proptest = "1"
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 tracing-subscriber = "0.3"

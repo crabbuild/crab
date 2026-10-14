@@ -126,6 +126,34 @@ async fn paged_lookup_reconstructs_offset_deltas_without_pack_sidecars() {
     assert_eq!(result.unwrap().data.as_ref(), b"hello world!");
 }
 
+#[tokio::test(start_paused = true)]
+async fn expired_negative_cache_restores_verified_physical_reads() {
+    let (reader, target) = fixture().await;
+    // Model an older cached miss against the now-complete physical source.
+    // Once expired it must not suppress verified reconstruction of that object.
+    let key = crate::runtime::ObjectCacheKey::new(&reader.identity, reader.generation, target);
+    reader.runtime.insert_exact_miss(key).await;
+    let budget = OperationBudget::new(crate::OperationLimits::default(), reader.runtime.clone());
+    let cancel = CancellationToken::new();
+    let session = GitObjectLocatorSession::without_catalog();
+    let before = reader
+        .read_with_session(&session, target, &budget, &cancel)
+        .await;
+    tokio::time::advance(reader.runtime.options().negative_cache_ttl).await;
+    let after = reader
+        .read_with_session(&session, target, &budget, &cancel)
+        .await;
+    reader.runtime.shutdown().await;
+    assert!(
+        matches!(before, Err(Error::ObjectNotFound { oid }) if oid == target)
+            && after
+                .expect("expired miss permits physical reconstruction")
+                .data
+                .as_ref()
+                == b"hello world!"
+    );
+}
+
 #[tokio::test]
 async fn paged_lookup_misses_are_definitive_without_pack_sidecars() {
     let (reader, _) = fixture().await;

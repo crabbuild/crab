@@ -4,13 +4,14 @@ use read_flight::ReadFlights;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crab_metadata::git_object_locator::GitPackInventoryEntry;
 use crab_metadata::manifests::Manifest;
 use crab_xet::hash::MerkleHash;
 use gix_hash::ObjectId;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, watch};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tokio_util::task::task_tracker::TaskTrackerToken;
@@ -535,8 +536,10 @@ impl RemoteGitRuntime {
     }
 
     pub(crate) async fn exact_miss_is_cached(&self, key: &ObjectCacheKey) -> bool {
-        let now = Instant::now();
         let mut cache = self.negative_cache.lock().await;
+        // Lock waiting must not extend a miss beyond its TTL. Validate expiry
+        // against the time of the cache read, not the start of admission.
+        let now = Instant::now();
         match cache.get(key) {
             Some(expires) if expires > now => true,
             Some(_) => {
@@ -1553,7 +1556,89 @@ mod tests {
         runtime.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn manifest_cache_expiry_is_checked_after_lock_admission() {
+        let options = RuntimeOptions {
+            manifest_cache_ttl: Duration::from_millis(1),
+            ..RuntimeOptions::default()
+        };
+        let runtime = RemoteGitRuntime::new(options, Arc::new(NoopMetrics)).expect("runtime");
+        let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
+        runtime
+            .insert_manifest(
+                identity.clone(),
+                Manifest::default_for_repo("refs/heads/main"),
+                "etag".into(),
+            )
+            .await;
+        let held = runtime.manifest_cache.lock().await;
+        let mut lookup = Box::pin(runtime.cached_manifest(&identity));
+        let waiting = futures_util::poll!(lookup.as_mut()).is_pending();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        drop(held);
+        let cached = lookup.await;
+        runtime.shutdown().await;
+        assert!(
+            waiting && cached.is_none(),
+            "manifest lock waiting must not extend cache lifetime"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manifest_cache_expires_at_its_exact_boundary() {
+        let options = RuntimeOptions {
+            manifest_cache_ttl: Duration::from_millis(1),
+            ..RuntimeOptions::default()
+        };
+        let runtime = RemoteGitRuntime::new(options, Arc::new(NoopMetrics)).expect("runtime");
+        let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
+        runtime
+            .insert_manifest(
+                identity.clone(),
+                Manifest::default_for_repo("refs/heads/main"),
+                "etag".into(),
+            )
+            .await;
+        let before = runtime
+            .cached_manifest(&identity)
+            .await
+            .map(|(_, etag)| etag);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let at_boundary = runtime
+            .cached_manifest(&identity)
+            .await
+            .map(|(_, etag)| etag);
+        runtime.shutdown().await;
+        assert_eq!((before, at_boundary), (Some("etag".into()), None));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn negative_cache_expiry_is_checked_after_lock_admission() {
+        let runtime = RemoteGitRuntime::new(
+            RuntimeOptions {
+                negative_cache_ttl: Duration::from_millis(1),
+                ..RuntimeOptions::default()
+            },
+            Arc::new(NoopMetrics),
+        )
+        .expect("runtime");
+        let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
+        let key = ObjectCacheKey::new(&identity, 1, ObjectId::empty_blob(gix_hash::Kind::Sha1));
+        runtime.insert_exact_miss(key.clone()).await;
+        let held = runtime.negative_cache.lock().await;
+        let mut lookup = Box::pin(runtime.exact_miss_is_cached(&key));
+        let waiting = futures_util::poll!(lookup.as_mut()).is_pending();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        drop(held);
+        let hit = lookup.await;
+        runtime.shutdown().await;
+        assert!(
+            waiting && !hit,
+            "lock waiting must not extend a cached miss's lifetime"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn negative_cache_is_generation_scoped_and_expires() {
         let options = RuntimeOptions {
             negative_cache_ttl: Duration::from_millis(1),
@@ -1568,7 +1653,7 @@ mod tests {
 
         assert!(runtime.exact_miss_is_cached(&first).await);
         assert!(!runtime.exact_miss_is_cached(&next).await);
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::advance(Duration::from_millis(1)).await;
         assert!(!runtime.exact_miss_is_cached(&first).await);
     }
 
