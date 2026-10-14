@@ -2110,12 +2110,11 @@ impl Index {
         Ok(chunks)
     }
 
-    /// Return the ordered list of chunk hashes for a given file.
+    /// Return every ordered chunk hash for a retained file version.
     ///
-    /// Queries both `chunks` and `pending_chunks` tables, deduplicated
-    /// by `chunk_index` (preferring `chunks` over `pending_chunks`),
-    /// ordered by `chunk_index`. Returns an empty vec if the file is
-    /// not found.
+    /// Verified recipe terms take precedence over physical segment rows.
+    /// Without a retained recipe, merges durable and pending occurrences by
+    /// index, preferring durable rows. Returns empty when no version is retained.
     pub fn chunks_for_file(&self, file_hash: &[u8; 32]) -> Result<Vec<[u8; 32]>> {
         // Physical segment rows can be partial for a mixed-authority recipe.
         // A sealed owner defines every occurrence even before publication.
@@ -2170,10 +2169,11 @@ impl Index {
         Ok(hashes)
     }
 
-    /// Return the ordered chunk hashes and sizes for a given file.
+    /// Return every ordered chunk hash and size for a retained file version.
     ///
-    /// Queries both durable and pending chunk tables, deduplicated by
-    /// `chunk_index` with durable rows preferred over pending rows.
+    /// Verified recipe terms take precedence over physical segment rows.
+    /// Without a retained recipe, merges durable and pending occurrences by
+    /// index, preferring durable rows.
     pub fn chunks_for_file_with_sizes(&self, file_hash: &[u8; 32]) -> Result<Vec<([u8; 32], u64)>> {
         if let Some(recipe) = self.retained_recipe_for_file(file_hash)? {
             return self.recipe_chunks(&recipe);
