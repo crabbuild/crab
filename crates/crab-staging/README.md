@@ -137,6 +137,17 @@ multiple batches with consecutive chunk offsets. Flush all staged bytes before
 publishing a push bundle; otherwise a remote upload can reference data that is
 not yet durable locally.
 
+`stream::stage_reader_streaming` accepts an `AsyncRead + Unpin` byte source
+without seeking, reopening or reading source metadata. Native file staging uses
+the same ingestion engine behind descriptor/path validation. Both paths compute
+ordered recipes and use the existing segment/prepared-Xorb ownership machinery.
+Successful ingestion flushes pending segment authority before recording the
+version lease. The returned batch stays open until its caller publishes or
+rolls back; the supplied logical path is not proof of a Git index update.
+Cancel through the token while awaiting the operation so failed attempts clean
+up. Git-clean still uses its existing ingestion path; routing packet streams and
+reconciling their leases with Git index publication remain separate work.
+
 ## Boundaries
 
 - [`crab-xet`](../crab-xet/README.md) computes chunk hashes and builds Xorb

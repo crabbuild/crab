@@ -1807,3 +1807,27 @@ Unified byte ingestion, native/Git-clean crossover publication policy and the
 10-GiB alternating multi-edit/push/read grid remain required. Representative S3
 qualification, pending pack-layout gate approval and the remaining indexed
 history/catalog/lifecycle/blame gates also remain open.
+
+### Shared byte-ingestion foundation
+
+Native descriptor staging now delegates to an `AsyncRead + Unpin` ingestion
+engine. `stage_reader_streaming` exposes that same engine for non-seeking byte
+sources; it does not open or stat its logical lease path. Native wrappers retain
+descriptor/path identity validation and changed-file detection. CDC, hashing,
+ordered recipes, preparation ownership and failure cleanup stay in one engine.
+Pending segment authority flushes before the returned version lease is recorded.
+The result retains an open batch; callers still own publication or rollback.
+
+A bounded pipe test covers both segment and prepared-Xorb modes, closes no
+staging handle before recovery, and verifies reconstructed bytes, file identity
+and absent source metadata. Cancellation of a pending read previously timed out;
+the retained negative receipt is `unified-stream-cancel-negative.log`. A token
+branch now wakes that read and runs attempt cleanup. Tokio 1.53.1 documents
+`read_buf` as cancellation-safe when another `select!` branch wins. The focused
+stream run passes 31 cases with the existing manual RSS case ignored.
+
+This is a draft foundation, not completed native/Git-clean unification. Packet
+transport wiring, exact prepared-recipe replay, deferred Git-index publication
+and crossover failure/10-GiB qualification remain required. The separate
+10-GiB run uses the preceding segment-lifecycle binary; it is not evidence for
+this extraction. Per-file flush cost and short-read performance remain unmeasured.
