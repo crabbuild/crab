@@ -45,6 +45,9 @@ the captured index; unindexed reads retain their existing pack-index path.
 Maintenance and writers requiring exact admission sets continue using the
 complete metadata entry point. Visibility, catalog and source/ref enumeration
 are still eager; this entry point does not establish bounded repository opening.
+Full-capsule and control-only views share borrowed visibility readiness/application
+checks. Canonical transaction decoding guarantees unique ref names; matched-row
+counts reject extra evidence without copying the per-object edit lists.
 
 `ShardHydrator` provides memory, file, and half-open byte-range reconstruction.
 Before full-file reconstruction it checks that the pointer's shard terms are

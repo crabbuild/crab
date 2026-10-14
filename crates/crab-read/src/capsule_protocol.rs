@@ -5345,7 +5345,20 @@ fn control_is_ready(
     refs: &BTreeMap<String, String>,
     visibility_index: &crab_metadata::git_visibility::GitVisibilityIndex,
 ) -> Result<bool> {
-    let transaction = capsule.transaction();
+    visibility_is_ready(
+        capsule.transaction(),
+        capsule.visibility_delta(),
+        refs,
+        visibility_index,
+    )
+}
+
+fn visibility_is_ready(
+    transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
+    delta: Option<&crab_metadata::capsule_protocol::CapsuleVisibilityDelta>,
+    refs: &BTreeMap<String, String>,
+    visibility_index: &crab_metadata::git_visibility::GitVisibilityIndex,
+) -> Result<bool> {
     if transaction
         .edits()
         .iter()
@@ -5353,13 +5366,16 @@ fn control_is_ready(
     {
         return Ok(false);
     }
-    let Some(delta) = capsule.visibility_delta() else {
+    let Some(delta) = delta else {
         return Ok(true);
     };
-    let mut evidence = delta.edits().clone();
+    // Transactions have unique refs. Count matched rows without copying OID lists;
+    // unmatched evidence still fails before it can authorize a publication.
+    let evidence = delta.edits();
+    let mut matched = 0;
     for edit in transaction.edits() {
         let Some(new_oid) = edit.new_oid() else {
-            if evidence.remove(edit.ref_name()).is_some() {
+            if evidence.get(edit.ref_name()).is_some() {
                 return Err(corrupt_path(
                     "capsule Git visibility",
                     "deleted ref has visibility evidence",
@@ -5367,12 +5383,13 @@ fn control_is_ready(
             }
             continue;
         };
-        let Some(visibility) = evidence.remove(edit.ref_name()) else {
+        let Some(visibility) = evidence.get(edit.ref_name()) else {
             return Err(corrupt_path(
                 "capsule Git visibility",
                 "live ref edit has no visibility evidence",
             ));
         };
+        matched += 1;
         visibility.validate()?;
         if visibility.new_oid != new_oid {
             return Err(corrupt_path(
@@ -5403,7 +5420,7 @@ fn control_is_ready(
             }
         }
     }
-    if !evidence.is_empty() {
+    if evidence.len() != matched {
         return Err(corrupt_path(
             "capsule Git visibility",
             "visibility evidence contains an uncommitted ref",
@@ -5451,84 +5468,30 @@ fn capsule_is_ready(
     visibility_index: &crab_metadata::git_visibility::GitVisibilityIndex,
 ) -> Result<bool> {
     let transaction = capsule.transaction()?;
-    if transaction
-        .edits()
-        .iter()
-        .any(|edit| refs.get(edit.ref_name()).map(String::as_str) != edit.expected_old())
-    {
-        return Ok(false);
-    }
-    let Some(delta) = capsule.visibility_delta()? else {
-        // Ref ordering is authenticated by expected-old links. Visibility is a
-        // separate read-admission proof and remains fail-closed when requested.
-        return Ok(true);
-    };
-    let mut evidence = delta.edits().clone();
-    for edit in transaction.edits() {
-        let Some(new_oid) = edit.new_oid() else {
-            if evidence.remove(edit.ref_name()).is_some() {
-                return Err(corrupt_path(
-                    "capsule Git visibility",
-                    "deleted ref has visibility evidence",
-                ));
-            }
-            continue;
-        };
-        let Some(visibility) = evidence.remove(edit.ref_name()) else {
-            return Err(corrupt_path(
-                "capsule Git visibility",
-                "live ref edit has no visibility evidence",
-            ));
-        };
-        visibility.validate()?;
-        if visibility.new_oid != new_oid {
-            return Err(corrupt_path(
-                "capsule Git visibility",
-                "visibility evidence does not match its ref edit",
-            ));
-        }
-        match edit.expected_old() {
-            Some(expected_old) => {
-                if visibility.old_oid.as_deref() != Some(expected_old) {
-                    return Err(corrupt_path(
-                        "capsule Git visibility",
-                        "visibility evidence does not match the expected old ref",
-                    ));
-                }
-                if !visibility_index.contains_ref(edit.ref_name()) {
-                    return Ok(false);
-                }
-            }
-            None if visibility.replaces => {}
-            None => {
-                let Some(old_oid) = visibility.old_oid.as_deref() else {
-                    continue;
-                };
-                if !visibility_index.contains_hex_in_any_ref(old_oid) {
-                    return Ok(false);
-                }
-            }
-        }
-    }
-    if !evidence.is_empty() {
-        return Err(corrupt_path(
-            "capsule Git visibility",
-            "visibility evidence contains an uncommitted ref",
-        ));
-    }
-    Ok(true)
+    let delta = capsule.visibility_delta()?;
+    visibility_is_ready(&transaction, delta.as_ref(), refs, visibility_index)
 }
 
 fn apply_capsule_control_visibility_index(
     capsule: &CapsuleControl,
     index: &mut crab_metadata::git_visibility::GitVisibilityIndex,
 ) -> Result<()> {
-    let transaction = capsule.transaction();
-    let delta = capsule.visibility_delta();
-    let mut evidence = delta.map(|delta| delta.edits().clone()).unwrap_or_default();
+    apply_transaction_visibility_index(capsule.transaction(), capsule.visibility_delta(), index)
+}
+
+fn apply_transaction_visibility_index(
+    transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
+    delta: Option<&crab_metadata::capsule_protocol::CapsuleVisibilityDelta>,
+    index: &mut crab_metadata::git_visibility::GitVisibilityIndex,
+) -> Result<()> {
+    let evidence = delta.map(|delta| delta.edits());
+    let mut matched = 0;
     for edit in transaction.edits() {
         let Some(new_oid) = edit.new_oid() else {
-            if evidence.remove(edit.ref_name()).is_some() {
+            if evidence
+                .and_then(|rows| rows.get(edit.ref_name()))
+                .is_some()
+            {
                 return Err(corrupt_path(
                     "capsule Git visibility",
                     "deleted ref has visibility evidence",
@@ -5537,12 +5500,15 @@ fn apply_capsule_control_visibility_index(
             index.remove_ref(edit.ref_name());
             continue;
         };
-        let visibility = evidence.remove(edit.ref_name()).ok_or_else(|| {
-            corrupt_path(
-                "capsule Git visibility",
-                "live ref edit has no visibility evidence",
-            )
-        })?;
+        let visibility = evidence
+            .and_then(|rows| rows.get(edit.ref_name()))
+            .ok_or_else(|| {
+                corrupt_path(
+                    "capsule Git visibility",
+                    "live ref edit has no visibility evidence",
+                )
+            })?;
+        matched += 1;
         if visibility.new_oid != new_oid {
             return Err(corrupt_path(
                 "capsule Git visibility",
@@ -5557,9 +5523,9 @@ fn apply_capsule_control_visibility_index(
                 "visibility evidence does not match the expected old ref",
             ));
         }
-        index.apply_ref_edit(edit.ref_name().to_owned(), &visibility)?;
+        index.apply_ref_edit(edit.ref_name().to_owned(), visibility)?;
     }
-    if !evidence.is_empty() {
+    if evidence.is_some_and(|rows| rows.len() != matched) {
         return Err(corrupt_path(
             "capsule Git visibility",
             "visibility evidence contains an uncommitted ref",
@@ -5574,47 +5540,7 @@ fn apply_capsule_visibility_index(
 ) -> Result<()> {
     let transaction = capsule.transaction()?;
     let delta = capsule.visibility_delta()?;
-    let mut evidence = delta.map(|delta| delta.edits().clone()).unwrap_or_default();
-    for edit in transaction.edits() {
-        let Some(new_oid) = edit.new_oid() else {
-            if evidence.remove(edit.ref_name()).is_some() {
-                return Err(corrupt_path(
-                    "capsule Git visibility",
-                    "deleted ref has visibility evidence",
-                ));
-            }
-            index.remove_ref(edit.ref_name());
-            continue;
-        };
-        let visibility = evidence.remove(edit.ref_name()).ok_or_else(|| {
-            corrupt_path(
-                "capsule Git visibility",
-                "live ref edit has no visibility evidence",
-            )
-        })?;
-        if visibility.new_oid != new_oid {
-            return Err(corrupt_path(
-                "capsule Git visibility",
-                "visibility evidence does not match its ref edit",
-            ));
-        }
-        if let Some(expected_old) = edit.expected_old()
-            && visibility.old_oid.as_deref() != Some(expected_old)
-        {
-            return Err(corrupt_path(
-                "capsule Git visibility",
-                "visibility evidence does not match the expected old ref",
-            ));
-        }
-        index.apply_ref_edit(edit.ref_name().to_owned(), &visibility)?;
-    }
-    if !evidence.is_empty() {
-        return Err(corrupt_path(
-            "capsule Git visibility",
-            "visibility evidence contains an uncommitted ref",
-        ));
-    }
-    Ok(())
+    apply_transaction_visibility_index(&transaction, delta.as_ref(), index)
 }
 
 fn apply_capsule_refs(
@@ -7258,6 +7184,72 @@ mod tests {
             index.incremental_objects("refs/heads/main", &[0xbb; 20], &[[0xaa; 20]]),
             Some(vec![[0xbb; 20], [0xcc; 20]])
         );
+    }
+
+    #[test]
+    fn full_and_control_visibility_reject_uncommitted_evidence() {
+        for case in ["extra", "missing", "deleted", "new-tip", "old-tip"] {
+            let old = "1".repeat(40);
+            let new = "2".repeat(40);
+            let transaction = CapsuleTransaction::new(
+                &"a".repeat(64),
+                vec![CapsuleRefEdit::new(
+                    "refs/heads/main",
+                    Some(old.clone()),
+                    (case != "deleted").then_some(new.clone()),
+                    None,
+                )],
+            )
+            .unwrap();
+            let evidence_tip = if case == "new-tip" {
+                "3".repeat(40)
+            } else {
+                new
+            };
+            let evidence_old = if case == "old-tip" {
+                "3".repeat(40)
+            } else {
+                old.clone()
+            };
+            let edit = GitVisibilityEdit::from_replacement_objects(
+                Some(evidence_old),
+                evidence_tip.clone(),
+                vec![evidence_tip],
+            );
+            let mut edits = BTreeMap::from([("refs/heads/main".to_owned(), edit.clone())]);
+            if case == "extra" || case == "missing" {
+                edits.insert("refs/heads/feature".to_owned(), edit);
+            }
+            if case == "missing" {
+                edits.remove("refs/heads/main");
+            }
+            let delta = CapsuleVisibilityDelta::new(edits).unwrap();
+            let capsule = Capsule::build(
+                &transaction,
+                Vec::new(),
+                vec![CapsuleSection::new(
+                    CapsuleSectionKind::VisibilityDelta,
+                    delta.encode().unwrap(),
+                )],
+            )
+            .unwrap();
+            let run = CapsuleRun::leaf(capsule.clone()).unwrap();
+            let (_, controls) = run.verified_controls().unwrap();
+            let refs = BTreeMap::from([("refs/heads/main".to_owned(), old.clone())]);
+            let index =
+                visibility_index(BTreeMap::from([("refs/heads/main".to_owned(), vec![old])]));
+            assert_eq!(
+                (
+                    capsule_is_ready(&capsule, &refs, &index).is_err(),
+                    control_is_ready(&controls[0], &refs, &index).is_err(),
+                    apply_capsule_visibility_index(&capsule, &mut index.clone()).is_err(),
+                    apply_capsule_control_visibility_index(&controls[0], &mut index.clone())
+                        .is_err(),
+                ),
+                (true, true, true, true),
+                "{case}",
+            );
+        }
     }
 
     #[test]
