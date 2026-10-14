@@ -13,7 +13,7 @@ use crate::validation::validate_content_hash;
 const RUN_MAGIC: &[u8; 8] = b"CRBRUN01";
 const RUN_VERSION: u32 = 2;
 const RUN_TRAILER_BYTES: usize = 8 + 32 + RUN_MAGIC.len();
-const MAX_RUN_FOOTER_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const MAX_RUN_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INLINE_RUN_CONTROL_SECTION_BYTES: usize = 512 * 1024;
 /// Largest number of push capsules coalesced before a repository checkpoint.
 pub const MAX_CAPSULES_PER_RUN: usize = 512;
@@ -76,6 +76,8 @@ struct CapsuleRunFooter {
 mod admission;
 use admission::AdmissionPages;
 pub use admission::CapsuleRunAdmission;
+#[cfg(feature = "storage")]
+pub use admission::CapsuleRunAdmissionReader;
 
 /// Immutable bounded run of complete push capsules.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +104,7 @@ pub struct CapsuleRunControl {
     git_packs: Vec<PackMemberDescriptor>,
     index_pool: Option<RunSectionLocation>,
     admission: Option<CapsuleRunAdmission>,
+    admission_info: Option<(RunSectionLocation, AdmissionPages)>,
 }
 
 /// Ranges for the transaction and optional metadata sections of one capsule.
@@ -132,7 +135,7 @@ pub struct CapsuleControl {
 }
 
 impl CapsuleRunControl {
-    /// Decode an authenticated run footer from its control suffix.
+    /// Decode complete control and admission bytes from the authenticated suffix.
     pub fn decode_suffix(
         bytes: Bytes,
         object_size: u64,
@@ -140,6 +143,101 @@ impl CapsuleRunControl {
         expected_level: u8,
         expected_transactions: &[String],
         expected_newest_base: &str,
+    ) -> Result<Self> {
+        let offset = object_size
+            .checked_sub(bytes.len() as u64)
+            .ok_or_else(|| corrupt("capsule run suffix starts outside its object"))?;
+        Self::decode_control(
+            bytes,
+            object_size,
+            expected_hash,
+            expected_level,
+            expected_transactions,
+            expected_newest_base,
+            offset,
+        )
+    }
+
+    #[cfg(feature = "storage")]
+    pub(crate) fn footer_range(
+        trailer: &[u8],
+        pointer: &crate::capsule_protocol::CapsulePointer,
+    ) -> Result<std::ops::Range<u64>> {
+        if trailer.len() != RUN_TRAILER_BYTES || &trailer[40..] != RUN_MAGIC {
+            return Err(corrupt("capsule run footer trailer is invalid"));
+        }
+        let length = u64::from_be_bytes(
+            trailer[..8]
+                .try_into()
+                .map_err(|_| corrupt("capsule run footer length is invalid"))?,
+        );
+        let hash = blake3::Hash::from_bytes(
+            trailer[8..40]
+                .try_into()
+                .map_err(|_| corrupt("capsule run footer hash is invalid"))?,
+        );
+        if length == 0
+            || length > MAX_RUN_FOOTER_BYTES as u64
+            || hash.to_hex().as_str() != pointer.footer_hash()
+        {
+            return Err(corrupt(
+                "capsule run footer trailer does not match its pointer",
+            ));
+        }
+        let start = pointer
+            .size()
+            .checked_sub(RUN_TRAILER_BYTES as u64)
+            .and_then(|end| end.checked_sub(length))
+            .ok_or_else(|| corrupt("capsule run footer range overflows"))?;
+        if start < pointer.control_offset() {
+            return Err(corrupt(
+                "capsule run footer starts outside its control range",
+            ));
+        }
+        Ok(start..pointer.size())
+    }
+
+    #[cfg(feature = "storage")]
+    pub(crate) const fn trailer_bytes() -> u64 {
+        RUN_TRAILER_BYTES as u64
+    }
+
+    /// Decode the footer alone, retaining authenticated page roots without materializing admission.
+    pub fn decode_footer(
+        bytes: Bytes,
+        pointer: &crate::capsule_protocol::CapsulePointer,
+    ) -> Result<Self> {
+        crate::capsule_protocol::root::validate_capsule_pointer(pointer)?;
+        let result = Self::decode_control(
+            bytes,
+            pointer.size(),
+            pointer.hash(),
+            pointer.level(),
+            pointer.transaction_ids(),
+            pointer.newest_base_root_digest(),
+            pointer.control_offset(),
+        )?;
+        if result.footer_hash != pointer.footer_hash()
+            || result.control_size != pointer.control_size()
+            || result.admission.is_some()
+        {
+            return Err(corrupt(
+                "capsule run footer does not match its pointer or contains admission bytes",
+            ));
+        }
+        Ok(result)
+    }
+
+    // Both entry points share footer/range validation; complete inspection
+    // additionally authenticates every admission byte before exposing OIDs.
+    fn decode_control(
+        bytes: Bytes,
+        object_size: u64,
+        expected_hash: &str,
+        expected_level: u8,
+        expected_transactions: &[String],
+        expected_newest_base: &str,
+        control_offset: u64,
     ) -> Result<Self> {
         if bytes.len() < RUN_TRAILER_BYTES {
             return Err(corrupt("capsule run control suffix is truncated"));
@@ -172,12 +270,10 @@ impl CapsuleRunControl {
         }
         validate_level_count(footer.level, footer.capsules.len())
             .map_err(|error| corrupt(error.to_string()))?;
-        let control_offset =
-            object_size
-                .checked_sub(u64::try_from(bytes.len()).map_err(|_| {
-                    corrupt("capsule run control suffix length cannot be represented")
-                })?)
-                .ok_or_else(|| corrupt("capsule run control suffix starts outside its object"))?;
+        let footer_offset = object_size
+            .checked_sub(bytes.len() as u64)
+            .and_then(|offset| offset.checked_add(footer_start as u64))
+            .ok_or_else(|| corrupt("capsule run footer starts outside its object"))?;
         let mut controls = Vec::with_capacity(footer.capsules.len());
         let mut expected_offset = 0_u64;
         for location in &footer.capsules {
@@ -252,26 +348,33 @@ impl CapsuleRunControl {
                 "capsule run admission descriptor presence differs from its body",
             ));
         }
-        let admission = if let Some(range) = footer.admission.as_ref() {
-            let footer_offset = control_offset
-                .checked_add(footer_start as u64)
-                .ok_or_else(|| corrupt("capsule run footer offset overflowed"))?;
+        let admission_info = footer.admission.clone().zip(footer.admission_pages.clone());
+        let admission = if let Some((range, pages)) = &admission_info {
             validate_body_range(range, control_offset, footer_offset)?;
-            let admission_bytes = &bytes[..footer_start];
-            if blake3::hash(admission_bytes).to_hex().as_str() != range.hash {
-                return Err(corrupt("capsule run admission hash does not match"));
+            pages.validate_region(range.length, footer.git_packs.len())?;
+            if footer_start == 0 {
+                None
+            } else {
+                let admission_bytes = &bytes[..footer_start];
+                if admission_bytes.len() as u64 != range.length
+                    || blake3::hash(admission_bytes).to_hex().as_str() != range.hash
+                {
+                    return Err(corrupt(
+                        "capsule run admission hash or length does not match",
+                    ));
+                }
+                if pages != &AdmissionPages::decode(admission_bytes)? {
+                    return Err(corrupt(
+                        "capsule run admission descriptor differs from its footer",
+                    ));
+                }
+                Some(CapsuleRunAdmission::decode(
+                    admission_bytes,
+                    footer.git_packs.len(),
+                )?)
             }
-            if footer.admission_pages.as_ref() != Some(&AdmissionPages::decode(admission_bytes)?) {
-                return Err(corrupt(
-                    "capsule run admission descriptor differs from its footer",
-                ));
-            }
-            Some(CapsuleRunAdmission::decode(
-                admission_bytes,
-                footer.git_packs.len(),
-            )?)
         } else {
-            if footer_start != 0 {
+            if footer_start != 0 || footer_offset != control_offset {
                 return Err(corrupt("capsule run control suffix has unclaimed bytes"));
             }
             None
@@ -296,15 +399,40 @@ impl CapsuleRunControl {
             hash: expected_hash.to_owned(),
             object_size,
             control_offset,
-            control_size: u64::try_from(bytes.len())
-                .map_err(|_| corrupt("capsule run control suffix length overflows"))?,
+            control_size: object_size
+                .checked_sub(control_offset)
+                .ok_or_else(|| corrupt("capsule run control range is invalid"))?,
             level: footer.level,
             footer_hash,
             capsules: controls,
             git_packs: footer.git_packs,
             index_pool: footer.index_pool,
             admission,
+            admission_info,
         })
+    }
+
+    #[cfg(feature = "storage")]
+    /// Open bounded admission lookup from this run's authenticated footer.
+    pub fn admission_reader(
+        &self,
+        layout: &crab_storage::StoreLayout<crab_storage::Store>,
+        maximum: u64,
+    ) -> Result<Option<CapsuleRunAdmissionReader>> {
+        self.admission_info
+            .as_ref()
+            .map(|(range, pages)| {
+                CapsuleRunAdmissionReader::new(
+                    layout,
+                    &self.hash,
+                    range.offset,
+                    range.length,
+                    pages.clone(),
+                    self.git_packs.len(),
+                    maximum,
+                )
+            })
+            .transpose()
     }
 
     /// Return the run's authenticated capsule controls.
@@ -330,7 +458,7 @@ impl CapsuleRunControl {
         git_index_ranges(&self.git_packs, self.index_pool.as_ref())
     }
 
-    /// Return the verified exact frontier admission from the control suffix.
+    /// Return materialized exact admission; footer-only reads retain a separate paged reader.
     #[must_use]
     pub fn admission(&self) -> Option<&CapsuleRunAdmission> {
         self.admission.as_ref()

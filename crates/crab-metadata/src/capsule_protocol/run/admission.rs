@@ -5,6 +5,11 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[cfg(feature = "storage")]
+mod reader;
+#[cfg(feature = "storage")]
+pub use reader::CapsuleRunAdmissionReader;
+
 const ADMISSION_MAGIC: &[u8; 8] = b"CRBADM01";
 const ADMISSION_VERSION: u32 = 2;
 const ADMISSION_TRAILER_BYTES: usize = 4;
@@ -40,6 +45,20 @@ impl AdmissionPages {
         {
             return Err(corrupt(
                 "capsule run admission member counts have incomplete coverage",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_region(&self, length: u64, member_count: usize) -> Result<()> {
+        self.validate()?;
+        let encoded = self
+            .body_bytes
+            .checked_add(self.header().len() as u64)
+            .and_then(|bytes| bytes.checked_add(ADMISSION_TRAILER_BYTES as u64));
+        if self.member_count as usize != member_count || encoded != Some(length) {
+            return Err(corrupt(
+                "capsule run admission descriptor does not match its range or inventory",
             ));
         }
         Ok(())
@@ -222,7 +241,7 @@ impl CapsuleRunAdmission {
     }
 
     pub(super) fn decode(bytes: &[u8], expected_member_count: usize) -> Result<Self> {
-        use crate::pages::{Input, Kind};
+        use crate::pages::Kind;
         let pages = AdmissionPages::decode(bytes)?;
         if pages.member_count as usize != expected_member_count {
             return Err(corrupt(
@@ -245,22 +264,7 @@ impl CapsuleRunAdmission {
         )?;
         let mut members = BTreeMap::new();
         for (oid, value) in rows {
-            let mut input = Input::new(&value, "capsule run admission members");
-            let count = input.u32()? as usize;
-            if count == 0 || count > expected_member_count || input.remaining() / 4 != count {
-                return Err(corrupt("capsule run admission has an invalid member list"));
-            }
-            let mut list = Vec::with_capacity(count);
-            for _ in 0..count {
-                let member = input.u32()?;
-                if member as usize >= expected_member_count
-                    || list.last().is_some_and(|previous| *previous >= member)
-                {
-                    return Err(corrupt("capsule run admission members are invalid"));
-                }
-                list.push(member);
-            }
-            input.finish()?;
+            let list = decode_members(&value, expected_member_count)?;
             let oid = oid
                 .try_into()
                 .map_err(|_| corrupt("capsule run admission OID has an invalid length"))?;
@@ -294,6 +298,26 @@ impl CapsuleRunAdmission {
             .iter()
             .map(|(oid, members)| (oid, members.as_slice()))
     }
+}
+
+fn decode_members(value: &[u8], member_count: usize) -> Result<Vec<u32>> {
+    let mut input = crate::pages::Input::new(value, "capsule run admission members");
+    let count = input.u32()? as usize;
+    if count == 0 || count > member_count || input.remaining() / 4 != count {
+        return Err(corrupt("capsule run admission has an invalid member list"));
+    }
+    let mut list = Vec::with_capacity(count);
+    for _ in 0..count {
+        let member = input.u32()?;
+        if member as usize >= member_count
+            || list.last().is_some_and(|previous| *previous >= member)
+        {
+            return Err(corrupt("capsule run admission members are invalid"));
+        }
+        list.push(member);
+    }
+    input.finish()?;
+    Ok(list)
 }
 
 #[cfg(test)]

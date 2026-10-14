@@ -37,6 +37,15 @@ Replica selection reports readiness, generations, fallbacks, and routing
 choices so callers can distinguish an unavailable replica from a corrupt
 object.
 
+`capsule_protocol::open_git_view_from_root` captures complete refs, visibility
+and pointer catalogs without materializing run OID admission. It validates
+authenticated member counts and omits placement-hint dictionaries. CLI reads,
+HTTP browse/projection and S3 gateway reads use this view. Physical lookup uses
+the captured index; unindexed reads retain their existing pack-index path.
+Maintenance and writers requiring exact admission sets continue using the
+complete metadata entry point. Visibility, catalog and source/ref enumeration
+are still eager; this entry point does not establish bounded repository opening.
+
 `ShardHydrator` provides memory, file, and half-open byte-range reconstruction.
 Before full-file reconstruction it checks that the pointer's shard terms are
 covered; after reconstruction it verifies the requested file hash. A shared

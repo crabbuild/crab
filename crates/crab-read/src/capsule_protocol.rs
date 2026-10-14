@@ -4124,7 +4124,15 @@ pub async fn open_view_from_root_for_repack(
         )
         .await;
     }
-    assemble_layered_control_view(router, snapshot, limits, heads, active, false).await
+    assemble_layered_control_view(
+        router,
+        snapshot,
+        limits,
+        heads,
+        active,
+        ControlRead::Complete,
+    )
+    .await
 }
 
 /// Load complete checkpoint catalog/visibility metadata and frontier controls.
@@ -4261,7 +4269,35 @@ pub async fn open_view_from_root_with_metadata(
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
     let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    assemble_layered_control_view(router, snapshot, limits, heads, active, false).await
+    assemble_layered_control_view(
+        router,
+        snapshot,
+        limits,
+        heads,
+        active,
+        ControlRead::Complete,
+    )
+    .await
+}
+
+/// Capture complete reference/visibility metadata while keeping run OID admission cold.
+///
+/// Paged member counts validate pack coverage. Placement reads use the captured origin;
+/// callers requiring exact admission sets use the complete metadata entry point.
+pub async fn open_git_view_from_root(
+    router: &StoreLayout<Store>,
+    snapshot: crab_metadata::capsule_protocol::RootSnapshot,
+    limits: CapsuleReadLimits,
+) -> Result<CapsuleRepositoryView> {
+    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    assemble_layered_control_view(router, snapshot, limits, heads, active, ControlRead::Git).await
+}
+
+#[derive(Clone, Copy)]
+enum ControlRead {
+    Complete,
+    Git,
+    Fetch,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4289,7 +4325,11 @@ async fn assemble_view(
             limits,
             heads,
             active,
-            matches!(checkpoint_load, CheckpointLoad::LayeredControl),
+            if matches!(checkpoint_load, CheckpointLoad::LayeredControl) {
+                ControlRead::Fetch
+            } else {
+                ControlRead::Complete
+            },
         )
         .await;
     }
@@ -4513,8 +4553,9 @@ async fn assemble_layered_control_view(
     limits: CapsuleReadLimits,
     heads: Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
     active: BTreeSet<String>,
-    footer_only: bool,
+    read: ControlRead,
 ) -> Result<CapsuleRepositoryView> {
+    let footer_only = matches!(read, ControlRead::Fetch);
     let mut refs = snapshot.record().root().refs().clone();
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
     let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
@@ -4548,7 +4589,12 @@ async fn assemble_layered_control_view(
             let (control, capsules) = run.verified_controls()?;
             Ok::<_, ReadError>((control, capsules, Some(run.bytes().clone())))
         } else {
-            let (control, capsules) = load_run_control(router, pointer).await?;
+            let (control, capsules) = if matches!(read, ControlRead::Git) {
+                crab_metadata::capsule_protocol::load_capsule_run_git_control(router, pointer)
+                    .await?
+            } else {
+                load_run_control(router, pointer).await?
+            };
             Ok((control, capsules, None))
         }
     }))
@@ -4621,7 +4667,9 @@ async fn assemble_layered_control_view(
                 capsule_run_member_oids.insert(pointer.hash().to_owned(), member_oids);
             }
             for capsule in capsules {
-                if let Some(visibility) = capsule.visibility_delta() {
+                if !matches!(read, ControlRead::Git)
+                    && let Some(visibility) = capsule.visibility_delta()
+                {
                     extend_frontier_object_admission(
                         &mut frontier_object_admission,
                         visibility,
@@ -6412,6 +6460,34 @@ mod tests {
                 .iter()
                 .any(|read| read.operation == StorageOperation::Range)
         );
+    }
+
+    #[tokio::test]
+    async fn git_metadata_view_preserves_references_visibility_and_catalog() {
+        for committed in [false, true] {
+            let inner = Arc::new(InMemory::new());
+            seed_prepared_multi_ref(inner.clone(), committed, committed).await;
+            let router = StoreLayout::new(Store::new(inner), "repositories/test".into());
+            let root = load_root(&router).await.unwrap();
+            let complete = open_view_from_root_with_metadata(&router, root.clone(), TEST_LIMITS)
+                .await
+                .unwrap();
+            let git = open_git_view_from_root(&router, root, TEST_LIMITS)
+                .await
+                .unwrap();
+            assert_eq!(
+                (
+                    git.git_snapshot().unwrap(),
+                    git.git_visibility_index().unwrap(),
+                    git.pointer_catalog().unwrap()
+                ),
+                (
+                    complete.git_snapshot().unwrap(),
+                    complete.git_visibility_index().unwrap(),
+                    complete.pointer_catalog().unwrap()
+                )
+            );
+        }
     }
 
     #[tokio::test]

@@ -790,7 +790,7 @@ pub(crate) async fn open_view(
         .map_err(metadata_error)?;
     // Origin-backed readers need complete visibility controls, while Git pack
     // bodies remain in their authenticated sources for bounded range reads.
-    let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(
+    let view = crab_read::capsule_protocol::open_git_view_from_root(
         layout,
         root,
         crab_read::capsule_protocol::CapsuleReadLimits {

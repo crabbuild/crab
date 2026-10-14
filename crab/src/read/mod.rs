@@ -568,17 +568,15 @@ impl Inner {
             remote.router.global_prefix().to_owned(),
         );
         let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
-        Ok(
-            crab_read::capsule_protocol::open_view_from_root_with_metadata(
-                &layout,
-                root,
-                crab_read::capsule_protocol::CapsuleReadLimits {
-                    max_capsule_bytes: maximum,
-                    max_frontier_bytes: maximum,
-                },
-            )
-            .await?,
+        Ok(crab_read::capsule_protocol::open_git_view_from_root(
+            &layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: maximum,
+                max_frontier_bytes: maximum,
+            },
         )
+        .await?)
     }
 }
 

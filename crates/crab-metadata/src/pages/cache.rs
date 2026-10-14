@@ -34,12 +34,16 @@ impl PageCache {
         store: &Store,
         path: &object_store::path::Path,
         layer: usize,
-        source_bytes: u64,
+        source: std::ops::Range<u64>,
         root: &PageRef,
         kind: Kind,
         keys: &[Vec<u8>],
         work: &mut PageWork,
     ) -> Result<Vec<Option<Vec<u8>>>> {
+        let source_bytes = source
+            .end
+            .checked_sub(source.start)
+            .ok_or_else(|| corruption("invalid page source range"))?;
         if keys.iter().any(|key| key.len() != kind.key_bytes()) {
             return Err(corruption("invalid lookup key"));
         }
@@ -51,7 +55,7 @@ impl PageCache {
         while !pending.is_empty() {
             for (reference, _) in &pending {
                 reference.validate(kind, source_bytes)?;
-                if work.seen.insert((layer, reference.offset)) {
+                if work.seen.insert((layer, source.start + reference.offset)) {
                     work.bytes = work
                         .bytes
                         .checked_add(u64::from(reference.bytes))
@@ -63,11 +67,14 @@ impl PageCache {
             }
             // Charge the entire wave before starting I/O, including warm pages.
             let pages = futures_util::stream::iter(std::mem::take(&mut pending))
-                .map(|(reference, positions)| async move {
-                    let page = self
-                        .fetch(store, path, layer, source_bytes, &reference, kind)
-                        .await?;
-                    Ok::<_, MetadataError>((page, positions))
+                .map(|(reference, positions)| {
+                    let source = source.clone();
+                    async move {
+                        let page = self
+                            .fetch(store, path, layer, source.clone(), &reference, kind)
+                            .await?;
+                        Ok::<_, MetadataError>((page, positions))
+                    }
                 })
                 .buffer_unordered(4)
                 .try_collect::<Vec<_>>()
@@ -118,12 +125,20 @@ impl PageCache {
         store: &Store,
         path: &object_store::path::Path,
         layer: usize,
-        source_bytes: u64,
+        source: std::ops::Range<u64>,
         reference: &PageRef,
         kind: Kind,
     ) -> Result<Arc<Page>> {
+        let source_bytes = source
+            .end
+            .checked_sub(source.start)
+            .ok_or_else(|| corruption("invalid page source range"))?;
         reference.validate(kind, source_bytes)?;
-        let key = (layer, reference.offset);
+        let offset = source
+            .start
+            .checked_add(reference.offset)
+            .ok_or_else(|| corruption("page source offset overflows"))?;
+        let key = (layer, offset);
         if let Some((previous_kind, previous, page)) = self.state()?.pages.get(&key) {
             if *previous_kind != kind || previous != reference {
                 return Err(corruption("cached page routing metadata changed"));
@@ -131,10 +146,7 @@ impl PageCache {
             return Ok(page.clone());
         }
         let bytes = store
-            .range_get(
-                path,
-                reference.offset..reference.offset + u64::from(reference.bytes),
-            )
+            .range_get(path, offset..offset + u64::from(reference.bytes))
             .await?;
         let page = Arc::new(decode(
             &bytes,
