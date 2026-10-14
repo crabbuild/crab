@@ -34,15 +34,17 @@ pub use lfs_pointer::{
 pub use odb_adapter::{CrabOdb, NoopXorbResolver, OdbError, XorbBlobResolver};
 pub use pack::{
     IndexedPack, InstalledPack, PackError, index_pack_file, initialize_bare_git_dir,
-    install_pack_file_from_path, object_kinds_from_git_dir, verify_pack_sha1,
+    install_pack_file_from_path, object_kinds_from_git_dir, object_metadata_from_git_dir,
+    verify_pack_sha1,
 };
 pub use pack_locator::{
     PackKindMetadataIter, PackLocationIter, PackLocatorError, PackObjectLocation,
-    decode_pack_kind_metadata, decode_pack_kind_metadata_iter, decode_pack_kind_metadata_records,
-    decode_pack_kind_metadata_with_external_deltas, encode_pack_kind_metadata,
-    encode_pack_kind_metadata_with_external_deltas, max_pack_index_size,
-    max_pack_kind_metadata_size, pack_kind_metadata_size, pack_reverse_index_size,
-    validate_pack_kind_metadata, write_pack_reverse_index,
+    PackObjectMetadata, decode_pack_kind_metadata, decode_pack_kind_metadata_iter,
+    decode_pack_kind_metadata_records, decode_pack_kind_metadata_with_external_deltas,
+    decode_pack_object_metadata, decode_pack_object_metadata_records, encode_pack_kind_metadata,
+    encode_pack_kind_metadata_with_external_deltas, encode_pack_object_metadata,
+    max_pack_index_size, max_pack_kind_metadata_size, pack_kind_metadata_size,
+    pack_reverse_index_size, validate_pack_kind_metadata, write_pack_reverse_index,
 };
 pub use pointer_detect::{PointerKind, classify};
 pub use pointer_ref::{PointerRefError, resolve_pointer_commit, resolve_pointer_ref};

@@ -17,6 +17,7 @@ use sha1::{Digest, Sha1};
 use super::{IncomingPack, object_id, scratch::ScratchDirectory};
 use crate::{
     PackLocationIter, PackLocatorError, encode_pack_kind_metadata_with_external_deltas,
+    encode_pack_object_metadata,
     pack_locator::{PackIndexEntry, write_pack_index_v2},
     write_pack_reverse_index,
 };
@@ -77,6 +78,7 @@ pub struct PreparedPack {
     index: PathBuf,
     reverse: PathBuf,
     kinds: PathBuf,
+    object_metadata: PathBuf,
     size: u64,
     object_count: u32,
     git_sha1: ObjectId,
@@ -114,6 +116,11 @@ impl PreparedPack {
     /// Returns the checksummed Crab object-kind sidecar path.
     pub fn kinds_path(&self) -> &Path {
         &self.kinds
+    }
+
+    /// Returns capsule metadata with proven resolved sizes and external bases.
+    pub fn object_metadata_path(&self) -> &Path {
+        &self.object_metadata
     }
 
     /// Returns the complete pack size including its SHA-1 trailer.
@@ -323,17 +330,33 @@ impl IncomingPack {
         for location in locations {
             check(cancelled)?;
             let location = location?;
-            let kind = self
+            let object = self
                 .objects
                 .get(&location.oid)
-                .ok_or(PreparePackError::Mismatch("unknown indexed object"))?
-                .kind;
-            metadata.push((kind, external_delta_map.get(&location.oid).copied()));
+                .ok_or(PreparePackError::Mismatch("unknown indexed object"))?;
+            metadata.push((
+                object.kind,
+                object.size as u64,
+                external_delta_map.get(&location.oid).copied(),
+            ));
         }
         let kinds_path = pack.with_extension("kinds");
-        let kinds = encode_pack_kind_metadata_with_external_deltas(git_sha1, &metadata)?;
+        // kinds_path is a released v1 artifact. Capsules use resolved metadata;
+        // both sidecars share this owner's admission and temporary lifetime.
+        let kinds = encode_pack_kind_metadata_with_external_deltas(
+            git_sha1,
+            &metadata
+                .iter()
+                .map(|(kind, _, base)| (*kind, *base))
+                .collect::<Vec<_>>(),
+        )?;
         directory.reserve(kinds.len() as u64)?;
         std::fs::write(&kinds_path, kinds)?;
+        check(cancelled)?;
+        let object_metadata_path = pack.with_extension("metadata");
+        let object_metadata = encode_pack_object_metadata(git_sha1, &metadata)?;
+        directory.reserve(object_metadata.len() as u64)?;
+        std::fs::write(&object_metadata_path, object_metadata)?;
         tracing::info!(
             phase = "sidecars",
             objects = object_count,
@@ -364,6 +387,7 @@ impl IncomingPack {
             index,
             reverse,
             kinds: kinds_path,
+            object_metadata: object_metadata_path,
             size,
             object_count,
             git_sha1,

@@ -647,3 +647,68 @@ download tests 5 passed, export tests 7 passed, error-source/diagnostic tests
 existing compact-unwind section-size warning. Broad lint/CI and native remote
 CLI end-to-end qualification remain pending. Publish this slice as a draft;
 these results do not establish stage-4 completion or readiness to merge.
+
+
+## Authenticated object-size publication in qualification
+
+Capsule producers now encode sidecar version 3: pack-offset object kinds,
+fully resolved uncompressed Git sizes, and sparse cross-pack delta bases. The
+existing pack checksum, object-count binding and Blake3 digest cover these facts.
+Lengths and counts are checked before decoding size and external-base payloads;
+new external-base ordinals must be strictly increasing. Content reads retain
+independent packed-entry CRC and reconstructed Git OID checks.
+
+Incoming quarantine supplies verified reconstructed sizes, including internal
+and external delta targets. Native Git builders request `objectsize` alongside
+`objecttype`, with replacement refs disabled. Git's pack-header size describes
+the delta program for deltified entries, so it is not used as the logical size.
+See [Git cat-file batch output](https://git-scm.com/docs/git-cat-file#_batch_output)
+and [Git's deltified representation](https://git-scm.com/docs/gitformat-pack#_deltified_representation).
+
+Producer coverage includes shared remote preparation, native CLI capsule push,
+checkpoint physical repacking, protected receive synthesis, filtered views, and
+S3 gateway capsule mutations. Both origin-backed and installed capsule locator
+consumers carry size facts into `GitObjectMetadata`; catalog ingestion also
+preserves the new field. Opaque `CapsuleGitPack` construction retains its existing
+format-only validation boundary.
+
+Release audit: kind sidecars introduced in `800364813bd` are reachable from
+`v1.0.1` and `v1.2.0`–`v1.2.4`; prepared pack artifacts introduced in
+`3f21529f020` are reachable from `v1.2.0`–`v1.2.4`. Released kind-only APIs and
+`PreparedPack::kinds_path()` retain their original shape/encoding. A separately
+reserved temporary metadata artifact supplies the unshipped capsule path;
+legacy publication remains on the released sidecar. Both artifacts belong to
+the same scratch owner and release their disk reservations together. Capsule
+repacking produces resolved facts for prior kind-only capsule sources.
+
+The initial mechanics receipt passes 28 focused tests: 12 codec/range tests,
+13 quarantine tests and 3 native metadata-query tests. These include malformed
+size/count/ordinal payloads, checksum binding, resolved internal/external delta
+sizes, replacement-ref isolation and scratch cleanup.
+
+The first CLI rerun still exceeded the unchanged listing byte bound. Tracing
+that failure found two additional gaps: control-only sources omitted the metadata
+range, and pack-index decoding discarded logical facts. Lazy index sources now
+carry the authenticated metadata range separately from the index, without
+reading reverse indexes or spanning intervening pack bodies. Batch flights bind
+the extra range proof into their identity. One OID-ordered fact vector replaces
+the sparse external-base map and participates in cache memory accounting.
+
+After these corrections, all 38 reader tests pass, including batched size facts,
+exact source-byte accounting and changed metadata-hash rejection. All four CLI
+remote-read tests pass, including the original 256-KiB listing bound beside the
+unrelated 2-MiB blob. Affected CLI, remote, read, protected-service and gateway
+consumers compile. The expanded RustFS runner now exercises real CLI download
+and export for plain/Crab/LFS content and checks temporary-object cleanup; its
+live receipt remains pending.
+
+The published draft at `0ea3e637bf9` has two CI failures. The architecture checker
+requires the removed pack installer in its delegation inventory; a prepared
+replacement additionally checks the new remote adapter and retains raw-layout
+bans. Its isolated positive/negative checks pass, but applying the inventory
+change awaits explicit approval under `AGENTS.md`. Git 2.40 fails the mirror
+pack-child cancellation marker check: the command returns `CRAB-E0090`, while
+the hook-stop witness is absent. The same check passes on base PR #537; the
+subprocess runner is unchanged in #538, and the cause remains unproven.
+These findings do not establish draft readiness, complete lifecycle proof or
+stage-4 completion.

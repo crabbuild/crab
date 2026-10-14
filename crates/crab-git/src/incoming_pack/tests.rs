@@ -78,6 +78,7 @@ fn prepared_sidecars_share_quarantine_admission_and_failed_growth_releases_only_
         prepared.index_path(),
         prepared.reverse_path(),
         prepared.kinds_path(),
+        prepared.object_metadata_path(),
     ]
     .iter()
     .map(|path| path.metadata().unwrap().len())
@@ -584,6 +585,25 @@ fn verify_prepared_artifacts_with_native_git(
         .map(|o| (o.oid, o.kind))
         .collect::<Vec<_>>();
     assert_eq!(kinds, expected);
+    let bytes = std::fs::read(prepared.object_metadata_path()).unwrap();
+    let locations = crate::PackLocationIter::open(
+        prepared.index_path(),
+        prepared.reverse_path(),
+        prepared.size(),
+    )
+    .unwrap();
+    let mut facts = crate::decode_pack_object_metadata(&bytes, locations).unwrap();
+    facts.sort_unstable_by_key(|(oid, _)| *oid);
+    assert_eq!(
+        facts
+            .iter()
+            .map(|(oid, facts)| (*oid, facts.kind, facts.logical_size))
+            .collect::<Vec<_>>(),
+        accepted
+            .objects()
+            .map(|object| (object.oid, object.kind, Some(object.size as u64)))
+            .collect::<Vec<_>>()
+    );
 
     // Native Git sees only the new self-contained pack, with no alternates or
     // source repository. It independently reconstructs every quarantined object.
@@ -775,6 +795,26 @@ fn generated_external_tree_base_produces_bounded_cross_pack_ref_delta() {
     )
     .unwrap();
     assert_eq!(metadata, vec![(target_oid, Kind::Tree, Some(base_oid))]);
+    let locations =
+        crate::PackLocationIter::open(delta.index_path(), delta.reverse_path(), delta.size())
+            .unwrap();
+    let facts = crate::decode_pack_object_metadata(
+        &std::fs::read(delta.object_metadata_path()).unwrap(),
+        locations,
+    )
+    .unwrap();
+    assert_eq!(
+        facts,
+        vec![(
+            target_oid,
+            crate::PackObjectMetadata {
+                kind: Kind::Tree,
+                logical_size: Some(target.len() as u64),
+                external_delta_base: Some(base_oid),
+            }
+        )]
+    );
+
     let client = tempfile::tempdir_in(temp.path()).unwrap();
     git(client.path(), &["init", "--bare", "-q"], b"");
     let written = git(

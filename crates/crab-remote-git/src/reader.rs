@@ -243,6 +243,7 @@ struct LazyPackSidecars {
 
 #[derive(Debug, Clone)]
 struct LazyPackIndex {
+    kind_metadata: Option<RemoteGitSidecarRange>,
     index: RemoteGitSidecarRange,
     reverse_index: RemoteGitSidecarRange,
 }
@@ -360,6 +361,7 @@ impl RemoteGitPackSource {
         source_size: u64,
         index: RemoteGitSidecarRange,
         reverse_index: RemoteGitSidecarRange,
+        kind_metadata: Option<RemoteGitSidecarRange>,
     ) -> Result<Self> {
         if pack_size == 0 || source_size == 0 {
             return Err(Error::RepositoryState {
@@ -372,7 +374,10 @@ impl RemoteGitPackSource {
             .ok_or(Error::RepositoryState {
                 reason: RepositoryStateError::InconsistentGeneration,
             })?;
-        for range in [&index, &reverse_index] {
+        for range in [&index, &reverse_index]
+            .into_iter()
+            .chain(kind_metadata.iter())
+        {
             if range.length == 0
                 || range
                     .offset
@@ -395,6 +400,7 @@ impl RemoteGitPackSource {
             kind_metadata: None,
             lazy_sidecars: None,
             lazy_index: Some(LazyPackIndex {
+                kind_metadata,
                 index,
                 reverse_index,
             }),
@@ -1159,14 +1165,15 @@ impl RemoteGitReader {
                     ) {
                         return Ok(());
                     }
-                    let object_id = index.object_ids[index_position];
                     let location = index.location_at(index_position)?;
-                    let delta_base_oid = index
-                        .external_delta_bases
-                        .get(&object_id)
-                        .map(|base| base.as_bytes().try_into())
-                        .transpose()
-                        .map_err(|_| Error::UnsupportedObjectFormat)?;
+                    let metadata = if index.metadata.is_empty() {
+                        Default::default()
+                    } else {
+                        *index.metadata.get(index_position).ok_or(Error::Corrupt {
+                            stage: CorruptionStage::PackIndex,
+                        })?
+                    };
+                    let delta_base_oid = metadata.delta_base_oid;
                     let candidate = GitObjectLocator {
                         // Pack indexes provide a complete immutable location but
                         // not the catalog's dense ordinal. Batch object reads use
@@ -1175,10 +1182,7 @@ impl RemoteGitReader {
                         ordinal: 0,
                         pack_id,
                         location,
-                        metadata: crab_metadata::git_object_locator::GitObjectMetadata {
-                            delta_base_oid,
-                            ..Default::default()
-                        },
+                        metadata,
                     };
                     let replace = match lookups[position] {
                         GitObjectLookup::Miss => true,
@@ -2153,50 +2157,72 @@ impl RemoteGitReader {
                     budget,
                     move |shared_cancellation, shared_budget| async move {
                         check_cancelled(&shared_cancellation)?;
-                        let (index_bytes, kind_metadata) =
-                            if let Some(index) = source_for_work.index.clone() {
-                                shared_budget
-                                    .charge(BudgetDimension::FetchedBytes, index.len() as u64)
-                                    .await?;
-                                (index, source_for_work.kind_metadata.clone())
-                            } else if let Some(lazy) = source_for_work.lazy_index.clone() {
-                                let path = source_for_work.path.clone().ok_or(Error::Corrupt {
-                                    stage: CorruptionStage::PackIndex,
-                                })?;
-                                let admission: Arc<dyn crab_storage::ReadAdmission> =
-                                    shared_budget.clone();
-                                let index = read_lazy_range_from_store(
+                        let (index_bytes, kind_metadata) = if let Some(index) =
+                            source_for_work.index.clone()
+                        {
+                            shared_budget
+                                .charge(BudgetDimension::FetchedBytes, index.len() as u64)
+                                .await?;
+                            (index, source_for_work.kind_metadata.clone())
+                        } else if let Some(lazy) = source_for_work.lazy_index.clone() {
+                            let path = source_for_work.path.clone().ok_or(Error::Corrupt {
+                                stage: CorruptionStage::PackIndex,
+                            })?;
+                            let admission: Arc<dyn crab_storage::ReadAdmission> =
+                                shared_budget.clone();
+                            let index = read_lazy_range_from_store(
+                                &store,
+                                &runtime,
+                                &path,
+                                &lazy.index,
+                                admission.clone(),
+                                &shared_cancellation,
+                            )
+                            .await?;
+                            let kind_metadata = if let Some(range) = &lazy.kind_metadata {
+                                let maximum =
+                                    crab_git::max_pack_kind_metadata_size(inventory.object_count)
+                                        .ok_or(Error::Corrupt {
+                                        stage: CorruptionStage::PackIndex,
+                                    })?;
+                                check_limit("pack metadata bytes", range.length, maximum)?;
+                                Some(
+                                    read_lazy_range_from_store(
+                                        &store,
+                                        &runtime,
+                                        &path,
+                                        range,
+                                        admission,
+                                        &shared_cancellation,
+                                    )
+                                    .await?,
+                                )
+                            } else {
+                                None
+                            };
+                            (index, kind_metadata)
+                        } else if let Some(lazy) = source_for_work.lazy_sidecars.clone() {
+                            let path = source_for_work.path.clone().ok_or(Error::Corrupt {
+                                stage: CorruptionStage::PackIndex,
+                            })?;
+                            let admission: Arc<dyn crab_storage::ReadAdmission> =
+                                shared_budget.clone();
+                            let (index, _reverse_index, kind_metadata) =
+                                read_lazy_sidecars_from_store(
                                     &store,
                                     &runtime,
                                     &path,
-                                    &lazy.index,
+                                    lazy,
                                     admission,
                                     &shared_cancellation,
                                 )
                                 .await?;
-                                (index, None)
-                            } else if let Some(lazy) = source_for_work.lazy_sidecars.clone() {
-                                let path = source_for_work.path.clone().ok_or(Error::Corrupt {
-                                    stage: CorruptionStage::PackIndex,
-                                })?;
-                                let admission: Arc<dyn crab_storage::ReadAdmission> =
-                                    shared_budget.clone();
-                                let (index, _reverse_index, kind_metadata) =
-                                    read_lazy_sidecars_from_store(
-                                        &store,
-                                        &runtime,
-                                        &path,
-                                        lazy,
-                                        admission,
-                                        &shared_cancellation,
-                                    )
-                                    .await?;
-                                (index, Some(kind_metadata))
-                            } else {
-                                return Err(Error::Corrupt {
-                                    stage: CorruptionStage::PackIndex,
-                                });
-                            };
+                            (index, Some(kind_metadata))
+                        } else {
+                            return Err(Error::Corrupt {
+                                stage: CorruptionStage::PackIndex,
+                            });
+                        };
                         if let Some(kind_metadata) = &kind_metadata {
                             let maximum =
                                 crab_git::max_pack_kind_metadata_size(inventory.object_count)
@@ -2359,10 +2385,13 @@ impl RemoteGitReader {
         if !matches {
             return Ok(None);
         }
-        if index.external_delta_bases.values().any(|base| {
-            !object_ids.iter().any(|oid| oid == base)
-                && !allowed_external_bases.iter().any(|oid| oid == base)
-        }) {
+        if index
+            .metadata
+            .iter()
+            .filter_map(|metadata| metadata.delta_base_oid)
+            .map(gix_hash::ObjectId::from)
+            .any(|base| !object_ids.contains(&base) && !allowed_external_bases.contains(&base))
+        {
             return Ok(None);
         }
         Ok(Some(index.pack_checksum))
@@ -3502,7 +3531,7 @@ pub(crate) struct PackIndex {
     pub(crate) offset_order: Vec<u32>,
     pub(crate) pack_data_end: u64,
     pub(crate) pack_checksum: [u8; 20],
-    pub(crate) external_delta_bases: HashMap<gix_hash::ObjectId, gix_hash::ObjectId>,
+    pub(crate) metadata: Vec<crab_metadata::git_object_locator::GitObjectMetadata>,
     pub(crate) source_bytes: u64,
 }
 
@@ -3577,13 +3606,9 @@ impl PackIndex {
                     .capacity()
                     .saturating_mul(std::mem::size_of::<u32>()),
             )
-            .saturating_add(
-                self.external_delta_bases
-                    .capacity()
-                    .saturating_mul(
-                        std::mem::size_of::<(gix_hash::ObjectId, gix_hash::ObjectId)>(),
-                    ),
-            )
+            .saturating_add(self.metadata.capacity().saturating_mul(std::mem::size_of::<
+                crab_metadata::git_object_locator::GitObjectMetadata,
+            >()))
     }
 }
 
@@ -3863,9 +3888,9 @@ fn parse_pack_index(
             });
         }
     }
-    let mut external_delta_bases = HashMap::new();
+    let mut metadata = Vec::new();
     if let Some(kind_metadata) = kind_metadata {
-        let records = crab_git::decode_pack_kind_metadata_records(
+        let records = crab_git::decode_pack_object_metadata_records(
             &kind_metadata,
             gix_hash::ObjectId::from(pack_checksum),
             inventory.object_count,
@@ -3873,17 +3898,45 @@ fn parse_pack_index(
         .map_err(|_| Error::Corrupt {
             stage: CorruptionStage::PackIndex,
         })?;
-        for (pack_position, (_, base)) in records.into_iter().enumerate() {
-            let Some(base) = base else {
-                continue;
-            };
+        metadata
+            .try_reserve_exact(capacity)
+            .map_err(|source| Error::Allocation {
+                requested: capacity.saturating_mul(std::mem::size_of::<
+                    crab_metadata::git_object_locator::GitObjectMetadata,
+                >()),
+                source,
+            })?;
+        metadata.resize(capacity, Default::default());
+        for (pack_position, record) in records.into_iter().enumerate() {
             let index_position = *offset_order.get(pack_position).ok_or(Error::Corrupt {
                 stage: CorruptionStage::PackIndex,
             })? as usize;
             let oid = *object_ids.get(index_position).ok_or(Error::Corrupt {
                 stage: CorruptionStage::PackIndex,
             })?;
-            external_delta_bases.insert(oid, base);
+            if record.external_delta_base == Some(oid) {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::PackIndex,
+                });
+            }
+            let kind = match record.kind {
+                gix_object::Kind::Commit => {
+                    crab_metadata::git_object_locator::GitObjectKind::Commit
+                }
+                gix_object::Kind::Tree => crab_metadata::git_object_locator::GitObjectKind::Tree,
+                gix_object::Kind::Blob => crab_metadata::git_object_locator::GitObjectKind::Blob,
+                gix_object::Kind::Tag => crab_metadata::git_object_locator::GitObjectKind::Tag,
+            };
+            let delta_base_oid = record
+                .external_delta_base
+                .map(|oid| oid.as_bytes().try_into())
+                .transpose()
+                .map_err(|_| Error::UnsupportedObjectFormat)?;
+            metadata[index_position] = crab_metadata::git_object_locator::GitObjectMetadata {
+                kind: Some(kind),
+                logical_size: record.logical_size,
+                delta_base_oid,
+            };
         }
     }
     Ok(PackIndex {
@@ -3893,7 +3946,7 @@ fn parse_pack_index(
         offset_order,
         pack_data_end,
         pack_checksum,
-        external_delta_bases,
+        metadata,
         source_bytes,
     })
 }
@@ -4884,7 +4937,7 @@ mod tests {
             offset_order: vec![0, 2, 1],
             pack_data_end: 400,
             pack_checksum: [0; 20],
-            external_delta_bases: HashMap::new(),
+            metadata: Vec::new(),
             source_bytes: 1,
         };
 
@@ -5033,11 +5086,34 @@ mod tests {
         assert_eq!(entries[0].base_oid, Some(base_oid));
     }
 
-    async fn lazy_index_fixture(gap: usize) -> (RemoteGitReader, u64) {
+    async fn lazy_index_fixture(gap: usize, with_metadata: bool) -> (RemoteGitReader, u64) {
         let runtime = Arc::new(RemoteGitRuntime::default());
         let store = Store::new(Arc::new(InMemory::new()));
         let path = ObjectPath::from("v2/capsules/index-batch");
         let mut body = vec![0; 100];
+        let mut metadata_ranges = HashMap::new();
+        if with_metadata {
+            for value in [1_u8, 2] {
+                let bytes = crab_git::encode_pack_object_metadata(
+                    gix_hash::ObjectId::from([value; 20]),
+                    &[(
+                        gix_object::Kind::Blob,
+                        2 * 1024 * 1024 + u64::from(value),
+                        None,
+                    )],
+                )
+                .unwrap();
+                metadata_ranges.insert(
+                    value,
+                    RemoteGitSidecarRange {
+                        offset: body.len() as u64,
+                        length: bytes.len() as u64,
+                        blake3: blake3::hash(&bytes).to_hex().to_string(),
+                    },
+                );
+                body.extend_from_slice(&bytes);
+            }
+        }
         let mut sources = HashMap::new();
         let mut inventory = Vec::new();
         for value in [1_u8, 2] {
@@ -5070,6 +5146,7 @@ mod tests {
                     body.len() as u64,
                     range.clone(),
                     range,
+                    metadata_ranges.get(&value).cloned(),
                 )
                 .unwrap(),
             );
@@ -5096,8 +5173,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coalesced_index_reads_preserve_resolved_metadata_without_body_reads() {
+        let (reader, size) = lazy_index_fixture(64, true).await;
+        let budget = OperationBudget::new(
+            crate::OperationLimits {
+                max_storage_requests: 3,
+                max_fetched_bytes: size,
+                ..Default::default()
+            },
+            reader.runtime.clone(),
+        );
+        let result = reader
+            .lookup_batch_from_pack_indexes(
+                &[[2; 20], [1; 20], [2; 20]],
+                &budget,
+                &CancellationToken::new(),
+            )
+            .await;
+        reader.runtime.shutdown().await;
+        let facts = result
+            .unwrap()
+            .into_iter()
+            .map(|lookup| match lookup {
+                GitObjectLookup::Hit(locator) => {
+                    (locator.metadata.kind, locator.metadata.logical_size)
+                }
+                _ => panic!("metadata-bearing indexes must resolve the requested objects"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            facts,
+            [2_u64, 1, 2].map(|value| (
+                Some(crab_metadata::git_object_locator::GitObjectKind::Blob),
+                Some(2 * 1024 * 1024 + value)
+            ))
+        );
+        assert_eq!(
+            budget.usage().await.amount(BudgetDimension::FetchedBytes),
+            size
+        );
+    }
+
+    #[tokio::test]
+    async fn coalesced_index_reads_reject_tampered_metadata_without_fallback() {
+        let (reader, _) = lazy_index_fixture(64, true).await;
+        let source = reader.pack_source(&MerkleHash::from([1; 32])).unwrap();
+        let path = source.path.clone().unwrap();
+        let range = source
+            .lazy_index
+            .as_ref()
+            .unwrap()
+            .kind_metadata
+            .as_ref()
+            .unwrap();
+        let (bytes, _) = reader.store.get_with_etag(&path).await.unwrap();
+        let mut bytes = bytes.to_vec();
+        bytes[range.offset as usize] ^= 1;
+        reader
+            .store
+            .put_overwrite(&path, Bytes::from(bytes))
+            .await
+            .unwrap();
+        let budget =
+            OperationBudget::new(crate::OperationLimits::default(), reader.runtime.clone());
+        let result = reader
+            .lookup_batch_from_pack_indexes(&[[1; 20], [2; 20]], &budget, &CancellationToken::new())
+            .await;
+        reader.runtime.shutdown().await;
+        assert!(matches!(
+            result,
+            Err(Error::Corrupt {
+                stage: CorruptionStage::PackIndex
+            })
+        ));
+    }
+
+    #[tokio::test]
     async fn nearby_embedded_indexes_share_one_bounded_origin_read() {
-        let (reader, window_size) = lazy_index_fixture(64).await;
+        let (reader, window_size) = lazy_index_fixture(64, false).await;
         let runtime = reader.runtime.clone();
         let budget = OperationBudget::new(
             crate::OperationLimits {
@@ -5131,7 +5284,7 @@ mod tests {
 
     #[tokio::test]
     async fn embedded_index_batch_preserves_unsorted_requests_duplicates_and_misses() {
-        let (reader, _) = lazy_index_fixture(64).await;
+        let (reader, _) = lazy_index_fixture(64, false).await;
         let budget = OperationBudget::new(
             crate::OperationLimits {
                 max_storage_requests: 1,
@@ -5170,7 +5323,7 @@ mod tests {
     #[tokio::test]
     async fn distant_embedded_indexes_do_not_overread_the_source() {
         let gap = MAX_COALESCED_SOURCE_GAP_BYTES as usize + 1;
-        let (reader, window_size) = lazy_index_fixture(gap).await;
+        let (reader, window_size) = lazy_index_fixture(gap, false).await;
         let budget =
             OperationBudget::new(crate::OperationLimits::default(), reader.runtime.clone());
         reader
@@ -5186,7 +5339,7 @@ mod tests {
 
     #[tokio::test]
     async fn embedded_index_window_rejects_corrupt_sibling_before_caching() {
-        let (mut reader, _) = lazy_index_fixture(0).await;
+        let (mut reader, _) = lazy_index_fixture(0, false).await;
         let source = reader
             .pack_sources
             .get_mut(&MerkleHash::from([2; 32]))
@@ -5211,7 +5364,7 @@ mod tests {
 
     #[tokio::test]
     async fn embedded_index_window_charges_gaps_to_the_byte_budget() {
-        let (reader, window_size) = lazy_index_fixture(64).await;
+        let (reader, window_size) = lazy_index_fixture(64, false).await;
         let budget = OperationBudget::new(
             crate::OperationLimits {
                 max_fetched_bytes: window_size - 1,
@@ -5232,7 +5385,7 @@ mod tests {
 
     #[tokio::test]
     async fn embedded_index_windows_keep_participant_budgets_independent() {
-        let (reader, window_size) = lazy_index_fixture(64).await;
+        let (reader, window_size) = lazy_index_fixture(64, false).await;
         let tight = OperationBudget::new(
             crate::OperationLimits {
                 max_fetched_bytes: window_size - 1,
@@ -5282,7 +5435,7 @@ mod tests {
                     offset_order: vec![0],
                     pack_data_end: 200,
                     pack_checksum: [0; 20],
-                    external_delta_bases: HashMap::new(),
+                    metadata: Vec::new(),
                     source_bytes: 1,
                 }),
             )
@@ -5339,7 +5492,7 @@ mod tests {
                     offset_order: vec![0],
                     pack_data_end: 200,
                     pack_checksum: [0; 20],
-                    external_delta_bases: HashMap::new(),
+                    metadata: Vec::new(),
                     source_bytes: 1,
                 }),
             )
@@ -5389,13 +5542,7 @@ mod tests {
         let external_pack = MerkleHash::from_hex(&"11".repeat(32)).expect("pack hash");
         let full_pack = MerkleHash::from_hex(&"22".repeat(32)).expect("pack hash");
         let oid = gix_hash::ObjectId::from([1; 20]);
-        for (pack_id, external_delta_bases) in [
-            (
-                external_pack,
-                HashMap::from([(oid, gix_hash::ObjectId::from([2; 20]))]),
-            ),
-            (full_pack, HashMap::new()),
-        ] {
+        for (pack_id, delta_base_oid) in [(external_pack, Some([2; 20])), (full_pack, None)] {
             runtime
                 .insert_pack_index(
                     crate::runtime::PackIndexCacheKey::new(&identity, pack_id),
@@ -5406,7 +5553,10 @@ mod tests {
                         offset_order: vec![0],
                         pack_data_end: 200,
                         pack_checksum: [0; 20],
-                        external_delta_bases,
+                        metadata: vec![crab_metadata::git_object_locator::GitObjectMetadata {
+                            delta_base_oid,
+                            ..Default::default()
+                        }],
                         source_bytes: 1,
                     }),
                 )
@@ -5463,7 +5613,10 @@ mod tests {
                     offset_order: vec![0],
                     pack_data_end: 200,
                     pack_checksum: [7; 20],
-                    external_delta_bases: HashMap::from([(object, base)]),
+                    metadata: vec![crab_metadata::git_object_locator::GitObjectMetadata {
+                        delta_base_oid: Some(base.as_bytes().try_into().unwrap()),
+                        ..Default::default()
+                    }],
                     source_bytes: 1,
                 }),
             )
@@ -5574,7 +5727,7 @@ mod tests {
                     offset_order: vec![0],
                     pack_data_end: 200,
                     pack_checksum: [0; 20],
-                    external_delta_bases: HashMap::new(),
+                    metadata: Vec::new(),
                     source_bytes: 1,
                 }),
             )
@@ -5686,7 +5839,7 @@ mod tests {
                     offset_order: vec![0],
                     pack_data_end: 200,
                     pack_checksum: [0; 20],
-                    external_delta_bases: HashMap::new(),
+                    metadata: Vec::new(),
                     source_bytes: 1,
                 }),
             )

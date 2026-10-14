@@ -46,7 +46,11 @@ pub(super) struct IndexWindow {
     path: ObjectPath,
     range: std::ops::Range<u64>,
     extra_bytes: u64,
-    members: Vec<(GitPackInventoryEntry, RemoteGitSidecarRange)>,
+    members: Vec<(
+        GitPackInventoryEntry,
+        RemoteGitSidecarRange,
+        Option<RemoteGitSidecarRange>,
+    )>,
 }
 
 impl RemoteGitReader {
@@ -84,13 +88,14 @@ impl RemoteGitReader {
                 lazy.index.length,
                 self.limits.max_pack_index_bytes,
             )?;
-            by_source
-                .entry(path.clone())
-                .or_default()
-                .push((inventory[&pack_id], lazy.index.clone()));
+            by_source.entry(path.clone()).or_default().push((
+                inventory[&pack_id],
+                lazy.index.clone(),
+                lazy.kind_metadata.clone(),
+            ));
         }
         for (path, mut members) in by_source {
-            members.sort_unstable_by_key(|(entry, index)| (index.offset, entry.pack_id));
+            members.sort_unstable_by_key(|(entry, index, _)| (index.offset, entry.pack_id));
             let mut current: Option<IndexWindow> = None;
             for member in members {
                 let start = member.1.offset;
@@ -159,13 +164,19 @@ impl RemoteGitReader {
         let mut digest = blake3::Hasher::new();
         digest.update(&(window.path.as_ref().len() as u64).to_le_bytes());
         digest.update(window.path.as_ref().as_bytes());
-        for (entry, range) in &window.members {
+        for (entry, range, metadata) in &window.members {
             digest.update(entry.pack_id.hex().as_bytes());
             digest.update(&entry.object_count.to_le_bytes());
             digest.update(&entry.pack_size.to_le_bytes());
             digest.update(&range.offset.to_le_bytes());
             digest.update(&range.length.to_le_bytes());
             digest.update(range.blake3.as_bytes());
+            digest.update(&[u8::from(metadata.is_some())]);
+            if let Some(metadata) = metadata {
+                digest.update(&metadata.offset.to_le_bytes());
+                digest.update(&metadata.length.to_le_bytes());
+                digest.update(metadata.blake3.as_bytes());
+            }
         }
         let key = PackIndexBatchFlightKey::new(
             &self.identity,
@@ -184,7 +195,7 @@ impl RemoteGitReader {
                 move |cancellation, budget| async move {
                     check_cancelled(&cancellation)?;
                     let mut cached = Vec::with_capacity(window.members.len());
-                    for (entry, _) in &window.members {
+                    for (entry, _, _) in &window.members {
                         let key = PackIndexCacheKey::new(&identity, entry.pack_id);
                         if let Some(index) = runtime.cached_pack_index(&key, maximum).await {
                             cached.push((entry.pack_id, index));
@@ -199,25 +210,48 @@ impl RemoteGitReader {
                         &runtime,
                         &window.path,
                         window.range.clone(),
-                        budget,
+                        budget.clone(),
                         &cancellation,
                     )
                     .await?;
+                    let mut inputs = Vec::with_capacity(window.members.len());
+                    for (entry, range, metadata) in window.members {
+                        check_cancelled(&cancellation)?;
+                        let metadata = if let Some(metadata) = metadata {
+                            let maximum = crab_git::max_pack_kind_metadata_size(entry.object_count)
+                                .ok_or(Error::Corrupt {
+                                    stage: CorruptionStage::PackIndex,
+                                })?;
+                            check_limit("pack metadata bytes", metadata.length, maximum)?;
+                            Some(
+                                read_lazy_range_from_store(
+                                    &store,
+                                    &runtime,
+                                    &window.path,
+                                    &metadata,
+                                    budget.clone(),
+                                    &cancellation,
+                                )
+                                .await?,
+                            )
+                        } else {
+                            None
+                        };
+                        let index = copy_lazy_sidecar(&bytes, window.range.start, &range)?;
+                        inputs.push((entry, index, metadata));
+                    }
                     let permit = runtime.decode_permit(&cancellation).await?;
                     let indexes = runtime
                         .spawn_blocking(move || {
-                            window
-                                .members
+                            inputs
                                 .into_iter()
-                                .map(|(entry, range)| {
+                                .map(|(entry, index, metadata)| {
                                     check_cancelled(&cancellation)?;
-                                    let index =
-                                        copy_lazy_sidecar(&bytes, window.range.start, &range)?;
                                     let parsed = parse_pack_index(
                                         entry.pack_id,
                                         entry,
                                         index,
-                                        None,
+                                        metadata,
                                         &cancellation,
                                     )?;
                                     Ok((entry.pack_id, Arc::new(parsed)))
@@ -430,6 +464,7 @@ mod tests {
                         offset + length,
                         range.clone(),
                         range,
+                        None,
                     )
                     .unwrap(),
                 );

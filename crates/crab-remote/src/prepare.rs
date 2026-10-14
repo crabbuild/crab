@@ -875,7 +875,7 @@ impl Prepared {
                 tokio::fs::read(pack.pack_path()),
                 tokio::fs::read(pack.index_path()),
                 tokio::fs::read(pack.reverse_path()),
-                tokio::fs::read(pack.kinds_path()),
+                tokio::fs::read(pack.object_metadata_path()),
             )?;
             let external_delta_bases = pack
                 .external_delta_bases()

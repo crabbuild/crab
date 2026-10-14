@@ -1381,6 +1381,52 @@ class ProtocolV2PartialCloneSmoke:
             {"before": before, "after": after},
         )
 
+    def remote_cli_materialization_checks(self) -> None:
+        """Exercise download and export through remote snapshots with real payloads."""
+        root = self.run_root / "remote-cli"
+        root.mkdir()
+        cases = [
+            ("ordinary", "main", "small.txt", b"small ordinary blob\n"),
+            (
+                "crab-pointer", "fixture/pointers", "pointer-heavy/file-0000.ptr",
+                deterministic_bytes(16 * 1024, f"pointer:{self.run_id}:0"),
+            ),
+            (
+                "lfs-pointer", "fixture/lfs-pointers", "lfs-pointer.bin",
+                deterministic_bytes(8 * 1024 * 1024, f"{self.run_id}:lfs-object"),
+            ),
+        ]
+        for label, revision, path, expected in cases:
+            for command in ("download", "export"):
+                cache = root / f"{command}-{label}-cache"
+                destination = root / f"{command}-{label}"
+                destination.mkdir()
+                args = [str(self.crab_bin), command, self.remote_url, path,
+                        "--revision", revision, "--cache-dir", str(cache), "--json"]
+                if command == "download":
+                    args.extend(["--local-dir", str(destination)])
+                else:
+                    args.extend(["--to", destination.as_uri()])
+                baseline = self.storage_telemetry()
+                result = self.run_cmd(f"remote CLI {command} {label}", args, self.run_root)
+                self.record_telemetry_delta(f"remote_cli_{command}_{label}", baseline)
+                materialized = destination / path
+                self.check(
+                    f"remote-cli-{command}-{label}-byte-identity",
+                    result["exit_code"] == 0 and materialized.is_file()
+                    and materialized.read_bytes() == expected,
+                    {"bytes": len(expected)},
+                )
+                self.check(
+                    f"remote-cli-{command}-{label}-no-installed-odb",
+                    not (cache / "git").exists(),
+                )
+                if command == "export":
+                    self.check(
+                        f"remote-cli-export-{label}-drains-temporary-objects",
+                        not any(item.is_file() for item in destination.rglob(".crab-export-tmp/*")),
+                    )
+
     def pointer_fixture_checks(self, lfs_oid: str) -> None:
         """Qualify Crab and Git LFS pointer blobs as distinct Git content."""
         if self.crab_pointer_bytes is None or self.lfs_pointer_bytes is None:
@@ -3911,6 +3957,7 @@ class ProtocolV2PartialCloneSmoke:
         self.clone_legacy(self.storage_telemetry())
         self.performance_fixtures()
         self.pointer_fixture_checks(lfs_oid)
+        self.remote_cli_materialization_checks()
         self.clone_shallow()
         self.store_snapshot("after-shallow-lifecycle")
         filtered_baseline = self.storage_telemetry()

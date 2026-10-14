@@ -64,39 +64,35 @@ async fn fixture() -> (RepositoryReader, Arc<ReadBytes>, tempfile::TempDir, Stri
     let dangling_oid =
         crab_remote::objects::object_id(gix_object::Kind::Commit, &dangling).unwrap();
     objects.push((gix_object::Kind::Commit, dangling));
-    let mut pack = Vec::new();
-    crab_git::pack_writer::write_pack(
-        &mut pack,
-        objects
-            .iter()
-            .map(|(kind, body)| Ok((*kind, body.len() as u64, body.as_slice()))),
-        8 * 1024 * 1024,
+    let directory = tempfile::tempdir().unwrap();
+    let incoming = crab_git::incoming_pack::IncomingPack::from_generated_objects(
+        objects.clone(),
+        directory.path(),
+        crab_git::incoming_pack::ReceiveLimits {
+            max_pack_bytes: 8 * 1024 * 1024,
+            max_objects: 10,
+            max_object_bytes: 4 * 1024 * 1024,
+            max_inflated_bytes: 8 * 1024 * 1024,
+            max_delta_depth: 8,
+        },
         || false,
     )
     .unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("source.pack");
-    std::fs::write(&source, &pack).unwrap();
-    let indexed = crab_git::pack::install_pack_file_from_path(
-        &directory.path().join("indexed"),
-        &source,
-        blake3::hash(&pack).to_hex().as_ref(),
-        8 * 1024 * 1024,
-        true,
-    )
-    .unwrap();
-    let kinds = objects.iter().map(|(kind, _)| *kind).collect::<Vec<_>>();
-    let kind_bytes = crab_git::pack_locator::encode_pack_kind_metadata(
-        gix_hash::ObjectId::from_hex(indexed.git_sha1.as_bytes()).unwrap(),
-        &kinds,
-    )
-    .unwrap();
+    let prepared = incoming
+        .prepare(
+            directory.path(),
+            8 * 1024 * 1024,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap()
+        .unwrap();
+    let kind_bytes = std::fs::read(prepared.object_metadata_path()).unwrap();
     let pack = CapsuleGitPack::new(
-        Bytes::from(pack),
-        Bytes::from(std::fs::read(indexed.idx_path).unwrap()),
-        Bytes::from(std::fs::read(indexed.rev_path).unwrap()),
+        Bytes::from(std::fs::read(prepared.pack_path()).unwrap()),
+        Bytes::from(std::fs::read(prepared.index_path()).unwrap()),
+        Bytes::from(std::fs::read(prepared.reverse_path()).unwrap()),
         Bytes::from(kind_bytes),
-        indexed.git_sha1,
+        prepared.git_sha1().to_string(),
         objects.len() as u64,
     )
     .unwrap();

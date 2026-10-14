@@ -1347,7 +1347,7 @@ mod tests {
                         offset_order: Vec::new(),
                         pack_data_end: 0,
                         pack_checksum: [0; 20],
-                        external_delta_bases: HashMap::new(),
+                        metadata: Vec::new(),
                         source_bytes: 32,
                     }),
                 )
@@ -1365,7 +1365,7 @@ mod tests {
                     offset_order: Vec::new(),
                     pack_data_end: 0,
                     pack_checksum: [0; 20],
-                    external_delta_bases: HashMap::new(),
+                    metadata: Vec::new(),
                     source_bytes: 32,
                 }),
             )
@@ -1483,7 +1483,7 @@ mod tests {
             offset_order: Vec::new(),
             pack_data_end: 0,
             pack_checksum: [0; 20],
-            external_delta_bases: HashMap::new(),
+            metadata: Vec::new(),
             source_bytes: 128,
         });
         runtime

@@ -377,16 +377,15 @@ async fn load_pack_kind_metadata(
         let locations =
             crab_git::pack_locator::PackLocationIter::open(&idx_path, &rev_path, pack_size)
                 .map_err(crab_git::pack::PackError::from)?;
-        let entries = crab_git::pack_locator::decode_pack_kind_metadata_with_external_deltas(
-            &bytes, locations,
-        )
-        .map_err(crab_git::pack::PackError::from)?;
+        let entries = crab_git::pack_locator::decode_pack_object_metadata(&bytes, locations)
+            .map_err(crab_git::pack::PackError::from)?;
         let mut metadata = HashMap::with_capacity(entries.len());
-        for (oid, kind, external_delta_base) in entries {
+        for (oid, entry) in entries {
             let oid: [u8; 20] = oid.as_bytes().try_into().map_err(|_| {
                 WriteError::Internal("Git kind metadata contains a non-SHA1 object".to_owned())
             })?;
-            let delta_base_oid = external_delta_base
+            let delta_base_oid = entry
+                .external_delta_base
                 .map(|base| {
                     base.as_bytes().try_into().map_err(|_| {
                         WriteError::Internal(
@@ -399,9 +398,9 @@ async fn load_pack_kind_metadata(
                 .insert(
                     oid,
                     crab_metadata::git_object_locator::GitObjectMetadata {
-                        kind: Some(metadata_kind(kind)),
+                        kind: Some(metadata_kind(entry.kind)),
+                        logical_size: entry.logical_size,
                         delta_base_oid,
-                        ..Default::default()
                     },
                 )
                 .is_some()

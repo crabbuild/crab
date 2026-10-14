@@ -1209,19 +1209,20 @@ fn build_synthesized_capsule_pack(
         .map(|location| location.map(|location| location.oid))
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(crab_git::pack::PackError::from)?;
-    let kinds =
-        crab_git::object_kinds_from_git_dir(git_dir, &object_ids).map_err(AuthServerError::from)?;
+    let kinds = crab_git::object_metadata_from_git_dir(git_dir, &object_ids)
+        .map_err(AuthServerError::from)?;
     let ordered_kinds = object_ids
         .iter()
         .map(|oid| {
             kinds
                 .get(oid)
                 .copied()
+                .map(|(kind, size)| (kind, size, None))
                 .ok_or_else(|| invalid("synthesized capsule pack kind metadata omitted an object"))
         })
         .collect::<Result<Vec<_>>>()?;
     let checksum = locations.pack_checksum();
-    let locator = crab_git::pack_locator::encode_pack_kind_metadata(checksum, &ordered_kinds)
+    let locator = crab_git::pack_locator::encode_pack_object_metadata(checksum, &ordered_kinds)
         .map_err(crab_git::pack::PackError::from)?;
     CapsuleGitPack::new(
         bytes::Bytes::from(pack_bytes),

@@ -190,19 +190,23 @@ pub(super) fn generate_view_pack(filtered_git: &Path) -> Result<GeneratedViewPac
         .map(|location| location.map(|location| location.oid))
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(crab_git::pack::PackError::from)?;
-    let kinds = crab_git::object_kinds_from_git_dir(filtered_git, &object_ids)?;
+    let kinds = crab_git::object_metadata_from_git_dir(filtered_git, &object_ids)?;
     let ordered_kinds = object_ids
         .iter()
         .map(|oid| {
-            kinds.get(oid).copied().ok_or_else(|| {
-                AuthServerError::Internal(
-                    "filtered view pack kind metadata omitted an object".to_owned(),
-                )
-            })
+            kinds
+                .get(oid)
+                .copied()
+                .map(|(kind, size)| (kind, size, None))
+                .ok_or_else(|| {
+                    AuthServerError::Internal(
+                        "filtered view pack kind metadata omitted an object".to_owned(),
+                    )
+                })
         })
         .collect::<Result<Vec<_>>>()?;
     let git_checksum = locations.pack_checksum().to_string();
-    let locator = crab_git::pack_locator::encode_pack_kind_metadata(
+    let locator = crab_git::pack_locator::encode_pack_object_metadata(
         locations.pack_checksum(),
         &ordered_kinds,
     )

@@ -1067,7 +1067,7 @@ fn materialize_packs(
             .iter()
             .map(|location| location.oid)
             .collect::<Vec<_>>();
-        let kinds = crab_git::pack::object_kinds_from_git_dir(git_dir, &object_ids)?;
+        let kinds = crab_git::pack::object_metadata_from_git_dir(git_dir, &object_ids)?;
         let ordered_kinds = object_ids
             .iter()
             .map(|oid| {
@@ -1090,18 +1090,17 @@ fn materialize_packs(
         let locator_entries = ordered_kinds
             .iter()
             .zip(&locations)
-            .map(|(kind, location)| {
+            .map(|((kind, size), location)| {
                 (
                     *kind,
+                    *size,
                     generated.external_delta_bases().get(&location.oid).copied(),
                 )
             })
             .collect::<Vec<_>>();
-        let locator = crab_git::pack_locator::encode_pack_kind_metadata_with_external_deltas(
-            checksum,
-            &locator_entries,
-        )
-        .map_err(crab_git::pack::PackError::from)?;
+        let locator =
+            crab_git::pack_locator::encode_pack_object_metadata(checksum, &locator_entries)
+                .map_err(crab_git::pack::PackError::from)?;
         let pack = std::fs::read(generated.pack_path())?;
         let index = std::fs::read(generated.index_path())?;
         let reverse = std::fs::read(generated.reverse_index_path())?;

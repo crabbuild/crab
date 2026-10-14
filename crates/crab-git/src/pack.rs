@@ -1285,6 +1285,20 @@ pub fn object_kinds_from_git_dir(
     git_dir: &Path,
     object_ids: &[gix_hash::ObjectId],
 ) -> Result<std::collections::HashMap<gix_hash::ObjectId, gix_object::Kind>> {
+    // Released callers keep the kind-only result; all queries share the same
+    // replacement-free object identity and framing checks.
+    Ok(object_metadata_from_git_dir(git_dir, object_ids)?
+        .into_iter()
+        .map(|(oid, (kind, _))| (oid, kind))
+        .collect())
+}
+
+/// Resolve raw object kinds and logical sizes from the local Git object database.
+/// Replacement refs are disabled so returned facts describe the requested OIDs.
+pub fn object_metadata_from_git_dir(
+    git_dir: &Path,
+    object_ids: &[gix_hash::ObjectId],
+) -> Result<std::collections::HashMap<gix_hash::ObjectId, (gix_object::Kind, u64)>> {
     use std::io::Write;
     use std::process::Stdio;
 
@@ -1295,16 +1309,14 @@ pub fn object_kinds_from_git_dir(
     let mut child = std::process::Command::new("git")
         .arg("--git-dir")
         .arg(git_dir)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .arg("cat-file")
-        .arg("--batch-check=%(objectname) %(objecttype)")
+        .arg("--batch-check=%(objectname) %(objecttype) %(objectsize)")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|source| PackError::ObjectKindQuery {
-            path: git_dir.to_owned(),
-            detail: source.to_string(),
-        })?;
+        .map_err(|source| io_error("spawn object metadata query", source))?;
     let mut stdin = child
         .stdin
         .take()
@@ -1323,10 +1335,7 @@ pub fn object_kinds_from_git_dir(
         let output = child.wait_with_output();
         (output, writer.join())
     });
-    let output = output.map_err(|source| PackError::ObjectKindQuery {
-        path: git_dir.to_owned(),
-        detail: source.to_string(),
-    })?;
+    let output = output.map_err(|source| io_error("wait for object metadata query", source))?;
     if !output.status.success() {
         return Err(PackError::ObjectKindQuery {
             path: git_dir.to_owned(),
@@ -1337,10 +1346,7 @@ pub fn object_kinds_from_git_dir(
         path: git_dir.to_owned(),
         detail: "git cat-file stdin writer thread panicked".to_owned(),
     })?;
-    writer_result.map_err(|source| PackError::ObjectKindQuery {
-        path: git_dir.to_owned(),
-        detail: source.to_string(),
-    })?;
+    writer_result.map_err(|source| io_error("write object metadata query", source))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines = stdout.lines().collect::<Vec<_>>();
@@ -1380,13 +1386,20 @@ pub fn object_kinds_from_git_dir(
                 });
             }
         };
+        let size = fields.next().and_then(|value| value.parse::<u64>().ok());
+        let Some(size) = size else {
+            return Err(PackError::ObjectKindQuery {
+                path: git_dir.to_owned(),
+                detail: format!("object {oid} returned an invalid size"),
+            });
+        };
         if returned != Some(*oid) || fields.next().is_some() {
             return Err(PackError::ObjectKindQuery {
                 path: git_dir.to_owned(),
                 detail: format!("object {oid} returned a mismatched response"),
             });
         }
-        kinds.insert(*oid, kind);
+        kinds.insert(*oid, (kind, size));
     }
     Ok(kinds)
 }
@@ -1532,6 +1545,27 @@ mod tests {
 
         assert_eq!(kinds.get(&object_ids[0]), Some(&gix_object::Kind::Blob));
         assert_eq!(kinds.get(&object_ids[1]), Some(&gix_object::Kind::Tree));
+        // Replacement refs must not change facts authenticated for the original OID.
+        git(
+            &[
+                "--git-dir",
+                git_dir.to_str().unwrap(),
+                "replace",
+                &blob,
+                &tree,
+                "-f",
+            ],
+            None,
+        );
+        let facts = object_metadata_from_git_dir(&git_dir, &object_ids).unwrap();
+        assert_eq!(
+            facts.get(&object_ids[0]),
+            Some(&(gix_object::Kind::Blob, b"catalogued blob\n".len() as u64))
+        );
+        assert_eq!(
+            facts.get(&object_ids[1]),
+            Some(&(gix_object::Kind::Tree, 36))
+        );
     }
 
     #[test]

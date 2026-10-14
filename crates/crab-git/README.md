@@ -245,3 +245,18 @@ The caller supplies per-ref deletion/non-fast-forward policy; Git's wire protoco
 has no separate force flag. Returned pointer dependencies still require artifact
 storage checks. Recheck the pinned base under writer locks before publishing; a
 validated plan alone is not an atomic commit or evidence of working HTTP push.
+
+
+Pack metadata sidecar version 3 adds fully resolved Git object sizes to kinds
+and sparse external delta bases. Producers use quarantine-verified target sizes
+or replacement-free native Git metadata queries; delta-program length is not a
+logical object size. Capsule readers bind the sidecar to its exact verified
+index and source identity before consuming these facts. Content reads still
+verify their packed-entry CRC and final Git OID.
+
+Released kind-only codec APIs and `PreparedPack::kinds_path()` remain supported.
+Capsule producers use `PreparedPack::object_metadata_path()` for resolved facts;
+both private artifacts are charged to the same scratch owner and removed when
+it drops. Legacy publishers keep the released kind-only artifact. Preparation
+proves pack identities and metadata facts, while graph connectivity, pointer
+payload verification and publication authority remain caller obligations.

@@ -713,11 +713,8 @@ impl CapsuleRepositoryView {
             )
             .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
             let locator_entries =
-                crab_git::pack_locator::decode_pack_kind_metadata_with_external_deltas(
-                    &locator_bytes,
-                    locations,
-                )
-                .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+                crab_git::pack_locator::decode_pack_object_metadata(&locator_bytes, locations)
+                    .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
             let locator_locations = crab_git::pack_locator::PackLocationIter::open(
                 &pack_path.with_extension("idx"),
                 &pack_path.with_extension("rev"),
@@ -726,7 +723,7 @@ impl CapsuleRepositoryView {
             .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
             let locator_pack_id = crab_xet::hash::MerkleHash::from_hex(&pack_id)
                 .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
-            for (ordinal, ((oid, kind, delta_base_oid), location)) in locator_entries
+            for (ordinal, ((oid, object_metadata), location)) in locator_entries
                 .into_iter()
                 .zip(locator_locations)
                 .enumerate()
@@ -739,7 +736,7 @@ impl CapsuleRepositoryView {
                     .map_err(|_| ReadError::internal("capsule Git locator is not SHA-1"))?;
                 let ordinal = u32::try_from(ordinal)
                     .map_err(|_| ReadError::internal("capsule Git locator ordinal overflowed"))?;
-                let kind = match kind {
+                let kind = match object_metadata.kind {
                     gix_object::Kind::Commit => {
                         crab_metadata::git_object_locator::GitObjectKind::Commit
                     }
@@ -763,8 +760,9 @@ impl CapsuleRepositoryView {
                         },
                         metadata: crab_metadata::git_object_locator::GitObjectMetadata {
                             kind: Some(kind),
-                            logical_size: None,
-                            delta_base_oid: delta_base_oid
+                            logical_size: object_metadata.logical_size,
+                            delta_base_oid: object_metadata
+                                .external_delta_base
                                 .map(|oid| oid.as_bytes().try_into())
                                 .transpose()
                                 .map_err(|_| {
@@ -1050,7 +1048,7 @@ impl CapsuleRepositoryView {
                     layered_range_bytes(bytes, 0, member.pack())?,
                     layered_range_bytes(bytes, 0, index)?,
                     layered_range_bytes(bytes, 0, member.reverse_index())?,
-                    None,
+                    Some(layered_range_bytes(bytes, 0, member.locator())?),
                 )?
             } else {
                 crab_remote_git::RemoteGitPackSource::embedded_lazy_index(
@@ -1068,6 +1066,11 @@ impl CapsuleRepositoryView {
                         length: member.reverse_index().length(),
                         blake3: member.reverse_index().blake3().to_owned(),
                     },
+                    Some(crab_remote_git::RemoteGitSidecarRange {
+                        offset: member.locator().offset(),
+                        length: member.locator().length(),
+                        blake3: member.locator().blake3().to_owned(),
+                    }),
                 )?
             };
             let preferred_pack_ids = if admitted_pack_ids.is_empty() {
@@ -3719,16 +3722,14 @@ fn inline_locators_for_pack(
             "pack index checksum does not match its descriptor",
         ));
     }
-    let locator_entries = crab_git::pack_locator::decode_pack_kind_metadata_with_external_deltas(
-        locator_bytes,
-        locations,
-    )
-    .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+    let locator_entries =
+        crab_git::pack_locator::decode_pack_object_metadata(locator_bytes, locations)
+            .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
     let locator_locations =
         crab_git::pack_locator::PackLocationIter::open(index_path, reverse_path, pack_size)
             .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
     let mut inline = std::collections::HashMap::new();
-    for (ordinal, ((oid, kind, delta_base_oid), location)) in locator_entries
+    for (ordinal, ((oid, object_metadata), location)) in locator_entries
         .into_iter()
         .zip(locator_locations)
         .enumerate()
@@ -3741,7 +3742,7 @@ fn inline_locators_for_pack(
             .map_err(|_| ReadError::internal("capsule Git locator is not SHA-1"))?;
         let ordinal = u32::try_from(ordinal)
             .map_err(|_| ReadError::internal("capsule Git locator ordinal overflowed"))?;
-        let kind = match kind {
+        let kind = match object_metadata.kind {
             gix_object::Kind::Commit => crab_metadata::git_object_locator::GitObjectKind::Commit,
             gix_object::Kind::Tree => crab_metadata::git_object_locator::GitObjectKind::Tree,
             gix_object::Kind::Blob => crab_metadata::git_object_locator::GitObjectKind::Blob,
@@ -3759,8 +3760,9 @@ fn inline_locators_for_pack(
                 },
                 metadata: crab_metadata::git_object_locator::GitObjectMetadata {
                     kind: Some(kind),
-                    logical_size: None,
-                    delta_base_oid: delta_base_oid
+                    logical_size: object_metadata.logical_size,
+                    delta_base_oid: object_metadata
+                        .external_delta_base
                         .map(|oid| oid.as_bytes().try_into())
                         .transpose()
                         .map_err(|_| ReadError::internal("capsule Git delta base is not SHA-1"))?,

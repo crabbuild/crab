@@ -42,7 +42,9 @@ impl ScratchAdmission for ReceiveLimits {
         let objects = u64::from(self.max_objects);
         let sidecars = crate::max_pack_index_size(objects)
             .and_then(|index| index.checked_add(crate::pack_reverse_index_size(objects)?))
-            .and_then(|indexes| indexes.checked_add(crate::max_pack_kind_metadata_size(objects)?))
+            .and_then(|indexes| {
+                indexes.checked_add(crate::max_pack_kind_metadata_size(objects)?.checked_mul(2)?)
+            })
             .ok_or(ScratchError::Overflow)?;
         let capacity = self
             .max_pack_bytes

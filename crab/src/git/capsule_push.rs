@@ -973,14 +973,19 @@ async fn prepare_generated_git_packs(
         if let Some(objects) = &mut visibility_objects {
             objects.extend(object_ids.iter().copied());
         }
-        let kinds = crab_git::object_kinds_from_git_dir(git_dir, &object_ids)?;
+        let object_metadata = crab_git::object_metadata_from_git_dir(git_dir, &object_ids)?;
+        let kinds = object_metadata
+            .iter()
+            .map(|(oid, (kind, _))| (*oid, *kind))
+            .collect();
         pointers.extend(collect_pointers(git_dir, &object_ids, &kinds)?);
         let ordered_kinds = object_ids
             .iter()
             .map(|oid| {
-                kinds
+                object_metadata
                     .get(oid)
                     .copied()
+                    .map(|(kind, size)| (kind, size, None))
                     .ok_or_else(|| CrabError::CorruptObject {
                         path: generated.pack_path.display().to_string(),
                         reason: format!("Git object-kind query omitted {oid}"),
@@ -991,7 +996,7 @@ async fn prepare_generated_git_packs(
             gix_hash::ObjectId::from_hex(installed.git_sha1.as_bytes()).map_err(|error| {
                 CrabError::Internal(format!("generated pack checksum is invalid: {error}"))
             })?;
-        let locator = crab_git::pack_locator::encode_pack_kind_metadata(checksum, &ordered_kinds)
+        let locator = crab_git::pack_locator::encode_pack_object_metadata(checksum, &ordered_kinds)
             .map_err(crab_git::pack::PackError::from)?;
         packs.push(crab_metadata::capsule_protocol::CapsuleGitPack::new(
             Bytes::from(std::fs::read(

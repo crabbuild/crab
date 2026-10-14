@@ -2206,7 +2206,7 @@ async fn upload_built_batch(
                 read(pack.pack_path()),
                 read(pack.index_path()),
                 read(pack.reverse_path()),
-                read(pack.kinds_path()),
+                read(pack.object_metadata_path()),
                 upload_attributes(),
             )?;
             UploadedArtifacts::Capsule(Box::new(CapsuleMutationArtifacts {
