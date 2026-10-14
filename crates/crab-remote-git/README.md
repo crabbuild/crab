@@ -48,6 +48,7 @@ bitmap. A full commit ID matching a verified captured root reuses that visibilit
 proof without rereading ancestry pages; other IDs still require exact membership.
 Graph/OID/parent reads share operation admission and cancellation, including
 warm queries. Released manifest graph version 1 retains complete graph validation.
+Version 0.2 marks the [source-breaking async migration](REFERENCE.md#migrating-from-01-to-02).
 `commits_reachable_from` is asynchronous and uses a metadata-admitted operation
 without opening the object-locator database.
 Without a commit graph, full commit-ID resolution checks matching ref tips

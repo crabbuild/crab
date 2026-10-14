@@ -109,5 +109,41 @@ class CelluleBoundaryTests(unittest.TestCase):
         self.assertFalse(self.check_source("#[cfg(test)] mod tests { use crab_ltx::CellReplica; }\n"))
 
 
+class PackageReleasePolicyTests(unittest.TestCase):
+    def metadata(self):
+        packages = []
+        for name in sorted(GATES.PRIVATE_INTERNAL_PACKAGES | GATES.PUBLISHED_LIBRARY_PACKAGES | set(GATES.SHIPPED_BINARY_PACKAGES)):
+            packages.append({
+                "name": name,
+                "version": "1.2.4" if name in GATES.SHIPPED_BINARY_PACKAGES else "0.2.0" if name == "crab-remote-git" else "0.1.0",
+                "publish": [] if name in GATES.PRIVATE_INTERNAL_PACKAGES else None,
+                "dependencies": [{"name": "crab-remote-git", "req": "=0.2.0"}] if name == "crab" else [],
+                "targets": [{"name": binary, "kind": ["bin"]} for binary in GATES.SHIPPED_BINARY_PACKAGES.get(name, set())],
+            })
+        return {"packages": packages}
+
+    def check(self, metadata):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return GATES.check_package_release_policy(metadata)
+
+    def test_library_api_versions_are_independent_of_product_versions(self):
+        self.assertTrue(self.check(self.metadata()))
+
+    def test_library_consumers_must_pin_the_declared_api_version(self):
+        for requirement in ("=0.1.0", "^0.2.0"):
+            with self.subTest(requirement=requirement):
+                metadata = self.metadata()
+                package = GATES.package_by_name(metadata, "crab")
+                package["dependencies"][0]["req"] = requirement
+                self.assertFalse(self.check(metadata))
+
+    def test_library_publishability_and_private_release_policy_remain_enforced(self):
+        for name, field, value in (("crab-remote-git", "publish", []), ("crab-http-server", "version", "0.2.0"), ("crab-http-server", "publish", None), ("crab-auth-server", "version", "1.2.3")):
+            with self.subTest(name=name, field=field):
+                metadata = self.metadata()
+                GATES.package_by_name(metadata, name)[field] = value
+                self.assertFalse(self.check(metadata))
+
+
 if __name__ == "__main__":
     unittest.main()

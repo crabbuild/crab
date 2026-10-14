@@ -2195,12 +2195,23 @@ def check_package_release_policy(metadata: dict) -> bool:
 
     for name in sorted(PUBLISHED_LIBRARY_PACKAGES):
         package = package_by_name(metadata, name)
-        if package["version"] != "0.1.0":
-            violations.append(
-                f"{name}: SDK dependency version is {package['version']}; expected 0.1.0"
-            )
         if package["publish"] == []:
             violations.append(f"{name}: SDK dependency must be publishable")
+
+    # Library versions follow their API compatibility boundary. Consumers must
+    # pin that exact version so a path build cannot hide stale release requirements.
+    published_versions = {
+        name: package_by_name(metadata, name)["version"]
+        for name in PUBLISHED_LIBRARY_PACKAGES
+    }
+    for package in metadata["packages"]:
+        for dependency in package["dependencies"]:
+            version = published_versions.get(dependency["name"])
+            if version is not None and dependency["req"] != f"={version}":
+                violations.append(
+                    f"{package['name']}: {dependency['name']} requirement is "
+                    f"{dependency['req']}; expected ={version}"
+                )
 
     for name, expected_bins in sorted(SHIPPED_BINARY_PACKAGES.items()):
         package = package_by_name(metadata, name)

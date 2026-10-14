@@ -16,7 +16,6 @@ import time
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSION = "0.1.0"
 CLOSURE = [
     "crab-types", "crab-xet", "crab-git", "crab-auth", "crab-storage",
     "crab-auth-store", "crab-coordination", "crab-cache", "crab-cache-store",
@@ -136,6 +135,12 @@ def main() -> None:
     env["CARGO_INCREMENTAL"] = "0"
     env["RUSTC_WRAPPER"] = ""
 
+    metadata = json.loads(run(
+        ["cargo", f"+{args.toolchain}", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+        cwd=ROOT, env=env,
+    ))
+    versions = {package["name"]: package["version"] for package in metadata["packages"]}
+
     command = ["cargo", f"+{args.toolchain}", "package", "--locked", "--no-verify"]
     if args.allow_dirty:
         command.append("--allow-dirty")
@@ -150,14 +155,14 @@ def main() -> None:
     packages = []
     patch = ["[patch.crates-io]"]
     for name in CLOSURE:
-        archive = package_directory / f"{name}-{VERSION}.crate"
+        archive = package_directory / f"{name}-{versions[name]}.crate"
         if not archive.is_file():
             raise RuntimeError(f"Cargo did not create {archive}")
         extracted = safe_extract(archive, vendor)
         if manifest_has_path_dependency(extracted / "Cargo.toml"):
             raise RuntimeError(f"normalized package retains a path dependency: {name}")
         patch.append(f'{name} = {{ path = {json.dumps(str(extracted))} }}')
-        packages.append({"name": name, "archive": archive.name,
+        packages.append({"name": name, "version": versions[name], "archive": archive.name,
                          "bytes": archive.stat().st_size, "sha256": sha256(archive)})
 
     consumer = output / "consumer"

@@ -54,7 +54,7 @@ crab-metadata = { version = "=0.1.0", path = "crates/crab-metadata", default-fea
 crab-read = { version = "=0.1.0", path = "crates/crab-read", default-features = false }
 crab-remote = { version = "=0.1.0", path = "crates/crab-remote", default-features = false }
 crab-sdk = { version = "=0.1.0", path = "crates/crab-sdk", default-features = false }
-crab-remote-git = { version = "=0.1.0", path = "crates/crab-remote-git", default-features = false }
+crab-remote-git = { version = "=0.2.0", path = "crates/crab-remote-git", default-features = false }
 crab-s3-gateway = { version = "=0.1.0", path = "crates/crab-s3-gateway", default-features = false }
 crab-staging = { version = "=0.1.0", path = "crates/crab-staging", default-features = false }
 crab-storage = { version = "=0.1.0", path = "crates/crab-storage", default-features = false }

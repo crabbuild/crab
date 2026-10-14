@@ -63,6 +63,41 @@ tracked best-effort cleanup fallback, while explicit completion preserves close
 errors. `OperationLimits::max_duration` bounds locator open and semantic work;
 expiration cancels the operation and returns a typed timeout.
 
+## Migrating from 0.1 to 0.2
+
+Version 0.2 marks the asynchronous graph-membership API. Tagged Crab releases
+v1.0.1 and v1.2.0 through v1.2.4 expose the synchronous 0.1 method; consumers
+must update their exact dependency requirement to `=0.2.0` and await the result:
+
+```rust
+use crab_remote_git::{RemoteGitRepository, Result};
+use gix_hash::ObjectId;
+use tokio_util::sync::CancellationToken;
+
+async fn membership(
+    repository: &RemoteGitRepository,
+    candidates: &[ObjectId],
+    roots: &[ObjectId],
+    cancel: &CancellationToken,
+) -> Result<Option<Vec<bool>>> {
+    repository.commits_reachable_from(candidates, roots, cancel).await
+}
+```
+
+`None` still means no complete pinned graph. `Some` preserves candidate order
+and duplicates. The call admits metadata reads and completes its operation
+before returning, including cancellation and close-error handling. Retain the
+runtime until active operations finish, then await shutdown. Do not block a
+Tokio thread to imitate the old synchronous call.
+
+The crate-version boundary does not change stored graph formats or require a
+repository rewrite. Released version-1 graphs retain full validation; paged
+capsule graphs retain authenticated dependency reads. Existing CLI callers
+already await this method. The workspace pins 0.2 exactly, while SDK package
+qualification discovers each library's declared version from Cargo metadata.
+Cargo treats a change in the leftmost nonzero version component as incompatible;
+see the [Cargo SemVer contract](https://doc.rust-lang.org/cargo/reference/semver.html#change-categories).
+
 ## Completing an operation
 
 Keep the semantic result until `finish` has closed the locator session:
