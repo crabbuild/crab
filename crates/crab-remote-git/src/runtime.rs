@@ -48,9 +48,9 @@ pub struct RuntimeOptions {
     pub max_parsed_cache_entries: usize,
     /// Maximum estimated parsed-object bytes retained in memory.
     pub max_parsed_cache_bytes: usize,
-    /// Maximum immutable blame results retained in memory.
+    /// Maximum immutable blame results and blob comparisons retained in memory.
     pub max_blame_cache_entries: usize,
-    /// Maximum estimated immutable blame-result bytes retained in memory.
+    /// Maximum estimated bytes shared by immutable blame results and blob comparisons.
     pub max_blame_cache_bytes: usize,
     /// Maximum short-lived manifest entries retained in memory.
     pub max_manifest_cache_entries: usize,
@@ -85,9 +85,9 @@ pub struct RuntimeSnapshot {
     pub parsed_entries: usize,
     /// Estimated resident parsed-object bytes.
     pub parsed_bytes: usize,
-    /// Retained immutable blame results.
+    /// Retained immutable blame results and blob comparisons.
     pub blame_entries: usize,
-    /// Estimated resident immutable blame-result bytes.
+    /// Estimated resident blame-result and blob-comparison bytes.
     pub blame_bytes: usize,
     /// Retained manifest pointers.
     pub manifest_entries: usize,
@@ -188,11 +188,29 @@ struct InventoryCacheKey {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct BlameCacheKey {
-    identity: RepositoryIdentity,
-    generation: u64,
-    commit: ObjectId,
-    path: GitPath,
+enum BlameCacheKey {
+    Attribution {
+        identity: RepositoryIdentity,
+        generation: u64,
+        commit: ObjectId,
+        path: GitPath,
+        semantics: u32,
+    },
+    Comparison {
+        identity: RepositoryIdentity,
+        parent: ObjectId,
+        current: ObjectId,
+        semantics: u32,
+    },
+}
+
+// Increment when first-parent attribution or Myers line-slider semantics change.
+const BLAME_SEMANTICS: u32 = 1;
+
+#[derive(Clone)]
+enum BlameCacheValue {
+    Attribution(CachedBlame),
+    Comparison(Arc<Vec<(usize, usize)>>),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -304,7 +322,7 @@ pub struct RemoteGitRuntime {
     object_cache: Mutex<BoundedLru<ObjectCacheKey, Arc<GitObject>>>,
     pack_index_cache: Mutex<BoundedLru<PackIndexCacheKey, Arc<PackIndex>>>,
     parsed_cache: Mutex<BoundedLru<ObjectCacheKey, ParsedObject>>,
-    blame_cache: Mutex<BoundedLru<BlameCacheKey, CachedBlame>>,
+    blame_cache: Mutex<BoundedLru<BlameCacheKey, BlameCacheValue>>,
     manifest_cache: Mutex<BoundedLru<RepositoryIdentity, Arc<CachedManifest>>>,
     inventory_cache:
         Mutex<BoundedLru<InventoryCacheKey, Arc<HashMap<MerkleHash, GitPackInventoryEntry>>>>,
@@ -618,13 +636,17 @@ impl RemoteGitRuntime {
         commit: ObjectId,
         path: &GitPath,
     ) -> Option<CachedBlame> {
-        let key = BlameCacheKey {
+        let key = BlameCacheKey::Attribution {
             identity: identity.clone(),
             generation,
             commit,
             path: path.clone(),
+            semantics: BLAME_SEMANTICS,
         };
-        let value = self.blame_cache.lock().await.get(&key);
+        let value = match self.blame_cache.lock().await.get(&key) {
+            Some(BlameCacheValue::Attribution(value)) => Some(value),
+            _ => None,
+        };
         self.metrics.record(MetricObservation {
             kind: MetricKind::Cache,
             value: u64::from(value.is_some()),
@@ -650,13 +672,14 @@ impl RemoteGitRuntime {
     ) {
         let bytes = blame_bytes(&value);
         let evicted = self.blame_cache.lock().await.insert(
-            BlameCacheKey {
+            BlameCacheKey::Attribution {
                 identity,
                 generation,
                 commit,
                 path,
+                semantics: BLAME_SEMANTICS,
             },
-            CachedBlame { value, usage },
+            BlameCacheValue::Attribution(CachedBlame { value, usage }),
             bytes,
         );
         if evicted > 0 {
@@ -668,6 +691,50 @@ impl RemoteGitRuntime {
                 cache: Some(CacheOutcome::Eviction),
             });
         }
+    }
+
+    pub(crate) async fn cached_blame_comparison(
+        &self,
+        identity: &RepositoryIdentity,
+        parent: ObjectId,
+        current: ObjectId,
+    ) -> Option<Arc<Vec<(usize, usize)>>> {
+        let key = BlameCacheKey::Comparison {
+            identity: identity.clone(),
+            parent,
+            current,
+            semantics: BLAME_SEMANTICS,
+        };
+        let value = match self.blame_cache.lock().await.get(&key) {
+            Some(BlameCacheValue::Comparison(value)) => Some(value),
+            _ => None,
+        };
+        tracing::debug!(target: "crab_remote_git::blame_comparison", cache_hit = value.is_some());
+        value
+    }
+
+    pub(crate) async fn insert_blame_comparison(
+        &self,
+        identity: RepositoryIdentity,
+        parent: ObjectId,
+        current: ObjectId,
+        matches: Arc<Vec<(usize, usize)>>,
+    ) {
+        let bytes = std::mem::size_of_val(matches.as_ref()).saturating_add(
+            matches
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(usize, usize)>()),
+        );
+        self.blame_cache.lock().await.insert(
+            BlameCacheKey::Comparison {
+                identity,
+                parent,
+                current,
+                semantics: BLAME_SEMANTICS,
+            },
+            BlameCacheValue::Comparison(matches),
+            bytes,
+        );
     }
 
     pub(crate) async fn insert_commit(
@@ -1218,6 +1285,92 @@ mod tests {
             ..RuntimeOptions::default()
         };
         assert!(RemoteGitRuntime::new(options, Arc::new(NoopMetrics)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn blame_comparisons_preserve_direction_and_repository_scope() {
+        let runtime = RemoteGitRuntime::default();
+        let identity = RepositoryIdentity::new("memory", "repo", 1).unwrap();
+        let other = RepositoryIdentity::new("memory", "other", 1).unwrap();
+        let parent = ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let current = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+        let matches = Arc::new(vec![(0, 1)]);
+        runtime
+            .insert_blame_comparison(identity.clone(), parent, current, matches.clone())
+            .await;
+        let cached = runtime
+            .cached_blame_comparison(&identity, parent, current)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&matches, &cached));
+        assert!(
+            runtime
+                .cached_blame_comparison(&identity, current, parent)
+                .await
+                .is_none()
+        );
+        assert!(
+            runtime
+                .cached_blame_comparison(&other, parent, current)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn blame_results_and_comparisons_share_one_capacity() {
+        let runtime = Arc::new(
+            RemoteGitRuntime::new(
+                RuntimeOptions {
+                    max_blame_cache_entries: 1,
+                    ..RuntimeOptions::default()
+                },
+                Arc::new(NoopMetrics),
+            )
+            .unwrap(),
+        );
+        let identity = RepositoryIdentity::new("memory", "repo", 1).unwrap();
+        let parent = ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let current = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+        let path = GitPath::new(Bytes::from_static(b"file")).unwrap();
+        runtime
+            .insert_blame_comparison(identity.clone(), parent, current, Arc::new(vec![(0, 0)]))
+            .await;
+        let usage =
+            crate::budget::OperationBudget::new(crate::OperationLimits::default(), runtime.clone())
+                .usage()
+                .await;
+        runtime
+            .insert_blame(
+                identity.clone(),
+                1,
+                current,
+                path.clone(),
+                Arc::new(Blame {
+                    commit: current,
+                    path: path.clone(),
+                    ranges: Vec::new(),
+                }),
+                usage,
+            )
+            .await;
+        assert!(
+            runtime
+                .cached_blame_comparison(&identity, parent, current)
+                .await
+                .is_none()
+        );
+        assert_eq!(runtime.snapshot().await.blame_entries, 1);
+        runtime
+            .insert_blame_comparison(identity.clone(), parent, current, Arc::new(vec![(0, 0)]))
+            .await;
+        assert!(
+            runtime
+                .cached_blame(&identity, 1, current, &path)
+                .await
+                .is_none()
+        );
+        assert_eq!(runtime.snapshot().await.blame_entries, 1);
     }
 
     #[tokio::test]

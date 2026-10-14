@@ -870,15 +870,38 @@ impl RemoteGitSnapshot {
                 operation
                     .charge(BudgetDimension::BlameComparisons, comparison_cells)
                     .await?;
-                let matches = git_line_matches(
-                    operation.runtime(),
-                    parent_bytes.clone(),
-                    parent_line_count,
-                    current_bytes.clone(),
-                    current_lines.len(),
-                    operation.cancellation().clone(),
-                )
-                .await?;
+                // Both blobs and the comparison budget are validated before a
+                // cache hit. Reusing line mappings cannot authorize an object or
+                // bypass a stricter operation limit.
+                let matches = match operation
+                    .cached_blame_comparison(parent_blob.metadata.oid, current_oid)
+                    .await
+                {
+                    Some(matches) => matches,
+                    None => {
+                        let matches = Arc::new(
+                            git_line_matches(
+                                operation.runtime(),
+                                parent_bytes.clone(),
+                                parent_line_count,
+                                current_bytes.clone(),
+                                current_lines.len(),
+                                operation.cancellation().clone(),
+                            )
+                            .await?,
+                        );
+                        operation.ensure_active()?;
+                        operation
+                            .insert_blame_comparison(
+                                parent_blob.metadata.oid,
+                                current_oid,
+                                matches.clone(),
+                            )
+                            .await;
+                        matches
+                    }
+                };
+                operation.ensure_active()?;
                 let mut parent_tracked = Vec::new();
                 parent_tracked
                     .try_reserve_exact(parent_lines.len())
@@ -889,7 +912,7 @@ impl RemoteGitSnapshot {
                         source,
                     })?;
                 parent_tracked.resize(parent_lines.len(), None);
-                for (parent_line, current_line) in matches {
+                for &(parent_line, current_line) in matches.iter() {
                     if let Some(final_line) = tracked[current_line] {
                         origins[final_line] = parent_commit.oid;
                         parent_tracked[parent_line] = Some(final_line);

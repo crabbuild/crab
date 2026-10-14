@@ -44,6 +44,8 @@ def verify_queries(source: Path, records: list[dict], revision: str) -> dict:
     expected_names = {"resolve", "commit", "tree", "blob", "object-point", "object-batch",
                       "history", "path-history", "attribution", "blame"}
     selection = records[-1]["selection"]
+    if selection == "blame-history-uncached":
+        selection = "blame-history"
     require(len(names) == len(set(names)), "duplicate query evidence")
     require(set(names) == (expected_names if selection == "all" else {selection}), "missing query evidence")
     measurements = [record for record in records if record["kind"] == "measurement"]
@@ -100,6 +102,12 @@ def verify_queries(source: Path, records: list[dict], revision: str) -> dict:
                 require(item["commit"] == expected, "last-change commit differs")
         elif name == "blame":
             lines_checked += check_line_origins(git, head, path, value["ranges"])
+        elif name == "blame-history":
+            expected = git("rev-list", "--first-parent", "--max-count=10", head).decode().splitlines()
+            require([entry["commit"] for entry in value["entries"]] == expected,
+                    "successive blame commits differ")
+            for entry in value["entries"]:
+                lines_checked += check_line_origins(git, entry["commit"], path, entry["ranges"])
         elif name in {"graph-pages", "graph-ancestry"}:
             rows = value["records"]
             require(len(rows) == 4 and rows[1] == rows[3], "graph batch order/duplicates differ")

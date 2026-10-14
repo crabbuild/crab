@@ -25,6 +25,7 @@ pub struct Measurements {
     read_bytes: AtomicU64,
     written_bytes: AtomicU64,
     active: AtomicU64,
+    comparison_work: [AtomicU64; 2],
     decoded_blocks: [AtomicU64; 7],
     decoded_bytes: [AtomicU64; 7],
 }
@@ -35,6 +36,7 @@ struct Snapshot {
     outcomes: [u64; 9],
     read_bytes: u64,
     written_bytes: u64,
+    comparison_work: [u64; 2],
     decoded_blocks: [u64; 7],
     decoded_bytes: [u64; 7],
 }
@@ -60,6 +62,7 @@ struct DecodeLayer(Arc<Measurements>);
 #[derive(Default)]
 struct DecodeEvent {
     format: Option<usize>,
+    cache_hit: Option<bool>,
     bytes: u64,
 }
 
@@ -79,6 +82,11 @@ impl tracing::field::Visit for DecodeEvent {
             };
         }
     }
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        if field.name() == "cache_hit" {
+            self.cache_hit = Some(value);
+        }
+    }
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
         if field.name() == "decoded_bytes" {
             self.bytes = value;
@@ -88,11 +96,19 @@ impl tracing::field::Visit for DecodeEvent {
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DecodeLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        if event.metadata().target() != "crab_metadata::index_decode" {
+        let target = event.metadata().target();
+        if target != "crab_metadata::index_decode" && target != "crab_remote_git::blame_comparison"
+        {
             return;
         }
         let mut decoded = DecodeEvent::default();
         event.record(&mut decoded);
+        if target == "crab_remote_git::blame_comparison" {
+            if let Some(hit) = decoded.cache_hit {
+                self.0.comparison_work[usize::from(hit)].fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
         if let Some(format) = decoded.format {
             self.0.decoded_blocks[format].fetch_add(1, Ordering::Relaxed);
             self.0.decoded_bytes[format].fetch_add(decoded.bytes, Ordering::Relaxed);
@@ -119,6 +135,10 @@ impl Measurements {
                 .map(|counter| counter.load(Ordering::Relaxed)),
             read_bytes: self.read_bytes.load(Ordering::Relaxed),
             written_bytes: self.written_bytes.load(Ordering::Relaxed),
+            comparison_work: self
+                .comparison_work
+                .each_ref()
+                .map(|counter| counter.load(Ordering::Relaxed)),
             decoded_blocks: self
                 .decoded_blocks
                 .each_ref()
@@ -192,6 +212,10 @@ impl Measurements {
                 "backend_written_bytes": after.written_bytes.saturating_sub(before.written_bytes),
                 "active_backend_operations": self.active.load(Ordering::Relaxed),
                 "decoded_index_blocks": decoded,
+                "blame_comparisons": {
+                    "misses": after.comparison_work[0].saturating_sub(before.comparison_work[0]),
+                    "hits": after.comparison_work[1].saturating_sub(before.comparison_work[1]),
+                },
             })
         );
         result
@@ -251,9 +275,12 @@ mod tests {
             tracing::debug!(target:"crab_metadata::index_decode", index_format="capsule_visibility", decoded_bytes=31_u64);
             tracing::debug!(target:"crab_metadata::index_decode", index_format="checkpoint_visibility", decoded_bytes=37_u64);
             tracing::debug!(target:"crab_metadata::index_decode", index_format="checkpoint_visibility_pages", decoded_bytes=43_u64);
+            tracing::debug!(target:"crab_remote_git::blame_comparison", cache_hit=false);
+            tracing::debug!(target:"crab_remote_git::blame_comparison", cache_hit=true);
             tracing::debug!(target:"unrelated", index_format="path_state", decoded_bytes=999_u64);
         });
         let snapshot = counters.snapshot();
+        assert_eq!(snapshot.comparison_work, [1, 1]);
         assert_eq!(
             (snapshot.decoded_blocks, snapshot.decoded_bytes),
             ([1, 1, 1, 1, 1, 1, 1], [41, 123, 67, 29, 31, 37, 43])

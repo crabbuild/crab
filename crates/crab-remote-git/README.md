@@ -254,3 +254,13 @@ permits ordinary raw reads. The manifest-based `open` retains its release-tagged
 optional-graph policy; cancellation and admission failures are never suppressed.
 Operation finalization normalizes wrapped cancellation only when its own scope
 was interrupted, preserving real failures and typed locator-close errors.
+
+## Blame comparison reuse
+
+First-parent blame retains verified line mappings by repository identity, ordered
+parent/current blob IDs and a fixed algorithm/semantics version. Complete blame
+results retain their commit, raw-path and generation identity. Both entry kinds
+share the existing blame cache's entry and byte limits; no additional cache
+configuration is introduced. Blob verification, comparison-budget charging and
+cancellation checks happen before consuming a retained line map. A cached map
+never authorizes a commit or substitutes for fetching an unverified blob.

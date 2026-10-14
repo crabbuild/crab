@@ -4709,6 +4709,84 @@ async fn immutable_blame_cache_is_bounded_and_replays_semantic_budgets() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn retained_blob_comparison_does_not_bypass_a_stricter_blame_budget() {
+    let runtime_options = RuntimeOptions {
+        max_blame_cache_bytes: 256,
+        ..RuntimeOptions::default()
+    };
+    let fixture = publish_with_runtime(
+        DeltaKind::Ref,
+        false,
+        RepositoryOptions::default(),
+        runtime_options,
+    )
+    .await;
+    let cancel = CancellationToken::new();
+    let path = GitPath::new(Bytes::from_static(b"text.txt")).unwrap();
+    let mut first = None;
+    for _ in 0..2 {
+        let operation = fixture
+            .repository
+            .operation(OperationKind::Blame, &cancel)
+            .await
+            .unwrap();
+        let result = async {
+            let snapshot = fixture
+                .repository
+                .snapshot(&Revision::Commit(fixture.semantic_head_commit), &operation)
+                .await?;
+            snapshot.blame(&path, &operation).await
+        }
+        .await;
+        let blame = operation.finish(result).await.unwrap();
+        if let Some(first) = &first {
+            assert_eq!(&blame, first);
+        }
+        first = Some(blame);
+    }
+    // The result exceeds this cache's byte limit; only its reusable line map fits.
+    assert_eq!(fixture.runtime.snapshot().await.blame_entries, 1);
+    let strict = RepositoryOptions::new(
+        ObjectLimits::default(),
+        OperationLimits {
+            max_blame_comparison_cells: 1,
+            ..OperationLimits::default()
+        },
+    )
+    .unwrap();
+    let repository = RemoteGitRepository::open(
+        fixture.store.clone(),
+        fixture.layout.clone(),
+        fixture.repository.identity().clone(),
+        fixture.runtime.clone(),
+        strict,
+        &cancel,
+    )
+    .await
+    .unwrap();
+    let operation = repository
+        .operation(OperationKind::Blame, &cancel)
+        .await
+        .unwrap();
+    let result = async {
+        let snapshot = repository
+            .snapshot(&Revision::Commit(fixture.semantic_head_commit), &operation)
+            .await?;
+        snapshot.blame(&path, &operation).await
+    }
+    .await;
+    let error = operation.finish(result).await.unwrap_err();
+    assert!(matches!(
+        error,
+        Error::LimitExceeded {
+            limit: "blame comparison cells",
+            ..
+        }
+    ));
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn archive_traversal_preserves_modes_links_submodules_and_raw_order() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();
