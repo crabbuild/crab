@@ -1155,20 +1155,23 @@ protected receive, replication and maintenance callers await that canonical API.
 Full catalog materialization still exists as the explicit bulk operation;
 normal historical Xet lookups remain a later, incomplete gate.
 
-Current proof: targeted capsule suites pass for metadata (96), read (46), and
-write (22); the added captured-catalog regression brings read to 47. Metadata includes four lazy-reader tests: a 50k-object lookup within
+Current proof: targeted capsule suites pass for metadata (96), read (47), and
+write (22), including the added captured-catalog regression. Metadata includes
+four lazy-reader tests: a 50k-object lookup within
 128 KiB despite a body over 2 MiB, retained-but-invisible denial, warm zero origin
 reads, full-materialization parity, and corrupted/missing page failure. Shared
 read/write/remote compile checks, the CLI link build, protected-receive all-target
 compile check and 84 payload-only capsule tests pass. Strict owner-crate
-Clippy passes with `--no-deps --all-targets` for metadata/read/write/remote. Format-specific
-fixtures use v6 without changing their epoch/visibility assertions. These are
-focused proofs, not fresh-prefix RustFS or end-to-end v6 qualification.
+Clippy passes with `--no-deps --all-targets` for metadata/read/write/remote.
+Format-specific fixtures use v6 without changing their epoch/visibility
+assertions. This local suite is separate from the fresh-prefix end-to-end proof
+below.
 
 Fresh-prefix RustFS proof passed under
 `checkpoint-pages-fresh-live-r1` outside the checkout. Native push published
 unchanged Git fixtures, then the actual checkpoint publisher and index builder
-ran before comparison. All three cells (100, 1,000 and 10,000 commits) pass 20 cold/warm samples for
+ran before comparison. All three cells (100, 1,000 and 10,000 commits) pass
+20 cold/warm samples for
 resolve, file history and blame, plus all ten query oracles. The 189 processes
 include six maintenance runs and prove 210 native query comparisons and 3,150
 blame-line origins. Every measured operation drains backend work; warm history
