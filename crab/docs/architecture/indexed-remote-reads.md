@@ -479,7 +479,7 @@ are debug component receipts, not native Git integrity, release-image performanc
 or whole-publication measurements. Release/provider and broader lifecycle gates
 remain open. Fixtures, source/binary hashes and raw receipts remain external.
 
-## Metadata-first opening: implementation in progress
+## Metadata-first opening qualification
 
 The existing complete-metadata checkpoint capture is now named
 `open_view_from_root_with_metadata`. HTTP browsing, S3 read views, CLI remote
@@ -495,7 +495,10 @@ activation/visibility equivalence, absence of whole-run body GETs and preservati
 of typed missing-dependency errors. Native delta-chain installation passes both
 complete and metadata-only views, including repeated installation and native Git
 byte comparisons. Architecture guardrails, strict read/remote-Git library Clippy,
-CLI and S3 gateway consumer checks pass. The HTTP consumer check remains running.
+CLI, S3 gateway and HTTP consumer checks pass; the frontend build ran before the
+HTTP check. The initial PR image qualification failed because ECR rejected all
+five attempts to pull its pinned AWS CLI image with a registry data-limit error.
+This remains a CI qualification gap rather than a passing image result.
 
 `metadata-queries-r1` passes 20 cold/warm attribution comparisons at both 100 and
 1,000 commits. At 10,000 commits opening reads 2,182,079 bytes, compared with
@@ -513,8 +516,18 @@ one-entry budget. Its implementation now reuses the root verified during opening
 charging one entry and checking cancellation without rereading ancestor pages.
 The focused suite passes ten tests, including the new root proof, retained-history
 denial, merge parents and dependency-page cancellation. The qualifier rebuild
-passes; the real-store repeat remains pending. Other commit IDs
-keep exact ancestry checks; arbitrary batch roots retain page verification and
+passes. Other commit IDs keep exact ancestry checks; arbitrary batch roots retain page verification and
 in-flight cancellation tests. Pack-index and historical-control work still scales, so
 this local optimization cannot establish the bounded-opening gate: directories,
 inventories and ref/frontier capture require indexing and further scaling proof.
+
+`metadata-queries-r2` passes all 63 native Git comparisons with the rebuilt binary:
+20 cold/warm attribution runs at each of 100/1k/10k commits and one full-OID
+resolution run at each size. At 10k, cold resolution reads 844,608 bytes and no
+graph pages; cold attribution reads at most 985,949 bytes and decodes 110,104
+graph/path bytes. All warm queries read zero backend bytes. The unchanged fixture
+byte bounds pass. Cold attribution p95 is 259.152 / 187.268 / 460.314 ms on this
+shared debug host, within its frozen relative bound; these timings do not establish
+release/provider performance. Full pack-index reads still scale with repository
+objects, and control opening still scales with history. Source/binary hashes,
+the earlier failure, raw receipts and checked summaries remain external.
