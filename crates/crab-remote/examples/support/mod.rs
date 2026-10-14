@@ -25,8 +25,8 @@ pub struct Measurements {
     read_bytes: AtomicU64,
     written_bytes: AtomicU64,
     active: AtomicU64,
-    decoded_blocks: [AtomicU64; 6],
-    decoded_bytes: [AtomicU64; 6],
+    decoded_blocks: [AtomicU64; 7],
+    decoded_bytes: [AtomicU64; 7],
 }
 
 #[derive(Clone, Copy)]
@@ -35,8 +35,8 @@ struct Snapshot {
     outcomes: [u64; 9],
     read_bytes: u64,
     written_bytes: u64,
-    decoded_blocks: [u64; 6],
-    decoded_bytes: [u64; 6],
+    decoded_blocks: [u64; 7],
+    decoded_bytes: [u64; 7],
 }
 
 impl StorageObserver for Measurements {
@@ -74,6 +74,7 @@ impl tracing::field::Visit for DecodeEvent {
                 "capsule_admission" => Some(3),
                 "capsule_visibility" => Some(4),
                 "checkpoint_visibility" => Some(5),
+                "checkpoint_visibility_pages" => Some(6),
                 _ => None,
             };
         }
@@ -170,6 +171,7 @@ impl Measurements {
             "capsule_admission",
             "capsule_visibility",
             "checkpoint_visibility",
+            "checkpoint_visibility_pages",
         ]
         .into_iter()
         .enumerate()
@@ -248,12 +250,13 @@ mod tests {
             tracing::debug!(target:"crab_metadata::index_decode", index_format="capsule_admission", decoded_bytes=29_u64);
             tracing::debug!(target:"crab_metadata::index_decode", index_format="capsule_visibility", decoded_bytes=31_u64);
             tracing::debug!(target:"crab_metadata::index_decode", index_format="checkpoint_visibility", decoded_bytes=37_u64);
+            tracing::debug!(target:"crab_metadata::index_decode", index_format="checkpoint_visibility_pages", decoded_bytes=43_u64);
             tracing::debug!(target:"unrelated", index_format="path_state", decoded_bytes=999_u64);
         });
         let snapshot = counters.snapshot();
         assert_eq!(
             (snapshot.decoded_blocks, snapshot.decoded_bytes),
-            ([1, 1, 1, 1, 1, 1], [41, 123, 67, 29, 31, 37])
+            ([1, 1, 1, 1, 1, 1, 1], [41, 123, 67, 29, 31, 37, 43])
         );
     }
 
