@@ -120,6 +120,8 @@ class ReadScalingRunner(AddCommitPushSmoke):
             self.run_git(repo, ["fsck", "--full", "--strict"])
             self.run_crab(repo, ["push", "origin", "HEAD:refs/heads/main"], name=f"history-{commits} publish")
             proxy = RequestCountingProxy(self.args.endpoint_url, self.args.bucket + "/" + prefix)
+            # Transfer receipts need object classes, not raw paths from ambient debug tracing.
+            proxy.trace_paths = False
             proxy.start()
             old_endpoint = {key:self.env.get(key) for key in ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3")}
             self.env.update(AWS_ENDPOINT_URL=proxy.url, AWS_ENDPOINT_URL_S3=proxy.url)

@@ -29,7 +29,7 @@ Xet files and unified local staging are subsequent workstreams.
 | 1 | Reproducible cold/warm baseline and contracts | Native Git oracle, isolated query/open measurements, process resources, HTTP bytes/classes, index decode counts, history scaling receipts | Implemented; RustFS history-scaling baseline passed; cloud latency cell pending |
 | 2 | Authenticated bounded path-state pages | Equivalence/property tests; malformed hashes, lengths, ordering, routing and allocations rejected; bounded internal directories | Implemented; 23 focused tests, GC retention regression and 1,000/10,000-commit RustFS format qualification passed |
 | 3 | Lazy canonical and projected attribution | Fixed directory page reads only needed pages; branch/force-push/recreation/raw-path/restart E2E proof | Canonical scaling/transitions passed; streaming Cell ingestion, projected native Git oracle and two process starts passed on RustFS; broader cloud/lifecycle qualification remains open |
-| 4 | Lazy graph lookup and bounded opening | Paged OID/ordinal/parent/summary queries; reachable versus retained proof; tag/shallow/cancellation/cleanup checks | Foreground graph/path integration qualified on RustFS; bounded control opening, broader shallow/lifecycle and release/cloud qualification remain pending |
+| 4 | Lazy graph lookup and bounded opening | Paged OID/ordinal/parent/summary queries; reachable versus retained proof; tag/shallow/cancellation/cleanup checks | Foreground graph/path and checkpointed opening qualified on RustFS; tag/shallow/retention/cancellation proofs pass; latency, broad CI and release/cloud gates remain open |
 | 5 | Change-point history and first-parent blame | Exact native Git origins under matching semantics; fixed file changes with growing unrelated history; comparison/result cache isolation | Pending |
 | 6 | Indexed historical Xet catalog | Indexed checkpoints and visible deltas; bounded compaction; 10-GiB edits and byte-identical cold historical hydration; protected receive and sibling consumers | Pending |
 | 7 | Lifecycle and migration | Interrupted publication/builds, concurrent owners, GC retained roots/readers, stale caches and released-format migration qualification | Pending; also required in every earlier implementation |
@@ -1439,3 +1439,61 @@ Current PR CI confirms the inherited architecture guard still requires the
 retired pack-installer delegation in `crab/src/read/mod.rs`. Its inventory
 correction remains subject to the earlier explicit-approval request. No guard,
 baseline, dependency or lockfile change is included in this proof update.
+
+## Checkpointed opening and visibility qualification
+
+`lazy-opening-scale-r1` uses the existing scaling harness with checkpointing,
+four selected workloads and 20 isolated process samples per history/workload.
+All 240 cold/warm query pairs match native Git; all 510 correctness, resource and
+transport checks pass. The fixtures retain the baseline's 100 displayed entries,
+50-line selected file and 20 content edits. Maintenance, opening and query costs
+remain separate. Ambient request-path tracing is disabled for this harness so
+transfer receipts retain only object classes.
+
+| Commits | Cold opening bytes | Cold point bytes | Cold attribution bytes | Attribution decoded bytes | Cold attribution p95 |
+| --- | --- | --- | --- | --- | --- |
+| 100 | 20,305 | 50,055 | 68,616 | 57,847 | 383.889 ms |
+| 1,000 | 45,180 | 247,501 | 298,071 | 257,262 | 251.661 ms |
+| 10,000 | 46,095 | 273,020 | 378,708 | 347,323 | 3,024.794 ms |
+
+Opening graph decoding is 10,024 / 34,837 / 35,764 B; visibility decoding is
+390 / 395 / 393 B. These opening bytes plateau once the queried pages fill;
+no complete graph or visibility dictionary is decoded. Reused-reader warm query
+transfers are zero; re-opening still revalidates authority and is measured again.
+The fixed 100-object batch at 10k reads 1,431,973 B and decodes 1,426,791 B of
+physical pages. That cost is distinct from a point read and remains a measured
+candidate for tuning; no locator-format or page-size change is justified from
+local latency alone.
+
+Attribution meets the frozen 512-KiB decode and 1-MiB transfer limits. Its original
+p95 **fails** the frozen relative latency target: four final 10k samples have
+unchanged bytes/request counts but much higher wall time. Do not describe this
+run as passing the full performance gate because its Git checks pass.
+
+`lazy-opening-latency-r1` follows with 80 read-only, paired attribution processes:
+20 samples for each 100/10k and direct/metered combination, alternating order.
+All results still match native Git. Direct p95 is 481.103 / 784.528 ms; metered
+p95 is 893.437 / 671.941 ms. Large delays also occur at 100 commits. In one slow
+metered 100-commit sample, query wall time is 1,634.285 ms, process CPU is 250 ms,
+and HTTP forwarding across all phases totals 199 ms. Timing records contain
+object classes and durations, without request paths. This isolates substantial
+waiting outside measured forwarding; it does not identify its cause or erase
+the original failed latency gate. Debug binaries and shared-host variance do not
+establish release or representative-provider latency.
+
+`lazy-opening-ref-r1` passes ten native checks. Nested annotated tags reconstruct
+the expected file. The existing protocol harness verifies depth-one clone,
+deepening, unshallowing and strict Git fsck on the unchanged native-fetch sibling.
+After checkpointing and index publication, deleting a side ref leaves its commit
+in the checkpoint dictionary. A cold direct-commit read rejects it as unreachable
+and preserves existing output. Recreating the ref and republishing indexes makes
+the same OID readable again; the nested tag remains correct throughout.
+
+The retained reader binaries are qualified against Rust source `9a08da540463`;
+the harness commit `d5e7359fc3a` changes Python and documentation only. A Git diff
+confirms all Rust sources, Cargo manifests and the lockfile match that reader
+revision. Binary hashes, source inputs, CPU/RSS and per-cell receipts remain in
+the external qualification root. Provider qualification still needs an authorized
+S3 bucket/region/prefix and locally configured credentials; neither checkout has
+an `.env` and this session has no ambient AWS credentials/profile. The earlier
+oracle/guard approval requests and public async API release boundary remain open.
