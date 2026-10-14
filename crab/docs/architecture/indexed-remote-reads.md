@@ -490,9 +490,31 @@ Complete body views remain available for embedded-pack and candidate installers.
 Origin-backed installation now handles uncheckpointed metadata source ranges;
 resident complete views retain their existing body installation path.
 
-The initial two focused tests pass snapshot/catalog equivalence, complete
-activation/visibility equivalence and absence of whole-run body GETs. Expanded
-native delta-chain installation, missing-dependency error preservation and
-consumer/real-store qualification remain in progress. No bounded-opening claim
-follows from this payload change: historical control directories, inventories
-and ref/frontier capture still require indexing and scaling proof.
+Final-source metadata checks pass five tests, including snapshot/catalog and
+activation/visibility equivalence, absence of whole-run body GETs and preservation
+of typed missing-dependency errors. Native delta-chain installation passes both
+complete and metadata-only views, including repeated installation and native Git
+byte comparisons. Architecture guardrails, strict read/remote-Git library Clippy,
+CLI and S3 gateway consumer checks pass. The HTTP consumer check remains running.
+
+`metadata-queries-r1` passes 20 cold/warm attribution comparisons at both 100 and
+1,000 commits. At 10,000 commits opening reads 2,182,079 bytes, compared with
+6,094,562 in `foreground-graph-r1` on the same fixed RustFS fixture. Full-OID
+resolution returns the correct native Git result but reads 1,057,066 cold-query
+bytes, exceeding the unchanged 1-MiB qualification bound. An independent replay
+reproduces this failure: its pack-index range is 844,460 bytes, its commit entry
+148 bytes, and graph pages account for another 212,458 bytes. Cold attribution
+independently passes at 985,949 backend bytes and 110,104 decoded graph/path bytes;
+20-sample largest-history qualification remains pending while resolution is fixed.
+The terminal failure and diagnostic receipts remain outside the checkout.
+
+The pre-fix captured-tip regression fails with two entry charges against a
+one-entry budget. Its implementation now reuses the root verified during opening,
+charging one entry and checking cancellation without rereading ancestor pages.
+The focused suite passes ten tests, including the new root proof, retained-history
+denial, merge parents and dependency-page cancellation. The qualifier rebuild
+passes; the real-store repeat remains pending. Other commit IDs
+keep exact ancestry checks; arbitrary batch roots retain page verification and
+in-flight cancellation tests. Pack-index and historical-control work still scales, so
+this local optimization cannot establish the bounded-opening gate: directories,
+inventories and ref/frontier capture require indexing and further scaling proof.

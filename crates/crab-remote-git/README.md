@@ -33,7 +33,9 @@ make no additional index requests. Publication of capsule-bound browse indexes
 is a separate maintenance responsibility, not part of opening or pushing.
 Capsule graphs retain an immutable paged reader and captured commit roots;
 membership reads exact ancestor sets rather than allocating a full reachability
-bitmap. Graph/OID/parent reads share operation admission and cancellation, including
+bitmap. A full commit ID matching a verified captured root reuses that visibility
+proof without rereading ancestry pages; other IDs still require exact membership.
+Graph/OID/parent reads share operation admission and cancellation, including
 warm queries. Released manifest graph version 1 retains complete graph validation.
 `commits_reachable_from` is asynchronous and uses a metadata-admitted operation
 without opening the object-locator database.
