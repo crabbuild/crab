@@ -759,3 +759,38 @@ initializer; the complete 107-check receipt remains bound to `b29565b9422`.
 The debug build retains the existing compact-unwind linker warning. Neither
 receipt resolves the Git 2.40 cancellation failure, the pending architecture
 inventory approval, nor the remaining stage-4 and release qualification gates.
+
+
+## Process-group cancellation grace in qualification
+
+A real process-runner regression reproduces premature SIGKILL: the leader exits
+and its pipes close after SIGTERM while a descendant with detached stdio is
+still completing durable shutdown. The callback marker is absent on the original
+runner. Both changed source files match `origin/main` before this fix, so this
+is an existing lifecycle defect exposed during the CLI-read qualification.
+
+The shared runner now permits early cancellation completion only after leader
+exit, joined pipes and a process-group observation containing no live members.
+macOS reuses its existing kernel group observer; Linux checks bounded proc stat
+records, excluding zombie/dead members and handling exit during either open or
+read. Restricted inspection does not prove completion. The original ten-second
+deadline still escalates unresponsive descendants; the leader stays unreaped
+until the group signal, preserving its process-group identity. Windows retains
+JobObject termination and completion waiting. Other Unix targets consume the
+full grace period because they have no group observer here.
+
+Dependency proof: `process-wrap` 10.0.0 sends signals to the group, but its wait
+loop uses `waitpid`, which cannot observe non-child descendants. This is why
+leader completion cannot substitute for group completion. See
+[waitid child selection and WNOWAIT](https://man7.org/linux/man-pages/man2/waitid.2.html),
+[Linux proc stat state and group fields](https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html),
+and [XNU group PID enumeration](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c).
+
+Focused macOS qualification passes all 13 mirror process tests and both platform
+cleanup tests. The new descendant fixture proves graceful callback completion
+before the deadline and deadline escalation with a stopped heartbeat when the
+descendant ignores SIGTERM. An isolated Linux container compiles the exact
+SHA-256-bound canonical runner source and passes the same two descendant cases.
+That probe has a small error/cancellation boundary driver; it is not full Linux
+CLI or Windows qualification. Native CLI cancellation, full cross-platform CI
+and the earlier Git 2.40 hook-marker failure still require current proof.

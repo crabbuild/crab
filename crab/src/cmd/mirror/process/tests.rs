@@ -100,6 +100,23 @@ fn child_fixture() {
                 child.wait().unwrap();
             }
         }
+        #[cfg(unix)]
+        "tree-grace" | "tree-ignore-term" => {
+            let child_root = root.join("child");
+            std::fs::create_dir(&child_root).unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", FIXTURE, "--nocapture"])
+                .env(MODE, mode.strip_prefix("tree-").unwrap())
+                .env(ROOT, &child_root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            wait_for(&child_root.join("ready"));
+            std::fs::write(root.join("ready"), b"ready").unwrap();
+            child.wait().unwrap();
+        }
         "sleep" => {
             std::fs::write(root.join("ready"), b"ready").unwrap();
             thread::sleep(Duration::from_secs(30));
@@ -118,6 +135,7 @@ fn child_fixture() {
             }
             std::fs::write(root.join("ready"), b"ready").unwrap();
             while !TERMINATED.load(std::sync::atomic::Ordering::Relaxed) {
+                std::fs::write(root.join("heartbeat"), format!("{:?}", Instant::now())).unwrap();
                 thread::sleep(Duration::from_millis(10));
             }
             thread::sleep(Duration::from_millis(150));
@@ -321,6 +339,36 @@ fn cancellation_stops_descendant_writer_before_cache_owner_returns() {
     });
     let _clean = CacheCleanGuard::acquire(&path, &CancellationToken::new()).unwrap();
     assert_writer_stopped(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_preserves_descendant_grace_after_the_leader_exits() {
+    for mode in ["tree-grace", "tree-ignore-term"] {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancellationToken::new();
+        let result = thread::scope(|scope| {
+            let worker_cancel = cancel.clone();
+            let root = dir.path();
+            let worker = scope.spawn(move || {
+                SystemCommandRunner::new(worker_cancel).run(&command(mode, root), OutputMode::Json)
+            });
+            wait_for(&root.join("ready"));
+            let start = Instant::now();
+            cancel.cancel();
+            let result = worker.join().unwrap();
+            if mode == "tree-grace" {
+                assert!(root.join("child/closed").is_file());
+                assert!(start.elapsed() < CANCELLATION_GRACE);
+            } else {
+                assert!(start.elapsed() >= CANCELLATION_GRACE);
+                assert!(start.elapsed() < CANCELLATION_GRACE + Duration::from_secs(5));
+                assert_writer_stopped(&root.join("child"));
+            }
+            result
+        });
+        assert!(matches!(result, Err(CrabError::Cancelled)));
+    }
 }
 
 #[test]

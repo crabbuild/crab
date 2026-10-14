@@ -141,7 +141,11 @@ fn communicate<'scope, T: Send + 'scope>(
             cancelling = Some(Instant::now());
         }
         if let Some(started) = cancelling {
-            if (pending == 0 && child.has_exited()?) || started.elapsed() >= CANCELLATION_GRACE {
+            // EOF and leader exit do not prove descendant shutdown: a hook
+            // may close its pipes before completing durable SIGTERM cleanup.
+            if started.elapsed() >= CANCELLATION_GRACE
+                || (pending == 0 && child.shutdown_finished()?)
+            {
                 child.stop()?;
                 return Err(CrabError::Cancelled);
             }
@@ -201,6 +205,23 @@ struct OwnedChild {
 }
 
 impl OwnedChild {
+    fn shutdown_finished(&mut self) -> io::Result<bool> {
+        if !self.has_exited()? {
+            return Ok(false);
+        }
+        #[cfg(target_os = "macos")]
+        return macos_group_finished(self.inner.id());
+        #[cfg(target_os = "linux")]
+        return linux_group_finished(self.inner.id());
+        // Windows shutdown terminates the job; stop waits for its completion.
+        #[cfg(windows)]
+        return Ok(true);
+        // Without a group-membership observer, only expiry proves that every
+        // descendant has received its full grace period.
+        #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+        Ok(false)
+    }
+
     #[cfg(unix)]
     fn has_exited(&mut self) -> io::Result<bool> {
         if self.finished {
@@ -293,6 +314,59 @@ impl OwnedChild {
             other => other,
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_group_finished(group: u32) -> io::Result<bool> {
+    let group = group.to_string();
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+            .is_none()
+        {
+            continue;
+        }
+        let stat = match std::fs::File::open(entry.path().join("stat"))
+            .and_then(|file| capture_output(file, 4096))
+        {
+            Ok(stat) => stat,
+            // Exit can race either opening or reading the proc entry.
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                continue;
+            }
+            // Restricted inspection is not evidence that the group finished.
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        // comm is parenthesized and may contain spaces or ')'; only the
+        // suffix after its final delimiter contains state, ppid and pgrp.
+        let tail = stat
+            .iter()
+            .rposition(|byte| *byte == b')')
+            .and_then(|end| stat.get(end + 2..))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid process stat"))?;
+        let mut fields = tail
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|field| !field.is_empty());
+        let state = fields.next();
+        let process_group = fields.nth(1);
+        if state.is_none() || process_group.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "incomplete process stat",
+            ));
+        }
+        if process_group == Some(group.as_bytes()) && !matches!(state, Some(b"Z" | b"X" | b"x")) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(target_os = "macos")]
