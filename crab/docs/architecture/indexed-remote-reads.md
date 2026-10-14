@@ -1505,3 +1505,37 @@ the external qualification root. Provider qualification still needs an authorize
 S3 bucket/region/prefix and locally configured credentials; neither checkout has
 an `.env` and this session has no ambient AWS credentials/profile. The earlier
 oracle/guard approval requests and public async API release boundary remain open.
+
+## Query phase timing and remaining latency work
+
+The TCP screen's apparent tail improvement does not survive a consistent
+median comparison. A subsequent 80-process, 20-pair confirmation alternates
+ordinary meter sockets and TCP_NODELAY against the same 100/10k fixtures.
+Median attribution is 147.319 / 109.7065 ms for the existing meter and
+197.262 / 127.6255 ms with TCP_NODELAY. All Git results match. The meter's TCP
+policy stays unchanged; these observations do not establish the original delay's
+cause. An owned process-sampling probe exceeds its 30-second deadline without
+producing stacks; its qualifier and sampler are terminated and the probe is
+excluded from qualification.
+
+`read-phase-timing-r1` qualifies source `e876e2dfa30` with 20 direct-transport
+processes at each of 100/1k/10k commits. All 60 cold/warm pairs match frozen,
+independently verified native Git results. Every phase uses its allowed timing
+fields only and occurs in admission/snapshot/directory/attribution/cleanup order.
+Phase durations do not overlap or exceed the parent query. Parent request, byte
+and decode counters match the earlier frozen fixture exactly; clocks do not hide
+work in preparation. A missing-path failure emits error outcomes for cleanup and
+the parent measurement, with no active backend work remaining.
+
+| Commits | Admission median | Snapshot median | Directory median | Indexed attribution median | Cleanup median | Parent p95 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 100 | 0.036 ms | 13.843 ms | 173.3205 ms | 20.6525 ms | 0.290 ms | 383.917 ms |
+| 1,000 | 0.0325 ms | 20.0425 ms | 113.9915 ms | 25.590 ms | 0.2215 ms | 293.513 ms |
+| 10,000 | 0.039 ms | 21.912 ms | 33.4125 ms | 34.5275 ms | 0.164 ms | 187.177 ms |
+
+These samples place observed cold time primarily in snapshot/tree reads and
+indexed lookup, not operation admission or cleanup. The slowest sample spends
+348.535 ms in raw directory reading. They do not prove the source of the earlier
+three-second tail or an isolated/provider latency guarantee. The original failed
+run remains part of the evidence. Locked qualifier build, selected Clippy with
+`--no-deps`, formatting and four existing Python oracle regressions pass.
