@@ -563,3 +563,29 @@ the complete map. Targeted/paged ref capture and remaining control/index scaling
 are open stage-4 gates. The multi-command stdio helper retains a pre-opened fetch
 snapshot; deferring that work and the CLI's native-pack materialization require
 separate consumer/lifecycle proof rather than this stateless HTTP change.
+
+## Stdio ref-only discovery
+
+The terminal helper now captures capsule ref authority before advertising
+protocol-v2 capabilities. It opens payload and visibility dependencies only
+when a `fetch` command arrives. The same captured refs serve every `ls-refs`
+round; hidden refs, peeling, unborn HEAD and existing entry limits remain intact.
+
+Deferred capsule fetch admission checks both the ref maps and their visible
+transaction positions against discovery. An intervening force-push or
+deletion/recreation cannot reuse identical tip OIDs to substitute another
+inventory. Changed authority produces a terminal `ERR` requesting a new fetch;
+the helper does not silently recapture refs. Promotion from a tip-bound view to
+complete visibility applies the same check. Once admitted, negotiation retains
+its verified repository, haves and existing generated-pack lease ownership.
+
+All 44 upload-pack session tests pass, including capsule discovery without run
+payloads before/after checkpointing, transaction ABA rejection, legacy discovery,
+empty repositories, negotiation and generated-pack admission release. Architecture
+guardrails and workflow YAML parsing pass. The session module is now included in
+Linux, macOS and Windows protocol CI. Native Git lifecycle, build and CI proof
+remain required before this slice can be described as working. Complete ref capture remains output-sized;
+remaining control/catalog/index opening costs are still stage-4 gates. The
+earlier helper capability probe still captures control metadata when an empty
+local object database needs classic cold-clone pack routing; this slice changes
+terminal upload-pack admission and does not remove that separate probe.

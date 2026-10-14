@@ -673,37 +673,31 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let layered_root = capsule_root
-        .clone()
-        .filter(|root| root.record().root().checkpoint().is_some());
     let mut cold_clone_pack = None;
-    let (refs, mut discovery_packs, mut fetch_snapshot) = match capsule_root {
-        Some(root) if layered_root.is_some() => {
-            // A normal protocol-v2 fetch only needs the authenticated root,
-            // ref controls, checkpoint footer, and run controls. Keep the
-            // large layered visibility body cold until a request actually
-            // needs shallow/filter/tag semantics.
-            let (repository, proof, direct_pack) =
-                open_capsule_repository_from_root(store, prefix, root, true, runtime, cancellation)
-                    .await?;
-            cold_clone_pack = direct_pack;
-            let refs = repository.refs().clone();
-            let proof = (!refs.is_empty()).then_some(proof);
-            (refs, Vec::new(), Some((repository, proof)))
-        }
+    let mut fetch_snapshot = None;
+    let (refs, mut discovery_packs, capsule_refs) = match capsule_root {
         Some(root) => {
-            let (repository, proof, _) = open_capsule_repository_from_root(
-                store,
-                prefix,
-                root,
-                false,
-                runtime,
-                cancellation,
-            )
-            .await?;
-            let refs = repository.refs().clone();
-            let proof = (!refs.is_empty()).then_some(proof);
-            (refs, Vec::new(), Some((repository, proof)))
+            let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
+            let view = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+                result = crab_read::capsule_protocol::open_ref_view_from_root(&layout, root) => result?,
+            };
+            let maximum = upload_pack_repository_options()
+                .map_err(remote_error)?
+                .operation_limits()
+                .max_entries;
+            let actual = view.refs().len() as u64;
+            if actual > maximum {
+                return Err(remote_error(RemoteGitError::LimitExceeded {
+                    limit: "snapshot entries",
+                    actual,
+                    maximum,
+                }));
+            }
+            let refs = RepositoryRefs::from_ref_state(view.head(), view.refs(), view.peeled_refs())
+                .map_err(remote_error)?;
+            (refs, Vec::new(), Some(view))
         }
         None => {
             let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
@@ -785,6 +779,65 @@ where
                     &mut negotiated_have_set,
                     &fetch.haves,
                 )?;
+                if fetch_snapshot.is_none() {
+                    let admitted = if let Some(view) = capsule_refs.as_ref() {
+                        let footer_only =
+                            view.root_snapshot().record().root().checkpoint().is_some();
+                        match open_capsule_repository_from_root(
+                            store,
+                            prefix,
+                            view,
+                            footer_only,
+                            runtime,
+                            cancellation,
+                        )
+                        .await
+                        {
+                            Ok((repository, proof, direct_pack)) => {
+                                cold_clone_pack = direct_pack;
+                                let proof = (!refs.is_empty()).then_some(proof);
+                                (repository, proof)
+                            }
+                            Err(error) => {
+                                return reject_protocol_request(writer, error, cancellation).await;
+                            }
+                        }
+                    } else {
+                        match open_repository_with_visibility_requirement(
+                            store,
+                            prefix,
+                            runtime,
+                            cancellation,
+                            VisibilityRequirement::Catalog,
+                        )
+                        .await
+                        {
+                            Ok(admitted) => admitted,
+                            Err(error) => {
+                                return reject_protocol_request(writer, error, cancellation).await;
+                            }
+                        }
+                    };
+                    // Legacy compaction may retain the advertised Git view at a new
+                    // generation. Capsule admission also checks transaction positions
+                    // so moving a ref away and back cannot silently replace its inventory.
+                    if admitted.0.refs() != &refs
+                        || (capsule_refs.is_none()
+                            && !admitted
+                                .0
+                                .matches_pack_inventory(&discovery_packs)
+                                .map_err(remote_error)?)
+                    {
+                        return reject_protocol_request(
+                            writer,
+                            protocol("repository changed after ref discovery; retry fetch"),
+                            cancellation,
+                        )
+                        .await;
+                    }
+                    discovery_packs = Vec::new();
+                    fetch_snapshot = Some(admitted);
+                }
                 let tip_bound = fetch_snapshot.as_ref().is_some_and(|(_, proof)| {
                     proof.as_ref().is_some_and(|proof| {
                         matches!(proof, UploadPackVisibilityProof::TipBound { .. })
@@ -796,33 +849,21 @@ where
                     && (cold_clone_needs_complete_view
                         || !tip_bound_fetch_eligible(&fetch, fetch_policy, &visible_ref_names))
                 {
-                    let Some(root) = layered_root.clone() else {
+                    let Some(view) = capsule_refs.as_ref() else {
                         return reject_protocol_request(
                             writer,
-                            protocol("tip-bound upload-pack proof lost its layered root"),
+                            protocol("tip-bound upload-pack proof lost its capsule ref capture"),
                             cancellation,
                         )
                         .await;
                     };
-                    let admitted = open_capsule_repository_from_root(
+                    let admitted = match open_capsule_repository_from_root(
                         store,
                         prefix,
-                        root,
+                        view,
                         false,
                         runtime,
                         cancellation,
-                    )
-                    .await?;
-                    cold_clone_pack = None;
-                    fetch_snapshot = Some((admitted.0, Some(admitted.1)));
-                }
-                if fetch_snapshot.is_none() {
-                    let admitted = match open_repository_with_visibility_requirement(
-                        store,
-                        prefix,
-                        runtime,
-                        cancellation,
-                        VisibilityRequirement::Catalog,
                     )
                     .await
                     {
@@ -831,24 +872,8 @@ where
                             return reject_protocol_request(writer, error, cancellation).await;
                         }
                     };
-                    // Compaction can change the generation without changing
-                    // the advertised Git view. Require exact refs and immutable
-                    // inventory so admission cannot silently switch authority.
-                    if admitted.0.refs() != &refs
-                        || !admitted
-                            .0
-                            .matches_pack_inventory(&discovery_packs)
-                            .map_err(remote_error)?
-                    {
-                        return reject_protocol_request(
-                            writer,
-                            protocol("repository changed after ref discovery; retry fetch"),
-                            cancellation,
-                        )
-                        .await;
-                    }
-                    discovery_packs = Vec::new();
-                    fetch_snapshot = Some(admitted);
+                    cold_clone_pack = None;
+                    fetch_snapshot = Some((admitted.0, Some(admitted.1)));
                 }
                 if fetch.done {
                     fetch.haves = negotiated_haves.clone();
@@ -1402,7 +1427,7 @@ async fn open_repository_snapshot(
 async fn open_capsule_repository_from_root(
     store: &crab_storage::Store,
     prefix: &str,
-    root: crab_metadata::capsule_protocol::RootSnapshot,
+    captured_refs: &crab_read::capsule_protocol::CapsuleRefView,
     footer_only: bool,
     runtime: &Arc<RemoteGitRuntime>,
     cancellation: &CancellationToken,
@@ -1411,6 +1436,7 @@ async fn open_capsule_repository_from_root(
     UploadPackVisibilityProof,
     Option<crab_read::capsule_protocol::LayeredColdClonePack>,
 )> {
+    let root = captured_refs.root_snapshot().clone();
     let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
     let options = upload_pack_repository_options().map_err(remote_error)?;
     let maximum = options.operation_limits().max_fetched_bytes;
@@ -1418,28 +1444,40 @@ async fn open_capsule_repository_from_root(
         max_capsule_bytes: maximum,
         max_frontier_bytes: maximum,
     };
-    let (view, direct_pack, tip_bound) = if footer_only {
-        let footer_view = crab_read::capsule_protocol::open_view_from_root_with_layered_control(
-            &layout,
-            root.clone(),
-            limits,
-        )
-        .await?;
-        let direct_pack = footer_view
-            .layered_cold_clone_pack(&layout, options.operation_limits().max_response_bytes)
-            .map_err(remote_error)?;
-        (footer_view, direct_pack, true)
+    let view = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+        result = async {
+            if footer_only {
+                crab_read::capsule_protocol::open_view_from_root_with_layered_control(
+                    &layout, root, limits,
+                ).await
+            } else {
+                crab_read::capsule_protocol::open_view_from_root(&layout, root, limits).await
+            }
+        } => result?,
+    };
+    // Ref OIDs alone miss deletion/recreation and force-push ABA. Admission
+    // must bind payloads to the exact transaction positions advertised by this
+    // session, including when a tip-bound view is promoted for filtered fetch.
+    if view.refs() != captured_refs.refs()
+        || view.peeled_refs() != captured_refs.peeled_refs()
+        || view.visible_ref_transactions() != captured_refs.visible_ref_transactions()
+    {
+        return Err(protocol(
+            "repository changed after ref discovery; retry fetch",
+        ));
+    }
+    let direct_pack = if footer_only {
+        view.layered_cold_clone_pack(&layout, options.operation_limits().max_response_bytes)
+            .map_err(remote_error)?
     } else {
-        (
-            crab_read::capsule_protocol::open_view_from_root(&layout, root, limits).await?,
-            None,
-            false,
-        )
+        None
     };
     let bucket = store.bucket_identity();
     let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
     let identity = RepositoryIdentity::new(provider, prefix.to_owned(), 1).map_err(remote_error)?;
-    let proof = if tip_bound {
+    let proof = if footer_only {
         UploadPackVisibilityProof::TipBound {
             transitions: Arc::new(view.tip_bound_transitions().clone()),
         }
