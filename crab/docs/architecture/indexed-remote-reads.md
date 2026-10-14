@@ -718,9 +718,52 @@ to the fetch loader. Existing metadata-view tests cover snapshot equivalence,
 multi-ref activation and missing dependencies; those invariants must remain in
 the next implementation slice. This audit does not close the opening gate.
 
-The optimized binary's RustFS run passes the full ten-query native oracle at
-100 commits and all 20 cold/warm resolve/attribution samples at 100 and 1,000
-commits. Warm queries read zero backend bytes and completed operations retain no
-active backend work. The 10k history sampling remains in progress; source/binary
-hashes and completed receipts are retained externally. This partial observation
-is not recorded as a completed 121-process qualification.
+The dictionary-join binary at `d68a9177915` completes all 121 RustFS native-Git
+query processes: all ten queries at 100 commits and 20 cold/warm resolve and
+attribution samples at 100/1,000/10,000 commits. Warm queries read zero backend
+bytes, and measured operations finish with zero active backend work. Exact source
+and binary hashes, native results and independently checked summaries are external.
+
+| History | Resolve p95, ms | Attribution p95, ms | Maximum attribution decoded bytes |
+| --- | ---: | ---: | ---: |
+| 100 | 18.843 | 398.433 | 51,111 |
+| 1,000 | 30.370 | 163.718 | 232,194 |
+| 10,000 | 32.646 | 871.628 | 345,933 |
+
+The fixed-query byte bounds pass. These noisy shared-host debug timings do not
+close the latency gate. Opening still reads 2,183,801 bytes at 10k and process
+memory/CPU grow with history; correctness proof is not bounded-opening proof.
+
+
+## Indexed opening without redundant placement hints
+
+`git_repository_from_store` previously copied every ordinal admission into an
+intermediate OID vector and built another per-object placement dictionary even
+when a complete physical index was attached. `lookup_batch_for_read` returns from
+that index before consulting any placement hints. Opening now borrows ordinal
+admission directly and retains hint dictionaries only for unindexed reads.
+Source/member range checks, hash parsing and capsule-run admission/count validation
+remain unconditional. Ref reconciliation, visibility proofs, catalog ordinals,
+thin-pack client-base authorization and reconstruction checks are unchanged.
+The refactor removes nine production lines and adds no format/config/API surface.
+
+Two metadata-view equivalence/activation tests, five runtime regressions and the
+unindexed admitted-source lookup test pass. Read-library strict Clippy and both
+qualification-tool builds pass. The final-source RustFS replay passes 61 native-Git
+processes: all ten queries at 100 commits plus 20 cold/warm opening and resolve
+samples at 100/1,000/10,000 commits. Warm resolve queries read zero backend bytes;
+measurements finish with no active backend work. Source/binary receipts and checked
+summaries remain external.
+
+| History | Cold open median / p95, ms | Opening backend bytes | Process median RSS, bytes | Process median CPU, s |
+| --- | --- | ---: | ---: | ---: |
+| 100 | 41.672 / 51.923 | 89,134 | 32,931,840 | 0.070 |
+| 1,000 | 141.332 / 164.715 | 557,942 | 36,544,512 | 0.225 |
+| 10,000 | 675.488 / 747.510 | 2,183,801 | 61,693,952 | 1.050 |
+
+The previous dictionary-join resolve cells used 78,217,216 bytes median RSS and
+1.23 s median process CPU at 10k; this replay uses 61,693,952 bytes and 1.05 s.
+These are shared-host debug observations, not a controlled release/provider
+latency result. Metadata transfer is unchanged. Complete visibility decoding,
+transaction reconciliation and source/ref inventory capture still scale; this
+cleanup does not satisfy bounded opening or finish stage 4.

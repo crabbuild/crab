@@ -936,30 +936,16 @@ impl CapsuleRepositoryView {
         // The footer still authenticates source descriptors and frontier
         // admission, while the complete ordinal join is only available to
         // maintenance/strict readers that loaded the full checkpoint.
-        let preferred_object_admission = if let Some(checkpoint) = checkpoint
+        // A ready physical index resolves every placement before hint paths run.
+        // Keep validating source/member admission, but avoid a second OID dictionary.
+        let mut preferred_object_admission_by_oid =
+            object_index.is_none().then(std::collections::HashMap::new);
+        if let Some(checkpoint) = checkpoint
             && !checkpoint.is_control_only()
+            && let Some(snapshot) = checkpoint.visibility_ordinal_snapshot()?
+            && let Some(admission) = snapshot.member_admission()
         {
-            checkpoint
-                .visibility_ordinal_snapshot()?
-                .and_then(|snapshot| {
-                    snapshot.member_admission().map(|admission| {
-                        snapshot
-                            .objects()
-                            .iter()
-                            .zip(admission)
-                            .map(|(oid, member)| (*oid, *member))
-                            .collect::<Vec<_>>()
-                    })
-                })
-        } else {
-            None
-        };
-        let mut preferred_object_admission_by_oid: std::collections::HashMap<
-            [u8; 20],
-            Vec<crab_xet::hash::MerkleHash>,
-        > = std::collections::HashMap::new();
-        if let Some(admission) = preferred_object_admission.as_ref() {
-            for (oid, member) in admission {
+            for (oid, member) in snapshot.objects().iter().zip(admission) {
                 let source = sources
                     .get(usize::from(member.source_index()))
                     .ok_or_else(|| {
@@ -973,19 +959,20 @@ impl CapsuleRepositoryView {
                     })?;
                 let pack_id = crab_xet::hash::MerkleHash::from_hex(pack.pack().blake3())
                     .map_err(|error| corrupt_path("layered visibility", error.to_string()))?;
-                preferred_object_admission_by_oid
-                    .entry(*oid)
-                    .or_default()
-                    .push(pack_id);
+                if let Some(admission) = preferred_object_admission_by_oid.as_mut() {
+                    admission.entry(*oid).or_insert_with(Vec::new).push(pack_id);
+                }
             }
         }
         for (oid, pack_ids) in self.frontier_object_admission() {
-            let entry = preferred_object_admission_by_oid.entry(*oid).or_default();
             for pack_id in pack_ids {
                 let pack_id = crab_xet::hash::MerkleHash::from_hex(pack_id)
                     .map_err(|error| corrupt_path("frontier admission", error.to_string()))?;
-                if !entry.contains(&pack_id) {
-                    entry.push(pack_id);
+                if let Some(admission) = preferred_object_admission_by_oid.as_mut() {
+                    let entry = admission.entry(*oid).or_insert_with(Vec::new);
+                    if !entry.contains(&pack_id) {
+                        entry.push(pack_id);
+                    }
                 }
             }
         }
@@ -995,15 +982,18 @@ impl CapsuleRepositoryView {
         for (pack_id, object_ids) in capsule_run_member_oids_by_pack(self)? {
             let pack_id = crab_xet::hash::MerkleHash::from_hex(&pack_id)
                 .map_err(|error| corrupt_path("capsule run admission", error.to_string()))?;
-            for oid in object_ids {
-                let entry = preferred_object_admission_by_oid.entry(oid).or_default();
-                if !entry.contains(&pack_id) {
-                    entry.push(pack_id);
+            if let Some(admission) = preferred_object_admission_by_oid.as_mut() {
+                for oid in object_ids {
+                    let entry = admission.entry(oid).or_insert_with(Vec::new);
+                    if !entry.contains(&pack_id) {
+                        entry.push(pack_id);
+                    }
                 }
             }
         }
         let admitted_pack_ids = preferred_object_admission_by_oid
-            .values()
+            .iter()
+            .flat_map(|admission| admission.values())
             .flat_map(|pack_ids| pack_ids.iter().map(ToString::to_string))
             .collect::<BTreeSet<_>>();
         let frontier_pack_ids = self
@@ -1197,9 +1187,10 @@ impl CapsuleRepositoryView {
         if let Some(index) = object_index {
             lookup_sources = lookup_sources.with_object_index(index);
         }
-        if !preferred_object_admission_by_oid.is_empty() {
-            lookup_sources =
-                lookup_sources.with_preferred_object_admission(preferred_object_admission_by_oid);
+        if let Some(admission) = preferred_object_admission_by_oid
+            && !admission.is_empty()
+        {
+            lookup_sources = lookup_sources.with_preferred_object_admission(admission);
         }
         crab_remote_git::RemoteGitRepository::from_snapshot_with_lookup_sources(
             layout,
