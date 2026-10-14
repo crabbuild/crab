@@ -7,14 +7,12 @@ mod cache;
 pub(crate) use cache::{PageCache, PageWork};
 
 use crate::error::{MetadataError, Result};
-#[cfg(any(feature = "storage", test))]
 use crate::validation::corrupt_object;
 
 fn corruption(reason: &str) -> MetadataError {
     crate::validation::corrupt_object("metadata page", reason)
 }
 
-#[cfg(any(feature = "storage", test))]
 fn corrupt_at<T>(path: &str, reason: &str) -> Result<T> {
     Err(corrupt_object(path, reason))
 }
@@ -57,12 +55,20 @@ pub(crate) enum Kind {
     PackInventory,
     #[cfg(feature = "remote-index")]
     PackSlots,
+    VisibilityRefs = 12,
+    VisibilityOids = 13,
+    VisibilityClosures = 14,
+    VisibilityTransitions = 15,
 }
 
 impl Kind {
     fn is_positional(self) -> bool {
         match self {
-            Self::Records | Self::Nodes | Self::CommitRecords | Self::CommitAncestryRoots => true,
+            Self::Records
+            | Self::Nodes
+            | Self::CommitRecords
+            | Self::CommitAncestryRoots
+            | Self::VisibilityTransitions => true,
             #[cfg(feature = "remote-index")]
             Self::PackSlots => true,
             _ => false,
@@ -71,8 +77,8 @@ impl Kind {
 
     pub(crate) fn key_bytes(self) -> usize {
         match self {
-            Self::Names | Self::CommitAncestryNodes => 32,
-            Self::CommitOids => 20,
+            Self::Names | Self::CommitAncestryNodes | Self::VisibilityRefs => 32,
+            Self::CommitOids | Self::VisibilityOids => 20,
             #[cfg(feature = "remote-index")]
             Self::PackInventory => 32,
             #[cfg(feature = "remote-index")]
@@ -85,7 +91,6 @@ impl Kind {
 }
 
 pub(crate) type Rows = Vec<(Vec<u8>, Vec<u8>)>;
-#[cfg(any(feature = "storage", test))]
 #[derive(Debug)]
 pub(crate) enum Page {
     Leaf(Rows),
@@ -250,7 +255,6 @@ fn header(kind: Kind, height: u8, count: u32) -> Vec<u8> {
     bytes
 }
 
-#[cfg(any(feature = "storage", test))]
 pub(crate) fn decode(
     bytes: &[u8],
     reference: &PageRef,
@@ -339,13 +343,13 @@ pub(crate) fn decode(
         Kind::CommitRecords | Kind::CommitOids | Kind::CommitAncestryRoots | Kind::CommitAncestryNodes => "commit_graph",
         #[cfg(feature = "remote-index")]
         Kind::ObjectLocators | Kind::PackOffsets | Kind::PackInventory | Kind::PackSlots => "git_object_index",
+        Kind::VisibilityRefs | Kind::VisibilityOids | Kind::VisibilityClosures | Kind::VisibilityTransitions => "git_visibility",
         _ => "path_state",
     },
         decoded_bytes=bytes.len() as u64, "index page decoded");
     Ok(page)
 }
 
-#[cfg(any(feature = "storage", test))]
 pub(crate) fn scan(
     source: &[u8],
     root: &PageRef,
@@ -374,7 +378,6 @@ pub(crate) fn scan(
     Ok(rows)
 }
 
-#[cfg(any(feature = "storage", test))]
 pub(crate) fn page_bytes<'a>(
     source: &'a [u8],
     reference: &PageRef,
@@ -431,7 +434,6 @@ pub(crate) fn encode_ref(bytes: &mut Vec<u8>, reference: &PageRef) {
     bytes.extend_from_slice(&reference.last);
 }
 
-#[cfg(any(feature = "storage", test))]
 pub(crate) fn decode_ref(input: &mut Input<'_, '_>, kind: Kind) -> Result<PageRef> {
     Ok(PageRef {
         offset: u64::from_le_bytes(input.array()?),
@@ -453,12 +455,10 @@ pub(crate) fn put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(feature = "storage", test))]
 pub(crate) struct Input<'a, 'p> {
     bytes: &'a [u8],
     path: &'p str,
 }
-#[cfg(any(feature = "storage", test))]
 impl<'a, 'p> Input<'a, 'p> {
     pub(crate) fn new(bytes: &'a [u8], path: &'p str) -> Self {
         Self { bytes, path }

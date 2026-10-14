@@ -138,6 +138,18 @@ Ordinal proofs must match the ordered source-catalog digest before becoming a
 Git visibility index; the existing full-object encoding preserves the same
 caller-supplied Git identity. A missing proof remains distinct from an empty
 ref set, so recovery can reject it explicitly.
+Ordinal visibility payloads use `CRBVPG03`: a bounded directory commits to
+paged OID and ref dictionaries, closure blocks and transition sequences.
+OID rank supplies the canonical ordinal; each 4096-position closure block uses
+sparse positions or a bitmap. Full decoding checks page identities, coverage,
+history semantics and canonical byte equality. The enclosing checkpoint still
+uses format 5 and authenticates the entire visibility section. This is a format
+foundation: normal opening still fetches and materializes the full proof.
+No release tag contains the layered-checkpoint module introduced at
+`5e28f2a8beff`. The unreleased `CRBVORD1` ordinal stream is rejected rather than
+read through a fallback. Existing development repositories using that stream
+require explicit migration before upgrading; migration and bounded opening
+remain release gates. The separately released manifest protocol is unchanged.
 Footer-only checkpoints have control offset zero when both optional catalog and
 visibility sections are absent. The storage reader accepts that canonical range
 while retaining footer-hash, pointer identity, source and size validation.

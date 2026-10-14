@@ -1226,3 +1226,44 @@ body allows a fresh process to return byte-identical content. The original
 fixture is untouched. Source/binary hashes and full receipts remain external.
 This proof uses 20 B / 16 KiB / 8 MiB content, not current 10-GiB qualification.
 Subsequent documentation edits leave the qualified production source unchanged.
+
+## Paged visibility format foundation
+
+The ordinal visibility producer and complete decoder share `CRBVPG03`, replacing
+the unreleased monolithic ordinal stream. Its directory is bounded to 16 KiB;
+internal dictionary and transition directories use the shared authenticated page
+codec. The sorted OID dictionary supplies ordinal rank and optional source/member
+admission. Ref records bind names to closure roots and preserve absent versus
+present-empty transition/history maps. Closures use 4096-position blocks with
+sparse or bitmap encoding; identical pages share storage within one body.
+
+Complete decoding checks hashes, ordering, coverage, source/member width bounds,
+transition semantics and canonical re-encoding. Existing consumers still bind
+the decoded proof to the captured source catalog and validate actual member
+indices. Producer/checkpoint, shared reader, physical selection and history
+recovery use this same codec; no alternate visibility policy is introduced.
+Visibility page metrics have their own format label.
+
+This is a draft format foundation, not bounded repository opening. The enclosing
+format-5 checkpoint still authenticates the complete visibility section. Normal
+opening still fetches the section and materializes the visibility index; the
+directory alone is not independently trusted for range reads. Publishing page
+roots in authenticated control metadata, lazy membership and ref-edit ordering,
+range budgets and native E2E qualification remain required before dependent work.
+
+Release-tag inspection finds no tag containing `5e28f2a8beff`, which introduced
+the layered-checkpoint module. The retired development `CRBVORD1` stream fails
+explicitly; no fallback reader is added. Existing development repositories using
+it cannot be opened by the new full reader without an explicit migration.
+Migration/recovery qualification remains a release blocker. Released manifest
+formats are unchanged. The prior RustFS receipts qualify the parent source,
+not this format change; current 10-GiB and provider qualification remain open.
+
+Focused validation passes 142 tests: 85 payload-only capsule metadata tests,
+35 shared capsule reader tests and 22 capsule writer tests. These include dense,
+sparse and empty closures, member admission, transition/history round trips,
+tampering, truncation, authenticated invalid coverage and arbitrary sparse-set
+properties. A one-million-position closure encodes below 160 KiB. Strict Clippy
+passes for payload-only metadata and the shared reader. These checks establish
+codec and consumer integration; they do not establish native E2E, bounded
+transport or migration safety.

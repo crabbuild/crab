@@ -2047,6 +2047,7 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             | crab_metadata::error::MetadataError::PathStateSize { .. }
             | crab_metadata::error::MetadataError::BrowseIndexRecord { .. }
             | crab_metadata::error::MetadataError::GitObjectIndexRecord { .. }
+            | crab_metadata::error::MetadataError::VisibilityPageRecord { .. }
             | crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. }
             | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }
             | crab_metadata::error::MetadataError::ManifestCommitUncertain { .. }) => {
