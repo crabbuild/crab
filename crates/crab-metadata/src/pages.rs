@@ -63,6 +63,12 @@ pub(crate) enum Kind {
     CheckpointTransitions = 17,
     CheckpointRefs = 18,
     CheckpointSets = 19,
+    CatalogFiles = 20,
+    CatalogShards = 21,
+    CatalogXorbs = 22,
+    CatalogChunks = 23,
+    CatalogXorbChunks = 24,
+    CatalogShardXorbs = 25,
 }
 
 impl Kind {
@@ -73,7 +79,8 @@ impl Kind {
             | Self::CommitRecords
             | Self::CommitAncestryRoots
             | Self::RunAdmissionCounts
-            | Self::CheckpointTransitions => true,
+            | Self::CheckpointTransitions
+            | Self::CatalogXorbChunks => true,
             #[cfg(feature = "remote-index")]
             Self::PackSlots => true,
             _ => false,
@@ -85,7 +92,12 @@ impl Kind {
             Self::Names
             | Self::CommitAncestryNodes
             | Self::VisibilityRefs
-            | Self::CheckpointRefs => 32,
+            | Self::CheckpointRefs
+            | Self::CatalogFiles
+            | Self::CatalogShards
+            | Self::CatalogXorbs
+            | Self::CatalogChunks
+            | Self::CatalogShardXorbs => 32,
             Self::CommitOids
             | Self::RunAdmission
             | Self::VisibilityChanges
@@ -358,6 +370,7 @@ pub(crate) fn decode(
         Kind::RunAdmission | Kind::RunAdmissionCounts => "capsule_admission",
         Kind::VisibilityRefs | Kind::VisibilityChanges => "capsule_visibility",
         Kind::CheckpointObjects | Kind::CheckpointRefs | Kind::CheckpointSets | Kind::CheckpointTransitions => "checkpoint_visibility_pages",
+        Kind::CatalogFiles | Kind::CatalogShards | Kind::CatalogXorbs | Kind::CatalogChunks | Kind::CatalogXorbChunks | Kind::CatalogShardXorbs => "pointer_catalog_pages",
         _ => "path_state",
     },
         decoded_bytes=bytes.len() as u64, "index page decoded");

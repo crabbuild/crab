@@ -46,6 +46,19 @@ Catalog readers resolve only ref heads in that root's authority epoch, before
 loading multi-ref activation records. Restore can leave retired heads in storage;
 their checkpoint positions and dependencies must not enter the restored catalog.
 Current-epoch activation and checkpoint-chain errors still fail closed.
+External pointer catalogs use `CRBPCP01` authenticated pages. A bounded descriptor
+commits file, shard, xorb and reverse-chunk directories; nested shard closures and
+ordered xorb chunk lists are paged too. Keys preserve canonical lowercase Xet hex
+ordering, including the previous lowest-xorb/first-occurrence placement rule.
+Complete inspection verifies the body hash, complete dependency closure and
+canonical page layout. Delta inspection defers base-owned closure to `apply`,
+which retains later file bindings at equal size and rejects immutable shard/xorb
+conflicts. Encoded catalogs are limited to 2 GiB and descriptors to 4 KiB.
+The retired monolithic JSON encoding was absent from all 19 audited release tags
+and is rejected. This format foundation still uses complete materialization in
+foreground callers; lazy lookup and bounded historical amplification remain
+unfinished and must not be inferred from the page representation alone.
+
 `v2/browse-indexes` is a bounded, mutable derived record, not ref authority.
 Its version 3 record binds a durable immutable commit graph, optional complete
 physical object lookup and optional complete path attribution to the exact

@@ -9,6 +9,8 @@ use crate::validation::validate_content_hash;
 
 const POINTER_CATALOG_VERSION: u32 = 1;
 
+mod paged;
+
 /// One file identity and the canonical shard that reconstructs it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -208,53 +210,33 @@ impl PointerCatalog {
         self.validate(true, false)
     }
 
-    /// Canonically encode and validate this catalog.
+    /// Encode this complete catalog as bounded authenticated page trees.
+    ///
+    /// Rejects incomplete dependencies, noncanonical hash keys and oversized catalogs.
     pub fn encode(&self) -> Result<Bytes> {
         self.encode_with_validation(true)
     }
 
-    /// Canonically encode a delta whose dependencies may come from its base catalog.
+    /// Encode paged delta metadata whose dependencies may come from its base catalog.
     pub fn encode_delta(&self) -> Result<Bytes> {
         self.encode_with_validation(false)
     }
 
     fn encode_with_validation(&self, require_complete_closure: bool) -> Result<Bytes> {
         self.validate(require_complete_closure, false)?;
-        serde_json::to_vec(self)
-            .map(Bytes::from)
-            .map_err(|source| MetadataError::Internal(format!("pointer catalog encode: {source}")))
+        paged::encode(self)
     }
 
-    /// Decode canonical bytes and validate their complete dependency closure.
+    /// Authenticate canonical pages and validate their complete dependency closure.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        let catalog: Self =
-            serde_json::from_slice(bytes).map_err(|source| MetadataError::CorruptObject {
-                path: "capsule-protocol pointer catalog".to_owned(),
-                reason: format!("invalid JSON: {source}"),
-            })?;
-        let canonical = serde_json::to_vec(&catalog).map_err(|source| {
-            MetadataError::Internal(format!("pointer catalog re-encode: {source}"))
-        })?;
-        if canonical != bytes {
-            return Err(corrupt("catalog is not canonically encoded"));
-        }
+        let catalog = paged::decode(bytes)?;
         catalog.validate(true, true)?;
         Ok(catalog)
     }
 
-    /// Decode a canonical delta and defer base-dependent closure checks to apply.
+    /// Authenticate canonical delta pages, deferring base-owned closure checks to apply.
     pub fn decode_delta(bytes: &[u8]) -> Result<Self> {
-        let catalog: Self =
-            serde_json::from_slice(bytes).map_err(|source| MetadataError::CorruptObject {
-                path: "capsule-protocol pointer catalog".to_owned(),
-                reason: format!("invalid JSON: {source}"),
-            })?;
-        let canonical = serde_json::to_vec(&catalog).map_err(|source| {
-            MetadataError::Internal(format!("pointer catalog re-encode: {source}"))
-        })?;
-        if canonical != bytes {
-            return Err(corrupt("catalog is not canonically encoded"));
-        }
+        let catalog = paged::decode(bytes)?;
         catalog.validate(false, true)?;
         Ok(catalog)
     }

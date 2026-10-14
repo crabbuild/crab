@@ -1289,3 +1289,54 @@ deterministic work reduction is established; the mixed latency results do not
 establish a production latency target. External receipts, binary fingerprint
 and source hashes live in `blame-comparison-live-r2`. Hosted S3 latency
 qualification remains outstanding.
+
+### Historical Xet catalog: page-format foundation in progress
+
+`prepare_delta` in the native push path and `PreparedReceive::upload_capsule`
+in shared receive both reconstruct `CapsuleRepositoryView::pointer_catalog`
+before selecting a few dependencies. File bindings are applied in publication
+order; equal file sizes permit a later shard binding, while shard/xorb identity
+conflicts fail. Chunk placement selection follows the lowest xorb hex identity
+and then its first matching occurrence. That precedence must survive indexing.
+
+The next branch replaces the monolithic JSON catalog codec with `CRBPCP01`
+authenticated page trees for files, shards, xorbs and reverse chunk placements.
+Shard closures and positional xorb chunk lists have nested page roots, so a wide
+dependency list cannot inflate one row or the bounded top-level descriptor.
+Normal lookups will use authenticated misses and loaded dependency closure;
+complete inspection retains body-hash, canonical-layout and full closure proof.
+This branch only supplies the format foundation through existing real catalog
+encode/decode callers. Foreground full scans are not removed yet.
+
+The codec preserves the original hex ordering rather than Xet's raw hash byte
+ordering. The locked xet-core-structures 1.6.0 implementation encodes its hex
+identities by little-endian u64 words; using raw bytes as ordered keys changes
+placement precedence. A wide-catalog regression caught this during development.
+All 19 local release tags lack the pointer/run/layered source modules. Retired
+catalog JSON is rejected; no fallback or legacy format reader is introduced.
+Payload-only capsule tests pass 91 cases; storage-enabled capsule tests pass
+103 cases, including the new wide/adversarial catalog cases. The CLI compile
+check passes through read, write, remote and VFS consumers. A separate official
+Makefile installation is building for fresh-prefix RustFS qualification; the
+older installed binary remains pinned to the active 10 GiB run. No full stage-6
+or live page-catalog feature claim yet.
+
+Run aggregation must retain capsule membership, not just merge every physical
+catalog into one map. `assemble_layered_control_view` trims each ref's run history
+after its compacted transaction, deduplicates root transactions and applies only
+required journal capsules in validated publication order. A selected run can
+therefore contain a checkpoint-covered prefix that must not override a newer
+checkpoint file binding. A whole-run aggregate without that selection proof
+would widen the catalog and change precedence.
+
+The next slice must capture authenticated catalog roots in run/checkpoint
+footers, retain the exact admitted capsule positions, and batch requested keys
+across those roots. Run-level key aggregation must retain enough occurrence
+membership to select only admitted positions and preserve the existing global
+capsule order. Shared immutable descriptors may be deduplicated only after
+conflict validation; file bindings retain their consistent size and ordered
+shard changes. Qualification must include a checkpoint cut through a compacted
+run, overlapping multi-ref transactions and incomparable ref histories, besides
+the fixed-recipe/increasing-history request and decode bounds. Root frontiers
+allow eight runs, ref frontiers 64 and each run 512 capsules; reading each
+capsule separately would retain excessive lookup amplification.
