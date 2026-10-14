@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "storage")]
 mod cache;
 #[cfg(feature = "storage")]
-pub(crate) use cache::PageCache;
+pub(crate) use cache::{PageCache, PageWork};
 
 use crate::error::{MetadataError, Result};
 #[cfg(any(feature = "storage", test))]
@@ -49,6 +49,12 @@ pub(crate) enum Kind {
     CommitOids,
     CommitAncestryRoots,
     CommitAncestryNodes,
+    #[cfg(feature = "remote-index")]
+    ObjectLocators,
+    #[cfg(feature = "remote-index")]
+    PackOffsets,
+    #[cfg(feature = "remote-index")]
+    PackInventory,
 }
 
 impl Kind {
@@ -56,6 +62,12 @@ impl Kind {
         match self {
             Self::Names | Self::CommitAncestryNodes => 32,
             Self::CommitOids => 20,
+            #[cfg(feature = "remote-index")]
+            Self::PackInventory => 32,
+            #[cfg(feature = "remote-index")]
+            Self::ObjectLocators => 20,
+            #[cfg(feature = "remote-index")]
+            Self::PackOffsets => 40,
             _ => 4,
         }
     }
@@ -316,7 +328,12 @@ pub(crate) fn decode(
         Page::Branch(children)
     };
     input.finish()?;
-    tracing::debug!(target:"crab_metadata::index_decode", index_format=if matches!(kind, Kind::CommitRecords | Kind::CommitOids | Kind::CommitAncestryRoots | Kind::CommitAncestryNodes) { "commit_graph" } else { "path_state" },
+    tracing::debug!(target:"crab_metadata::index_decode", index_format=match kind {
+        Kind::CommitRecords | Kind::CommitOids | Kind::CommitAncestryRoots | Kind::CommitAncestryNodes => "commit_graph",
+        #[cfg(feature = "remote-index")]
+        Kind::ObjectLocators | Kind::PackOffsets | Kind::PackInventory => "git_object_index",
+        _ => "path_state",
+    },
         decoded_bytes=bytes.len() as u64, "index page decoded");
     Ok(page)
 }
