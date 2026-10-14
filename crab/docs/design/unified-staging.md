@@ -1,6 +1,6 @@
 # Unified staging design and implementation plan
 
-Status: implemented in draft PR #529; focused tests and the cache-adjusted RustFS smoke passed. Both final 10 GiB qualification directions, workspace CI and final review remain pending. Implementation source baseline: `bb590b78f58`, including the large-file fixes in PR #521. This plan is a follow-up to that PR.
+Status: implemented and qualified in PR #533 against `crab-v2`. Both final 10 GiB RustFS directions passed all 133 checks each; full workspace CI and architecture gates passed. PR #521 merged into `crab-v2`; deleting its branch closed the stacked PR #529. Rebasing the four implementation commits onto that merge preserved the exact source tree. Implementation source baseline: `bb590b78f58`, including the large-file fixes in PR #521. These results qualify this staging refactor, not the entire remote for production S3 workloads.
 
 Unify native `crab add` and Git clean beneath their input adapters. One staging module should own content hashing, chunking, authority selection, bounded payload preparation, recipe recording, durability and rollback. File validation, Git framing and Git-index publication remain with their respective callers.
 
@@ -66,7 +66,7 @@ IngestSession::abort().await
 CompletedInput::abort().await
 ```
 
-`CompletedInput` retains the operation's resources. It carries the verified hash and size, but cannot expose a publishable pointer. Native callers validate the original descriptor and pathname before calling `seal`; SDK callers also validate expected identity. Clean callers can seal after a valid request terminator and successful content verification. Invalid or truncated framing never calls `finish_input` as a successful EOF.
+`CompletedInput` retains the operation's resources. It carries the verified hash and size, but cannot expose a publishable pointer. Native callers validate the original descriptor and pathname before calling `seal`. SDK callers preserve their existing additional commitment check: after sealing into their private preparation directory, they compare expected hash/size before constructing `PreparedContent` or returning pointers. That directory's owner governs cleanup; rejected content never reaches remote publication. Clean callers can seal after a valid request terminator and successful content verification. Invalid or truncated framing never calls `finish_input` as a successful EOF.
 
 `seal` drains bounded workers, verifies/install-syncs prepared bodies, flushes segment dependencies, resolves outstanding claims, validates full recipe coverage, and installs recipe/path leases. Return the existing batch/hash/size/recipe/prepared-body information required by real callers; avoid a second broad result model. Finalizing the enclosing preparation remains separate because native add spans several files.
 
@@ -208,8 +208,9 @@ cargo fmt --all -- --check
 Add the new session test module to these commands after it exists. Run the ownership regression names introduced in step 1 against `crab-staging`; retain them after moving tests. Verify test counts so renamed filters cannot silently run zero tests. Broad staging/recovery suites, default-feature sibling checks and cross-platform checks belong in CI or the dedicated environment.
 
 Before implementation push, build the affected binary and run strict Clippy on
-touched crates. The stale `double_must_use` expectations in the staging crate
-were removed after strict Clippy demonstrated they were unfulfilled. Report any
+touched crates. Explicit await diagnostics on the two `async_trait` lookup methods
+avoid the macro's redundant `must_use` warning on Rust 1.99 and unfulfilled lint
+expectations on Rust 1.97; strict macro probes pass on both versions. Report any
 independently reproduced unrelated blocker rather than suppressing the gate.
 No dependency or lockfile change is planned.
 
@@ -237,7 +238,7 @@ First run a 16 MiB smoke with a different ID/bucket. Then run the 10 GiB workloa
 
 Required outcomes:
 
-- All eight historical file SHA-256 comparisons, Git fsck checks, remote Crab fsck and remote ref assertions pass after original source/staging/cache removal.
+- All ten historical file SHA-256 comparisons across five snapshots (including the version before the first push), Git fsck checks, remote Crab fsck and remote ref assertions pass after original source/staging/cache removal, in both native-first and clean-first runs.
 - Unchanged native↔clean transitions create zero payload bytes. Edited transitions add only missing chunk payloads and normal packing overhead; no new full-size segment mirror. Count metadata separately.
 - Existing small-edit upload bound remains satisfied; new xorb bytes and requests do not increase without explanation. The historical edited pushes uploaded roughly 2.1–2.2 MB, not 10 GiB.
 - Peak memory remains bounded with file size and concurrent files; no full-file spool. Exact-prepared verification still avoids CDC. Native add, clean add and push have no unexplained performance regression.
@@ -262,21 +263,81 @@ mutable lifecycle. The unpublished-only recipe query remains because it is a
 public contract reachable from release v1.2.4; both query forms use one index
 implementation.
 
-Local evidence so far: 233 staging tests passed (one manual RSS test ignored),
+Against the merged `crab-v2` base, `git diff --numstat` reports 5,520 added and
+5,751 removed lines including qualification evidence. Excluding test-only Rust
+files and inline test modules gives an approximate 574-line reduction in Rust
+production source. The shared session and retention indexes replace more
+caller/lifecycle code than they add; recipe and packet tests remain separate
+from those source counts.
+
+Completed evidence: 233 staging tests passed (one manual RSS test ignored),
 strict staging Clippy passed, the final release build passed, and final RustFS
 smoke passed 133 checks across five committed versions. The implementation
 before the cache adjustment also passed the full 10 GiB workload: 133 checks,
 five versions and ten historical SHA comparisons after source/cache removal.
-Both cache-adjusted 10 GiB directions and final workspace CI remain pending. An earlier candidate
+Both cache-adjusted runs passed all 133 checks and 85 commands each:
+five snapshots, ten historical SHA comparisons after source/cache removal,
+Git fsck, remote integrity and the unchanged-binary guard. Receipts are
+`large-native-cache-final/artifacts/report.json` and
+`large-clean-cache-final/artifacts/report.json`, retained with their logs outside
+Git in the dedicated qualification directory. Both used binary SHA-256
+`d5413cea0b8ddd6849c77b92f5d7b2604c810cc1585144de90af9fa2fc080604`.
+Each direction used a fresh bucket. Full workspace CI passed both before
+and after the diagnostic-only correction. An earlier candidate
 passed the four-version 10 GiB workload with 120 checks; it is supplementary
 evidence, not final-revision qualification.
 
-Default-feature CI passed all 4,321 Crab library tests, 233 staging tests and
-584 VFS tests. Its only failed target was five clean integration fixtures that
-used the removed no-op writer. They now attach real staging through the
-filter's blocking/runtime bridge and verify restored bytes after reopening;
-all 16 integration tests pass locally, including rejection without an owner.
+The final default-feature Rust CI job passed all 4,321 Crab library tests,
+233 staging tests, 584 VFS tests and all 16 clean integration tests. The earlier
+run exposed five integration fixtures that used the removed no-op writer.
+They now attach real staging through the filter's blocking/runtime bridge and
+verify restored bytes after reopening, including rejection without an owner.
 No pointer/hash assertions were weakened and no no-op production path was restored.
+Formatting, Clippy and the managed API checks also passed in
+[CI run 38489995385](https://github.com/crabbuild/crab/actions/runs/38489995385).
+
+The architecture gate's interface, behavior and test checks passed, but its
+Rust 1.99 Clippy check exposed two macro-generated `double_must_use` warnings.
+Explicit await diagnostics fix them without a lint suppression or dependency
+change. Pinned-macro probes pass on Rust 1.97 and 1.99; the real staging crate
+passes strict all-target Clippy on Rust 1.97. Commit `6a44ea30bc9` changes only
+those diagnostics; the qualified ingestion runtime and frozen binary remain
+unchanged. [Exact-head CI](https://github.com/crabbuild/crab/actions/runs/38497086930)
+passed, including the full Rust suite, formatting, Clippy and managed API checks.
+[Architecture gates](https://github.com/crabbuild/crab/actions/runs/38497088172)
+passed, including split-crate Clippy/tests and real RustFS server recovery.
+
+### Completed 10 GiB measurements in both directions
+
+These are individual wall-clock observations, not a controlled baseline comparison.
+Serialized payload counters exclude metadata and physical device write traffic.
+Ingestion phase totals can exceed wall time when native files run concurrently.
+
+| Operation | Native-first wall time | Clean-first wall time | New prepared payload bytes, each run |
+| --- | ---: | ---: | ---: |
+| Initial add, identical files | Native: 585.895 s | Git: 449.282 s | 10,744,916,848 |
+| Unchanged switch to opposite path | Git: 78.509 s | Native: 149.225 s | 0 |
+| Late Git edit before first push | 140.977 s | 135.074 s | 2,214,993 |
+| Beginning edit | Git: 245.297 s | Native: 256.307 s | 2,216,109 |
+| Middle edit | Native: 164.212 s | Git: 221.227 s | 2,133,870 |
+| Tail edit | Git: 166.451 s | Native: 418.128 s | 2,214,948 |
+| Final unchanged switch | Native: 274.905 s | Git: 48.674 s | 0 |
+
+Every recorded add phase had zero segment bytes. Sampled peak retained staging payload
+was 10,753,696,768 bytes across all five snapshots in each direction; the path
+switches did not create another full-size representation. Sampled process-tree
+RSS for initial native add was 477,118,464 bytes; initial Git clean peaked at
+438,304,768 bytes. Exact Git verification peaked at 111,476,736 bytes in the
+native-first run and 119,193,600 in the inverse run.
+Edited pushes took 3.256–5.214 s and uploaded 2,133,870–2,216,109 xorb bytes.
+Fresh-cache hydration of each 20 GiB snapshot took 391.164–509.606 s. Client
+hydration RSS peaked at 3,442,589,696 bytes across these snapshots; ingestion
+and push have separate budgets and measurements.
+
+Initial add remains slow: authority/index work took 290.1 s and payload
+persistence 259.3 s, versus 12.0 s in CDC and 5.7 s in hashing. These receipts
+prove removal of the duplicate payload copy and preservation of small uploads;
+they do not prove an overall latency improvement.
 
 The broad minimal-feature Crab suite passed 4,162 tests and exposed 12 failures.
 One was related: staging admission masked an already parse-rejected atomic push;
@@ -309,11 +370,11 @@ Full input reads and hashing remain necessary for stream verification. Changed c
 
 Complete only when both adapters use the shared module, old clean lifecycle code is deleted, sibling contracts pass, the dedicated workload proves byte-identical history, and measured disk accounting shows no full-size copy on path switches. Include `git diff --numstat` in review; explain any net non-test growth through ownership correctness or remove unnecessary abstractions.
 
-After these gates, prioritize the measured remaining costs:
+The required gates passed. Prioritize the measured remaining costs:
 
-1. Authority-index and lease-transfer I/O. The 10 GiB run before the cache adjustment spent 213.5 s in initial authority lookup/recording, versus 12.3 s in CDC and 5.9 s in hashing. Measure the final cache-adjusted runs before choosing further batching or query changes; preserve atomic retention and durability checkpoints.
-2. Cold reconstruction throughput. The earlier full-size candidate needed 432–542 s to hydrate each 20 GiB version with a fresh, 2 GiB cache. Profile range reads, decompression, cache writes and output writes independently before changing concurrency or cache policy.
+1. Authority-index and lease-transfer I/O. Final initial adds spent 231.7–290.1 s in authority/index work and 192.6–259.3 s in payload persistence. The native tail edit accumulated 670.6 s of index work across two concurrent files, despite writing only 2.2 MB. Profile query plans, transaction/lease costs and checkpoints before changing batching; preserve atomic retention and durability. Native exact-recipe verification is another candidate: unlike clean's prepared-candidate path, native currently performs CDC and authority resolution when its stat skip is invalidated.
+2. Cold reconstruction throughput and memory. Final runs needed 391–510 s per 20 GiB snapshot with a fresh 2 GiB client cache, with sampled hydration RSS up to 3.44 GB. Profile range reads, decompression, cache writes and output writes independently before changing concurrency or cache policy.
 3. Small-file/index overhead for large codebases, using a real repository qualification alongside the 5,000-file synthetic case.
 4. Real S3 latency, retries and interrupted-upload recovery before calling the full remote production-ready.
 
-Review whether this remains the best fix by checking that complexity was actually removed from both callers, not relocated behind a larger interface. Performance numbers above are individual diagnostic/qualification receipts, not controlled percentage speedup claims.
+Review question: is one canonical ingestion owner the best fix for the duplicate-write and lifecycle problem? The evidence supports it: both adapters exercise the same hash/chunk/record/retain/seal/abort state machine; obsolete mutable clean implementations are gone; native validation and Git framing remain at their caller boundaries. This removes local complexity while preserving every tested ownership, reconstruction and publication invariant. Segment consumers remain supported, and tagged data-layout compatibility has an explicit upgrade boundary. Further latency optimization belongs in that shared owner rather than another staging path. Performance numbers above are individual diagnostic/qualification receipts, not controlled percentage speedup claims.

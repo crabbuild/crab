@@ -823,9 +823,8 @@ impl CleanSession {
     /// has `filter=lfs` in `.gitattributes` and an LFS object store is
     /// configured. Otherwise uses the crab path (Blake3 + CDC).
     ///
-    /// Cancel-safe: if this function is interrupted (e.g. the filter process
-    /// is killed), no partial index.db rows are left behind because staging
-    /// uses a transaction that only commits on success.
+    /// Errors abort unpublished preparation; process termination leaves its
+    /// journal for writable-reopen recovery before payload reclamation.
     ///
     /// This is a thin wrapper that re-frames `content` as pkt-line data
     /// packets and delegates to [`clean_stream`](Self::clean_stream) so
