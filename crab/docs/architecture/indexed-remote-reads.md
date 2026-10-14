@@ -1318,3 +1318,24 @@ removals and transaction ordering. Lazy closure updates remain required before
 switching that path; this change makes no bounded-opening claim. First-parent
 change-point blame, historical Xet paging, lifecycle/release qualification, fuller
 blame, unified staging and current 10-GiB/provider grids remain unfinished.
+
+The clean-source locked CLI/qualifier build at `d2683fcde6e` passes a fresh
+RustFS replay: native pushes, checkpoint publication, clone with content/tip
+identity and a later push/fetch. Twenty cold/warm admission pairs match complete
+decoding. This fixture transfers 4,424 B for checkpoint footer opening, 322 B for
+a cold admission query and zero bytes for a reused-reader warm query; every
+measurement boundary has no active backend work. The fixture contains 1 MiB of
+ordinary Git data, not current 10-GiB Xet or provider latency qualification.
+
+Default modern Git chooses stateless upload-pack for warm fetches. The first
+corrupted-page probe therefore bypassed the classic selector and is not its
+failure proof. An explicit classic-protocol replay corrupts a required
+dictionary page while keeping the authenticated footer intact. Fetch returns
+a page-integrity error without changing installed packs or remote-tracking
+refs. The original checkpoint bytes are restored and verified byte-for-byte;
+retry reaches the native source tip. Full source/binary receipts remain external.
+
+Rust 1.99 CI caught the parent's constant-size `chunks_exact` lint. The codec
+now uses fixed-array chunks, with all 21 codec checks and strict metadata Clippy
+passing. This correction is published in parent PR #544 before the reader
+rebase. Documentation-only evidence edits leave the qualified source unchanged.
