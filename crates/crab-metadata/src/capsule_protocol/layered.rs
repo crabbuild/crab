@@ -21,6 +21,8 @@ const MAX_LAYER_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PHYSICAL_SOURCES: usize = 64;
 const MAX_SOURCE_MEMBERS: usize = 512;
 mod visibility_pages;
+#[cfg(feature = "storage")]
+pub use visibility_pages::LayeredVisibilityReader;
 const MAX_LAYERED_VISIBILITY_BYTES: usize = 128 * 1024 * 1024;
 const MAX_LAYERED_VISIBILITY_REFS: usize = 100_000;
 const MAX_LAYERED_VISIBILITY_TRANSITIONS: usize = 1_000_000;
@@ -911,6 +913,8 @@ struct CheckpointFooter {
     sections: Vec<LayerSectionLocation>,
     sources: Vec<PackSourceDescriptor>,
     #[serde(default)]
+    visibility_pages: Option<visibility_pages::Directory>,
+    #[serde(default)]
     cold_clone_object_set_digest: Option<String>,
     #[serde(default)]
     cold_clone_object_count: Option<u64>,
@@ -1041,6 +1045,11 @@ impl LayeredCheckpoint {
                 pointer_catalog.encode()?,
             )?;
         }
+        let visibility_pages = visibility
+            .as_ref()
+            .filter(|(kind, _)| *kind == CapsuleSectionKind::VisibilityOrdinalSnapshot)
+            .map(|(_, bytes)| visibility_pages::directory(bytes))
+            .transpose()?;
         if let Some((kind, visibility)) = visibility {
             append_section(&mut body, &mut sections, kind, visibility)?;
         }
@@ -1052,6 +1061,7 @@ impl LayeredCheckpoint {
             control_offset,
             sections,
             sources,
+            visibility_pages,
             cold_clone_object_set_digest,
             cold_clone_object_count,
             visibility_transitions,
@@ -1303,7 +1313,48 @@ impl LayeredCheckpoint {
         let Some(section) = self.section(CapsuleSectionKind::VisibilityOrdinalSnapshot)? else {
             return Ok(None);
         };
+        if self.footer.visibility_pages.as_ref() != Some(&visibility_pages::directory(&section)?) {
+            return Err(corrupt(
+                "visibility section directory differs from its authenticated footer",
+            ));
+        }
         LayeredVisibilitySnapshot::decode(&section).map(Some)
+    }
+
+    /// Bind range lookups to this checkpoint's authenticated visibility directory.
+    ///
+    /// The supplied path must name this immutable checkpoint in the captured repository.
+    #[cfg(feature = "storage")]
+    pub fn visibility_reader(
+        &self,
+        path: object_store::path::Path,
+        maximum: u64,
+    ) -> Result<Option<LayeredVisibilityReader>> {
+        let Some(directory) = &self.footer.visibility_pages else {
+            return Ok(None);
+        };
+        let section = self
+            .footer
+            .sections
+            .iter()
+            .find(|section| section.kind == CapsuleSectionKind::VisibilityOrdinalSnapshot)
+            .ok_or_else(|| corrupt("visibility directory has no section"))?;
+        let header_bytes = directory.validate_checkpoint(
+            &self.footer.sources,
+            section.length,
+            self.footer.cold_clone_object_count,
+        )?;
+        let offset = section
+            .offset
+            .checked_add(header_bytes)
+            .ok_or_else(|| corrupt("visibility body offset overflows"))?;
+        Ok(Some(LayeredVisibilityReader::new(
+            directory.clone(),
+            path,
+            offset,
+            &self.footer.sources,
+            maximum,
+        )))
     }
 
     /// Decode visibility bound to this source inventory and the caller's Git identity.
@@ -1522,6 +1573,22 @@ fn validate_checkpoint_footer(
     if expected_offset != footer_start {
         return Err(corrupt("layered checkpoint sections do not cover its body"));
     }
+    let ordinal_sections = footer
+        .sections
+        .iter()
+        .filter(|section| section.kind == CapsuleSectionKind::VisibilityOrdinalSnapshot)
+        .collect::<Vec<_>>();
+    match (&footer.visibility_pages, ordinal_sections.as_slice()) {
+        (Some(directory), [section]) => {
+            directory.validate_checkpoint(
+                &footer.sources,
+                section.length,
+                footer.cold_clone_object_count,
+            )?;
+        }
+        (None, []) => {}
+        _ => return Err(corrupt("visibility page directory and section disagree")),
+    }
     validate_source_inventory(&footer.sources)?;
     for source in &footer.sources {
         source.validate()?;
@@ -1712,13 +1779,10 @@ mod tests {
             vec![source],
             PointerCatalog::new(),
             Some(visibility),
-        )
-        .unwrap();
-        assert!(
-            checkpoint
-                .visibility_index(1, &"4".repeat(64), &"5".repeat(64))
-                .is_err()
         );
+        // The source binding belongs to the authenticated footer, so a
+        // conflicting directory must fail before it can be published.
+        assert!(checkpoint.is_err());
     }
 
     #[test]

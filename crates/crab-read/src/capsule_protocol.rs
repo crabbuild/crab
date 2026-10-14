@@ -2543,7 +2543,9 @@ pub async fn install_layered_git_packs_for_fetch(
     if object_ids.is_empty() {
         return Ok(Some(Vec::new()));
     }
-    let Some(selected) = layered_fetch_pack_selection(view, object_ids)? else {
+    let Some(selected) =
+        layered_fetch_pack_selection(view, router, object_ids, max_input_bytes, cancel).await?
+    else {
         return Ok(None);
     };
     install_layered_git_packs_for_fetch_selected(
@@ -2657,10 +2659,23 @@ pub async fn install_layered_git_packs_for_fetch_selected(
 
 /// Return the authenticated layered members that may cover an incremental
 /// object delta without materializing a response pack.
-pub fn layered_fetch_pack_selection(
+pub async fn layered_fetch_pack_selection(
     view: &CapsuleRepositoryView,
+    router: &StoreLayout<Store>,
     object_ids: &[ObjectId],
+    maximum: u64,
+    cancel: &CancellationToken,
 ) -> Result<Option<BTreeSet<String>>> {
+    if cancel.is_cancelled() {
+        return Err(ReadError::Cancelled);
+    }
+    let mut requested = Vec::with_capacity(object_ids.len());
+    for oid in object_ids {
+        let Ok(raw) = oid.as_bytes().try_into() else {
+            return Ok(None);
+        };
+        requested.push(raw);
+    }
     let mut candidates = BTreeMap::<[u8; 20], BTreeSet<String>>::new();
     for (oid, pack_ids) in view.frontier_object_admission() {
         candidates
@@ -2672,17 +2687,18 @@ pub fn layered_fetch_pack_selection(
     let Some(checkpoint) = view.layered_checkpoint() else {
         return Ok(None);
     };
-    if !checkpoint.is_control_only()
-        && let Some(snapshot) = checkpoint.visibility_ordinal_snapshot()?
-        && let Some(admission) = snapshot.member_admission()
-    {
-        if admission.len() != snapshot.objects().len() {
-            return Err(corrupt_path(
-                "layered visibility",
-                "member admission count does not match the object dictionary",
-            ));
-        }
-        for (oid, member) in snapshot.objects().iter().zip(admission) {
+    let checkpoint_path = router.capsule_checkpoint_path(checkpoint.hash());
+    // The authenticated footer binds dictionary pages even in a control-only
+    // view. Placement narrows an already authorized fetch; it never grants
+    // visibility from mere physical presence.
+    if let Some(reader) = checkpoint.visibility_reader(checkpoint_path, maximum)? {
+        let admission = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ReadError::Cancelled),
+            result = reader.members(router.store(), &requested) => result?,
+        };
+        for (oid, member) in requested.iter().zip(admission.into_iter().flatten()) {
+            let Some(member) = member else { continue };
             let Some(source) = checkpoint.sources().get(usize::from(member.source_index())) else {
                 return Err(corrupt_path(
                     "layered visibility",

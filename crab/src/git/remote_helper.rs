@@ -3177,11 +3177,14 @@ async fn fetch_capsule_incremental_packs(
             // than installing a member that depends on an unproven object.
             (None, "incomplete_local_base")
         } else {
-            let selected =
-                crab_read::capsule_protocol::layered_fetch_pack_selection(view, &plan.object_ids)
-                    .map_err(|error| {
-                    CrabError::Protocol(format!("incremental fetch admission failed: {error}"))
-                })?;
+            let selected = crab_read::capsule_protocol::layered_fetch_pack_selection(
+                view,
+                &layout,
+                &plan.object_ids,
+                maximum,
+                cancel,
+            )
+            .await?;
             match selected {
                 Some(selected) => (Some(selected), "frontier_admission"),
                 None => {

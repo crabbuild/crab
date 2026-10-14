@@ -1,4 +1,4 @@
-//! Each cache belongs to one captured immutable layer directory.
+//! Each cache belongs to one captured immutable layer directory, including its base offsets.
 use super::*;
 use crab_storage::Store;
 use futures_util::{StreamExt, TryStreamExt};
@@ -34,6 +34,7 @@ impl PageCache {
         store: &Store,
         path: &object_store::path::Path,
         layer: usize,
+        source_offset: u64,
         source_bytes: u64,
         root: &PageRef,
         kind: Kind,
@@ -65,7 +66,15 @@ impl PageCache {
             let pages = futures_util::stream::iter(std::mem::take(&mut pending))
                 .map(|(reference, positions)| async move {
                     let page = self
-                        .fetch(store, path, layer, source_bytes, &reference, kind)
+                        .fetch(
+                            store,
+                            path,
+                            layer,
+                            source_offset,
+                            source_bytes,
+                            &reference,
+                            kind,
+                        )
                         .await?;
                     Ok::<_, MetadataError>((page, positions))
                 })
@@ -118,6 +127,7 @@ impl PageCache {
         store: &Store,
         path: &object_store::path::Path,
         layer: usize,
+        source_offset: u64,
         source_bytes: u64,
         reference: &PageRef,
         kind: Kind,
@@ -130,12 +140,13 @@ impl PageCache {
             }
             return Ok(page.clone());
         }
-        let bytes = store
-            .range_get(
-                path,
-                reference.offset..reference.offset + u64::from(reference.bytes),
-            )
-            .await?;
+        let start = source_offset
+            .checked_add(reference.offset)
+            .ok_or_else(|| corruption("embedded page offset overflows"))?;
+        let end = start
+            .checked_add(u64::from(reference.bytes))
+            .ok_or_else(|| corruption("embedded page range overflows"))?;
+        let bytes = store.range_get(path, start..end).await?;
         let page = Arc::new(decode(
             &bytes,
             reference,

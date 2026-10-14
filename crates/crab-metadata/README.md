@@ -142,13 +142,21 @@ Ordinal visibility payloads use `CRBVPG03`: a bounded directory commits to
 paged OID and ref dictionaries, closure blocks and transition sequences.
 OID rank supplies the canonical ordinal; each 4096-position closure block uses
 sparse positions or a bitmap. Full decoding checks page identities, coverage,
-history semantics and canonical byte equality. The enclosing checkpoint still
-uses format 5 and authenticates the entire visibility section. This is a format
-foundation: normal opening still fetches and materializes the full proof.
+history semantics and canonical byte equality. The format-5 footer commits to
+the directory, its source-catalog binding and dictionary count. Range readers
+use these roots without fetching the section header or unrelated pages; full
+inspection also checks that the section directory matches the footer.
+`LayeredVisibilityReader` batches selected OID admission, preserves misses and
+duplicates, checks actual source/member bounds and charges warm pages against
+the query byte limit. Each reader owns its immutable directory and bounded
+cache. Physical admission selects packs for an already authorized request;
+it does not grant ref visibility. Normal opening still materializes the proof
+for ref-edit ordering; replacing that validation remains a separate gate.
 No release tag contains the layered-checkpoint module introduced at
 `5e28f2a8beff`. The unreleased `CRBVORD1` ordinal stream is rejected rather than
 read through a fallback. Existing development repositories using that stream
-require explicit migration before upgrading; migration and bounded opening
+or a paged payload without footer commitments require explicit migration
+before upgrading; migration and bounded opening
 remain release gates. The separately released manifest protocol is unchanged.
 Footer-only checkpoints have control offset zero when both optional catalog and
 visibility sections are absent. The storage reader accepts that canonical range

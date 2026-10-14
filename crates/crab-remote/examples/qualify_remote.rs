@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
             [bucket, prefix, path] => (bucket, prefix, path, "all"),
             [bucket, prefix, path, selection] => (bucket, prefix, path, selection.as_str()),
             _ => return Err(io::Error::other(
-                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes]",
+                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|visibility-members]",
             )
             .into()),
         };
@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
         && selection != "build-indexes"
         && selection != "graph-pages"
         && selection != "graph-ancestry"
+        && selection != "visibility-members"
         && !WORKLOADS.contains(&selection)
     {
         return Err(io::Error::other("unknown qualification operation").into());
@@ -107,6 +108,8 @@ async fn main() -> Result<()> {
             .await;
         runtime.shutdown().await;
         result?;
+    } else if selection == "visibility-members" {
+        qualify_visibility_members(&layout, &counters).await?;
     } else if matches!(selection, "graph-pages" | "graph-ancestry") {
         qualify_graph_pages(&layout, &path, &counters, selection).await?;
     } else {
@@ -133,6 +136,83 @@ async fn main() -> Result<()> {
         "{}",
         json!({"kind":"complete", "schema":1, "selection":selection})
     );
+    Ok(())
+}
+
+// This elected maintenance mode publishes authoritative metadata. Run only in
+// a dedicated qualification namespace; ordinary reads never invoke it.
+async fn qualify_visibility_members(
+    layout: &StoreLayout<crab_storage::Store>,
+    counters: &Measurements,
+) -> Result<()> {
+    counters
+        .measure("visibility-checkpoint", "maintenance", async {
+            crab_remote::checkpoint::publish_capsule_checkpoint(
+                layout,
+                1,
+                128 * 1024 * 1024,
+                &CancellationToken::new(),
+            )
+            .await?;
+            Ok(())
+        })
+        .await?;
+    let root = crab_metadata::capsule_protocol::load_root(layout).await?;
+    let pointer = root
+        .record()
+        .root()
+        .checkpoint()
+        .ok_or_else(|| io::Error::other("checkpoint is absent"))?;
+    let full = crab_metadata::capsule_protocol::load_layered_checkpoint(layout, pointer).await?;
+    let snapshot = full
+        .visibility_ordinal_snapshot()?
+        .ok_or_else(|| io::Error::other("ordinal visibility is absent"))?;
+    let objects = snapshot.objects();
+    if objects.is_empty() {
+        return Err(io::Error::other("visibility dictionary is empty").into());
+    }
+    let admission = snapshot
+        .member_admission()
+        .ok_or_else(|| io::Error::other("member admission is absent"))?;
+    let requested = [objects[0], objects[objects.len() - 1], objects[0]];
+    let expected = Some(vec![
+        Some(admission[0]),
+        Some(admission[objects.len() - 1]),
+        Some(admission[0]),
+    ]);
+    for sample in 0..20 {
+        let control = counters
+            .measure("visibility-open", "cold", async {
+                Ok(
+                    crab_metadata::capsule_protocol::load_layered_checkpoint_control(
+                        layout, pointer,
+                    )
+                    .await?,
+                )
+            })
+            .await?;
+        let path = layout.capsule_checkpoint_path(control.hash());
+        let reader = control
+            .visibility_reader(path, 128 * 1024)?
+            .ok_or_else(|| io::Error::other("visibility pages are absent"))?;
+        for cache in ["cold", "warm"] {
+            let observed = counters
+                .measure("visibility-members", cache, async {
+                    Ok(reader.members(layout.store(), &requested).await?)
+                })
+                .await?;
+            if observed != expected {
+                return Err(io::Error::other(
+                    "paged admission differs from the canonical snapshot",
+                )
+                .into());
+            }
+        }
+        println!(
+            "{}",
+            json!({"kind":"visibility-sample", "sample":sample, "oracle":"complete canonical snapshot", "objects":objects.len(), "duplicates_preserved":true})
+        );
+    }
     Ok(())
 }
 

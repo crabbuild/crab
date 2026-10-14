@@ -2,6 +2,80 @@ use super::*;
 use object_store::ObjectStoreExt;
 
 #[tokio::test]
+async fn footer_only_fetch_selection_uses_authenticated_checkpoint_pages() {
+    let (layout, observations) = fixture().await;
+    let complete = checkpoint(&layout).await;
+    let checkpoint = complete.layered_checkpoint().unwrap();
+    let view = crab_read::capsule_protocol::open_view_from_root_with_layered_control(
+        &layout,
+        complete.root_snapshot().clone(),
+        LIMITS,
+    )
+    .await
+    .unwrap();
+    assert!(view.layered_checkpoint().unwrap().is_control_only());
+    let oid =
+        gix_hash::ObjectId::from_hex(complete.refs().values().next().unwrap().as_bytes()).unwrap();
+    let cancel = CancellationToken::new();
+    let snapshot = checkpoint.visibility_ordinal_snapshot().unwrap().unwrap();
+    let raw: [u8; 20] = oid.as_bytes().try_into().unwrap();
+    let ordinal = snapshot.objects().binary_search(&raw).unwrap();
+    let member = snapshot.member_admission().unwrap()[ordinal];
+    let pack = &checkpoint.sources()[usize::from(member.source_index())].members()
+        [usize::from(member.member_index())];
+    let expected = std::collections::BTreeSet::from([pack.pack().blake3().to_owned()]);
+    observations.0.lock().unwrap().clear();
+    let selected = crab_read::capsule_protocol::layered_fetch_pack_selection(
+        &view,
+        &layout,
+        &[oid, oid],
+        LIMIT,
+        &cancel,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(selected, expected);
+    assert!(
+        observations
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|read| read.operation == StorageOperation::Range)
+    );
+
+    cancel.cancel();
+    observations.0.lock().unwrap().clear();
+    assert!(matches!(
+        crab_read::capsule_protocol::layered_fetch_pack_selection(
+            &view,
+            &layout,
+            &[oid],
+            LIMIT,
+            &cancel,
+        )
+        .await,
+        Err(crab_read::ReadError::Cancelled)
+    ));
+    assert!(observations.0.lock().unwrap().is_empty());
+
+    let path = layout.capsule_checkpoint_path(checkpoint.hash());
+    layout.store().inner().delete(&path).await.unwrap();
+    assert!(
+        crab_read::capsule_protocol::layered_fetch_pack_selection(
+            &view,
+            &layout,
+            &[oid],
+            LIMIT,
+            &CancellationToken::new(),
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
 async fn frontier_delta_base_placement_does_not_probe_unrelated_member_indexes() {
     let (layout, observations) = empty_fixture().await;
     publish_blob(&layout, "seed").await;

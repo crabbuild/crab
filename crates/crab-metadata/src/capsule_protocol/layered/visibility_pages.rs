@@ -9,9 +9,14 @@ const BLOCK_BITS: u32 = 4096;
 const BLOCK_BYTES: usize = BLOCK_BITS as usize / 8;
 const PATH: &str = "layered visibility pages";
 
+#[cfg(feature = "storage")]
+mod reader;
+#[cfg(feature = "storage")]
+pub use reader::LayeredVisibilityReader;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Directory {
+pub(crate) struct Directory {
     catalog_digest: String,
     body_bytes: u64,
     member_admission: bool,
@@ -184,7 +189,7 @@ pub(super) fn encode(snapshot: &LayeredVisibilitySnapshot) -> Result<Bytes> {
 }
 
 impl Directory {
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         validate_content_hash(&self.catalog_digest, "visibility source catalog", PATH)?;
         for (root, kind, maximum) in [
             (
@@ -209,6 +214,63 @@ impl Directory {
             return Err(corrupt("visibility page body exceeds its byte bound"));
         }
         Ok(())
+    }
+}
+
+pub(super) fn directory(bytes: &[u8]) -> Result<Directory> {
+    if bytes.len() > MAX_LAYERED_VISIBILITY_BYTES || bytes.get(..8) != Some(MAGIC) {
+        return Err(corrupt("visibility page magic or byte bound is invalid"));
+    }
+    let header_bytes = scalar(
+        bytes
+            .get(8..12)
+            .ok_or_else(|| corrupt("visibility directory is truncated"))?,
+    )? as usize;
+    if header_bytes > MAX_DIRECTORY_BYTES {
+        return Err(corrupt("visibility directory exceeds its byte bound"));
+    }
+    let end = HEADER_BYTES
+        .checked_add(header_bytes)
+        .ok_or_else(|| corrupt("visibility directory range overflows"))?;
+    let directory: Directory = record(
+        bytes
+            .get(HEADER_BYTES..end)
+            .ok_or_else(|| corrupt("visibility directory is truncated"))?,
+    )?;
+    directory.validate()?;
+    if bytes.len().checked_sub(end).map(|size| size as u64) != Some(directory.body_bytes) {
+        return Err(corrupt("visibility body length differs from its directory"));
+    }
+    Ok(directory)
+}
+
+impl Directory {
+    pub(super) fn validate_checkpoint(
+        &self,
+        sources: &[PackSourceDescriptor],
+        section_bytes: u64,
+        object_count: Option<u64>,
+    ) -> Result<u64> {
+        self.validate()?;
+        let header_bytes = section_bytes
+            .checked_sub(self.body_bytes)
+            .ok_or_else(|| corrupt("visibility section does not cover its pages"))?;
+        if header_bytes < HEADER_BYTES as u64
+            || header_bytes > (HEADER_BYTES + MAX_DIRECTORY_BYTES) as u64
+            || section_bytes > MAX_LAYERED_VISIBILITY_BYTES as u64
+            || self.catalog_digest != source_catalog_digest(sources)?
+            || object_count
+                != Some(
+                    self.objects
+                        .as_ref()
+                        .map_or(0, |root| u64::from(root.count)),
+                )
+        {
+            return Err(corrupt(
+                "visibility directory does not match its checkpoint",
+            ));
+        }
+        Ok(header_bytes)
     }
 }
 
@@ -312,32 +374,8 @@ fn restore_transitions(
 }
 
 pub(super) fn decode(bytes: &[u8]) -> Result<LayeredVisibilitySnapshot> {
-    if bytes.len() > MAX_LAYERED_VISIBILITY_BYTES || bytes.get(..8) != Some(MAGIC) {
-        return Err(corrupt("visibility page magic or byte bound is invalid"));
-    }
-    let header_bytes = scalar(
-        bytes
-            .get(8..12)
-            .ok_or_else(|| corrupt("visibility directory is truncated"))?,
-    )? as usize;
-    if header_bytes > MAX_DIRECTORY_BYTES {
-        return Err(corrupt("visibility directory exceeds its byte bound"));
-    }
-    let end = HEADER_BYTES
-        .checked_add(header_bytes)
-        .ok_or_else(|| corrupt("visibility directory range overflows"))?;
-    let directory: Directory = record(
-        bytes
-            .get(HEADER_BYTES..end)
-            .ok_or_else(|| corrupt("visibility directory is truncated"))?,
-    )?;
-    directory.validate()?;
-    let body = bytes
-        .get(end..)
-        .ok_or_else(|| corrupt("visibility body is truncated"))?;
-    if body.len() as u64 != directory.body_bytes {
-        return Err(corrupt("visibility body length differs from its directory"));
-    }
+    let directory = directory(bytes)?;
+    let body = &bytes[bytes.len() - directory.body_bytes as usize..];
     let mut audit = BTreeMap::new();
     let mut objects = Vec::new();
     let mut admission = directory.member_admission.then(Vec::new);
@@ -428,7 +466,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LayeredVisibilitySnapshot> {
 mod tests {
     use super::*;
 
-    fn fixture(count: u32) -> LayeredVisibilitySnapshot {
+    pub(super) fn fixture(count: u32) -> LayeredVisibilitySnapshot {
         let objects = (0..count)
             .map(|ordinal| {
                 let mut oid = [0; 20];

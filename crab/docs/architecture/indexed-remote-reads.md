@@ -1267,3 +1267,54 @@ properties. A one-million-position closure encodes below 160 KiB. Strict Clippy
 passes for payload-only metadata and the shared reader. These checks establish
 codec and consumer integration; they do not establish native E2E, bounded
 transport or migration safety.
+
+## Authenticated checkpoint ranges and fetch admission
+
+The checkpoint footer now commits to the visibility directory, including its
+source-catalog binding, dictionary count and relative page roots. Control-only
+decoding requires exactly one matching ordinal section; conflicting or missing
+commitments fail before publication. Complete inspection also compares the
+section directory with that footer. The unreleased format-5 outer envelope is
+retained; older development ordinal checkpoints without these commitments are
+rejected. No released layered-checkpoint contract exists and no fallback reader
+is introduced. Development migration remains an explicit upgrade boundary.
+
+`LayeredVisibilityReader` batches selected OID-to-member reads from the captured
+immutable checkpoint. It validates actual source/member indices and retains
+misses and duplicate occurrences. The shared cache translates relative pages
+through the authenticated body offset; graph, path and physical indexes retain
+zero base offsets. Query admission charges all required pages, including warm
+ones, before issuing each I/O wave. Each reader owns its directory and bounded
+cache; it opens no metadata database or background tasks.
+
+Incremental fetch selection uses this reader for both complete and footer-only
+views. The requested objects have already passed fetch authorization. Placement
+only narrows candidate packs, and the existing installer still proves each
+member is self-contained and covered by requested objects or local haves.
+Cancellation and missing/corrupt pages return errors; page failures do not become
+locator misses. The CLI preserves typed storage, metadata and cancellation
+errors through its existing shared conversion.
+
+Focused validation passes 280 tests: 85 payload-only capsule metadata, 95
+storage-enabled capsule metadata, 13 physical paging, 27 graph, 21 path,
+35 shared reader, two publisher/fetch admission and two measurement tests.
+At 10,000 and 100,000 OIDs, footer opening stays below 16 KiB and selected
+admission below 128 KiB; repeat reads transfer zero backend bytes. Other cases
+cover corruption, missing ranges, actual member bounds, invalid footer roots
+and cancellation before I/O. Strict metadata/shared-reader Clippy passes.
+Qualifier Clippy with dependencies stops on six existing coordination lint
+expectations; those source files are unchanged from the parent. Selected
+qualifier Clippy with `--no-deps` passes; this does not establish a clean
+dependency-wide lint gate.
+
+The existing qualifier gains `visibility-members`. This elected maintenance
+operation publishes a checkpoint and records 20 cold/warm admission pairs against
+complete canonical decoding. Run it only in a dedicated qualification namespace.
+It does not run maintenance from ordinary reads. Native source/binary receipts
+will record the live result when complete.
+
+Normal repository opening still materializes visibility for ref inheritance,
+removals and transaction ordering. Lazy closure updates remain required before
+switching that path; this change makes no bounded-opening claim. First-parent
+change-point blame, historical Xet paging, lifecycle/release qualification, fuller
+blame, unified staging and current 10-GiB/provider grids remain unfinished.
