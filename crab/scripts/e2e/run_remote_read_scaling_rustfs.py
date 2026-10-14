@@ -80,6 +80,14 @@ class ReadScalingRunner(AddCommitPushSmoke):
             "Cargo.lock", "crates/crab-remote/Cargo.toml",
             "crates/crab-remote/examples/qualify_remote.rs",
             "crates/crab-remote/examples/support/mod.rs",
+            "crates/crab-metadata/src/pages.rs",
+            "crates/crab-metadata/src/pages/cache.rs",
+            "crates/crab-metadata/src/capsule_protocol/layered.rs",
+            "crates/crab-metadata/src/capsule_protocol/layered/visibility_pages.rs",
+            "crates/crab-metadata/src/capsule_protocol/layered/visibility_pages/reader.rs",
+            "crates/crab-metadata/src/capsule_protocol/layered/visibility_pages/state.rs",
+            "crates/crab-read/src/capsule_protocol.rs",
+            "crates/crab-read/src/capsule_protocol/paged_visibility.rs",
             "crates/crab-metadata/src/path_state/codec.rs",
             "crates/crab-metadata/src/split_commit_graph.rs",
             "crab/scripts/e2e/run_remote_read_scaling_rustfs.py",
@@ -116,12 +124,19 @@ class ReadScalingRunner(AddCommitPushSmoke):
             old_endpoint = {key:self.env.get(key) for key in ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3")}
             self.env.update(AWS_ENDPOINT_URL=proxy.url, AWS_ENDPOINT_URL_S3=proxy.url)
             try:
+                if self.args.checkpoint:
+                    before = proxy.snapshot()
+                    checkpoint, resources = self.measured(f"history-{commits} checkpoint",
+                        [str(self.args.qualifier), self.args.bucket, prefix, "target.txt", "visibility-members"], repo)
+                    results.append({"commits":commits, "operation":"visibility-members", "checkpoint":True,
+                                    "resources":resources, "transport":RequestCountingProxy.delta(before, proxy.snapshot()),
+                                    "evidence":checkpoint.stdout_log})
                 before = proxy.snapshot()
                 maintenance, resources = self.measured(f"history-{commits} build-indexes",
                     [str(self.args.qualifier), self.args.bucket, prefix, "target.txt", "build-indexes"], repo)
-                results.append({"commits":commits, "operation":"build-indexes", "resources":resources,
+                results.append({"commits":commits, "operation":"build-indexes", "checkpoint":self.args.checkpoint, "resources":resources,
                                 "transport":RequestCountingProxy.delta(before, proxy.snapshot()), "evidence":maintenance.stdout_log})
-                for name in WORKLOADS:
+                for name in self.args.workloads:
                     for repeat in range(self.args.repeats):
                         before = proxy.snapshot()
                         record, resources = self.measured(f"history-{commits} {name} repeat-{repeat}",
@@ -129,6 +144,7 @@ class ReadScalingRunner(AddCommitPushSmoke):
                         proof = verify(repo, Path(record.stdout_log), "HEAD")
                         self.check(f"history-{commits}-{name}-{repeat}-git-oracle", proof["status"] == "passed")
                         results.append({"commits":commits, "fixed_file_changes":20, "fixed_directory_entries":100,
+                                        "checkpoint":self.args.checkpoint,
                                         "operation":name, "repeat":repeat, "resources":resources, "proof":proof,
                                         "transport":RequestCountingProxy.delta(before, proxy.snapshot()), "evidence":record.stdout_log})
                         self.write_results(results)
@@ -162,6 +178,10 @@ def main() -> None:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--history", type=int, nargs="+", default=[100, 1000, 10000])
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--workloads", nargs="+", choices=WORKLOADS, default=WORKLOADS,
+                        help="Measure selected operations while retaining their opening and Git oracles")
+    parser.add_argument("--checkpoint", action="store_true",
+                        help="Publish and qualify paged visibility before index building and measured reads")
     parser.add_argument("--timeout", type=int, default=3600)
     args = parser.parse_args()
     if any(value <= 20 for value in args.history) or args.repeats < 1 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.run_id):

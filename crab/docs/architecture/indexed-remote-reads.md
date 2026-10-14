@@ -101,6 +101,14 @@ cloud qualification uses the same read binaries with authorized credentials and
 a representative dedicated dataset. Run the existing large-file harness with
 10,240 MiB per file separately. Preserve receipts outside the source checkout.
 
+For checkpointed opening qualification, add `--checkpoint --workloads resolve
+object-point object-batch attribution --repeats 20`. Checkpoint publication and
+its complete visibility oracle run as measured maintenance before browse-index
+construction. Every selected query still has an independent Git oracle and
+separate cold/warm opening measurements. Receipts identify checkpointed cases;
+omitting the flag retains the original frontier workload. The source manifest
+also captures the shared page and lazy visibility implementations used by opening.
+
 The scaling fixture fixes the selected file at 50 lines and 20 content edits,
 and the directory page at 100 entries. It changes a separate path in every
 commit. Commit timestamps and data generation are deterministic. Fixtures are
