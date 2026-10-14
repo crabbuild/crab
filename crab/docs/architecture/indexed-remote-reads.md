@@ -1076,3 +1076,53 @@ limits are published. Receipts remain in the dedicated qualification volume.
 
 Checkpoint visibility/catalog opening, comparison caching, provider/lifecycle
 proof and later stages remain incomplete. The initiative remains active.
+
+
+## Checkpoint admission ownership and measured duplicate decoding
+
+The qualifier now exposes `checkpoint`, which uses the real logical publisher
+and verifies the advertised pointer and footer afterward. It reports publication
+work independently of reads. A successful `metadb compact` no-op is not used
+as checkpoint evidence. `checkpoint_visibility` records complete ordinal-proof
+decodes separately from graph/path/physical and frontier visibility pages.
+
+The dedicated RustFS fixtures were checkpointed at 100/1,000/10,000 commits,
+then their indexes rebuilt. A 189-process baseline passes native Git comparisons
+and twenty cold/warm samples each for resolve, path history and blame per cell.
+It exposes two full visibility decodes during every indexed opening.
+
+Source/member ordinal bounds now belong to the checkpoint metadata decoder,
+which checks its own source inventory before frontier sources are appended.
+Previously an out-of-range checkpoint source could alias a newer frontier
+source in the combined inventory. The new regression fails against the prior
+decoder, then passes with the source fix. Complete view capture still checks
+the source-catalog digest and closure proof. With verified physical readiness,
+repository opening skips the second decode used only to construct placement
+hints. Unindexed placement retains that needed admission map; ordinary fetch
+controls still leave the body cold. No format, dependency or config changes.
+
+A source/binary-matched 183-process replay passes the same native oracles and
+twenty cold/warm samples per operation/history. Operations drain and warm query
+origin bytes remain zero. The measured change is decode work, not I/O:
+
+| Commits | Opening origin bytes | Proof bytes decoded before | After |
+| --- | ---: | ---: | ---: |
+| 100 | 29,255 | 20,492 | 10,246 |
+| 1,000 | 119,259 | 150,768 | 75,384 |
+| 10,000 | 771,540 | 1,453,518 | 726,759 |
+
+Proof: 15 checkpoint codec tests with storage and 15 payload-only tests; 46
+capsule-read tests; qualifier instrumentation tests; strict selected-owner
+Clippy (`--no-deps`, all targets); qualifier and CLI link builds. A broader
+dependency-inclusive Clippy probe still fails six pre-existing coordination
+lint expectations; this is not a green workspace-lint claim. These expectations
+are present on this stack and absent on current `origin/main`; no main-only
+unrelated-failure claim is made. CI remains a separate gate.
+
+Opening still reads and decodes the entire checkpoint proof once. The next
+implementation must page the retained OID dictionary, source/member bindings,
+ref closures and transition histories through authenticated footer roots, then
+wire lazy initial reconciliation and explicit bulk materialization. Retained
+but invisible OIDs must stay separate from ref membership. Footer/source/ref
+inventory costs, historical Xet catalog paging, comparison caching, lifecycle
+and provider proof and fuller blame semantics remain incomplete.

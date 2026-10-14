@@ -138,6 +138,10 @@ Ordinal proofs must match the ordered source-catalog digest before becoming a
 Git visibility index; the existing full-object encoding preserves the same
 caller-supplied Git identity. A missing proof remains distinct from an empty
 ref set, so recovery can reject it explicitly.
+Checkpoint ordinal decoding validates source/member positions against that
+checkpoint's own inventory, before newer frontier sources are appended. Indexed
+opening can then avoid decoding the complete proof again for placement hints;
+unindexed readers retain the admission map they actually consume.
 Footer-only checkpoints have control offset zero when both optional catalog and
 visibility sections are absent. The storage reader accepts that canonical range
 while retaining footer-hash, pointer identity, source and size validation.

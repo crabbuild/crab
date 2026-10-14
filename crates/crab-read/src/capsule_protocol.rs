@@ -964,10 +964,12 @@ impl CapsuleRepositoryView {
         // admission, while the complete ordinal join is only available to
         // maintenance/strict readers that loaded the full checkpoint.
         // A ready physical index resolves every placement before hint paths run.
-        // Keep validating source/member admission, but avoid a second OID dictionary.
+        // Checkpoint visibility decoding already validates source/member bounds.
+        // Only unindexed placement needs the complete admission dictionary here.
         let mut preferred_object_admission_by_oid =
             object_index.is_none().then(std::collections::HashMap::new);
-        if let Some(checkpoint) = checkpoint
+        if let Some(admission_by_oid) = preferred_object_admission_by_oid.as_mut()
+            && let Some(checkpoint) = checkpoint
             && !checkpoint.is_control_only()
             && let Some(snapshot) = checkpoint.visibility_ordinal_snapshot()?
             && let Some(admission) = snapshot.member_admission()
@@ -986,9 +988,10 @@ impl CapsuleRepositoryView {
                     })?;
                 let pack_id = crab_xet::hash::MerkleHash::from_hex(pack.pack().blake3())
                     .map_err(|error| corrupt_path("layered visibility", error.to_string()))?;
-                if let Some(admission) = preferred_object_admission_by_oid.as_mut() {
-                    admission.entry(*oid).or_insert_with(Vec::new).push(pack_id);
-                }
+                admission_by_oid
+                    .entry(*oid)
+                    .or_insert_with(Vec::new)
+                    .push(pack_id);
             }
         }
         for (oid, pack_ids) in self.frontier_object_admission() {
