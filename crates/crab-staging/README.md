@@ -68,12 +68,24 @@ with their locators, so unlink and reader-pool eviction cannot invalidate an
 already captured segment read. Recovery reclaims unindexed compaction bodies
 only after checking both segment registry and canonical payload ownership.
 
-Staging layout v2 upgrades the released v1 layout transactionally on writable
-or shared open. It repairs inventory using the locators v1 readers used, then
-changes admission in the same transaction; old writers reject v2. Tables,
-indexes and payload encoding stay unchanged. Missing segment dependencies fail
-the upgrade without changing admission. The repair runs once, not on every v2
-open; it cannot recover payload bytes already deleted by an older binary.
+Staging layout v3 upgrades the released v1 layout transactionally on writable
+or shared open. It repairs inventory using the locators v1 readers used and
+creates explicit external-publication ownership in the same transaction. Old
+writers reject v3. Payload encoding stays unchanged. Missing dependencies or
+failed schema installation leave v1 admission intact; deleted bytes cannot be
+recovered by migration. The unreleased v2 prototype is rejected and needs a
+fresh staging root and restaging, rather than an implicit compatibility reader.
+
+Native add owns its batches until its Git-index transaction succeeds or rolls
+back. Git-clean cannot acknowledge Git's subsequent index replacement. It
+instead delegates a complete verified lease after payload flush, before returning
+a pointer. Native `--defer` delegates the same way. Delegation does not create a
+published path head. Push discovers pointers in selected Git history, loads only
+their published or delegated recipes, then captures exact eligible leases.
+Retirement releases only captured owners after remote publication; newer handoffs
+and active native transactions survive. Publishing a newer head never cancels
+another caller's open lease. Failed Git conversion can leave a retained handoff;
+reconciliation and abandoned-handoff reclamation still need qualification.
 
 ## Recovery contract
 
@@ -145,8 +157,13 @@ Successful ingestion flushes pending segment authority before recording the
 version lease. The returned batch stays open until its caller publishes or
 rolls back; the supplied logical path is not proof of a Git index update.
 Cancel through the token while awaiting the operation so failed attempts clean
-up. Git-clean still uses its existing ingestion path; routing packet streams and
-reconciling their leases with Git index publication remain separate work.
+up. Production Git-clean adapts packet bytes to this engine without reopening or
+seeking the source. Exact prepared inputs reuse their recipe after byte verification;
+changed inputs replay a pinned, bounded prefix and continue through the same engine.
+Short reads coalesce into one bounded block before CDC. The released custom
+`ChunkStager` injection API retains its byte-to-chunk adapter until a breaking
+library release. Real 10-GiB crossover, termination and failure qualification remain
+required before declaring the unification complete.
 
 ## Boundaries
 

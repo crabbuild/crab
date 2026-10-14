@@ -1167,11 +1167,19 @@ async fn stream_chunk_and_stage_producer<R: AsyncRead + Unpin>(
     loop {
         check_cancelled(cancel)?;
         let mut buf = BytesMut::with_capacity(READ_BUF_SIZE);
-        let n = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return Err(CrabError::Cancelled),
-            read = file.read_buf(&mut buf) => read?,
-        };
+        // Short packet/prefix reads must not retain a full allocation per
+        // fragment in zero-copy chunks. Fill one bounded block before CDC.
+        while buf.len() < READ_BUF_SIZE {
+            let n = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                read = file.read_buf(&mut buf) => read?,
+            };
+            if n == 0 {
+                break;
+            }
+        }
+        let n = buf.len();
         if n == 0 {
             break;
         }

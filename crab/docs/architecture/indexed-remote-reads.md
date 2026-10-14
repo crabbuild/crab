@@ -1864,3 +1864,41 @@ corrected without changing assertions or adding suppressions. Both successful
 and failed receipts remain retained. This fixes the recovery boundary; routing
 Crab's clean stream through shared ingestion and deferring its recipe
 publication remain required.
+
+### Unified production byte ingestion and external publication handoffs
+
+Production Git-clean now routes ordinary bytes and changed prepared streams through
+`crab-staging::stream::stage_reader_streaming`, the same engine native add uses.
+Packet adaptation consumes exactly one filter request and preserves its terminal
+flush. It restores typed framing errors after ingestion cleanup. The synchronous
+filter runs on its existing blocking thread; this does not promise interruption
+of a stalled underlying blocking stdin read. Short reads coalesce before CDC to
+avoid retaining a full read allocation per small packet. Exact prepared inputs
+are verified without CDC or rewriting payloads. Changed inputs replay bounded
+verified chunks from a pinned recipe, then continue with the supplied stream.
+Late edits still pay prefix reread/CDC cost; no speedup is claimed without measurement.
+
+Git's filter success precedes its index installation. A new durable handoff owner
+therefore distinguishes externally delegated leases from active native batches
+and published path heads. Git-clean and native `--defer` delegate only complete,
+verified recipes with durable payloads. Native atomic index publication retains
+its existing intent and rollback protocol. Pointer discovery precedes batched
+published/delegated recipe selection in push. Snapshots capture exact eligible
+leases and retire only captured owners after remote publication, preserving active
+native owners and handoffs created after capture. Both direct and intent publication
+supersede only published leases; another caller's open lease remains its property.
+The old test requiring deletion of an open prepared owner was removed because its
+behavior violated this invariant; the new regression covers both publication paths.
+
+Layout v3 adds the handoff table with a cascading composite lease foreign key.
+Released v1 schema creation, locator repair and admission update commit together;
+upgrade failure preserves the released shape. The unreleased v2 prototype is
+rejected rather than receiving a compatibility reader. The released v1.2.4 public
+custom `ChunkStager` API retains its adapter until a breaking library release;
+production local ingestion uses the canonical engine. No dependency or lockfile
+changes are required.
+
+This remains draft work. New-path 10-GiB multi-edit/push/reconstruction, representative
+S3 performance, Git termination and abandoned-handoff reconciliation/reclamation,
+full failure injection and broad CI remain required. The concurrent 10-GiB run is
+pinned to the older segment-lifecycle binary and cannot qualify these changes.

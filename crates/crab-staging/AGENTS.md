@@ -51,6 +51,12 @@ Trace one path: `crab/src/cmd/add.rs` (`close_staging_before_indexing`) →
 - Multipart abandonment scans reject unrepresentable clock values; never convert a failed time conversion into an expired-lease cutoff. Provider cleanup still requires claiming the observed row revision.
   Source: `crates/crab-staging/src/multipart_resume.rs`.
 
+- Completed Git-clean and native `--defer` batches delegate publication only after
+  flush and verification. Delegation is not Git-index acceptance. Push may capture
+  only selected pointer identities; retirement preserves uncaptured handoffs and
+  active native owners. Layout v3 upgrades released v1 atomically and rejects the
+  unreleased v2 prototype. Sources: `index.rs`, `lib.rs`, and crate README.
+
 ## Features and platform
 
 No declared Cargo features. Requires writable local filesystem/SQLite and platform lock semantics. Scale tests under `crates/crab-staging/tests` need dedicated disk/time budgets; do not run them as an incidental unit check.

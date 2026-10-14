@@ -18,15 +18,22 @@ type StoredRecipeMetadata = (i64, i64, Vec<u8>, i64, Vec<u8>, String);
 type StoredRecipeWithHashRow = (Vec<u8>, i64, i64, Vec<u8>, i64, Vec<u8>, String, Vec<u8>);
 type ResidualAuthorityRow = (i64, Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
 
-/// Version 2 makes segment payload inventory authoritative for reads and lifetime.
-const LAYOUT_VERSION: &str = "2";
+/// Version 3 records leases handed to an external Git publisher.
+const LAYOUT_VERSION: &str = "3";
 const PUBLISHED_RECIPE_LOOKUP_BATCH_SIZE: usize = 512;
+
+#[derive(Clone, Copy)]
+enum RecipeOwner {
+    Published,
+    External,
+}
 
 const CANONICAL_TABLES: &[&str] = &[
     "add_preparation_batches",
     "add_preparations",
     "chunk_payloads",
     "chunks",
+    "external_publications",
     "file_paths",
     "file_recipes",
     "files",
@@ -582,10 +589,30 @@ impl Index {
         let fresh = existing_tables.is_empty();
         let mut needs_payload_upgrade = false;
         if !fresh {
+            if !existing_tables.iter().any(|name| name == "staging_meta") {
+                return Err(retired_staging_schema());
+            }
+            let version: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT value FROM staging_meta WHERE key = 'layout_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            needs_payload_upgrade = match version.as_deref() {
+                Some("1") => true,
+                Some(LAYOUT_VERSION) => false,
+                _ => return Err(retired_staging_schema()),
+            };
+            let expected_tables = CANONICAL_TABLES
+                .iter()
+                .copied()
+                .filter(|name| !needs_payload_upgrade || *name != "external_publications");
             if existing_tables
                 .iter()
                 .map(String::as_str)
-                .ne(CANONICAL_TABLES.iter().copied())
+                .ne(expected_tables)
             {
                 return Err(retired_staging_schema());
             }
@@ -634,27 +661,57 @@ impl Index {
             {
                 return Err(retired_staging_schema());
             }
-            let version: Option<String> = self
-                .conn
-                .query_row(
-                    "SELECT value FROM staging_meta WHERE key = 'layout_version'",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to read staging layout version: {e}"))
-                })?;
-            match version.as_deref() {
-                Some("1") => needs_payload_upgrade = true,
-                Some(LAYOUT_VERSION) => {}
-                _ => return Err(retired_staging_schema()),
+            if !needs_payload_upgrade
+                && self
+                    .table_columns("external_publications")?
+                    .iter()
+                    .map(String::as_str)
+                    .ne(["batch_id", "path_bytes"])
+            {
+                return Err(retired_staging_schema());
+            }
+            if !needs_payload_upgrade {
+                let keys = self.conn.prepare(
+                    "SELECT name, pk FROM pragma_table_info('external_publications') ORDER BY cid"
+                )?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let foreign = self.conn.prepare(
+                    "SELECT [table], [from], [to], on_delete FROM pragma_foreign_key_list('external_publications') ORDER BY id, seq"
+                )?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                if keys != [("batch_id".to_owned(), 1), ("path_bytes".to_owned(), 2)]
+                    || foreign
+                        != [
+                            (
+                                "path_leases".to_owned(),
+                                "batch_id".to_owned(),
+                                "batch_id".to_owned(),
+                                "CASCADE".to_owned(),
+                            ),
+                            (
+                                "path_leases".to_owned(),
+                                "path_bytes".to_owned(),
+                                "path_bytes".to_owned(),
+                                "CASCADE".to_owned(),
+                            ),
+                        ]
+                {
+                    return Err(retired_staging_schema());
+                }
             }
         }
 
+        // Admission, new ownership schema and released locator repair commit
+        // together. A failed upgrade must leave the v1 shape and bytes intact.
+        let tx = self.conn.unchecked_transaction()?;
         self.initialize_schema()?;
         if needs_payload_upgrade {
-            self.upgrade_segment_payload_authority()?;
+            Self::repair_segment_payload_authority(&tx)?;
+            tx.execute(
+                "UPDATE staging_meta SET value = ?1 WHERE key = 'layout_version'",
+                params![LAYOUT_VERSION],
+            )?;
         }
         if fresh {
             self.conn
@@ -670,14 +727,14 @@ impl Index {
                 "initialized canonical staging schema"
             );
         }
+        tx.commit()?;
         Ok(())
     }
 
-    fn upgrade_segment_payload_authority(&self) -> Result<()> {
+    fn repair_segment_payload_authority(tx: &rusqlite::Transaction<'_>) -> Result<()> {
         // Released v1 compaction moved occurrence rows without updating payload
         // inventory. Repair from the locators v1 readers actually used, then
         // change admission atomically so an old writer cannot recreate the gap.
-        let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE chunk_payloads AS payload
              SET (segment_id, segment_offset) = (
@@ -698,7 +755,7 @@ impl Index {
                            WHERE chunk_hash = payload.chunk_hash AND size = payload.size)",
             [],
         )?;
-        Self::prune_unowned_segment_payloads(&tx)?;
+        Self::prune_unowned_segment_payloads(tx)?;
         let missing_segment: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM chunk_payloads AS payload
                            WHERE NOT EXISTS (SELECT 1 FROM segments
@@ -711,11 +768,6 @@ impl Index {
                 "released payload inventory references a missing segment".to_owned(),
             ));
         }
-        tx.execute(
-            "UPDATE staging_meta SET value = ?1 WHERE key = 'layout_version'",
-            params![LAYOUT_VERSION],
-        )?;
-        tx.commit()?;
         Ok(())
     }
 
@@ -755,7 +807,7 @@ impl Index {
             })
     }
 
-    fn initialize_schema(&mut self) -> Result<()> {
+    fn initialize_schema(&self) -> Result<()> {
         self.conn
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS files (
@@ -927,6 +979,14 @@ impl Index {
 
                 CREATE INDEX IF NOT EXISTS leases_by_file
                     ON path_leases(file_hash);
+
+                CREATE TABLE IF NOT EXISTS external_publications (
+                    batch_id   TEXT NOT NULL,
+                    path_bytes BLOB NOT NULL,
+                    PRIMARY KEY (batch_id, path_bytes),
+                    FOREIGN KEY (batch_id, path_bytes) REFERENCES path_leases(batch_id, path_bytes)
+                        ON DELETE CASCADE
+                );
 
                 CREATE TABLE IF NOT EXISTS path_heads (
                     path_bytes   BLOB PRIMARY KEY,
@@ -3530,6 +3590,8 @@ impl Index {
             params![batch_id],
         )
         .map_err(|e| StagingError::Internal(format!("failed to replace path heads: {e}")))?;
+        // A new head cannot cancel another active caller or external writer.
+        // Supersede only published leases; open owners release themselves.
         tx.execute(
             "DELETE FROM path_leases AS lease
              WHERE EXISTS (
@@ -3537,6 +3599,10 @@ impl Index {
                  WHERE incoming.batch_id = ?1
                    AND incoming.path_bytes = lease.path_bytes
              )
+               AND EXISTS (
+                   SELECT 1 FROM staging_batches AS owner
+                   WHERE owner.batch_id = lease.batch_id AND owner.state = 'published'
+               )
                AND NOT EXISTS (
                    SELECT 1 FROM path_heads AS head
                    WHERE head.batch_id = lease.batch_id
@@ -3647,6 +3713,35 @@ impl Index {
         Ok(Some(unowned))
     }
 
+    /// Delegate complete verified leases without asserting a Git index write.
+    pub fn delegate_publication(&self, entries: &[(String, Vec<u8>)]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (batch_id, path_bytes) in entries {
+            let ready: bool = tx.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM path_leases AS lease
+                    JOIN staging_batches AS batch USING (batch_id)
+                    JOIN verified_recipes USING (recipe_hash)
+                    WHERE lease.batch_id = ?1 AND lease.path_bytes = ?2 AND batch.state = 'open'
+                      AND NOT EXISTS (SELECT 1 FROM publication_intent_entries AS intent
+                                      WHERE intent.batch_id = lease.batch_id)
+                )",
+                params![batch_id, path_bytes],
+                |row| row.get(0),
+            )?;
+            if !ready {
+                return Err(StagingError::StagingCorrupt(
+                    "external publication requires a verified open lease without a native intent"
+                        .to_owned(),
+                ));
+            }
+            tx.execute("INSERT OR IGNORE INTO external_publications (batch_id, path_bytes) VALUES (?1, ?2)",
+                params![batch_id, path_bytes])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn create_publication_intent(
         &self,
         intent_id: &str,
@@ -3678,7 +3773,9 @@ impl Index {
                      JOIN staging_batches AS batch USING (batch_id)
                      JOIN verified_recipes AS verified USING (recipe_hash)
                      WHERE lease.batch_id = ?1 AND lease.path_bytes = ?2
-                       AND batch.state = 'open'",
+                       AND batch.state = 'open'
+                       AND NOT EXISTS (SELECT 1 FROM external_publications AS external
+                                       WHERE external.batch_id = lease.batch_id)",
                     params![batch_id, path_bytes],
                     |row| row.get(0),
                 )
@@ -3871,6 +3968,8 @@ impl Index {
                 "failed to replace publication path heads {intent_id}: {e}"
             ))
         })?;
+        // A new head cannot cancel another active caller or external writer.
+        // Supersede only published leases; open owners release themselves.
         tx.execute(
             "DELETE FROM path_leases AS lease
              WHERE EXISTS (
@@ -3878,6 +3977,10 @@ impl Index {
                  WHERE incoming.intent_id = ?1
                    AND incoming.path_bytes = lease.path_bytes
              )
+               AND EXISTS (
+                   SELECT 1 FROM staging_batches AS owner
+                   WHERE owner.batch_id = lease.batch_id AND owner.state = 'published'
+               )
                AND NOT EXISTS (
                    SELECT 1 FROM path_heads AS head
                    WHERE head.batch_id = lease.batch_id
@@ -3990,7 +4093,7 @@ impl Index {
     ) -> Result<Option<crate::recipe::FileRecipe>> {
         let mut selected = None;
         for (returned_hash, recipe) in
-            self.load_published_recipe_rows(std::slice::from_ref(file_hash))?
+            self.load_recipe_rows(std::slice::from_ref(file_hash), RecipeOwner::Published)?
         {
             if returned_hash != *file_hash {
                 return Err(StagingError::StagingCorrupt(
@@ -4016,12 +4119,28 @@ impl Index {
         &self,
         file_hashes: &[[u8; 32]],
     ) -> Result<HashMap<[u8; 32], Option<crate::recipe::FileRecipe>>> {
+        self.recipes_for_files(file_hashes, RecipeOwner::Published)
+    }
+
+    /// Load only caller-verified leases explicitly delegated to an external writer.
+    pub fn external_recipes_for_files(
+        &self,
+        file_hashes: &[[u8; 32]],
+    ) -> Result<HashMap<[u8; 32], Option<crate::recipe::FileRecipe>>> {
+        self.recipes_for_files(file_hashes, RecipeOwner::External)
+    }
+
+    fn recipes_for_files(
+        &self,
+        file_hashes: &[[u8; 32]],
+        owner: RecipeOwner,
+    ) -> Result<HashMap<[u8; 32], Option<crate::recipe::FileRecipe>>> {
         let mut recipes = HashMap::with_capacity(file_hashes.len());
         for batch in file_hashes.chunks(PUBLISHED_RECIPE_LOOKUP_BATCH_SIZE) {
             for file_hash in batch {
                 recipes.entry(*file_hash).or_insert(None);
             }
-            for (file_hash, recipe) in self.load_published_recipe_rows(batch)? {
+            for (file_hash, recipe) in self.load_recipe_rows(batch, owner)? {
                 match recipes.get_mut(&file_hash) {
                     Some(slot @ None) => *slot = Some(recipe),
                     Some(Some(prior)) if prior == &recipe => {}
@@ -4041,9 +4160,10 @@ impl Index {
         Ok(recipes)
     }
 
-    fn load_published_recipe_rows(
+    fn load_recipe_rows(
         &self,
         file_hashes: &[[u8; 32]],
+        owner: RecipeOwner,
     ) -> Result<Vec<([u8; 32], crate::recipe::FileRecipe)>> {
         if file_hashes.is_empty() {
             return Ok(Vec::new());
@@ -4051,6 +4171,20 @@ impl Index {
         let placeholders = std::iter::repeat_n("?", file_hashes.len())
             .collect::<Vec<_>>()
             .join(",");
+        let ownership = match owner {
+            RecipeOwner::Published => {
+                "JOIN path_heads AS head USING (recipe_hash)
+                 JOIN staging_batches AS batch USING (batch_id)
+                 WHERE batch.state = 'published'"
+            }
+            RecipeOwner::External => {
+                "JOIN path_leases AS lease USING (recipe_hash)
+                 JOIN external_publications AS external
+                   ON external.batch_id = lease.batch_id AND external.path_bytes = lease.path_bytes
+                 JOIN staging_batches AS batch ON batch.batch_id = lease.batch_id
+                 WHERE batch.state = 'open'"
+            }
+        };
         let query = format!(
             "SELECT DISTINCT recipe.file_hash, recipe.recipe_hash, recipe.file_size,
                     recipe.chunk_count, recipe.sequence_hash,
@@ -4058,9 +4192,7 @@ impl Index {
              FROM file_recipes AS recipe
              JOIN files AS file USING (file_hash)
              JOIN verified_recipes AS verified USING (recipe_hash)
-             JOIN path_heads AS head USING (recipe_hash)
-             JOIN staging_batches AS batch USING (batch_id)
-             WHERE recipe.file_hash IN ({placeholders}) AND batch.state = 'published'
+             {ownership} AND recipe.file_hash IN ({placeholders})
              ORDER BY recipe.file_hash, recipe.recipe_hash"
         );
         let mut statement = self.conn.prepare_cached(&query).map_err(|e| {
@@ -4599,9 +4731,9 @@ impl Index {
 
     /// Atomically pin the exact immutable recipes consumed by one push.
     ///
-    /// Every recipe must already be owned by a published path lease. The
-    /// snapshot is therefore a reference to committed local staging state,
-    /// never a way to manufacture ownership from a pointer alone.
+    /// Every recipe must have a published head or an explicitly delegated
+    /// verified lease. Callers must first observe its Git pointer; ordinary
+    /// open native batches cannot manufacture push visibility.
     pub fn create_push_snapshot(
         &self,
         snapshot_id: &str,
@@ -4681,6 +4813,13 @@ impl Index {
                          FROM path_heads AS head
                          JOIN staging_batches AS batch USING (batch_id)
                          WHERE head.recipe_hash = ?1 AND batch.state = 'published'
+                     ) OR EXISTS (
+                         SELECT 1 FROM external_publications AS external
+                         JOIN path_leases AS lease
+                           ON lease.batch_id = external.batch_id AND lease.path_bytes = external.path_bytes
+                         JOIN staging_batches AS batch ON batch.batch_id = lease.batch_id
+                         JOIN verified_recipes USING (recipe_hash)
+                         WHERE lease.recipe_hash = ?1 AND batch.state = 'open'
                      )",
                     params![recipe_hash.as_slice()],
                     |row| row.get(0),
@@ -4692,7 +4831,7 @@ impl Index {
                 })?;
             if !published_head {
                 return Err(StagingError::StagingCorrupt(format!(
-                    "push snapshot {snapshot_id} recipe {} has no published path head",
+                    "push snapshot {snapshot_id} recipe {} has no published or delegated lease",
                     blake3::Hash::from(recipe_hash).to_hex()
                 )));
             }
@@ -4714,7 +4853,14 @@ impl Index {
                             head.file_hash, head.recipe_hash
                      FROM path_heads AS head
                      JOIN staging_batches AS batch ON batch.batch_id = head.batch_id
-                     WHERE head.recipe_hash = ?2 AND batch.state = 'published'",
+                     WHERE head.recipe_hash = ?2 AND batch.state = 'published'
+                     UNION
+                     SELECT ?1, lease.batch_id, lease.path_bytes, lease.file_hash, lease.recipe_hash
+                     FROM external_publications AS external
+                     JOIN path_leases AS lease
+                       ON lease.batch_id = external.batch_id AND lease.path_bytes = external.path_bytes
+                     JOIN staging_batches AS batch ON batch.batch_id = lease.batch_id
+                     WHERE lease.recipe_hash = ?2 AND batch.state = 'open'",
                     params![snapshot_id, recipe_hash.as_slice()],
                 )
                 .map_err(|e| {
@@ -4724,7 +4870,7 @@ impl Index {
                 })?;
             if captured == 0 {
                 return Err(StagingError::StagingCorrupt(format!(
-                    "push snapshot {snapshot_id} recipe {} lost its published lease",
+                    "push snapshot {snapshot_id} recipe {} lost its eligible lease",
                     blake3::Hash::from(recipe_hash).to_hex()
                 )));
             }
@@ -4773,7 +4919,7 @@ impl Index {
         }
     }
 
-    /// Retire only the exact published path leases captured by one committed
+    /// Retire only the exact eligible path leases captured by one committed
     /// push snapshot. Returns file hashes whose final lease disappeared and
     /// whose physical chunk rows can therefore be reclaimed.
     pub fn retire_push_snapshot(&self, snapshot_id: &str) -> Result<Vec<[u8; 32]>> {
@@ -4903,12 +5049,18 @@ impl Index {
             })?;
             tx.execute(
                 "DELETE FROM staging_batches
-                 WHERE state = 'published'
+                 WHERE (state = 'published' OR batch_id IN (
+                     SELECT batch_id FROM push_snapshot_leases WHERE snapshot_id = ?1
+                 ))
                    AND NOT EXISTS (
                        SELECT 1 FROM path_leases
                        WHERE path_leases.batch_id = staging_batches.batch_id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM publication_intent_entries AS intent
+                       WHERE intent.batch_id = staging_batches.batch_id
                    )",
-                [],
+                params![snapshot_id],
             )
             .map_err(|e| {
                 StagingError::Internal(format!(
@@ -8574,7 +8726,9 @@ impl Index {
                    AND NOT EXISTS (
                        SELECT 1 FROM publication_intent_entries AS entry
                        WHERE entry.batch_id = batch.batch_id
-                   )",
+                   )
+                   AND NOT EXISTS (SELECT 1 FROM external_publications AS external
+                                   WHERE external.batch_id = batch.batch_id)",
             )?,
             open_push_snapshots: count("SELECT COUNT(*) FROM push_snapshots WHERE state = 'open'")?,
             committed_push_snapshots: count(
@@ -8775,6 +8929,137 @@ mod tests {
             .expect("batch lookup");
         assert_eq!(recipes.get(&file_hash), Some(&Some(recipe)));
         assert_eq!(recipes.get(&missing_hash), Some(&None));
+    }
+
+    #[test]
+    fn external_snapshot_retires_only_captured_handoffs_and_keeps_native_owners() {
+        let idx = open_in_memory();
+        let path = b"model.bin";
+        let recipe = insert_test_recipe_lease(&idx, "external", path, 0x51, 0x52);
+        let file_hash: [u8; 32] = recipe.file_hash().into();
+        idx.delegate_publication(&[("external".to_owned(), path.to_vec())])
+            .unwrap();
+        idx.insert_batch("native").unwrap();
+        idx.insert_recipe_lease("native", path, &recipe, RecipeVerification::CallerVerified)
+            .unwrap();
+        assert!(idx.published_recipe_for_file(&file_hash).unwrap().is_none());
+        assert_eq!(
+            idx.external_recipes_for_files(&[file_hash]).unwrap()[&file_hash],
+            Some(recipe.clone())
+        );
+        idx.create_push_snapshot("first", std::slice::from_ref(&recipe))
+            .unwrap();
+        idx.insert_batch("late").unwrap();
+        idx.insert_recipe_lease("late", path, &recipe, RecipeVerification::CallerVerified)
+            .unwrap();
+        idx.delegate_publication(&[("late".to_owned(), path.to_vec())])
+            .unwrap();
+        idx.commit_push_snapshot("first").unwrap();
+        let retired = idx.retire_push_snapshot("first").unwrap();
+        let leases: Vec<String> = idx
+            .conn
+            .prepare("SELECT batch_id FROM path_leases ORDER BY batch_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert!(retired.is_empty() && leases == ["late", "native"]);
+        idx.rollback_batch("native").unwrap();
+        idx.create_push_snapshot("second", std::slice::from_ref(&recipe))
+            .unwrap();
+        idx.commit_push_snapshot("second").unwrap();
+        assert_eq!(idx.retire_push_snapshot("second").unwrap(), vec![file_hash]);
+    }
+
+    #[test]
+    fn external_delegation_is_atomic_and_cannot_share_a_native_intent() {
+        let idx = open_in_memory();
+        let path = b"model.bin";
+        let recipe = insert_test_recipe_lease(&idx, "native", path, 0x61, 0x62);
+        idx.create_publication_intent(
+            "native-intent",
+            &[(
+                "native".to_owned(),
+                path.to_vec(),
+                "oid".to_owned(),
+                "prior".to_owned(),
+            )],
+        )
+        .unwrap();
+        idx.insert_batch("external").unwrap();
+        idx.insert_recipe_lease(
+            "external",
+            path,
+            &recipe,
+            RecipeVerification::CallerVerified,
+        )
+        .unwrap();
+        let failed = idx.delegate_publication(&[
+            ("external".to_owned(), path.to_vec()),
+            ("native".to_owned(), path.to_vec()),
+        ]);
+        let count: i64 = idx
+            .conn
+            .query_row("SELECT count(*) FROM external_publications", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            failed.is_err()
+                && count == 0
+                && idx.unresolved_publication_intents().unwrap().len() == 1
+        );
+        idx.delegate_publication(&[("external".to_owned(), path.to_vec())])
+            .unwrap();
+        assert!(
+            idx.create_publication_intent(
+                "wrong-native",
+                &[(
+                    "external".to_owned(),
+                    path.to_vec(),
+                    "oid".to_owned(),
+                    "prior".to_owned(),
+                )]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn publishing_a_path_preserves_another_callers_open_lease() {
+        for through_intent in [false, true] {
+            let idx = open_in_memory();
+            let path = b"model.bin";
+            let pending = insert_test_recipe_lease(&idx, "pending", path, 0x31, 0x32);
+            let current = insert_test_recipe_lease(&idx, "current", path, 0x41, 0x42);
+            let retired = if through_intent {
+                idx.create_publication_intent(
+                    "current-intent",
+                    &[(
+                        "current".to_owned(),
+                        path.to_vec(),
+                        "current-oid".to_owned(),
+                        "prior".to_owned(),
+                    )],
+                )
+                .unwrap();
+                idx.publish_publication_intent("current-intent").unwrap()
+            } else {
+                idx.mark_batch_published("current").unwrap()
+            };
+            let pending_hash: [u8; 32] = pending.file_hash().into();
+            let current_hash: [u8; 32] = current.file_hash().into();
+            let retained = idx.has_file_owner(&pending_hash).unwrap();
+            let released = idx.rollback_batch("pending").unwrap();
+            assert!(
+                retired.is_empty()
+                    && retained
+                    && released == vec![pending_hash]
+                    && idx.published_recipe_for_file(&current_hash).unwrap() == Some(current),
+                "publication must leave another active caller's lease for that caller to release"
+            );
+        }
     }
 
     #[test]
@@ -9195,45 +9480,6 @@ mod tests {
     }
 
     #[test]
-    fn published_replacement_removes_superseded_empty_open_batch() {
-        let idx = open_in_memory();
-        let path = b"models/prepared.bin";
-        let prepared = insert_test_recipe_lease(&idx, "batch-prepared", path, 0x31, 0x32);
-        idx.insert_batch("batch-published")
-            .expect("published batch");
-        idx.insert_recipe_lease(
-            "batch-published",
-            path,
-            &prepared,
-            RecipeVerification::CallerVerified,
-        )
-        .expect("published lease");
-
-        assert!(
-            idx.mark_batch_published("batch-published")
-                .expect("publish prepared replacement")
-                .is_empty(),
-            "the published owner keeps the same prepared recipe live"
-        );
-
-        let prepared_batch_exists: bool = idx
-            .conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM staging_batches WHERE batch_id = 'batch-prepared')",
-                [],
-                |row| row.get(0),
-            )
-            .expect("prepared batch existence");
-        assert!(!prepared_batch_exists);
-        let published_file_hash: [u8; 32] = prepared.file_hash().into();
-        assert_eq!(
-            idx.published_recipe_for_file(&published_file_hash)
-                .expect("published recipe"),
-            Some(prepared)
-        );
-    }
-
-    #[test]
     fn rollback_preserves_snapshot_pin_and_rejects_published_batch() {
         let idx = open_in_memory();
         let path = b"models/rollback.bin";
@@ -9388,6 +9634,9 @@ mod tests {
                 .expect("released relocation");
             idx.drop_segment(old).expect("released retirement");
             idx.conn
+                .execute_batch("DROP TABLE external_publications;")
+                .unwrap();
+            idx.conn
                 .execute(
                     "UPDATE staging_meta SET value = '1' WHERE key = 'layout_version'",
                     [],
@@ -9419,7 +9668,7 @@ mod tests {
     #[test]
     fn failed_inventory_upgrade_preserves_released_admission_and_locator() {
         for fail_late in [false, true] {
-            let idx = open_in_memory();
+            let mut idx = open_in_memory();
             insert_test_recipe_lease(&idx, "source", b"source", 0xB8, 0xB9);
             let chunk = test_hash(0xB9);
             let before = idx.locate(&chunk).expect("before");
@@ -9429,6 +9678,9 @@ mod tests {
                     params![chunk.as_slice()],
                 )
                 .expect("released relocation");
+            idx.conn
+                .execute_batch("DROP TABLE external_publications;")
+                .unwrap();
             idx.conn
                 .execute(
                     "UPDATE staging_meta SET value = '1' WHERE key = 'layout_version'",
@@ -9441,9 +9693,7 @@ mod tests {
                 "chunk_payloads"
             };
             idx.conn.execute_batch(&format!("CREATE TEMP TRIGGER reject_upgrade BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT, 'upgrade failure'); END;")).expect("inject failure");
-            let error = idx
-                .upgrade_segment_payload_authority()
-                .expect_err("upgrade fails");
+            let error = idx.open_canonical_schema().expect_err("upgrade fails");
             let version: String = idx
                 .conn
                 .query_row(
@@ -9456,6 +9706,11 @@ mod tests {
                 matches!(error, StagingError::Io(ref source) if source.get_ref().is_some_and(|source| source.is::<rusqlite::Error>()))
                     && version == "1"
                     && idx.locate(&chunk).expect("after") == before
+                    && !idx
+                        .application_objects("table")
+                        .unwrap()
+                        .iter()
+                        .any(|name| name == "external_publications")
             );
         }
     }
@@ -9481,6 +9736,21 @@ mod tests {
     }
 
     #[test]
+    fn canonical_schema_rejects_external_handoffs_without_lease_cascade() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let idx = Index::open(temp.path()).unwrap();
+        idx.conn
+            .execute_batch(
+                "DROP TABLE external_publications;
+            CREATE TABLE external_publications(batch_id TEXT NOT NULL, path_bytes BLOB NOT NULL,
+                PRIMARY KEY(batch_id, path_bytes));",
+            )
+            .unwrap();
+        drop(idx);
+        assert_staging_corrupt_contains(Index::open(temp.path()), "canonical v3");
+    }
+
+    #[test]
     fn canonical_schema_rejects_missing_required_index() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let path = tmp.path();
@@ -9491,7 +9761,7 @@ mod tests {
             .expect("drop chunk lease index");
         drop(idx);
 
-        assert_staging_corrupt_contains(Index::open(path), "canonical v2");
+        assert_staging_corrupt_contains(Index::open(path), "canonical v3");
     }
 
     #[test]
@@ -9517,7 +9787,7 @@ mod tests {
             .expect("install retired publication table");
         drop(idx);
 
-        assert_staging_corrupt_contains(Index::open(path), "canonical v2");
+        assert_staging_corrupt_contains(Index::open(path), "canonical v3");
     }
 
     #[test]
@@ -9534,7 +9804,7 @@ mod tests {
             .expect("install retired remote authority table");
         drop(idx);
 
-        assert_staging_corrupt_contains(Index::open(path), "canonical v2");
+        assert_staging_corrupt_contains(Index::open(path), "canonical v3");
     }
 
     #[test]
@@ -10086,7 +10356,7 @@ mod tests {
                 .expect("create retired schema");
         }
 
-        assert_staging_corrupt_contains(Index::open(&path), "canonical v2");
+        assert_staging_corrupt_contains(Index::open(&path), "canonical v3");
 
         let connection = Connection::open(&path).expect("reopen retired db");
         let tables: Vec<String> = connection

@@ -1,6 +1,6 @@
 //! Segment-based staging area for chunks awaiting upload.
 //!
-//! Canonical layout (v2, with transactional upgrade from released v1):
+//! Canonical layout (v3, with transactional upgrade from released v1):
 //! ```text
 //! {root}/
 //! ├── segments/
@@ -2624,6 +2624,18 @@ impl StagingArea {
         Ok(())
     }
 
+    /// Persist a completed lease handoff without claiming that Git accepted it.
+    ///
+    /// Payloads must already be flushed. Delegation excludes subsequent native
+    /// index intents; an observed Git pointer permits push snapshot capture.
+    pub fn delegate_publication(&self, entries: &[(&StagingBatchId, &Path)]) -> Result<()> {
+        let entries = entries
+            .iter()
+            .map(|(batch, path)| (batch.as_str().to_owned(), staging_path_bytes(path)))
+            .collect::<Vec<_>>();
+        lock_index(&self.index)?.delegate_publication(&entries)
+    }
+
     /// Mark a batch as published after its Git index replacement commits.
     pub fn mark_batch_published(&self, batch_id: &StagingBatchId) -> Result<()> {
         let unleased = lock_index(&self.index)?.mark_batch_published(batch_id.as_str())?;
@@ -3927,6 +3939,22 @@ impl StagingAreaReadOnly {
             .collect())
     }
 
+    /// Load delegated recipes only for the Git pointers selected by the caller.
+    pub fn external_recipes_for_files(
+        &self,
+        file_hashes: &[MerkleHash],
+    ) -> Result<HashMap<MerkleHash, Option<crate::recipe::FileRecipe>>> {
+        let hashes = file_hashes
+            .iter()
+            .map(|hash| (*hash).into())
+            .collect::<Vec<[u8; 32]>>();
+        Ok(lock_index(&self.index)?
+            .external_recipes_for_files(&hashes)?
+            .into_iter()
+            .map(|(hash, recipe)| (MerkleHash::from(hash), recipe))
+            .collect())
+    }
+
     /// Read one bounded page from an indexed immutable recipe.
     pub fn recipe_page(
         &self,
@@ -4877,6 +4905,9 @@ mod tests {
                 let connection =
                     rusqlite::Connection::open(root.join("index.db")).expect("released database");
                 connection.execute("UPDATE chunk_payloads SET segment_id = ?1, segment_offset = ?2 WHERE chunk_hash = ?3", rusqlite::params![old.segment_id, old.offset, <[u8; 32]>::from(hash).as_slice()]).expect("released stale inventory");
+                connection
+                    .execute_batch("DROP TABLE external_publications;")
+                    .unwrap();
                 connection
                     .execute(
                         "UPDATE staging_meta SET value = '1' WHERE key = 'layout_version'",

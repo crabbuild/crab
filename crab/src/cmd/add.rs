@@ -1392,6 +1392,37 @@ async fn execute_add(
     }
 
     let publish_git_index = should_publish_git_index(args, &summary, staged_entries.len());
+    if args.skip_git_add && summary.files_failed == 0 {
+        let handoffs = staged_entries
+            .iter()
+            .filter_map(|entry| {
+                entry.batch_id.as_ref().map(|batch| {
+                    (
+                        batch,
+                        entry
+                            .abs_path
+                            .strip_prefix(&repo_root)
+                            .unwrap_or(&entry.abs_path),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        // --defer hands completed versions to a later Git writer. Active
+        // native index transactions stay caller-owned and cannot be retired
+        // merely because another push sees the same file hash.
+        if let Err(error) = staging.delegate_publication(&handoffs) {
+            let cleanup = rollback_unpublished_open_entries(
+                &staging,
+                &mut summary,
+                &mut staged_entries,
+                "external publication handoff failed",
+            );
+            stop_progress_ticker(ticker.take(), &ticker_cancel).await;
+            cleanup?;
+            return Err(error.into());
+        }
+    }
+
     if publish_git_index
         && let Err(error) =
             pin_committed_recipes_before_path_replacement(&staging, &repo_root, &staged_entries)
