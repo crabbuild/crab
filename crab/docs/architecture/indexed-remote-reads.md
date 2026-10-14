@@ -1340,9 +1340,9 @@ catalog JSON is rejected; no fallback or legacy format reader is introduced.
 Payload-only capsule tests pass 91 cases; storage-enabled capsule tests pass
 103 cases, including the new wide/adversarial catalog cases. The CLI compile
 check passes through read, write, remote and VFS consumers. A separate official
-Makefile installation is building for fresh-prefix RustFS qualification; the
-older installed binary remains pinned to the active 10 GiB run. No full stage-6
-or live page-catalog feature claim yet.
+Makefile installation completed for fresh-prefix RustFS qualification. The
+older installed binary remains pinned to its separate 10 GiB receipts. This
+format foundation does not establish the complete stage-6 performance gate.
 
 The Make-generated full-feature artifact now passes the separate
 `pointer-pages-live-fuse-r1` RustFS qualification: 96 commands and 71 checks.
@@ -1353,7 +1353,8 @@ The captured checkpoint bodies contain `CRBPCP01`. The test pins the artifact
 SHA-256 `10fa04219b2099cc1940f39225500c8e27c7c52b62e424c936c8df77278504b1`
 and verifies unchanged Rust/manifest fingerprints. Its version metadata names
 the dirty build's base `0ac1c27d4c8`; this is not a clean-head release receipt.
-The final installed no-FUSE binary is still building and needs separate proof.
+The final installed no-FUSE binary separately passes the same 96-command,
+71-check suite in `pointer-pages-live-r1`, with its own binary fingerprint.
 This establishes the new format's live integration for these workflows; full
 catalog scans, run aggregation and the remaining stage-6 gates remain unfinished.
 
