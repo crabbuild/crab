@@ -712,3 +712,22 @@ the hook-stop witness is absent. The same check passes on base PR #537; the
 subprocess runner is unchanged in #538, and the cause remains unproven.
 These findings do not establish draft readiness, complete lifecycle proof or
 stage-4 completion.
+
+
+The size-publication implementation is committed at `b29565b9422`. Its clean
+source checkout matches the qualified CLI binary. The expanded RustFS native
+smoke passes 107 checks across 329 commands, including 15 new checks for remote
+CLI plain/Crab/LFS download/export byte identity, absent installed Git ODBs and
+export temporary-object cleanup. This run uses native Git 2.50.1 and a dedicated
+RustFS prefix; it does not resolve the separate Git 2.40 mirror-cancellation CI
+failure or establish representative S3 latency.
+
+Focused checks now total 75 passes: the prior 70 plus one physical-repack test
+preserving newer refs/captured history and four catalog persistence/recovery
+tests. The new catalog test queries pinned locator size facts before object
+reads, so payload reconstruction cannot hide a dropped size field. Released
+kind-only and absent-sidecar cases retain absent size facts. Strict library
+Clippy passes for `crab-git` and `crab-remote-git`; broader CLI/lifecycle gates and
+the pending inventory approval remain open. The native receipt stays bound to
+`b29565b9422`; subsequent catalog-test/documentation changes do not change its
+production code.

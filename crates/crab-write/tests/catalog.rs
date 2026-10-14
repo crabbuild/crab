@@ -46,24 +46,33 @@ fn git(directory: &std::path::Path, args: &[&str], input: &[u8]) -> Vec<u8> {
 
 #[tokio::test]
 async fn catalog_recovers_from_bad_evidence_without_a_local_repository() {
-    catalog_recovery(true).await;
+    catalog_recovery_mode(SidecarFixture::KindOnly, false).await;
 }
 
 #[tokio::test]
 async fn catalog_reads_metadata_without_kind_sidecars_or_a_local_repository() {
-    catalog_recovery(false).await;
+    catalog_recovery_mode(SidecarFixture::Absent, false).await;
 }
 
 #[tokio::test]
 async fn catalog_rebuilds_missing_pack_sidecars_from_the_canonical_pack() {
-    catalog_recovery_mode(true, true).await;
+    catalog_recovery_mode(SidecarFixture::KindOnly, true).await;
 }
 
-async fn catalog_recovery(with_kind_sidecar: bool) {
-    catalog_recovery_mode(with_kind_sidecar, false).await;
+#[tokio::test]
+async fn catalog_preserves_resolved_sizes_after_origin_recovery() {
+    catalog_recovery_mode(SidecarFixture::Resolved, false).await;
 }
 
-async fn catalog_recovery_mode(with_kind_sidecar: bool, missing_sidecars: bool) {
+#[derive(Clone, Copy)]
+enum SidecarFixture {
+    Absent,
+    KindOnly,
+    Resolved,
+}
+
+async fn catalog_recovery_mode(sidecar: SidecarFixture, missing_sidecars: bool) {
+    let with_kind_sidecar = !matches!(sidecar, SidecarFixture::Absent);
     let fixture = tempfile::tempdir().unwrap();
     git(fixture.path(), &["init", "--bare", "--quiet"], b"");
     let blob = String::from_utf8(git(
@@ -118,7 +127,11 @@ async fn catalog_recovery_mode(with_kind_sidecar: bool, missing_sidecars: bool) 
     let layout = StoreLayout::new(store.clone(), "catalog".to_owned());
     let pack_id = prepared.content_hash().to_hex().to_string();
     let kinds_path = layout.pack_kind_metadata_path(&pack_id);
-    let kinds = Bytes::from(std::fs::read(prepared.kinds_path()).unwrap());
+    let sidecar_path = match sidecar {
+        SidecarFixture::Resolved => prepared.object_metadata_path(),
+        SidecarFixture::Absent | SidecarFixture::KindOnly => prepared.kinds_path(),
+    };
+    let kinds = Bytes::from(std::fs::read(sidecar_path).unwrap());
     if with_kind_sidecar {
         store.put(&kinds_path, kinds.clone()).await.unwrap();
     }
@@ -333,6 +346,8 @@ async fn catalog_recovery_mode(with_kind_sidecar: bool, missing_sidecars: bool) 
         .await
         .unwrap();
     let result = async {
+        let oids = expected.iter().map(|(oid, _)| *oid).collect::<Vec<_>>();
+        let pinned = operation.pinned_object_metadata(&oids).await?;
         let mut actual = Vec::new();
         let mut metadata = Vec::new();
         for (oid, _) in &expected {
@@ -340,12 +355,23 @@ async fn catalog_recovery_mode(with_kind_sidecar: bool, missing_sidecars: bool) 
             metadata.push((entry.oid, entry.kind, entry.size));
             actual.push((*oid, operation.read_object(*oid).await?.data.to_vec()));
         }
-        Ok((actual, metadata))
+        Ok((actual, metadata, pinned))
     }
     .await;
     let actual = operation.finish(result).await;
     runtime.shutdown().await;
-    let (actual, metadata) = actual.unwrap();
+    let (actual, metadata, pinned) = actual.unwrap();
+    assert_eq!(
+        pinned
+            .iter()
+            .map(|facts| facts.logical_size)
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|(_, bytes)| matches!(sidecar, SidecarFixture::Resolved)
+                .then_some(bytes.len() as u64))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(actual, expected.to_vec());
     assert_eq!(
         metadata,
