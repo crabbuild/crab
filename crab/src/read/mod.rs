@@ -129,6 +129,7 @@ struct RemoteContext {
     hydrator: Arc<HydrationRuntime>,
     git_runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     lfs_reads: LfsReadSession,
+    catalog_tasks: tokio_util::task::TaskTracker,
 }
 
 /// A repository snapshot pinned to a resolved commit.
@@ -138,7 +139,6 @@ pub struct SnapshotReader {
     requested_revision: String,
     resolved_revision: String,
     source: SnapshotSource,
-    file_index_lookup: Option<crab_metadata::file_index_lookup::SharedFileIndexLookup>,
 }
 
 #[derive(Clone)]
@@ -218,7 +218,7 @@ impl RepositoryReader {
     pub async fn snapshot(&self, revision: Option<&str>) -> Result<SnapshotReader> {
         check_cancelled(&self.inner.cancel)?;
         let requested = revision.unwrap_or(DEFAULT_REV).to_owned();
-        let (resolved_revision, source, file_index_lookup) = match self.inner.git_dir.as_ref() {
+        let (resolved_revision, source) = match self.inner.git_dir.as_ref() {
             Some(git_dir) => {
                 let git_dir_for_task = git_dir.clone();
                 let requested_for_task = requested.clone();
@@ -229,7 +229,7 @@ impl RepositoryReader {
                 .map_err(|join_err| {
                     CrabError::Internal(format!("resolve revision task failed: {join_err}"))
                 })??;
-                (resolved, SnapshotSource::Local(git_dir.clone()), None)
+                (resolved, SnapshotSource::Local(git_dir.clone()))
             }
             None => self.inner.remote_snapshot(&requested).await?,
         };
@@ -239,16 +239,17 @@ impl RepositoryReader {
             requested_revision: requested,
             resolved_revision,
             source,
-            file_index_lookup,
         })
     }
 
-    /// Drain remote Git operations and LFS verification before Tokio exits.
+    /// Drain remote Git operations, catalog decoders and LFS verification before Tokio exits.
     ///
     /// Finish or drop materialization futures before closing their verification session.
     pub async fn shutdown(&self) {
         if let Some(remote) = self.inner.remote.get() {
             remote.lfs_reads.close().await;
+            remote.catalog_tasks.close();
+            remote.catalog_tasks.wait().await;
             remote.git_runtime.shutdown().await;
         }
     }
@@ -375,14 +376,10 @@ impl SnapshotReader {
 
         if let Ok(ptr) = Pointer::parse(&blob_bytes) {
             let remote = self.repo.inner.remote().await?;
+            let lookup = self.file_index_lookup().await?;
             return remote
                 .hydrator
-                .reconstruct_to_path_with(
-                    &ptr,
-                    dest,
-                    self.file_index_lookup.as_ref(),
-                    &self.repo.inner.cancel,
-                )
+                .reconstruct_to_path_with(&ptr, dest, lookup, &self.repo.inner.cancel)
                 .await;
         }
 
@@ -409,14 +406,10 @@ impl SnapshotReader {
 
         if let Ok(ptr) = Pointer::parse(&blob_bytes) {
             let remote = self.repo.inner.remote().await?;
+            let lookup = self.file_index_lookup().await?;
             return remote
                 .hydrator
-                .reconstruct_to_writer_with(
-                    &ptr,
-                    writer,
-                    self.file_index_lookup.as_ref(),
-                    &self.repo.inner.cancel,
-                )
+                .reconstruct_to_writer_with(&ptr, writer, lookup, &self.repo.inner.cancel)
                 .await;
         }
 
@@ -427,6 +420,21 @@ impl SnapshotReader {
         }
 
         write_blob_to_writer(writer, &blob_bytes)
+    }
+
+    async fn file_index_lookup(
+        &self,
+    ) -> Result<Option<&crab_metadata::file_index_lookup::SharedFileIndexLookup>> {
+        match &self.source {
+            SnapshotSource::Local(_) => Ok(None),
+            SnapshotSource::Remote(snapshot) => {
+                let remote = self.repo.inner.remote().await?;
+                snapshot
+                    .file_index_lookup(&remote.catalog_tasks, &self.repo.inner.cancel)
+                    .await
+                    .map(Some)
+            }
+        }
     }
     async fn blob_bytes(&self, path: &str) -> Result<bytes::Bytes> {
         check_cancelled(&self.repo.inner.cancel)?;
@@ -497,6 +505,7 @@ impl Inner {
                         hydrator: Arc::new(hydrator),
                         git_runtime: Arc::new(crab_remote_git::RemoteGitRuntime::default()),
                         lfs_reads: LfsReadSession::default(),
+                        catalog_tasks: tokio_util::task::TaskTracker::new(),
                     }))
                 })
             })
@@ -504,14 +513,7 @@ impl Inner {
         Ok(Arc::clone(ctx))
     }
 
-    async fn remote_snapshot(
-        &self,
-        rev: &str,
-    ) -> Result<(
-        String,
-        SnapshotSource,
-        Option<crab_metadata::file_index_lookup::SharedFileIndexLookup>,
-    )> {
+    async fn remote_snapshot(&self, rev: &str) -> Result<(String, SnapshotSource)> {
         let remote = self.remote().await?;
         let view = self.read_remote_capsule_view().await?;
         let resolved = resolve_remote_rev(view.refs(), view.peeled_refs(), view.head(), rev)
@@ -529,8 +531,8 @@ impl Inner {
             remote.router.global_prefix().to_owned(),
         );
         let snapshot = RemoteSnapshot::open(
-            &view,
-            layout.clone(),
+            view,
+            layout,
             Arc::clone(&remote.git_runtime),
             maximum,
             &resolved,
@@ -538,15 +540,7 @@ impl Inner {
         )
         .await?;
         let resolved = snapshot.commit_oid().to_string();
-        let catalog = view.pointer_catalog()?;
-        let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
-            layout, &catalog,
-        )?;
-        Ok((
-            resolved,
-            SnapshotSource::Remote(Arc::new(snapshot)),
-            Some(lookup),
-        ))
+        Ok((resolved, SnapshotSource::Remote(Arc::new(snapshot))))
     }
 
     async fn read_remote_capsule_view(

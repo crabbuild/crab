@@ -882,3 +882,46 @@ injections are not claimed there. Production source still matches the clean
 qualified revision; subsequent harness/documentation changes do not alter it.
 Full new-head CI, current 10-GiB read qualification, remaining bounded control
 opening and stages 5–8 still require work.
+
+## Deferred CLI catalog materialization
+
+Selective Git/LFS snapshots previously materialized the complete Xet catalog and
+copied every file binding into a lookup map before selecting content. CLI
+snapshots now retain only the authenticated catalog source; first Crab
+hydration initializes the shared immutable lookup. Snapshot clones share that
+initialization. Both file and writer delivery use the same captured source,
+without rereading mutable roots or opening the latest file-index database.
+
+The captured source detaches checkpoint catalog bytes and transfers ordered
+control deltas. It releases unrelated visibility, source directories and Git
+metadata instead of retaining the complete view. Materialization preserves
+canonical dependency validation, descriptor conflicts and file-binding
+precedence. Existing complete inspection and mount hydration keep their shared
+catalog contracts; mount needs its lookup for ongoing reconstruction.
+
+Blocking catalog decoders belong to the repository reader. Cancellation can
+abandon waiting for a decoder, but shutdown drains its tracked work. Admission
+stays registered until a decoder is tracked; a closed tracker rejects later
+initialization. Finish or drop materialization futures before shutdown.
+
+Focused checks total 147 passing tests: 16 CLI read, 35 capsule reader, 78 minimal
+metadata codec, eight export, five download and five fixture-consumer tests.
+Strict Clippy passes for the shared reader and minimal metadata crate.
+Default-feature CLI Clippy retains the parent's 585 diagnostic identities;
+the strict invocation fails on those existing warnings. Numeric sizes and line
+references are normalized in that inventory comparison. No new diagnostics or
+source suppressions are introduced.
+New cases cover concurrent
+file/writer hydration, first hydration after later catalog publication,
+shutdown draining, unchanged visibility rejection, checkpoint precedence and
+catalog conflicts. A synthetic checkpoint initially violated the existing
+nonempty-source contract; its fixture now includes a valid source descriptor.
+This does not weaken the codec. Native qualification and new-head CI are
+recorded separately when complete. CLI lint remains a separate baseline gate.
+
+This removes an unnecessary opening-time reconstruction and map copy. Control
+deltas remain decoded during opening, checkpoint catalog bytes remain captured,
+and first Crab hydration still materializes the complete catalog. Bounded
+visibility/control opening, paged historical Xet lookup, current 10-GiB reads,
+provider latency and stages 5–8 remain unqualified. No format or release contract
+changes in this slice.

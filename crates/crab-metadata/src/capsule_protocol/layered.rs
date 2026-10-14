@@ -1674,6 +1674,13 @@ impl LayeredCheckpoint {
         PointerCatalog::decode(&section)
     }
 
+    /// Detach authenticated catalog bytes without retaining unrelated checkpoint sections.
+    pub fn into_pointer_catalog_bytes(self) -> Result<Option<Bytes>> {
+        // section copies only the authenticated range, so captured hydration
+        // state cannot retain the full visibility body through a Bytes slice.
+        self.section(CapsuleSectionKind::CatalogDelta)
+    }
+
     /// Decode the complete visibility snapshot compacted by this checkpoint.
     pub fn visibility_snapshot(
         &self,

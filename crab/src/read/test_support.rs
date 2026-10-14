@@ -20,6 +20,26 @@ pub(crate) async fn stored_file(
     content: Bytes,
     corrupt_origin: bool,
 ) -> Result<(HydrationRuntime, Pointer, Arc<CountingObjectStore>)> {
+    let counted = Arc::new(CountingObjectStore::new(Arc::new(InMemory::new())));
+    let store = crate::storage::Store::new(counted.clone());
+    let layout = crab_storage::StoreLayout::new(store.clone(), "read-test".into());
+    let (pointer, _) = store_xet_file(&layout, content, corrupt_origin).await?;
+    let local = Arc::new(crate::cache::LocalCache::new(cache_root.to_owned()));
+    let config = Config::default();
+    let caching =
+        crab_cache_store::CachingStore::new_with_local_cache(store, &config.cache, local)?;
+    let hydrator = super::build_cli_hydrator(caching, layout, &config)?;
+    Ok((hydrator, pointer, counted))
+}
+
+pub(crate) async fn store_xet_file(
+    layout: &crab_storage::StoreLayout<crate::storage::Store>,
+    content: Bytes,
+    corrupt_origin: bool,
+) -> Result<(Pointer, crab_metadata::capsule_protocol::PointerCatalog)> {
+    use crab_metadata::capsule_protocol::{
+        FileCatalogEntry, PointerCatalog, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
+    };
     let file_hash = *blake3::hash(&content).as_bytes();
     let size = content.len();
     let chunk = crab_xet::xorb::format::Chunk::new(content);
@@ -38,30 +58,41 @@ pub(crate) async fn stored_file(
         metadata_ext: None,
     })?;
     let (shard_bytes, shard_hash) = shard.finalize()?;
-    let counted = Arc::new(CountingObjectStore::new(Arc::new(InMemory::new())));
-    let store = crate::storage::Store::new(counted.clone());
-    let layout = crab_storage::StoreLayout::new(store.clone(), "read-test".into());
-    store
+    let mut catalog = PointerCatalog::new();
+    catalog.insert_file(
+        crab_xet::hash::MerkleHash::from(file_hash).hex(),
+        FileCatalogEntry::new(size as u64, shard_hash.hex()),
+    )?;
+    catalog.insert_shard(
+        shard_hash.hex(),
+        ShardCatalogEntry::new(shard_bytes.len() as u64, vec![xorb.hash.hex()]),
+    )?;
+    catalog.insert_xorb(
+        xorb.hash.hex(),
+        XorbCatalogEntry::new(
+            xorb.bytes.len() as u64,
+            blake3::hash(&xorb.bytes).to_hex().to_string(),
+            vec![XorbChunkEntry::new(chunk.hash.hex(), size as u32)],
+        ),
+    )?;
+    layout
+        .store()
         .put(&layout.shard_path(&shard_hash), shard_bytes.into())
         .await?;
     let mut xorb_bytes = xorb.bytes.to_vec();
     if corrupt_origin {
         *xorb_bytes.last_mut().unwrap() ^= 0xff;
     }
-    store
+    layout
+        .store()
         .put(&layout.xorb_path(&xorb.hash), xorb_bytes.into())
         .await?;
-    let local = Arc::new(crate::cache::LocalCache::new(cache_root.to_owned()));
-    let config = Config::default();
-    let caching =
-        crab_cache_store::CachingStore::new_with_local_cache(store, &config.cache, local)?;
-    let hydrator = super::build_cli_hydrator(caching, layout, &config)?;
     let pointer = Pointer {
         file_hash,
         size: size as u64,
         shard_hint: Some(shard_hash.into()),
     };
-    Ok((hydrator, pointer, counted))
+    Ok((pointer, catalog))
 }
 
 use super::{
@@ -173,6 +204,7 @@ pub(crate) async fn lfs_snapshot(
                 hydrator: Arc::new(hydrator),
                 git_runtime: Arc::new(crab_remote_git::RemoteGitRuntime::default()),
                 lfs_reads: LfsReadSession::default(),
+                catalog_tasks: tokio_util::task::TaskTracker::new(),
             }))),
         }),
     };
@@ -181,7 +213,6 @@ pub(crate) async fn lfs_snapshot(
         requested_revision: "HEAD".into(),
         resolved_revision: commit,
         source: SnapshotSource::Local(git_dir),
-        file_index_lookup: None,
     };
     (repo, snapshot, counted, headers, slow, directory)
 }

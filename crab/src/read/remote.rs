@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use crab_read::capsule_protocol::CapsuleRepositoryView;
+use crab_metadata::file_index_lookup::SharedFileIndexLookup;
+use crab_read::capsule_protocol::{CapsulePointerCatalog, CapsuleRepositoryView};
 use crab_remote_git::{
     ContentClassification, EntryKind, GitPath, OperationKind, RemoteGitRepository,
     RemoteGitRuntime, RemoteGitSnapshot, RepositoryIdentity, RepositoryOptions, Revision,
     TreeListingItem, TreeListingRequest,
 };
 use crab_storage::{Store, StoreLayout};
+use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use super::{DownloadEntry, DownloadEntryKind, classify_blob_bytes};
@@ -16,11 +18,14 @@ use crate::core::error::{CrabError, Result};
 pub(super) struct RemoteSnapshot {
     repository: RemoteGitRepository,
     snapshot: RemoteGitSnapshot,
+    catalog: CapsulePointerCatalog,
+    layout: StoreLayout<Store>,
+    file_index_lookup: OnceCell<SharedFileIndexLookup>,
 }
 
 impl RemoteSnapshot {
     pub(super) async fn open(
-        view: &CapsuleRepositoryView,
+        view: CapsuleRepositoryView,
         layout: StoreLayout<Store>,
         runtime: Arc<RemoteGitRuntime>,
         maximum: u64,
@@ -46,7 +51,7 @@ impl RemoteSnapshot {
         operation.max_history_commits = operation.max_logical_objects;
         let options = RepositoryOptions::new(object, operation).map_err(remote_error)?;
         let repository = view
-            .git_repository_from_store(layout, identity, runtime, options, maximum, cancel)
+            .git_repository_from_store(layout.clone(), identity, runtime, options, maximum, cancel)
             .await?;
         let revision = Revision::from_oid_hex(revision).map_err(remote_error)?;
         let operation = repository
@@ -58,7 +63,42 @@ impl RemoteSnapshot {
         Ok(Self {
             repository,
             snapshot,
+            catalog: view.into_pointer_catalog_source()?,
+            layout,
+            file_index_lookup: OnceCell::new(),
         })
+    }
+
+    pub(super) async fn file_index_lookup(
+        self: &Arc<Self>,
+        tasks: &tokio_util::task::TaskTracker,
+        cancel: &CancellationToken,
+    ) -> Result<&SharedFileIndexLookup> {
+        crate::core::error::check_cancelled(cancel)?;
+        // Keep admission alive until blocking work is registered. Closing a
+        // TaskTracker permits waiters to finish but does not reject new tasks.
+        let _admission = tasks.token();
+        if tasks.is_closed() {
+            return Err(CrabError::Cancelled);
+        }
+        let initialize = self.file_index_lookup.get_or_try_init(|| async {
+            let snapshot = Arc::clone(self);
+            tasks
+                .spawn_blocking(move || {
+                    // Plain Git/LFS reads need no Xet catalog. First hydration
+                    // stays on this captured view despite later publication.
+                    let catalog = snapshot.catalog.materialize()?;
+                    SharedFileIndexLookup::for_pointer_catalog(snapshot.layout.clone(), &catalog)
+                        .map_err(CrabError::from)
+                })
+                .await
+                .map_err(crab_read::ReadError::ResolutionTask)?
+        });
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(CrabError::Cancelled),
+            result = initialize => result,
+        }
     }
 
     pub(super) fn commit_oid(&self) -> gix_hash::ObjectId {

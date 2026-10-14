@@ -232,6 +232,15 @@ Pack installation from metadata views also requires the origin layout and consum
 authenticated source ranges. The embedded-pack reader and candidate installers
 retain complete body views. Control directories and ref capture remain separate
 indexing work; this change does not make their historical decoding constant-cost.
+`CapsuleRepositoryView::into_pointer_catalog_source` transfers only authenticated
+catalog state to a later hydration operation. Checkpoint catalog bytes are
+detached from the visibility body; ordered control deltas retain their original
+publication order. `CapsulePointerCatalog::materialize` uses the same canonical
+file-binding precedence, descriptor conflicts and dependency-closure validation
+as complete catalog reads. CLI Git/LFS selection defers this materialization
+and lookup-map construction until Crab hydration, with reader-owned blocking
+decoders drained at shutdown. Capturing control deltas and checkpoint bytes
+still costs their encoded/decoded size; this is not a paged historical catalog.
 For an ordinary fetch whose admitted capsule frontier totals at most 128 MiB,
 the reader verifies each complete run once and reuses its resident pack and
 index bytes. Larger frontiers retain bounded suffix and range reads; stable

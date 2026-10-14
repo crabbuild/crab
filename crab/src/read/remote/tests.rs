@@ -21,6 +21,13 @@ impl StorageObserver for ReadBytes {
 }
 
 async fn fixture() -> (RepositoryReader, Arc<ReadBytes>, tempfile::TempDir, String) {
+    fixture_with_content(None).await
+}
+
+async fn fixture_with_content(
+    content: Option<Bytes>,
+) -> (RepositoryReader, Arc<ReadBytes>, tempfile::TempDir, String) {
+    let directory = tempfile::tempdir().unwrap();
     let observer = Arc::new(ReadBytes::default());
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
         .with_storage_observer(observer.clone());
@@ -37,11 +44,31 @@ async fn fixture() -> (RepositoryReader, Arc<ReadBytes>, tempfile::TempDir, Stri
         (gix_object::Kind::Blob, unrelated),
         (gix_object::Kind::Blob, b"wanted.txt".to_vec()),
     ];
+    let catalog = if let Some(content) = content {
+        let product_layout = StoreLayout::new(
+            crate::storage::Store::from_storage(store.clone()),
+            layout.repo_prefix().to_owned(),
+        );
+        let (mut pointer, catalog) =
+            crate::read::test_support::store_xet_file(&product_layout, content, false)
+                .await
+                .unwrap();
+        // A hint would bypass the catalog and fail to exercise snapshot binding.
+        pointer.shard_hint = None;
+        objects.push((gix_object::Kind::Blob, pointer.serialize()));
+        Some(catalog)
+    } else {
+        None
+    };
     let ids = objects
         .iter()
         .map(|(kind, data)| crab_remote::objects::object_id(*kind, data).unwrap())
         .collect::<Vec<_>>();
     let mut tree = Vec::new();
+    if catalog.is_some() {
+        tree.extend_from_slice(b"100644 file.crab\0");
+        tree.extend_from_slice(ids[3].as_bytes());
+    }
     for (mode, name, oid) in [
         ("120000", "link", ids[2]),
         ("100644", "unrelated.bin", ids[1]),
@@ -64,7 +91,6 @@ async fn fixture() -> (RepositoryReader, Arc<ReadBytes>, tempfile::TempDir, Stri
     let dangling_oid =
         crab_remote::objects::object_id(gix_object::Kind::Commit, &dangling).unwrap();
     objects.push((gix_object::Kind::Commit, dangling));
-    let directory = tempfile::tempdir().unwrap();
     let incoming = crab_git::incoming_pack::IncomingPack::from_generated_objects(
         objects.clone(),
         directory.path(),
@@ -121,15 +147,17 @@ async fn fixture() -> (RepositoryReader, Arc<ReadBytes>, tempfile::TempDir, Stri
         ),
     )]))
     .unwrap();
-    let capsule = Capsule::build(
-        &transaction,
-        vec![pack],
-        vec![CapsuleSection::new(
-            CapsuleSectionKind::VisibilityDelta,
-            visibility.encode().unwrap(),
-        )],
-    )
-    .unwrap();
+    let mut sections = vec![CapsuleSection::new(
+        CapsuleSectionKind::VisibilityDelta,
+        visibility.encode().unwrap(),
+    )];
+    if let Some(catalog) = catalog {
+        sections.push(CapsuleSection::new(
+            CapsuleSectionKind::CatalogDelta,
+            catalog.encode_delta().unwrap(),
+        ));
+    }
+    let capsule = Capsule::build(&transaction, vec![pack], sections).unwrap();
     crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
         .await
         .unwrap();
@@ -169,6 +197,7 @@ async fn fixture() -> (RepositoryReader, Arc<ReadBytes>, tempfile::TempDir, Stri
                 hydrator: Arc::new(hydrator),
                 git_runtime: Arc::new(RemoteGitRuntime::default()),
                 lfs_reads: crab_lfs::LfsReadSession::default(),
+                catalog_tasks: tokio_util::task::TaskTracker::new(),
             }))
             .is_ok()
     );
@@ -243,4 +272,173 @@ async fn cancellation_stops_selected_reads_before_storage() {
     ));
     assert_eq!(bytes.0.load(Ordering::Relaxed), 0);
     reader.shutdown().await;
+}
+
+#[tokio::test]
+async fn git_selection_keeps_xet_catalog_cold_until_hydration() {
+    let content = Bytes::from_static(b"captured Crab content\n");
+    let (reader, _, directory, _) = fixture_with_content(Some(content.clone())).await;
+    let snapshot = reader.snapshot(None).await.unwrap();
+    let crate::read::SnapshotSource::Remote(remote) = &snapshot.source else {
+        panic!("expected remote snapshot");
+    };
+    let plain = directory.path().join("plain.txt");
+    snapshot
+        .download_to_path("wanted.txt", &plain)
+        .await
+        .unwrap();
+    let entries = snapshot.list_entries().await.unwrap();
+    assert!(entries.iter().any(|entry| entry.path == "file.crab"));
+    assert!(remote.file_index_lookup.get().is_none());
+
+    let path = directory.path().join("hydrated.txt");
+    let writer = std::fs::File::create(directory.path().join("writer.txt")).unwrap();
+    let writer_snapshot = snapshot.clone();
+    let (file, streamed) = tokio::join!(
+        snapshot.download_to_path("file.crab", &path),
+        writer_snapshot.write_to_writer("file.crab", writer)
+    );
+    assert_eq!(file.unwrap(), content.len() as u64);
+    assert_eq!(streamed.unwrap(), content.len() as u64);
+    assert_eq!(std::fs::read(path).unwrap(), content);
+    assert_eq!(
+        std::fs::read(directory.path().join("writer.txt")).unwrap(),
+        content
+    );
+    assert!(remote.file_index_lookup.get().is_some());
+    reader.shutdown().await;
+}
+
+#[tokio::test]
+async fn first_hydration_uses_catalog_captured_before_publication() {
+    use crab_metadata::capsule_protocol::{FileCatalogEntry, PointerCatalog, ShardCatalogEntry};
+    let content = Bytes::from_static(b"captured before later catalog binding\n");
+    let (reader, _, directory, _) = fixture_with_content(Some(content.clone())).await;
+    let snapshot = reader.snapshot(None).await.unwrap();
+    let crate::read::SnapshotSource::Remote(remote) = &snapshot.source else {
+        panic!("expected remote snapshot");
+    };
+    assert!(remote.file_index_lookup.get().is_none());
+    let old_catalog = remote.catalog.materialize().unwrap();
+    let (file_hash, entry) = old_catalog.files().first_key_value().unwrap();
+    let old_shard = crab_xet::hash::MerkleHash::from_hex(entry.shard_hash()).unwrap();
+    let mut delta = PointerCatalog::new();
+    delta
+        .insert_shard("f".repeat(64), ShardCatalogEntry::new(1, vec![]))
+        .unwrap();
+    delta
+        .insert_file(
+            file_hash,
+            FileCatalogEntry::new(content.len() as u64, "f".repeat(64)),
+        )
+        .unwrap();
+    let root = crab_write::capsule_protocol::open_root(&remote.layout)
+        .await
+        .unwrap();
+    let oid = snapshot.resolved_revision().to_owned();
+    let transaction = CapsuleTransaction::new(
+        root.record().digest(),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/later",
+            None,
+            Some(oid.clone()),
+            None,
+        )],
+    )
+    .unwrap();
+    let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+        "refs/heads/later".to_owned(),
+        GitVisibilityEdit::from_delta_objects(Some(oid.clone()), oid, vec![], vec![]),
+    )]))
+    .unwrap();
+    let capsule = Capsule::build(
+        &transaction,
+        vec![],
+        vec![
+            CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                visibility.encode().unwrap(),
+            ),
+            CapsuleSection::new(
+                CapsuleSectionKind::CatalogDelta,
+                delta.encode_delta().unwrap(),
+            ),
+        ],
+    )
+    .unwrap();
+    crab_write::capsule_protocol::publish(&remote.layout, root, &transaction, &capsule)
+        .await
+        .unwrap();
+    let latest = reader.snapshot(None).await.unwrap();
+    let crate::read::SnapshotSource::Remote(latest_remote) = &latest.source else {
+        panic!("expected remote snapshot");
+    };
+    let hash = crab_xet::hash::MerkleHash::from_hex(file_hash).unwrap();
+    assert_eq!(
+        latest_remote
+            .file_index_lookup(
+                &reader.inner.remote().await.unwrap().catalog_tasks,
+                &reader.inner.cancel
+            )
+            .await
+            .unwrap()
+            .lookup(&hash)
+            .await
+            .unwrap(),
+        Some(crab_xet::hash::MerkleHash::from_hex(&"f".repeat(64)).unwrap()),
+    );
+    let unavailable = directory.path().join("later.txt");
+    std::fs::write(&unavailable, b"preserve existing output\n").unwrap();
+    assert!(
+        latest
+            .download_to_path("file.crab", &unavailable)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(unavailable).unwrap(),
+        b"preserve existing output\n"
+    );
+
+    let path = directory.path().join("captured.txt");
+    snapshot.download_to_path("file.crab", &path).await.unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), content);
+    assert_eq!(
+        remote
+            .file_index_lookup
+            .get()
+            .unwrap()
+            .lookup(&hash)
+            .await
+            .unwrap(),
+        Some(old_shard)
+    );
+    reader.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_drains_detached_catalog_decoders_and_rejects_new_initialization() {
+    let (reader, _, _, _) = fixture().await;
+    let snapshot = reader.snapshot(None).await.unwrap();
+    let remote = reader.inner.remote().await.unwrap();
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let (release, wait) = tokio::sync::oneshot::channel();
+    drop(remote.catalog_tasks.spawn_blocking(move || {
+        entered.send(()).unwrap();
+        wait.blocking_recv().unwrap();
+    }));
+    started.await.unwrap();
+    let shutdown = reader.shutdown();
+    tokio::pin!(shutdown);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut shutdown)
+            .await
+            .is_err()
+    );
+    release.send(()).unwrap();
+    shutdown.await;
+    assert!(matches!(
+        snapshot.file_index_lookup().await,
+        Err(CrabError::Cancelled)
+    ));
 }

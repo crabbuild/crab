@@ -89,6 +89,28 @@ pub struct CapsuleRepositoryView {
     frontier_object_admission: BTreeMap<[u8; 20], Vec<String>>,
 }
 
+/// Catalog-only state captured from one authenticated repository view.
+pub struct CapsulePointerCatalog {
+    checkpoint: Option<Bytes>,
+    deltas: Vec<PointerCatalog>,
+}
+
+impl CapsulePointerCatalog {
+    /// Materialize the captured catalog using canonical publication-order conflict checks.
+    pub fn materialize(&self) -> Result<PointerCatalog> {
+        let mut catalog = self
+            .checkpoint
+            .as_deref()
+            .map(PointerCatalog::decode)
+            .transpose()?
+            .unwrap_or_default();
+        for delta in &self.deltas {
+            catalog.apply(delta)?;
+        }
+        Ok(catalog)
+    }
+}
+
 /// One complete layered Git pack that can be copied directly to a clone.
 ///
 /// This is admitted only for a cold, unfiltered clone whose authenticated view
@@ -650,6 +672,26 @@ impl CapsuleRepositoryView {
             }
         }
         Ok(catalog)
+    }
+
+    /// Transfer catalog state without retaining Git metadata or rereading mutable refs.
+    pub fn into_pointer_catalog_source(self) -> Result<CapsulePointerCatalog> {
+        let checkpoint = self
+            .checkpoint
+            .map(LayeredCheckpoint::into_pointer_catalog_bytes)
+            .transpose()?
+            .flatten();
+        let mut deltas = self
+            .capsules
+            .into_iter()
+            .filter_map(|capsule| capsule.pointer_catalog_delta().transpose())
+            .collect::<crab_metadata::error::Result<Vec<_>>>()?;
+        deltas.extend(
+            self.capsule_controls
+                .into_iter()
+                .filter_map(CapsuleControl::into_pointer_catalog_delta),
+        );
+        Ok(CapsulePointerCatalog { checkpoint, deltas })
     }
 
     /// Open the authenticated embedded Git packs as a filesystem-free repository.
@@ -6287,6 +6329,19 @@ mod tests {
             metadata.pointer_catalog().unwrap(),
             complete.pointer_catalog().unwrap()
         );
+        assert_eq!(
+            metadata
+                .clone()
+                .into_pointer_catalog_source()
+                .unwrap()
+                .materialize()
+                .unwrap(),
+            complete
+                .into_pointer_catalog_source()
+                .unwrap()
+                .materialize()
+                .unwrap()
+        );
         assert!(metadata.capsules().is_empty());
         let observations = observer.observations.lock().unwrap();
         assert!(
@@ -6299,6 +6354,55 @@ mod tests {
                 .iter()
                 .any(|read| read.operation == StorageOperation::Range)
         );
+    }
+
+    #[test]
+    fn captured_catalog_keeps_checkpoint_precedence_and_conflict_checks() {
+        use crab_metadata::capsule_protocol::{FileCatalogEntry, ShardCatalogEntry};
+        let mut base = PointerCatalog::new();
+        base.insert_shard("b".repeat(64), ShardCatalogEntry::new(1, vec![]))
+            .unwrap();
+        base.insert_file("a".repeat(64), FileCatalogEntry::new(13, "b".repeat(64)))
+            .unwrap();
+        let source = PackLayer::build(
+            &CapsuleGitPack::new(
+                Bytes::from_static(b"pack"),
+                Bytes::from_static(b"index"),
+                Bytes::from_static(b"reverse"),
+                Bytes::from_static(b"locator"),
+                "e".repeat(40),
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .source_descriptor()
+        .unwrap();
+        let checkpoint =
+            LayeredCheckpoint::build(1, &"d".repeat(64), vec![source], base.clone(), None).unwrap();
+        let encoded = checkpoint.into_pointer_catalog_bytes().unwrap();
+        let mut delta = PointerCatalog::new();
+        delta
+            .insert_shard("c".repeat(64), ShardCatalogEntry::new(1, vec![]))
+            .unwrap();
+        delta
+            .insert_file("a".repeat(64), FileCatalogEntry::new(13, "c".repeat(64)))
+            .unwrap();
+        let captured = CapsulePointerCatalog {
+            checkpoint: encoded.clone(),
+            deltas: vec![delta.clone()],
+        };
+        base.apply(&delta).unwrap();
+        assert_eq!(captured.materialize().unwrap(), base);
+        let mut conflicting = PointerCatalog::new();
+        conflicting
+            .insert_file("a".repeat(64), FileCatalogEntry::new(14, "c".repeat(64)))
+            .unwrap();
+        let captured = CapsulePointerCatalog {
+            checkpoint: encoded,
+            deltas: vec![delta, conflicting],
+        };
+        assert!(captured.materialize().is_err());
     }
 
     #[tokio::test]

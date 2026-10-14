@@ -637,6 +637,12 @@ impl CapsuleControl {
         self.catalog.as_ref()
     }
 
+    /// Transfer the authenticated catalog delta and release other control metadata.
+    #[must_use]
+    pub fn into_pointer_catalog_delta(self) -> Option<PointerCatalog> {
+        self.catalog
+    }
+
     /// Return the authenticated pack directory for this capsule.
     pub fn git_packs(&self) -> &[PackMemberDescriptor] {
         &self.git_packs
