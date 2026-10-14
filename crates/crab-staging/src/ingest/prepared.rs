@@ -319,6 +319,8 @@ impl StreamPreparedXorbWriter {
 
 #[derive(Clone, Default)]
 pub(crate) struct StreamStageHooks {
+    #[cfg(test)]
+    pub(crate) after_input_read: Option<Arc<dyn Fn() + Send + Sync>>,
     pub(crate) after_batch_flush: Option<Arc<dyn Fn() + Send + Sync>>,
     pub(crate) before_prepared_xorb_write: Option<PreparedXorbWriteHook>,
     pub(crate) before_prepared_xorb_promote: Option<PreparedXorbWriteHook>,

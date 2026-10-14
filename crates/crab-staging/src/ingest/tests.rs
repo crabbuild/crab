@@ -9,6 +9,9 @@ use crate::stream::{
 use crab_xet::xorb::builder::{CompressionPolicy, FixedCompression, XorbResult};
 use crab_xet::xorb::format::CompressionScheme;
 
+#[path = "tests/native.rs"]
+mod native;
+
 struct BatchRemoteLookup {
     first_only: bool,
 }

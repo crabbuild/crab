@@ -43,8 +43,11 @@ This is a per-connection budget, not memory proportional to file size.
 clean. `stream` supplies descriptor-safe file reads and validation. Git owns
 packet framing, LFS/pointer dispatch, history preservation and pointer emission.
 The session batches chunk work, retains existing authority, prepares only
-missing payloads, and records every ordered occurrence. Exact prepared input
-avoids CDC and payload writes. Changed input retains verified prefix terms and
+missing payloads, and records every ordered occurrence. Both input adapters pin
+a locally retained recipe before reading. Exact input verifies every chunk and
+the whole-file hash without CDC, payload writes or rebuilding recipe occurrences.
+Native still validates descriptor and pathname identity before sealing.
+Changed input retains verified prefix terms and
 replays only the last verified chunk to preserve EOF-tail boundary behavior.
 
 `finish_input` completes input and workers. After source validation, `seal`

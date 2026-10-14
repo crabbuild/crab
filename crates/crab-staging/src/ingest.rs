@@ -343,18 +343,15 @@ impl<'a> IngestSession<'a> {
         cancel: &CancellationToken,
         prepared: Option<crate::recipe::FileRecipe>,
     ) -> Result<Self> {
-        let mut session =
-            Self::begin_with_hooks(staging, path, progress, cancel, StreamStageHooks::default())
-                .await?;
-        if let Some(recipe) = prepared {
-            if let Err(error) = staging.retain_verified_recipe(&session.batch_id, path, &recipe) {
-                session.abort().await?;
-                return Err(error);
-            }
-            session.candidate_hash = Some(recipe.file_hash());
-            session.prepared = Some(PreparedRecipeVerifier::new(recipe));
-        }
-        Ok(session)
+        Self::begin_with_hooks(
+            staging,
+            path,
+            progress,
+            cancel,
+            prepared,
+            StreamStageHooks::default(),
+        )
+        .await
     }
 
     pub(crate) async fn begin_with_hooks(
@@ -362,6 +359,7 @@ impl<'a> IngestSession<'a> {
         path: &Path,
         mut progress: StreamStageProgress,
         cancel: &CancellationToken,
+        prepared: Option<crate::recipe::FileRecipe>,
         hooks: StreamStageHooks,
     ) -> Result<Self> {
         check_cancelled(cancel)?;
@@ -383,7 +381,7 @@ impl<'a> IngestSession<'a> {
             .ok_or_else(|| CrabError::Internal("missing ingestion preparation".to_owned()))?
             .clone();
         let provisional = provisional_file_hash(path, &batch_id);
-        let session = Self {
+        let mut session = Self {
             staging,
             path: path.to_path_buf(),
             batch_id,
@@ -414,6 +412,13 @@ impl<'a> IngestSession<'a> {
         };
         let setup = (|| -> Result<()> {
             staging.pre_register_file_with_path(&provisional, 0, &path.to_string_lossy())?;
+            if let Some(recipe) = prepared {
+                // Pin pages and payloads before either adapter consumes input;
+                // the previous owner may retire while verification is running.
+                staging.retain_verified_recipe(&session.batch_id, path, &recipe)?;
+                session.candidate_hash = Some(recipe.file_hash());
+                session.prepared = Some(PreparedRecipeVerifier::new(recipe));
+            }
             Ok(())
         })();
         if let Err(error) = setup {
@@ -874,8 +879,12 @@ impl CompletedInput<'_> {
         // A complete recipe may also reuse pending segment authorities. Persist
         // their bytes before the lease can authorize any pointer or upload.
         s.staging.flush_pending().await?;
-        s.staging
-            .record_verified_recipe_lease(&s.batch_id, &s.path, &self.recipe)?;
+        // Exact verification already owns this verified recipe through begin's
+        // retained lease. Rebuilding its occurrences adds I/O without new proof.
+        if s.prepared.is_none() {
+            s.staging
+                .record_verified_recipe_lease(&s.batch_id, &s.path, &self.recipe)?;
+        }
         s.staging
             .record_file_path(&hash, &s.path.to_string_lossy())?;
         if let Some(candidate) = s.candidate_hash

@@ -259,9 +259,13 @@ async fn stage_file_streaming_inner(
             second_size: VerifiedIndexStat::from_path_no_follow(abs_path).map_or(0, |s| s.len),
         });
     }
+    let prepared = staging.local_recipe_for_path(&rel_path)?;
+    #[cfg(test)]
+    let after_input_read = hooks.after_input_read.clone();
     let mut read_file = tokio::fs::File::from_std(descriptor.try_clone()?);
     let mut session =
-        IngestSession::begin_with_hooks(staging, &rel_path, progress, cancel, hooks).await?;
+        IngestSession::begin_with_hooks(staging, &rel_path, progress, cancel, prepared, hooks)
+            .await?;
     let read = async {
         loop {
             check_cancelled(cancel)?;
@@ -270,6 +274,10 @@ async fn stage_file_streaming_inner(
                 break;
             }
             session.feed(bytes.freeze()).await?;
+            #[cfg(test)]
+            if let Some(after_read) = &after_input_read {
+                after_read();
+            }
         }
         Ok::<_, CrabError>(())
     }
