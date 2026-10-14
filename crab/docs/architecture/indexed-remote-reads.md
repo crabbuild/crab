@@ -1831,3 +1831,30 @@ transport wiring, exact prepared-recipe replay, deferred Git-index publication
 and crossover failure/10-GiB qualification remain required. The separate
 10-GiB run uses the preceding segment-lifecycle binary; it is not evidence for
 this extraction. Per-file flush cost and short-read performance remain unmeasured.
+
+### Git-index publication recovery serialization
+
+The unified-staging audit reproduced recovery returning success while another
+writer still held Git's index lock. Recovery previously inspected the prior
+index without serialization and could roll back a still-active publication.
+The negative receipt is `index-recovery-lock-negative.log`; its source patch is
+retained separately. Git 2.50.1's [add implementation](https://github.com/git/git/blob/v2.50.1/builtin/add.c)
+holds that lock during cleaning, then installs the index after conversion.
+Filter success therefore cannot attest to index publication.
+
+Publication recovery now belongs to `crab/src/git/index.rs`, shared by native
+add and push. It uses gix-lock 23.0.1's non-writing Marker to acquire the exact
+index lock, reads the index and fresh intent list under that lock, and keeps the
+marker until staging publication/rollback finishes. Lock acquisition fails
+immediately to avoid waiting in the inverse Git-index/staging order used by
+Git and its filter child. The typed lock error remains an I/O source. Drop
+releases only the marker acquired by recovery; no index replacement is written.
+Existing exact-new, exact-prior and ambiguous-state decisions are preserved.
+No schema, path encoding, intent format or dependency changes are required.
+
+The regressions cover both exclusive and shared staging handles. A real Git
+child pauses inside a controlled clean filter: recovery must retain the recipe
+and payload until Git finishes installing its pointer, then publish on retry.
+The test releases its filter and reaps Git on exit. Final validation results
+remain pending. This fixes the recovery boundary; routing Crab's clean stream
+through shared ingestion and deferring its recipe publication remain required.

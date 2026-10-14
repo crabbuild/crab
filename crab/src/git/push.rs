@@ -9713,7 +9713,7 @@ impl PushPipeline {
 
         if !staging.unresolved_publication_intents()?.is_empty() {
             let worktree = crate::git::worktree::WorktreeContext::resolve()?;
-            crate::cmd::add::reconcile_publication_intents(
+            crate::git::index::reconcile_publication_intents(
                 staging,
                 &worktree.current_worktree_root,
             )
