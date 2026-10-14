@@ -262,14 +262,32 @@ pub(crate) async fn upload_pack(
             "Only one command is allowed per HTTP request",
         ));
     }
-    let (view, repository) = entry
-        .open_capsule_repository(&server, upload_pack_repository_options()?, &cancel)
-        .await?;
     let mut response = Vec::new();
     match request.command.as_str() {
         "ls-refs" => {
             let request = wire::parse_ls_refs(&request.args)?;
-            write_refs(&mut response, repository.refs(), &request, &cancel).await?;
+            // Discovery consumes only ref authority. Payload and visibility
+            // dependencies remain mandatory when the client requests a fetch.
+            let view = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(GitError::Cancelled),
+                view = entry.open_ref_view() => view?,
+            };
+            let maximum = upload_pack_repository_options()?
+                .operation_limits()
+                .max_entries;
+            let actual = view.refs().len() as u64;
+            if actual > maximum {
+                return Err(crab_remote_git::Error::LimitExceeded {
+                    limit: "snapshot entries",
+                    actual,
+                    maximum,
+                }
+                .into());
+            }
+            let refs =
+                RepositoryRefs::from_ref_state(view.head(), view.refs(), view.peeled_refs())?;
+            write_refs(&mut response, &refs, &request, &cancel).await?;
             Ok((
                 [("content-type", "application/x-git-upload-pack-result")],
                 response,
@@ -278,6 +296,9 @@ pub(crate) async fn upload_pack(
         }
         "fetch" => {
             let request = wire::parse_fetch(&request.args)?;
+            let (view, repository) = entry
+                .open_capsule_repository(&server, upload_pack_repository_options()?, &cancel)
+                .await?;
             let visibility = view.git_visibility_index()?;
             let refs = repository
                 .refs()

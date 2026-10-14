@@ -498,7 +498,9 @@ byte comparisons. Architecture guardrails, strict read/remote-Git library Clippy
 CLI, S3 gateway and HTTP consumer checks pass; the frontend build ran before the
 HTTP check. The initial PR image qualification failed because ECR rejected all
 five attempts to pull its pinned AWS CLI image with a registry data-limit error.
-This remains a CI qualification gap rather than a passing image result.
+Final head `4a7b039c3d0` passes every non-skipped CI check, including both image
+jobs, four native Git versions, macOS/Windows protocol and RustFS partial-clone
+lifecycle. Kubernetes and scheduled-fleet cells were skipped and remain unproved.
 
 `metadata-queries-r1` passes 20 cold/warm attribution comparisons at both 100 and
 1,000 commits. At 10,000 commits opening reads 2,182,079 bytes, compared with
@@ -531,3 +533,32 @@ shared debug host, within its frozen relative bound; these timings do not establ
 release/provider performance. Full pack-index reads still scale with repository
 objects, and control opening still scales with history. Source/binary hashes,
 the earlier failure, raw receipts and checked summaries remain external.
+
+## HTTP ref-only discovery
+
+HTTP protocol-v2 `ls-refs` now captures only transaction-consistent ref authority.
+It validates that complete map through `RepositoryRefs::from_ref_state`, sharing
+the manifest conversion's names, targets, peeling and HEAD policy. The existing
+entry limit and cancellation remain at the HTTP boundary. Fetch still opens its
+complete verified visibility and payload path; receive validation is unchanged.
+
+The native Git regression first failed with HTTP 502 when a committed capsule
+body was unavailable. With the change, `git ls-remote` returns exact HEAD/branch
+refs and native fetch still fails with HTTP 502 for that missing dependency.
+The sibling native push/fetch exercise passes for main and trunk, including tags,
+unborn HEAD, clone, ref changes and atomic rejection. The same existing ignored
+qualification passes against a fresh dedicated RustFS prefix. Three HTTP wire
+tests, unauthorized-membership rejection, shared ref-validation tests and
+architecture guardrails pass. The frontend builds from the unchanged lockfile.
+Test scratch uses the mounted workspace volume; earlier fixture-start failures
+on the main disk preserve the required 20-GiB Cell capacity check.
+
+Strict remote-Git library Clippy passes. Strict HTTP Clippy reaches the unchanged
+six coordinator lint expectations described above; the diagnostic lint and binary
+build remain in progress. Broad CI and final packaged-image proof remain required.
+No format, dependency or configuration changes accompany this discovery slice.
+Full ref enumeration remains output-sized, and prefix filtering still captures
+the complete map. Targeted/paged ref capture and remaining control/index scaling
+are open stage-4 gates. The multi-command stdio helper retains a pre-opened fetch
+snapshot; deferring that work and the CLI's native-pack materialization require
+separate consumer/lifecycle proof rather than this stateless HTTP change.

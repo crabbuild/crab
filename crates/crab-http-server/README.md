@@ -23,6 +23,12 @@ so unrelated repository Cell reads do not block browsing. The unfiltered catalog
 still supplies the repository list and loads Git access scopes when that
 selector is opened.
 
+Native HTTP Git `ls-refs` captures transaction-consistent ref authority without
+opening capsule payloads, visibility dictionaries or object indexes. Discovery
+can therefore return committed refs when an immutable payload dependency is
+unavailable; fetch still requires its complete verified visibility and payload
+path. Full ref enumeration retains output-sized work and its entry limit.
+
 Unchanged browse and background probes share the root/ref/index change probe.
 Immutable descriptors are verified on identity changes and at the existing
 hourly scrub boundary; explicit repair invalidates the cached proof. One worker

@@ -795,6 +795,69 @@ async fn checkpoint_bounds_ref_frontier_and_next_push_starts_fresh() {
     close(&server).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn native_git_discovery_uses_ref_authority_without_missing_payloads() {
+    let history = git_history(2);
+    let tip = history.oids.last().unwrap().clone();
+    let server = fixture_without_cells().await;
+    let repo = repository(&server);
+    let root = crab_write::capsule_protocol::open_root(&repo.layout)
+        .await
+        .unwrap();
+    publish_next(&repo, root, None, tip.clone(), Some(history.pack)).await;
+    let view = repo.open_view().await.unwrap();
+    for source in view.capsule_run_sources() {
+        repo.store
+            .delete(&repo.layout.capsule_path(source.object_hash()))
+            .await
+            .unwrap();
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://{}/git/team/repo.git",
+        listener.local_addr().unwrap()
+    );
+    let stop = CancellationToken::new();
+    let stopped = stop.clone();
+    let app = router(Arc::clone(&server));
+    let http = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stopped.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let listed = super::receive_tests::git(
+        directory.path(),
+        &["-c", "protocol.version=2", "ls-remote", &url],
+    )
+    .await;
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(listed.stdout).unwrap(),
+        format!("{tip}\tHEAD\n{tip}\trefs/heads/main\n")
+    );
+    super::receive_tests::success(
+        directory.path(),
+        &["init", "--initial-branch=main", "--object-format=sha1", "."],
+    )
+    .await;
+    let fetched = super::receive_tests::git(
+        directory.path(),
+        &["-c", "protocol.version=2", "fetch", &url, "refs/heads/main"],
+    )
+    .await;
+    assert!(!fetched.status.success());
+    assert!(String::from_utf8_lossy(&fetched.stderr).contains("502"));
+    stop.cancel();
+    http.await.unwrap();
+    close(&server).await;
+}
+
 #[tokio::test]
 async fn lagging_checkpoint_preserves_concurrent_ref_suffix() {
     let history = git_history(35);

@@ -25,6 +25,11 @@ and its root tree. Locator publication lag returns `RepositoryIndexing`;
 opening never performs write-side catalog maintenance. Empty repositories can
 open, but selecting a snapshot returns `EmptyRepository`.
 
+`RepositoryRefs::from_ref_state` validates complete caller-captured reference
+maps, peeling associations and HEAD without opening Git payloads. Manifest
+conversion uses the same validation. Ref discovery uses this shape; object and
+snapshot reads retain their separate visibility and integrity requirements.
+
 Snapshot constructors retain explicitly supplied commit-graph/path-state indexes
 only for their exact materialized Git state. Loading a graph shares the normal
 identity, integrity and admission checks; a journal ref change discards stale
