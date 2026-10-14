@@ -349,6 +349,41 @@ Tokio does not promise. Keep that timing-test gap explicit. Other failures
 concern tier, provider and replication behavior outside this refactor;
 default-feature CI must distinguish them from staging regressions.
 
+### Native exact-recipe reuse qualification
+
+The native follow-up at `65f3b0dadff` supplies the retained local recipe to the
+shared verifier and seals exact input using its existing lease. Source validation,
+payload flush and the FULL ownership checkpoint remain mandatory.
+`crab/scripts/e2e/run_native_recipe_reuse_rustfs.py` passed all 66 checks and
+38 commands with one non-sparse 10 GiB file; its 16 MiB smoke also passed.
+
+| Operation | Wall time | New prepared payload bytes |
+| --- | ---: | ---: |
+| Initial native add | 573.809 s | 10,744,920,178 |
+| Forced-mtime native restage after native | 46.247 s | 0 |
+| Forced-mtime native restage after Git clean | 31.308 s | 0 |
+| Native 1 MiB tail edit before first push | 90.380 s | 1,090,201 |
+| Forced-mtime native restage after tail edit | 35.573 s | 0 |
+
+Every unchanged native restage read all 10,737,418,240 input bytes with zero CDC,
+authority-classification and compression time. Sampled process-tree RSS for those
+restages was 79,134,720–120,651,776 bytes. Metadata and durability I/O still occur;
+zero payload bytes does not mean zero disk writes. These are individual observations,
+not controlled percentage speedup measurements.
+
+Both pre-push versions were published together. After deleting source, staging and
+the source cache, an independent clone reconstructed each 10 GiB version from a
+fresh 2 GiB client cache. Both SHA comparisons, Git fsck, remote integrity and the
+frozen-binary guard passed. External receipts remain in the dedicated
+`native-recipe-reuse-3eb3/large-10g/artifacts/report.json` qualification output.
+
+Staging tests cover segment/prepared/published reuse, an SQL trigger rejecting
+recipe-occurrence rebuilds, descriptor rewind and repository-path selection,
+source mutation/replacement, cancellation and concurrent original-owner rollback.
+All 238 staging tests and 46 Git-clean tests passed, as did strict staging Clippy
+and formatting. Initial add still spent 282.6 s in authority/index work and
+231.5 s in payload persistence; the tail edit spent 43.7 s in index work.
+
 ## Expected gains and limits
 
 Historical baseline: `large-10g-r2` from the large-file audit. Receipts are retained outside Git under the audit's `artifacts/report.json` and `artifacts/large-file-edits.json`; the excluded benchmark summary files stay excluded from PR #521.

@@ -289,22 +289,25 @@ async fn native_verification_survives_concurrent_original_owner_rollback() {
     let original = stage_file_streaming(&path, dir.path(), &staging, progress.clone(), &cancel)
         .await
         .unwrap();
-    let barrier = Arc::new(std::sync::Barrier::new(2));
-    let retire_barrier = Arc::clone(&barrier);
+    let (start, started) = std::sync::mpsc::sync_channel(0);
+    let (finish, finished) = std::sync::mpsc::sync_channel(0);
+    let finished = std::sync::Mutex::new(finished);
     let retire_staging = Arc::clone(&staging);
     let original_batch = original.batch_id.clone();
     let retire = tokio::task::spawn_blocking(move || {
-        retire_barrier.wait();
+        started.recv().unwrap();
         let result = retire_staging.rollback_batch(&original_batch);
-        retire_barrier.wait();
+        finish.send(()).unwrap();
         result
     });
     let once = AtomicBool::new(false);
     let hooks = StreamStageHooks {
         after_input_read: Some(Arc::new(move || {
             if !once.swap(true, Ordering::SeqCst) {
-                barrier.wait();
-                barrier.wait();
+                // Dropping the hook on an early staging error disconnects the
+                // worker instead of leaving runtime shutdown waiting on a barrier.
+                start.send(()).unwrap();
+                finished.lock().unwrap().recv().unwrap();
             }
         })),
         ..Default::default()
