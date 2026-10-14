@@ -11,15 +11,10 @@ use crate::error::{MetadataError, Result};
 use crate::validation::validate_content_hash;
 
 const RUN_MAGIC: &[u8; 8] = b"CRBRUN01";
-const RUN_VERSION: u32 = 1;
+const RUN_VERSION: u32 = 2;
 const RUN_TRAILER_BYTES: usize = 8 + 32 + RUN_MAGIC.len();
 const MAX_RUN_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INLINE_RUN_CONTROL_SECTION_BYTES: usize = 512 * 1024;
-const ADMISSION_MAGIC: &[u8; 8] = b"CRBADM01";
-const ADMISSION_VERSION: u32 = 1;
-const ADMISSION_HEADER_BYTES: usize = ADMISSION_MAGIC.len() + 4 + 4 + 8;
-const MAX_RUN_ADMISSION_BYTES: usize = 128 * 1024 * 1024;
-const MAX_RUN_ADMISSION_ENTRIES: usize = 8_000_000;
 /// Largest number of push capsules coalesced before a repository checkpoint.
 pub const MAX_CAPSULES_PER_RUN: usize = 512;
 
@@ -75,203 +70,12 @@ struct CapsuleRunFooter {
     index_pool: Option<RunSectionLocation>,
     #[serde(default)]
     admission: Option<RunSectionLocation>,
+    admission_pages: Option<AdmissionPages>,
 }
 
-/// Exact object-to-member admission for one immutable capsule run.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapsuleRunAdmission {
-    members: BTreeMap<[u8; 20], Vec<u32>>,
-}
-
-impl CapsuleRunAdmission {
-    fn from_member_oids(member_oids: &[Vec<[u8; 20]>], member_count: usize) -> Result<Self> {
-        if member_oids.len() != member_count {
-            return Err(contract_error(
-                "capsule run admission member count does not match the pack directory",
-            ));
-        }
-        let mut members = BTreeMap::new();
-        for (member_index, oids) in member_oids.iter().enumerate() {
-            let member_index = u32::try_from(member_index)
-                .map_err(|_| contract_error("capsule run admission member index overflowed"))?;
-            let mut oids = oids.clone();
-            oids.sort_unstable();
-            oids.dedup();
-            for oid in oids {
-                members
-                    .entry(oid)
-                    .or_insert_with(Vec::new)
-                    .push(member_index);
-            }
-        }
-        Ok(Self { members })
-    }
-
-    fn append(&mut self, newer: Self, member_offset: usize) -> Result<()> {
-        let member_offset = u32::try_from(member_offset)
-            .map_err(|_| contract_error("capsule run admission member offset overflowed"))?;
-        for (oid, newer_members) in newer.members {
-            let entry = self.members.entry(oid).or_default();
-            for member in newer_members {
-                entry.push(member.checked_add(member_offset).ok_or_else(|| {
-                    contract_error("capsule run admission member index overflowed")
-                })?);
-            }
-        }
-        Ok(())
-    }
-
-    fn encode(&self, member_count: usize) -> Result<Bytes> {
-        if self.members.len() > MAX_RUN_ADMISSION_ENTRIES {
-            return Err(contract_error("capsule run admission has too many objects"));
-        }
-        let member_count = u32::try_from(member_count)
-            .map_err(|_| contract_error("capsule run admission member count overflowed"))?;
-        let entry_count = u64::try_from(self.members.len())
-            .map_err(|_| contract_error("capsule run admission object count overflowed"))?;
-        let mut bytes = Vec::with_capacity(
-            ADMISSION_HEADER_BYTES.saturating_add(self.members.len().saturating_mul(28)),
-        );
-        bytes.extend_from_slice(ADMISSION_MAGIC);
-        bytes.extend_from_slice(&ADMISSION_VERSION.to_be_bytes());
-        bytes.extend_from_slice(&member_count.to_be_bytes());
-        bytes.extend_from_slice(&entry_count.to_be_bytes());
-        let mut previous = None;
-        for (oid, members) in &self.members {
-            if members.is_empty()
-                || members.windows(2).any(|pair| pair[0] >= pair[1])
-                || members.iter().any(|member| *member >= member_count)
-            {
-                return Err(contract_error(
-                    "capsule run admission members are not canonical",
-                ));
-            }
-            if previous.is_some_and(|previous| previous >= *oid) {
-                return Err(contract_error(
-                    "capsule run admission objects are not canonical",
-                ));
-            }
-            previous = Some(*oid);
-            bytes.extend_from_slice(oid);
-            let count = u32::try_from(members.len())
-                .map_err(|_| contract_error("capsule run admission member list overflowed"))?;
-            bytes.extend_from_slice(&count.to_be_bytes());
-            for member in members {
-                bytes.extend_from_slice(&member.to_be_bytes());
-            }
-        }
-        if bytes.len() > MAX_RUN_ADMISSION_BYTES {
-            return Err(contract_error(
-                "capsule run admission exceeds its size bound",
-            ));
-        }
-        Ok(Bytes::from(bytes))
-    }
-
-    fn decode(bytes: &[u8], expected_member_count: usize) -> Result<Self> {
-        if bytes.len() < ADMISSION_HEADER_BYTES || bytes.len() > MAX_RUN_ADMISSION_BYTES {
-            return Err(corrupt("capsule run admission has an invalid size"));
-        }
-        let mut cursor = 0;
-        let take = |cursor: &mut usize, length: usize| -> Result<&[u8]> {
-            let end = cursor
-                .checked_add(length)
-                .ok_or_else(|| corrupt("capsule run admission offset overflowed"))?;
-            let bytes = bytes
-                .get(*cursor..end)
-                .ok_or_else(|| corrupt("capsule run admission is truncated"))?;
-            *cursor = end;
-            Ok(bytes)
-        };
-        if take(&mut cursor, ADMISSION_MAGIC.len())? != ADMISSION_MAGIC {
-            return Err(corrupt("capsule run admission magic is invalid"));
-        }
-        let version = u32::from_be_bytes(
-            take(&mut cursor, 4)?
-                .try_into()
-                .map_err(|_| corrupt("capsule run admission version is truncated"))?,
-        );
-        if version != ADMISSION_VERSION {
-            return Err(corrupt("capsule run admission version is unsupported"));
-        }
-        let member_count = u32::from_be_bytes(
-            take(&mut cursor, 4)?
-                .try_into()
-                .map_err(|_| corrupt("capsule run admission member count is truncated"))?,
-        );
-        if usize::try_from(member_count).ok() != Some(expected_member_count) {
-            return Err(corrupt(
-                "capsule run admission member count does not match the pack directory",
-            ));
-        }
-        let entry_count = u64::from_be_bytes(
-            take(&mut cursor, 8)?
-                .try_into()
-                .map_err(|_| corrupt("capsule run admission object count is truncated"))?,
-        );
-        let entry_count = usize::try_from(entry_count)
-            .map_err(|_| corrupt("capsule run admission object count overflows"))?;
-        if entry_count > MAX_RUN_ADMISSION_ENTRIES {
-            return Err(corrupt("capsule run admission has too many objects"));
-        }
-        let mut members = BTreeMap::new();
-        let mut previous = None;
-        for _ in 0..entry_count {
-            let oid: [u8; 20] = take(&mut cursor, 20)?
-                .try_into()
-                .map_err(|_| corrupt("capsule run admission object ID is truncated"))?;
-            if previous.is_some_and(|previous| previous >= oid) {
-                return Err(corrupt("capsule run admission objects are not sorted"));
-            }
-            previous = Some(oid);
-            let member_count = u32::from_be_bytes(
-                take(&mut cursor, 4)?
-                    .try_into()
-                    .map_err(|_| corrupt("capsule run admission member list is truncated"))?,
-            );
-            if member_count == 0 {
-                return Err(corrupt("capsule run admission has an empty member list"));
-            }
-            let mut oid_members = Vec::with_capacity(
-                usize::try_from(member_count)
-                    .map_err(|_| corrupt("capsule run admission member list overflows"))?,
-            );
-            for _ in 0..member_count {
-                let member = u32::from_be_bytes(
-                    take(&mut cursor, 4)?
-                        .try_into()
-                        .map_err(|_| corrupt("capsule run admission member is truncated"))?,
-                );
-                if member >= u32::try_from(expected_member_count).unwrap_or(u32::MAX)
-                    || oid_members
-                        .last()
-                        .is_some_and(|previous| *previous >= member)
-                {
-                    return Err(corrupt("capsule run admission members are invalid"));
-                }
-                oid_members.push(member);
-            }
-            members.insert(oid, oid_members);
-        }
-        if cursor != bytes.len() {
-            return Err(corrupt("capsule run admission has trailing bytes"));
-        }
-        Ok(Self { members })
-    }
-
-    /// Return the member ordinals that contain one Git object.
-    #[must_use]
-    pub fn object_members(&self, oid: &[u8; 20]) -> Option<&[u32]> {
-        self.members.get(oid).map(Vec::as_slice)
-    }
-
-    /// Return every admitted object and the run members that contain it.
-    pub fn entries(&self) -> impl Iterator<Item = (&[u8; 20], &[u32])> {
-        self.members
-            .iter()
-            .map(|(oid, members)| (oid, members.as_slice()))
-    }
-}
+mod admission;
+use admission::AdmissionPages;
+pub use admission::CapsuleRunAdmission;
 
 /// Immutable bounded run of complete push capsules.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -443,6 +247,11 @@ impl CapsuleRunControl {
         }
         // The pointer covers admission and footer together. Validate the exact
         // boundary and admission hash before exposing any physical object hints.
+        if footer.admission.is_some() != footer.admission_pages.is_some() {
+            return Err(corrupt(
+                "capsule run admission descriptor presence differs from its body",
+            ));
+        }
         let admission = if let Some(range) = footer.admission.as_ref() {
             let footer_offset = control_offset
                 .checked_add(footer_start as u64)
@@ -451,6 +260,11 @@ impl CapsuleRunControl {
             let admission_bytes = &bytes[..footer_start];
             if blake3::hash(admission_bytes).to_hex().as_str() != range.hash {
                 return Err(corrupt("capsule run admission hash does not match"));
+            }
+            if footer.admission_pages.as_ref() != Some(&AdmissionPages::decode(admission_bytes)?) {
+                return Err(corrupt(
+                    "capsule run admission descriptor differs from its footer",
+                ));
             }
             Some(CapsuleRunAdmission::decode(
                 admission_bytes,
@@ -867,6 +681,13 @@ impl CapsuleRun {
                 git_packs: git_packs.clone(),
                 index_pool: index_pool.clone(),
                 admission: admission.as_ref().map(|(_, range)| range.clone()),
+                admission_pages: admission
+                    .as_ref()
+                    .map(|(_, range)| {
+                        let start = range.offset as usize;
+                        AdmissionPages::decode(&body[start..start + range.length as usize])
+                    })
+                    .transpose()?,
             };
             let footer_bytes = serde_json::to_vec(&footer).map_err(|source| {
                 MetadataError::Internal(format!("capsule run serialization failed: {source}"))
@@ -1007,6 +828,11 @@ impl CapsuleRun {
             }
         }
         expected_offset = pool_end;
+        if footer.admission.is_some() != footer.admission_pages.is_some() {
+            return Err(corrupt(
+                "capsule run admission descriptor presence differs from its body",
+            ));
+        }
         let admission = if let Some(admission) = footer.admission.as_ref() {
             validate_body_range(admission, expected_offset, footer_start as u64)?;
             let end = admission
@@ -1024,6 +850,11 @@ impl CapsuleRun {
                 return Err(corrupt("capsule run admission hash does not match"));
             }
             expected_offset = end as u64;
+            if footer.admission_pages.as_ref() != Some(&AdmissionPages::decode(bytes)?) {
+                return Err(corrupt(
+                    "capsule run admission descriptor differs from its footer",
+                ));
+            }
             Some(CapsuleRunAdmission::decode(bytes, expected_packs.len())?)
         } else {
             None
@@ -1751,15 +1582,6 @@ mod tests {
     }
 
     #[test]
-    fn run_serializes_format_one() {
-        let run = CapsuleRun::leaf(capsule('1', '2')).unwrap();
-        assert_eq!(
-            (&run.bytes()[run.bytes().len() - 8..], run.footer.version),
-            (&b"CRBRUN01"[..], 1)
-        );
-    }
-
-    #[test]
     fn retired_run_magic_is_rejected() {
         let run = CapsuleRun::leaf(capsule('1', '2')).unwrap();
         for magic in [b"CRBRUN04", b"CRBRUN05", b"CRBRUN06", b"CRBRUN07"] {
@@ -1785,7 +1607,7 @@ mod tests {
     #[test]
     fn unsupported_run_footer_versions_are_rejected() {
         let run = CapsuleRun::leaf(capsule('1', '2')).unwrap();
-        for version in [0, 2, 3, 4, 5, 6, 7] {
+        for version in [0, 1, 3, 4, 5, 6, 7] {
             let mut footer = run.footer.clone();
             footer.version = version;
             let footer = serde_json::to_vec(&footer).unwrap();

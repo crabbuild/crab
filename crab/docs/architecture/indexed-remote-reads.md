@@ -767,3 +767,36 @@ These are shared-host debug observations, not a controlled release/provider
 latency result. Metadata transfer is unchanged. Complete visibility decoding,
 transaction reconciliation and source/ref inventory capture still scale; this
 cleanup does not satisfy bounded opening or finish stage 4.
+
+
+## Paged run admission: format work in progress
+
+The frontier fixture opens from capsule runs, not a checkpoint. Its 10k transport
+receipts contain capsule-control ranges and no `v2/checkpoints` reads. Paging only
+checkpoint visibility would therefore miss the measured source of linear opening.
+
+Run footer/admission version 2 commits two existing-engine page trees: OID-to-member
+lists and dense per-member object counts. Full readers authenticate the entire
+sidecar, cross-check its page descriptor against the footer and reconstruct canonical
+bytes, including counts. Member lists retain ordering, aliases and bounds; zero-count
+members remain represented. Explicit page-kind discriminants prevent Cargo feature
+selection from changing wire bytes. Pure page decoding remains payload-only; the
+existing qualifier now counts capsule-admission page decoding separately.
+
+Twenty-one focused run/admission tests pass with default and storage/remote-index
+features. Payload-only compilation, strict metadata Clippy, two metadata-view tests
+and qualifier observer tests pass. Re-signing incorrect member counts remains an
+error; removing canonical body/count comparison makes the exact negative-control
+test fail, and restored source passes. The obsolete format-1 positive assertion is
+removed; the unsupported-version test now explicitly rejects version 1.
+
+The introducing capsule commit has no containing release tag, consistent with the
+recorded upstream release audit. Released v1 manifest/catalog formats are unchanged.
+Retired run prefixes must be republished; no compatibility reader is added. An
+isolated `make install` passes for FUSE/NFS/cache-server binaries without changing
+global installations. Fresh-prefix RustFS proof passes 63 harness checks and 45
+commands: Crab pushes 100/1,000-commit fixtures, two index-maintenance processes
+finish, and all 20 native-Git query processes pass. Source/binary hashes and receipts
+remain external. This establishes a real publication/read smoke for the new format.
+The slice still performs complete admission decoding and does not satisfy bounded
+opening or finish the initiative.
