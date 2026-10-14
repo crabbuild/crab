@@ -54,6 +54,9 @@ async fn run_pointer_binding_is_identical_for_full_and_control_reads() {
     let (layout, pointer, _) = run_fixture().await;
     load_capsule_run(&layout, &pointer).await.unwrap();
     load_capsule_run_control(&layout, &pointer).await.unwrap();
+    load_capsule_run_git_control(&layout, &pointer)
+        .await
+        .unwrap();
     for field in ["footer_hash", "control_boundary"] {
         let mut changed = serde_json::to_value(&pointer).unwrap();
         if field == "footer_hash" {
@@ -70,6 +73,12 @@ async fn run_pointer_binding_is_identical_for_full_and_control_reads() {
         assert!(
             load_capsule_run_control(&layout, &changed).await.is_err(),
             "control read: {field}"
+        );
+        assert!(
+            load_capsule_run_git_control(&layout, &changed)
+                .await
+                .is_err(),
+            "paged Git control: {field}"
         );
     }
 }
@@ -275,4 +284,110 @@ async fn pointer_catalog_resolves_dependencies_only_for_current_epoch_heads() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn git_control_keeps_oid_admission_cold_and_paged_queries_obey_budgets() {
+    use crate::capsule_protocol::{CapsuleGitPack, CapsulePointer};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let bytes = Arc::new(AtomicU64::new(0));
+    let observed = bytes.clone();
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_read_byte_observer(Arc::new(move |read| {
+            observed.fetch_add(read, Ordering::Relaxed);
+        }));
+    let layout = StoreLayout::new(store, "repositories/lazy-admission".into());
+    let transaction = CapsuleTransaction::new(
+        &"1".repeat(64),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/main",
+            None,
+            Some("2".repeat(40)),
+            None,
+        )],
+    )
+    .unwrap();
+    let pack = CapsuleGitPack::new(
+        bytes::Bytes::from_static(b"PACK"),
+        bytes::Bytes::from_static(b"index"),
+        bytes::Bytes::from_static(b"reverse"),
+        bytes::Bytes::from_static(b"locator"),
+        "4".repeat(40),
+        10000,
+    )
+    .unwrap();
+    let capsule = Capsule::build(&transaction, vec![pack], vec![]).unwrap();
+    let oids = (0u32..10000)
+        .map(|index| {
+            let mut oid = [0; 20];
+            oid[..4].copy_from_slice(&index.to_be_bytes());
+            oid
+        })
+        .collect::<Vec<_>>();
+    let run = CapsuleRun::leaf_with_member_oids(capsule, vec![oids.clone()]).unwrap();
+    layout
+        .store()
+        .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+        .await
+        .unwrap();
+    let pointer = CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )
+    .unwrap();
+    bytes.store(0, Ordering::Relaxed);
+    let (control, controls) = load_capsule_run_git_control(&layout, &pointer)
+        .await
+        .unwrap();
+    let opening_bytes = bytes.swap(0, Ordering::Relaxed);
+    assert!(opening_bytes < 16 * 1024 && control.admission().is_none());
+    assert_eq!(controls.len(), 1);
+    let reader = control
+        .admission_reader(&layout, 128 * 1024)
+        .unwrap()
+        .unwrap();
+    let requested = [oids[9999], oids[0], oids[9999], [0xff; 20]];
+    let expected = vec![Some(vec![0]), Some(vec![0]), Some(vec![0]), None];
+    assert_eq!(
+        reader.lookup(layout.store(), &requested).await.unwrap(),
+        expected
+    );
+    assert!(bytes.swap(0, Ordering::Relaxed) < 128 * 1024);
+    assert_eq!(
+        reader.lookup(layout.store(), &requested).await.unwrap(),
+        expected
+    );
+    assert_eq!(bytes.swap(0, Ordering::Relaxed), 0);
+    let limited = control.admission_reader(&layout, 1).unwrap().unwrap();
+    assert!(limited.lookup(layout.store(), &requested).await.is_err());
+    assert_eq!(bytes.load(Ordering::Relaxed), 0);
+    // Unrequested OID corruption must remain cold during Git control opening;
+    // exact lookup and complete inspection still reject the damaged dependency.
+    let mut damaged = run.bytes().to_vec();
+    damaged[run.control_offset() as usize] ^= 1;
+    layout
+        .store()
+        .put_overwrite(&layout.capsule_path(run.hash()), damaged.into())
+        .await
+        .unwrap();
+    let fresh = control
+        .admission_reader(&layout, 128 * 1024)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            load_capsule_run_git_control(&layout, &pointer)
+                .await
+                .is_ok(),
+            load_capsule_run_control(&layout, &pointer).await.is_err(),
+            fresh.lookup(layout.store(), &[oids[0]]).await.is_err(),
+        ),
+        (true, true, true),
+    );
 }

@@ -333,7 +333,7 @@ impl PagedGitObjectIndex {
                 store,
                 &self.path,
                 0,
-                self.descriptor.body_bytes,
+                0..self.descriptor.body_bytes,
                 root,
                 kind,
                 keys,

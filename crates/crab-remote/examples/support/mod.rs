@@ -203,7 +203,7 @@ pub async fn open_repository(
 ) -> Result<RemoteGitRepository> {
     let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
     let indexes = crab_metadata::capsule_protocol::load_browse_indexes(&layout).await?;
-    let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(
+    let view = crab_read::capsule_protocol::open_git_view_from_root(
         &layout,
         root,
         crab_read::capsule_protocol::CapsuleReadLimits {

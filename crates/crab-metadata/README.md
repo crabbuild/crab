@@ -169,7 +169,7 @@ capsules and encodes/authenticates the final run once. Run level is the
 `ceil(log2(count))` size class; the authenticated capsule count remains exact.
 Mixed-level carries retain canonical capsule bytes and member ordinals without
 encoding discarded intermediate runs; complete capsule verification remains
-mandatory. The v2 cutover uses CRBRUN01 with footer version 1 and
+mandatory. The v2 cutover uses CRBRUN01 with footer version 2 and
 root/history/ref-head versions 4/3/5; there is no reader fallback to earlier
 run or pointer semantics.
 Runs may contain byte-identical packs from different transactions. Their source
@@ -184,9 +184,10 @@ unchanged for recovery, installation and repack. Control-only readers derive
 pool ranges in member order with the original index hashes; full decoding checks
 the pool and every copied index. Leaves do not duplicate indexes. The run's
 authenticated control suffix covers its exact member-admission bytes together
-with the footer, so control loading needs no second admission request. The
-decoder verifies the entire admission hash and exact suffix boundary before
-exposing placement hints. Payload bytes and the lookup pool remain outside the
+with the footer. Complete control loading verifies the entire admission hash
+and exact suffix boundary before exposing placement hints. Git control loading
+authenticates the footer and reads member-count pages while keeping the OID
+directory cold. Payload bytes and the lookup pool remain outside the
 suffix. Detached large visibility/catalog sections retain their separate bounded
 reads. The unshipped `CRBRUN04`/`CRBRUN05`/`CRBRUN06`/`CRBRUN07` formats are
 rejected, not read through a compatibility path; readers and writers must cut
@@ -198,8 +199,12 @@ both directories and canonical body bytes before exposing admission. Page kind
 codes are explicit, so payload-only and storage-enabled producers share one wire
 format. The layout retains 500-capsule rollups and pooled indexes. Repositories
 containing retired runs must be republished into a fresh repository prefix;
-no automatic migration is provided. Control-suffix reads currently still load the
-complete admission; lazy admission/visibility opening remains unfinished.
+no automatic migration is provided. `load_capsule_run_git_control` preserves
+complete reference controls and verifies counts against the pack directory.
+Its paged admission reader returns authenticated misses and preserves request
+order and duplicates; cached and fetched pages share one encoded-work budget.
+Complete inspection still scans both admission trees. Complete visibility and
+catalog decoding and source/ref capture remain separate opening costs.
 
 Payload modules cover manifests, segmented lists, pack metadata, commit-graph
 summaries, ref registries, chunk/file indexes, receipts, transactions, and

@@ -398,6 +398,47 @@ pub async fn load_capsule_run_control(
     Ok((control, capsules))
 }
 
+/// Load complete reference controls while validating admission counts through authenticated pages.
+///
+/// OID admission remains cold; reference reconciliation still validates complete visibility edits.
+pub async fn load_capsule_run_git_control(
+    router: &StoreLayout<Store>,
+    pointer: &super::CapsulePointer,
+) -> Result<(CapsuleRunControl, Vec<CapsuleControl>)> {
+    super::root::validate_capsule_pointer(pointer)?;
+    let path = router.capsule_path(pointer.hash());
+    let start = pointer
+        .size()
+        .checked_sub(CapsuleRunControl::trailer_bytes())
+        .ok_or_else(|| corrupt(&path, "capsule run is shorter than its trailer"))?;
+    let trailer = router
+        .store()
+        .range_get(&path, start..pointer.size())
+        .await?;
+    let range = CapsuleRunControl::footer_range(&trailer, pointer)?;
+    let footer = router.store().range_get(&path, range).await?;
+    let control = CapsuleRunControl::decode_footer(footer, pointer)?;
+    if let Some(reader) =
+        control.admission_reader(router, super::run::MAX_RUN_FOOTER_BYTES as u64)?
+    {
+        let counts = reader.counts(router.store()).await?;
+        if counts.len() != control.git_packs().len()
+            || counts
+                .iter()
+                .zip(control.git_packs())
+                .any(|(count, member)| *count != member.object_count())
+        {
+            return Err(corrupt(
+                &path,
+                "capsule member counts do not match its authenticated pack directory",
+            ));
+        }
+    }
+    let detached = load_detached_control_sections(router, &path, &control).await?;
+    let capsules = control.materialize_capsules_with_external_controls(&detached)?;
+    Ok((control, capsules))
+}
+
 async fn load_detached_control_sections(
     router: &StoreLayout<Store>,
     path: &object_store::path::Path,

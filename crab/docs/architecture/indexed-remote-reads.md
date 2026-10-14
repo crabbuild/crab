@@ -800,3 +800,41 @@ finish, and all 20 native-Git query processes pass. Source/binary hashes and rec
 remain external. This establishes a real publication/read smoke for the new format.
 The slice still performs complete admission decoding and does not satisfy bounded
 opening or finish the initiative.
+
+## Git control opening with cold OID admission
+
+Git read consumers now use `open_git_view_from_root`. Metadata authenticates the
+run footer against its captured pointer and validates paged member counts against
+the pack directory. It keeps the OID admission body cold and omits eager frontier
+placement-hint dictionaries. Complete maintenance/publication readers still verify
+the entire admission sidecar and its canonical trees. Reference reconciliation,
+visibility edits, catalog precedence and source/member ranges retain their owners.
+The wire format is unchanged from the preceding version-2 format slice.
+
+`CapsuleRunAdmissionReader` provides duplicate-preserving batched exact hints and
+authenticated misses. Both directories share one encoded-page budget; warm pages
+remain charged. The shared cache now accepts embedded body ranges and keys pages
+by absolute source offset. Graph, path-state and physical-index consumers retain
+their zero-based body ranges. Page and object authentication remain mandatory;
+placement membership never authorizes reference visibility.
+
+Five metadata-store tests, 21 payload-only run tests and the Git/complete view
+equivalence test pass. The shared pager's 21 path-state, 27 graph and 15 physical
+index tests pass. Metadata/read strict Clippy, frontend build, CLI/HTTP/S3 consumer
+checks and qualifier builds pass. Fault injection leaves unrequested OID damage
+cold during opening; exact lookup and complete inspection reject that damage.
+
+The final-source RustFS replay reuses the preceding format slice's immutable
+100/1,000-commit fixtures. It passes 41 qualifier processes: all ten supported
+queries at 100 commits and 20 cold/warm resolve samples per history. Native Git
+oracles pass, warm resolve reads fetch zero backend bytes, and every measurement
+ends without active backend work. Opening reads 78,142/471,334 backend bytes and
+decodes one admission count page at 100/1,000 commits. Source/binary hashes,
+transport receipts and results remain external; frozen fixtures are unchanged.
+
+This removes full run-OID decoding from these read opens, not all linear opening
+work. Checkpoint visibility/catalog decoding, ref/source inventories and transaction
+reconciliation remain eager. The unindexed pack-index path remains existing product
+behavior. HTTP/S3 service E2E, 10k version-2 scaling and representative-provider
+latency qualification are still missing for this slice. Stages 5–8 and unified
+native/Git staging remain separate work. The PR stays draft and is not merged.
