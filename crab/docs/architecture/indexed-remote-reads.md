@@ -1209,3 +1209,20 @@ binary-bound receipts and new-head CI are recorded when complete. Importing an
 existing paging implementation does not close its latency, visibility/control
 opening, release or lifecycle gates. Full visibility still loads during normal
 opening; stages 5–8 and current 10-GiB/provider qualification remain unfinished.
+
+
+The clean-source locked CLI and qualifier build at `3df42b5782d` passes integrated
+RustFS maintenance and six fresh-cache plain/Crab/LFS download/export commands.
+All materialized bytes match, without installed Git ODBs or export leftovers.
+Twenty cold/warm resolve pairs match the original fixture's native Git main tip;
+warm queries read zero backend bytes and all measurement boundaries have no
+active backend work. Cold query transfer is 62,092 bytes; cold opening still
+transfers 595,293 bytes on this fixture. These numbers expose remaining opening
+work, not a latency guarantee or history-scaling qualification.
+
+Deleting only the fresh namespace's physical-page body makes native selective
+download fail without overwriting existing output. Restoring the exact saved
+body allows a fresh process to return byte-identical content. The original
+fixture is untouched. Source/binary hashes and full receipts remain external.
+This proof uses 20 B / 16 KiB / 8 MiB content, not current 10-GiB qualification.
+Subsequent documentation edits leave the qualified production source unchanged.
