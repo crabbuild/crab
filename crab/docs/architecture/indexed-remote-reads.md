@@ -554,8 +554,9 @@ Test scratch uses the mounted workspace volume; earlier fixture-start failures
 on the main disk preserve the required 20-GiB Cell capacity check.
 
 Strict remote-Git library Clippy passes. Strict HTTP Clippy reaches the unchanged
-six coordinator lint expectations described above; the diagnostic lint and binary
-build remain in progress. Broad CI and final packaged-image proof remain required.
+six coordinator lint expectations described above; the diagnostic run allowing
+only `unfulfilled-lint-expectations` passes without source suppression. The server
+binary builds. Broad CI and final packaged-image proof remain required.
 No format, dependency or configuration changes accompany this discovery slice.
 Full ref enumeration remains output-sized, and prefix filtering still captures
 the complete map. Targeted/paged ref capture and remaining control/index scaling
