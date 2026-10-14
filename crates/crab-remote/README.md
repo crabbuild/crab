@@ -82,10 +82,10 @@ this orchestration boundary. The low-level remote Git reader retains its narrow
 Git/storage/metadata dependency boundary. See the
 [indexed-read qualification contract](../../crab/docs/architecture/indexed-remote-reads.md)
 for commands, native Git oracles and cold/warm measurement semantics.
-Foreground qualification and browse-index builders capture complete metadata
-through `open_view_from_root_with_metadata`; pack payloads stay in authenticated
-origin ranges before and after checkpoints. Catalog/control decoding and ref
-capture remain measured opening work, not a completed bounded-opening gate.
+Foreground qualification uses `open_git_view_from_root`; browse-index builders
+use the complete metadata entry point. Pack payloads stay in authenticated origin
+ranges before and after checkpoints. Checkpoint catalog/visibility decoding and
+ref capture remain measured opening work, not a completed bounded-opening gate.
 `qualify_remote <bucket> <prefix> <text-path> graph-pages` measures sampled
 ordinal/parent records and duplicate OID batches through `CommitGraphReader`.
 It verifies the derived graph's captured state and Git identity before reads.
@@ -96,3 +96,10 @@ workload does not claim bounded foreground opening or replace ref visibility.
 ref view. The native oracle uses `git merge-base --is-ancestor`, treating only
 exit status 1 as a valid negative answer. Foreground graph conversion is a separate
 gate; this component qualification does not bypass repository visibility.
+
+`checkpoint` publishes through the real logical-checkpoint API, then verifies
+the advertised checkpoint pointer and authenticated footer. It mutates the
+chosen repository; use a dedicated qualification prefix. Run `build-indexes`
+afterward, then repeat the same native-Git query oracles. This separates
+checkpoint maintenance costs from foreground opening and prevents a no-op
+maintenance command from standing in for checkpoint qualification.

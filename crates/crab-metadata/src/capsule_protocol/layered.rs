@@ -279,6 +279,8 @@ impl LayeredVisibilitySnapshot {
         if snapshot.encode()?.as_ref() != bytes {
             return Err(corrupt("layered visibility snapshot is not canonical"));
         }
+        #[cfg(feature = "storage")]
+        tracing::debug!(target: "crab_metadata::index_decode", index_format = "checkpoint_visibility", decoded_bytes = bytes.len() as u64);
         Ok(snapshot)
     }
 
@@ -1684,12 +1686,29 @@ impl LayeredCheckpoint {
         crate::capsule_protocol::CapsuleVisibilitySnapshot::decode(&section).map(Some)
     }
 
-    /// Decode the compact ordinal visibility proof, when present.
+    /// Decode the compact ordinal proof and validate its checkpoint source bindings.
     pub fn visibility_ordinal_snapshot(&self) -> Result<Option<LayeredVisibilitySnapshot>> {
         let Some(section) = self.section(CapsuleSectionKind::VisibilityOrdinalSnapshot)? else {
             return Ok(None);
         };
-        LayeredVisibilitySnapshot::decode(&section).map(Some)
+        let snapshot = LayeredVisibilitySnapshot::decode(&section)?;
+        // Admission ordinals belong to this checkpoint, before frontier sources
+        // are appended. Validating against the combined inventory would let an
+        // out-of-range ordinal alias an unrelated newer source.
+        if snapshot.member_admission().is_some_and(|members| {
+            members.iter().any(|member| {
+                self.footer
+                    .sources
+                    .get(usize::from(member.source_index()))
+                    .and_then(|source| source.members().get(usize::from(member.member_index())))
+                    .is_none()
+            })
+        }) {
+            return Err(corrupt(
+                "layered visibility admission is outside its checkpoint source inventory",
+            ));
+        }
+        Ok(Some(snapshot))
     }
 
     /// Decode visibility bound to this source inventory and the caller's Git identity.
@@ -2305,6 +2324,46 @@ mod tests {
                 .to_index(1, &"1".repeat(64), &"2".repeat(64), &"f".repeat(64))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn checkpoint_visibility_rejects_admission_outside_its_own_sources() {
+        let layer = PackLayer::build(&pack()).unwrap();
+        let source = layer.source_descriptor().unwrap();
+        let digest = source_catalog_digest(std::slice::from_ref(&source)).unwrap();
+        let index = GitVisibilityIndex::new(
+            1,
+            "1".repeat(64),
+            "2".repeat(64),
+            BTreeMap::from([("refs/heads/main".to_owned(), vec!["a".repeat(40)])]),
+        )
+        .unwrap();
+        for (member, valid) in [
+            (LayeredObjectMember::new(0, 0), true),
+            (LayeredObjectMember::new(1, 0), false),
+            (LayeredObjectMember::new(0, 1), false),
+        ] {
+            let snapshot = LayeredVisibilitySnapshot::from_index_with_member_admission(
+                &index,
+                &digest,
+                vec![member],
+            )
+            .unwrap();
+            let checkpoint = LayeredCheckpoint::build_with_ordinal_visibility(
+                1,
+                &"3".repeat(64),
+                vec![source.clone()],
+                PointerCatalog::new(),
+                Some(snapshot),
+            )
+            .unwrap();
+            assert_eq!(
+                checkpoint
+                    .visibility_index(1, &"1".repeat(64), &"2".repeat(64))
+                    .is_ok(),
+                valid
+            );
+        }
     }
 
     #[test]

@@ -36,12 +36,13 @@ async fn main() -> Result<()> {
             [bucket, prefix, path] => (bucket, prefix, path, "all"),
             [bucket, prefix, path, selection] => (bucket, prefix, path, selection.as_str()),
             _ => return Err(io::Error::other(
-                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes]",
+                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint]",
             )
             .into()),
         };
     if selection != "all"
         && selection != "build-indexes"
+        && selection != "checkpoint"
         && selection != "graph-pages"
         && selection != "graph-ancestry"
         && !WORKLOADS.contains(&selection)
@@ -67,7 +68,32 @@ async fn main() -> Result<()> {
         .with_storage_observer(counters.clone());
     let layout = StoreLayout::new(store, prefix.to_owned());
     let identity = RepositoryIdentity::new(format!("s3:{bucket}"), prefix.as_str(), 1)?;
-    if selection == "build-indexes" {
+    if selection == "checkpoint" {
+        counters
+            .measure("checkpoint", "maintenance", async {
+                let outcome = crab_remote::checkpoint::publish_capsule_checkpoint(
+                    &layout,
+                    0,
+                    2 * 1024 * 1024 * 1024,
+                    &CancellationToken::new(),
+                )
+                .await?;
+                if !outcome.published {
+                    return Err(io::Error::other("checkpoint publication lost its captured root").into());
+                }
+                let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
+                let pointer = root.record().root().checkpoint().ok_or_else(|| {
+                    io::Error::other("published root does not advertise a checkpoint")
+                })?;
+                let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint_control(
+                    &layout, pointer,
+                )
+                .await?;
+                println!("{}", json!({"kind":"checkpoint", "hash":pointer.hash(), "bytes":pointer.size(), "control_bytes":pointer.control_size(), "sources":checkpoint.source_count(), "objects":checkpoint.object_count()?, "pack_bytes_read":outcome.pack_bytes_read, "pack_bytes_written":outcome.pack_bytes_written}));
+                Ok(())
+            })
+            .await?;
+    } else if selection == "build-indexes" {
         let runtime = Arc::new(RemoteGitRuntime::default());
         let cancel = CancellationToken::new();
         let result = counters
