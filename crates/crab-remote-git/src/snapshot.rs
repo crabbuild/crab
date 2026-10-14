@@ -111,7 +111,13 @@ impl RemoteGitSnapshot {
                     }
                 }
                 HistoryTraversal::AllParents => {
-                    queue_all_parents(&mut pending, &commit, self.commit_graph.as_deref())?;
+                    queue_all_parents(
+                        &mut pending,
+                        &commit,
+                        self.commit_graph.as_deref(),
+                        operation,
+                    )
+                    .await?;
                 }
             }
             if traversed >= skip {
@@ -206,7 +212,13 @@ impl RemoteGitSnapshot {
             visited.insert(oid);
             operation.charge(BudgetDimension::HistoryCommits, 1).await?;
             let commit = operation.read_commit(oid).await?;
-            queue_all_parents(&mut pending, &commit, self.commit_graph.as_deref())?;
+            queue_all_parents(
+                &mut pending,
+                &commit,
+                self.commit_graph.as_deref(),
+                operation,
+            )
+            .await?;
             if traversed >= skip {
                 operation
                     .charge(
@@ -283,7 +295,10 @@ impl RemoteGitSnapshot {
         let mut carry: Option<(Commit, Option<TreeEntry>)> = None;
         let mut next_oid = start;
         loop {
-            let Some(oids) = commit_graph.first_parent_chain(next_oid, PREFETCH) else {
+            let Some(oids) = commit_graph
+                .first_parent_chain(next_oid, PREFETCH, operation)
+                .await?
+            else {
                 let fallback = carry.as_ref().map_or(next_oid, |(commit, _)| commit.oid);
                 return self
                     .raw_first_parent_path_history(fallback, path, page, operation, items)
@@ -297,10 +312,7 @@ impl RemoteGitSnapshot {
             let commits = path_history_commits(&oids, operation).await?;
             // The graph only supplies the batch shape. Raw commit objects must
             // confirm every positional parent before the batch can affect history.
-            if commits
-                .iter()
-                .any(|commit| !commit_graph.parents_match(commit.oid, &commit.parents))
-            {
+            if !commit_graph.parents_match(&commits, operation).await? {
                 let fallback = carry.as_ref().map_or(next_oid, |(commit, _)| commit.oid);
                 return self
                     .raw_first_parent_path_history(fallback, path, page, operation, items)
@@ -489,7 +501,13 @@ impl RemoteGitSnapshot {
                     }
                 }
                 HistoryTraversal::AllParents => {
-                    queue_all_parents(&mut pending, &commit, self.commit_graph.as_deref())?;
+                    queue_all_parents(
+                        &mut pending,
+                        &commit,
+                        self.commit_graph.as_deref(),
+                        operation,
+                    )
+                    .await?;
                 }
             }
             let mut filled_page = false;
@@ -1770,13 +1788,13 @@ async fn blame_parent_commits(
     const RAW_PREFETCH: usize = 16;
 
     if let Some(commit_graph) = commit_graph
-        && let Some(oids) = commit_graph.first_parent_chain(start, GRAPH_PREFETCH)
+        && let Some(oids) = commit_graph
+            .first_parent_chain(start, GRAPH_PREFETCH, operation)
+            .await?
         && !oids.is_empty()
     {
         let commits = path_history_commits(&oids, operation).await?;
-        let valid = commits
-            .iter()
-            .all(|commit| commit_graph.parents_match(commit.oid, &commit.parents))
+        let valid = commit_graph.parents_match(&commits, operation).await?
             && commits
                 .windows(2)
                 .all(|pair| pair[0].parents.first() == Some(&pair[1].oid));
@@ -1949,15 +1967,16 @@ async fn commit_ancestors(
         }
         operation.charge(BudgetDimension::HistoryCommits, 1).await?;
         let commit = operation.read_commit(oid).await?;
-        queue_all_parents(&mut pending, &commit, commit_graph)?;
+        queue_all_parents(&mut pending, &commit, commit_graph, operation).await?;
     }
     Ok(ancestors)
 }
 
-fn queue_all_parents(
+async fn queue_all_parents(
     pending: &mut Vec<ObjectId>,
     commit: &Commit,
     commit_graph: Option<&CommitGraphIndex>,
+    operation: &OperationContext,
 ) -> Result<()> {
     pending
         .try_reserve(commit.parents.len())
@@ -1968,12 +1987,17 @@ fn queue_all_parents(
                 .saturating_mul(mem::size_of::<ObjectId>()),
             source,
         })?;
-    let Some(commit_graph) =
-        commit_graph.filter(|index| index.parents_match(commit.oid, &commit.parents))
-    else {
+    let Some(commit_graph) = commit_graph else {
         pending.extend(commit.parents.iter().rev().copied());
         return Ok(());
     };
+    if !commit_graph
+        .parents_match(std::slice::from_ref(commit), operation)
+        .await?
+    {
+        pending.extend(commit.parents.iter().rev().copied());
+        return Ok(());
+    }
     let mut ordered = Vec::new();
     ordered
         .try_reserve_exact(commit.parents.len())
@@ -1984,14 +2008,14 @@ fn queue_all_parents(
                 .saturating_mul(mem::size_of::<ObjectId>()),
             source,
         })?;
-    ordered.extend(commit.parents.iter().copied());
-    ordered.sort_unstable_by(|left, right| {
-        commit_graph
-            .generation(right)
-            .cmp(&commit_graph.generation(left))
+    let generations = commit_graph.generations(&commit.parents, operation).await?;
+    ordered.extend(commit.parents.iter().copied().zip(generations));
+    ordered.sort_unstable_by(|(left, left_generation), (right, right_generation)| {
+        right_generation
+            .cmp(left_generation)
             .then_with(|| left.cmp(right))
     });
-    pending.extend(ordered.into_iter().rev());
+    pending.extend(ordered.into_iter().rev().map(|(oid, _)| oid));
     Ok(())
 }
 

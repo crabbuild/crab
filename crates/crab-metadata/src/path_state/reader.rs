@@ -11,7 +11,7 @@ use super::{
     corrupt, corruption, validate_path,
 };
 use crate::pages::{self as paged, Kind, Page, PageRef};
-use crate::split_commit_graph::{CommitGraphLayerRef, SplitCommitGraph};
+use crate::split_commit_graph::{CommitGraphLayerRef, CommitGraphView, SplitCommitGraph};
 
 #[path = "scan.rs"]
 mod scan;
@@ -45,14 +45,14 @@ impl PathStateReader {
         store: &Store,
         layout: &StoreLayout<Store>,
         hash: &str,
-        graph: &SplitCommitGraph,
+        graph: CommitGraphView<'_>,
         max_bytes: u64,
     ) -> Result<Self> {
         let (descriptor, descriptor_bytes) =
             super::storage::load_path_state_descriptor_with_size(store, layout, hash, max_bytes)
                 .await?;
         if !matches_graph(&descriptor, graph)
-            || descriptor.commit_ordinal_digest != graph.ordinal_digest()
+            || descriptor.commit_ordinal_digest != graph.ordinal_digest()?
         {
             return corrupt("path-state descriptor does not match its commit graph");
         }
@@ -63,7 +63,7 @@ impl PathStateReader {
             .collect();
         Ok(Self {
             descriptor,
-            graph_layers: graph.descriptor.layers.clone(),
+            graph_layers: graph.descriptor().layers.clone(),
             paths,
             descriptor_bytes,
             max_bytes,
@@ -75,13 +75,14 @@ impl PathStateReader {
     pub async fn latest(
         &self,
         store: &Store,
-        graph: &SplitCommitGraph,
+        graph: CommitGraphView<'_>,
         start: &[u8; 20],
         paths: &[&[u8]],
     ) -> Result<Vec<PathStateSummary>> {
         // Scalars can match two rebuilt graphs with different ordinals. The
         // immutable layer identities pin the ordering verified during load.
-        if !matches_graph(&self.descriptor, graph) || self.graph_layers != graph.descriptor.layers {
+        if !matches_graph(&self.descriptor, graph) || self.graph_layers != graph.descriptor().layers
+        {
             return corrupt("path-state query graph identity changed");
         }
         if paths.is_empty() {
@@ -91,7 +92,9 @@ impl PathStateReader {
             validate_path(path, false)?;
         }
         let start_ordinal = graph
-            .ordinal(start)
+            .ordinals(store, &[*start])
+            .await?
+            .remove(0)
             .ok_or_else(|| corruption("start commit is absent from graph"))?;
         let mut work = Work {
             maximum: self.max_bytes,
@@ -206,7 +209,7 @@ impl PathStateReader {
     async fn records(
         &self,
         store: &Store,
-        graph: &SplitCommitGraph,
+        graph: CommitGraphView<'_>,
         ordinals: &[u32],
         work: &mut Work,
     ) -> Result<Vec<PathStateRecord>> {
@@ -225,6 +228,7 @@ impl PathStateReader {
             grouped.entry(layer).or_default().push((position, ordinal));
         }
         let mut output = vec![None; ordinals.len()];
+        let commits = graph.records(store, ordinals).await?;
         for (layer, requests) in grouped {
             let reference = &self.descriptor.layers[layer];
             let keys = requests
@@ -241,11 +245,11 @@ impl PathStateReader {
                     work,
                 )
                 .await?;
-            for ((position, ordinal), value) in requests.into_iter().zip(values) {
+            for ((position, _), value) in requests.into_iter().zip(values) {
                 let value = value.ok_or_else(|| corruption("positional record is missing"))?;
                 let record = codec::decode_record(&value, self.paths[layer].as_ref())?;
-                let commit = graph
-                    .record(ordinal)
+                let commit = commits[position]
+                    .as_ref()
                     .ok_or_else(|| corruption("commit graph record is missing"))?;
                 if record.oid != commit.oid
                     || record.first_parent != commit.parents.first().copied()
@@ -433,11 +437,11 @@ impl PathStateReader {
     }
 }
 
-fn matches_graph(descriptor: &PathStateDescriptor, graph: &SplitCommitGraph) -> bool {
-    descriptor.generation == graph.descriptor.generation
-        && descriptor.pack_index_hash == graph.descriptor.pack_index_hash
-        && descriptor.git_validation_digest == graph.descriptor.git_validation_digest
-        && descriptor.commit_count == graph.descriptor.commit_count
+fn matches_graph(descriptor: &PathStateDescriptor, graph: CommitGraphView<'_>) -> bool {
+    descriptor.generation == graph.descriptor().generation
+        && descriptor.pack_index_hash == graph.descriptor().pack_index_hash
+        && descriptor.git_validation_digest == graph.descriptor().git_validation_digest
+        && descriptor.commit_count == graph.descriptor().commit_count
 }
 
 #[cfg(test)]

@@ -5880,13 +5880,18 @@ mod tests {
             store.as_storage(),
             &layout,
             &current_path_state_hash,
-            &current_graph,
+            crab_metadata::split_commit_graph::CommitGraphView::Materialized(&current_graph),
             crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
         )
         .await
         .unwrap();
         let attribution = reader
-            .latest(store.as_storage(), &current_graph, &[3; 20], &[b"file"])
+            .latest(
+                store.as_storage(),
+                crab_metadata::split_commit_graph::CommitGraphView::Materialized(&current_graph),
+                &[3; 20],
+                &[b"file"],
+            )
             .await
             .unwrap();
         assert_eq!(attribution[0].oid, [3; 20]);

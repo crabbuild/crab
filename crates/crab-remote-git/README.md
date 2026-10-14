@@ -31,6 +31,12 @@ identity, integrity and admission checks; a journal ref change discards stale
 base indexes even when its generation is unchanged. Snapshots without indexes
 make no additional index requests. Publication of capsule-bound browse indexes
 is a separate maintenance responsibility, not part of opening or pushing.
+Capsule graphs retain an immutable paged reader and captured commit roots;
+membership reads exact ancestor sets rather than allocating a full reachability
+bitmap. Graph/OID/parent reads share operation admission and cancellation, including
+warm queries. Released manifest graph version 1 retains complete graph validation.
+`commits_reachable_from` is asynchronous and uses a metadata-admitted operation
+without opening the object-locator database.
 Without a commit graph, full commit-ID resolution checks matching ref tips
 before traversing other roots. Matching annotated tags still require verified
 peeling; non-tip commits retain bounded breadth-first reachability traversal.

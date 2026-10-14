@@ -20,6 +20,60 @@ struct Work {
     seen: BTreeSet<(usize, u64)>,
 }
 
+/// Read-only positional access for maintenance graphs and immutable paged readers.
+#[derive(Clone, Copy)]
+pub enum CommitGraphView<'a> {
+    Materialized(&'a SplitCommitGraph),
+    Paged(&'a CommitGraphReader),
+}
+
+impl CommitGraphView<'_> {
+    /// Return the descriptor defining this view's positional identity.
+    pub fn descriptor(&self) -> &CommitGraphDescriptor {
+        match self {
+            Self::Materialized(graph) => &graph.descriptor,
+            Self::Paged(graph) => graph.descriptor(),
+        }
+    }
+
+    pub(crate) fn ordinal_digest(&self) -> Result<std::borrow::Cow<'_, str>> {
+        match self {
+            Self::Materialized(graph) => Ok(graph.ordinal_digest().into()),
+            Self::Paged(graph) => graph
+                .descriptor
+                .commit_ordinal_digest
+                .as_deref()
+                .map(std::borrow::Cow::Borrowed)
+                .ok_or_else(|| {
+                    crate::validation::corrupt_object("graph", "positional identity is absent")
+                }),
+        }
+    }
+
+    /// Resolve OIDs while preserving requested positions and duplicates.
+    pub async fn ordinals(&self, store: &Store, oids: &[[u8; 20]]) -> Result<Vec<Option<u32>>> {
+        match self {
+            Self::Materialized(graph) => Ok(oids.iter().map(|oid| graph.ordinal(oid)).collect()),
+            Self::Paged(graph) => graph.ordinals(store, oids).await,
+        }
+    }
+
+    /// Resolve the requested records, validating the consumed paged parent edges.
+    pub async fn records(
+        &self,
+        store: &Store,
+        ordinals: &[u32],
+    ) -> Result<Vec<Option<CommitGraphRecord>>> {
+        match self {
+            Self::Materialized(graph) => Ok(ordinals
+                .iter()
+                .map(|ordinal| graph.record(*ordinal).cloned())
+                .collect()),
+            Self::Paged(graph) => graph.records(store, ordinals).await,
+        }
+    }
+}
+
 impl CommitGraphReader {
     /// Test membership in a captured commit's verified ancestor set, including itself.
     ///

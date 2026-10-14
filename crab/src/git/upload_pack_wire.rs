@@ -1691,7 +1691,7 @@ async fn visible_objects_catalog(
     operation.finish(result).await.map_err(remote_error)
 }
 
-fn native_shallow_visibility(
+async fn native_shallow_visibility(
     repository: &RemoteGitRepository,
     request: &FetchRequest,
     visible_ref_names: &[String],
@@ -1714,6 +1714,7 @@ fn native_shallow_visibility(
     let started = Instant::now();
     let Some(visible) = repository
         .commits_reachable_from(&object_ids, &roots, cancellation)
+        .await
         .map_err(remote_error)?
     else {
         tracing::debug!(
@@ -1990,7 +1991,8 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
         let cancellation = &producer_cancellation;
         if native_shallow_pack_eligible(request) && proof.as_catalog().is_some() {
             let (common_haves, shallow_visible) =
-                native_shallow_visibility(repository, request, visible_ref_names, cancellation)?;
+                native_shallow_visibility(repository, request, visible_ref_names, cancellation)
+                    .await?;
             if !common_haves.is_empty() && shallow_visible {
                 let visible_tag_refs = visible_ref_names
                     .iter()

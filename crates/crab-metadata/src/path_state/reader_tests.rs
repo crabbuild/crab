@@ -56,7 +56,7 @@ async fn batched_pages_preserve_old_roots_order_and_repeated_paths() {
         &store,
         &layout,
         &write.descriptor_hash,
-        &graph,
+        CommitGraphView::Materialized(&graph),
         DEFAULT_MAX_PATH_STATE_BYTES,
     )
     .await
@@ -69,7 +69,12 @@ async fn batched_pages_preserve_old_roots_order_and_repeated_paths() {
     ];
     for commit in [[1; 20], [2; 20]] {
         let actual = reader
-            .latest(&store, &graph, &commit, &paths)
+            .latest(
+                &store,
+                CommitGraphView::Materialized(&graph),
+                &commit,
+                &paths,
+            )
             .await
             .unwrap();
         let expected = write.index.latest(&graph, &commit, &paths).unwrap();
@@ -89,7 +94,7 @@ async fn query_reads_only_dependency_pages_and_caches_verified_results() {
         &store,
         &layout,
         &write.descriptor_hash,
-        &graph,
+        CommitGraphView::Materialized(&graph),
         DEFAULT_MAX_PATH_STATE_BYTES,
     )
     .await
@@ -97,12 +102,22 @@ async fn query_reads_only_dependency_pages_and_caches_verified_results() {
     bytes.store(0, Ordering::Relaxed);
     let paths = [b"tree/name-0001".as_slice()];
     reader
-        .latest(&store, &graph, &[2; 20], &paths)
+        .latest(
+            &store,
+            CommitGraphView::Materialized(&graph),
+            &[2; 20],
+            &paths,
+        )
         .await
         .unwrap();
     let cold = bytes.swap(0, Ordering::Relaxed);
     reader
-        .latest(&store, &graph, &[2; 20], &paths)
+        .latest(
+            &store,
+            CommitGraphView::Materialized(&graph),
+            &[2; 20],
+            &paths,
+        )
         .await
         .unwrap();
     let full = write
@@ -122,7 +137,7 @@ async fn query_rejects_a_rebuilt_graph_with_matching_scalar_identity() {
         &store,
         &layout,
         &write.descriptor_hash,
-        &graph,
+        CommitGraphView::Materialized(&graph),
         DEFAULT_MAX_PATH_STATE_BYTES,
     )
     .await
@@ -130,7 +145,12 @@ async fn query_rejects_a_rebuilt_graph_with_matching_scalar_identity() {
     graph.descriptor.layers[0].hash = "f".repeat(64);
     assert!(
         reader
-            .latest(&store, &graph, &[2; 20], &[b"tree/name-0001"])
+            .latest(
+                &store,
+                CommitGraphView::Materialized(&graph),
+                &[2; 20],
+                &[b"tree/name-0001"]
+            )
             .await
             .is_err()
     );
@@ -155,14 +175,19 @@ async fn required_corrupt_or_missing_pages_never_become_a_lookup_miss() {
             &store,
             &layout,
             &write.descriptor_hash,
-            &graph,
+            CommitGraphView::Materialized(&graph),
             DEFAULT_MAX_PATH_STATE_BYTES,
         )
         .await
         .unwrap();
         assert!(
             reader
-                .latest(&store, &graph, &[2; 20], &[b"tree/name-0001"])
+                .latest(
+                    &store,
+                    CommitGraphView::Materialized(&graph),
+                    &[2; 20],
+                    &[b"tree/name-0001"]
+                )
                 .await
                 .is_err()
         );
@@ -176,7 +201,7 @@ async fn cache_identity_includes_the_page_kind() {
         &store,
         &layout,
         &write.descriptor_hash,
-        &graph,
+        CommitGraphView::Materialized(&graph),
         DEFAULT_MAX_PATH_STATE_BYTES,
     )
     .await
@@ -201,19 +226,29 @@ async fn warm_cache_cannot_bypass_the_query_byte_limit() {
         &store,
         &layout,
         &write.descriptor_hash,
-        &graph,
+        CommitGraphView::Materialized(&graph),
         DEFAULT_MAX_PATH_STATE_BYTES,
     )
     .await
     .unwrap();
     reader
-        .latest(&store, &graph, &[2; 20], &[b"tree/name-0001"])
+        .latest(
+            &store,
+            CommitGraphView::Materialized(&graph),
+            &[2; 20],
+            &[b"tree/name-0001"],
+        )
         .await
         .unwrap();
     reader.max_bytes = reader.descriptor_bytes;
     assert!(
         reader
-            .latest(&store, &graph, &[2; 20], &[b"tree/name-0001"])
+            .latest(
+                &store,
+                CommitGraphView::Materialized(&graph),
+                &[2; 20],
+                &[b"tree/name-0001"]
+            )
             .await
             .is_err()
     );
@@ -229,11 +264,77 @@ async fn page_queries_remain_send_without_holding_cache_guards_across_io() {
         &store,
         &layout,
         &write.descriptor_hash,
-        &graph,
+        CommitGraphView::Materialized(&graph),
         DEFAULT_MAX_PATH_STATE_BYTES,
     )
     .await
     .unwrap();
-    let result = require_send(reader.latest(&store, &graph, &[2; 20], &[b"tree/name-0001"])).await;
+    let result = require_send(reader.latest(
+        &store,
+        CommitGraphView::Materialized(&graph),
+        &[2; 20],
+        &[b"tree/name-0001"],
+    ))
+    .await;
     assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn paged_graph_binding_matches_materialized_attribution_without_layer_loading() {
+    use crate::split_commit_graph::{
+        CommitGraphReader, append_paged_commit_graph, upload_split_commit_graph,
+    };
+    let (store, layout, graph, write) = fixture().await;
+    let paged = append_paged_commit_graph(
+        Some(graph.clone()),
+        graph.descriptor.generation,
+        graph.descriptor.pack_index_hash.clone(),
+        graph.descriptor.git_validation_digest.clone(),
+        &[[2; 20]],
+        Vec::new(),
+    )
+    .unwrap()
+    .unwrap();
+    upload_split_commit_graph(&store, &layout, &paged)
+        .await
+        .unwrap();
+    let bytes = Arc::new(AtomicU64::new(0));
+    let observed = bytes.clone();
+    let store = store.with_read_byte_observer(Arc::new(move |read| {
+        observed.fetch_add(read, Ordering::Relaxed);
+    }));
+    let graph_reader = CommitGraphReader::load(&store, &layout, &paged.descriptor_hash, 512 * 1024)
+        .await
+        .unwrap();
+    let reader = PathStateReader::load(
+        &store,
+        &layout,
+        &write.descriptor_hash,
+        CommitGraphView::Paged(&graph_reader),
+        DEFAULT_MAX_PATH_STATE_BYTES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        bytes.load(Ordering::Relaxed),
+        paged.descriptor_bytes.len() as u64 + reader.descriptor_bytes
+    );
+    let paths = [
+        b"tree/name-0001".as_slice(),
+        b"tree/name-2999",
+        b"tree/name-0001",
+    ];
+    let expected = write.index.latest(&graph, &[2; 20], &paths).unwrap();
+    assert_eq!(
+        reader
+            .latest(
+                &store,
+                CommitGraphView::Paged(&graph_reader),
+                &[2; 20],
+                &paths
+            )
+            .await
+            .unwrap(),
+        expected
+    );
 }

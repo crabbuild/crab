@@ -4926,77 +4926,79 @@ async fn rejects_wrong_kind_and_unreachable_retained_commit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn attached_graph_preserves_tag_visibility_and_rejects_retained_commits() {
-    let options = RepositoryOptions::new(
-        ObjectLimits::default(),
-        OperationLimits {
-            max_history_commits: 1,
-            ..OperationLimits::default()
-        },
-    )
-    .unwrap();
-    let fixture = publish(DeltaKind::Ref, false, options).await;
-    let hash = publish_complete_graph(&fixture).await;
-    let cancel = CancellationToken::new();
-    let attached = fixture
-        .repository
-        .with_commit_graph(&hash, &cancel)
-        .await
+    for paged in [false, true] {
+        let options = RepositoryOptions::new(
+            ObjectLimits::default(),
+            OperationLimits {
+                max_history_commits: 1,
+                ..OperationLimits::default()
+            },
+        )
         .unwrap();
-    assert_eq!(
-        (
-            fixture.repository.commit_graph_available(),
-            attached.commit_graph_available()
-        ),
-        (false, true)
-    );
-    let operation = attached
-        .operation(OperationKind::Resolve, &cancel)
-        .await
-        .unwrap();
-    let result = async {
-        for oid in [fixture.root_commit, fixture.side_commit] {
-            assert_eq!(
-                attached
-                    .resolve(&Revision::Commit(oid), &operation)
-                    .await?
-                    .commit,
-                oid
-            );
-        }
-        assert!(matches!(
-            attached
-                .resolve(&Revision::Commit(fixture.unreachable), &operation)
-                .await,
-            Err(Error::Revision {
-                reason: crab_remote_git::RevisionError::NotReachable
-            })
-        ));
-        assert!(
-            attached
-                .resolve(&Revision::Reference("v2".to_owned()), &operation)
-                .await
-                .is_ok()
+        let fixture = publish(DeltaKind::Ref, false, options).await;
+        let hash = publish_complete_graph(&fixture, paged).await;
+        let cancel = CancellationToken::new();
+        let attached = fixture
+            .repository
+            .with_commit_graph(&hash, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                fixture.repository.commit_graph_available(),
+                attached.commit_graph_available()
+            ),
+            (false, true)
         );
-        assert!(matches!(
-            attached
-                .resolve(&Revision::Reference("blob".to_owned()), &operation)
-                .await,
-            Err(Error::Revision {
-                reason: crab_remote_git::RevisionError::NotCommit
-            })
-        ));
-        Ok(())
+        let operation = attached
+            .operation(OperationKind::Resolve, &cancel)
+            .await
+            .unwrap();
+        let result = async {
+            for oid in [fixture.root_commit, fixture.side_commit] {
+                assert_eq!(
+                    attached
+                        .resolve(&Revision::Commit(oid), &operation)
+                        .await?
+                        .commit,
+                    oid
+                );
+            }
+            assert!(matches!(
+                attached
+                    .resolve(&Revision::Commit(fixture.unreachable), &operation)
+                    .await,
+                Err(Error::Revision {
+                    reason: crab_remote_git::RevisionError::NotReachable
+                })
+            ));
+            assert!(
+                attached
+                    .resolve(&Revision::Reference("v2".to_owned()), &operation)
+                    .await
+                    .is_ok()
+            );
+            assert!(matches!(
+                attached
+                    .resolve(&Revision::Reference("blob".to_owned()), &operation)
+                    .await,
+                Err(Error::Revision {
+                    reason: crab_remote_git::RevisionError::NotCommit
+                })
+            ));
+            Ok(())
+        }
+        .await;
+        let result = operation.finish(result).await;
+        fixture.runtime.shutdown().await;
+        result.unwrap();
     }
-    .await;
-    let result = operation.finish(result).await;
-    fixture.runtime.shutdown().await;
-    result.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn declared_graph_uses_verified_commit_roots_including_nested_tags() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
-    let hash = publish_complete_graph(&fixture).await;
+    let hash = publish_complete_graph(&fixture, false).await;
     let (mut manifest, etag) = read_manifest(&fixture.store, &fixture.layout)
         .await
         .unwrap();
@@ -5024,7 +5026,7 @@ async fn declared_graph_uses_verified_commit_roots_including_nested_tags() {
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_attachment_rejects_other_ref_state_and_cancelled_work() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
-    let hash = publish_complete_graph(&fixture).await;
+    let hash = publish_complete_graph(&fixture, false).await;
     let cancel = CancellationToken::new();
     cancel.cancel();
     assert!(matches!(
@@ -5062,9 +5064,10 @@ async fn graph_attachment_rejects_other_ref_state_and_cancelled_work() {
     ));
 }
 
-async fn publish_complete_graph(fixture: &PublishedFixture) -> String {
+async fn publish_complete_graph(fixture: &PublishedFixture, paged: bool) -> String {
     use crab_metadata::split_commit_graph::{
-        CommitGraphInput, append_split_commit_graph, upload_split_commit_graph,
+        CommitGraphInput, append_paged_commit_graph, append_split_commit_graph,
+        upload_split_commit_graph,
     };
     let (manifest, _) = read_manifest(&fixture.store, &fixture.layout)
         .await
@@ -5115,7 +5118,12 @@ async fn publish_complete_graph(fixture: &PublishedFixture) -> String {
         })
         .collect::<Vec<_>>();
     let roots = inputs.iter().map(|input| input.oid).collect::<Vec<_>>();
-    let graph = append_split_commit_graph(
+    let append = if paged {
+        append_paged_commit_graph
+    } else {
+        append_split_commit_graph
+    };
+    let graph = append(
         None,
         manifest.generation,
         manifest.pack_index_hash,

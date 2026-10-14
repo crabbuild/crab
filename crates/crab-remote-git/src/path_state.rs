@@ -36,7 +36,7 @@ impl PathStateIndex {
                 store,
                 layout,
                 content_hash,
-                commit_graph.graph(),
+                commit_graph.view(),
                 max_bytes,
             ) => result.map_err(metadata_error)?,
         };
@@ -80,7 +80,7 @@ impl PathStateIndex {
         let summaries = tokio::select! {
             biased;
             () = operation.cancellation().cancelled() => return Err(Error::Cancelled),
-            result = self.index.latest(&store, self.commit_graph.graph(), &commit, &paths) => {
+            result = self.index.latest(&store, self.commit_graph.view(), &commit, &paths) => {
                 result.map_err(metadata_error)?
             },
         };

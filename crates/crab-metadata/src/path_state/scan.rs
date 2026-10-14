@@ -55,7 +55,9 @@ impl PathStateReader {
         store: &'a Store,
         graph: &'a SplitCommitGraph,
     ) -> Result<PathStateScan<'a>> {
-        if !matches_graph(&self.descriptor, graph) || self.graph_layers != graph.descriptor.layers {
+        if !matches_graph(&self.descriptor, CommitGraphView::Materialized(graph))
+            || self.graph_layers != graph.descriptor.layers
+        {
             return corrupt("path-state scan graph identity changed");
         }
         let bytes =
@@ -347,7 +349,7 @@ mod tests {
             &store,
             &layout,
             &write.descriptor_hash,
-            &graph,
+            CommitGraphView::Materialized(&graph),
             DEFAULT_MAX_PATH_STATE_BYTES,
         )
         .await
@@ -388,7 +390,7 @@ mod tests {
             &store,
             &layout,
             &write.descriptor_hash,
-            &graph,
+            CommitGraphView::Materialized(&graph),
             DEFAULT_MAX_PATH_STATE_BYTES,
         )
         .await
@@ -468,10 +470,15 @@ mod tests {
             )
             .await
             .unwrap();
-        let reader =
-            PathStateReader::load(&store, &layout, &hash, &graph, DEFAULT_MAX_PATH_STATE_BYTES)
-                .await
-                .unwrap();
+        let reader = PathStateReader::load(
+            &store,
+            &layout,
+            &hash,
+            CommitGraphView::Materialized(&graph),
+            DEFAULT_MAX_PATH_STATE_BYTES,
+        )
+        .await
+        .unwrap();
         let mut scan = reader.scan(&store, &graph).unwrap();
         while matches!(scan.next().await, Ok(Some(_))) {}
         assert!(scan.next().await.is_err());
