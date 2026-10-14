@@ -1685,6 +1685,46 @@ class AddCommitPushSmoke:
             {"original_sha256": original_hash},
         )
 
+        # Reopen from a new cache after catalog compaction; the original clone
+        # can otherwise hide a checkpoint reader that only works with warm data.
+        self.run_crab(
+            repo, ["metadb", "owner", "--once", "--jsonl"],
+            name=f"{case_name} checkpoint catalog", timeout=self.args.push_timeout,
+        )
+        diagnosis = self.run_crab(
+            repo, ["metadb", "diagnose", "--json"],
+            name=f"{case_name} checkpoint diagnosis",
+        )
+        self.check(
+            f"{case_name}-checkpoint-present",
+            json.loads(self.read_stdout(diagnosis))["data"]["capsule"]["checkpoint_present"],
+        )
+        checkpoint_clone = self.run_root / case_name / "checkpoint-clone"
+        checkpoint_cache = self.run_root / case_name / "checkpoint-cache"
+        self.check(f"{case_name}-checkpoint-cache-starts-empty", not checkpoint_cache.exists())
+        checkpoint_env = {"CRAB_CACHE_DIR": str(checkpoint_cache)}
+        self.run_cmd(
+            f"{case_name} clone checkpoint",
+            [self.crab_bin, "clone", remote_url, str(checkpoint_clone), "--jsonl"],
+            self.run_root, extra_env=checkpoint_env,
+        )
+        self.check(
+            f"{case_name}-checkpoint-clone-tip-matches",
+            self.rev_parse(checkpoint_clone, "HEAD") == source_tip,
+        )
+        self.run_crab(
+            checkpoint_clone, ["hydrate", "--all"],
+            name=f"{case_name} cold checkpoint hydration", extra_env=checkpoint_env,
+        )
+        self.check(
+            f"{case_name}-checkpoint-model-byte-identical",
+            sha256_file(checkpoint_clone / "model.bin") == original_hash,
+        )
+        self.check(
+            f"{case_name}-checkpoint-duplicate-byte-identical",
+            sha256_file(checkpoint_clone / "duplicate.bin") == original_hash,
+        )
+
         sqlite_files = self.sqlite_cache_files()
         self.check(
             f"{case_name}-sqlite-cache-used",
