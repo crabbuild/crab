@@ -1539,3 +1539,40 @@ indexed lookup, not operation admission or cleanup. The slowest sample spends
 three-second tail or an isolated/provider latency guarantee. The original failed
 run remains part of the evidence. Locked qualifier build, selected Clippy with
 `--no-deps`, formatting and four existing Python oracle regressions pass.
+
+
+## Shared point and batch delta materialization
+
+Source `7ee346ece2b` removes the separate point delta application policy.
+Point reads retain their packed-entry flights and iteratively gather the bounded
+dependency chain, then apply that chain through the batch resolver in one tracked
+CPU task. Non-delta point entries retain their direct verified return. Compressed
+batch entries charge inflation plus reconstruction; already inflated point entries
+charge only new reconstruction allocations. Cached bases remain identity-scoped
+and verified. Depth rejection now reports the absolute depth consistently with
+batch resolution; the rejection threshold is unchanged. Failed chains do not
+publish intermediate reconstructed deltas to the cache.
+
+The production reader removes 25 lines overall; the additional lines are focused
+regression tests for exact allocation accounting, repeated requests, cached bases,
+insufficient budgets, excessive depth, cycles and cancellation. No exported type,
+storage format, dependency or storage-layout contract changes.
+
+Proof: 39 reader regressions, the tracked-blocking shutdown test, and 21 real-Git
+integration cases covering REF/OFS reads, batch materialization, budget rejection,
+cancelled cold waiters, CRC rejection and shutdown pass. Selected strict Clippy,
+formatting and the publication-enabled qualifier build pass. The content-metadata
+integration case separately checks ordinary Git, Crab and Git LFS representations.
+
+`shared-materializer-native-r2` qualifies the clean source against local RustFS:
+20 cold/warm pairs at each of 100/1k/10k commits. Native Git independently verifies
+the first result for each history; subsequent results match those frozen results.
+Physical request/byte/decode counters match the preceding phase-clock run. All
+successful operations drain backend work. The missing-path error preserves its
+admission/snapshot/cleanup phase order, error outcomes and zero active backend
+operations. The initial run created only a Python bytecode cache; the final run
+disables bytecode writes and records a clean checkout.
+
+This establishes shared reconstruction and local correctness, not a causal latency
+speedup. The original failed latency run, representative S3 qualification, full
+10 GiB history scaling, and the remaining stage acceptance gates stay open.
