@@ -1245,6 +1245,29 @@ impl OperationContext {
             .await;
     }
 
+    pub(crate) async fn cached_blame_comparison(
+        &self,
+        parent: gix_hash::ObjectId,
+        current: gix_hash::ObjectId,
+    ) -> Option<Arc<Vec<(usize, usize)>>> {
+        self.state
+            .runtime
+            .cached_blame_comparison(&self.state.identity, parent, current)
+            .await
+    }
+
+    pub(crate) async fn insert_blame_comparison(
+        &self,
+        parent: gix_hash::ObjectId,
+        current: gix_hash::ObjectId,
+        matches: Arc<Vec<(usize, usize)>>,
+    ) {
+        self.state
+            .runtime
+            .insert_blame_comparison(self.state.identity.clone(), parent, current, matches)
+            .await;
+    }
+
     pub(crate) fn object_limits(&self) -> crate::ObjectLimits {
         self.state.options.object_limits()
     }

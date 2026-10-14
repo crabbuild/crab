@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
             [bucket, prefix, path] => (bucket, prefix, path, "all"),
             [bucket, prefix, path, selection] => (bucket, prefix, path, selection.as_str()),
             _ => return Err(io::Error::other(
-                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint|ref-point|resolve-oid]",
+                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint|ref-point|resolve-oid|blame-history|blame-history-uncached]",
             )
             .into()),
         };
@@ -47,6 +47,8 @@ async fn main() -> Result<()> {
         && selection != "graph-ancestry"
         && selection != "ref-point"
         && selection != "resolve-oid"
+        && selection != "blame-history"
+        && selection != "blame-history-uncached"
         && !WORKLOADS.contains(&selection)
     {
         return Err(io::Error::other("unknown qualification operation").into());
@@ -166,16 +168,32 @@ async fn main() -> Result<()> {
     } else if matches!(selection, "graph-pages" | "graph-ancestry") {
         qualify_graph_pages(&layout, &path, &counters, selection).await?;
     } else {
-        let workloads = if selection == "resolve-oid" {
-            &["resolve-oid"][..]
+        let selected_workload = if selection == "blame-history-uncached" {
+            "blame-history"
         } else {
-            WORKLOADS
+            selection
+        };
+        let workloads = match selected_workload {
+            "resolve-oid" => &["resolve-oid"][..],
+            "blame-history" => &["blame-history"][..],
+            _ => WORKLOADS,
         };
         for &name in workloads
             .iter()
-            .filter(|&&name| selection == "all" || selection == name)
+            .filter(|&&name| selected_workload == "all" || selected_workload == name)
         {
-            let runtime = Arc::new(RemoteGitRuntime::default());
+            let runtime = if selection == "blame-history-uncached" {
+                RemoteGitRuntime::new(
+                    crab_remote_git::RuntimeOptions {
+                        max_blame_cache_entries: 0,
+                        ..crab_remote_git::RuntimeOptions::default()
+                    },
+                    Arc::new(crab_remote_git::NoopMetrics),
+                )?
+            } else {
+                RemoteGitRuntime::default()
+            };
+            let runtime = Arc::new(runtime);
             let result = qualify(
                 name,
                 &layout,
@@ -395,7 +413,7 @@ async fn query(
         "history" => OperationKind::History,
         "path-history" => OperationKind::PathHistory,
         "attribution" => OperationKind::DirectoryAttribution,
-        "blame" => OperationKind::Blame,
+        "blame" | "blame-history" => OperationKind::Blame,
         _ => OperationKind::Content,
     };
     let requested_oid = if name == "resolve-oid" {
@@ -443,6 +461,19 @@ async fn query(
                     &PageRequest::new(1_000, None)?, &operation).await?;
                 Ok(json!({"commits":page.items.iter().map(|entry| entry.commit.oid.to_string()).collect::<Vec<_>>(),
                     "has_more":page.next.is_some()}))
+            }
+            "blame-history" => {
+                let history = snapshot.history(HistoryTraversal::FirstParent, &PageRequest::new(10, None)?, &operation).await?;
+                let mut entries = Vec::new();
+                for commit in history.items {
+                    let version = repository.snapshot(&Revision::Commit(commit.oid), &operation).await?;
+                    let blame = version.blame(path, &operation).await?;
+                    entries.push(json!({"commit":commit.oid.to_string(), "ranges":blame.ranges.iter().map(|range| json!({
+                        "start":range.start, "lines":range.lines, "commit":range.commit.oid.to_string(),
+                        "source_path":range.source_path.as_bytes(),
+                    })).collect::<Vec<_>>()}));
+                }
+                Ok(json!({"entries":entries}))
             }
             "blame" => {
                 let blame = snapshot.blame(path, &operation).await?;

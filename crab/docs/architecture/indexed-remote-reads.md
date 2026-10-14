@@ -1249,3 +1249,30 @@ deterministic entropy, 5,000 code files and four versions, alternating native
 add and Git clean. It checks pointer staging, incremental upload, fresh-cache
 historical hydration and integrity after removing source authority. Results are
 pending; earlier v5 or small-file receipts do not qualify this run.
+
+
+### Blame comparison cache
+
+The next branch adds reuse of first-parent Myers line mappings across immutable
+blob pairs. Attribution and comparison entries share one bounded LRU and its
+existing configuration. Ordered blob IDs, repository identity and an explicit
+semantics version identify comparisons; full attribution also includes commit,
+raw path and generation. The caller still reads/verifies both blobs, charges the
+comparison-cell budget and checks cancellation before using a retained mapping.
+
+The qualifier's `blame-history` case requests ten successive first-parent
+snapshots and checks each range against native Git. Hit/miss instrumentation is
+separate from graph/path-page decode counts. Two focused cache isolation/capacity
+tests, five blame integration tests and two qualifier counter tests pass,
+including rejection under a stricter comparison budget. The 11 snapshot-index
+contract tests pass, including caller/shutdown/deadline cancellation of graph
+and path pages. Strict Clippy passes for both changed owner crates with
+`--all-targets --no-deps -D warnings` and the publication feature.
+
+The dedicated RustFS comparison run uses cache-enabled and disabled queries at
+100, 1,000 and 10,000 commits, with 20 process samples per cell and native Git
+line-origin checks on ten successive snapshots. At 100 commits, all 20 paired
+samples pass; cold comparison misses fall from 192 to 21 with 171 hits. The
+larger cells remain running, so the complete acceptance gate and latency
+conclusions remain pending. External receipts live in
+`blame-comparison-live-r2`; hosted S3 latency qualification is still outstanding.
