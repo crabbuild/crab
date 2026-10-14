@@ -748,3 +748,14 @@ limitation. The invocation permits only the previously identified dependency
 `unfulfilled-lint-expectations` category to reach CLI diagnostics. This is not a
 strict full CLI lint pass. The small initializer change still needs current
 binary/native qualification before publication.
+
+
+The initializer change at `6672e9adec3` now has a successful locked CLI binary
+build. Replaying the six remote CLI download/export cases against the existing
+RustFS fixture with fresh destination/cache directories also passes: plain, Crab
+and LFS bytes remain identical, no installed Git ODB is created, and export
+leaves no temporary object files. This narrower replay qualifies the changed
+initializer; the complete 107-check receipt remains bound to `b29565b9422`.
+The debug build retains the existing compact-unwind linker warning. Neither
+receipt resolves the Git 2.40 cancellation failure, the pending architecture
+inventory approval, nor the remaining stage-4 and release qualification gates.
