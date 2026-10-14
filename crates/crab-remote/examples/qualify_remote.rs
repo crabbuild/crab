@@ -84,11 +84,24 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| {
                     io::Error::other("index build was superseded or repository was empty")
                 })?;
-                if complete.path_state_hash().is_none() {
-                    return Err(
-                        io::Error::other("path attribution was not completely published").into(),
-                    );
+                if complete.path_state_hash().is_none() || complete.object_index_hash().is_none() {
+                    return Err(io::Error::other(
+                        "physical lookup and path attribution were not completely published",
+                    )
+                    .into());
                 }
+                let hash = complete.object_index_hash().ok_or_else(|| io::Error::other("physical index readiness is absent"))?;
+                let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
+                let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(
+                    &layout, root,
+                    crab_read::capsule_protocol::CapsuleReadLimits { max_capsule_bytes: 2 * 1024 * 1024 * 1024, max_frontier_bytes: 2 * 1024 * 1024 * 1024 },
+                ).await?;
+                let snapshot = view.git_snapshot()?;
+                let index = crab_metadata::git_object_locator::PagedGitObjectIndex::load(
+                    layout.store(), &layout, hash, &snapshot.manifest_etag, &snapshot.manifest,
+                    options.object_limits().max_pack_index_bytes,
+                ).await?;
+                println!("{}", json!({"kind":"physical-index", "descriptor_hash":hash, "body_bytes":layout.store().head(index.body_path()).await?.size}));
                 Ok(())
             })
             .await;
