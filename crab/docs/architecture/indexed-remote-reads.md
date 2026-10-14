@@ -731,3 +731,20 @@ Clippy passes for `crab-git` and `crab-remote-git`; broader CLI/lifecycle gates 
 the pending inventory approval remain open. The native receipt stays bound to
 `b29565b9422`; subsequent catalog-test/documentation changes do not change its
 production code.
+
+
+CLI Clippy qualification initially reported three new large-future diagnostics.
+Boxing individual read/factory calls did not remove them and was discarded.
+Boxing only the provider initializer in the shared `OnceCell` removes the new
+transfer warnings and 19 previously reported diagnostics. Locked Tokio source
+confirms initialized cells return before invoking this closure, so warm lookups
+do not allocate the box. No lint suppression was added to source.
+
+The comparison reports 586 CLI diagnostics versus 604 at the earlier baseline,
+with large-future byte sizes normalized only for matching. The one additional
+match-arm diagnostic concerns a pack-error conversion verified byte-identical
+to both the baseline and `origin/main`; it is retained as an existing-source
+limitation. The invocation permits only the previously identified dependency
+`unfulfilled-lint-expectations` category to reach CLI diagnostics. This is not a
+strict full CLI lint pass. The small initializer change still needs current
+binary/native qualification before publication.

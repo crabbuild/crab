@@ -464,49 +464,53 @@ impl Inner {
     async fn remote(&self) -> Result<Arc<RemoteContext>> {
         let ctx = self
             .remote
-            .get_or_try_init(|| async {
-                check_cancelled(&self.cancel)?;
-                let remote_url = match self.work_dir.as_deref() {
-                    Some(work_dir) => read_workspace_remote(work_dir, &self.config)?,
-                    None => self.url.clone(),
-                };
-                let object_url = ObjectUrl::parse(&remote_url)?;
-                let (store, router) = if object_url.form == UrlForm::Crab {
-                    let parsed = CrabUrl::parse(&remote_url)?;
-                    let selection = crate::replication::select_read_store(
-                        &self.config,
-                        &parsed,
-                        "download",
-                        &self.cancel,
-                    )
-                    .await?;
-                    (selection.store, selection.router)
-                } else {
-                    let resolved = resolve_object_url_store(
-                        &object_url,
-                        &self.config,
-                        "download",
-                        &self.cancel,
-                    )
-                    .await?;
-                    let router = StoreLayout::new(resolved.store.clone(), resolved.prefix);
-                    (resolved.store, router)
-                };
+            // Provider selection owns a large cold-start future. Box only the
+            // initializer; warm OnceCell lookups keep their allocation-free path.
+            .get_or_try_init(|| {
+                Box::pin(async {
+                    check_cancelled(&self.cancel)?;
+                    let remote_url = match self.work_dir.as_deref() {
+                        Some(work_dir) => read_workspace_remote(work_dir, &self.config)?,
+                        None => self.url.clone(),
+                    };
+                    let object_url = ObjectUrl::parse(&remote_url)?;
+                    let (store, router) = if object_url.form == UrlForm::Crab {
+                        let parsed = CrabUrl::parse(&remote_url)?;
+                        let selection = crate::replication::select_read_store(
+                            &self.config,
+                            &parsed,
+                            "download",
+                            &self.cancel,
+                        )
+                        .await?;
+                        (selection.store, selection.router)
+                    } else {
+                        let resolved = resolve_object_url_store(
+                            &object_url,
+                            &self.config,
+                            "download",
+                            &self.cancel,
+                        )
+                        .await?;
+                        let router = StoreLayout::new(resolved.store.clone(), resolved.prefix);
+                        (resolved.store, router)
+                    };
 
-                let caching_store = CachingStore::new_with_local_cache(
-                    store,
-                    &self.config.cache,
-                    Arc::clone(&self.cache),
-                )?;
-                let hydrator =
-                    build_cli_hydrator(caching_store.clone(), router.clone(), &self.config)?;
+                    let caching_store = CachingStore::new_with_local_cache(
+                        store,
+                        &self.config.cache,
+                        Arc::clone(&self.cache),
+                    )?;
+                    let hydrator =
+                        build_cli_hydrator(caching_store.clone(), router.clone(), &self.config)?;
 
-                Ok::<_, CrabError>(Arc::new(RemoteContext {
-                    caching_store,
-                    router,
-                    hydrator: Arc::new(hydrator),
-                    git_runtime: Arc::new(crab_remote_git::RemoteGitRuntime::default()),
-                }))
+                    Ok::<_, CrabError>(Arc::new(RemoteContext {
+                        caching_store,
+                        router,
+                        hydrator: Arc::new(hydrator),
+                        git_runtime: Arc::new(crab_remote_git::RemoteGitRuntime::default()),
+                    }))
+                })
             })
             .await?;
         Ok(Arc::clone(ctx))
