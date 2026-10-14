@@ -1187,8 +1187,12 @@ Opening performs 12/13/14 backend operations in these fixed-ref/source fixtures.
 These results establish no bound across independently growing refs or source
 inventories. Loopback RustFS latency is not representative hosted-S3 latency.
 
-The v6 checkpoint plus a subsequent native add/commit/push passes all ten native
-Git query comparisons. Removing only the physical-index readiness field also
+A subsequent commit and native push passes all ten native Git query
+comparisons. The first small-text harness invoked `crab add` without a tracking
+pattern, so that command correctly skipped the edit; its commit changed only
+other staged metadata. This did not qualify a committed text edit. The helper
+probe subsequently staged the text with `git add`, checked committed bytes and
+pushed the actual edit through the installed Git helper. Removing only the physical-index readiness field also
 passes, then the exact readiness record is restored. Tampering with its retained
 dictionary page fails capture with a page-integrity error and zero active
 backend operations; restoring the object restores native Git parity. A focused
@@ -1199,6 +1203,49 @@ visibility page decoding separately from complete proof decoding.
 Before marking this draft ready: finish tagged-ref, force-push, cancellation,
 Git-helper fetch/hydration and live lifecycle qualification; independently grow
 ref count, source inventory and uncompacted history. The standard Makefile
-installer is building current helpers into an isolated workspace prefix. Source
+installer completed into an isolated workspace prefix. Its Git helper passes
+clone and strict fsck, actual text-edit push/fetch, annotated tag push/fetch/
+delete, force-push/fetch and shallow clone/fsck. A fresh empty client rejects
+the removed commit with upload-pack policy error CRAB-E0060; an already-populated
+client is not a valid oracle for that denial. The fixture main is restored. Source
 inventory/ref capture, comparison caches, catalog indexing, lifecycle/provider
 qualification, unified staging and fuller blame remain incomplete.
+
+
+### Ref and physical inventory qualification
+
+The existing qualifier passed 20 cold/warm samples each for resolve, object point
+and object batch reads, plus its full native-oracle set, at 1/10/100/1,000 refs.
+All refs point to the same fixed history; selected query output stays unchanged.
+The 252 processes prove 280 native query comparisons. Complete repository
+opening reads 20,588/34,934/175,073/1,577,466 bytes with 12/22/114/1,028 backend
+operations. Its fixed resolve query reads 37,365 bytes at every ref count. This
+exposes full ref-head capture cost; it does not establish bounded single-ref
+opening. The existing selected-ref API separately passes 20 cold/warm samples per
+cell. Its query reads 1,442/1,985/1,989/1,993 bytes in 2/3/3/3 backend operations.
+Root loading is measured separately and reads 1,312/2,734/16,955/159,158 bytes;
+this is not constant total opening cost. Native push and import already consume
+this selected-ref API; the qualifier now exercises it directly.
+
+A second 252-process/280-query matrix holds the final 164 commits and 613 Git
+objects fixed while varying publication schedules. Actual pack counts are
+1/8/32/64; capsule-run rollup makes actual source counts 1/8/1/1. Logical
+checkpointing reads/writes zero pack-body bytes. Opening reads
+26,951/45,215/59,169/83,443 bytes, and resolve reads
+54,283/55,067/57,755/61,339 bytes. Peak process RSS for resolve stays below
+35 MB. These cells expose member-inventory and publication-history growth;
+they do not prove independent scaling to 64 source objects.
+
+
+The direct commit-visibility probe publishes a distinct commit on a temporary
+ref and resolves its immutable OID successfully. After deletion and index
+rebuild, the same retained OID fails with `Revision { reason: NotReachable }` and
+zero active backend operations. This checks the reader's visibility boundary,
+separately from Git-helper upload-pack's default want policy.
+
+The existing large-file harness is running against the isolated Makefile-installed
+v6 binary in a fresh RustFS bucket. It uses two actual 10 GiB files with
+deterministic entropy, 5,000 code files and four versions, alternating native
+add and Git clean. It checks pointer staging, incremental upload, fresh-cache
+historical hydration and integrity after removing source authority. Results are
+pending; earlier v5 or small-file receipts do not qualify this run.

@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
             [bucket, prefix, path] => (bucket, prefix, path, "all"),
             [bucket, prefix, path, selection] => (bucket, prefix, path, selection.as_str()),
             _ => return Err(io::Error::other(
-                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint]",
+                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint|ref-point|resolve-oid]",
             )
             .into()),
         };
@@ -45,6 +45,8 @@ async fn main() -> Result<()> {
         && selection != "checkpoint"
         && selection != "graph-pages"
         && selection != "graph-ancestry"
+        && selection != "ref-point"
+        && selection != "resolve-oid"
         && !WORKLOADS.contains(&selection)
     {
         return Err(io::Error::other("unknown qualification operation").into());
@@ -68,7 +70,35 @@ async fn main() -> Result<()> {
         .with_storage_observer(counters.clone());
     let layout = StoreLayout::new(store, prefix.to_owned());
     let identity = RepositoryIdentity::new(format!("s3:{bucket}"), prefix.as_str(), 1)?;
-    if selection == "checkpoint" {
+    if selection == "ref-point" {
+        let root = counters
+            .measure("open", "cold", async {
+                Ok(crab_metadata::capsule_protocol::load_root(&layout).await?)
+            })
+            .await?;
+        let names = std::collections::BTreeSet::from([root.record().root().head().to_owned()]);
+        let mut previous = None;
+        for cache in ["cold", "warm"] {
+            let refs = counters
+                .measure("ref-point", cache, async {
+                    Ok(
+                        crab_read::capsule_protocol::read_visible_refs_from_root_for_refs(
+                            &layout, &root, &names,
+                        )
+                        .await?,
+                    )
+                })
+                .await?;
+            if previous.as_ref().is_some_and(|value| value != &refs) {
+                return Err(io::Error::other("selected refs changed during qualification").into());
+            }
+            previous = Some(refs);
+        }
+        println!(
+            "{}",
+            json!({"kind":"result", "operation":"ref-point", "value":previous})
+        );
+    } else if selection == "checkpoint" {
         counters
             .measure("checkpoint", "maintenance", async {
                 let outcome = crab_remote::checkpoint::publish_capsule_checkpoint(
@@ -136,7 +166,12 @@ async fn main() -> Result<()> {
     } else if matches!(selection, "graph-pages" | "graph-ancestry") {
         qualify_graph_pages(&layout, &path, &counters, selection).await?;
     } else {
-        for &name in WORKLOADS
+        let workloads = if selection == "resolve-oid" {
+            &["resolve-oid"][..]
+        } else {
+            WORKLOADS
+        };
+        for &name in workloads
             .iter()
             .filter(|&&name| selection == "all" || selection == name)
         {
@@ -354,7 +389,7 @@ async fn query(
     cancel: &CancellationToken,
 ) -> Result<Value> {
     let kind = match name {
-        "resolve" => OperationKind::Resolve,
+        "resolve" | "resolve-oid" => OperationKind::Resolve,
         "commit" => OperationKind::Commit,
         "tree" => OperationKind::Tree,
         "history" => OperationKind::History,
@@ -363,16 +398,22 @@ async fn query(
         "blame" => OperationKind::Blame,
         _ => OperationKind::Content,
     };
+    let requested_oid = if name == "resolve-oid" {
+        Some(gix_hash::ObjectId::from_hex(path.as_bytes())?)
+    } else {
+        None
+    };
     let operation = repository.operation(kind, cancel).await?;
     // Keep every failure inside the semantic result until the locator closes.
     let result = async {
         let snapshot = repository.snapshot(revision, &operation).await?;
         match name {
-            "resolve" => {
-                // Ref resolution alone bypasses ancestor membership. Resolve the
-                // same immutable OID through the foreground visibility boundary.
+            "resolve" | "resolve-oid" => {
+                // Ref-tip resolution alone bypasses ancestor membership. Explicit
+                // commit reads must also exercise the foreground visibility gate.
+                let oid = requested_oid.unwrap_or(snapshot.commit_oid());
                 let resolved = repository
-                    .resolve(&Revision::Commit(snapshot.commit_oid()), &operation)
+                    .resolve(&Revision::Commit(oid), &operation)
                     .await?;
                 Ok(json!({"commit":resolved.commit.to_string()}))
             }
