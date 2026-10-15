@@ -2130,3 +2130,26 @@ relaxed. Both updated fixtures pass against the unchanged #570 root consumer
 (23 commands, 23 checks), and the 11 source-isolation tests pass. The explicit
 v1 upgrade/reset fixtures remain separate. Full final-source canary proof is
 still pending.
+
+## Forced publication without a local remote tip
+
+A clone can diverge after another writer advances the remote. Its explicit
+force push must not require fetching the discarded tip. Capsule admission now
+allows an unavailable ancestry result only for an explicitly forced update or
+matched ref lease when receive policy permits rewrites. Stale leases and
+`receive.denyNonFastForwards` still reject; publication retains its expected-old
+conditional transition. Real ancestry-probe errors remain errors.
+
+Proven fast-forwards keep incremental visibility. Other updates publish the
+existing authenticated replacement-closure representation, walking only the
+new tip. This removes old objects from that ref's authorization without reading
+discarded history. Pack generation and LFS publication already exclude only
+remote tips present in the local object database. Both native CLI and Git
+remote-helper publication use this capsule owner.
+
+The regression matrix covers ordinary, forced, matched/stale lease and denied
+updates with the old remote commit absent locally. Successful rewrites verify
+the remote tip, revoke old-tip visibility, install packs into an independent
+repository and run Git connectivity checks. The existing RustFS ref matrix
+also exercises native and remote-helper force pushes without fetching first.
+These tests remain pending until the updated-source CI run completes.

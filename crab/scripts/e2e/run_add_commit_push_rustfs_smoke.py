@@ -960,6 +960,17 @@ class AddCommitPushSmoke:
             {"expected": third},
         )
 
+        missing_tip = self.run_git(
+            contender,
+            ["cat-file", "-e", third],
+            name=f"{case_name} remote tip absent locally",
+            check=False,
+        )
+        self.check(
+            f"{case_name}-force-push-does-not-require-fetch",
+            missing_tip.exit_code != 0,
+            {"remote_tip": third},
+        )
         self.run_git(contender, ["push", "--force", "origin", "main"])
         self.check(
             f"{case_name}-force-push-updates-tip",
@@ -970,6 +981,20 @@ class AddCommitPushSmoke:
             {"expected": divergent},
         )
 
+        self.run_crab(
+            repo,
+            ["push", "--force", "origin", "main"],
+            name=f"{case_name} native force without fetching contender",
+        )
+        self.check(
+            f"{case_name}-native-force-push-updates-tip",
+            self.ls_remote(remote_url, name=f"{case_name} list after native force").get(
+                "refs/heads/main"
+            )
+            == third,
+            {"expected": third},
+        )
+        self.run_git(contender, ["push", "--force", "origin", "main"])
         self.run_git(contender, ["tag", "-a", "v1", "-m", "version one"])
         tag_oid = self.rev_parse(contender, "refs/tags/v1")
         self.run_git(contender, ["push", "--follow-tags", "origin", "main"])

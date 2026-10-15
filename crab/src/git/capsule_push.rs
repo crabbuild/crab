@@ -257,12 +257,18 @@ async fn run_inner(
             } else {
                 is_ancestor(&common_git_dir, old_oid, &new_oid)?
             };
-            let Some(is_fast_forward) = is_fast_forward else {
-                outcomes.insert(
-                    spec.dst.clone(),
-                    RefPushOutcome::Rejected(PushRejectReason::StaleInfo),
-                );
-                continue;
+            let is_fast_forward = match is_fast_forward {
+                Some(proven) => proven,
+                // A forced rewrite need not have fetched the remote tip. The ref
+                // lease was checked above; publication still compares the old tip.
+                None if update.force && !config.receive_deny_non_fast_forwards => false,
+                None => {
+                    outcomes.insert(
+                        spec.dst.clone(),
+                        RefPushOutcome::Rejected(PushRejectReason::StaleInfo),
+                    );
+                    continue;
+                }
             };
             let decision = if !is_fast_forward && config.receive_deny_non_fast_forwards {
                 Err(PushRejectReason::DenyNonFastForward)
@@ -756,7 +762,9 @@ fn prepare_visibility_delta(
                 pack_objects.iter().map(ToString::to_string).collect(),
                 Vec::new(),
             )
-        } else if let Some(old_oid) = edit.expected_old() {
+        } else if let Some(old_oid) = edit.expected_old()
+            && fast_forward_refs.contains(edit.ref_name())
+        {
             let added = super::push::enumerate_visibility_difference(
                 git_dir,
                 new_oid,
@@ -764,31 +772,20 @@ fn prepare_visibility_delta(
                 maximum,
             )?
             .ok_or_else(|| visibility_limit_error(edit.ref_name()))?;
-            // Ancestry is already proven by the ref-update decision; old history is
-            // therefore still reachable, so walking `old - new` only repeats that proof.
-            let removed = if fast_forward_refs.contains(edit.ref_name()) {
-                Vec::new()
-            } else {
-                super::push::enumerate_visibility_difference(
-                    git_dir,
-                    old_oid,
-                    Some(new_oid),
-                    maximum.saturating_sub(added.len()),
-                )?
-                .ok_or_else(|| visibility_limit_error(edit.ref_name()))?
-            };
             crab_metadata::git_visibility::GitVisibilityEdit::from_delta_objects(
                 Some(old_oid.to_owned()),
                 new_oid.to_owned(),
                 added,
-                removed,
+                Vec::new(),
             )
         } else {
+            // Rewrites may lack the old tip locally. A complete replacement
+            // closure revokes its visibility without fetching discarded history.
             let objects =
                 super::push::enumerate_visibility_difference(git_dir, new_oid, None, maximum)?
                     .ok_or_else(|| visibility_limit_error(edit.ref_name()))?;
             crab_metadata::git_visibility::GitVisibilityEdit::from_replacement_objects(
-                None,
+                edit.expected_old().map(str::to_owned),
                 new_oid.to_owned(),
                 objects,
             )
@@ -1414,6 +1411,156 @@ mod tests {
                 .uploaded_objects
                 .contains(&layout.capsule_plan_intent_path(&plan_id).to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn force_rewrite_without_local_remote_tip_preserves_policy_and_visibility() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        for (name, force, lease, deny, succeeds) in [
+            ("ordinary", false, None, false, false),
+            ("force", true, None, false, true),
+            ("lease", false, Some(true), false, true),
+            ("stale-lease", true, Some(false), false, false),
+            ("deny-force", true, None, true, false),
+            ("deny-lease", false, Some(true), true, false),
+        ] {
+            let source = tempfile::tempdir().expect("source repository");
+            git(source.path(), &["init", "-b", "main"]);
+            git(source.path(), &["config", "user.name", "Crab Test"]);
+            git(
+                source.path(),
+                &["config", "user.email", "crab@example.invalid"],
+            );
+            let first = commit(source.path(), "first");
+            let contender_root = tempfile::tempdir().expect("contender directory");
+            let contender = contender_root.path().join("repo");
+            git(
+                contender_root.path(),
+                &[
+                    "clone",
+                    "--no-local",
+                    source.path().to_str().unwrap(),
+                    "repo",
+                ],
+            );
+            git(&contender, &["config", "user.name", "Crab Test"]);
+            git(
+                &contender,
+                &["config", "user.email", "crab@example.invalid"],
+            );
+            let second = commit(source.path(), "second");
+            let divergent = commit(&contender, "divergent");
+            let git_dir = contender.join(".git");
+            assert_eq!(
+                is_ancestor(&git_dir, &second, &divergent).unwrap(),
+                None,
+                "{name}"
+            );
+
+            let store = crate::storage::store::Store::from_storage(crab_storage::Store::new(
+                Arc::new(InMemory::new()),
+            ));
+            let router = crate::storage::StoreLayout::new(store.clone(), "repos/test".to_owned());
+            let layout =
+                crab_storage::StoreLayout::new(store.as_storage().clone(), "repos/test".to_owned());
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+            let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 16 * 1024 * 1024,
+                max_frontier_bytes: 16 * 1024 * 1024,
+            };
+            let spec = PushSpec {
+                force: false,
+                src: "refs/heads/main".to_owned(),
+                dst: "refs/heads/main".to_owned(),
+            };
+            let config = PushConfig {
+                git_dir: Some(source.path().join(".git")),
+                ..PushConfig::default()
+            };
+            let (initial, _) = run(
+                &config,
+                std::slice::from_ref(&spec),
+                &store,
+                &router,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert!(initial.all_ok(), "{name}: initial publication");
+            let mut config = PushConfig {
+                git_dir: Some(git_dir),
+                receive_deny_non_fast_forwards: deny,
+                ..PushConfig::default()
+            };
+            if let Some(matches) = lease {
+                config.expected_refs.insert(
+                    "refs/heads/main".to_owned(),
+                    Some(if matches { second.clone() } else { first }),
+                );
+            }
+            let spec = PushSpec { force, ..spec };
+            let (result, _) = run(
+                &config,
+                &[spec],
+                &store,
+                &router,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.all_ok(), succeeds, "{name}");
+            let view = crab_read::capsule_protocol::open_view(&layout, limits)
+                .await
+                .unwrap();
+            assert_eq!(
+                view.refs()["refs/heads/main"],
+                if succeeds {
+                    divergent.clone()
+                } else {
+                    second.clone()
+                },
+                "{name}: remote tip"
+            );
+            if succeeds {
+                let visibility = view.git_visibility_index().unwrap();
+                let refs = visibility.ref_closures();
+                let closure = &refs["refs/heads/main"];
+                assert!(
+                    closure.binary_search(&divergent).is_ok()
+                        && closure.binary_search(&second).is_err(),
+                    "{name}: rewrite must retire old visibility"
+                );
+                let destination = tempfile::tempdir().unwrap();
+                git(destination.path(), &["init", "--bare"]);
+                crab_read::capsule_protocol::install_git_packs_from_store(
+                    &view,
+                    &layout,
+                    destination.path(),
+                    16 * 1024 * 1024,
+                    None,
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+                git(
+                    destination.path(),
+                    &["cat-file", "-e", &format!("{divergent}^{{commit}}")],
+                );
+                git(destination.path(), &["fsck", "--connectivity-only"]);
+            }
+        }
     }
 
     #[test]
