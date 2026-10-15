@@ -2040,6 +2040,15 @@ walk fails without authorizing rollback. Ordinary pushes without unresolved
 intents do not perform this history scan; this does not replace the historical
 remote-catalog indexing workstream.
 
+The minimum Git 2.30 dependency contract supports the selected walk flags and
+includes other worktrees with `--all --reflog` by default
+([revision options](https://github.com/git/git/blob/v2.30.0/Documentation/rev-list-options.txt)).
+Its transport allowlist takes precedence over configured transport permissions
+([transport implementation](https://github.com/git/git/blob/v2.30.0/transport.c));
+the empty allowlist prevents an implicit fetch during local recovery. Windows
+startup sets stdout to binary mode, matching the OID parser's LF delimiter
+([MinGW startup](https://github.com/git/git/blob/v2.30.0/compat/mingw.c)).
+
 Both exclusive native-add recovery and shared push recovery use this ownership
 rule. The shared staging helper validates all requested recipes against the
 intent before adding history owners, preserves the original intent across an
@@ -2071,3 +2080,53 @@ default features. Its binary hash is recorded externally. Resumed workload
 subsequent v2 native push, with 2,216,109 and 2,133,870 incremental xorb bytes.
 The full workload is still running; cold historical reconstruction is unproven.
 This artifact precedes the lifecycle and finalize-contract changes above.
+
+
+The 10-GiB harness also selects `--first-ingestion native|git`, covering both
+native→clean→native and clean→native→clean. Receipts include the selected order
+and each add's ingestion path. After each add, the harness rejects local
+segment/prepared storage (including temporary stream bodies) beyond one initial
+representation, cumulative edited
+bytes and metadata allowance (10% of source size, at least 32 MiB). This detects
+the observed extra full 10-GiB representation; it is not a latency target or a
+claim that all allowed overhead is necessary. Existing runs retain their
+original harness identity and cannot prove these newly added checks.
+
+The local history dependency probe additionally reproduces exit zero with a
+missing reflog commit and an omitted expected pointer. Git reports that partial
+walk only through diagnostics; its
+[reflog traversal implementation](https://github.com/git/git/blob/v2.30.0/revision.c)
+confirms that contract. Recovery therefore requires a diagnostic-free successful
+walk before accepting absence. A warning retains the unresolved intent and its
+payloads; there is no log-message matching or alternate deletion path. Both a
+missing reflog tip and a missing referenced tree are regression cases. Earlier
+consumer builds do not qualify this tightened scanner until rerun.
+
+An extracted-source probe compiles the exact helper and canonical subprocess
+owner against the frozen release's actual error/dependency types. The old helper
+accepts the incomplete walk (negative runtime exits 1); the tightened helper
+preserves the healthy reflog result and rejects the missing tip (positive runtime
+exits 0). Source hashes are recorded with both probes. This is function-level
+runtime proof; the full updated consumer still needs its own Cargo/CLI run.
+
+
+Reduced crossover qualification passes with the frozen #570 release: Git-first
+repeated data and native-first zero data, each with two 128-MiB files, four
+versions, source removal, eight cold file digests and remote fsck. Each run records
+71 commands and 53 passing checks. An older debug binary fails the new storage
+assertion after its first native-to-clean switch: 67,156,162 prepared bytes plus
+68,224,532 segment bytes exceed the 102,760,448-byte bound for its 64-MiB input.
+These runs qualify the order/storage oracle; they do not qualify the final
+lifecycle source or replace the full 10-GiB matrix. The later inclusion of
+stream-temporary bytes in the accounting remains part of that final matrix.
+
+The dedicated #572 provider run passes its provider contract and the initial
+native cutover push's retirement check, then stops at the old missing-manifest
+fixture. It deleted a retired key while `v2/root` remained authoritative. Missing
+and corrupt fixtures now initialize a healthy repository, attest the live root,
+and verify their deletion/overwrite took effect before requiring list/clone to
+fail. Corruption still requires the integrity error; expectations were not
+relaxed. Both updated fixtures pass against the unchanged #570 root consumer
+(23 commands, 23 checks), and the 11 source-isolation tests pass. The explicit
+v1 upgrade/reset fixtures remain separate. Full final-source canary proof is
+still pending.

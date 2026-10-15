@@ -372,9 +372,11 @@ fn committed_pointer_oids(
             Ok(found)
         },
     )?;
-    if !output.status.success() {
+    // Git can exit zero while skipping unavailable reflog tips. A diagnostic
+    // means this walk cannot attest absence and authorize payload deletion.
+    if !output.status.success() || !output.stderr.is_empty() {
         return Err(CrabError::Internal(format!(
-            "Git recovery history scan failed ({}): {}",
+            "Git recovery history scan did not complete cleanly ({}): {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -390,48 +392,52 @@ mod tests {
     #[test]
     fn recovery_history_includes_reflogs_and_rejects_incomplete_walks() {
         let _env = crate::test::git_repo::CleanGitEnvGuard::new();
-        let temp = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            let output = Command::new("git")
-                .args(args)
-                .current_dir(temp.path())
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{:?}", output.stderr);
-            String::from_utf8(output.stdout).unwrap().trim().to_owned()
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["config", "user.name", "Crab Test"]);
-        git(&["config", "user.email", "crab@example.invalid"]);
-        std::fs::write(temp.path().join("file"), b"initial").unwrap();
-        git(&["add", "file"]);
-        git(&["commit", "-qm", "initial"]);
-        let initial = git(&["rev-parse", "HEAD"]);
-        std::fs::write(temp.path().join("file"), b"committed pointer").unwrap();
-        git(&["add", "file"]);
-        git(&["commit", "-qm", "pointer"]);
-        let pointer = git(&["rev-parse", "HEAD:file"]);
-        let tree = git(&["rev-parse", "HEAD^{tree}"]);
-        git(&["reset", "--hard", &initial]);
-        let wanted = HashSet::from([pointer]);
-        let cancel = CancellationToken::new();
-        assert_eq!(
-            committed_pointer_oids(temp.path(), &wanted, &cancel).unwrap(),
-            wanted
-        );
-        cancel.cancel();
-        assert!(matches!(
-            committed_pointer_oids(temp.path(), &wanted, &cancel),
-            Err(CrabError::Cancelled)
-        ));
-        std::fs::remove_file(
-            temp.path()
-                .join(".git/objects")
-                .join(&tree[..2])
-                .join(&tree[2..]),
-        )
-        .unwrap();
-        assert!(committed_pointer_oids(temp.path(), &wanted, &CancellationToken::new()).is_err());
+        for revision in ["HEAD^{tree}", "HEAD"] {
+            let temp = tempfile::tempdir().unwrap();
+            let git = |args: &[&str]| {
+                let output = Command::new("git")
+                    .args(args)
+                    .current_dir(temp.path())
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{:?}", output.stderr);
+                String::from_utf8(output.stdout).unwrap().trim().to_owned()
+            };
+            git(&["init", "-q", "-b", "main"]);
+            git(&["config", "user.name", "Crab Test"]);
+            git(&["config", "user.email", "crab@example.invalid"]);
+            std::fs::write(temp.path().join("file"), b"initial").unwrap();
+            git(&["add", "file"]);
+            git(&["commit", "-qm", "initial"]);
+            let initial = git(&["rev-parse", "HEAD"]);
+            std::fs::write(temp.path().join("file"), b"committed pointer").unwrap();
+            git(&["add", "file"]);
+            git(&["commit", "-qm", "pointer"]);
+            let pointer = git(&["rev-parse", "HEAD:file"]);
+            let missing = git(&["rev-parse", revision]);
+            git(&["reset", "--hard", &initial]);
+            let wanted = HashSet::from([pointer]);
+            let cancel = CancellationToken::new();
+            assert_eq!(
+                committed_pointer_oids(temp.path(), &wanted, &cancel).unwrap(),
+                wanted
+            );
+            cancel.cancel();
+            assert!(matches!(
+                committed_pointer_oids(temp.path(), &wanted, &cancel),
+                Err(CrabError::Cancelled)
+            ));
+            std::fs::remove_file(
+                temp.path()
+                    .join(".git/objects")
+                    .join(&missing[..2])
+                    .join(&missing[2..]),
+            )
+            .unwrap();
+            assert!(
+                committed_pointer_oids(temp.path(), &wanted, &CancellationToken::new()).is_err()
+            );
+        }
     }
 
     #[test]

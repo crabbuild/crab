@@ -8,7 +8,7 @@ The harness exercises both user-facing staging paths:
 
 The large-file cases prove pointer staging, object-store publication, fresh
 clone, hydration, and byte identity. A separate ordinary-Git matrix proves
-missing/corrupt manifest handling, update/fetch, deletion, force and
+missing/corrupt metadata-root handling, update/fetch, deletion, force and
 non-fast-forward behavior, atomic rejection, tag following, shallow history,
 immutable-pack failures, and concurrent push serialization.
 
@@ -850,19 +850,25 @@ class AddCommitPushSmoke:
             check=check,
         )
 
-    def run_missing_manifest_case(self) -> None:
-        case_name = "missing-manifest"
+    def run_missing_root_case(self) -> None:
+        case_name = "missing-root"
         _repo, remote_url, repo_prefix = self.prepare_git_repo(case_name)
+        root_key = f"{repo_prefix}/v2/root"
+        self.ls_remote(remote_url, name=f"{case_name} healthy list")
+        self.head_key(root_key)
         self.run_aws(
-            "delete canonical manifest fixture",
+            "delete canonical root fixture",
             [
                 "delete-object",
                 "--bucket",
                 self.args.bucket,
                 "--key",
-                f"{repo_prefix}/manifest",
+                root_key,
             ],
         )
+        status, _, _ = self.signed_s3_request("HEAD", root_key)
+        self.check(f"{case_name}-fixture-removed", status == 404,
+                   {"key": root_key, "status": status})
         listing = self.run_git(
             self.run_root,
             ["ls-remote", remote_url],
@@ -1174,13 +1180,15 @@ class AddCommitPushSmoke:
             {"commit_count": full_depth},
         )
 
-    def run_corrupt_manifest_case(self) -> None:
-        case_name = "corrupt-manifest"
-        remote_url, repo_prefix = self.remote_for_case(case_name)
-        manifest_key = f"{repo_prefix}/manifest"
+    def run_corrupt_root_case(self) -> None:
+        case_name = "corrupt-root"
+        _repo, remote_url, repo_prefix = self.prepare_git_repo(case_name)
+        root_key = f"{repo_prefix}/v2/root"
+        self.ls_remote(remote_url, name=f"{case_name} healthy list")
+        self.head_key(root_key)
         status, _, response_body = self.signed_s3_request(
             "PUT",
-            manifest_key,
+            root_key,
             body=b'{"version":',
         )
         self.check(
@@ -1192,6 +1200,11 @@ class AddCommitPushSmoke:
                 "body": response_body.decode("utf-8", errors="replace")[:200],
             },
         )
+
+        status, _, body = self.signed_s3_request("GET", root_key)
+        self.check(f"{case_name}-fixture-overwritten",
+                   status == 200 and body == b'{"version":',
+                   {"key": root_key, "status": status})
 
         ls_remote = self.run_git(
             self.run_root,
@@ -2207,8 +2220,8 @@ class AddCommitPushSmoke:
             self.write_report()
             return
         self.run_v1_hard_cutover_reset_case()
-        self.run_missing_manifest_case()
-        self.run_corrupt_manifest_case()
+        self.run_missing_root_case()
+        self.run_corrupt_root_case()
         self.run_ref_update_delete_force_and_tag_case()
         self.run_atomic_rejection_case()
         self.run_shallow_case()
