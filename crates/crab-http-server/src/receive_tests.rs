@@ -415,17 +415,25 @@ async fn exercise(server: Arc<Server>, branch: &str) {
     .await
     .unwrap();
 
-    let indexes = crab_metadata::capsule_protocol::load_browse_indexes(&repo.layout)
-        .await
-        .unwrap()
-        .unwrap();
-    let path_state_hash = indexes.path_state_hash().unwrap();
     for corruption in [
         "missing descriptor",
         "corrupt descriptor",
         "malformed record",
         "oversized record",
     ] {
+        // Readiness can precede its repair worker's completion. Drain it before
+        // injecting another fault, or that worker can replace the tested record
+        // with legitimate graph-only readiness before the corruption probe.
+        server.finish_maintenance().await.unwrap();
+        let indexes = crab_metadata::capsule_protocol::load_browse_indexes(&repo.layout)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            indexes.state_digest(),
+            repo.open_view().await.unwrap().state_digest()
+        );
+        let path_state_hash = indexes.path_state_hash().unwrap();
         let descriptor = repo
             .layout
             .bulk_manifest_path("path-state", path_state_hash);

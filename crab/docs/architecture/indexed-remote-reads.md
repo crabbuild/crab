@@ -2368,3 +2368,34 @@ large-file, growth and latency cells.
 
 The final combined 10-GiB matrix, unrelated-history/ref/frontier scaling, broader
 lifecycle/provider proof and fuller blame semantics still prevent completion.
+
+
+## Combined catalog/staging qualification and HTTP fault boundaries
+
+The combined revision carries selected publication, verified catalog bindings,
+source/browse retention, retained-source fsck, exact capsule chunk reuse and
+shared native-content preparation. Focused checks passed: 558 metadata tests,
+81 protected-receive tests, six shared-preparation tests, 242 staging tests,
+26 CLI integration tests, 57 CLI siblings, 20 origin/lease tests and eight HTTP
+receive/fault tests. Explicit live tests remain separately qualified; these
+counts do not establish the full release gate.
+
+The first combined RustFS native HTTP fixture returned 202 during its
+corrupt-descriptor case, where the corruption oracle required 503. Readiness
+can become visible before the publishing repair worker finishes. A diagnostic
+assertion with a one-second delayed generation-owner release response proved
+that the fixture could inject its next fault while that worker was active.
+The shared native HTTP fixture now awaits maintenance completion before each
+fault, reloads the current descriptor and checks its snapshot identity. All
+original status, error-code, recovery and Git assertions remain intact. The
+controlled probe then passed across ten delayed lease releases, and all eight
+HTTP unit/fault checks passed. This changes test synchronization, not the valid
+production distinction between incomplete readiness and corrupt metadata.
+
+Raw before/after evidence remains outside the checkout in
+`final-integration-http-metadata-probe-r4.json`,
+`final-integration-http-metadata-probe-r5.json` and
+`http-fault-boundary-after-r1.log`. Combined-source 10 GiB qualification,
+representative S3 latency, additional history/ref scaling and fuller Git blame
+semantics remain open gates. Earlier component receipts retain their original
+source identities and are not final combined-source proof.
