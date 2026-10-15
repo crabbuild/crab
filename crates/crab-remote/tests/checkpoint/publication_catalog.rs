@@ -239,7 +239,7 @@ async fn fixed_pointer_publication_keeps_unrelated_catalog_history_cold() {
                         assert!(matches!(outcome, crab_remote::prepare::CapsuleCommitOutcome::Committed { .. }));
                         let after = open_history_view(&layout).await;
                         assert_eq!(after.refs()[&target], oid);
-                        assert!(after.pointer_catalog_lookup(&layout, LIMIT)?.files(layout.store(), &[file_hash.clone()]).await?.files().contains_key(&file_hash));
+                        assert!(after.pointer_catalog_lookup(&layout, LIMIT)?.files(layout.store(), std::slice::from_ref(&file_hash)).await?.files().contains_key(&file_hash));
                         drop(prepared);
                         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
                     },
