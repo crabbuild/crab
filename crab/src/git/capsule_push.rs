@@ -1552,7 +1552,7 @@ mod tests {
                 "{name}: remote tip"
             );
             if succeeds {
-                let visibility = view.git_visibility_index().unwrap();
+                let visibility = view.git_visibility_index().await.unwrap();
                 let refs = visibility.ref_closures();
                 let closure = &refs["refs/heads/main"];
                 assert!(

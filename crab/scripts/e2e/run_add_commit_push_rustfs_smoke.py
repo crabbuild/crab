@@ -2100,11 +2100,18 @@ class AddCommitPushSmoke:
             ["staging", "stats", "--json"],
             name=f"{case_name} staging ownership before push",
         )
-        before_push = json.loads(self.read_stdout(before_push_record))["data"]["lifecycle"]
+        before_push_data = json.loads(self.read_stdout(before_push_record))["data"]
+        before_push = before_push_data["lifecycle"]
+        expected_versions = {first_pointer.file_hash, second_pointer.file_hash}
+        retained_versions = {entry["file_hash"] for entry in before_push_data["files"]}
+        # Native preparation and Git-clean retain independent handoff leases.
+        # Version coverage, followed by exact retirement, proves their lifetime;
+        # a fixed pre-push lease count cannot identify the preserved versions.
         self.check(
             f"{case_name}-retains-current-and-committed-history-owners",
-            before_push["path_heads"] == 2
-            and before_push["path_leases"] == 2
+            retained_versions == expected_versions
+            and before_push["recipes"] == len(expected_versions)
+            and before_push["path_leases"] >= len(expected_versions)
             and before_push["open_batches_without_publication"] == 0
             and before_push["reclaimable_superseded_leases"] == 0
             and before_push["reclaimable_files"] == 0,

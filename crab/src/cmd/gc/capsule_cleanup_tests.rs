@@ -20,6 +20,200 @@ use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 
 #[tokio::test]
+async fn captured_catalog_pages_survive_checkpoint_replacement_and_gc() {
+    use crab_metadata::capsule_protocol::{
+        CapsuleGitPack, FileCatalogEntry, LayeredCheckpoint, PackLayer, PointerCatalog,
+        ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
+    };
+    use crab_metadata::file_index_lookup::FileIndexLookupSession;
+    use crab_xet::hash::MerkleHash;
+
+    let store = Store::new(Arc::new(InMemory::new()));
+    let router = StoreLayout::new(store.clone(), "org/catalog-gc".to_owned());
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let base =
+        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+    let mut catalog = PointerCatalog::new();
+    let shard = "a".repeat(64);
+    let xorb = "b".repeat(64);
+    catalog
+        .insert_xorb(
+            xorb.clone(),
+            XorbCatalogEntry::new(
+                80,
+                "c".repeat(64),
+                vec![XorbChunkEntry::new("d".repeat(64), 16)],
+            ),
+        )
+        .unwrap();
+    catalog
+        .insert_shard(shard.clone(), ShardCatalogEntry::new(80, vec![xorb]))
+        .unwrap();
+    for index in 0..20_000 {
+        catalog
+            .insert_file(
+                format!("{index:064x}"),
+                FileCatalogEntry::new(16, shard.clone()),
+            )
+            .unwrap();
+    }
+    let transaction = CapsuleTransaction::new(
+        base.record().digest(),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/main",
+            None,
+            Some("2".repeat(40)),
+            None,
+        )],
+    )
+    .unwrap();
+    let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
+    crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+        .await
+        .unwrap();
+    let view = crab_read::capsule_protocol::open_view(
+        &layout,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 1024 * 1024,
+            max_frontier_bytes: 8 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap();
+    let layer = PackLayer::build(
+        &CapsuleGitPack::new(
+            Bytes::from_static(b"PACK"),
+            Bytes::from_static(b"index"),
+            Bytes::from_static(b"reverse"),
+            Bytes::from_static(b"locator"),
+            "3".repeat(40),
+            1,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let source = layer.source_descriptor().unwrap();
+    store
+        .put(
+            &layout.capsule_pack_layer_path(layer.hash()),
+            layer.bytes().clone(),
+        )
+        .await
+        .unwrap();
+    let checkpoint = LayeredCheckpoint::build(
+        view.root().root().generation(),
+        view.root().digest(),
+        vec![source.clone()],
+        catalog,
+        None,
+    )
+    .unwrap();
+    let first = crab_write::capsule_protocol::publish_ref_layered_checkpoint(
+        &layout,
+        view.root_snapshot().clone(),
+        &checkpoint,
+        view.refs().clone(),
+        view.peeled_refs().clone(),
+        view.visible_ref_transactions().clone(),
+        view.capsule_run_pointers().to_vec(),
+    )
+    .await
+    .unwrap();
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_reads = reads.clone();
+    let observed = layout
+        .store()
+        .clone()
+        .with_read_request_observer(Arc::new(move |_| {
+            observed_reads.fetch_add(1, Ordering::SeqCst);
+        }));
+    let captured = FileIndexLookupSession::open_for_storage(&observed, layout.repo_prefix())
+        .await
+        .unwrap();
+    // No file query has run: the old reader must fetch its catalog leaf after
+    // compaction and a real sweep, rather than succeed from a warmed page cache.
+    let next = LayeredCheckpoint::build(
+        first.record().root().generation(),
+        first.record().digest(),
+        vec![source],
+        PointerCatalog::new(),
+        None,
+    )
+    .unwrap();
+    let root = crab_write::capsule_protocol::publish_ref_layered_checkpoint(
+        &layout,
+        first.clone(),
+        &next,
+        first.record().root().refs().clone(),
+        first.record().root().peeled_refs().clone(),
+        first.record().root().compacted_ref_transactions().clone(),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let file = MerkleHash::from_hex(&format!("{:064x}", 19_999)).unwrap();
+    let latest = FileIndexLookupSession::open_for_storage(layout.store(), layout.repo_prefix())
+        .await
+        .unwrap();
+    let latest_result = latest.lookup(&file).await;
+    latest.close().await.unwrap();
+    assert_eq!(latest_result.unwrap(), None);
+
+    let orphan = layout.capsule_checkpoint_path(&"e".repeat(64));
+    store
+        .put(&orphan, Bytes::from_static(b"orphan"))
+        .await
+        .unwrap();
+    let current = crab_read::capsule_protocol::open_view_from_root_with_control(
+        &layout,
+        root.clone(),
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 8 * 1024 * 1024,
+            max_frontier_bytes: 8 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap();
+    let snapshot = current.git_snapshot().unwrap();
+    let outcome = sweep_capsule_objects(
+        &GcArgs::default(),
+        &store,
+        &layout,
+        root.record().root(),
+        current.capsule_run_pointers(),
+        &current.state_digest(),
+        &snapshot.manifest,
+        &HashSet::new(),
+        &CancellationToken::new(),
+        SystemTime::now() + Duration::from_secs(2 * 3600),
+        Duration::from_secs(3600),
+        Instant::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.packs_deleted, 1);
+    assert!(matches!(
+        store.head(&orphan).await,
+        Err(CrabError::NotFound { .. })
+    ));
+    reads.store(0, Ordering::SeqCst);
+    let selected = captured.lookup_batch(&[file, file]).await;
+    captured.close().await.unwrap();
+    assert!(
+        reads.load(Ordering::SeqCst) > 0,
+        "captured lookup must fetch cold pages after GC"
+    );
+    let expected = MerkleHash::from_hex(&shard).unwrap();
+    assert_eq!(selected.unwrap(), vec![Some(expected), Some(expected)]);
+}
+
+#[tokio::test]
 async fn failed_capsule_view_releases_root_and_sweep_fences() {
     let store = Store::new(Arc::new(InMemory::new()));
     let router = StoreLayout::new(store.clone(), "org/gc-cleanup".to_owned());
