@@ -103,7 +103,7 @@ pub async fn ensure(
             // loses, extra retained data is safe; the opposite order can strand readers.
             retain_browse_indexes(
                 layout, &indexes, snapshot.manifest.generation, view.layered_checkpoint(),
-                view.capsule_run_sources(),
+                view.capsule_run_pointers(),
             ).await?;
             if previous.as_ref() == Some(&indexes) && indexes.path_state_hash().is_some() {
                 ready = Some(indexes);
@@ -133,7 +133,7 @@ pub async fn ensure(
             .await?;
             retain_browse_indexes(
                 layout, &complete, snapshot.manifest.generation, view.layered_checkpoint(),
-                view.capsule_run_sources(),
+                view.capsule_run_pointers(),
             ).await?;
             if publish_current(layout, &complete, etag, cancel)
                 .await?

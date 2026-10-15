@@ -5,8 +5,8 @@ use crab_storage::{ETag, Store, StoreLayout};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    BrowseIndexes, LayeredCheckpoint, MAX_BROWSE_INDEXES_BYTES, MAX_HISTORY_CHAIN_BYTES,
-    MAX_HISTORY_CHAIN_SEGMENTS, MAX_HISTORY_SEGMENT_BYTES, PackSourceDescriptor, PackSourceKind,
+    BrowseIndexes, CapsulePointer, LayeredCheckpoint, MAX_BROWSE_INDEXES_BYTES,
+    MAX_HISTORY_CHAIN_BYTES, MAX_HISTORY_CHAIN_SEGMENTS, MAX_HISTORY_SEGMENT_BYTES, PackSourceKind,
 };
 use crate::error::{MetadataError, Result};
 use crate::validation::{corrupt_object, validate_content_hash};
@@ -198,19 +198,21 @@ pub async fn retain_browse_indexes(
     indexes: &BrowseIndexes,
     generation: u64,
     checkpoint: Option<&LayeredCheckpoint>,
-    run_sources: &[PackSourceDescriptor],
+    run_pointers: &[CapsulePointer],
 ) -> Result<()> {
     let previous = load_head(layout).await?;
     let mut sources = BTreeMap::new();
-    for source in checkpoint
+    let checkpoint_sources = checkpoint
         .into_iter()
         .flat_map(LayeredCheckpoint::sources)
-        .chain(run_sources)
-    {
-        if sources
-            .insert(source.object_hash().to_owned(), source.kind())
-            .is_some_and(|kind| kind != source.kind())
-        {
+        .map(|source| (source.object_hash().to_owned(), source.kind()));
+    let capsule_sources = run_pointers
+        .iter()
+        .map(|pointer| (pointer.hash().to_owned(), PackSourceKind::CapsuleRun));
+    // Ref-only runs carry visibility/catalog pages despite having no Git
+    // members. Captures own those lazy reads as well as physical pack ranges.
+    for (hash, kind) in checkpoint_sources.chain(capsule_sources) {
+        if sources.insert(hash, kind).is_some_and(|old| old != kind) {
             return Err(corrupt("retained source has conflicting kinds"));
         }
     }
