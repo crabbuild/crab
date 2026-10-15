@@ -88,6 +88,7 @@ pub struct CapsuleRepositoryView {
     ref_capsule_counts: BTreeMap<String, u32>,
     capsule_run_pointers: Vec<CapsulePointer>,
     capsule_run_sources: Vec<PackSourceDescriptor>,
+    catalog_sources: Vec<crab_metadata::capsule_protocol::RunCatalogSource>,
     capsule_run_bytes: BTreeMap<String, Bytes>,
     capsule_run_indexes: BTreeMap<String, Vec<PackRange>>,
     capsule_run_member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
@@ -740,8 +741,8 @@ impl CapsuleRepositoryView {
 
     /// Capture batched catalog lookup against this view's checkpoint and selected deltas.
     ///
-    /// Checkpoint pages stay cold. Publication deltas still use the view's
-    /// authenticated materialization; unrelated checkpoint history is never decoded.
+    /// Checkpoint and run pages stay cold until selected dependency queries;
+    /// exact logical-capsule order excludes unrelated physical run occurrences.
     pub fn pointer_catalog_lookup(
         &self,
         layout: &StoreLayout<Store>,
@@ -755,18 +756,17 @@ impl CapsuleRepositoryView {
             .unwrap_or_else(|| {
                 crab_metadata::capsule_protocol::PointerCatalogLookup::empty(maximum)
             });
-        let mut deltas = Vec::new();
-        for capsule in &self.capsules {
-            if let Some(delta) = capsule.pointer_catalog_delta()? {
-                deltas.push(delta);
-            }
-        }
-        deltas.extend(
-            self.capsule_controls
-                .iter()
-                .filter_map(|capsule| capsule.pointer_catalog_delta().cloned()),
-        );
-        Ok(lookup.with_deltas(deltas)?)
+        let order = self
+            .capsules
+            .iter()
+            .map(|capsule| capsule.hash().to_owned())
+            .chain(
+                self.capsule_controls
+                    .iter()
+                    .map(|capsule| capsule.hash().to_owned()),
+            )
+            .collect::<Vec<_>>();
+        Ok(lookup.with_run_sources(self.catalog_sources.clone(), &order)?)
     }
 
     /// Materialize the complete generation-pinned external pointer catalog.
@@ -794,8 +794,11 @@ impl CapsuleRepositoryView {
             }
         }
         for capsule in &self.capsule_controls {
-            if let Some(delta) = capsule.pointer_catalog_delta() {
-                catalog.apply(delta)?;
+            let layout = self.metadata_layout.as_ref().ok_or_else(|| {
+                ReadError::internal("catalog materialization has no captured origin")
+            })?;
+            if let Some(delta) = capsule.materialize_catalog(layout.store()).await? {
+                catalog.apply(&delta)?;
             }
         }
         Ok(catalog)
@@ -4321,6 +4324,7 @@ pub fn compacted_view_from_checkpoint(
         ref_capsule_counts: BTreeMap::new(),
         capsule_run_pointers: Vec::new(),
         capsule_run_sources: Vec::new(),
+        catalog_sources: Vec::new(),
         capsule_run_bytes: BTreeMap::new(),
         capsule_run_indexes: BTreeMap::new(),
         capsule_run_member_oids: BTreeMap::new(),
@@ -4456,6 +4460,13 @@ async fn assemble_view(
         .into_iter()
         .map(|run| (run.hash().to_owned(), run))
         .collect::<BTreeMap<_, _>>();
+    let catalog_sources = runs
+        .values()
+        .map(|run| run.catalog_source(router))
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     let mut capsule_run_sources = Vec::new();
     let mut capsule_run_indexes = BTreeMap::new();
     let mut capsule_run_member_oids = BTreeMap::new();
@@ -4628,7 +4639,7 @@ async fn assemble_view(
         capsules: root_capsules,
         capsule_controls: Vec::new(),
         tip_bound_transitions,
-        metadata_layout: None,
+        metadata_layout: Some(router.clone()),
         tip_bound_controls: Vec::new(),
         refs,
         peeled_refs,
@@ -4636,6 +4647,7 @@ async fn assemble_view(
         ref_capsule_counts,
         capsule_run_pointers: pointers,
         capsule_run_sources,
+        catalog_sources,
         capsule_run_bytes: BTreeMap::new(),
         capsule_run_indexes,
         capsule_run_member_oids,
@@ -4709,6 +4721,13 @@ async fn assemble_layered_control_view(
         }
         runs.insert(hash, (control, capsules));
     }
+    let catalog_sources = runs
+        .values()
+        .map(|(control, _)| control.catalog_source(router))
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     let all_capsule_controls = runs
         .values()
         .flat_map(|(_, capsules)| capsules.iter().cloned())
@@ -4885,6 +4904,7 @@ async fn assemble_layered_control_view(
             ref_capsule_counts,
             capsule_run_pointers: pointers,
             capsule_run_sources,
+            catalog_sources,
             capsule_run_bytes,
             capsule_run_indexes,
             capsule_run_member_oids,
@@ -4973,7 +4993,7 @@ async fn assemble_layered_control_view(
         capsules: Vec::new(),
         capsule_controls: root_capsules,
         tip_bound_transitions,
-        metadata_layout: matches!(read, ControlRead::Git).then(|| router.clone()),
+        metadata_layout: Some(router.clone()),
         tip_bound_controls: if matches!(read, ControlRead::Git) {
             all_capsule_controls
         } else {
@@ -4985,6 +5005,7 @@ async fn assemble_layered_control_view(
         ref_capsule_counts,
         capsule_run_pointers: pointers,
         capsule_run_sources,
+        catalog_sources,
         capsule_run_bytes,
         capsule_run_indexes,
         capsule_run_member_oids,
@@ -6545,6 +6566,142 @@ mod tests {
                     complete.pointer_catalog().await.unwrap()
                 )
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn git_catalog_queries_leave_unrelated_run_history_cold() {
+        use crab_metadata::capsule_protocol::{
+            FileCatalogEntry, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
+        };
+        for count in [100, 10_000] {
+            let observer = Arc::new(RecordingObserver::default());
+            let store =
+                Store::new(Arc::new(InMemory::new())).with_storage_observer(observer.clone());
+            let router = StoreLayout::new(store.clone(), "repositories/catalog-query".into());
+            let initial = RootRecord::encode(
+                RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+            )
+            .unwrap();
+            let transaction = CapsuleTransaction::new(
+                initial.digest(),
+                vec![CapsuleRefEdit::new(
+                    "refs/heads/main",
+                    None,
+                    Some("2".repeat(40)),
+                    None,
+                )],
+            )
+            .unwrap();
+            let mut catalog = PointerCatalog::new();
+            for index in 0..count {
+                let xorb = format!("{:064x}", index + 1_000_000);
+                let shard = format!("{:064x}", index + 3_000_000);
+                catalog
+                    .insert_xorb(
+                        xorb.clone(),
+                        XorbCatalogEntry::new(
+                            99,
+                            "e".repeat(64),
+                            vec![XorbChunkEntry::new(
+                                format!("{:064x}", index + 2_000_000),
+                                7,
+                            )],
+                        ),
+                    )
+                    .unwrap();
+                catalog
+                    .insert_shard(shard.clone(), ShardCatalogEntry::new(80, vec![xorb]))
+                    .unwrap();
+                catalog
+                    .insert_file(format!("{index:064x}"), FileCatalogEntry::new(7, shard))
+                    .unwrap();
+            }
+            let capsule = Capsule::build(
+                &transaction,
+                Vec::new(),
+                vec![CapsuleSection::new(
+                    CapsuleSectionKind::CatalogDelta,
+                    catalog.encode_delta().unwrap(),
+                )],
+            )
+            .unwrap();
+            let run = CapsuleRun::leaf(capsule).unwrap();
+            store
+                .put(&router.capsule_path(run.hash()), run.bytes().clone())
+                .await
+                .unwrap();
+            let pointer = CapsulePointer::new(
+                run.hash(),
+                run.bytes().len() as u64,
+                run.control_offset(),
+                run.control_size(),
+                run.footer_hash(),
+                run.level(),
+                run.transaction_ids(),
+                run.newest_base_root_digest(),
+            )
+            .unwrap();
+            let next = initial
+                .root()
+                .advance(
+                    initial.digest(),
+                    BTreeMap::from([("refs/heads/main".into(), "2".repeat(40))]),
+                    BTreeMap::new(),
+                    vec![pointer],
+                    &transaction.id().unwrap(),
+                )
+                .unwrap();
+            let root = RootRecord::encode(next).unwrap();
+            store
+                .create_strict(&router.capsule_root_path(), root.bytes().clone())
+                .await
+                .unwrap();
+            observer.observations.lock().unwrap().clear();
+            let root = load_root(&router).await.unwrap();
+            let view = open_git_view_from_root(
+                &router,
+                root,
+                CapsuleReadLimits {
+                    max_capsule_bytes: 64 * 1024 * 1024,
+                    max_frontier_bytes: 64 * 1024 * 1024,
+                },
+            )
+            .await
+            .unwrap();
+            let opening = observer
+                .observations
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|read| read.bytes_read)
+                .sum::<u64>();
+            assert!(
+                opening <= 64 * 1024,
+                "opening decoded catalog history: {opening}"
+            );
+            let lookup = view.pointer_catalog_lookup(&router, 256 * 1024).unwrap();
+            observer.observations.lock().unwrap().clear();
+            let file = format!("{:064x}", 42);
+            let selected = lookup
+                .files(router.store(), std::slice::from_ref(&file))
+                .await
+                .unwrap();
+            assert_eq!(selected.files().get(&file), catalog.files().get(&file));
+            assert!(
+                observer
+                    .observations
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|read| read.bytes_read)
+                    .sum::<u64>()
+                    <= 256 * 1024
+            );
+            observer.observations.lock().unwrap().clear();
+            lookup.files(router.store(), &[file]).await.unwrap();
+            assert!(observer.observations.lock().unwrap().is_empty());
+            assert_eq!(view.pointer_catalog().await.unwrap(), catalog);
         }
     }
 

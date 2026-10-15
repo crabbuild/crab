@@ -3,8 +3,14 @@ use super::*;
 use crate::pages::{Input, Kind, PageRef, Rows, Writer};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(feature = "storage")]
+mod reader;
 #[cfg(test)]
 mod tests;
+#[cfg(feature = "storage")]
+pub use reader::RunCatalogSource;
+#[cfg(feature = "storage")]
+pub(in crate::capsule_protocol) use reader::{CatalogOrigin, CatalogValue};
 
 const MAGIC: &[u8; 8] = b"CRBRCG01";
 const MAX_DESCRIPTOR_BYTES: usize = 16 * 1024;

@@ -1101,9 +1101,14 @@ mod tests {
         (catalog, pointer)
     }
 
-    async fn publish_catalog(
+    async fn catalog_publication(
         bytes: Bytes,
-    ) -> (crab_storage::StoreLayout<crab_storage::Store>, RootSnapshot) {
+    ) -> (
+        crab_storage::StoreLayout<crab_storage::Store>,
+        RootSnapshot,
+        CapsuleTransaction,
+        Capsule,
+    ) {
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
         let layout = crab_storage::StoreLayout::new(store, "repo".to_owned());
         let base =
@@ -1126,6 +1131,13 @@ mod tests {
             vec![CapsuleSection::new(CapsuleSectionKind::CatalogDelta, bytes)],
         )
         .unwrap();
+        (layout, base, transaction, capsule)
+    }
+
+    async fn publish_catalog(
+        bytes: Bytes,
+    ) -> (crab_storage::StoreLayout<crab_storage::Store>, RootSnapshot) {
+        let (layout, base, transaction, capsule) = catalog_publication(bytes).await;
         let base = crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
             .await
             .unwrap();
@@ -1385,34 +1397,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn known_pointers_reject_corrupted_catalog_pages() {
-        let (catalog, pointer) = pointer_catalog(1, 1);
+    async fn corrupted_catalog_pages_are_rejected_before_publication() {
+        let (catalog, _) = pointer_catalog(1, 1);
         let encoded = catalog.encode().unwrap();
         for truncate in [false, true] {
             let mut bytes = encoded.to_vec();
             if truncate {
                 bytes.pop();
             } else {
-                // Corrupt the first chunk's hash while the outer capsule still
-                // authenticates these bytes. A known file cannot bypass pages.
                 bytes[22] ^= 1;
             }
-            let (layout, base) = publish_catalog(Bytes::from(bytes)).await;
-            let error = prepare_delta(
-                &layout,
-                &base,
-                std::slice::from_ref(&pointer),
-                None,
-                None,
-                None,
-                4,
-                true,
-                &CancellationToken::new(),
-            )
-            .await
-            .unwrap_err();
-            assert!(matches!(error, CrabError::CorruptObject { path, reason }
-                if path == "capsule-protocol pointer catalog" && reason.contains("catalog")));
+            let (layout, base, transaction, capsule) =
+                catalog_publication(Bytes::from(bytes)).await;
+            let expected_root = base.record().digest().to_owned();
+            let error =
+                crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+                    .await
+                    .unwrap_err();
+            assert!(matches!(error, crab_write::WriteError::Metadata(
+                crab_metadata::error::MetadataError::CorruptObject { path, .. })
+                if path == "capsule-protocol pointer catalog"));
+            // Reject before a ref becomes visible: root identity alone cannot
+            // prove this because per-ref heads publish independently of the root.
+            let root = crab_metadata::capsule_protocol::load_root(&layout)
+                .await
+                .unwrap();
+            let refs = crab_read::capsule_protocol::read_visible_refs(&layout)
+                .await
+                .unwrap();
+            assert_eq!(
+                (root.record().digest(), refs.is_empty()),
+                (expected_root.as_str(), true)
+            );
         }
     }
 

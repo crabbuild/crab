@@ -93,18 +93,22 @@ pub(in crate::capsule_protocol) fn index_rows(
                 )?,
                 _ => value.clone(),
             };
-            let mut identity = blake3::Hasher::new();
-            identity.update(b"crab.catalog.value.v1\0");
-            identity.update(&[kind as u8]);
-            identity.update(&normalized);
             output[position].push(CatalogIndexRow {
                 key,
                 value,
-                identity: *identity.finalize().as_bytes(),
+                identity: semantic_identity(kind, &normalized),
             });
         }
     }
     Ok((descriptor.body_bytes, output))
+}
+
+pub(in crate::capsule_protocol) fn semantic_identity(kind: Kind, bytes: &[u8]) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"crab.catalog.value.v1\0");
+    hash.update(&[kind as u8]);
+    hash.update(bytes);
+    *hash.finalize().as_bytes()
 }
 
 fn hash(value: &str) -> Result<[u8; 32]> {
