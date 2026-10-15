@@ -298,6 +298,14 @@ closed and asks the user to run `crab add` again. Recipe leases and push
 snapshots retain shared bodies until the final owner is released; restaging
 reclaims only globally unleased payloads.
 
+Capsule publication adopts a complete prepared xorb only when every chunk is
+selected for the push and still unresolved. Mixed sources are repacked using
+only missing chunks, retaining committed placements for reused bytes. The shared
+staging read plan groups residual requests across files by source, verifies each
+prepared body once, and yields bounded decoded batches. Compression runs off the
+async worker. Ordered recipe occurrences still produce complete file terms;
+local recipe ownership and flush-before-pointer publication are unchanged.
+
 There is no persisted per-file JSON plan or per-file payload copy. Runtime
 `FilePushPlan` values are derived from normalized recipe, remote, prepared, and
 segment rows for the push attempt.
