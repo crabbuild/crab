@@ -1981,3 +1981,38 @@ initial push, then Git-clean add and commit. Its next push failed with
 (`crab/src/git/xet_publication.rs`). The failed fixture retains both delegated
 leases. This maintenance/occurrence slice does not resolve that push blocker;
 full alternating-path and cold-reconstruction qualification remains incomplete.
+
+### Capsule publication uses selected delegated recipes
+
+The preserved 10-GiB failure identifies a verified delegated recipe with 166,469
+ordered occurrences and a 10,737,418,240-byte size. Public occurrence enumeration
+was fixed in #569, but capsule assembly still loaded prepared plans and remote
+chunk authority through published-only queries. That would reconstruct delegated
+files and rebuild their xorbs instead of using their ingestion proof.
+
+A minimized real-staging regression also demonstrates capsule assembly accepting
+an active native batch before handoff. The negative run completes with the
+assertion `unaccepted or inconsistent recipe became publishable` in
+`capsule-handoff-negative-r1.log`; its source patch is captured separately.
+
+The follow-up moves the existing published/delegated merge rule into
+`crab/src/git/push_staging.rs`, shared by pipeline admission and capsule assembly.
+Capsule assembly requires a selected verified recipe with the pointer's exact
+size, reads its ordered pages, and batches prepared authority by recipe identity.
+It reads remote authority from that same recipe. Physical xorbs still undergo
+body, logical-hash and placement verification before they become dependencies.
+There is no admission path for an unrelated active native lease.
+
+The new regression covers native rejection, delegated size mismatch, and exact
+preservation of a non-default prepared encoding. All nine publication tests pass, including the new three-case regression and
+existing protected-publication, catalog-integrity, deduplication and concurrency
+cases. Real 10-GiB retry and cold historical reconstruction remain pending.
+The historical catalog scan in `prepare_delta` remains stage 6 work.
+
+The caller audit confirms `crab/src/cmd/push.rs` and the remote helper both use
+`capsule_push::run`. Neither those success paths nor capsule publication currently
+captures or retires staging push snapshots. The legacy pipeline's snapshot tests
+therefore do not qualify capsule lifecycle. A separate follow-up must bind exact
+selected owners before publication and release only proven committed owners,
+including cancellation, partial/ref-CAS failure and concurrent readers. Until that
+is implemented and tested, local post-push reclamation is not qualified.

@@ -9754,27 +9754,8 @@ impl PushPipeline {
             .iter()
             .map(|(file_hash, _)| *file_hash)
             .collect::<Vec<_>>();
-        let mut selected_recipes = staging.published_recipes_for_files(&file_hashes)?;
-        let delegated_recipes = staging.external_recipes_for_files(&file_hashes)?;
-        // Pointer discovery supplies Git reachability evidence. Delegated
-        // filter/defer leases are eligible only for these selected identities;
-        // unrelated or active native leases never become push-visible here.
-        for (file_hash, delegated) in delegated_recipes {
-            let slot = selected_recipes.get_mut(&file_hash).ok_or_else(|| {
-                CrabError::StagingCorrupt(
-                    "delegated recipe lookup returned an unrequested identity".to_owned(),
-                )
-            })?;
-            match (slot.as_ref(), delegated) {
-                (Some(published), Some(delegated)) if *published != delegated => {
-                    return Err(CrabError::StagingCorrupt(
-                        "published and delegated recipes disagree for one file identity".to_owned(),
-                    ));
-                }
-                (None, Some(delegated)) => *slot = Some(delegated),
-                _ => {}
-            }
-        }
+        let selected_recipes =
+            super::push_staging::recipes_for_selected_pointers(staging, &file_hashes)?;
         let selected_recipes = Arc::new(selected_recipes);
         let recipe_hashes = selected_recipes
             .values()

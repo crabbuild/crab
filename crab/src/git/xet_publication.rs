@@ -110,6 +110,15 @@ pub(crate) async fn prepare_delta(
         }
     })?;
 
+    let file_hashes = unresolved.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+    let recipes = super::push_staging::recipes_for_selected_pointers(staging, &file_hashes)?;
+    let recipe_hashes = recipes
+        .values()
+        .flatten()
+        .map(|recipe| MerkleHash::from(recipe.hash()))
+        .collect::<Vec<_>>();
+    let mut prepared_xorbs = staging.prepared_xorbs_for_recipes(&recipe_hashes)?;
+
     let mut xorb_entries = HashMap::<MerkleHash, XorbCatalogEntry>::new();
     let mut placements = ChunkPlacementMap::new();
 
@@ -125,25 +134,41 @@ pub(crate) async fn prepare_delta(
 
     for (file_hash, file_size) in unresolved {
         check_cancelled(cancel)?;
-        let chunks = staging.chunks_for_file_with_sizes(&file_hash)?;
-        if chunks.is_empty() && file_size != 0 {
+        let recipe = recipes
+            .get(&file_hash)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| CrabError::PointerMissingStaging {
+                total: file_hashes.len(),
+                missing: 1,
+                example_file_hash: file_hash.hex(),
+                example_size: file_size,
+            })?;
+        if recipe.file_size() != file_size {
             return Err(CrabError::StagingCorrupt(format!(
-                "pointer file {} has no staged chunk recipe",
-                file_hash.hex()
+                "staged recipe for file {} has {} bytes, pointer size {file_size}",
+                file_hash.hex(),
+                recipe.file_size(),
             )));
         }
-        let plan = staging.load_file_push_plan(&file_hash).await?;
-        if chunks.is_empty() || plan.is_none() {
-            staging
-                .verify_file_reconstruction_from_chunks(&file_hash, file_size, &chunks)
-                .await?;
+        let mut chunks = Vec::new();
+        let mut next = 0;
+        while next < recipe.chunk_count() {
+            let page = staging.recipe_page(recipe, next)?;
+            next = page.next_occurrence();
+            chunks.extend(
+                page.chunks
+                    .iter()
+                    .map(|chunk| (chunk.chunk_hash, chunk.len)),
+            );
         }
+        let mut plan = crab_staging::push_plan::FilePushPlan::new_verified_recipe(recipe);
+        plan.prepared_xorbs = prepared_xorbs
+            .remove(&MerkleHash::from(recipe.hash()))
+            .unwrap_or_default();
 
-        // An indexed plan is rebuilt from the caller-verified canonical recipe.
-        // Reconstructing the whole file here would duplicate add's stable-stream
-        // proof; payloads newly consumed below still receive hash verification.
-        if plan.is_some()
-            && let Some(recipe) = staging.published_recipe_for_file(&file_hash)?
+        // The selected immutable recipe carries the ingestion verification.
+        // Inspect its remote authority without reconstructing the entire file;
+        // each local or remote xorb consumed below is independently verified.
         {
             let expected_sizes = chunks.iter().copied().collect::<HashMap<_, _>>();
             let mut next_occurrence = 0_u64;
@@ -157,7 +182,7 @@ pub(crate) async fn prepare_delta(
                     })?
                     .min(recipe.chunk_count());
                 for (chunk_hash, candidate) in
-                    staging.recipe_remote_chunk_range(&recipe, next_occurrence, page_end)?
+                    staging.recipe_remote_chunk_range(recipe, next_occurrence, page_end)?
                 {
                     let expected_size = expected_sizes.get(&chunk_hash).ok_or_else(|| {
                         CrabError::StagingCorrupt(format!(
@@ -280,43 +305,41 @@ pub(crate) async fn prepare_delta(
 
     let mut candidate_chunks = placements.keys().copied().collect::<HashSet<_>>();
     for (_, _, _, plan) in &prepared_files {
-        if let Some(plan) = plan {
-            for planned in &plan.prepared_xorbs {
-                let planned_hash = planned.hash()?;
-                if let Some(index) = candidate_indices.get(&planned_hash).copied() {
-                    let existing = prepared_candidates.get(index).ok_or_else(|| {
-                        CrabError::Internal("prepared xorb candidate index is invalid".to_owned())
-                    })?;
-                    if !planned_xorbs_match(existing, planned) {
-                        return Err(CrabError::StagingCorrupt(format!(
-                            "prepared xorb {} has conflicting plans",
-                            planned_hash.hex()
-                        )));
-                    }
-                    continue;
+        for planned in &plan.prepared_xorbs {
+            let planned_hash = planned.hash()?;
+            if let Some(index) = candidate_indices.get(&planned_hash).copied() {
+                let existing = prepared_candidates.get(index).ok_or_else(|| {
+                    CrabError::Internal("prepared xorb candidate index is invalid".to_owned())
+                })?;
+                if !planned_xorbs_match(existing, planned) {
+                    return Err(CrabError::StagingCorrupt(format!(
+                        "prepared xorb {} has conflicting plans",
+                        planned_hash.hex()
+                    )));
                 }
-                if xorb_entries.contains_key(&planned_hash) {
-                    continue;
-                }
-                let planned_placements = planned
-                    .placements
-                    .iter()
-                    .map(crab_staging::push_plan::PlannedPlacement::to_placement)
-                    .collect::<crab_staging::Result<Vec<_>>>()?;
-                if planned_placements
-                    .iter()
-                    .all(|placement| candidate_chunks.contains(&placement.chunk_hash))
-                {
-                    continue;
-                }
-                candidate_chunks.extend(
-                    planned_placements
-                        .iter()
-                        .map(|placement| placement.chunk_hash),
-                );
-                candidate_indices.insert(planned_hash, prepared_candidates.len());
-                prepared_candidates.push(planned.clone());
+                continue;
             }
+            if xorb_entries.contains_key(&planned_hash) {
+                continue;
+            }
+            let planned_placements = planned
+                .placements
+                .iter()
+                .map(crab_staging::push_plan::PlannedPlacement::to_placement)
+                .collect::<crab_staging::Result<Vec<_>>>()?;
+            if planned_placements
+                .iter()
+                .all(|placement| candidate_chunks.contains(&placement.chunk_hash))
+            {
+                continue;
+            }
+            candidate_chunks.extend(
+                planned_placements
+                    .iter()
+                    .map(|placement| placement.chunk_hash),
+            );
+            candidate_indices.insert(planned_hash, prepared_candidates.len());
+            prepared_candidates.push(planned.clone());
         }
     }
 
@@ -1175,6 +1198,15 @@ mod tests {
             )
             .await
             .unwrap();
+        staging.flush_pending().await.unwrap();
+        let recipe = crab_staging::recipe::FileRecipe::from_staged_chunks(
+            crab_staging::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+            MerkleHash::from(file_hash),
+            18,
+            &[(chunk_hash, 9), (chunk_hash, 9)],
+        )
+        .unwrap();
+        staging.publish_verified_history_recipe(&recipe).unwrap();
         staging.close().await.unwrap();
         let staging = Arc::new(
             StagingAreaReadOnly::open(root.path().to_owned())
@@ -1209,6 +1241,94 @@ mod tests {
             ),
             (1024, 0, 1),
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capsule_publication_requires_handoff_and_preserves_prepared_encoding() {
+        use crab_staging::stream::{
+            StreamStageProgress, StreamStageXorbBuilder, stage_reader_streaming,
+        };
+        for (delegated, wrong_size) in [(false, false), (true, true), (true, false)] {
+            let root = tempfile::tempdir().unwrap();
+            let staging = crab_staging::StagingArea::open(root.path().to_owned())
+                .await
+                .unwrap();
+            let bytes = vec![0x71; 2 * 1024 * 1024];
+            let staged = stage_reader_streaming(
+                &mut std::io::Cursor::new(&bytes),
+                Path::new("model.bin"),
+                &staging,
+                StreamStageProgress {
+                    xorb_builder: Some(StreamStageXorbBuilder::new(1, || {
+                        let policy = Arc::new(FixedCompression::new(CompressionScheme::None))
+                            as Arc<dyn CompressionPolicy>;
+                        XorbBuilder::with_policy(policy)
+                    })),
+                    ..Default::default()
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            if delegated {
+                staging
+                    .delegate_publication(&[(&staged.batch_id, Path::new("model.bin"))])
+                    .unwrap();
+            }
+            staging.close().await.unwrap();
+            let staging = Arc::new(
+                StagingAreaReadOnly::open(root.path().to_owned())
+                    .await
+                    .unwrap(),
+            );
+            let expected = staging
+                .prepared_xorbs_for_recipes(&[MerkleHash::from(staged.recipe.hash())])
+                .unwrap();
+            let expected = &expected[&MerkleHash::from(staged.recipe.hash())];
+            assert_eq!(expected.len(), 1);
+            let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+            let layout = crab_storage::StoreLayout::new(store, "repo".to_owned());
+            let base = crab_write::capsule_protocol::initialize(
+                &layout,
+                &"1".repeat(64),
+                "refs/heads/main",
+            )
+            .await
+            .unwrap();
+            let result = prepare_delta(
+                &layout,
+                &base,
+                &[Pointer {
+                    file_hash: staged.file_hash,
+                    size: staged.size + u64::from(wrong_size),
+                    shard_hint: None,
+                }],
+                Some(&staging),
+                None,
+                None,
+                1,
+                false,
+                &CancellationToken::new(),
+            )
+            .await;
+            if !delegated || wrong_size {
+                assert!(
+                    result.is_err(),
+                    "unaccepted or inconsistent recipe became publishable"
+                );
+                continue;
+            }
+            let (delta, stats) = result.unwrap();
+            let actual = &delta.xorbs()[&expected[0].hash];
+            assert_eq!(
+                (
+                    stats.xorbs_uploaded,
+                    actual.body_digest(),
+                    actual.encoded_size()
+                ),
+                (1, expected[0].payload_hash.as_str(), expected[0].bytes),
+            );
+        }
     }
 
     #[derive(Default)]
