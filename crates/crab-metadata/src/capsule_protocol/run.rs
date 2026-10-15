@@ -11,7 +11,7 @@ use crate::error::{MetadataError, Result};
 use crate::validation::validate_content_hash;
 
 const RUN_MAGIC: &[u8; 8] = b"CRBRUN01";
-const RUN_VERSION: u32 = 4;
+const RUN_VERSION: u32 = 5;
 const RUN_TRAILER_BYTES: usize = 8 + 32 + RUN_MAGIC.len();
 pub(super) const MAX_RUN_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 /// Largest number of push capsules coalesced before a repository checkpoint.
@@ -64,6 +64,7 @@ struct CapsuleRunFooter {
     capsules: Vec<RunCapsuleLocation>,
     git_packs: Vec<PackMemberDescriptor>,
     index_pool: Option<RunSectionLocation>,
+    visibility_pool: Option<RunSectionLocation>,
     #[serde(default)]
     admission: Option<RunSectionLocation>,
     admission_pages: Option<AdmissionPages>,
@@ -73,6 +74,7 @@ struct CapsuleRunFooter {
 
 mod admission;
 pub(in crate::capsule_protocol) mod catalog;
+mod visibility_pool;
 use admission::AdmissionPages;
 pub use admission::CapsuleRunAdmission;
 #[cfg(feature = "storage")]
@@ -105,6 +107,7 @@ pub struct CapsuleRunControl {
     capsules: Vec<CapsuleControlLocation>,
     git_packs: Vec<PackMemberDescriptor>,
     index_pool: Option<RunSectionLocation>,
+    visibility_pool: Option<RunSectionLocation>,
     admission: Option<CapsuleRunAdmission>,
     admission_info: Option<(RunSectionLocation, AdmissionPages)>,
     catalog_info: Option<(RunSectionLocation, CatalogPages)>,
@@ -370,6 +373,7 @@ impl CapsuleRunControl {
                 .ok_or_else(|| corrupt("capsule run range overflowed"))?;
         }
         expected_offset = validate_index_pool(&footer, expected_offset, control_offset)?;
+        expected_offset = visibility_pool::validate(&footer, expected_offset, control_offset)?;
         expected_offset = validate_catalog(&footer, expected_offset, control_offset)?;
         if expected_offset != control_offset {
             return Err(corrupt(
@@ -442,6 +446,7 @@ impl CapsuleRunControl {
             capsules: controls,
             git_packs: footer.git_packs,
             index_pool: footer.index_pool,
+            visibility_pool: footer.visibility_pool,
             admission,
             admission_info,
             catalog_info: footer.catalog.zip(footer.catalog_pages),
@@ -508,18 +513,55 @@ impl CapsuleRunControl {
         capsule_hash: &str,
         maximum: u64,
     ) -> Result<Option<super::visibility::CapsuleVisibilityReader>> {
+        self.visibility_reader_with_cache(layout, capsule_hash, maximum, self.visibility_cache())
+    }
+
+    #[cfg(feature = "storage")]
+    fn visibility_cache(&self) -> std::sync::Arc<crate::pages::PageCache> {
+        std::sync::Arc::new(match &self.visibility_pool {
+            Some(pool) => {
+                crate::pages::PageCache::for_region(pool.offset..pool.offset + pool.length)
+            }
+            None => crate::pages::PageCache::default(),
+        })
+    }
+
+    #[cfg(feature = "storage")]
+    fn visibility_reader_with_cache(
+        &self,
+        layout: &crab_storage::StoreLayout<crab_storage::Store>,
+        capsule_hash: &str,
+        maximum: u64,
+        cache: std::sync::Arc<crate::pages::PageCache>,
+    ) -> Result<Option<super::visibility::CapsuleVisibilityReader>> {
         let location = self
             .capsules
             .iter()
             .find(|location| location.hash == capsule_hash)
             .ok_or_else(|| corrupt("visibility capsule is absent from its run"))?;
-        match (&location.visibility, &location.visibility_pages) {
+        let mut range = location.visibility.clone();
+        if let Some(pool) = &self.visibility_pool {
+            let preceding = self
+                .capsules
+                .iter()
+                .take_while(|item| item.hash != capsule_hash)
+                .filter_map(|item| item.visibility.as_ref())
+                .try_fold(pool.offset, |offset, item| {
+                    offset.checked_add(item.length())
+                })
+                .ok_or_else(|| corrupt("pooled visibility offset overflows"))?;
+            range = range
+                .map(|range| PackRange::from_parts(preceding, range.length(), range.blake3()))
+                .transpose()?;
+        }
+        match (&range, &location.visibility_pages) {
             (Some(range), Some(pages)) => super::visibility::CapsuleVisibilityReader::new(
                 layout,
                 &self.hash,
                 range,
                 pages.clone(),
                 maximum,
+                cache,
             )
             .map(Some),
             (None, None) => Ok(None),
@@ -625,12 +667,17 @@ impl CapsuleRunControl {
         &self,
         layout: &crab_storage::StoreLayout<crab_storage::Store>,
     ) -> Result<Vec<CapsuleControl>> {
+        // One immutable run owns this bounded cache. All of its logical edits
+        // share co-located proof blocks; each decoded page still authenticates
+        // against the original capsule's roots and consumes its query budget.
+        let cache = self.visibility_cache();
         let mut controls = self.materialize_controls(
             |location| {
-                self.visibility_reader(
+                self.visibility_reader_with_cache(
                     layout,
                     &location.hash,
                     crate::git_visibility::MAX_GIT_VISIBILITY_INDEX_BYTES,
+                    cache.clone(),
                 )
                 .map(|reader| {
                     reader.map(|reader| ControlVisibility::Paged(std::sync::Arc::new(reader)))
@@ -1015,6 +1062,7 @@ impl CapsuleRun {
         } else {
             None
         };
+        let visibility_pool = visibility_pool::build(&mut body, level, &locations)?;
         let catalog = CatalogPages::build(&capsules)?.map(|(bytes, descriptor)| {
             let range = RunSectionLocation {
                 offset: body.len() as u64,
@@ -1059,6 +1107,7 @@ impl CapsuleRun {
                 capsules: locations.clone(),
                 git_packs: git_packs.clone(),
                 index_pool: index_pool.clone(),
+                visibility_pool,
                 catalog: catalog.as_ref().map(|(range, _)| range.clone()),
                 catalog_pages: catalog.as_ref().map(|(_, descriptor)| descriptor.clone()),
                 admission: admission.as_ref().map(|(_, range)| range.clone()),
@@ -1172,7 +1221,9 @@ impl CapsuleRun {
                 }
             }
         }
-        expected_offset = validate_catalog(&footer, pool_end, footer_start as u64)?;
+        let visibility_end = visibility_pool::validate(&footer, pool_end, footer_start as u64)?;
+        visibility_pool::verify(&bytes, &footer)?;
+        expected_offset = validate_catalog(&footer, visibility_end, footer_start as u64)?;
         if let (Some(range), Some(pages)) = (&footer.catalog, &footer.catalog_pages) {
             let body = bytes
                 .get(range.offset as usize..expected_offset as usize)
@@ -1653,8 +1704,9 @@ fn validate_index_pool(
         return Ok(capsule_end);
     };
     let end = footer
-        .catalog
+        .visibility_pool
         .as_ref()
+        .or(footer.catalog.as_ref())
         .or(footer.admission.as_ref())
         .map_or(control_offset, |range| range.offset);
     validate_body_range(pool, capsule_end, end)?;
@@ -2000,7 +2052,7 @@ mod tests {
     #[test]
     fn unsupported_run_footer_versions_are_rejected() {
         let run = CapsuleRun::leaf(capsule('1', '2')).unwrap();
-        for version in [0, 1, 2, 3, 5, 6, 7] {
+        for version in [0, 1, 2, 3, 4, 6, 7] {
             let mut footer = run.footer.clone();
             footer.version = version;
             let footer = serde_json::to_vec(&footer).unwrap();

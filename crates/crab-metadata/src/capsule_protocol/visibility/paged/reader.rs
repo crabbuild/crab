@@ -21,7 +21,7 @@ pub struct CapsuleVisibilityReader {
     length: u64,
     hash: String,
     complete: std::sync::OnceLock<std::sync::Arc<CapsuleVisibilityDelta>>,
-    cache: PageCache,
+    cache: std::sync::Arc<PageCache>,
 }
 
 impl CapsuleVisibilityReader {
@@ -31,6 +31,7 @@ impl CapsuleVisibilityReader {
         range: &super::super::super::PackRange,
         descriptor: Descriptor,
         maximum: u64,
+        cache: std::sync::Arc<PageCache>,
     ) -> Result<Self> {
         descriptor.validate_region(range.length())?;
         range
@@ -45,7 +46,7 @@ impl CapsuleVisibilityReader {
             length: range.length(),
             hash: range.blake3().to_owned(),
             complete: std::sync::OnceLock::new(),
-            cache: PageCache::default(),
+            cache,
         })
     }
 

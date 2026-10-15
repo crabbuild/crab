@@ -538,7 +538,8 @@ loads, resumable construction, compaction and maintenance scans retain markers.
 The retired unreleased version 5 is rebuilt by existing maintenance, never read
 through an alternate codec.
 
-Run footer version 4 adds an embedded `CRBRCG01` catalog index. Its four paged
+Run footer version 5 retains the embedded `CRBRCG01` catalog index introduced in
+version 4. Its four paged
 key directories retain exact capsule occurrences and group equal immutable
 values by a semantic commitment that excludes physical page offsets. Full run
 verification rebuilds the index from nested capsules, so re-signed membership
@@ -554,5 +555,18 @@ than loading catalog bytes. Full maintenance inspection materializes those
 captured sections explicitly. Run footers contain catalog roots, never inline
 catalog bodies. This reader wiring is under qualification; it does not establish
 the complete history-scaling, lifecycle or 10 GiB acceptance gates.
-The affected run format is absent from the audited release tags; unshipped
-version 3 is rejected rather than retained through a fallback.
+Compacted runs also concatenate copies of their visibility sections after the
+Git index pool. The footer binds the pool's span and digest; full verification
+checks each copy against its original capsule section. Logical controls share
+one cache of decoded pages and 64 KiB proof blocks, bounded to 8 MiB and 256
+entries per physical run. Read-ahead stays inside the visibility pool, never
+crossing Git payloads, and charges the complete fetched blocks on cold and warm
+queries. Every requested page still authenticates against its capsule's roots.
+Expected-old checks, captured prior closures, canonical transaction ordering and
+the distinct-object proof limit remain unchanged. This reduces per-edit network
+round trips; logical replay and distinct historical-object growth remain open
+qualification gates.
+The current capsule format is absent from the six published release tags and
+19 known local tag objects audited on 2026-10-15. The published `v1.2.4` object
+differs from the local tag; both were inspected without replacing that tag.
+Unshipped run footer versions 1 through 4 are rejected, with no fallback reader.
