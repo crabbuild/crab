@@ -1353,7 +1353,12 @@ class Verifier:
         )
 
     def verify_cli_hydrate_traffic(self) -> None:
-        for name in ("cli-cold-hydrate", "cli-warm-hydrate", "restart-cli-hydrate"):
+        for name in (
+            "cli-dedup-cold-hydrate",
+            "cli-cold-hydrate",
+            "cli-warm-hydrate",
+            "restart-cli-hydrate",
+        ):
             record = self.record("cli_hydrates", name)
             origin_delta = self.int_value(record, "origin_gets_after") - self.int_value(
                 record, "origin_gets_before"
