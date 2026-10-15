@@ -674,7 +674,11 @@ async fn load_visible_ref_capsules(
     Ok(ordered)
 }
 
-async fn capture_ref_heads(
+/// Capture one stable, epoch-filtered ref-head view and its committed activations.
+///
+/// Rejects mismatched object identities, activation records and uncommitted base
+/// heads. Concurrent changes retry within the existing bounded capture policy.
+pub async fn capture_ref_heads(
     router: &StoreLayout<Store>,
     root: &super::RepositoryRoot,
 ) -> Result<(Vec<CapsuleRefHead>, BTreeSet<String>)> {
@@ -717,6 +721,16 @@ async fn capture_ref_heads(
         if before != after {
             continue;
         }
+        for head in &heads {
+            let visible = head.visible(&active);
+            let base_oid = root.refs().get(head.ref_name()).map(String::as_str);
+            if visible.transaction_id().is_none() && visible.oid() != base_oid {
+                return Err(corrupt(
+                    &router.capsule_ref_head_path(&capsule_ref_name_key(head.ref_name())),
+                    "capsule ref head without a transaction differs from the compacted root",
+                ));
+            }
+        }
         return Ok((heads, active));
     }
     Err(contract_error(
@@ -745,7 +759,11 @@ fn listed_version_matches(object: &ObjectMeta, etag: &ETag) -> bool {
             .is_none_or(|listed| etag.version.as_ref() == Some(listed))
 }
 
-async fn resolve_referenced_activations(
+/// Validate referenced activation records and select those committed for these heads.
+///
+/// Callers filter retired epochs before resolving activations so stale heads
+/// cannot introduce authority or demand retired dependencies.
+pub async fn resolve_referenced_activations(
     router: &StoreLayout<Store>,
     heads: &[CapsuleRefHead],
 ) -> Result<BTreeSet<String>> {

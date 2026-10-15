@@ -64,10 +64,10 @@ pub use run::{
 pub use run::{CapsuleRunAdmissionReader, RunCatalogSource};
 #[cfg(feature = "storage")]
 pub use store::{
-    RootSnapshot, create_root, load_capsule_run, load_capsule_run_control,
+    RootSnapshot, capture_ref_heads, create_root, load_capsule_run, load_capsule_run_control,
     load_capsule_run_git_control, load_history_chain, load_history_segment,
     load_layered_checkpoint, load_layered_checkpoint_control, load_pointer_catalog,
-    load_pointer_catalog_from_root, load_root,
+    load_pointer_catalog_from_root, load_root, resolve_referenced_activations,
 };
 pub use transaction::{CapsuleRefEdit, CapsuleTransaction};
 pub use transaction_record::{

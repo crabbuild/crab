@@ -534,3 +534,40 @@ async fn visibility_lookup_keeps_oid_pages_cold_until_requested() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn ref_capture_rejects_uncommitted_base_changes_only_in_the_active_epoch() {
+    for retired in [false, true] {
+        let layout = StoreLayout::new(
+            Store::new(Arc::new(object_store::memory::InMemory::new())),
+            "repositories/ref-capture".to_owned(),
+        );
+        let root = RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap();
+        let name = "refs/tags/uncommitted";
+        let head = CapsuleRefHead::from_root(
+            name,
+            if retired {
+                "2".repeat(64)
+            } else {
+                root.ref_epoch().to_owned()
+            },
+            Some("3".repeat(40)),
+            None,
+        )
+        .unwrap();
+        layout
+            .store()
+            .create_strict(
+                &layout.capsule_ref_head_path(&capsule_ref_name_key(name)),
+                head.encode().unwrap(),
+            )
+            .await
+            .unwrap();
+        let result = capture_ref_heads(&layout, &root).await;
+        if retired {
+            assert!(result.unwrap().0.is_empty());
+        } else {
+            assert!(matches!(result, Err(MetadataError::CorruptObject { .. })));
+        }
+    }
+}
