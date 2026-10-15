@@ -10,7 +10,7 @@ The large-file cases prove pointer staging, object-store publication, fresh
 clone, hydration, and byte identity. A separate ordinary-Git matrix proves
 missing/corrupt metadata-root handling, update/fetch, deletion, force and
 non-fast-forward behavior, atomic rejection, tag following, shallow history,
-immutable-pack failures, and concurrent push serialization.
+capsule loss, embedded pack/index corruption, and concurrent push serialization.
 
 With ``--source``, run only the two managed-file workflows on disposable
 clones of a read-only real repository. Use a run root on the workspace volume
@@ -203,6 +203,31 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def capsule_member_range(body: bytes, kind: str) -> tuple[int, int]:
+    """Locate one pack/index fault inside the synthetic single-member run."""
+    if len(body) < 48 or body[-8:] != b"CRBRUN01" or kind not in ("pack", "index"):
+        raise SmokeError("fault fixture is not a capsule run with a pack/index target")
+    footer_length = int.from_bytes(body[-48:-40], "big")
+    footer_start = len(body) - 48 - footer_length
+    if not 0 < footer_length <= 8 * 1024 * 1024 or footer_start < 0:
+        raise SmokeError("fault fixture footer is outside its container")
+    try:
+        footer = json.loads(body[footer_start:-48])
+        members = footer["git_packs"]
+        if footer["version"] != 4 or len(members) != 1:
+            raise SmokeError("fault fixture requires one current-format pack member")
+        offset, length = members[0][kind]["offset"], members[0][kind]["length"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SmokeError("fault fixture has no usable pack member") from exc
+    if (type(offset) is not int or type(length) is not int
+            or offset < 0 or length < 4 or offset + length > footer_start):
+        raise SmokeError("fault fixture range overlaps control bytes or escapes its container")
+    magic = b"PACK" if kind == "pack" else b"\xfftOc"
+    if body[offset:offset + 4] != magic:
+        raise SmokeError("fault fixture member does not contain the selected Git format")
+    return offset, length
 
 
 def parse_pointer(blob: str) -> PointerRecord:
@@ -1314,122 +1339,74 @@ class AddCommitPushSmoke:
             {"stderr_log": clone.stderr_log},
         )
 
-    def run_immutable_object_failure_case(self, object_kind: str) -> None:
-        case_name = f"missing-{object_kind}"
+    def run_capsule_failure_case(self, fault: str) -> None:
+        case_name = "missing-capsule" if fault == "missing" else f"corrupt-{fault}"
         repo, remote_url, repo_prefix = self.prepare_git_repo(case_name)
         remote_tip = self.commit_text(repo, "payload.txt", "immutable\n", "immutable")
         self.run_git(repo, ["push", "-u", "origin", "main"])
+        self.check(
+            f"{case_name}-healthy-tip-before-fault",
+            self.ls_remote(remote_url, name=f"{case_name} healthy refs").get("refs/heads/main") == remote_tip,
+        )
         keys = self.list_keys(repo_prefix)
-        suffix = f".{object_kind}"
-        candidates = sorted(key for key in keys if key.endswith(suffix))
-        self.check(
-            f"{case_name}-fixture-object-found",
-            bool(candidates),
-            {"suffix": suffix, "keys": sorted(keys)},
-        )
+        candidates = sorted(key for key in keys if key.startswith(f"{repo_prefix}/v2/capsules/"))
+        self.check(f"{case_name}-fixture-object-found", len(candidates) == 1, {"keys": candidates})
         target_key = candidates[0]
-        status, _, body = self.signed_s3_request("DELETE", target_key)
-        self.check(
-            f"{case_name}-fixture-object-deleted",
-            status in (200, 204),
-            {
-                "status": status,
-                "key": target_key,
-                "body": body.decode("utf-8", errors="replace")[:200],
-            },
-        )
-
+        authority = {}
+        for key in sorted(key for key in keys if key == f"{repo_prefix}/v2/root" or key.startswith(f"{repo_prefix}/v2/refs/")):
+            status, _, value = self.signed_s3_request("GET", key)
+            self.check(f"{case_name}-authority-readable-before-fault", status == 200, {"key": key})
+            authority[key] = value
+        status, headers, original = self.signed_s3_request("GET", target_key)
+        self.check(f"{case_name}-fixture-body-readable", status == 200 and len(original) < 1024 * 1024)
+        if fault == "missing":
+            status, _, _ = self.signed_s3_request("DELETE", target_key)
+            absent, _, _ = self.signed_s3_request("GET", target_key)
+            self.check(f"{case_name}-fixture-object-deleted", status in (200, 204) and absent == 404)
+        else:
+            offset, length = capsule_member_range(original, fault)
+            damaged = bytearray(original)
+            damaged[offset] ^= 1
+            status, _, _ = self.signed_s3_request(
+                "PUT", target_key, body=bytes(damaged), extra_headers={"if-match": headers["etag"]},
+            )
+            read_status, _, stored = self.signed_s3_request("GET", target_key)
+            self.check(
+                f"{case_name}-fixture-member-corrupted",
+                status in (200, 201) and read_status == 200 and stored == bytes(damaged),
+                {"key": target_key, "member_offset": offset, "member_length": length},
+            )
         clone_dir = self.run_root / case_name / "clone"
-        clone = self.clone_git(
-            remote_url, clone_dir, name=f"{case_name} git clone", check=False
+        clone_cache = self.run_root / case_name / "cold-cache"
+        self.check(f"{case_name}-clone-cache-starts-empty", not clone_cache.exists())
+        clone = self.run_cmd(
+            f"{case_name} git clone", ["git", "clone", remote_url, str(clone_dir)], self.run_root,
+            check=False, extra_env={"CRAB_CACHE_DIR": str(clone_cache)},
         )
         head = self.run_git(
-            self.run_root,
-            ["-C", str(clone_dir), "rev-parse", "--verify", "HEAD"],
-            name=f"{case_name} verify no local ref update",
-            check=False,
+            self.run_root, ["-C", str(clone_dir), "rev-parse", "--verify", "HEAD"],
+            name=f"{case_name} verify no local ref update", check=False,
         )
         self.check(
             f"{case_name}-clone-fails-before-checkout",
-            clone.exit_code != 0
-            and head.exit_code != 0
-            and not (clone_dir / "payload.txt").exists(),
-            {
-                "clone_exit_code": clone.exit_code,
-                "head_exit_code": head.exit_code,
-                "target_key": target_key,
-            },
+            clone.exit_code != 0 and head.exit_code != 0 and not (clone_dir / "payload.txt").exists(),
+            {"clone_exit_code": clone.exit_code, "head_exit_code": head.exit_code, "target_key": target_key},
         )
-        refs = self.ls_remote(remote_url, name=f"{case_name} refs remain coherent")
-        self.check(
-            f"{case_name}-remote-ref-remains-original",
-            refs.get("refs/heads/main") == remote_tip,
-            {"expected": remote_tip, "actual": refs.get("refs/heads/main")},
-        )
-
-    def run_corrupt_index_failure_case(self) -> None:
-        case_name = "corrupt-idx"
-        repo, remote_url, repo_prefix = self.prepare_git_repo(case_name)
-        remote_tip = self.commit_text(repo, "payload.txt", "immutable\n", "immutable")
-        self.run_git(repo, ["push", "-u", "origin", "main"])
-        candidates = sorted(
-            key for key in self.list_keys(repo_prefix) if key.endswith(".idx")
-        )
-        self.check(
-            f"{case_name}-fixture-object-found",
-            bool(candidates),
-            {"suffix": ".idx", "keys": candidates},
-        )
-        target_key = candidates[0]
-        status, _, body = self.signed_s3_request(
-            "PUT", target_key, body=b"not a valid git pack index\n"
-        )
-        self.check(
-            f"{case_name}-fixture-object-corrupted",
-            status in (200, 201),
-            {
-                "status": status,
-                "key": target_key,
-                "body": body.decode("utf-8", errors="replace")[:200],
-            },
-        )
-
-        clone_dir = self.run_root / case_name / "clone"
-        clone = self.clone_git(
-            remote_url, clone_dir, name=f"{case_name} git clone", check=False
-        )
-        head = self.run_git(
-            self.run_root,
-            ["-C", str(clone_dir), "rev-parse", "--verify", "HEAD"],
-            name=f"{case_name} verify no local ref update",
-            check=False,
-        )
-        clone_stderr = Path(clone.stderr_log).read_text(
-            encoding="utf-8", errors="replace"
-        )
-        self.check(
-            f"{case_name}-clone-fails-before-checkout",
-            clone.exit_code != 0
-            and head.exit_code != 0
-            and not (clone_dir / "payload.txt").exists(),
-            {
-                "clone_exit_code": clone.exit_code,
-                "head_exit_code": head.exit_code,
-                "target_key": target_key,
-            },
-        )
-        self.check(
-            f"{case_name}-clone-surfaces-integrity-error",
-            "CRAB-E0020" in clone_stderr
-            or "corrupt object" in clone_stderr.lower(),
-            {"stderr_log": clone.stderr_log},
-        )
-        refs = self.ls_remote(remote_url, name=f"{case_name} refs remain coherent")
-        self.check(
-            f"{case_name}-remote-ref-remains-original",
-            refs.get("refs/heads/main") == remote_tip,
-            {"expected": remote_tip, "actual": refs.get("refs/heads/main")},
-        )
+        if fault != "missing":
+            diagnostic = Path(clone.stderr_log).read_text(encoding="utf-8", errors="replace")
+            self.check(
+                f"{case_name}-clone-surfaces-integrity-error",
+                "CRAB-E0020" in diagnostic or "corrupt object" in diagnostic.lower(),
+                {"stderr_log": clone.stderr_log},
+            )
+        # Payloads share their physical object with discovery controls. Compare
+        # authority bytes directly; failed discovery cannot prove unchanged refs.
+        after = {}
+        for key in authority:
+            status, _, value = self.signed_s3_request("GET", key)
+            self.check(f"{case_name}-authority-readable-after-fault", status == 200, {"key": key})
+            after[key] = value
+        self.check(f"{case_name}-remote-authority-unchanged", after == authority)
 
     def run_concurrent_push_case(self) -> None:
         case_name = "concurrent-cas"
@@ -2312,9 +2289,8 @@ class AddCommitPushSmoke:
         self.run_ref_update_delete_force_and_tag_case()
         self.run_atomic_rejection_case()
         self.run_shallow_case()
-        self.run_immutable_object_failure_case("pack")
-        self.run_immutable_object_failure_case("idx")
-        self.run_corrupt_index_failure_case()
+        for fault in ("missing", "pack", "index"):
+            self.run_capsule_failure_case(fault)
         self.run_concurrent_push_case()
         self.run_committed_restage_before_first_push_case()
         self.run_partial_overlap_case()
