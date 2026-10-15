@@ -203,6 +203,22 @@ SlateDB contains only committed, origin-bound receipts and is updated after a
 successful push CAS; it never stores add claims, local paths, or pending
 uploads.
 
+Capsule pushes publish chunk hints into the same shared database after ref
+visibility. Their head/source keys are separate from the released manifest
+receipt keys. A source assertion carries the whole-xorb catalog digest and an
+origin receipt captured from the verified PUT or GET; the receipt's payload
+digest remains distinct. Readers batch requested chunks, authenticate the
+source repository's current paged catalog, check each exact chunk position and
+size, then verify canonical origin identity. An absent source or changed
+physical descriptor cannot turn an index hint into authority.
+
+Direct publication and protected receive use the same bounded candidate
+encoder/writer. Protected promotion carries the canonical operation identity;
+client staging-prefix writes do not confer canonical origin proof. Every index
+writer is explicitly closed, including batch failures. A post-commit index
+failure leaves a successful ref publication visible and reports repair work;
+local packing remains available for future lookup misses.
+
 Concurrent add lookups own their receipt snapshot and validation result across
 remote awaits. They share keyed advisory caches, not the push pipeline's
 mutable per-push proof accumulator; otherwise one file can erase another's

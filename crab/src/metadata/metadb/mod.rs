@@ -27,6 +27,7 @@ use tracing::{debug, info, warn};
 use crate::core::error::{CrabError, MetaDbError, Result};
 use crate::core::metrics::Metrics;
 use crab_metadata::chunk_index::ChunkIndex;
+use crab_metadata::key_codec::METADB_FORMAT_VERSION;
 use crab_metadata::persistent_chunk_index::PersistentChunkIndex;
 use crab_metadata::{key_codec, value_codec};
 
@@ -65,8 +66,6 @@ const DEFAULT_WAL_FLUSH_SIZE: u64 = 4 * 1024 * 1024;
 /// a ~1% false-positive rate, which SlateDB recommends for point
 /// lookups.
 const DEFAULT_BLOOM_BITS_PER_KEY: u32 = 10;
-
-const METADB_FORMAT_VERSION: u32 = 1;
 
 /// Aggregated snapshot of `sys:*` keys in one database.
 ///
