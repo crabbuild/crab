@@ -250,6 +250,39 @@ async fn integrity_checks_every_retained_body_after_readiness_replacement() {
 
 #[tokio::test]
 #[cfg(feature = "remote-index")]
+async fn verified_capture_distinguishes_control_movement_from_corruption() {
+    for readiness in [false, true] {
+        let layout = fixture();
+        let capture = verify_retained_browse_indexes(&layout, 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(capture.is_current(&layout).await.unwrap());
+        let path = if readiness {
+            let path = layout.capsule_browse_indexes_path();
+            layout
+                .store()
+                .put(&path, indexes('a').encode().unwrap())
+                .await
+                .unwrap();
+            path
+        } else {
+            retain_browse_indexes(&layout, &indexes('a'), 1, None, &[])
+                .await
+                .unwrap();
+            layout.browse_retained_head_path()
+        };
+        assert!(!capture.is_current(&layout).await.unwrap());
+        layout
+            .store()
+            .put_overwrite(&path, Bytes::from_static(b"corrupt"))
+            .await
+            .unwrap();
+        assert!(capture.is_current(&layout).await.is_err());
+    }
+}
+
+#[tokio::test]
+#[cfg(feature = "remote-index")]
 async fn advertised_readiness_requires_authenticated_lifetime_ownership() {
     let layout = fixture();
     layout

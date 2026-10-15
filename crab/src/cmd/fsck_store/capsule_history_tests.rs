@@ -225,6 +225,117 @@ async fn fsck_rejects_lifetime_corruption_during_original_source_verification() 
 }
 
 #[tokio::test]
+async fn data_checks_reject_browse_corruption_during_xorb_verification() {
+    for readiness in [false, true] {
+        let (store, prefix, root, xorb_hash, _) = super::tests::capsule_checker_fixture().await;
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let backend = Arc::new(CorruptLifetimeDuringRead {
+            inner: Arc::clone(store.inner()),
+            source: router.xorb_path(&xorb_hash),
+            head: if readiness {
+                layout.capsule_browse_indexes_path()
+            } else {
+                layout.browse_retained_head_path()
+            },
+            fired: AtomicBool::new(false),
+        });
+        let store = crab_storage::Store::new(backend.clone());
+        let checker = StoreChecker::for_capsule_repository(
+            crate::storage::store::Store::from_storage(store),
+            prefix,
+            root,
+        )
+        .await
+        .unwrap();
+        let result = checker.check_data_chain().await;
+        assert!(backend.fired.load(Ordering::SeqCst));
+        assert!(
+            result.is_err(),
+            "fsck accepted corrupt browse metadata after its xorb read: readiness={readiness}, {result:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn final_snapshot_check_rejects_browse_movement_after_payload_verification() {
+    for readiness in [false, true] {
+        let (store, prefix, root, _, _) = super::tests::capsule_checker_fixture().await;
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let checker = StoreChecker::for_capsule_repository(store.clone(), prefix, root)
+            .await
+            .unwrap();
+        assert!(checker.check_data_chain().await.unwrap().is_empty());
+        let indexes = crab_metadata::capsule_protocol::BrowseIndexes::new(
+            "a".repeat(64),
+            "b".repeat(64),
+            None,
+        )
+        .unwrap();
+        if readiness {
+            store
+                .put(
+                    &layout.capsule_browse_indexes_path(),
+                    indexes.encode().unwrap(),
+                )
+                .await
+                .unwrap();
+        } else {
+            crab_metadata::capsule_protocol::retain_browse_indexes(&layout, &indexes, 0, None, &[])
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            checker.check_orphan_file_index().await,
+            Err(CrabError::Protocol(reason)) if reason.contains("browse retention changed")
+        ));
+    }
+}
+
+#[tokio::test]
+async fn capsule_recipe_probe_does_not_require_browse_maintenance() {
+    let (store, prefix, root, _, _) = super::tests::capsule_checker_fixture().await;
+    let router = StoreLayout::new(store.clone(), prefix.clone());
+    store
+        .put(
+            &router.repo_path("v2/browse-retention"),
+            Bytes::from_static(b"corrupt"),
+        )
+        .await
+        .unwrap();
+    let checker = StoreChecker::for_capsule_repository(store, prefix, root)
+        .await
+        .unwrap();
+    let (hash, file) = checker
+        .capsule
+        .as_ref()
+        .unwrap()
+        .catalog
+        .files()
+        .first_key_value()
+        .unwrap();
+    let pointer = Pointer {
+        file_hash: MerkleHash::from_hex(hash).unwrap().into(),
+        size: file.size(),
+        shard_hint: None,
+    };
+    let proof = checker
+        .verify_capsule_pointer_data(&[pointer], &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(proof.verified == 1 && proof.issues.is_empty(), "{proof:?}");
+}
+
+#[tokio::test]
 async fn data_checks_reject_lifetime_movement_after_checker_construction() {
     let (layout, root, run) = history_fixture().await;
     let pointer = run_pointer(&run, root.record().digest());

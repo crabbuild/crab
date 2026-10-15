@@ -133,8 +133,10 @@ requires background browse maintenance before GC; there is no scan fallback.
 Full capsule fsck also authenticates the retained chain, decodes complete
 graph/path-state indexes, and verifies physical-index and original source bytes,
 including superseded ref-only runs. Shared captures stream each source body once
-during this phase. Lifetime/readiness movement during verification requires a retry;
-mirror pointer-recipe probes do not acquire this full maintenance workload.
+during this phase. Fsck holds the verified lifetime/readiness capture through
+payload verification and the final snapshot check. Revalidation reads only bounded
+control records; valid movement requires a retry and corruption fails validation.
+Mirror pointer-recipe probes do not initialize this full maintenance workload.
 
 Explicit history pruning trims superseded captures below the oldest retained
 checkpoint generation only after the authoritative history CAS succeeds. Current
