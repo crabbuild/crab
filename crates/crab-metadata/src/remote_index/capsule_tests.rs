@@ -84,3 +84,82 @@ async fn capsule_candidates_writer_rejects_noncanonical_existing_databases() {
         }
     }
 }
+
+#[tokio::test]
+async fn capsule_exact_placement_survives_head_replacement() {
+    use crate::capsule_protocol::ShardCatalogEntry;
+    use crate::receipts::CommittedChunkPlacement;
+
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+    let config = RemoteIndexConfig::for_repo("source");
+    let xorb = MerkleHash::from([3; 32]);
+    let chunk = MerkleHash::from([1; 32]);
+    let mut catalog = PointerCatalog::new();
+    catalog
+        .insert_xorb(
+            xorb.hex(),
+            XorbCatalogEntry::new(
+                100,
+                "4".repeat(64),
+                vec![XorbChunkEntry::new(chunk.hex(), 9)],
+            ),
+        )
+        .unwrap();
+    catalog
+        .insert_shard("2".repeat(64), ShardCatalogEntry::new(20, vec![xorb.hex()]))
+        .unwrap();
+    let mut origin = OriginReceipt::new(
+        "canonical-origin".to_owned(),
+        format!(".crab/xorbs/03/{}", xorb.hex()),
+        xorb.into(),
+        [5; 32],
+        100,
+        Some("first".to_owned()),
+        None,
+    );
+    let mut placements = Vec::new();
+    for repo in ["source", "newer-source"] {
+        write_capsule_chunk_candidates(
+            Arc::clone(&store),
+            &config,
+            repo,
+            &catalog,
+            &HashMap::from([(xorb, origin.clone())]),
+        )
+        .await
+        .unwrap();
+        let reader = super::open_reader(
+            Arc::clone(&store),
+            &config.chunk_index_path,
+            "chunk_index_db",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let head = reader
+            .get(crate::key_codec::capsule_chunk_head_key(&chunk.into()))
+            .await
+            .unwrap()
+            .unwrap();
+        reader.close().await.unwrap();
+        placements.push(CommittedChunkPlacement::decode(&head).unwrap());
+        origin.etag = Some("second".to_owned());
+    }
+    let first = &placements[0];
+    let mut key = vec![0x08];
+    key.extend_from_slice(&first.placement_id());
+    let reader = super::open_reader(store, &config.chunk_index_path, "chunk_index_db")
+        .await
+        .unwrap()
+        .unwrap();
+    let exact = reader.get(key).await.unwrap();
+    reader.close().await.unwrap();
+    assert_eq!(
+        (
+            placements[0] != placements[1],
+            exact.map(|value| CommittedChunkPlacement::decode(&value).unwrap())
+        ),
+        (true, Some(first.clone())),
+        "a changed shared head must not erase the proof selected by an earlier add",
+    );
+}

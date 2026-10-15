@@ -418,6 +418,7 @@ async fn run_inner(
                     staging,
                     caching_store,
                     metrics,
+                    &config.metadb,
                     config.upload_concurrency,
                     config.protected_push.is_none(),
                     cancel,

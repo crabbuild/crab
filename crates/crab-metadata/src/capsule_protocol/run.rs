@@ -144,6 +144,7 @@ pub struct CapsuleControl {
 
 #[derive(Debug, Clone)]
 enum ControlVisibility {
+    #[cfg(any(feature = "storage", test))]
     Complete(std::sync::Arc<CapsuleVisibilityDelta>),
     #[cfg(feature = "storage")]
     Paged(std::sync::Arc<super::visibility::CapsuleVisibilityReader>),
@@ -768,6 +769,9 @@ impl CapsuleControl {
     pub fn visibility_delta(&self) -> Result<Option<&CapsuleVisibilityDelta>> {
         match &self.visibility {
             None => Ok(None),
+            #[cfg(not(any(feature = "storage", test)))]
+            Some(never) => match *never {},
+            #[cfg(any(feature = "storage", test))]
             Some(ControlVisibility::Complete(delta)) => Ok(Some(delta)),
             #[cfg(feature = "storage")]
             Some(ControlVisibility::Paged(_)) => Err(corrupt(

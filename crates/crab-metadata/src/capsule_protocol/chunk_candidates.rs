@@ -1,11 +1,15 @@
 //! Rebuildable chunk hints whose source authority is a capsule catalog.
-use std::collections::{BTreeMap, HashMap};
+#[cfg(any(test, feature = "remote-index"))]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
 use super::XorbCatalogEntry;
 use crate::error::{MetadataError, Result};
-use crate::receipts::{CommittedChunkPlacement, OriginReceipt, RECEIPT_SCHEMA_VERSION};
+#[cfg(any(test, feature = "remote-index"))]
+use crate::receipts::RECEIPT_SCHEMA_VERSION;
+use crate::receipts::{CommittedChunkPlacement, OriginReceipt};
 use crab_xet::hash::MerkleHash;
 
 pub use crate::key_codec::{capsule_chunk_anchor_key, capsule_chunk_head_key};
@@ -110,6 +114,7 @@ pub struct CapsuleChunkCandidates {
     pub anchors: HashMap<[u8; 32], CapsuleChunkAnchor>,
 }
 
+#[cfg(any(test, feature = "remote-index"))]
 /// Encode one bounded xorb's candidates after full verification and ref publication.
 pub(crate) fn capsule_chunk_candidate_rows(
     repo_prefix: &str,
@@ -152,10 +157,14 @@ pub(crate) fn capsule_chunk_candidate_rows(
             });
     }
     for (hash, placement) in placements {
+        let encoded = placement.encode()?.to_vec();
+        // Preserve the exact add-time assertion when another publication replaces
+        // the shared head. The placement digest also commits to the chunk key.
         rows.push((
-            capsule_chunk_head_key(&hash).to_vec(),
-            placement.encode()?.to_vec(),
+            crate::key_codec::capsule_chunk_placement_key(&placement.placement_id()).to_vec(),
+            encoded.clone(),
         ));
+        rows.push((capsule_chunk_head_key(&hash).to_vec(), encoded));
     }
     Ok(rows)
 }

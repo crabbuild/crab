@@ -10,6 +10,7 @@ use crate::validation::validate_content_hash;
 const POINTER_CATALOG_VERSION: u32 = 1;
 
 pub(super) mod paged;
+pub use paged::MAX_CATALOG_BYTES;
 #[cfg(feature = "storage")]
 pub use paged::PointerCatalogLookup;
 
