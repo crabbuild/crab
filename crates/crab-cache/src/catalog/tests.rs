@@ -5,6 +5,15 @@ fn open_catalog(root: &Path) -> Result<Database> {
     super::open_catalog(&PinnedRoot::create(root)?, &root.join(CATALOG_FILE))
 }
 
+fn checkpoint_catalog_snapshot(root: &Path) {
+    // These fixtures copy or replace only the main file. Let SQLite fold its
+    // WAL and remove recovery side files before constructing that snapshot.
+    open_catalog(root)
+        .unwrap()
+        .execute_batch("PRAGMA journal_mode = DELETE;")
+        .unwrap();
+}
+
 async fn payload(root: &Path, byte: u8, size: usize) -> PathBuf {
     let data = vec![byte; size];
     let hash = crab_xet::hash::compute_data_hash(&data).hex();
@@ -19,6 +28,28 @@ async fn payload(root: &Path, byte: u8, size: usize) -> PathBuf {
         .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(u64::from(byte)))
         .unwrap();
     path
+}
+
+#[tokio::test]
+async fn reservations_reuse_uncheckpointed_wal_between_operations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cache");
+    let catalog = CacheCatalog::new(root.clone(), 1024 * 1024);
+    for index in 0..8 {
+        drop(
+            catalog
+                .reserve(&root.join(format!("incoming-{index}")), 7)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    // A checkpoint on every final connection close makes small cache fills
+    // issue a device flush per reservation, even under WAL/NORMAL policy.
+    assert!(
+        std::fs::metadata(root.join(format!("{CATALOG_FILE}-wal")))
+            .is_ok_and(|metadata| metadata.len() > 32)
+    );
 }
 
 #[tokio::test]
@@ -215,14 +246,12 @@ fn read_only_stats_preserves_quiet_and_uncheckpointed_catalogs() {
                 "INSERT INTO cache_entries VALUES ('entry', 'temporary', 'key', 17, 0, 0)",
             )
             .unwrap();
-        if retained_wal {
-            connection
-                .set_db_config(
-                    rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
-                    true,
-                )
-                .unwrap();
-        }
+        connection
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                retained_wal,
+            )
+            .unwrap();
         drop(connection);
         assert_eq!(
             root.join(format!("{CATALOG_FILE}-wal")).exists(),
@@ -507,6 +536,7 @@ async fn owner_cleanup_releases_only_the_original_root_after_replacement() {
     let path = root.join("incoming");
     let lease = catalog.lease(&path).await.unwrap();
     let reservation = catalog.reserve(&path, 7).await.unwrap().unwrap();
+    checkpoint_catalog_snapshot(&root);
     let moved = tmp.path().join("moved");
     std::fs::rename(&root, &moved).unwrap();
     ensure_private_cache_directory(&root).unwrap();
@@ -584,6 +614,7 @@ fn reservation_keeps_database_generation_leased_after_connection_close() {
         .reserve_sync(&root.join("incoming"), 7)
         .unwrap()
         .unwrap();
+    checkpoint_catalog_snapshot(&root);
     let main = root.join(CATALOG_FILE);
     let retired = root.join("retired.sqlite");
     std::fs::rename(&main, &retired).unwrap();
@@ -654,6 +685,7 @@ fn windows_pid_liveness_distinguishes_current_and_missing_processes() {
 
 #[cfg(unix)]
 fn replace_catalog_generation(root: &Path, replace_main: bool) {
+    checkpoint_catalog_snapshot(root);
     let main = root.join(CATALOG_FILE);
     let retired = root.join("retired.sqlite");
     if replace_main {
@@ -1137,6 +1169,7 @@ async fn dropping_owners_never_recreates_or_follows_a_replaced_catalog() {
         let catalog = CacheCatalog::new(root.clone(), 1024 * 1024);
         let lease = catalog.lease(&path).await.unwrap();
         let reservation = catalog.reserve(&path, 7).await.unwrap().unwrap();
+        checkpoint_catalog_snapshot(&root);
         let old = tmp.path().join("retired.sqlite");
         std::fs::rename(root.join(CATALOG_FILE), &old).unwrap();
         if link {

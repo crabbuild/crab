@@ -719,6 +719,7 @@ fn open_catalog(root: &PinnedRoot, path: &Path) -> Result<Database> {
 }
 
 fn configure_catalog(mut connection: Database, path: &Path) -> Result<Database> {
+    retain_catalog_wal(&connection).map_err(|source| index_error(path, source))?;
     connection
         .pragma_update(None, "synchronous", "NORMAL")
         .map_err(|source| index_error(path, source))?;
@@ -742,6 +743,18 @@ fn configure_catalog(mut connection: Database, path: &Path) -> Result<Database> 
             Err(error) => return Err(error),
         }
     }
+}
+
+fn retain_catalog_wal(connection: &Database) -> rusqlite::Result<()> {
+    // Short catalog connections must not checkpoint and flush the device on
+    // every reservation or owner release. SQLite's automatic checkpoints and
+    // existing sync policy still govern the retained, generation-bound WAL.
+    connection
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .map(|_| ())
 }
 
 fn catalog_schema_ready(connection: &Database, path: &Path) -> Result<bool> {
@@ -935,7 +948,12 @@ fn remove_owner_row(
     ) else {
         return;
     };
-    let _ = connection.execute(sql, params![first, second]);
+    if let Err(error) = retain_catalog_wal(&connection)
+        .and_then(|()| connection.execute(sql, params![first, second]).map(|_| ()))
+    {
+        tracing::warn!(family = "catalog", operation = "release-owner", %error,
+            "cache owner cleanup failed");
+    }
 }
 
 fn remove_stale_owners(transaction: &Transaction<'_>, catalog_path: &Path) -> Result<()> {

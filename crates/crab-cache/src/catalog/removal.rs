@@ -165,11 +165,16 @@ impl PayloadRemoval {
         // A standalone range directory need not have a private catalog parent.
         // Never inspect that ambient parent or open SQLite during a dry run.
         let connection = if let Some(root) = root.filter(|_| !dry_run) {
-            match root.open_database(
-                Path::new(CATALOG_FILE),
-                DatabaseMode::ReadWrite,
-                std::time::Duration::ZERO,
-            ) {
+            match root
+                .open_database(
+                    Path::new(CATALOG_FILE),
+                    DatabaseMode::ReadWrite,
+                    std::time::Duration::ZERO,
+                )
+                .and_then(|connection| {
+                    retain_catalog_wal(&connection).map_err(|source| index_error(&path, source))?;
+                    Ok(connection)
+                }) {
                 Ok(connection) => Some(connection),
                 Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) if busy(&error) => return Err(error),

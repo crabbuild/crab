@@ -11,6 +11,7 @@ their outstanding qualification limits.
 - [Health inspection and accounting](#health-inspection-and-accounting)
 - [Object maintenance and recency](#object-maintenance-and-recency)
 - [Catalog eviction](#catalog-eviction)
+- [Catalog checkpoint cadence](#catalog-checkpoint-cadence)
 - [Private SQLite ownership](#private-sqlite-ownership)
 - [Database generation binding](#database-generation-binding)
 - [Read-only SQLite inspection](#read-only-sqlite-inspection)
@@ -303,3 +304,33 @@ closing their file handles. On Unix, a descriptor inherited by a concurrent
 fork must not prolong ownership until that unrelated child executes or exits.
 Callers still must join their own cache workers before dropping the guard;
 explicit unlock does not make a detached writer safe.
+
+## Catalog checkpoint cadence
+
+Catalog writers retain their generation-bound WAL when short connections
+close. Reservation creation, owner release and payload removal use the same
+close policy; closing one SQL operation no longer requests a full checkpoint
+of the catalog. SQLite's existing automatic checkpoint policy remains enabled
+(the pinned dependency defaults to 1,000 pages), and synchronization settings,
+payload flushes, private filesystem checks and accounting transactions remain
+unchanged. A long active reader can still defer an automatic checkpoint under
+SQLite's existing WAL rules.
+
+Committed catalog state may remain in WAL after all catalog handles close.
+Inspection reads that WAL through the existing read-only private VFS. Copying
+the main database alone is not a coherent snapshot; fixture builders and repair
+operations must use a complete SQLite snapshot or checkpoint under its locks.
+Generation replacement still rejects stale owners instead of adopting recovery
+files from a different main/owner identity. This changes checkpoint cadence,
+not the schema or public cache configuration.
+
+The pre-fix regression fails for repeated reservations and immediate release.
+Post-fix qualification passes 46 catalog tests and 128 private-filesystem,
+lifecycle and local-cache tests, plus strict local-cache all-target Clippy.
+Native-platform coverage and the failed 1,024-file push rerun remain required.
+
+The pinned SQLite 3.49.1 also falls in the affected range of the upstream
+[WAL-reset race](https://www.sqlite.org/wal.html#walreset). A matched Crab and
+Cellule dependency upgrade to a fixed SQLite release is a prerequisite for
+release qualification; these focused tests do not establish immunity to that
+race. No dependency or lockfile change is included in this optimization.
