@@ -837,7 +837,39 @@ impl Prepared {
                 "Capsule view differs from the prepared repository version",
             ));
         }
-        let base_catalog = view.pointer_catalog().await?;
+        let lookup = view.pointer_catalog_lookup(&self.layout, 2 * 1024 * 1024 * 1024)?;
+        let local = self.content.as_ref().map(PreparedContent::pointer_catalog);
+        let mut files = self
+            .plan
+            .pointers()
+            .iter()
+            .filter_map(|dependency| match &dependency.pointer {
+                crab_git::pointer_detect::PointerKind::Crab(pointer) => {
+                    Some(crab_xet::hash::MerkleHash::from(pointer.file_hash).hex())
+                }
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        files.extend(
+            local
+                .into_iter()
+                .flat_map(|catalog| catalog.files().keys().cloned()),
+        );
+        let files = files.into_iter().collect::<Vec<_>>();
+        let shards = local
+            .into_iter()
+            .flat_map(|catalog| catalog.shards().keys().cloned())
+            .collect::<Vec<_>>();
+        let xorbs = local
+            .into_iter()
+            .flat_map(|catalog| catalog.xorbs().keys().cloned())
+            .collect::<Vec<_>>();
+        // Local artifacts can collide with historical identities even when
+        // none of their files are present. Select those keys and the outgoing
+        // file closure together; unrelated history must stay cold.
+        let base_catalog = lookup
+            .dependencies(self.layout.store(), &files, &shards, &xorbs)
+            .await?;
         let prepared_files = self
             .content
             .as_ref()

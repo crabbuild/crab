@@ -57,12 +57,16 @@ remain rejected.
 Checkpoint format 7 (`CRBCKP07`) carries authenticated catalog page roots in
 its footer. `LayeredCheckpoint::pointer_catalog_lookup` captures these roots;
 `PointerCatalogLookup` batches file/chunk/xorb keys through one bounded page
-cache and byte budget, validates selected dependency closure and keeps immutable
-descriptor conflicts distinct from absent keys. Full inspection remains an
-explicit maintenance operation. All 19 audited local release tags omit these
+cache and byte budget. Its `dependencies` query selects files plus explicit
+shard/xorb identities in one aggregate budget, including complete dependency
+closure. Missing candidate identities remain misses; missing referenced
+artifacts and conflicting visible descriptors fail. Full inspection remains
+an explicit maintenance operation. All 19 audited local release tags omit these
 capsule checkpoint formats; unshipped format 6 is rejected without a fallback.
-Publication deltas are still materialized by the caller's captured view; their
-run-level aggregation and lazy capture remain required for the complete gate.
+Captured run-v4 roots provide the same selected lookup over exact logical
+capsule occurrences; catalog bodies remain cold until their keys are selected.
+CLI and shared capsule-publication preparation use these captured queries.
+Protected receive and hydration still require separate consumer integration.
 
 External pointer catalogs use `CRBPCP01` authenticated pages. A bounded descriptor
 commits file, shard, xorb and reverse-chunk directories; nested shard closures and
@@ -73,9 +77,10 @@ canonical page layout. Delta inspection defers base-owned closure to `apply`,
 which retains later file bindings at equal size and rejects immutable shard/xorb
 conflicts. Encoded catalogs are limited to 2 GiB and descriptors to 4 KiB.
 The retired monolithic JSON encoding was absent from all 19 audited release tags
-and is rejected. This format foundation still uses complete materialization in
-foreground callers; lazy lookup and bounded historical amplification remain
-unfinished and must not be inferred from the page representation alone.
+and is rejected. Foreground consumers must use captured selected lookups rather
+than infer bounded work from the page encoding alone. Maintenance retains explicit full
+inspection; shared/protected hydration and lifecycle qualification remain
+separate gates.
 
 `v2/browse-indexes` is a bounded, mutable derived record, not ref authority.
 Its version 3 record binds a durable immutable commit graph, optional complete
