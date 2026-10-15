@@ -352,8 +352,12 @@ async fn captured_catalog_close_waits_for_active_reads_and_abandonment_releases_
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let storage = crab_storage::Store::new(inner.clone());
         let router = crab_storage::StoreLayout::new(storage, "pinned/close".to_owned());
-        let (catalog, path) =
-            super::catalog_tests::capture(&router, super::catalog_tests::catalog(10_000)).await;
+        let (catalog, path, _) = super::catalog_tests::capture(
+            &router,
+            super::catalog_tests::catalog(10_000),
+            512 * 1024,
+        )
+        .await;
         let store = Arc::new(PausedLookupStore {
             inner,
             shard: path,
