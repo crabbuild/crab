@@ -9,6 +9,9 @@ mod frontier_admission;
 #[path = "checkpoint/native_cache.rs"]
 mod native_cache;
 
+#[path = "checkpoint/publication_catalog.rs"]
+mod publication_catalog;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 

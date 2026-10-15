@@ -233,8 +233,24 @@ impl PointerCatalogLookup {
 
     /// Select requested files and their complete shard/xorb dependency closure.
     pub async fn files(&self, store: &Store, hashes: &[String]) -> Result<PointerCatalog> {
+        self.dependencies(store, hashes, &[], &[]).await
+    }
+
+    /// Select files and explicit shard/xorb identities with their complete closure.
+    ///
+    /// All keys and dependency pages share one query budget. Absent requested
+    /// identities are misses; a present file or shard with missing dependencies fails.
+    pub async fn dependencies(
+        &self,
+        store: &Store,
+        files: &[String],
+        shards: &[String],
+        xorbs: &[String],
+    ) -> Result<PointerCatalog> {
         let mut work = self.work();
-        let hashes = requested(hashes, &mut work)?;
+        let hashes = requested(files, &mut work)?;
+        let mut shards = requested(shards, &mut work)?;
+        let mut xorbs = requested(xorbs, &mut work)?;
         let root = self
             .checkpoint
             .as_ref()
@@ -243,7 +259,6 @@ impl PointerCatalogLookup {
             .rows(store, root, Kind::CatalogFiles, &keys(&hashes)?, &mut work)
             .await?;
         let mut catalog = PointerCatalog::new();
-        let mut shards = BTreeSet::new();
         for (hash, row) in hashes.iter().zip(rows) {
             let mut selected: Option<(usize, FileCatalogEntry)> = None;
             for value in row {
@@ -279,7 +294,6 @@ impl PointerCatalogLookup {
         let rows = self
             .rows(store, root, Kind::CatalogShards, &keys(&shards)?, &mut work)
             .await?;
-        let mut xorbs = BTreeSet::new();
         for (hash, row) in shards.iter().zip(rows) {
             for value in row {
                 let row: ShardRow = from_json(&value.bytes)?;
@@ -305,12 +319,19 @@ impl PointerCatalogLookup {
                 verify_identity(&value, Kind::CatalogShards, &json(&entry)?)?;
                 catalog.insert_shard(hash.clone(), entry)?;
             }
-            let entry = catalog
-                .shards
-                .get(hash)
-                .ok_or_else(|| corrupt("selected file references an absent shard"))?;
-            xorbs.extend(entry.xorb_hashes.iter().cloned());
         }
+        for file in catalog.files.values() {
+            catalog
+                .shards
+                .get(&file.shard_hash)
+                .ok_or_else(|| corrupt("selected file references an absent shard"))?;
+        }
+        xorbs.extend(
+            catalog
+                .shards
+                .values()
+                .flat_map(|entry| entry.xorb_hashes.iter().cloned()),
+        );
         let selected = self.selected_xorbs(store, &xorbs, &mut work).await?;
         for (hash, entry) in selected.xorbs {
             catalog.insert_xorb(hash, entry)?;
