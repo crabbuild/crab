@@ -577,7 +577,20 @@ async fn checkpoint_catalog_gc_preserves_roots_and_grace_period() {
     catalog
         .insert_file("b".repeat(64), FileCatalogEntry::new(1, "a".repeat(64)))
         .unwrap();
-    let before = view(&layout).await;
+    // Checkpoint publication needs exact member admission; query views leave it cold.
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let before = crab_read::capsule_protocol::open_view_from_root_with_metadata(
+        &layout,
+        root,
+        CapsuleReadLimits {
+            max_capsule_bytes: LIMIT,
+            max_frontier_bytes: LIMIT,
+        },
+    )
+    .await
+    .unwrap();
     crab_remote::checkpoint::publish_capsule_checkpoint_with_catalog_from_view(
         &layout,
         &before,

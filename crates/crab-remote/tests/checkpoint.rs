@@ -94,6 +94,31 @@ async fn maintenance_reuses_committed_checkpoint_without_reloading_authority() {
 }
 
 #[tokio::test]
+async fn query_view_cannot_publish_checkpoint_without_member_admission() {
+    let (layout, _) = fixture().await;
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let query = crab_read::capsule_protocol::open_git_view_from_root(&layout, root, LIMITS)
+        .await
+        .unwrap();
+    let result = crab_remote::checkpoint::publish_capsule_checkpoint_with_catalog_from_view(
+        &layout,
+        &query,
+        crab_metadata::capsule_protocol::PointerCatalog::new(),
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(crab_remote::checkpoint::CheckpointError::Repack(
+            crab_git::repack::RepackError::SourceIntegrity { .. }
+        ))
+    ));
+}
+
+#[tokio::test]
 async fn retained_checkpoint_view_requires_complete_metadata_and_exact_root_binding() {
     let (layout, _) = fixture().await;
     let checkpointed = checkpoint(&layout).await;

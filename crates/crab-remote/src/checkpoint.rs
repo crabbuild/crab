@@ -372,8 +372,9 @@ pub async fn publish_capsule_checkpoint_from_view(
 /// Publish one checkpoint from a pinned view with a replacement pointer catalog.
 ///
 /// The caller must make every external object named by `catalog` durable and
-/// verify its complete dependency closure before calling. Publication retains
-/// the captured ref frontier and succeeds only against the view's exact root.
+/// verify its complete dependency closure before calling. The view must retain
+/// complete pack-member admission from the metadata entry point. Publication
+/// retains the captured ref frontier and succeeds only against its exact root.
 pub async fn publish_capsule_checkpoint_with_catalog_from_view(
     layout: &StoreLayout<Store>,
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
