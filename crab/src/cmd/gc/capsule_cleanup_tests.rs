@@ -187,7 +187,6 @@ async fn captured_catalog_pages_survive_checkpoint_replacement_and_gc() {
         &layout,
         root.record().root(),
         current.capsule_run_pointers(),
-        &current.state_digest(),
         &snapshot.manifest,
         &HashSet::new(),
         &CancellationToken::new(),
