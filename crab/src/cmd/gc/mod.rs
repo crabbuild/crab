@@ -3238,6 +3238,7 @@ async fn sweep_capsule_objects(
 
     let capsule_prefix = layout.repo_path("v2/capsules/");
     let checkpoint_prefix = layout.repo_path("v2/checkpoints/");
+    let catalog_prefix = layout.capsule_catalog_prefix();
     let pack_layer_prefix = layout.repo_path("v2/pack-layers/");
     let history_prefix = layout.repo_path("v2/history/");
     let metadata_prefix = layout.repo_path("metadata/");
@@ -3251,6 +3252,7 @@ async fn sweep_capsule_objects(
     let (
         capsules,
         checkpoints,
+        catalogs,
         pack_layers,
         history,
         metadata_objects,
@@ -3259,6 +3261,7 @@ async fn sweep_capsule_objects(
     ) = tokio::try_join!(
         store.list_prefix(&capsule_prefix),
         store.list_prefix(&checkpoint_prefix),
+        store.list_prefix(&catalog_prefix),
         store.list_prefix(&pack_layer_prefix),
         store.list_prefix(&history_prefix),
         store.list_prefix(&metadata_prefix),
@@ -3317,6 +3320,7 @@ async fn sweep_capsule_objects(
     let candidates = capsules
         .into_iter()
         .chain(checkpoints)
+        .chain(catalogs)
         .chain(pack_layers)
         .chain(history)
         .chain(derived_index_objects)
@@ -3382,8 +3386,8 @@ async fn sweep_capsule_objects(
         }
     }
     Ok(GcOutcome {
-        list_requests: 7,
-        list_parallelism: 7,
+        list_requests: 8,
+        list_parallelism: 8,
         list_wall_seconds: started.elapsed().as_secs_f64(),
         dry_run: args.dry_run,
         ..accounting
@@ -3512,9 +3516,20 @@ async fn mark_layered_checkpoint_sources(
     pointer: &crab_metadata::capsule_protocol::CheckpointPointer,
     reachable: &mut HashSet<String>,
 ) -> Result<()> {
-    let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(layout, pointer)
-        .await
-        .map_err(CrabError::from)?;
+    let checkpoint =
+        crab_metadata::capsule_protocol::load_layered_checkpoint(layout, pointer, u64::MAX)
+            .await
+            .map_err(CrabError::from)?;
+    if let Some(catalog) = checkpoint.catalog() {
+        let path = layout.capsule_catalog_path(catalog.hash()).to_string();
+        // Ref-only checkpoints share one catalog. Authenticate it once per
+        // sweep, so retained checkpoint count does not multiply body decoding.
+        if reachable.insert(path) {
+            checkpoint
+                .pointer_catalog_from_store(layout, u64::MAX)
+                .await?;
+        }
+    }
     for source in checkpoint.sources() {
         let path = match source.kind() {
             crab_metadata::capsule_protocol::PackSourceKind::CapsuleRun => {

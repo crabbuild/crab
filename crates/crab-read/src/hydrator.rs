@@ -1273,6 +1273,7 @@ mod tests {
             None,
         )
         .unwrap();
+        checkpoint.publish_catalog(&router).await.unwrap();
         router
             .store()
             .put_overwrite(

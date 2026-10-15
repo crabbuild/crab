@@ -31,9 +31,12 @@ pub(super) async fn materialize_from_root(
 ) -> Result<PointerCatalog> {
     let captured = capture(layout, root).await?;
     let base_catalog = match root.record().root().checkpoint() {
-        Some(pointer) => load_layered_checkpoint(layout, pointer)
-            .await?
-            .pointer_catalog()?,
+        Some(pointer) => {
+            load_layered_checkpoint(layout, pointer, MAX_CATALOG_BYTES)
+                .await?
+                .pointer_catalog_from_store(layout, MAX_CATALOG_BYTES)
+                .await?
+        }
         None => PointerCatalog::new(),
     };
     // Concurrent ref histories have a canonical binding order, not a global

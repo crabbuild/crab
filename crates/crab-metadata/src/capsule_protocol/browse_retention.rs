@@ -5,7 +5,7 @@ use crab_storage::{ETag, Store, StoreLayout};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    BrowseIndexes, CapsulePointer, LayeredCheckpoint, MAX_BROWSE_INDEXES_BYTES,
+    BrowseIndexes, CapsulePointer, CheckpointPointer, LayeredCheckpoint, MAX_BROWSE_INDEXES_BYTES,
     MAX_HISTORY_CHAIN_BYTES, MAX_HISTORY_CHAIN_SEGMENTS, MAX_HISTORY_SEGMENT_BYTES, PackSourceKind,
 };
 use crate::error::{MetadataError, Result};
@@ -27,7 +27,8 @@ struct Payload {
     generation: u64,
     indexes: BrowseIndexes,
     previous: Option<String>,
-    checkpoint: Option<String>,
+    checkpoint: Option<CheckpointPointer>,
+    catalog: Option<String>,
     sources: BTreeMap<String, PackSourceKind>,
 }
 
@@ -63,7 +64,13 @@ impl RetainedBrowseIndexes {
         self.payload
             .checkpoint
             .iter()
-            .map(|hash| layout.capsule_checkpoint_path(hash))
+            .map(|pointer| layout.capsule_checkpoint_path(pointer.hash()))
+            .chain(
+                self.payload
+                    .catalog
+                    .iter()
+                    .map(|hash| layout.capsule_catalog_path(hash)),
+            )
             .chain(self.payload.sources.iter().map(|(hash, kind)| match kind {
                 PackSourceKind::CapsuleRun => layout.capsule_path(hash),
                 PackSourceKind::PackLayer => layout.capsule_pack_layer_path(hash),
@@ -84,14 +91,19 @@ impl Payload {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.version != 1 {
+        if self.version != 2 {
             return Err(corrupt("unsupported retained browse version"));
         }
         self.indexes.encode()?;
+        if let Some(pointer) = &self.checkpoint {
+            super::root::validate_checkpoint_pointer(pointer)?;
+        } else if self.catalog.is_some() {
+            return Err(corrupt("retained catalog has no checkpoint owner"));
+        }
         for hash in self
             .previous
             .iter()
-            .chain(self.checkpoint.iter())
+            .chain(self.catalog.iter())
             .chain(self.sources.keys())
         {
             validate_content_hash(hash, "retention dependency", "browse retention")?;
@@ -169,6 +181,20 @@ async fn load_payload(
     let payload: Payload = serde_json::from_slice(&bytes)
         .map_err(|source| MetadataError::BrowseIndexRecord { source })?;
     payload.validate()?;
+    if let Some(pointer) = &payload.checkpoint {
+        // A retention record cannot omit an owned dependency from GC marking.
+        // Authenticate the checkpoint footer before trusting its captured paths.
+        let checkpoint = super::load_layered_checkpoint_control(layout, pointer).await?;
+        let catalog = checkpoint.catalog().map(|value| value.hash());
+        if payload.catalog.as_deref() != catalog
+            || checkpoint
+                .sources()
+                .iter()
+                .any(|source| payload.sources.get(source.object_hash()) != Some(&source.kind()))
+        {
+            return Err(corrupt("retained dependencies differ from checkpoint"));
+        }
+    }
     Ok((payload, bytes.len() as u64))
 }
 
@@ -217,11 +243,14 @@ pub async fn retain_browse_indexes(
         }
     }
     let mut payload = Payload {
-        version: 1,
+        version: 2,
         generation,
         indexes: indexes.clone(),
         previous: previous.as_ref().map(|(head, _)| head.hash.clone()),
-        checkpoint: checkpoint.map(|value| value.hash().to_owned()),
+        checkpoint: checkpoint.map(LayeredCheckpoint::pointer).transpose()?,
+        catalog: checkpoint
+            .and_then(LayeredCheckpoint::catalog)
+            .map(|value| value.hash().to_owned()),
         sources,
     };
     if let Some((head, _)) = &previous {

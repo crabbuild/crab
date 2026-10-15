@@ -198,10 +198,10 @@ pub async fn maintain_capsule_repository_from_view(
     let logical_due =
         count >= u64::from(threshold) && (count > 0 || view.layered_checkpoint().is_none());
     let logical = if logical_due {
-        publish_checkpoint_with_catalog(
+        publish_checkpoint(
             layout,
             view,
-            view.pointer_catalog().await?,
+            catalog_for_checkpoint(view).await?,
             maximum_bytes,
             cancel,
         )
@@ -225,7 +225,9 @@ pub async fn maintain_capsule_repository_from_view(
     });
     let compacted = retained
         .map(|(root, checkpoint)| {
-            crab_read::capsule_protocol::compacted_view_from_checkpoint(root, checkpoint, limits)
+            crab_read::capsule_protocol::compacted_view_from_checkpoint(
+                layout, root, checkpoint, limits,
+            )
         })
         .transpose()?;
     let physical = match compacted.as_ref() {
@@ -237,7 +239,9 @@ pub async fn maintain_capsule_repository_from_view(
     let published = physical
         .committed
         .map(|(root, checkpoint)| {
-            crab_read::capsule_protocol::compacted_view_from_checkpoint(root, checkpoint, limits)
+            crab_read::capsule_protocol::compacted_view_from_checkpoint(
+                layout, root, checkpoint, limits,
+            )
         })
         .transpose()?;
     let inventory = published
@@ -295,7 +299,7 @@ pub async fn repack_capsule_repository_from_view(
                 view,
                 consolidation.sources,
                 member_oids,
-                view.pointer_catalog().await?,
+                catalog_for_checkpoint(view).await?,
                 maximum_bytes,
                 cancel,
             )
@@ -308,10 +312,10 @@ pub async fn repack_capsule_repository_from_view(
                 committed,
             };
         } else if logical_due {
-            publication = publish_checkpoint_with_catalog(
+            publication = publish_checkpoint(
                 layout,
                 view,
-                view.pointer_catalog().await?,
+                catalog_for_checkpoint(view).await?,
                 maximum_bytes,
                 cancel,
             )
@@ -326,7 +330,9 @@ pub async fn repack_capsule_repository_from_view(
     let published = publication
         .committed
         .map(|(root, checkpoint)| {
-            crab_read::capsule_protocol::compacted_view_from_checkpoint(root, checkpoint, limits)
+            crab_read::capsule_protocol::compacted_view_from_checkpoint(
+                layout, root, checkpoint, limits,
+            )
         })
         .transpose()?;
     let inventory = published.as_ref().unwrap_or(view);
@@ -342,6 +348,8 @@ pub async fn repack_capsule_repository_from_view(
 /// Reusing the caller's pinned view avoids a second mutable-root and ref-head
 /// capture. Publication still compares against that exact root, so concurrent
 /// writers either win cleanly or leave this maintenance pass as a no-op.
+/// The view must retain complete pack-member admission from the metadata entry
+/// point; a Git query view deliberately omits that maintenance proof.
 pub async fn publish_capsule_checkpoint_from_view(
     layout: &StoreLayout<Store>,
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
@@ -353,9 +361,12 @@ pub async fn publish_capsule_checkpoint_from_view(
     if view.capsule_count()? < u64::from(threshold) {
         return Ok(CheckpointOutcome::default());
     }
-    let catalog = view.pointer_catalog().await?;
-    publish_capsule_checkpoint_with_catalog_from_view(layout, view, catalog, maximum_bytes, cancel)
-        .await
+    let catalog = catalog_for_checkpoint(view).await?;
+    Ok(
+        publish_checkpoint(layout, view, catalog, maximum_bytes, cancel)
+            .await?
+            .work,
+    )
 }
 
 /// Publish one checkpoint from a pinned view with a replacement pointer catalog.
@@ -370,17 +381,41 @@ pub async fn publish_capsule_checkpoint_with_catalog_from_view(
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<CheckpointOutcome, CheckpointError> {
-    Ok(
-        publish_checkpoint_with_catalog(layout, view, catalog, maximum_bytes, cancel)
-            .await?
-            .work,
+    Ok(publish_checkpoint(
+        layout,
+        view,
+        CatalogWrite::New(catalog),
+        maximum_bytes,
+        cancel,
     )
+    .await?
+    .work)
 }
 
-async fn publish_checkpoint_with_catalog(
+enum CatalogWrite {
+    New(PointerCatalog),
+    Retained(Option<crab_metadata::capsule_protocol::CheckpointCatalog>),
+}
+
+async fn catalog_for_checkpoint(
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+) -> Result<CatalogWrite, CheckpointError> {
+    if view.has_catalog_deltas()? {
+        return Ok(CatalogWrite::New(view.pointer_catalog().await?));
+    }
+    // The checkpoint freezes prior replay precedence. Reuse only when every
+    // newly selected control lacks a catalog delta, even if other refs moved.
+    Ok(CatalogWrite::Retained(
+        view.layered_checkpoint()
+            .and_then(LayeredCheckpoint::catalog)
+            .cloned(),
+    ))
+}
+
+async fn publish_checkpoint(
     layout: &StoreLayout<Store>,
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
-    catalog: PointerCatalog,
+    catalog: CatalogWrite,
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<CheckpointPublication, CheckpointError> {
@@ -486,7 +521,7 @@ async fn repack_checkpoint_from_view(
     let Some(selected_start) = layered_suffix_start(checkpoint.sources())? else {
         return Ok(CheckpointPublication::default());
     };
-    let catalog = checkpoint.pointer_catalog()?;
+    let catalog = CatalogWrite::Retained(checkpoint.catalog().cloned());
     let consolidation = consolidate_layered_suffix(
         layout,
         view,
@@ -520,7 +555,7 @@ async fn publish_layered_sources(
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
     sources: Vec<PackSourceDescriptor>,
     member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
-    catalog: PointerCatalog,
+    catalog: CatalogWrite,
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<
@@ -543,14 +578,21 @@ async fn publish_layered_sources(
         &catalog_digest,
         member_admission,
     )?;
-    let checkpoint = crab_metadata::capsule_protocol::LayeredCheckpoint::build(
-        view.root().root().generation(),
-        view.root().digest(),
-        sources,
-        catalog,
-        Some(visibility),
-    )?;
-    if checkpoint.bytes().len() as u64 > maximum_bytes && maximum_bytes > 0 {
+    let generation = view.root().root().generation();
+    let root_digest = view.root().digest();
+    let checkpoint = match catalog {
+        CatalogWrite::New(catalog) => {
+            LayeredCheckpoint::build(generation, root_digest, sources, catalog, Some(visibility))?
+        }
+        CatalogWrite::Retained(catalog) => LayeredCheckpoint::build_reusing_catalog(
+            generation,
+            root_digest,
+            sources,
+            catalog,
+            Some(visibility),
+        )?,
+    };
+    if checkpoint.encoded_metadata_bytes()? > maximum_bytes && maximum_bytes > 0 {
         return Err(CheckpointError::OutputLimit {
             maximum: maximum_bytes,
         });

@@ -214,6 +214,19 @@ impl<S> StoreLayout<S> {
         self.repo_path(&format!("v2/checkpoints/{partition}/{hash}"))
     }
 
+    /// Prefix containing immutable checkpoint catalog objects.
+    #[must_use]
+    pub fn capsule_catalog_prefix(&self) -> ObjectPath {
+        self.repo_path("v2/catalogs/")
+    }
+
+    /// Path to an immutable checkpoint catalog object.
+    #[must_use]
+    pub fn capsule_catalog_path(&self, hash: &str) -> ObjectPath {
+        let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
+        self.repo_path(&format!("v2/catalogs/{partition}/{hash}"))
+    }
+
     /// Path to one immutable protocol-v2 geometric Git pack layer.
     #[must_use]
     pub fn capsule_pack_layer_path(&self, hash: &str) -> ObjectPath {

@@ -11,20 +11,26 @@ use crate::git_visibility::{
 };
 use crate::validation::{validate_content_hash, validate_sha1};
 
+mod catalog;
+use catalog::CatalogInput;
+pub use catalog::CheckpointCatalog;
+
 mod visibility_pages;
 #[cfg(feature = "storage")]
 pub use visibility_pages::LayeredVisibilityReader;
 
-const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP07";
-pub(super) const CHECKPOINT_VERSION: u32 = 7;
+const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP08";
+pub(super) const CHECKPOINT_VERSION: u32 = 8;
 const LAYER_MAGIC: &[u8; 8] = b"CRBPKL01";
 const LAYER_VERSION: u32 = 1;
 const TRAILER_BYTES: usize = 8 + 32 + 8;
-const MAX_CHECKPOINT_FOOTER_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const MAX_CHECKPOINT_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_LAYER_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PHYSICAL_SOURCES: usize = 64;
 const MAX_SOURCE_MEMBERS: usize = 512;
 const MAX_LAYERED_VISIBILITY_BYTES: usize = 128 * 1024 * 1024;
+pub(super) const MAX_CHECKPOINT_BYTES: u64 =
+    (MAX_LAYERED_VISIBILITY_BYTES + MAX_CHECKPOINT_FOOTER_BYTES + TRAILER_BYTES) as u64;
 const MAX_LAYERED_VISIBILITY_REFS: usize = 100_000;
 const MAX_LAYERED_VISIBILITY_TRANSITIONS: usize = 1_000_000;
 const VISIBILITY_OBJECT_SET_DIGEST_DOMAIN: &[u8] = b"crab layered visibility object set\0";
@@ -933,7 +939,7 @@ struct CheckpointFooter {
     #[serde(default)]
     visibility_transitions: BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>,
     visibility_pages: Option<visibility_pages::Descriptor>,
-    catalog_pages: Option<super::pointer::paged::Descriptor>,
+    catalog: Option<CheckpointCatalog>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -946,7 +952,7 @@ struct LayerSectionLocation {
 }
 
 /// Metadata-only authenticated v2 checkpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct LayeredCheckpoint {
     bytes: Bytes,
     hash: String,
@@ -955,7 +961,24 @@ pub struct LayeredCheckpoint {
     object_size: u64,
     control_offset: u64,
     control_only: bool,
+    catalog_bytes: Option<Bytes>,
 }
+
+impl PartialEq for LayeredCheckpoint {
+    fn eq(&self, other: &Self) -> bool {
+        // Loaded/pending catalog bytes are runtime state. The footer already
+        // commits to their exact identity, independently of cache residency.
+        self.bytes == other.bytes
+            && self.hash == other.hash
+            && self.footer_hash == other.footer_hash
+            && self.footer == other.footer
+            && self.object_size == other.object_size
+            && self.control_offset == other.control_offset
+            && self.control_only == other.control_only
+    }
+}
+
+impl Eq for LayeredCheckpoint {}
 
 impl LayeredCheckpoint {
     /// Build a metadata-only checkpoint with the compact ordinal proof.
@@ -964,6 +987,41 @@ impl LayeredCheckpoint {
         covered_root_digest: &str,
         sources: Vec<PackSourceDescriptor>,
         pointer_catalog: PointerCatalog,
+        visibility: Option<LayeredVisibilitySnapshot>,
+    ) -> Result<Self> {
+        Self::build_with_catalog(
+            covered_generation,
+            covered_root_digest,
+            sources,
+            CatalogInput::New(pointer_catalog),
+            visibility,
+        )
+    }
+
+    /// Reuse a captured immutable catalog when no visible catalog delta changed it.
+    ///
+    /// The caller retains the source checkpoint's catalog through publication.
+    pub fn build_reusing_catalog(
+        covered_generation: u64,
+        covered_root_digest: &str,
+        sources: Vec<PackSourceDescriptor>,
+        catalog: Option<CheckpointCatalog>,
+        visibility: Option<LayeredVisibilitySnapshot>,
+    ) -> Result<Self> {
+        Self::build_with_catalog(
+            covered_generation,
+            covered_root_digest,
+            sources,
+            CatalogInput::Retained(catalog),
+            visibility,
+        )
+    }
+
+    fn build_with_catalog(
+        covered_generation: u64,
+        covered_root_digest: &str,
+        sources: Vec<PackSourceDescriptor>,
+        catalog: CatalogInput,
         visibility: Option<LayeredVisibilitySnapshot>,
     ) -> Result<Self> {
         if let Some(snapshot) = &visibility {
@@ -997,7 +1055,7 @@ impl LayeredCheckpoint {
             covered_generation,
             covered_root_digest,
             sources,
-            pointer_catalog,
+            catalog,
             visibility,
             cold_clone_object_set_digest,
             cold_clone_object_count,
@@ -1009,7 +1067,7 @@ impl LayeredCheckpoint {
         covered_generation: u64,
         covered_root_digest: &str,
         sources: Vec<PackSourceDescriptor>,
-        pointer_catalog: PointerCatalog,
+        catalog: CatalogInput,
         visibility: Option<(CapsuleSectionKind, Bytes)>,
         cold_clone_object_set_digest: Option<String>,
         cold_clone_object_count: Option<u64>,
@@ -1027,14 +1085,7 @@ impl LayeredCheckpoint {
         }
         let mut body = Vec::new();
         let mut sections = Vec::new();
-        if !pointer_catalog.is_empty() {
-            append_section(
-                &mut body,
-                &mut sections,
-                CapsuleSectionKind::CatalogDelta,
-                pointer_catalog.encode()?,
-            )?;
-        }
+        let (catalog, catalog_bytes) = catalog.prepare()?;
         if let Some((kind, visibility)) = visibility {
             append_section(&mut body, &mut sections, kind, visibility)?;
         }
@@ -1043,15 +1094,6 @@ impl LayeredCheckpoint {
             .find(|section| section.kind == CapsuleSectionKind::VisibilityOrdinalSnapshot)
             .map(|section| {
                 visibility_pages::Descriptor::decode(
-                    &body[section.offset as usize..(section.offset + section.length) as usize],
-                )
-            })
-            .transpose()?;
-        let catalog_pages = sections
-            .iter()
-            .find(|section| section.kind == CapsuleSectionKind::CatalogDelta)
-            .map(|section| {
-                super::pointer::paged::Descriptor::decode(
                     &body[section.offset as usize..(section.offset + section.length) as usize],
                 )
             })
@@ -1068,7 +1110,7 @@ impl LayeredCheckpoint {
             cold_clone_object_count,
             visibility_transitions,
             visibility_pages,
-            catalog_pages,
+            catalog,
         };
         validate_source_inventory(&footer.sources)?;
         for source in &footer.sources {
@@ -1088,11 +1130,16 @@ impl LayeredCheckpoint {
         body.extend_from_slice(&(footer_bytes.len() as u64).to_be_bytes());
         body.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());
         body.extend_from_slice(CHECKPOINT_MAGIC);
-        Self::decode(Bytes::from(body))
+        let mut checkpoint = Self::decode(Bytes::from(body))?;
+        checkpoint.catalog_bytes = catalog_bytes;
+        Ok(checkpoint)
     }
 
     /// Decode and authenticate one layered checkpoint object.
     pub fn decode(bytes: Bytes) -> Result<Self> {
+        if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
+            return Err(corrupt("layered checkpoint exceeds its encoded size bound"));
+        }
         let (footer, footer_start, footer_hash) = decode_checkpoint_footer(&bytes)?;
         validate_checkpoint_footer(&footer, footer_start as u64, bytes.len() as u64)?;
         let hash = blake3::hash(&bytes).to_hex().to_string();
@@ -1108,6 +1155,7 @@ impl LayeredCheckpoint {
             object_size,
             control_offset,
             control_only: false,
+            catalog_bytes: None,
         })
     }
 
@@ -1123,8 +1171,11 @@ impl LayeredCheckpoint {
         expected_hash: &str,
         expected_footer_hash: &str,
     ) -> Result<Self> {
-        if bytes.is_empty() {
-            return Err(corrupt("layered checkpoint control range is empty"));
+        if object_size > MAX_CHECKPOINT_BYTES
+            || bytes.is_empty()
+            || bytes.len() > MAX_CHECKPOINT_FOOTER_BYTES + TRAILER_BYTES
+        {
+            return Err(corrupt("layered checkpoint control range is out of bounds"));
         }
         validate_content_hash(
             expected_hash,
@@ -1168,6 +1219,7 @@ impl LayeredCheckpoint {
             object_size,
             control_offset: footer_start,
             control_only: true,
+            catalog_bytes: None,
         })
     }
 
@@ -1206,21 +1258,9 @@ impl LayeredCheckpoint {
         layout: &crab_storage::StoreLayout<crab_storage::Store>,
         maximum: u64,
     ) -> Result<super::PointerCatalogLookup> {
-        let Some(descriptor) = &self.footer.catalog_pages else {
-            return Ok(super::PointerCatalogLookup::empty(maximum));
-        };
-        let section = self
-            .footer
-            .sections
-            .iter()
-            .find(|section| section.kind == CapsuleSectionKind::CatalogDelta)
-            .ok_or_else(|| corrupt("checkpoint catalog pages have no section"))?;
-        let range = PackRange::from_parts(section.offset, section.length, section.blake3.clone())?;
-        super::PointerCatalogLookup::checkpoint(
-            layout.capsule_checkpoint_path(&self.hash),
-            range,
-            descriptor.clone(),
-            maximum,
+        self.footer.catalog.as_ref().map_or_else(
+            || Ok(super::PointerCatalogLookup::empty(maximum)),
+            |catalog| catalog.lookup(layout, maximum),
         )
     }
 
@@ -1338,21 +1378,6 @@ impl LayeredCheckpoint {
         &self,
     ) -> &BTreeMap<String, Vec<GitVisibilityCheckpointTransition>> {
         &self.footer.visibility_transitions
-    }
-
-    /// Decode the complete pointer catalog compacted by this checkpoint.
-    pub fn pointer_catalog(&self) -> Result<PointerCatalog> {
-        let Some(section) = self.section(CapsuleSectionKind::CatalogDelta)? else {
-            return Ok(PointerCatalog::new());
-        };
-        if Some(&super::pointer::paged::Descriptor::decode(&section)?)
-            != self.footer.catalog_pages.as_ref()
-        {
-            return Err(corrupt(
-                "checkpoint catalog body roots differ from its authenticated footer",
-            ));
-        }
-        PointerCatalog::decode(&section)
     }
 
     /// Decode the compact ordinal proof and validate its checkpoint source bindings.
@@ -1592,26 +1617,12 @@ fn validate_checkpoint_footer(
             ));
         }
     }
-    let catalogs = footer
-        .sections
-        .iter()
-        .filter(|section| section.kind == CapsuleSectionKind::CatalogDelta)
-        .collect::<Vec<_>>();
-    match (&footer.catalog_pages, catalogs.as_slice()) {
-        (Some(descriptor), [section]) => descriptor.validate(section.length)?,
-        (None, []) => {}
-        _ => {
-            return Err(corrupt(
-                "checkpoint catalog section and footer roots differ",
-            ));
-        }
+    if let Some(catalog) = &footer.catalog {
+        catalog.validate()?;
     }
     let mut expected_offset = 0_u64;
     for section in &footer.sections {
-        if !matches!(
-            section.kind,
-            CapsuleSectionKind::CatalogDelta | CapsuleSectionKind::VisibilityOrdinalSnapshot
-        ) {
+        if !matches!(section.kind, CapsuleSectionKind::VisibilityOrdinalSnapshot) {
             return Err(corrupt("checkpoint section kind is retired or unsupported"));
         }
         validate_content_hash(
@@ -1763,7 +1774,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_control_requires_catalog_roots_for_exactly_one_section() {
+    fn checkpoint_control_rejects_invalid_catalog_roots() {
         let source = PackLayer::build(&pack())
             .unwrap()
             .source_descriptor()
@@ -1783,20 +1794,22 @@ mod tests {
             .unwrap();
         let checkpoint =
             LayeredCheckpoint::build(0, &"3".repeat(64), vec![source], catalog, None).unwrap();
-        for remove_section in [false, true] {
-            let mut footer = checkpoint.footer.clone();
-            if remove_section {
-                footer.sections.clear();
-            } else {
-                footer.catalog_pages = None;
+        for field in ["hash", "bytes", "body_bytes"] {
+            let mut footer = serde_json::to_value(&checkpoint.footer).unwrap();
+            match field {
+                "hash" => footer["catalog"]["hash"] = serde_json::json!("invalid"),
+                "bytes" => footer["catalog"]["bytes"] = serde_json::json!(0),
+                _ => footer["catalog"]["pages"]["body_bytes"] = serde_json::json!(u64::MAX),
             }
+            let footer = serde_json::from_value(footer).unwrap();
             assert!(
                 validate_checkpoint_footer(
                     &footer,
                     checkpoint.control_offset(),
-                    checkpoint.bytes.len() as u64
+                    checkpoint.bytes.len() as u64,
                 )
-                .is_err()
+                .is_err(),
+                "accepted invalid {field}"
             );
         }
     }

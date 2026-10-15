@@ -15,6 +15,9 @@ use crate::error::Result;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod catalog_order_tests;
+
 /// A verified stored root and the provider token protecting its next update.
 #[derive(Debug, Clone)]
 pub struct RootSnapshot {
@@ -294,11 +297,21 @@ pub async fn load_history_chain(
     Ok(segments)
 }
 
-/// Load and verify one immutable metadata-only layered checkpoint.
+/// Load and verify a checkpoint's visibility body and external catalog commitment.
+///
+/// Catalog pages remain cold until lookup or explicit full materialization.
 pub async fn load_layered_checkpoint(
     router: &StoreLayout<Store>,
     pointer: &super::CheckpointPointer,
+    maximum_bytes: u64,
 ) -> Result<LayeredCheckpoint> {
+    let checkpoint_limit = maximum_bytes.min(super::layered::MAX_CHECKPOINT_BYTES);
+    if pointer.size() > checkpoint_limit {
+        return Err(MetadataError::CheckpointSize {
+            bytes: pointer.size(),
+            maximum: checkpoint_limit,
+        });
+    }
     if pointer.format() != super::layered::CHECKPOINT_VERSION {
         return Err(corrupt(
             &router.capsule_checkpoint_path(pointer.hash()),
@@ -317,6 +330,13 @@ pub async fn load_layered_checkpoint(
             "layered checkpoint does not match its authenticated pointer",
         ));
     }
+    let total = checkpoint.encoded_metadata_bytes()?;
+    if total > maximum_bytes {
+        return Err(MetadataError::CheckpointSize {
+            bytes: total,
+            maximum: maximum_bytes,
+        });
+    }
     Ok(checkpoint)
 }
 
@@ -329,6 +349,15 @@ pub async fn load_layered_checkpoint_control(
         return Err(corrupt(
             &router.capsule_checkpoint_path(pointer.hash()),
             "checkpoint pointer does not name the layered checkpoint format",
+        ));
+    }
+    super::root::validate_checkpoint_pointer(pointer)?;
+    if pointer.size() > super::layered::MAX_CHECKPOINT_BYTES
+        || pointer.control_size() > super::layered::MAX_CHECKPOINT_FOOTER_BYTES as u64 + 48
+    {
+        return Err(corrupt(
+            &router.capsule_checkpoint_path(pointer.hash()),
+            "checkpoint control exceeds format byte bounds",
         ));
     }
     // A checkpoint without catalog or visibility sections is entirely footer.

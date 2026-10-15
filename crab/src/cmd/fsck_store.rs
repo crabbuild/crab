@@ -972,10 +972,16 @@ async fn verify_capsule_history(
     let mut sources = BTreeMap::new();
     let mut checkpoints =
         futures_util::stream::iter(checkpoints.into_values().map(|pointer| async move {
-            crab_metadata::capsule_protocol::load_layered_checkpoint(layout, &pointer)
-                .await
-                .map(|checkpoint| checkpoint.sources().to_vec())
-                .map_err(CrabError::from)
+            let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(
+                layout,
+                &pointer,
+                u64::MAX,
+            )
+            .await?;
+            checkpoint
+                .pointer_catalog_from_store(layout, u64::MAX)
+                .await?;
+            Ok::<_, CrabError>(checkpoint.sources().to_vec())
         }))
         .buffer_unordered(16);
     while let Some(checkpoint_sources) = checkpoints.try_next().await? {

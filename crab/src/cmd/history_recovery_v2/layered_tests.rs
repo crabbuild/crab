@@ -129,7 +129,7 @@ async fn layered_history_verification_preserves_historical_refs_and_bytes() {
     let (layout, root) = fixture().await;
     let chain = history_chain(&layout, &root).await.unwrap();
     let oldest = chain.last().unwrap();
-    assert_eq!(oldest.checkpoint().format(), 7);
+    assert_eq!(oldest.checkpoint().format(), 8);
 
     let verified = verify_history(
         &layout,
@@ -252,10 +252,13 @@ async fn layered_restore_preserves_sources_and_allows_new_epoch_publication() {
     let (layout, root) = fixture().await;
     let chain = history_chain(&layout, &root).await.unwrap();
     let oldest = chain.last().unwrap();
-    let historical =
-        crab_metadata::capsule_protocol::load_layered_checkpoint(&layout, oldest.checkpoint())
-            .await
-            .unwrap();
+    let historical = crab_metadata::capsule_protocol::load_layered_checkpoint(
+        &layout,
+        oldest.checkpoint(),
+        u64::MAX,
+    )
+    .await
+    .unwrap();
     let store = Store::from_storage(layout.store().clone());
     let router = StoreLayout::new(store.clone(), layout.repo_prefix().to_owned());
     let cancel = CancellationToken::new();
@@ -286,6 +289,7 @@ async fn layered_restore_preserves_sources_and_allows_new_epoch_publication() {
     let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(
         &layout,
         restored.record().root().checkpoint().unwrap(),
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -350,10 +354,13 @@ async fn corrupt_layered_history_cannot_restore_or_leak_the_sweep_lease() {
     let (layout, root) = fixture().await;
     let chain = history_chain(&layout, &root).await.unwrap();
     let oldest = chain.last().unwrap();
-    let checkpoint =
-        crab_metadata::capsule_protocol::load_layered_checkpoint(&layout, oldest.checkpoint())
-            .await
-            .unwrap();
+    let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(
+        &layout,
+        oldest.checkpoint(),
+        u64::MAX,
+    )
+    .await
+    .unwrap();
     let source = &checkpoint.sources()[0];
     let path = layout.capsule_path(source.object_hash());
     let (body, _) = layout.store().get_with_etag(&path).await.unwrap();
