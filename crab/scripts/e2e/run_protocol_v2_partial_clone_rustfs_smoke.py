@@ -2835,19 +2835,41 @@ class ProtocolV2PartialCloneSmoke:
         oid = self.git_value(source, ["rev-parse", "HEAD:hook-lfs.bin"], name="capture LFS pointer Git OID")
         head = self.git_value(source, ["rev-parse", "HEAD"], name="capture LFS discovery source ref")
         before = self.git_value(source, ["ls-remote", "--refs", destination], name="capture refs before LFS discovery fault")
-        path = source / ".git/objects" / oid[:2] / oid[2:]
-        original = path.read_bytes()
+        pointer = self.git_value(source, ["cat-file", "blob", oid], name="capture healthy LFS pointer")
         working_bytes = (source / "hook-lfs.bin").read_bytes()
-        large_file = self.artifacts / "lfs-discovery-large-blob.bin"
-        large_file.write_bytes(b"x" * 65536)
-        large_oid = self.git_value(source, ["hash-object", "-w", str(large_file)], name="create LFS discovery large-header fault")
-        replacement = (source / ".git/objects" / large_oid[:2] / large_oid[2:]).read_bytes()
-        command = [str(self.crab_bin), "lfs", "push", "--dry-run", destination]
-        # Only this disposable fixture's directory entry changes. Restore it
-        # even if the assertion fails; no source worktree data is rewritten.
-        path.unlink()
+        objects = source / ".git/objects"
+        original_objects = {
+            str(path.relative_to(objects)): sha256_file(path)
+            for path in objects.rglob("*") if path.is_file()
+        }
+        saved_objects = source / ".git/lfs-discovery-saved-objects"
+        loose_objects = source / ".git/lfs-discovery-loose-objects"
+        loose_objects.mkdir()
+        pack = self.artifacts / "lfs-discovery-source.pack"
+        self.run_binary(
+            "export disposable LFS source objects",
+            [str(self.git_bin), "pack-objects", "--all", "--stdout"], source, pack,
+        )
+        # Unpack into an empty database: Git skips objects already present, and
+        # a healthy packed duplicate could mask the corrupt loose entry in gix.
+        self.run_git(
+            source, ["unpack-objects", "--strict"],
+            name="prepare isolated loose LFS fault database",
+            extra_env={"GIT_OBJECT_DIRECTORY": str(loose_objects), "GIT_ALTERNATE_OBJECT_DIRECTORIES": ""},
+            input_data=pack.read_bytes(),
+        )
+        make_private_fixture_tree(loose_objects)
+        objects.rename(saved_objects)
         try:
+            loose_objects.rename(objects)
+            path = objects / oid[:2] / oid[2:]
+            large_file = self.artifacts / "lfs-discovery-large-blob.bin"
+            large_file.write_bytes(b"x" * 65536)
+            large_oid = self.git_value(source, ["hash-object", "-w", str(large_file)], name="create LFS discovery large-header fault")
+            replacement = (objects / large_oid[:2] / large_oid[2:]).read_bytes()
+            path.unlink()
             path.write_bytes(replacement)
+            command = [str(self.crab_bin), "lfs", "push", "--dry-run", destination]
             rejected = self.run_cmd("LFS discovery rejects oversized corrupt pointer", command, source, check=False)
             self.check(
                 "mirror-lfs-discovery-rejects-corrupt-git-pointer",
@@ -2857,13 +2879,19 @@ class ProtocolV2PartialCloneSmoke:
                 and self.git_value(source, ["ls-remote", "--refs", destination], name="verify remote refs after LFS discovery refusal") == before,
             )
         finally:
-            if path.exists():
-                path.unlink()
-            path.write_bytes(original)
+            # Restore the original object database even when injection or its
+            # assertion fails; packed/loose layout and original bytes stay intact.
+            if objects.exists():
+                shutil.rmtree(objects)
+            saved_objects.rename(objects)
         self.run_cmd("LFS discovery accepts restored Git pointer", command, source)
         self.check(
             "mirror-lfs-discovery-restoration-preserves-refs",
-            path.read_bytes() == original and (source / "hook-lfs.bin").read_bytes() == working_bytes
+            {str(path.relative_to(objects)): sha256_file(path)
+             for path in objects.rglob("*") if path.is_file()} == original_objects
+            and self.git_value(source, ["cat-file", "blob", oid], name="verify restored LFS pointer") == pointer
+            and self.git_value(source, ["rev-parse", "HEAD"], name="verify restored LFS source ref") == head
+            and (source / "hook-lfs.bin").read_bytes() == working_bytes
             and self.git_value(source, ["ls-remote", "--refs", destination], name="verify refs after LFS discovery restoration") == before,
         )
 
@@ -2920,6 +2948,7 @@ class ProtocolV2PartialCloneSmoke:
         )
         self.run_git(source, ["add", ".gitattributes", "hook-lfs.bin"])
         self.run_git(source, ["commit", "-m", "hook LFS data"])
+        self.run_git(source, ["repack", "-ad"], name="pack hook source before LFS discovery fault")
         self.mirror_lfs_discovery_check(source, destination)
         self.run_git(source, ["tag", "-a", "hook-v1", "-m", "hook annotated tag"])
         selected = self.git_value(source, ["rev-parse", "topic"], name="hook selected commit")

@@ -2154,3 +2154,27 @@ the remote tip, revoke old-tip visibility, install packs into an independent
 repository and run Git connectivity checks. The existing RustFS ref matrix
 also exercises native and remote-helper force pushes without fetching first.
 These tests remain pending until the updated-source CI run completes.
+
+## Packed-object qualification fault fixture
+
+The Git-current protocol canary stopped before corruption injection because the
+LFS pointer blob was packed, while the fixture opened a loose-object pathname.
+The same failure reproduces locally after `git repack -ad`.
+
+The fixture now exports its small disposable source history and unpacks it into
+an empty object database before injection. Healthy packed duplicates cannot
+mask the corrupt loose blob. The original object database is moved aside and
+restored in `finally`; the success check compares every original object-file
+hash, the pointer, source/remote refs and working bytes. The caller deliberately
+packs its source first so the previous failure remains a regression case.
+The checksum mismatch and successful restored dry run remain required.
+
+This changes qualification setup only. Full Git-current CI remains required;
+a source-layout repair does not establish a product-level compatibility result.
+
+Local proof with the unchanged #572 release: the repaired packed-source mirror
+workflow passes 66 commands and 13 checks; deliberate assertion failure after
+the verified checksum rejection restores every original object-file hash and
+passes strict Git fsck (34 commands, three checks; cleanup scope only). Seventeen
+existing log/source-isolation tests pass. These are selected fixture and mirror
+receipts, not a full final-source protocol qualification.
