@@ -7,7 +7,7 @@ use bytes::Bytes;
 use object_store::memory::InMemory;
 use std::sync::atomic::AtomicUsize;
 
-async fn capture(
+pub(super) async fn capture(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     catalog: PointerCatalog,
 ) -> (PointerCatalogLookup, object_store::path::Path) {
@@ -48,7 +48,7 @@ async fn capture(
     )
 }
 
-fn catalog(count: usize) -> PointerCatalog {
+pub(super) fn catalog(count: usize) -> PointerCatalog {
     let mut result = PointerCatalog::new();
     for index in 0..count {
         let file = super::tests::hash_from_seed(index as u64);
