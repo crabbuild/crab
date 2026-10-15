@@ -1477,6 +1477,21 @@ shard, xorb and reverse-chunk metadata against complete inspection on RustFS.
 Opening decoded no catalog pages. Cold lookup fetched six ranges (9,132 bytes),
 while warm lookup fetched zero origin bytes. The run exposed duplicate decode
 instrumentation in the cache wrapper; the shared page decoder already emits
-that event. The duplicate event is removed, and corrected measured qualification
-remains pending. This four-MiB fixture is functional evidence, not the required
-10-GiB/increasing-history performance gate.
+that event. `catalog-lookup-fixed-live-r2` passes after removal: exactly six
+cold page decodes (9,132 bytes) and zero warm decodes, with the same transport
+counts and zero active backend work at completion. The corrected executable's
+SHA-256 is `22157c5a665a9a063b1aa81c2fdc1b10c339e9827e66ff524e376aa0a98500ca`.
+The raw root/checkpoint footer and object fingerprints confirm format 7 and its
+catalog roots; frozen Rust/manifest fingerprints remain unchanged. Receipts are
+retained outside the checkout in `catalog-lookup-fixed-live-r2/` under the
+dedicated qualification directory. This four-MiB fixture is functional evidence,
+not the required 10-GiB/increasing-history performance gate.
+
+Validation passes: 110 storage-enabled metadata capsule tests, 92 payload-only
+metadata capsule tests, 48 read capsule tests, 22 writer capsule tests, all eight
+CLI publication tests, the six final lookup regressions and both qualification
+counter tests. Strict metadata/read/remote Clippy with all targets and publication
+features passes, as do CLI compilation, formatting and diff checks. The CLI test
+binary emits an Apple linker warning about unwind-table size; the eight tests
+still complete successfully. Installed CLI push/hydration and representative S3
+latency qualification remain separate required proof.
