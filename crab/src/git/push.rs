@@ -9713,9 +9713,10 @@ impl PushPipeline {
 
         if !staging.unresolved_publication_intents()?.is_empty() {
             let worktree = crate::git::worktree::WorktreeContext::resolve()?;
-            crate::cmd::add::reconcile_publication_intents(
+            crate::git::index::reconcile_publication_intents(
                 staging,
                 &worktree.current_worktree_root,
+                &self.cancel,
             )
             .await?;
         }
@@ -9754,8 +9755,10 @@ impl PushPipeline {
             .iter()
             .map(|(file_hash, _)| *file_hash)
             .collect::<Vec<_>>();
-        let published_recipes = Arc::new(staging.published_recipes_for_files(&file_hashes)?);
-        let recipe_hashes = published_recipes
+        let selected_recipes =
+            super::push_staging::recipes_for_selected_pointers(staging, &file_hashes)?;
+        let selected_recipes = Arc::new(selected_recipes);
+        let recipe_hashes = selected_recipes
             .values()
             .filter_map(|recipe| {
                 recipe
@@ -9772,10 +9775,10 @@ impl PushPipeline {
         };
         let verify_results = futures_util::stream::iter(unique_specs.into_iter().map(
             |(file_hash, pointer_size)| {
-                let published_recipes = Arc::clone(&published_recipes);
+                let selected_recipes = Arc::clone(&selected_recipes);
                 let prepared_xorbs = prepared_xorbs.clone();
                 async move {
-                    let recipe = published_recipes
+                    let recipe = selected_recipes
                         .get(&file_hash)
                         .cloned()
                         .ok_or_else(|| {
@@ -9787,7 +9790,7 @@ impl PushPipeline {
                     let Some(recipe) = recipe else {
                         debug!(
                             file_hash = %file_hash.hex(),
-                            "step 2: no published staging recipe for pointer"
+                            "step 2: no eligible staging recipe for pointer"
                         );
                         return Ok((
                             file_hash,
@@ -31137,6 +31140,78 @@ mod tests {
             !pipeline.xorbs.lock().await.is_empty(),
             "missing remote xorb must force a replacement upload"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lookup_staging_requires_delegation_before_adopting_open_prepared_recipe() {
+        use crate::git::walk::PointerBlob;
+        use crab_staging::{StagingArea, StagingAreaReadOnly};
+
+        for delegated in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let source = tmp.path().join("model.bin");
+            std::fs::write(&source, vec![0x71; 1024 * 1024]).unwrap();
+            let root = tmp.path().join("staging");
+            let staging = StagingArea::open(root.clone()).await.unwrap();
+            let staged = crab_staging::stream::stage_file_streaming(
+                &source,
+                tmp.path(),
+                &staging,
+                crab_staging::stream::StreamStageProgress {
+                    xorb_builder: Some(crab_staging::stream::StreamStageXorbBuilder::new(
+                        1,
+                        crab_xet::xorb::builder::XorbBuilder::new,
+                    )),
+                    ..crab_staging::stream::StreamStageProgress::default()
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            if delegated {
+                staging
+                    .delegate_publication(&[(&staged.batch_id, std::path::Path::new("model.bin"))])
+                    .unwrap();
+            }
+            staging.close().await.unwrap();
+            let staging = Arc::new(StagingAreaReadOnly::open(root).await.unwrap());
+            let pipeline = PushPipeline::new(
+                PushConfig::default(),
+                vec![],
+                None,
+                None,
+                Some(Arc::clone(&staging)),
+                "delegated-recipe".to_owned(),
+                test_router("delegated-recipe"),
+                None,
+                CancellationToken::new(),
+                None,
+            );
+            pipeline.pointers.lock().await.push(PointerBlob {
+                oid: [0; 20],
+                file_hash: staged.file_hash,
+                size: staged.size,
+            });
+            let lookup = pipeline.lookup_staging().await;
+            if !delegated {
+                assert!(matches!(
+                    lookup,
+                    Err(CrabError::PointerMissingStaging { .. })
+                ));
+                continue;
+            }
+            lookup.unwrap();
+            pipeline.classify_chunks().await.unwrap();
+            pipeline.pack_xorbs().await.unwrap();
+            assert!(
+                !pipeline.xorbs.lock().await.is_empty()
+                    && staging
+                        .published_recipe_for_file(&staged.recipe.file_hash())
+                        .unwrap()
+                        .is_none(),
+                "selected handoff supplies prepared payloads without claiming index publication"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

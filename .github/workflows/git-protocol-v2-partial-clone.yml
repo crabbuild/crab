@@ -45,6 +45,8 @@ on:
       - "crab/tests/**"
       - "crates/crab-git/**"
       - "crates/crab-auth-server/**"
+      - "crates/crab-auth/**"
+      - "crates/crab-staging/**"
       - "crates/crab-metadata/**"
       - "crates/crab-read/**"
       - "crates/crab-remote-git/**"
@@ -99,6 +101,8 @@ on:
       - "crab/tests/**"
       - "crates/crab-git/**"
       - "crates/crab-auth-server/**"
+      - "crates/crab-auth/**"
+      - "crates/crab-staging/**"
       - "crates/crab-metadata/**"
       - "crates/crab-read/**"
       - "crates/crab-remote-git/**"
@@ -176,6 +180,11 @@ jobs:
           cargo test -p crab --bin crab pull_machine_errors_keep_the_selected_mode_and_schema --locked --features gix-transport
           cargo test -p crab --lib git::push_native::tests --locked --features gix-transport
           cargo test -p crab --lib git::push_staging::tests --locked --features gix-transport
+          cargo test -p crab-staging --locked --test push_snapshot_guard --test publication_history_recovery
+          cargo test -p crab-auth --lib protected_push --locked --features crab-auth-client
+          cargo test -p crab --lib git::index::tests --locked --features gix-transport
+          cargo test -p crab --lib publication_recovery --locked --features gix-transport
+          cargo test -p crab --lib git::capsule_push::tests --locked --features gix-transport
           cargo test -p crab --lib --locked --features gix-transport -- \
             git::push::tests::lookup_staging \
             git::push::tests::under_lock_refresh \
@@ -268,6 +277,11 @@ jobs:
           cargo test -p crab --lib cmd::lfs::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib git::push_native::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib git::push_staging::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab-staging --locked --test push_snapshot_guard --test publication_history_recovery
+          cargo test -p crab-auth --lib protected_push --locked --features crab-auth-client
+          cargo test -p crab --lib git::index::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib publication_recovery --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib capsule_push_retires_staging_only_after_confirmed_ref_publication --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
 
       - name: Run LFS pre-push contracts

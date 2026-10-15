@@ -291,6 +291,13 @@ impl FileIndexChecker for StoreFileIndexChecker {
 /// The real implementation writes chunks to the segment-based staging area
 /// and records them in index.db within a transaction.
 pub trait ChunkStager: Send {
+    /// Return the local reader-ingestion owner when this backend provides it.
+    ///
+    /// The default preserves custom stagers in the released v1.2.4 API.
+    fn reader_stager(&self) -> Option<&StagingChunkStager> {
+        None
+    }
+
     /// Stage a batch of chunks transactionally.
     ///
     /// On success, all chunks are recorded in index.db. Callers must
@@ -412,6 +419,7 @@ impl ChunkStager for NoopChunkStager {
 /// `StagingArea` API by using `Handle::block_on`. This is safe because
 /// the filter-process loop runs inside `spawn_blocking`, so blocking on
 /// async calls won't starve the tokio runtime.
+#[derive(Clone)]
 pub struct StagingChunkStager {
     staging: Arc<StagingArea>,
     handle: tokio::runtime::Handle,
@@ -425,12 +433,43 @@ impl StagingChunkStager {
     pub fn new(staging: Arc<StagingArea>, handle: tokio::runtime::Handle) -> Self {
         Self { staging, handle }
     }
+
+    fn stage_reader<R: tokio::io::AsyncRead + Unpin>(
+        &self,
+        reader: &mut R,
+        path: &Path,
+        ctx: &AppContext,
+    ) -> Result<crab_staging::stream::StreamStageResult> {
+        use crab_staging::stream::{StreamStageProgress, StreamStageXorbBuilder};
+        use crab_xet::xorb::builder::XorbBuilder;
+
+        let config = Arc::new(crate::git::push::PushConfig::from_config(ctx.config()));
+        let builder = StreamStageXorbBuilder::new(1, move || {
+            config.configure_builder(XorbBuilder::with_policy(config.compression_policy()))
+        });
+        self.handle
+            .block_on(crab_staging::stream::stage_reader_streaming(
+                reader,
+                path,
+                &self.staging,
+                StreamStageProgress {
+                    xorb_builder: Some(builder),
+                    ..StreamStageProgress::default()
+                },
+                &ctx.cancel_token(),
+            ))
+            .map_err(CrabError::from)
+    }
 }
 
 // SAFETY: StagingArea is Send (Arc-wrapped internals), and Handle is Send+Sync.
 unsafe impl Send for StagingChunkStager {}
 
 impl ChunkStager for StagingChunkStager {
+    fn reader_stager(&self) -> Option<&StagingChunkStager> {
+        Some(self)
+    }
+
     fn stage_chunks(
         &self,
         chunks: &[([u8; 32], Bytes)],
@@ -484,7 +523,7 @@ impl ChunkStager for StagingChunkStager {
                 .record_verified_recipe_lease(&batch_id, path, recipe)?;
             self.staging
                 .record_file_path(&file_hash, &path.to_string_lossy())?;
-            self.staging.mark_batch_published(&batch_id)?;
+            self.staging.delegate_publication(&[(&batch_id, path)])?;
             Ok(())
         })();
         if let Err(error) = publish {
@@ -1100,6 +1139,75 @@ impl PreparedRecipeVerifier {
             bytes: bytes.freeze(),
         }
     }
+}
+
+fn prepared_prefix_reader(
+    stager: StagingChunkStager,
+    recipe: FileRecipe,
+    occurrences: u64,
+    error: std::rc::Rc<std::cell::RefCell<Option<CrabError>>>,
+) -> impl tokio::io::AsyncRead + Unpin {
+    let state = (
+        stager,
+        PreparedRecipeCursor::new(recipe),
+        occurrences,
+        std::collections::VecDeque::<Bytes>::new(),
+    );
+    let chunks = futures_util::stream::try_unfold(state, move |state| {
+        let error = error.clone();
+        async move {
+            let (stager, mut cursor, mut remaining, mut payloads) = state;
+            let read = async {
+                if payloads.is_empty() && remaining > 0 {
+                    let mut terms = Vec::new();
+                    while remaining > 0 && terms.len() < PREPARED_REPLAY_BATCH_CHUNKS {
+                        let chunk = cursor.next(&stager)?.ok_or_else(|| {
+                            CrabError::StagingCorrupt(
+                                "prepared prefix ended before verified occurrences".to_owned(),
+                            )
+                        })?;
+                        terms.push(chunk);
+                        remaining -= 1;
+                    }
+                    let hashes = terms
+                        .iter()
+                        .map(|chunk| chunk.chunk_hash)
+                        .collect::<Vec<_>>();
+                    // This source is polled inside the engine's block_on.
+                    // Await staging reads directly; a nested stager bridge
+                    // would enter the runtime twice and panic.
+                    let read = stager.staging.get_chunks_batch(&hashes).await?;
+                    if read.len() != terms.len() {
+                        return Err(CrabError::StagingCorrupt(
+                            "prepared prefix lost an authoritative chunk".to_owned(),
+                        ));
+                    }
+                    for ((hash, bytes), term) in read.into_iter().zip(terms) {
+                        if hash != term.chunk_hash
+                            || bytes.len() as u64 != term.len
+                            || crab_xet::hash::compute_data_hash(&bytes) != term.chunk_hash
+                        {
+                            return Err(CrabError::StagingCorrupt(
+                                "prepared prefix payload differs from verified input".to_owned(),
+                            ));
+                        }
+                        payloads.push_back(bytes);
+                    }
+                }
+                Ok(payloads.pop_front())
+            }
+            .await;
+            match read {
+                Ok(Some(bytes)) => Ok(Some((bytes, (stager, cursor, remaining, payloads)))),
+                Ok(None) => Ok(None),
+                Err(cause) => {
+                    *error.borrow_mut() = Some(cause);
+                    Err(std::io::Error::other("prepared prefix read failed"))
+                }
+            }
+        }
+    });
+    tokio_util::io::StreamReader::new(Box::pin(chunks))
 }
 
 struct PreparedChangedReplay {
@@ -1854,6 +1962,14 @@ impl CleanSession {
     /// hydrated files succeed even while another crab process holds
     /// `.crab/staging`.
     fn crab_clean_path(&mut self, pathname: &str, content: Vec<u8>) -> Result<Vec<u8>> {
+        if self.staging_unavailable.is_none()
+            && let Some(stager) = self.chunk_stager.reader_stager().cloned()
+        {
+            return self.crab_clean_reader(pathname, &mut std::io::Cursor::new(content), &stager);
+        }
+        // Custom stagers remain a released v1.2.4 library contract. Their
+        // byte-to-chunk adapter is retained until a breaking library release;
+        // the production local backend delegates ingestion to crab-staging.
         use crab_xet::chunker::GearChunker;
 
         let file_size = content.len() as u64;
@@ -2097,6 +2213,19 @@ impl CleanSession {
             return self.crab_clean_prepared_stream(pathname, first, reader, reached_flush, recipe);
         }
 
+        if self.staging_unavailable.is_none()
+            && let Some(stager) = self.chunk_stager.reader_stager().cloned()
+        {
+            let cancel = self.ctx.cancel_token();
+            let mut stream = reader.byte_stream(first, reached_flush, &cancel);
+            let result = self.crab_clean_reader(pathname, &mut stream, &stager);
+            if result.is_err()
+                && let Some(error) = stream.take_error()
+            {
+                return Err(error);
+            }
+            return result;
+        }
         let staging_available = self.staging_unavailable.is_none();
         let mut file_hasher = blake3::Hasher::new();
         let mut chunker = staging_available.then(GearChunker::new);
@@ -2236,6 +2365,160 @@ impl CleanSession {
         result
     }
 
+    fn crab_clean_reader<R: tokio::io::AsyncRead + Unpin>(
+        &mut self,
+        pathname: &str,
+        reader: &mut R,
+        stager: &StagingChunkStager,
+    ) -> Result<Vec<u8>> {
+        let staged = stager.stage_reader(reader, Path::new(pathname), &self.ctx)?;
+        let publication = (|| -> Result<(Vec<u8>, bool)> {
+            self.ctx.check_cancelled()?;
+            if let Some(pointer) = self.try_index_pointer_match(pathname, &staged.file_hash) {
+                return Ok((pointer, false));
+            }
+            if let Some(pointer) = self.try_fast_path(staged.size, &staged.file_hash)? {
+                return Ok((pointer, false));
+            }
+            self.preserve_committed_recipe_before_publication(pathname, &staged.file_hash)?;
+            let pointer = self
+                .build_pointer(staged.file_hash, staged.size, None)
+                .serialize();
+            Ok((pointer, true))
+        })();
+        match publication {
+            Ok((pointer, false)) => {
+                stager.staging.rollback_batch(&staged.batch_id)?;
+                Ok(pointer)
+            }
+            Ok((pointer, true)) => {
+                if let Err(error) = stager
+                    .staging
+                    .delegate_publication(&[(&staged.batch_id, Path::new(pathname))])
+                {
+                    let _ = stager.staging.rollback_batch(&staged.batch_id);
+                    return Err(error.into());
+                }
+                Ok(pointer)
+            }
+            Err(error) => {
+                if let Err(cleanup) = stager.staging.rollback_batch(&staged.batch_id) {
+                    tracing::warn!(error = %cleanup, path = %pathname, "clean reader rollback failed");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn crab_clean_prepared_reader<R: std::io::Read>(
+        &mut self,
+        pathname: &str,
+        first: Vec<u8>,
+        reader: &mut crate::git::filter_process::PktLineReader<R>,
+        reached_flush: bool,
+        prepared: FileRecipe,
+        stager: &StagingChunkStager,
+    ) -> Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+
+        // Retain the source recipe before verification/replay. Original native
+        // rollback cannot invalidate a prefix the filter already accepted.
+        let batch = stager.staging.create_batch()?;
+        if let Err(error) =
+            stager
+                .staging
+                .record_verified_recipe_lease(&batch, Path::new(pathname), &prepared)
+        {
+            let _ = stager.staging.rollback_batch(&batch);
+            return Err(error.into());
+        }
+        let mut delegated = false;
+        let result = (|| {
+            let mut verifier = PreparedRecipeVerifier::new(prepared.clone());
+            let mut hasher = blake3::Hasher::new();
+            let mut size = 0u64;
+            let mut bytes = Bytes::from(first);
+            let mut at_flush = reached_flush;
+            let (occurrences, changed) = loop {
+                self.ctx.check_cancelled()?;
+                hasher.update(&bytes);
+                size = size.checked_add(bytes.len() as u64).ok_or_else(|| {
+                    CrabError::StagingCorrupt("prepared verification size overflow".to_owned())
+                })?;
+                match verifier.feed(&bytes, stager)? {
+                    PreparedVerification::Changed {
+                        verified_occurrences,
+                        bytes,
+                    } => break (verified_occurrences, bytes),
+                    PreparedVerification::Matching => {}
+                    PreparedVerification::Exact => {
+                        return Err(CrabError::Internal(
+                            "prepared verifier ended before EOF".to_owned(),
+                        ));
+                    }
+                }
+                if !at_flush {
+                    if let Some(packet) = reader.read_packet()? {
+                        bytes = Bytes::copy_from_slice(packet);
+                        continue;
+                    }
+                    at_flush = true;
+                }
+                match verifier.finish(stager)? {
+                    PreparedVerification::Changed {
+                        verified_occurrences,
+                        bytes,
+                    } => break (verified_occurrences, bytes),
+                    PreparedVerification::Exact => {
+                        let hash = *hasher.finalize().as_bytes();
+                        if prepared.file_hash() != MerkleHash::from(hash)
+                            || prepared.file_size() != size
+                        {
+                            return Err(CrabError::StagingCorrupt(
+                                "prepared chunks matched but file identity differed".to_owned(),
+                            ));
+                        }
+                        self.preserve_committed_recipe_before_publication(pathname, &hash)?;
+                        stager
+                            .staging
+                            .delegate_publication(&[(&batch, Path::new(pathname))])?;
+                        delegated = true;
+                        return Ok(self.build_pointer(hash, size, None).serialize());
+                    }
+                    PreparedVerification::Matching => {
+                        return Err(CrabError::Internal(
+                            "prepared verifier incomplete at EOF".to_owned(),
+                        ));
+                    }
+                }
+            };
+            let original = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let prefix = prepared_prefix_reader(
+                stager.clone(),
+                prepared.clone(),
+                occurrences,
+                original.clone(),
+            );
+            let cancel = self.ctx.cancel_token();
+            let tail = reader.byte_stream(changed.to_vec(), at_flush, &cancel);
+            let mut source = prefix.chain(tail);
+            let result = self.crab_clean_reader(pathname, &mut source, stager);
+            if result.is_err() {
+                if let Some(error) = original.borrow_mut().take() {
+                    return Err(error);
+                }
+                if let Some(error) = source.get_mut().1.take_error() {
+                    return Err(error);
+                }
+            }
+            result
+        })();
+        if !delegated && let Err(error) = stager.staging.rollback_batch(&batch) {
+            tracing::warn!(error = %error, path = %pathname, "prepared verification lease cleanup failed");
+        }
+        result
+    }
+
     /// Verify a deferred recipe against its ordered local chunks and promote
     /// it without CDC, staging writes, or a full-file spool. A changed stream
     /// reconstructs only its verified prefix before continuing through the
@@ -2248,6 +2531,18 @@ impl CleanSession {
         reached_flush: bool,
         prepared: FileRecipe,
     ) -> Result<Vec<u8>> {
+        if self.staging_unavailable.is_none()
+            && let Some(stager) = self.chunk_stager.reader_stager().cloned()
+        {
+            return self.crab_clean_prepared_reader(
+                pathname,
+                first,
+                reader,
+                reached_flush,
+                prepared,
+                &stager,
+            );
+        }
         let verify_start = std::time::Instant::now();
         let mut hasher = blake3::Hasher::new();
         let mut file_size = 0u64;
@@ -4728,6 +5023,210 @@ mod tests {
             after_second.current_segment_bytes, after_first.current_segment_bytes,
             "an exact recipe hit must not rewrite identical chunk payloads"
         );
+    }
+
+    #[test]
+    fn native_and_git_clean_crossover_reuses_payloads_and_reconstructs_edits() {
+        for native_first in [false, true] {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("model.bin");
+            let staging = Arc::new(
+                rt.block_on(StagingArea::open(tmp.path().join("staging")))
+                    .unwrap(),
+            );
+            let mut random = 0x4352_4142_2d53_4841u64;
+            let mut content = (0..4 * 1024 * 1024)
+                .map(|_| {
+                    random ^= random << 13;
+                    random ^= random >> 7;
+                    random ^= random << 17;
+                    random as u8
+                })
+                .collect::<Vec<_>>();
+            let mut initial_recipe = None;
+            let mut initial_payload_inventory = None;
+            for version in 0..6 {
+                if version == 2 {
+                    let offset = content.len() / 2;
+                    content[offset] ^= 127;
+                }
+                if version == 3 {
+                    let offset = content.len() - 17;
+                    content[offset] ^= 63;
+                }
+                if version == 4 {
+                    content.extend_from_slice(b"appended tail");
+                }
+                if version == 5 {
+                    content.truncate(content.len() - 123);
+                }
+                let native = native_first == (version % 2 == 0);
+                let expected_hash = *blake3::hash(&content).as_bytes();
+                let recipe = if native {
+                    std::fs::write(&path, &content).unwrap();
+                    let staged = rt
+                        .block_on(crab_staging::stream::stage_file_streaming(
+                            &path,
+                            tmp.path(),
+                            &staging,
+                            crab_staging::stream::StreamStageProgress {
+                                xorb_builder: Some(
+                                    crab_staging::stream::StreamStageXorbBuilder::new(
+                                        1,
+                                        crab_xet::xorb::builder::XorbBuilder::new,
+                                    ),
+                                ),
+                                ..crab_staging::stream::StreamStageProgress::default()
+                            },
+                            &tokio_util::sync::CancellationToken::new(),
+                        ))
+                        .unwrap();
+                    // A deferred native first version exercises changed-prefix replay.
+                    if version > 0 {
+                        staging.mark_batch_published(&staged.batch_id).unwrap();
+                    }
+                    staged.recipe
+                } else {
+                    let mut session = CleanSession::with_deps(
+                        AppContext::default(),
+                        Box::new(NoopFileIndexChecker),
+                        Box::new(StagingChunkStager::new(
+                            staging.clone(),
+                            rt.handle().clone(),
+                        )),
+                        &[],
+                        u64::MAX,
+                        DEFAULT_CHUNK_BUFFER_CAP,
+                    );
+                    let framed = frame_as_pktlines(&content);
+                    let mut reader = crate::git::filter_process::PktLineReader::from_slice(&framed);
+                    let pointer = session.clean_stream("model.bin", &mut reader).unwrap();
+                    assert_eq!(Pointer::parse(&pointer).unwrap().file_hash, expected_hash);
+                    staging
+                        .unpublished_local_recipe_for_path(Path::new("model.bin"))
+                        .unwrap()
+                        .unwrap()
+                };
+                let payloads = std::fs::read_dir(staging.root().join("push-plans/payloads"))
+                    .unwrap()
+                    .flat_map(|directory| std::fs::read_dir(directory.unwrap().path()).unwrap())
+                    .map(|file| {
+                        let file = file.unwrap();
+                        (file.file_name(), file.metadata().unwrap().len())
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                if version == 0 {
+                    initial_recipe = Some(recipe.clone());
+                    initial_payload_inventory = Some(payloads.clone());
+                } else if version == 1 {
+                    assert!(
+                        Some(&recipe) == initial_recipe.as_ref()
+                            && Some(&payloads) == initial_payload_inventory.as_ref(),
+                        "switching add paths without editing must reuse identical physical payloads"
+                    );
+                } else {
+                    let original_bytes = initial_payload_inventory
+                        .as_ref()
+                        .unwrap()
+                        .values()
+                        .sum::<u64>();
+                    assert!(
+                        payloads.values().sum::<u64>() < original_bytes + 2 * 1024 * 1024,
+                        "small edits must retain reused payloads without another full-file copy"
+                    );
+                }
+                let mut hashes = Vec::new();
+                let mut occurrence = 0;
+                while occurrence < recipe.chunk_count() {
+                    let page = staging.recipe_page(&recipe, occurrence).unwrap();
+                    occurrence = page.next_occurrence();
+                    hashes.extend(page.chunks.into_iter().map(|chunk| chunk.chunk_hash));
+                }
+                let reconstructed = rt
+                    .block_on(staging.get_chunks_batch(&hashes))
+                    .unwrap()
+                    .into_iter()
+                    .flat_map(|(_, bytes)| bytes.to_vec())
+                    .collect::<Vec<_>>();
+                let health = staging.lifecycle_health().unwrap();
+                let stats = staging.stats().unwrap();
+                assert!(
+                    reconstructed == content
+                        && recipe.file_hash() == MerkleHash::from(expected_hash)
+                        && stats.total_staged_bytes == 0
+                        && health.current_head_prepared_bytes < 2 * content.len() as u64,
+                    "crossover version {version} must retain one shared payload representation"
+                );
+            }
+            rt.block_on(Arc::try_unwrap(staging).ok().unwrap().close())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_packet_input_preserves_prepared_version_and_releases_attempt_leases() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.bin");
+        let original = vec![0x71; 3 * 1024 * 1024];
+        std::fs::write(&path, &original).unwrap();
+        let staging = Arc::new(
+            rt.block_on(StagingArea::open(tmp.path().join("staging")))
+                .unwrap(),
+        );
+        let prepared = rt
+            .block_on(crab_staging::stream::stage_file_streaming(
+                &path,
+                tmp.path(),
+                &staging,
+                crab_staging::stream::StreamStageProgress {
+                    xorb_builder: Some(crab_staging::stream::StreamStageXorbBuilder::new(
+                        1,
+                        crab_xet::xorb::builder::XorbBuilder::new,
+                    )),
+                    ..crab_staging::stream::StreamStageProgress::default()
+                },
+                &tokio_util::sync::CancellationToken::new(),
+            ))
+            .unwrap();
+        let before = staging.lifecycle_health().unwrap();
+        let mut session = CleanSession::with_deps(
+            AppContext::default(),
+            Box::new(NoopFileIndexChecker),
+            Box::new(StagingChunkStager::new(
+                staging.clone(),
+                rt.handle().clone(),
+            )),
+            &[],
+            u64::MAX,
+            DEFAULT_CHUNK_BUFFER_CAP,
+        );
+        let mut changed = original;
+        changed[0] ^= 0x7f;
+        let mut framed = frame_as_pktlines(&changed);
+        // A complete payload without Git's flush is not a complete request.
+        // The prepared prefix pin and reader attempt must both roll back.
+        framed.truncate(framed.len() - 4);
+        let mut reader = crate::git::filter_process::PktLineReader::from_slice(&framed);
+        let result = session.clean_stream("model.bin", &mut reader);
+        drop(session);
+        let after = staging.lifecycle_health().unwrap();
+        assert!(
+            matches!(result, Err(CrabError::Io(ref error))
+                if error.kind() == std::io::ErrorKind::UnexpectedEof)
+                && staging
+                    .unpublished_local_recipe_for_path(Path::new("model.bin"))
+                    .unwrap()
+                    == Some(prepared.recipe)
+                && before.path_leases == after.path_leases
+                && before.open_batches_without_publication
+                    == after.open_batches_without_publication
+                && staging.stats().unwrap().total_staged_bytes == 0,
+            "failed framing must retain the original owner and release only attempt ownership"
+        );
+        rt.block_on(Arc::try_unwrap(staging).ok().unwrap().close())
+            .unwrap();
     }
 
     #[test]

@@ -18,15 +18,23 @@ type StoredRecipeMetadata = (i64, i64, Vec<u8>, i64, Vec<u8>, String);
 type StoredRecipeWithHashRow = (Vec<u8>, i64, i64, Vec<u8>, i64, Vec<u8>, String, Vec<u8>);
 type ResidualAuthorityRow = (i64, Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
 
-/// Canonical pre-release on-disk layout contract.
-const LAYOUT_VERSION: &str = "1";
-const PUBLISHED_RECIPE_LOOKUP_BATCH_SIZE: usize = 512;
+/// Version 3 records leases handed to an external Git publisher.
+const LAYOUT_VERSION: &str = "3";
+const RECIPE_LOOKUP_BATCH_SIZE: usize = 512;
+
+#[derive(Clone, Copy)]
+enum RecipeOwner {
+    Published,
+    External,
+    Retained,
+}
 
 const CANONICAL_TABLES: &[&str] = &[
     "add_preparation_batches",
     "add_preparations",
     "chunk_payloads",
     "chunks",
+    "external_publications",
     "file_paths",
     "file_recipes",
     "files",
@@ -281,9 +289,9 @@ fn nonnegative_count(field: &str, value: i64) -> Result<u64> {
 }
 
 fn retired_staging_schema() -> StagingError {
-    StagingError::StagingCorrupt(
-        "staging schema is not canonical v1; remove .crab/staging and restage".to_owned(),
-    )
+    StagingError::StagingCorrupt(format!(
+        "staging schema is not canonical v{LAYOUT_VERSION}; remove .crab/staging and restage"
+    ))
 }
 
 fn sqlite_i64(field: &str, value: u64) -> Result<i64> {
@@ -303,11 +311,12 @@ fn validate_chunk_index(expected: usize, actual: i64) -> Result<()> {
     Ok(())
 }
 
-fn ensure_recording_batch_open(
+fn ensure_batch_mutable(
     tx: &rusqlite::Transaction<'_>,
     batch_id: &str,
     operation: &str,
 ) -> Result<()> {
+    ensure_batch_not_delegated(tx, batch_id, operation)?;
     let batch_is_open: bool = tx
         .query_row(
             "SELECT EXISTS(
@@ -328,6 +337,24 @@ fn ensure_recording_batch_open(
     Err(StagingError::NotFound {
         path: format!("open staging batch {batch_id}"),
     })
+}
+
+fn ensure_batch_not_delegated(
+    tx: &rusqlite::Transaction<'_>,
+    batch_id: &str,
+    operation: &str,
+) -> Result<()> {
+    let delegated: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM external_publications WHERE batch_id = ?1)",
+        params![batch_id],
+        |row| row.get(0),
+    )?;
+    if delegated {
+        return Err(StagingError::StagingCorrupt(format!(
+            "{operation} cannot mutate delegated batch {batch_id}"
+        )));
+    }
+    Ok(())
 }
 
 fn publication_intent_batch_ids(
@@ -497,7 +524,7 @@ impl Index {
     /// Open (or create) the staging index at `path`.
     ///
     /// Enables WAL mode, `PRAGMA synchronous = NORMAL`, and foreign key
-    /// enforcement. Initializes a fresh canonical v1 schema or rejects any
+    /// enforcement. Initializes or upgrades the canonical schema, rejecting any
     /// other shape with an explicit restage instruction.
     ///
     /// # Errors
@@ -580,11 +607,32 @@ impl Index {
     fn open_canonical_schema(&mut self) -> Result<()> {
         let existing_tables = self.application_objects("table")?;
         let fresh = existing_tables.is_empty();
+        let mut needs_payload_upgrade = false;
         if !fresh {
+            if !existing_tables.iter().any(|name| name == "staging_meta") {
+                return Err(retired_staging_schema());
+            }
+            let version: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT value FROM staging_meta WHERE key = 'layout_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            needs_payload_upgrade = match version.as_deref() {
+                Some("1") => true,
+                Some(LAYOUT_VERSION) => false,
+                _ => return Err(retired_staging_schema()),
+            };
+            let expected_tables = CANONICAL_TABLES
+                .iter()
+                .copied()
+                .filter(|name| !needs_payload_upgrade || *name != "external_publications");
             if existing_tables
                 .iter()
                 .map(String::as_str)
-                .ne(CANONICAL_TABLES.iter().copied())
+                .ne(expected_tables)
             {
                 return Err(retired_staging_schema());
             }
@@ -633,23 +681,58 @@ impl Index {
             {
                 return Err(retired_staging_schema());
             }
-            let version: Option<String> = self
-                .conn
-                .query_row(
-                    "SELECT value FROM staging_meta WHERE key = 'layout_version'",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to read staging layout version: {e}"))
-                })?;
-            if version.as_deref() != Some(LAYOUT_VERSION) {
+            if !needs_payload_upgrade
+                && self
+                    .table_columns("external_publications")?
+                    .iter()
+                    .map(String::as_str)
+                    .ne(["batch_id", "path_bytes"])
+            {
                 return Err(retired_staging_schema());
+            }
+            if !needs_payload_upgrade {
+                let keys = self.conn.prepare(
+                    "SELECT name, pk FROM pragma_table_info('external_publications') ORDER BY cid"
+                )?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let foreign = self.conn.prepare(
+                    "SELECT [table], [from], [to], on_delete FROM pragma_foreign_key_list('external_publications') ORDER BY id, seq"
+                )?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                if keys != [("batch_id".to_owned(), 1), ("path_bytes".to_owned(), 2)]
+                    || foreign
+                        != [
+                            (
+                                "path_leases".to_owned(),
+                                "batch_id".to_owned(),
+                                "batch_id".to_owned(),
+                                "CASCADE".to_owned(),
+                            ),
+                            (
+                                "path_leases".to_owned(),
+                                "path_bytes".to_owned(),
+                                "path_bytes".to_owned(),
+                                "CASCADE".to_owned(),
+                            ),
+                        ]
+                {
+                    return Err(retired_staging_schema());
+                }
             }
         }
 
+        // Admission, new ownership schema and released locator repair commit
+        // together. A failed upgrade must leave the v1 shape and bytes intact.
+        let tx = self.conn.unchecked_transaction()?;
         self.initialize_schema()?;
+        if needs_payload_upgrade {
+            Self::repair_segment_payload_authority(&tx)?;
+            tx.execute(
+                "UPDATE staging_meta SET value = ?1 WHERE key = 'layout_version'",
+                params![LAYOUT_VERSION],
+            )?;
+        }
         if fresh {
             self.conn
                 .execute(
@@ -663,6 +746,47 @@ impl Index {
                 version = LAYOUT_VERSION,
                 "initialized canonical staging schema"
             );
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn repair_segment_payload_authority(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+        // Released v1 compaction moved occurrence rows without updating payload
+        // inventory. Repair from the locators v1 readers actually used, then
+        // change admission atomically so an old writer cannot recreate the gap.
+        tx.execute(
+            "UPDATE chunk_payloads AS payload
+             SET (segment_id, segment_offset) = (
+                 SELECT candidate.segment_id, candidate.segment_offset FROM (
+                     SELECT segment_id, segment_offset, size, 0 AS priority, rowid
+                     FROM chunks WHERE chunk_hash = payload.chunk_hash
+                     UNION ALL
+                     SELECT segment_id, segment_offset, size, 1 AS priority, rowid
+                     FROM pending_chunks WHERE chunk_hash = payload.chunk_hash
+                 ) AS candidate
+                 JOIN segments USING (segment_id)
+                 WHERE candidate.size = payload.size
+                 ORDER BY candidate.priority, candidate.rowid LIMIT 1
+             )
+             WHERE EXISTS (SELECT 1 FROM chunks JOIN segments USING (segment_id)
+                           WHERE chunk_hash = payload.chunk_hash AND size = payload.size)
+                OR EXISTS (SELECT 1 FROM pending_chunks JOIN segments USING (segment_id)
+                           WHERE chunk_hash = payload.chunk_hash AND size = payload.size)",
+            [],
+        )?;
+        Self::prune_unowned_segment_payloads(tx)?;
+        let missing_segment: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunk_payloads AS payload
+                           WHERE NOT EXISTS (SELECT 1 FROM segments
+                                             WHERE segments.segment_id = payload.segment_id))",
+            [],
+            |row| row.get(0),
+        )?;
+        if missing_segment {
+            return Err(StagingError::StagingCorrupt(
+                "released payload inventory references a missing segment".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -703,7 +827,7 @@ impl Index {
             })
     }
 
-    fn initialize_schema(&mut self) -> Result<()> {
+    fn initialize_schema(&self) -> Result<()> {
         self.conn
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS files (
@@ -875,6 +999,14 @@ impl Index {
 
                 CREATE INDEX IF NOT EXISTS leases_by_file
                     ON path_leases(file_hash);
+
+                CREATE TABLE IF NOT EXISTS external_publications (
+                    batch_id   TEXT NOT NULL,
+                    path_bytes BLOB NOT NULL,
+                    PRIMARY KEY (batch_id, path_bytes),
+                    FOREIGN KEY (batch_id, path_bytes) REFERENCES path_leases(batch_id, path_bytes)
+                        ON DELETE CASCADE
+                );
 
                 CREATE TABLE IF NOT EXISTS path_heads (
                     path_bytes   BLOB PRIMARY KEY,
@@ -1369,33 +1501,12 @@ impl Index {
         Ok(count as u64)
     }
 
-    /// Look up a chunk by hash, returning its locator if staged.
-    ///
-    /// Single index lookup on `chunks_by_hash`. Returns `None` if the
-    /// chunk is not in the committed `chunks` table.
-    ///
-    /// # Errors
-    ///
-    /// Look up a chunk by hash, returning its locator if staged.
-    ///
-    /// Checks the committed `chunks` table first, falling back to
-    /// `pending_chunks`. Post-`flush_pending` rows still live in
-    /// `pending_chunks`, so `locate` must check both tables to stay
-    /// consistent with `locate_batch` and `get_chunk`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StagingError::Internal`] on SQLite failure.
+    /// Resolve a segment payload independently of file occurrence ownership.
     pub fn locate(&self, chunk_hash: &[u8; 32]) -> Result<Option<ChunkLocator>> {
-        let hash_slice: &[u8] = chunk_hash;
-        let committed = self
-            .conn
+        self.conn
             .query_row(
-                "SELECT segment_id, segment_offset, size
-                 FROM chunks
-                 WHERE chunk_hash = ?1
-                 LIMIT 1",
-                params![hash_slice],
+                "SELECT segment_id, segment_offset, size FROM chunk_payloads WHERE chunk_hash = ?1",
+                params![chunk_hash.as_slice()],
                 |row| {
                     Ok(ChunkLocator {
                         segment_id: row.get(0)?,
@@ -1405,13 +1516,7 @@ impl Index {
                 },
             )
             .optional()
-            .map_err(|e| StagingError::Internal(format!("failed to locate chunk: {e}")))?;
-
-        if committed.is_some() {
-            return Ok(committed);
-        }
-
-        self.locate_pending(chunk_hash)
+            .map_err(StagingError::from)
     }
 
     /// Return the byte offset one past the last committed record for a
@@ -1469,9 +1574,14 @@ impl Index {
         let offset: Option<i64> = self
             .conn
             .query_row(
-                "SELECT MAX(segment_offset + size + 8)
-                 FROM chunks
-                 WHERE segment_id = ?1",
+                "SELECT MAX(boundary) FROM (
+                     SELECT segment_offset + size + 8 AS boundary FROM chunks WHERE segment_id = ?1
+                     UNION ALL
+                     SELECT payload.segment_offset + payload.size + 8
+                     FROM chunk_payloads AS payload WHERE payload.segment_id = ?1
+                       AND EXISTS (SELECT 1 FROM recipe_payload_leases AS lease
+                                   WHERE lease.chunk_hash = payload.chunk_hash)
+                 )",
                 params![segment_id],
                 |row| row.get(0),
             )
@@ -1535,6 +1645,7 @@ impl Index {
                  LEFT JOIN pending_chunks p ON p.segment_id = s.segment_id
                  WHERE s.live_chunk_count = 0
                    AND s.sealed_at IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM chunk_payloads AS payload WHERE payload.segment_id = s.segment_id)
                  GROUP BY s.segment_id
                  HAVING COUNT(p.rowid) = 0",
             )
@@ -1574,7 +1685,7 @@ impl Index {
                         COALESCE(p.n, 0) AS pending_chunks
                  FROM segments s
                  LEFT JOIN (
-                     SELECT segment_id, COUNT(*) AS n FROM chunks GROUP BY segment_id
+                     SELECT segment_id, COUNT(*) AS n FROM chunk_payloads GROUP BY segment_id
                  ) c ON c.segment_id = s.segment_id
                  LEFT JOIN (
                      SELECT segment_id, COUNT(*) AS n FROM pending_chunks GROUP BY segment_id
@@ -1654,7 +1765,8 @@ impl Index {
                  ) p ON p.segment_id = s.segment_id
                  WHERE s.segment_id != ?1
                    AND COALESCE(c.n, 0) = 0
-                   AND COALESCE(p.n, 0) = 0",
+                   AND COALESCE(p.n, 0) = 0
+                   AND NOT EXISTS (SELECT 1 FROM chunk_payloads AS payload WHERE payload.segment_id = s.segment_id)",
             )
             .map_err(|e| {
                 StagingError::Internal(format!("failed to prepare abandoned query: {e}"))
@@ -1746,17 +1858,22 @@ impl Index {
     ///
     /// Returns [`StagingError::Internal`] on SQLite failure.
     pub fn delete_orphan_pending_rows(&self) -> Result<u64> {
-        let n = self
-            .conn
-            .execute(
-                "DELETE FROM pending_chunks
-                 WHERE segment_id NOT IN (SELECT segment_id FROM segments)",
-                [],
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("failed to delete orphan pending rows: {e}"))
-            })?;
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "DELETE FROM pending_chunks WHERE segment_id NOT IN (SELECT segment_id FROM segments)",
+            [],
+        )?;
+        Self::prune_unowned_segment_payloads(&tx)?;
+        tx.commit()?;
         Ok(n as u64)
+    }
+
+    pub fn segment_has_payloads(&self, segment_id: u64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunk_payloads WHERE segment_id = ?1)",
+            params![segment_id],
+            |row| row.get(0),
+        )?)
     }
 
     /// Mark a segment as sealed with the current timestamp.
@@ -1862,10 +1979,7 @@ impl Index {
             .conn
             .query_row(
                 "SELECT EXISTS(
-                    SELECT 1 FROM chunks WHERE chunk_hash = ?1
-                    UNION ALL
-                    SELECT 1 FROM pending_chunks WHERE chunk_hash = ?1
-                    LIMIT 1
+                    SELECT 1 FROM chunk_payloads WHERE chunk_hash = ?1
                 )",
                 params![hash_slice],
                 |row| row.get(0),
@@ -2261,6 +2375,7 @@ impl Index {
                    AND EXISTS (
                            SELECT 1 FROM staging_batches
                            WHERE batch_id = ?2 AND state = 'open'
+                             AND NOT EXISTS (SELECT 1 FROM external_publications WHERE batch_id = ?2)
                        )",
                 params![preparation_id, batch_id],
             )
@@ -2296,6 +2411,7 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|error| {
             StagingError::Internal(format!("failed to begin prepared claim batch: {error}"))
         })?;
+        ensure_batch_not_delegated(&tx, batch_id, "prepared authority")?;
         let valid_owner: bool = tx
             .query_row(
                 "SELECT EXISTS(
@@ -2479,6 +2595,11 @@ impl Index {
             }
         }
 
+        let mut retained_xorbs = HashSet::new();
+        let mut retain_payload = tx.prepare_cached(
+            "INSERT OR IGNORE INTO preparation_payloads (preparation_id, xorb_hash)
+             VALUES (?1, ?2)",
+        )?;
         let mut out = Vec::with_capacity(chunks.len());
         for (chunk_hash, size) in chunks {
             if let Some(locator) = prepared.get(chunk_hash) {
@@ -2488,6 +2609,13 @@ impl Index {
                         crab_xet::hash::MerkleHash::from(*chunk_hash).hex(),
                         locator.size
                     )));
+                }
+                // The incoming recipe is not sealed yet. Pin reused bytes in
+                // this transaction so retiring their old recipe cannot remove
+                // them before this preparation transfers or releases ownership.
+                if retained_xorbs.insert(locator.xorb_hash) {
+                    retain_payload
+                        .execute(params![preparation_id, locator.xorb_hash.as_slice()])?;
                 }
                 out.push(PreparedChunkClaim::Prepared(*locator));
                 continue;
@@ -2530,6 +2658,7 @@ impl Index {
             claims.insert(*chunk_hash, (preparation_id.to_owned(), *size));
             out.push(PreparedChunkClaim::Claimed);
         }
+        drop(retain_payload);
         tx.commit().map_err(|error| {
             StagingError::Internal(format!("failed to commit prepared claim batch: {error}"))
         })?;
@@ -2545,6 +2674,7 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|error| {
             StagingError::Internal(format!("failed to begin prepared payload seal: {error}"))
         })?;
+        ensure_batch_not_delegated(&tx, owner_batch_id, "prepared authority")?;
         let recording: bool = tx
             .query_row(
                 "SELECT EXISTS(
@@ -3083,7 +3213,7 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|e| {
             StagingError::Internal(format!("failed to begin recipe recording append: {e}"))
         })?;
-        ensure_recording_batch_open(&tx, batch_id, "recipe")?;
+        ensure_batch_mutable(&tx, batch_id, "recipe")?;
         Self::append_recipe_recording_terms_in_tx(
             &tx,
             batch_id,
@@ -3377,7 +3507,7 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|error| {
             StagingError::Internal(format!("failed to begin recording batch append: {error}"))
         })?;
-        ensure_recording_batch_open(&tx, batch_id, "combined")?;
+        ensure_batch_mutable(&tx, batch_id, "combined")?;
         Self::append_recording_remote_chunks_in_tx(&tx, batch_id, remote_chunks)?;
         Self::append_recipe_recording_terms_in_tx(
             &tx,
@@ -3484,12 +3614,22 @@ impl Index {
         )
         .map_err(|e| StagingError::Internal(format!("failed to replace path heads: {e}")))?;
         tx.execute(
+            "DELETE FROM external_publications WHERE batch_id = ?1",
+            params![batch_id],
+        )?;
+        // A new head cannot cancel another active caller or external writer.
+        // Supersede only published leases; open owners release themselves.
+        tx.execute(
             "DELETE FROM path_leases AS lease
              WHERE EXISTS (
                  SELECT 1 FROM path_heads AS incoming
                  WHERE incoming.batch_id = ?1
                    AND incoming.path_bytes = lease.path_bytes
              )
+               AND EXISTS (
+                   SELECT 1 FROM staging_batches AS owner
+                   WHERE owner.batch_id = lease.batch_id AND owner.state = 'published'
+               )
                AND NOT EXISTS (
                    SELECT 1 FROM path_heads AS head
                    WHERE head.batch_id = lease.batch_id
@@ -3600,6 +3740,118 @@ impl Index {
         Ok(Some(unowned))
     }
 
+    /// Delegate complete verified leases without asserting a Git index write.
+    pub fn delegate_publication(&self, entries: &[(String, Vec<u8>)]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (batch_id, path_bytes) in entries {
+            let ready: bool = tx.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM path_leases AS lease
+                    JOIN staging_batches AS batch USING (batch_id)
+                    JOIN verified_recipes USING (recipe_hash)
+                    WHERE lease.batch_id = ?1 AND lease.path_bytes = ?2 AND batch.state = 'open'
+                      AND NOT EXISTS (SELECT 1 FROM recipe_recording_terms AS term WHERE term.batch_id = lease.batch_id)
+                      AND NOT EXISTS (SELECT 1 FROM recording_remote_chunks AS remote WHERE remote.batch_id = lease.batch_id)
+                      AND NOT EXISTS (SELECT 1 FROM add_preparation_batches AS preparation
+                                      WHERE preparation.batch_id = lease.batch_id)
+                      AND NOT EXISTS (SELECT 1 FROM publication_intent_entries AS intent
+                                      WHERE intent.batch_id = lease.batch_id)
+                )",
+                params![batch_id, path_bytes],
+                |row| row.get(0),
+            )?;
+            if !ready {
+                return Err(StagingError::StagingCorrupt(
+                    "external publication requires a complete verified batch without an active native publisher"
+                        .to_owned(),
+                ));
+            }
+            tx.execute("INSERT OR IGNORE INTO external_publications (batch_id, path_bytes) VALUES (?1, ?2)",
+                params![batch_id, path_bytes])?;
+        }
+        for batch_id in entries
+            .iter()
+            .map(|(batch, _)| batch)
+            .collect::<std::collections::HashSet<_>>()
+        {
+            let incomplete: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM path_leases AS lease
+                 WHERE lease.batch_id = ?1 AND NOT EXISTS (
+                     SELECT 1 FROM external_publications AS external
+                     WHERE external.batch_id = lease.batch_id AND external.path_bytes = lease.path_bytes
+                 ))",
+                params![batch_id], |row| row.get(0),
+            )?;
+            if incomplete {
+                return Err(StagingError::StagingCorrupt(
+                    "delegation must hand off every completed path in a batch".to_owned(),
+                ));
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delegated_publications(&self) -> Result<Vec<super::DelegatedPublication>> {
+        let invalid: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM external_publications AS external
+             JOIN staging_batches AS batch USING (batch_id)
+             WHERE batch.state = 'open' AND (
+                 EXISTS (SELECT 1 FROM recipe_recording_terms AS term WHERE term.batch_id = external.batch_id) OR
+                 EXISTS (SELECT 1 FROM recording_remote_chunks AS remote WHERE remote.batch_id = external.batch_id) OR
+                 EXISTS (SELECT 1 FROM add_preparation_batches AS preparation
+                         WHERE preparation.batch_id = external.batch_id) OR
+                 NOT EXISTS (
+                     SELECT 1 FROM path_leases AS lease JOIN verified_recipes USING (recipe_hash)
+                     JOIN file_recipes AS recipe USING (recipe_hash)
+                     WHERE lease.batch_id = external.batch_id AND lease.path_bytes = external.path_bytes
+                       AND lease.file_hash = recipe.file_hash
+                 ) OR EXISTS (
+                     SELECT 1 FROM path_leases AS lease WHERE lease.batch_id = external.batch_id
+                     AND NOT EXISTS (SELECT 1 FROM external_publications AS sibling
+                         WHERE sibling.batch_id = lease.batch_id AND sibling.path_bytes = lease.path_bytes)
+                 )
+             ))", [], |row| row.get(0),
+        )?;
+        if invalid {
+            return Err(StagingError::StagingCorrupt(
+                "incomplete delegated batch ownership".to_owned(),
+            ));
+        }
+        let mut statement = self.conn.prepare_cached(
+            "SELECT lease.batch_id, lease.path_bytes, lease.file_hash, recipe.file_size
+             FROM external_publications AS external
+             JOIN path_leases AS lease
+               ON lease.batch_id = external.batch_id AND lease.path_bytes = external.path_bytes
+             JOIN staging_batches AS batch ON batch.batch_id = lease.batch_id
+             JOIN file_recipes AS recipe USING (recipe_hash)
+             JOIN verified_recipes USING (recipe_hash)
+             WHERE batch.state = 'open'
+             ORDER BY lease.batch_id, lease.path_bytes",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (batch_id, path_bytes, file_hash, size) = row?;
+            Ok(super::DelegatedPublication {
+                batch_id: super::StagingBatchId(batch_id),
+                path_bytes,
+                file_hash: crab_xet::hash::MerkleHash::from(decode_hash_blob(
+                    "delegated file hash",
+                    file_hash,
+                )?),
+                size: nonnegative_count("delegated file size", size)?,
+            })
+        })
+        .collect()
+    }
+
     pub fn create_publication_intent(
         &self,
         intent_id: &str,
@@ -3631,7 +3883,9 @@ impl Index {
                      JOIN staging_batches AS batch USING (batch_id)
                      JOIN verified_recipes AS verified USING (recipe_hash)
                      WHERE lease.batch_id = ?1 AND lease.path_bytes = ?2
-                       AND batch.state = 'open'",
+                       AND batch.state = 'open'
+                       AND NOT EXISTS (SELECT 1 FROM external_publications AS external
+                                       WHERE external.batch_id = lease.batch_id)",
                     params![batch_id, path_bytes],
                     |row| row.get(0),
                 )
@@ -3824,6 +4078,8 @@ impl Index {
                 "failed to replace publication path heads {intent_id}: {e}"
             ))
         })?;
+        // A new head cannot cancel another active caller or external writer.
+        // Supersede only published leases; open owners release themselves.
         tx.execute(
             "DELETE FROM path_leases AS lease
              WHERE EXISTS (
@@ -3831,6 +4087,10 @@ impl Index {
                  WHERE incoming.intent_id = ?1
                    AND incoming.path_bytes = lease.path_bytes
              )
+               AND EXISTS (
+                   SELECT 1 FROM staging_batches AS owner
+                   WHERE owner.batch_id = lease.batch_id AND owner.state = 'published'
+               )
                AND NOT EXISTS (
                    SELECT 1 FROM path_heads AS head
                    WHERE head.batch_id = lease.batch_id
@@ -3943,7 +4203,7 @@ impl Index {
     ) -> Result<Option<crate::recipe::FileRecipe>> {
         let mut selected = None;
         for (returned_hash, recipe) in
-            self.load_published_recipe_rows(std::slice::from_ref(file_hash))?
+            self.load_recipe_rows(std::slice::from_ref(file_hash), RecipeOwner::Published)?
         {
             if returned_hash != *file_hash {
                 return Err(StagingError::StagingCorrupt(
@@ -3969,23 +4229,48 @@ impl Index {
         &self,
         file_hashes: &[[u8; 32]],
     ) -> Result<HashMap<[u8; 32], Option<crate::recipe::FileRecipe>>> {
+        self.recipes_for_files(file_hashes, RecipeOwner::Published)
+    }
+
+    /// Load only caller-verified leases explicitly delegated to an external writer.
+    pub fn external_recipes_for_files(
+        &self,
+        file_hashes: &[[u8; 32]],
+    ) -> Result<HashMap<[u8; 32], Option<crate::recipe::FileRecipe>>> {
+        self.recipes_for_files(file_hashes, RecipeOwner::External)
+    }
+
+    pub fn retained_recipe_for_file(
+        &self,
+        file_hash: &[u8; 32],
+    ) -> Result<Option<crate::recipe::FileRecipe>> {
+        let mut recipes =
+            self.recipes_for_files(std::slice::from_ref(file_hash), RecipeOwner::Retained)?;
+        Ok(recipes.remove(file_hash).flatten())
+    }
+
+    fn recipes_for_files(
+        &self,
+        file_hashes: &[[u8; 32]],
+        owner: RecipeOwner,
+    ) -> Result<HashMap<[u8; 32], Option<crate::recipe::FileRecipe>>> {
         let mut recipes = HashMap::with_capacity(file_hashes.len());
-        for batch in file_hashes.chunks(PUBLISHED_RECIPE_LOOKUP_BATCH_SIZE) {
+        for batch in file_hashes.chunks(RECIPE_LOOKUP_BATCH_SIZE) {
             for file_hash in batch {
                 recipes.entry(*file_hash).or_insert(None);
             }
-            for (file_hash, recipe) in self.load_published_recipe_rows(batch)? {
+            for (file_hash, recipe) in self.load_recipe_rows(batch, owner)? {
                 match recipes.get_mut(&file_hash) {
                     Some(slot @ None) => *slot = Some(recipe),
                     Some(Some(prior)) if prior == &recipe => {}
                     Some(Some(_)) => {
                         return Err(StagingError::StagingCorrupt(
-                            "one file hash has conflicting published recipes".to_owned(),
+                            "one file hash has conflicting stored recipes".to_owned(),
                         ));
                     }
                     None => {
                         return Err(StagingError::StagingCorrupt(
-                            "published recipe query returned an unexpected file hash".to_owned(),
+                            "stored recipe query returned an unexpected file hash".to_owned(),
                         ));
                     }
                 }
@@ -3994,9 +4279,10 @@ impl Index {
         Ok(recipes)
     }
 
-    fn load_published_recipe_rows(
+    fn load_recipe_rows(
         &self,
         file_hashes: &[[u8; 32]],
+        owner: RecipeOwner,
     ) -> Result<Vec<([u8; 32], crate::recipe::FileRecipe)>> {
         if file_hashes.is_empty() {
             return Ok(Vec::new());
@@ -4004,6 +4290,30 @@ impl Index {
         let placeholders = std::iter::repeat_n("?", file_hashes.len())
             .collect::<Vec<_>>()
             .join(",");
+        let ownership = match owner {
+            RecipeOwner::Published => {
+                "JOIN path_heads AS head USING (recipe_hash)
+                 JOIN staging_batches AS batch USING (batch_id)
+                 WHERE batch.state = 'published'"
+            }
+            RecipeOwner::Retained => {
+                "WHERE (EXISTS (SELECT 1 FROM path_leases AS lease
+                               WHERE lease.file_hash = recipe.file_hash
+                                 AND lease.recipe_hash = recipe.recipe_hash)
+                     OR EXISTS (SELECT 1 FROM push_snapshots AS snapshot
+                                WHERE snapshot.state IN ('open', 'committed')
+                                  AND EXISTS (SELECT 1 FROM push_snapshot_recipes AS pin
+                                      WHERE pin.snapshot_id = snapshot.snapshot_id
+                                        AND pin.recipe_hash = recipe.recipe_hash)))"
+            }
+            RecipeOwner::External => {
+                "JOIN path_leases AS lease USING (recipe_hash)
+                 JOIN external_publications AS external
+                   ON external.batch_id = lease.batch_id AND external.path_bytes = lease.path_bytes
+                 JOIN staging_batches AS batch ON batch.batch_id = lease.batch_id
+                 WHERE batch.state = 'open'"
+            }
+        };
         let query = format!(
             "SELECT DISTINCT recipe.file_hash, recipe.recipe_hash, recipe.file_size,
                     recipe.chunk_count, recipe.sequence_hash,
@@ -4011,13 +4321,11 @@ impl Index {
              FROM file_recipes AS recipe
              JOIN files AS file USING (file_hash)
              JOIN verified_recipes AS verified USING (recipe_hash)
-             JOIN path_heads AS head USING (recipe_hash)
-             JOIN staging_batches AS batch USING (batch_id)
-             WHERE recipe.file_hash IN ({placeholders}) AND batch.state = 'published'
+             {ownership} AND recipe.file_hash IN ({placeholders})
              ORDER BY recipe.file_hash, recipe.recipe_hash"
         );
         let mut statement = self.conn.prepare_cached(&query).map_err(|e| {
-            StagingError::Internal(format!("failed to prepare published recipe query: {e}"))
+            StagingError::Internal(format!("failed to prepare stored recipe query: {e}"))
         })?;
         let rows = statement
             .query_map(
@@ -4035,10 +4343,10 @@ impl Index {
                     ))
                 },
             )
-            .map_err(|e| StagingError::Internal(format!("failed to query published recipes: {e}")))?
+            .map_err(|e| StagingError::Internal(format!("failed to query stored recipes: {e}")))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| {
-                StagingError::Internal(format!("failed to collect published recipes: {e}"))
+                StagingError::Internal(format!("failed to collect stored recipes: {e}"))
             })?;
 
         let mut recipes = Vec::with_capacity(rows.len());
@@ -4053,8 +4361,8 @@ impl Index {
             policy_id,
         ) in rows
         {
-            let file_hash = decode_hash_blob("published recipe file hash", raw_file_hash)?;
-            let stored_recipe_hash = decode_hash_blob("published recipe hash", raw_recipe_hash)?;
+            let file_hash = decode_hash_blob("stored recipe file hash", raw_file_hash)?;
+            let stored_recipe_hash = decode_hash_blob("stored recipe hash", raw_recipe_hash)?;
             let recipe = self.load_stored_recipe(
                 &stored_recipe_hash,
                 &file_hash,
@@ -4552,9 +4860,9 @@ impl Index {
 
     /// Atomically pin the exact immutable recipes consumed by one push.
     ///
-    /// Every recipe must already be owned by a published path lease. The
-    /// snapshot is therefore a reference to committed local staging state,
-    /// never a way to manufacture ownership from a pointer alone.
+    /// Every recipe must have a published head or an explicitly delegated
+    /// verified lease. Callers must first observe its Git pointer; ordinary
+    /// open native batches cannot manufacture push visibility.
     pub fn create_push_snapshot(
         &self,
         snapshot_id: &str,
@@ -4634,6 +4942,13 @@ impl Index {
                          FROM path_heads AS head
                          JOIN staging_batches AS batch USING (batch_id)
                          WHERE head.recipe_hash = ?1 AND batch.state = 'published'
+                     ) OR EXISTS (
+                         SELECT 1 FROM external_publications AS external
+                         JOIN path_leases AS lease
+                           ON lease.batch_id = external.batch_id AND lease.path_bytes = external.path_bytes
+                         JOIN staging_batches AS batch ON batch.batch_id = lease.batch_id
+                         JOIN verified_recipes USING (recipe_hash)
+                         WHERE lease.recipe_hash = ?1 AND batch.state = 'open'
                      )",
                     params![recipe_hash.as_slice()],
                     |row| row.get(0),
@@ -4645,7 +4960,7 @@ impl Index {
                 })?;
             if !published_head {
                 return Err(StagingError::StagingCorrupt(format!(
-                    "push snapshot {snapshot_id} recipe {} has no published path head",
+                    "push snapshot {snapshot_id} recipe {} has no published or delegated lease",
                     blake3::Hash::from(recipe_hash).to_hex()
                 )));
             }
@@ -4667,7 +4982,14 @@ impl Index {
                             head.file_hash, head.recipe_hash
                      FROM path_heads AS head
                      JOIN staging_batches AS batch ON batch.batch_id = head.batch_id
-                     WHERE head.recipe_hash = ?2 AND batch.state = 'published'",
+                     WHERE head.recipe_hash = ?2 AND batch.state = 'published'
+                     UNION
+                     SELECT ?1, lease.batch_id, lease.path_bytes, lease.file_hash, lease.recipe_hash
+                     FROM external_publications AS external
+                     JOIN path_leases AS lease
+                       ON lease.batch_id = external.batch_id AND lease.path_bytes = external.path_bytes
+                     JOIN staging_batches AS batch ON batch.batch_id = lease.batch_id
+                     WHERE lease.recipe_hash = ?2 AND batch.state = 'open'",
                     params![snapshot_id, recipe_hash.as_slice()],
                 )
                 .map_err(|e| {
@@ -4677,7 +4999,7 @@ impl Index {
                 })?;
             if captured == 0 {
                 return Err(StagingError::StagingCorrupt(format!(
-                    "push snapshot {snapshot_id} recipe {} lost its published lease",
+                    "push snapshot {snapshot_id} recipe {} lost its eligible lease",
                     blake3::Hash::from(recipe_hash).to_hex()
                 )));
             }
@@ -4726,7 +5048,7 @@ impl Index {
         }
     }
 
-    /// Retire only the exact published path leases captured by one committed
+    /// Retire only the exact eligible path leases captured by one committed
     /// push snapshot. Returns file hashes whose final lease disappeared and
     /// whose physical chunk rows can therefore be reclaimed.
     pub fn retire_push_snapshot(&self, snapshot_id: &str) -> Result<Vec<[u8; 32]>> {
@@ -4856,12 +5178,18 @@ impl Index {
             })?;
             tx.execute(
                 "DELETE FROM staging_batches
-                 WHERE state = 'published'
+                 WHERE (state = 'published' OR batch_id IN (
+                     SELECT batch_id FROM push_snapshot_leases WHERE snapshot_id = ?1
+                 ))
                    AND NOT EXISTS (
                        SELECT 1 FROM path_leases
                        WHERE path_leases.batch_id = staging_batches.batch_id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM publication_intent_entries AS intent
+                       WHERE intent.batch_id = staging_batches.batch_id
                    )",
-                [],
+                params![snapshot_id],
             )
             .map_err(|e| {
                 StagingError::Internal(format!(
@@ -5081,6 +5409,9 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|e| {
             StagingError::Internal(format!("failed to begin recipe lease transaction: {e}"))
         })?;
+        // Delegation seals batch membership. Git-aware recovery can inspect
+        // identities outside this mutex only while those identities stay fixed.
+        ensure_batch_not_delegated(&tx, batch_id, "recipe lease")?;
         tx.execute("DELETE FROM temp.incoming_recipe_occurrences", [])
             .map_err(|e| {
                 StagingError::Internal(format!("failed to clear incoming recipe occurrences: {e}"))
@@ -5713,6 +6044,7 @@ impl Index {
         )
         .map_err(|e| StagingError::Internal(format!("failed to delete staging batch: {e}")))?;
 
+        Self::prune_unowned_segment_payloads(&tx)?;
         let unleased = unowned_file_hashes(&tx, file_hashes)?;
         tx.commit()
             .map_err(|e| StagingError::Internal(format!("failed to commit batch rollback: {e}")))?;
@@ -5924,6 +6256,22 @@ impl Index {
         })
     }
 
+    fn prune_unowned_segment_payloads(conn: &Connection) -> Result<()> {
+        // Occurrences and recording terms retain bytes independently of their
+        // original file rows. Materialize recording hashes once so cleanup does
+        // not rescan a growing in-flight recipe for each inventory entry.
+        conn.execute(
+            "DELETE FROM chunk_payloads
+             WHERE NOT EXISTS (SELECT 1 FROM recipe_payload_leases AS lease
+                               WHERE lease.chunk_hash = chunk_payloads.chunk_hash)
+               AND NOT EXISTS (SELECT 1 FROM chunks WHERE chunks.chunk_hash = chunk_payloads.chunk_hash)
+               AND NOT EXISTS (SELECT 1 FROM pending_chunks WHERE pending_chunks.chunk_hash = chunk_payloads.chunk_hash)
+               AND chunk_hash NOT IN (SELECT chunk_hash FROM recipe_recording_terms)",
+            [],
+        )?;
+        Ok(())
+    }
+
     /// Atomically remove files and their chunk rows, then reclaim unowned payload inventory.
     ///
     /// Returns per-file retirement stats and prepared bodies eligible for unlinking.
@@ -5975,25 +6323,7 @@ impl Index {
                 .map_err(|e| StagingError::Internal(format!("failed to delete file_path: {e}")))?;
         }
 
-        tx.execute(
-            "DELETE FROM chunk_payloads
-             WHERE NOT EXISTS (
-                       SELECT 1 FROM recipe_payload_leases
-                       WHERE recipe_payload_leases.chunk_hash = chunk_payloads.chunk_hash
-                   )
-               AND NOT EXISTS (
-                       SELECT 1 FROM chunks
-                       WHERE chunks.chunk_hash = chunk_payloads.chunk_hash
-                   )
-               AND NOT EXISTS (
-                       SELECT 1 FROM pending_chunks
-                       WHERE pending_chunks.chunk_hash = chunk_payloads.chunk_hash
-                   )",
-            [],
-        )
-        .map_err(|e| {
-            StagingError::Internal(format!("failed to delete unleased chunk payloads: {e}"))
-        })?;
+        Self::prune_unowned_segment_payloads(&tx)?;
 
         let reclaimable_payloads = {
             let mut statement = tx
@@ -6077,6 +6407,7 @@ impl Index {
             StagingError::Internal(format!("failed to begin chunk retirement: {e}"))
         })?;
         let stats = Self::delete_chunks_for_file_in(&tx, file_hash)?;
+        Self::prune_unowned_segment_payloads(&tx)?;
         tx.commit().map_err(|e| {
             StagingError::Internal(format!("failed to commit chunk retirement: {e}"))
         })?;
@@ -7402,8 +7733,8 @@ impl Index {
 
     /// Insert chunk rows for a file, linking them to their segment locators.
     ///
-    /// For each `(chunk_hash, size)` pair, looks up the locator from
-    /// `chunks` (preferred) or `pending_chunks` and inserts into `chunks`.
+    /// For each `(chunk_hash, size)` pair, resolves canonical payload authority
+    /// and inserts one committed occurrence into `chunks`.
     /// Removes old chunk rows for this file first and keeps
     /// `live_chunk_count` in sync with the replacement.
     ///
@@ -7482,15 +7813,9 @@ impl Index {
         {
             let mut locate_stmt = tx
                 .prepare_cached(
-                    "SELECT segment_id, segment_offset, size FROM chunks WHERE chunk_hash = ?1 LIMIT 1",
+                    "SELECT segment_id, segment_offset, size FROM chunk_payloads WHERE chunk_hash = ?1",
                 )
                 .map_err(|e| StagingError::Internal(format!("prepare locate: {e}")))?;
-
-            let mut locate_pending_stmt = tx
-                .prepare_cached(
-                    "SELECT segment_id, segment_offset, size FROM pending_chunks WHERE chunk_hash = ?1 LIMIT 1",
-                )
-                .map_err(|e| StagingError::Internal(format!("prepare locate pending: {e}")))?;
 
             let mut insert_stmt = tx
                 .prepare_cached(
@@ -7501,7 +7826,6 @@ impl Index {
 
             for (idx, (chunk_hash, size)) in chunks.iter().enumerate() {
                 let ch: &[u8] = chunk_hash;
-                // Try committed chunks first, then pending.
                 let locator: Option<(u64, u64, i64)> = locate_stmt
                     .query_row(params![ch], |row| {
                         Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -7509,21 +7833,15 @@ impl Index {
                     .optional()
                     .map_err(|e| StagingError::Internal(format!("locate chunk: {e}")))?;
 
-                let (seg_id, seg_offset, _stored_size) = if let Some(loc) = locator {
-                    loc
-                } else {
-                    locate_pending_stmt
-                        .query_row(params![ch], |row| {
-                            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                        })
-                        .optional()
-                        .map_err(|e| StagingError::Internal(format!("locate pending chunk: {e}")))?
-                        .ok_or_else(|| {
-                            StagingError::Internal(
-                                "chunk not found in chunks or pending_chunks".into(),
-                            )
-                        })?
-                };
+                let (seg_id, seg_offset, stored_size) =
+                    locator.ok_or_else(|| StagingError::ChunkNotFound {
+                        hash: crab_xet::hash::MerkleHash::from(*chunk_hash).hex(),
+                    })?;
+                if nonnegative_count("registered chunk size", stored_size)? != *size {
+                    return Err(StagingError::StagingCorrupt(
+                        "registered chunk size does not match its payload".to_owned(),
+                    ));
+                }
 
                 insert_stmt
                     .execute(params![
@@ -7577,6 +7895,7 @@ impl Index {
             }
         }
 
+        Self::prune_unowned_segment_payloads(&tx)?;
         tx.commit().map_err(|e| {
             StagingError::Internal(format!("failed to commit insert_chunks_for_file tx: {e}"))
         })?;
@@ -7639,41 +7958,29 @@ impl Index {
     ///
     /// Returns [`StagingError::Internal`] on SQLite failure.
     pub fn delete_pending_for_segment(&self, segment_id: u64) -> Result<u64> {
-        let n = self
-            .conn
-            .execute(
-                "DELETE FROM pending_chunks WHERE segment_id = ?1",
-                params![segment_id],
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to delete pending chunks for segment {segment_id}: {e}"
-                ))
-            })?;
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "DELETE FROM pending_chunks WHERE segment_id = ?1",
+            params![segment_id],
+        )?;
+        Self::prune_unowned_segment_payloads(&tx)?;
+        tx.commit()?;
         Ok(n as u64)
     }
 
-    /// Delete pending rows whose framed record crosses a recovered boundary.
-    ///
-    /// Used by recovery to discard rows whose payload or framing was truncated,
-    /// while preserving rows fully contained within the valid range.
+    /// Discard pending locators and payload inventory beyond the recovered boundary.
     pub fn delete_pending_beyond_offset(&self, segment_id: u64, max_offset: u64) -> Result<()> {
-        #[expect(clippy::cast_possible_wrap, reason = "offset fits in i64")]
-        let max_offset_i64 = max_offset as i64;
-        self.conn
-            .execute(
-                "DELETE FROM pending_chunks
-                 WHERE segment_id = ?1
-                   AND (segment_offset < 0
-                        OR size < 0
-                        OR segment_offset + size + 8 > ?2)",
-                params![segment_id, max_offset_i64],
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to delete pending chunks crossing offset {max_offset} for segment {segment_id}: {e}"
-                ))
-            })?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM pending_chunks WHERE segment_id = ?1
+             AND (segment_offset < 0 OR size < 0 OR segment_offset + size + 8 > ?2)",
+            params![
+                segment_id,
+                sqlite_i64("recovered segment boundary", max_offset)?
+            ],
+        )?;
+        Self::prune_unowned_segment_payloads(&tx)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -7682,6 +7989,7 @@ impl Index {
     /// # Errors
     ///
     /// Returns [`StagingError::Internal`] on SQLite failure.
+    #[cfg(test)]
     pub fn locate_pending(&self, chunk_hash: &[u8; 32]) -> Result<Option<ChunkLocator>> {
         let hash_slice: &[u8] = chunk_hash;
         self.conn
@@ -7703,135 +8011,44 @@ impl Index {
             .map_err(|e| StagingError::Internal(format!("failed to locate pending chunk: {e}")))
     }
 
-    /// Batch locator lookup across `chunks` and `pending_chunks`.
-    ///
-    /// Issues bounded `WHERE chunk_hash IN (?, ?, ...)` queries per table
-    /// instead of one round-trip per hash. Returns locators in the same
-    /// order as `hashes`, with `None` for chunks absent from both tables.
-    ///
-    /// Committed rows in `chunks` take precedence over pending rows for
-    /// the same hash — matching the fallback order in `get_chunk`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StagingError::Internal`] on SQLite failure.
+    /// Resolve requested segment payloads in bounded batches, preserving order and repeats.
     pub fn locate_batch(&self, hashes: &[[u8; 32]]) -> Result<Vec<Option<ChunkLocator>>> {
-        if hashes.is_empty() {
-            return Ok(Vec::new());
+        let mut positions = HashMap::<[u8; 32], Vec<usize>>::with_capacity(hashes.len());
+        for (position, hash) in hashes.iter().enumerate() {
+            positions.entry(*hash).or_default().push(position);
         }
-
-        // Bucket input indices by chunk_hash. Duplicate hashes in the
-        // input all get the same locator.
-        let mut index_by_hash: std::collections::HashMap<[u8; 32], Vec<usize>> =
-            std::collections::HashMap::with_capacity(hashes.len());
-        for (i, h) in hashes.iter().enumerate() {
-            index_by_hash.entry(*h).or_default().push(i);
-        }
-
-        let unique_hashes = index_by_hash.keys().copied().collect::<Vec<_>>();
-        let mut out: Vec<Option<ChunkLocator>> = vec![None; hashes.len()];
-        const LOCATE_QUERY_BATCH: usize = 400;
-
-        // Query committed chunks first.
-        for hash_batch in unique_hashes.chunks(LOCATE_QUERY_BATCH) {
-            let placeholders = vec!["?"; hash_batch.len()].join(",");
+        let unique = positions.keys().copied().collect::<Vec<_>>();
+        let mut out = vec![None; hashes.len()];
+        for batch in unique.chunks(400) {
+            let placeholders = vec!["?"; batch.len()].join(",");
             let sql = format!(
                 "SELECT chunk_hash, segment_id, segment_offset, size
-                 FROM chunks
-                 WHERE chunk_hash IN ({placeholders})"
+                               FROM chunk_payloads WHERE chunk_hash IN ({placeholders})"
             );
-            let mut stmt = self
-                .conn
-                .prepare(&sql)
-                .map_err(|e| StagingError::Internal(format!("prepare locate_batch: {e}")))?;
-            let rows = stmt
-                .query_map(
-                    params_from_iter(hash_batch.iter().map(|h| h.as_slice())),
-                    |row| {
-                        let blob: Vec<u8> = row.get(0)?;
-                        let seg_id: u64 = row.get(1)?;
-                        let offset: u64 = row.get(2)?;
-                        let length: u32 = row.get(3)?;
-                        Ok((blob, seg_id, offset, length))
-                    },
-                )
-                .map_err(|e| StagingError::Internal(format!("query locate_batch: {e}")))?;
-
+            let mut statement = self.conn.prepare_cached(&sql)?;
+            let rows = statement.query_map(
+                params_from_iter(batch.iter().map(|hash| hash.as_slice())),
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        ChunkLocator {
+                            segment_id: row.get(1)?,
+                            offset: row.get(2)?,
+                            length: row.get(3)?,
+                        },
+                    ))
+                },
+            )?;
             for row in rows {
-                let (blob, seg_id, offset, length) =
-                    row.map_err(|e| StagingError::Internal(format!("read locate_batch row: {e}")))?;
-                if blob.len() != 32 {
-                    continue;
-                }
-                let mut h = [0u8; 32];
-                h.copy_from_slice(&blob);
-                if let Some(indices) = index_by_hash.get(&h) {
-                    let loc = ChunkLocator {
-                        segment_id: seg_id,
-                        offset,
-                        length,
-                    };
-                    for &i in indices {
-                        out[i] = Some(loc);
+                let (hash, locator) = row?;
+                let hash = decode_hash_blob("segment payload hash", hash)?;
+                if let Some(indices) = positions.get(&hash) {
+                    for &position in indices {
+                        out[position] = Some(locator);
                     }
                 }
             }
         }
-
-        // Query pending chunks for hashes still missing.
-        let missing_hashes: Vec<[u8; 32]> = index_by_hash
-            .iter()
-            .filter(|(_, indices)| indices.iter().any(|&i| out[i].is_none()))
-            .map(|(h, _)| *h)
-            .collect();
-
-        for hash_batch in missing_hashes.chunks(LOCATE_QUERY_BATCH) {
-            let pending_placeholders = vec!["?"; hash_batch.len()].join(",");
-            let sql = format!(
-                "SELECT chunk_hash, segment_id, segment_offset, size
-                 FROM pending_chunks
-                 WHERE chunk_hash IN ({pending_placeholders})"
-            );
-            let mut stmt = self.conn.prepare(&sql).map_err(|e| {
-                StagingError::Internal(format!("prepare locate_batch pending: {e}"))
-            })?;
-            let rows = stmt
-                .query_map(
-                    params_from_iter(hash_batch.iter().map(|h| h.as_slice())),
-                    |row| {
-                        let blob: Vec<u8> = row.get(0)?;
-                        let seg_id: u64 = row.get(1)?;
-                        let offset: u64 = row.get(2)?;
-                        let length: u32 = row.get(3)?;
-                        Ok((blob, seg_id, offset, length))
-                    },
-                )
-                .map_err(|e| StagingError::Internal(format!("query locate_batch pending: {e}")))?;
-
-            for row in rows {
-                let (blob, seg_id, offset, length) = row.map_err(|e| {
-                    StagingError::Internal(format!("read locate_batch pending row: {e}"))
-                })?;
-                if blob.len() != 32 {
-                    continue;
-                }
-                let mut h = [0u8; 32];
-                h.copy_from_slice(&blob);
-                if let Some(indices) = index_by_hash.get(&h) {
-                    let loc = ChunkLocator {
-                        segment_id: seg_id,
-                        offset,
-                        length,
-                    };
-                    for &i in indices {
-                        if out[i].is_none() {
-                            out[i] = Some(loc);
-                        }
-                    }
-                }
-            }
-        }
-
         Ok(out)
     }
 
@@ -7954,6 +8171,27 @@ impl Index {
             .collect::<Vec<_>>();
         let segment_locators = self.locate_batch(&hashes)?;
         let prepared_locators = self.locate_prepared_batch(&hashes)?;
+        // Released push-plan repair repacks from surviving segment occurrences
+        // when a prepared body is corrupt. Preserve that preference; otherwise
+        // use prepared source groups without mistaking retained inventory for rows.
+        let mut occurrence_backed = HashSet::new();
+        for batch in hashes.chunks(400) {
+            let placeholders = (1..=batch.len())
+                .map(|position| format!("?{position}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut statement = self.conn.prepare_cached(&format!(
+                "SELECT chunk_hash FROM chunks WHERE chunk_hash IN ({placeholders})
+                 UNION SELECT chunk_hash FROM pending_chunks WHERE chunk_hash IN ({placeholders})"
+            ))?;
+            let rows = statement.query_map(
+                params_from_iter(batch.iter().map(|hash| hash.as_slice())),
+                |row| row.get::<_, Vec<u8>>(0),
+            )?;
+            for row in rows {
+                occurrence_backed.insert(decode_hash_blob("segment occurrence hash", row?)?);
+            }
+        }
         let tx = self.conn.unchecked_transaction().map_err(|error| {
             StagingError::Internal(format!(
                 "failed to begin coalesced residual request append: {error}"
@@ -7979,7 +8217,9 @@ impl Index {
             for (((sequence, hash, expected_size, context), segment), prepared) in
                 requests.iter().zip(segment_locators).zip(prepared_locators)
             {
-                if let Some(locator) = segment {
+                if let Some(locator) = segment
+                    && (prepared.is_none() || occurrence_backed.contains(hash))
+                {
                     let actual_size = u64::from(locator.length);
                     if actual_size != *expected_size {
                         return Err(StagingError::StagingCorrupt(format!(
@@ -8324,83 +8564,19 @@ impl Index {
         Ok(())
     }
 
-    /// Classify requested chunk occurrences by existing payload locator or absence.
-    ///
-    /// Committed locators take precedence over pending locators. Every requested
-    /// occurrence is retained, including repeated hashes and cross-file reuse.
+    /// Classify every requested occurrence through the canonical segment payload inventory.
     pub fn batch_dedup_check(&self, hashes: &[(usize, [u8; 32])]) -> Result<BatchDedupResult> {
-        let mut indices_by_hash: std::collections::HashMap<[u8; 32], Vec<usize>> =
-            std::collections::HashMap::with_capacity(hashes.len());
-        for (index, hash) in hashes {
-            indices_by_hash.entry(*hash).or_default().push(*index);
-        }
-        let mut existing_by_hash = std::collections::HashMap::<[u8; 32], ChunkLocator>::new();
-
-        // Membership is recorded separately for every occurrence. Computing an
-        // unused per-file membership flag here made each reused chunk scan the
-        // growing destination file, turning repeated-file ingestion quadratic.
-        for table in ["chunks", "pending_chunks"] {
-            let missing = indices_by_hash
-                .keys()
-                .filter(|hash| !existing_by_hash.contains_key(*hash))
-                .copied()
-                .collect::<Vec<_>>();
-            for batch in missing.chunks(400) {
-                let placeholders = vec!["?"; batch.len()].join(",");
-                let sql = format!(
-                    "SELECT picked.chunk_hash, c.segment_id, c.segment_offset, c.size
-                     FROM (
-                         SELECT chunk_hash, MIN(rowid) AS picked_rowid
-                         FROM {table}
-                         WHERE chunk_hash IN ({placeholders})
-                         GROUP BY chunk_hash
-                     ) picked
-                     INNER JOIN {table} c ON c.rowid = picked.picked_rowid"
-                );
-                let mut statement = self.conn.prepare(&sql).map_err(|error| {
-                    StagingError::Internal(format!("prepare {table} dedup lookup: {error}"))
-                })?;
-                let rows = statement
-                    .query_map(
-                        params_from_iter(batch.iter().map(|hash| hash.as_slice())),
-                        |row| {
-                            Ok((
-                                row.get::<_, Vec<u8>>(0)?,
-                                ChunkLocator {
-                                    segment_id: row.get(1)?,
-                                    offset: row.get(2)?,
-                                    length: row.get(3)?,
-                                },
-                            ))
-                        },
-                    )
-                    .map_err(|error| {
-                        StagingError::Internal(format!("query {table} dedup lookup: {error}"))
-                    })?;
-                for row in rows {
-                    let (blob, locator) = row.map_err(|error| {
-                        StagingError::Internal(format!("read {table} dedup locator: {error}"))
-                    })?;
-                    let mut hash = [0; 32];
-                    if blob.len() == 32 {
-                        hash.copy_from_slice(&blob);
-                    }
-                    existing_by_hash.insert(hash, locator);
-                }
-            }
-        }
-
-        let new_indices = hashes
-            .iter()
-            .filter_map(|(index, hash)| (!existing_by_hash.contains_key(hash)).then_some(*index))
-            .collect();
+        let requested = hashes.iter().map(|(_, hash)| *hash).collect::<Vec<_>>();
+        let locators = self.locate_batch(&requested)?;
         let mut existing = Vec::new();
-        for (hash, locator) in existing_by_hash {
-            if let Some(indices) = indices_by_hash.get(&hash) {
-                existing.extend(indices.iter().map(|index| (*index, hash, locator)));
+        let mut missing = Vec::new();
+        for ((position, hash), locator) in hashes.iter().zip(locators) {
+            match locator {
+                Some(locator) => existing.push((*position, *hash, locator)),
+                None => missing.push(*position),
             }
         }
-        Ok((existing, new_indices))
+        Ok((existing, missing))
     }
 
     /// Return sealed segment ids whose dead-byte ratio exceeds `dead_ratio`.
@@ -8413,7 +8589,7 @@ impl Index {
     ///
     /// Returns [`StagingError::Internal`] on SQLite failure.
     pub fn compaction_candidates(&self, dead_ratio: f64) -> Result<Vec<u64>> {
-        // Compute live_bytes per segment from the chunks table, then
+        // Count each retained physical payload once, then
         // compare against segments.size_bytes.
         let mut stmt = self
             .conn
@@ -8422,7 +8598,7 @@ impl Index {
                  FROM segments s
                  LEFT JOIN (
                      SELECT segment_id, SUM(size + 8) AS live_bytes
-                     FROM chunks
+                     FROM chunk_payloads
                      GROUP BY segment_id
                  ) c ON s.segment_id = c.segment_id
                  WHERE s.sealed_at IS NOT NULL
@@ -8447,162 +8623,104 @@ impl Index {
         Ok(ids)
     }
 
-    /// Return live chunks for a segment, ordered by segment offset.
-    ///
-    /// Each tuple is `(chunk_hash, file_hash, chunk_index, size, segment_offset)`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StagingError::Internal`] on SQLite failure.
-    #[expect(
-        clippy::type_complexity,
-        reason = "tuple matches the design's specified return shape"
-    )]
+    /// Return canonical segment payloads once each, ordered by physical offset.
     pub fn live_chunks_for_segment(
         &self,
         segment_id: u64,
-    ) -> Result<Vec<([u8; 32], [u8; 32], i64, i64, u64)>> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT chunk_hash, file_hash, chunk_index, size, segment_offset
-                 FROM chunks
-                 WHERE segment_id = ?1
-                 ORDER BY segment_offset ASC",
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to prepare live_chunks query for segment {segment_id}: {e}"
-                ))
-            })?;
-
-        let rows = stmt
-            .query_map(params![segment_id], |row| {
-                let ch_blob: Vec<u8> = row.get(0)?;
-                let fh_blob: Vec<u8> = row.get(1)?;
-                let mut ch = [0u8; 32];
-                let mut fh = [0u8; 32];
-                if ch_blob.len() == 32 {
-                    ch.copy_from_slice(&ch_blob);
-                }
-                if fh_blob.len() == 32 {
-                    fh.copy_from_slice(&fh_blob);
-                }
-                Ok((
-                    ch,
-                    fh,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, u64>(4)?,
-                ))
-            })
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to query live chunks for segment {segment_id}: {e}"
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to collect live chunks for segment {segment_id}: {e}"
-                ))
-            })?;
-
-        Ok(rows)
+    ) -> Result<Vec<([u8; 32], ChunkLocator)>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT chunk_hash, segment_id, segment_offset, size FROM chunk_payloads
+             WHERE segment_id = ?1 ORDER BY segment_offset",
+        )?;
+        let rows = statement.query_map(params![segment_id], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                ChunkLocator {
+                    segment_id: row.get(1)?,
+                    offset: row.get(2)?,
+                    length: row.get(3)?,
+                },
+            ))
+        })?;
+        rows.map(|row| {
+            let (hash, locator) = row?;
+            Ok((decode_hash_blob("compacted chunk hash", hash)?, locator))
+        })
+        .collect()
     }
 
-    /// Atomically swap chunk locators from an old segment to a new one.
-    ///
-    /// In a single transaction: updates each chunk's `segment_id` and
-    /// `segment_offset`, inserts the new segment row, and zeroes the old
-    /// segment's `live_chunk_count` (marking it for sweep).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StagingError::Internal`] on SQLite failure.
-    #[expect(clippy::cast_possible_wrap, reason = "sizes fit in i64 for SQLite")]
+    /// Reserve compaction output without committing an extra current segment.
+    pub fn begin_compaction(&self) -> Result<(rusqlite::Transaction<'_>, u64)> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("INSERT INTO segments (size_bytes) VALUES (0)", [])?;
+        let id = nonnegative_count("compaction segment id", tx.last_insert_rowid())?;
+        Ok((tx, id))
+    }
+
+    /// Move physical authority and all segment occurrence locators together.
     pub fn swap_locators(
-        &self,
+        tx: rusqlite::Transaction<'_>,
         old_segment_id: u64,
         new_segment_id: u64,
         new_size_bytes: u64,
-        updates: &[([u8; 32], [u8; 32], i64, u64)], // (chunk_hash, file_hash, chunk_index, new_offset)
+        updates: &[([u8; 32], u64)],
     ) -> Result<()> {
-        let tx = self.conn.unchecked_transaction().map_err(|e| {
-            StagingError::Internal(format!("failed to begin swap_locators tx: {e}"))
-        })?;
-
-        // Update each chunk's locator to point at the new segment.
-        {
-            let mut stmt = tx
-                .prepare_cached(
-                    "UPDATE chunks
-                     SET segment_id = ?1, segment_offset = ?2
-                     WHERE chunk_hash = ?3 AND file_hash = ?4 AND chunk_index = ?5",
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to prepare swap update: {e}"))
-                })?;
-
-            for (chunk_hash, file_hash, chunk_index, new_offset) in updates {
-                let ch: &[u8] = chunk_hash;
-                let fh: &[u8] = file_hash;
-                stmt.execute(params![
+        for (chunk_hash, new_offset) in updates {
+            let moved = tx.execute(
+                "UPDATE chunk_payloads SET segment_id = ?1, segment_offset = ?2
+                 WHERE chunk_hash = ?3 AND segment_id = ?4",
+                params![
                     new_segment_id,
-                    *new_offset as i64,
-                    ch,
-                    fh,
-                    chunk_index,
-                ])
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to swap locator for chunk: {e}"))
-                })?;
+                    sqlite_i64("compacted record offset", *new_offset)?,
+                    chunk_hash.as_slice(),
+                    old_segment_id
+                ],
+            )?;
+            if moved != 1 {
+                return Err(StagingError::StagingCorrupt(
+                    "compaction lost canonical payload authority".to_owned(),
+                ));
+            }
+            for table in ["chunks", "pending_chunks"] {
+                tx.execute(
+                    &format!(
+                        "UPDATE {table} SET segment_id = ?1, segment_offset = ?2
+                              WHERE chunk_hash = ?3 AND segment_id = ?4"
+                    ),
+                    params![
+                        new_segment_id,
+                        sqlite_i64("compacted record offset", *new_offset)?,
+                        chunk_hash.as_slice(),
+                        old_segment_id
+                    ],
+                )?;
             }
         }
-
-        // Insert the new segment as sealed.
-        let chunk_count = updates.len() as i64;
+        let remaining: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chunk_payloads WHERE segment_id = ?1)",
+            params![old_segment_id],
+            |row| row.get(0),
+        )?;
+        if remaining {
+            return Err(StagingError::StagingCorrupt(
+                "compaction did not cover every retained payload".to_owned(),
+            ));
+        }
         tx.execute(
-            "UPDATE segments
-             SET sealed_at = datetime('now'),
-                 size_bytes = ?1,
-                 chunk_count = ?2,
-                 live_chunk_count = ?3
-             WHERE segment_id = ?4",
+            "UPDATE segments SET sealed_at = datetime('now'), size_bytes = ?1, chunk_count = ?2,
+             live_chunk_count = (SELECT COUNT(*) FROM chunks WHERE segment_id = ?3)
+             WHERE segment_id = ?3",
             params![
-                new_size_bytes as i64,
-                chunk_count,
-                chunk_count,
+                sqlite_i64("compacted segment bytes", new_size_bytes)?,
+                updates.len(),
                 new_segment_id
             ],
-        )
-        .map_err(|e| {
-            StagingError::Internal(format!(
-                "failed to update new segment {new_segment_id}: {e}"
-            ))
-        })?;
-
-        // Zero out the old segment's live_chunk_count so it becomes a sweep candidate.
+        )?;
         tx.execute(
-            "UPDATE segments SET live_chunk_count = 0 WHERE segment_id = ?1",
+            "DELETE FROM segments WHERE segment_id = ?1",
             params![old_segment_id],
-        )
-        .map_err(|e| {
-            StagingError::Internal(format!(
-                "failed to zero live_chunk_count for old segment {old_segment_id}: {e}"
-            ))
-        })?;
-
-        tx.commit().map_err(|e| {
-            StagingError::Internal(format!("failed to commit swap_locators tx: {e}"))
-        })?;
-
-        debug!(
-            old_segment_id,
-            new_segment_id,
-            chunks = updates.len(),
-            "swapped locators"
-        );
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -8740,7 +8858,9 @@ impl Index {
                    AND NOT EXISTS (
                        SELECT 1 FROM publication_intent_entries AS entry
                        WHERE entry.batch_id = batch.batch_id
-                   )",
+                   )
+                   AND NOT EXISTS (SELECT 1 FROM external_publications AS external
+                                   WHERE external.batch_id = batch.batch_id)",
             )?,
             open_push_snapshots: count("SELECT COUNT(*) FROM push_snapshots WHERE state = 'open'")?,
             committed_push_snapshots: count(
@@ -8944,6 +9064,253 @@ mod tests {
     }
 
     #[test]
+    fn delegation_freezes_recipe_membership_and_recording_terms() {
+        let idx = open_in_memory();
+        let path = b"model.bin";
+        let original = insert_test_recipe_lease(&idx, "original", path, 0x71, 0x72);
+        let replacement = insert_test_recipe_lease(&idx, "replacement", path, 0x73, 0x74);
+        idx.delegate_publication(&[("original".to_owned(), path.to_vec())])
+            .unwrap();
+        let replace = idx.insert_recipe_lease(
+            "original",
+            path,
+            &replacement,
+            RecipeVerification::CallerVerified,
+        );
+        let append = idx.append_recipe_recording_terms(
+            "original",
+            0,
+            0,
+            &[(crab_xet::hash::MerkleHash::from(test_hash(0x74)), 8)],
+        );
+        let leases = idx.delegated_publications().unwrap();
+        assert!(
+            replace.is_err()
+                && append.is_err()
+                && leases.len() == 1
+                && leases[0].file_hash == original.file_hash()
+        );
+    }
+
+    #[test]
+    fn delegation_rejects_unfinished_recording_and_active_preparation() {
+        for preparation in [false, true] {
+            let idx = open_in_memory();
+            let recipe = insert_test_recipe_lease(&idx, "unfinished", b"model", 0x75, 0x76);
+            if preparation {
+                idx.insert_add_preparation("active").unwrap();
+                idx.attach_add_preparation_batch("active", "unfinished")
+                    .unwrap();
+            } else {
+                idx.append_recipe_recording_terms(
+                    "unfinished",
+                    0,
+                    0,
+                    &[(crab_xet::hash::MerkleHash::from(test_hash(0x76)), 8)],
+                )
+                .unwrap();
+            }
+            let handed = idx.delegate_publication(&[("unfinished".to_owned(), b"model".to_vec())]);
+            assert!(
+                handed.is_err()
+                    && idx.delegated_publications().unwrap().is_empty()
+                    && idx.has_file_owner(&recipe.file_hash().into()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn delegation_requires_complete_batch_handoff_and_publication_consumes_markers() {
+        let idx = open_in_memory();
+        let first = insert_test_recipe_lease(&idx, "shared", b"first", 0x81, 0x82);
+        let second = insert_test_recipe_lease(&idx, "source", b"second", 0x83, 0x84);
+        idx.insert_recipe_lease(
+            "shared",
+            b"second",
+            &second,
+            RecipeVerification::CallerVerified,
+        )
+        .unwrap();
+        let partial = idx.delegate_publication(&[("shared".to_owned(), b"first".to_vec())]);
+        assert!(partial.is_err() && idx.delegated_publications().unwrap().is_empty());
+        idx.delegate_publication(&[
+            ("shared".to_owned(), b"first".to_vec()),
+            ("shared".to_owned(), b"second".to_vec()),
+        ])
+        .unwrap();
+        idx.mark_batch_published("shared").unwrap();
+        assert!(
+            idx.delegated_publications().unwrap().is_empty()
+                && idx
+                    .published_recipe_for_file(&first.file_hash().into())
+                    .unwrap()
+                    == Some(first)
+                && idx
+                    .published_recipe_for_file(&second.file_hash().into())
+                    .unwrap()
+                    == Some(second)
+        );
+    }
+
+    #[test]
+    fn delegated_listing_rejects_partial_or_unverified_ownership() {
+        for unverified in [false, true] {
+            let idx = open_in_memory();
+            let recipe = insert_test_recipe_lease(&idx, "shared", b"first", 0x91, 0x92);
+            if unverified {
+                idx.conn
+                    .execute(
+                        "DELETE FROM verified_recipes WHERE recipe_hash = ?1",
+                        params![recipe.hash().as_slice()],
+                    )
+                    .unwrap();
+            } else {
+                idx.insert_recipe_lease(
+                    "shared",
+                    b"second",
+                    &recipe,
+                    RecipeVerification::CallerVerified,
+                )
+                .unwrap();
+            }
+            idx.conn.execute("INSERT INTO external_publications (batch_id, path_bytes) VALUES ('shared', ?1)",
+                params![b"first".as_slice()]).unwrap();
+            assert!(idx.delegated_publications().is_err());
+        }
+    }
+
+    #[test]
+    fn external_snapshot_retires_only_captured_handoffs_and_keeps_native_owners() {
+        let idx = open_in_memory();
+        let path = b"model.bin";
+        let recipe = insert_test_recipe_lease(&idx, "external", path, 0x51, 0x52);
+        let file_hash: [u8; 32] = recipe.file_hash().into();
+        idx.delegate_publication(&[("external".to_owned(), path.to_vec())])
+            .unwrap();
+        idx.insert_batch("native").unwrap();
+        idx.insert_recipe_lease("native", path, &recipe, RecipeVerification::CallerVerified)
+            .unwrap();
+        assert!(idx.published_recipe_for_file(&file_hash).unwrap().is_none());
+        assert_eq!(
+            idx.external_recipes_for_files(&[file_hash]).unwrap()[&file_hash],
+            Some(recipe.clone())
+        );
+        idx.create_push_snapshot("first", std::slice::from_ref(&recipe))
+            .unwrap();
+        idx.insert_batch("late").unwrap();
+        idx.insert_recipe_lease("late", path, &recipe, RecipeVerification::CallerVerified)
+            .unwrap();
+        idx.delegate_publication(&[("late".to_owned(), path.to_vec())])
+            .unwrap();
+        idx.commit_push_snapshot("first").unwrap();
+        let retired = idx.retire_push_snapshot("first").unwrap();
+        let leases: Vec<String> = idx
+            .conn
+            .prepare("SELECT batch_id FROM path_leases ORDER BY batch_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert!(retired.is_empty() && leases == ["late", "native"]);
+        idx.rollback_batch("native").unwrap();
+        idx.create_push_snapshot("second", std::slice::from_ref(&recipe))
+            .unwrap();
+        idx.commit_push_snapshot("second").unwrap();
+        assert_eq!(idx.retire_push_snapshot("second").unwrap(), vec![file_hash]);
+    }
+
+    #[test]
+    fn external_delegation_is_atomic_and_cannot_share_a_native_intent() {
+        let idx = open_in_memory();
+        let path = b"model.bin";
+        let recipe = insert_test_recipe_lease(&idx, "native", path, 0x61, 0x62);
+        idx.create_publication_intent(
+            "native-intent",
+            &[(
+                "native".to_owned(),
+                path.to_vec(),
+                "oid".to_owned(),
+                "prior".to_owned(),
+            )],
+        )
+        .unwrap();
+        idx.insert_batch("external").unwrap();
+        idx.insert_recipe_lease(
+            "external",
+            path,
+            &recipe,
+            RecipeVerification::CallerVerified,
+        )
+        .unwrap();
+        let failed = idx.delegate_publication(&[
+            ("external".to_owned(), path.to_vec()),
+            ("native".to_owned(), path.to_vec()),
+        ]);
+        let count: i64 = idx
+            .conn
+            .query_row("SELECT count(*) FROM external_publications", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            failed.is_err()
+                && count == 0
+                && idx.unresolved_publication_intents().unwrap().len() == 1
+        );
+        idx.delegate_publication(&[("external".to_owned(), path.to_vec())])
+            .unwrap();
+        assert!(
+            idx.create_publication_intent(
+                "wrong-native",
+                &[(
+                    "external".to_owned(),
+                    path.to_vec(),
+                    "oid".to_owned(),
+                    "prior".to_owned(),
+                )]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn publishing_a_path_preserves_another_callers_open_lease() {
+        for through_intent in [false, true] {
+            let idx = open_in_memory();
+            let path = b"model.bin";
+            let pending = insert_test_recipe_lease(&idx, "pending", path, 0x31, 0x32);
+            let current = insert_test_recipe_lease(&idx, "current", path, 0x41, 0x42);
+            let retired = if through_intent {
+                idx.create_publication_intent(
+                    "current-intent",
+                    &[(
+                        "current".to_owned(),
+                        path.to_vec(),
+                        "current-oid".to_owned(),
+                        "prior".to_owned(),
+                    )],
+                )
+                .unwrap();
+                idx.publish_publication_intent("current-intent").unwrap()
+            } else {
+                idx.mark_batch_published("current").unwrap()
+            };
+            let pending_hash: [u8; 32] = pending.file_hash().into();
+            let current_hash: [u8; 32] = current.file_hash().into();
+            let retained = idx.has_file_owner(&pending_hash).unwrap();
+            let released = idx.rollback_batch("pending").unwrap();
+            assert!(
+                retired.is_empty()
+                    && retained
+                    && released == vec![pending_hash]
+                    && idx.published_recipe_for_file(&current_hash).unwrap() == Some(current),
+                "publication must leave another active caller's lease for that caller to release"
+            );
+        }
+    }
+
+    #[test]
     fn publication_intent_atomically_replaces_canonical_path_head() {
         let idx = open_in_memory();
         let path = b"models/large.bin";
@@ -9054,6 +9421,49 @@ mod tests {
             idx.finalize_add_preparation("preparation-a"),
             "has no sealed recipe lease",
         );
+    }
+
+    #[test]
+    fn failed_prepared_reuse_claim_does_not_leave_retention() {
+        for insertion_failure in [false, true] {
+            let idx = open_in_memory();
+            idx.insert_add_preparation("reuse").expect("preparation");
+            idx.insert_batch("reuse-batch").expect("batch");
+            idx.attach_add_preparation_batch("reuse", "reuse-batch")
+                .expect("attach");
+            let xorb = test_hash(0xA1);
+            idx.conn.execute("INSERT INTO prepared_payloads (xorb_hash, payload_hash, bytes) VALUES (?1, ?2, 16)", params![xorb.as_slice(), test_hash(0xA2).as_slice()]).expect("prepared payload");
+            for (position, chunk) in [test_hash(0xA3), test_hash(0xA4)].iter().enumerate() {
+                idx.conn.execute("INSERT INTO prepared_payload_chunks (xorb_hash, chunk_index, chunk_hash, uncompressed_size) VALUES (?1, ?2, ?3, 8)", params![xorb.as_slice(), position, chunk.as_slice()]).expect("prepared placement");
+            }
+            if insertion_failure {
+                idx.conn.execute_batch("CREATE TEMP TRIGGER reject_reuse_retention BEFORE INSERT ON preparation_payloads BEGIN SELECT RAISE(ABORT, 'retention failure'); END;").expect("failure injection");
+            }
+            let error = idx
+                .claim_prepared_chunks(
+                    "reuse",
+                    "reuse-batch",
+                    &[(test_hash(0xA3), 8), (test_hash(0xA4), 9)],
+                )
+                .expect_err("claim fails");
+            let leases: i64 = idx
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM preparation_payloads WHERE preparation_id = 'reuse'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("retention count");
+            let expected_error = if insertion_failure {
+                matches!(error, StagingError::Io(ref source) if source.get_ref().is_some_and(|source| source.is::<rusqlite::Error>()))
+            } else {
+                matches!(error, StagingError::StagingCorrupt(_))
+            };
+            assert!(
+                expected_error && leases == 0,
+                "failed claim must roll back retention and preserve the cause"
+            );
+        }
     }
 
     #[test]
@@ -9318,45 +9728,6 @@ mod tests {
     }
 
     #[test]
-    fn published_replacement_removes_superseded_empty_open_batch() {
-        let idx = open_in_memory();
-        let path = b"models/prepared.bin";
-        let prepared = insert_test_recipe_lease(&idx, "batch-prepared", path, 0x31, 0x32);
-        idx.insert_batch("batch-published")
-            .expect("published batch");
-        idx.insert_recipe_lease(
-            "batch-published",
-            path,
-            &prepared,
-            RecipeVerification::CallerVerified,
-        )
-        .expect("published lease");
-
-        assert!(
-            idx.mark_batch_published("batch-published")
-                .expect("publish prepared replacement")
-                .is_empty(),
-            "the published owner keeps the same prepared recipe live"
-        );
-
-        let prepared_batch_exists: bool = idx
-            .conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM staging_batches WHERE batch_id = 'batch-prepared')",
-                [],
-                |row| row.get(0),
-            )
-            .expect("prepared batch existence");
-        assert!(!prepared_batch_exists);
-        let published_file_hash: [u8; 32] = prepared.file_hash().into();
-        assert_eq!(
-            idx.published_recipe_for_file(&published_file_hash)
-                .expect("published recipe"),
-            Some(prepared)
-        );
-    }
-
-    #[test]
     fn rollback_preserves_snapshot_pin_and_rejects_published_batch() {
         let idx = open_in_memory();
         let path = b"models/rollback.bin";
@@ -9423,6 +9794,176 @@ mod tests {
     }
 
     #[test]
+    fn segment_recording_retention_releases_only_after_last_batch() {
+        let idx = open_in_memory();
+        let file = test_hash(0xB1);
+        let chunk = test_hash(0xB2);
+        let segment = idx.allocate_segment_id().expect("segment");
+        insert_test_file(&idx, &file, 8);
+        idx.insert_pending(&[PendingRow {
+            chunk_hash: chunk,
+            file_hash: file,
+            chunk_index: 0,
+            size: 8,
+            segment_id: segment,
+            segment_offset: 0,
+        }])
+        .expect("payload");
+        for batch in ["first", "second"] {
+            idx.insert_batch(batch).expect("batch");
+            idx.append_recipe_recording_terms(batch, 0, 0, &[(chunk.into(), 8)])
+                .expect("record");
+        }
+        idx.remove_files(&[file]).expect("retire original");
+        idx.rollback_batch("first").expect("retire first recording");
+        let retained = idx.locate(&chunk).expect("lookup retained");
+        idx.rollback_batch("second")
+            .expect("retire second recording");
+        assert!(retained.is_some() && idx.locate(&chunk).expect("lookup retired").is_none());
+    }
+
+    #[test]
+    fn incomplete_compaction_rolls_back_inventory_and_occurrences() {
+        let idx = open_in_memory();
+        let file = test_hash(0xB3);
+        let old = idx.allocate_segment_id().expect("old segment");
+        insert_test_file(&idx, &file, 16);
+        let chunks = [test_hash(0xB4), test_hash(0xB5)];
+        for (position, hash) in chunks.iter().enumerate() {
+            idx.insert_pending(&[PendingRow {
+                chunk_hash: *hash,
+                file_hash: file,
+                chunk_index: position as i64,
+                size: 8,
+                segment_id: old,
+                segment_offset: position as u64 * 16,
+            }])
+            .expect("payload");
+        }
+        let before = idx.locate_batch(&chunks).expect("before");
+        let (transaction, new) = idx.begin_compaction().expect("reserve output");
+        let error = Index::swap_locators(transaction, old, new, 16, &[(chunks[0], 0)])
+            .expect_err("partial coverage");
+        let pending_segment: u64 = idx
+            .conn
+            .query_row(
+                "SELECT segment_id FROM pending_chunks WHERE chunk_hash = ?1",
+                params![chunks[0].as_slice()],
+                |row| row.get(0),
+            )
+            .expect("occurrence");
+        assert!(
+            matches!(error, StagingError::StagingCorrupt(_))
+                && idx.locate_batch(&chunks).expect("after") == before
+                && pending_segment == old
+        );
+    }
+
+    #[test]
+    fn released_compaction_inventory_upgrades_on_writable_and_shared_open() {
+        for shared in [false, true] {
+            let temp = tempfile::NamedTempFile::new().expect("database");
+            let idx = Index::open(temp.path()).expect("index");
+            insert_test_recipe_lease(&idx, "source", b"source", 0xB6, 0xB7);
+            let chunk = test_hash(0xB7);
+            let old = idx
+                .locate(&chunk)
+                .expect("old locator")
+                .expect("payload")
+                .segment_id;
+            let new = idx.allocate_segment_id().expect("new segment");
+            // The released compactor updated chunks, then removed the old
+            // segment, leaving payload inventory at its original locator.
+            idx.conn
+                .execute(
+                    "UPDATE chunks SET segment_id = ?1, segment_offset = 16 WHERE chunk_hash = ?2",
+                    params![new, chunk.as_slice()],
+                )
+                .expect("released relocation");
+            idx.drop_segment(old).expect("released retirement");
+            idx.conn
+                .execute_batch("DROP TABLE external_publications;")
+                .unwrap();
+            idx.conn
+                .execute(
+                    "UPDATE staging_meta SET value = '1' WHERE key = 'layout_version'",
+                    [],
+                )
+                .expect("released admission");
+            drop(idx);
+            let reopened = if shared {
+                Index::open_readonly(temp.path())
+            } else {
+                Index::open(temp.path())
+            }
+            .expect("upgrade");
+            let locator = reopened
+                .locate(&chunk)
+                .expect("repaired locator")
+                .expect("payload");
+            let version: String = reopened
+                .conn
+                .query_row(
+                    "SELECT value FROM staging_meta WHERE key = 'layout_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("admission");
+            assert!(locator.segment_id == new && locator.offset == 16 && version == LAYOUT_VERSION);
+        }
+    }
+
+    #[test]
+    fn failed_inventory_upgrade_preserves_released_admission_and_locator() {
+        for fail_late in [false, true] {
+            let mut idx = open_in_memory();
+            insert_test_recipe_lease(&idx, "source", b"source", 0xB8, 0xB9);
+            let chunk = test_hash(0xB9);
+            let before = idx.locate(&chunk).expect("before");
+            idx.conn
+                .execute(
+                    "UPDATE chunks SET segment_offset = 16 WHERE chunk_hash = ?1",
+                    params![chunk.as_slice()],
+                )
+                .expect("released relocation");
+            idx.conn
+                .execute_batch("DROP TABLE external_publications;")
+                .unwrap();
+            idx.conn
+                .execute(
+                    "UPDATE staging_meta SET value = '1' WHERE key = 'layout_version'",
+                    [],
+                )
+                .expect("released admission");
+            let table = if fail_late {
+                "staging_meta"
+            } else {
+                "chunk_payloads"
+            };
+            idx.conn.execute_batch(&format!("CREATE TEMP TRIGGER reject_upgrade BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT, 'upgrade failure'); END;")).expect("inject failure");
+            let error = idx.open_canonical_schema().expect_err("upgrade fails");
+            let version: String = idx
+                .conn
+                .query_row(
+                    "SELECT value FROM staging_meta WHERE key = 'layout_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("admission");
+            assert!(
+                matches!(error, StagingError::Io(ref source) if source.get_ref().is_some_and(|source| source.is::<rusqlite::Error>()))
+                    && version == "1"
+                    && idx.locate(&chunk).expect("after") == before
+                    && !idx
+                        .application_objects("table")
+                        .unwrap()
+                        .iter()
+                        .any(|name| name == "external_publications")
+            );
+        }
+    }
+
+    #[test]
     fn canonical_schema_reopens_without_change() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let path = tmp.path();
@@ -9443,6 +9984,21 @@ mod tests {
     }
 
     #[test]
+    fn canonical_schema_rejects_external_handoffs_without_lease_cascade() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let idx = Index::open(temp.path()).unwrap();
+        idx.conn
+            .execute_batch(
+                "DROP TABLE external_publications;
+            CREATE TABLE external_publications(batch_id TEXT NOT NULL, path_bytes BLOB NOT NULL,
+                PRIMARY KEY(batch_id, path_bytes));",
+            )
+            .unwrap();
+        drop(idx);
+        assert_staging_corrupt_contains(Index::open(temp.path()), "canonical v3");
+    }
+
+    #[test]
     fn canonical_schema_rejects_missing_required_index() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let path = tmp.path();
@@ -9453,7 +10009,7 @@ mod tests {
             .expect("drop chunk lease index");
         drop(idx);
 
-        assert_staging_corrupt_contains(Index::open(path), "canonical v1");
+        assert_staging_corrupt_contains(Index::open(path), "canonical v3");
     }
 
     #[test]
@@ -9479,7 +10035,7 @@ mod tests {
             .expect("install retired publication table");
         drop(idx);
 
-        assert_staging_corrupt_contains(Index::open(path), "canonical v1");
+        assert_staging_corrupt_contains(Index::open(path), "canonical v3");
     }
 
     #[test]
@@ -9496,7 +10052,7 @@ mod tests {
             .expect("install retired remote authority table");
         drop(idx);
 
-        assert_staging_corrupt_contains(Index::open(path), "canonical v1");
+        assert_staging_corrupt_contains(Index::open(path), "canonical v3");
     }
 
     #[test]
@@ -10048,7 +10604,7 @@ mod tests {
                 .expect("create retired schema");
         }
 
-        assert_staging_corrupt_contains(Index::open(&path), "canonical v1");
+        assert_staging_corrupt_contains(Index::open(&path), "canonical v3");
 
         let connection = Connection::open(&path).expect("reopen retired db");
         let tables: Vec<String> = connection

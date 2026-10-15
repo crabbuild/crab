@@ -1,4 +1,4 @@
-//! Bounded-memory local-file staging shared by `crab add` and `crab adopt`.
+//! Bounded-memory byte ingestion with native descriptor validation at its boundary.
 //!
 //! The staging schema keys chunk rows by file hash. Local files are read once
 //! into a provisional staging key, then the staged rows are adopted under the
@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -640,6 +640,94 @@ async fn stage_file_streaming_inner(
         });
     }
     let mut read_file = tokio::fs::File::from_std(descriptor.try_clone()?);
+    let result = stage_reader_inner(
+        &mut read_file,
+        abs_path,
+        &rel_path,
+        staging,
+        progress,
+        cancel,
+        hooks,
+        |file_hash, size| {
+            let after_descriptor_stat = VerifiedIndexStat::from_file(&descriptor);
+            let after_path_stat = VerifiedIndexStat::from_path_no_follow(abs_path);
+            if after_descriptor_stat != Some(before_stream_stat)
+                || after_path_stat != after_descriptor_stat
+            {
+                return Err(CrabError::FileChangedDuringStaging {
+                    path: abs_path.display().to_string(),
+                    first_hash: file_hash.hex(),
+                    second_hash: "unread".to_owned(),
+                    first_size: size,
+                    second_size: after_path_stat.map_or(0, |stat| stat.len),
+                });
+            }
+            Ok(after_descriptor_stat.filter(|stat| stat.len == size))
+        },
+    )
+    .await;
+    match result {
+        Ok(mut result) => {
+            result.duration_ms = start.elapsed().as_millis() as u64;
+            Ok(result)
+        }
+        Err(CrabError::FileChangedDuringStaging {
+            first_hash,
+            first_size,
+            ..
+        }) => {
+            let second = stream_hash_file(abs_path, None, cancel)
+                .await
+                .map_err(|error| with_path(abs_path, error))?;
+            Err(CrabError::FileChangedDuringStaging {
+                path: abs_path.display().to_string(),
+                first_hash,
+                second_hash: MerkleHash::from(second.hash).hex(),
+                first_size,
+                second_size: second.size,
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Stage supplied bytes without opening, seeking or trusting a source path.
+///
+/// `path` identifies the recipe lease only. The returned version has durable
+/// payloads and an open batch; the caller owns publication or rollback.
+/// `abs_path` preserves this logical identity and `index_stat` is always absent.
+/// Cancellation must use the token while awaiting the operation so cleanup runs.
+pub async fn stage_reader_streaming<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    path: &Path,
+    staging: &StagingArea,
+    progress: StreamStageProgress,
+    cancel: &CancellationToken,
+) -> Result<StreamStageResult> {
+    stage_reader_inner(
+        reader,
+        path,
+        path,
+        staging,
+        progress,
+        cancel,
+        StreamStageHooks::default(),
+        |_, _| Ok(None),
+    )
+    .await
+}
+
+async fn stage_reader_inner<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    abs_path: &Path,
+    rel_path: &Path,
+    staging: &StagingArea,
+    progress: StreamStageProgress,
+    cancel: &CancellationToken,
+    hooks: StreamStageHooks,
+    validate: impl FnOnce(MerkleHash, u64) -> Result<Option<VerifiedIndexStat>>,
+) -> Result<StreamStageResult> {
+    let start = Instant::now();
     let batch_id = staging.create_batch()?;
     let mut xorb_builder = progress.xorb_builder.clone();
     let owned_preparation = if let Some(builder) = xorb_builder.as_mut()
@@ -659,7 +747,7 @@ async fn stage_file_streaming_inner(
         let _ = staging.rollback_batch(&batch_id);
         return Err(with_path(abs_path, error));
     }
-    let provisional_merkle = provisional_file_hash(&rel_path, &batch_id);
+    let provisional_merkle = provisional_file_hash(rel_path, &batch_id);
     let retired = staging.retire_file(&provisional_merkle)?;
     if retired.rows_deleted > 0 {
         debug!(
@@ -676,7 +764,7 @@ async fn stage_file_streaming_inner(
     }
     staging.pre_register_file_with_path(&provisional_merkle, 0, &rel_path.to_string_lossy())?;
     let stage_result = stream_chunk_and_stage(
-        &mut read_file,
+        reader,
         &provisional_merkle,
         staging,
         &batch_id,
@@ -723,30 +811,21 @@ async fn stage_file_streaming_inner(
             return Err(with_path(abs_path, error));
         }
     };
-    let after_descriptor_stat = VerifiedIndexStat::from_file(&descriptor);
-    let after_path_stat = VerifiedIndexStat::from_path_no_follow(abs_path);
-    if after_descriptor_stat != Some(before_stream_stat) || after_path_stat != after_descriptor_stat
-    {
-        fail_stream_preparation(staging, xorb_builder.as_ref(), owned_preparation.as_ref());
-        cleanup_staged_file(
-            staging,
-            &provisional_merkle,
-            abs_path,
-            "file changed during stream staging",
-        );
-        cleanup_stream_prepared_xorb_dir(staging.root(), &provisional_merkle, abs_path);
-        let _ = staging.rollback_batch(&batch_id);
-        let second = stream_hash_file(abs_path, None, cancel)
-            .await
-            .map_err(|e| with_path(abs_path, e))?;
-        return Err(CrabError::FileChangedDuringStaging {
-            path: abs_path.display().to_string(),
-            first_hash: file_merkle.hex(),
-            second_hash: MerkleHash::from(second.hash).hex(),
-            first_size: stage_stats.size,
-            second_size: second.size,
-        });
-    }
+    let index_stat = match validate(file_merkle, stage_stats.size) {
+        Ok(stat) => stat,
+        Err(error) => {
+            fail_stream_preparation(staging, xorb_builder.as_ref(), owned_preparation.as_ref());
+            cleanup_staged_file(
+                staging,
+                &provisional_merkle,
+                abs_path,
+                "source validation failed",
+            );
+            cleanup_stream_prepared_xorb_dir(staging.root(), &provisional_merkle, abs_path);
+            let _ = staging.rollback_batch(&batch_id);
+            return Err(with_path(abs_path, error));
+        }
+    };
 
     // A renamed or copied path can resolve entirely to proven remote chunks
     // while the same canonical recipe is still indexed locally. Its partial
@@ -821,7 +900,16 @@ async fn stage_file_streaming_inner(
         return Err(with_path(abs_path, err));
     }
 
-    if let Err(err) = staging.record_verified_recipe_lease(&batch_id, &rel_path, &recipe) {
+    // A supplied stream cannot be reopened after its pointer is returned.
+    // Flush segment authority before sealing the caller-owned version lease.
+    if let Err(error) = staging.flush_pending().await {
+        fail_stream_preparation(staging, xorb_builder.as_ref(), owned_preparation.as_ref());
+        let _ = staging.retire_file_if_unleased(&file_merkle);
+        let _ = staging.rollback_batch(&batch_id);
+        return Err(with_path(abs_path, error));
+    }
+
+    if let Err(err) = staging.record_verified_recipe_lease(&batch_id, rel_path, &recipe) {
         if let Some(builder) = &xorb_builder {
             builder.fail_preparation();
         }
@@ -848,14 +936,6 @@ async fn stage_file_streaming_inner(
         let _ = staging.rollback_batch(&batch_id);
         return Err(with_path(abs_path, err));
     }
-
-    let index_stat = match after_descriptor_stat {
-        Some(after) if after.len == stage_stats.size => Some(after),
-        _ => {
-            debug!(path = %rel_path.display(), "leaving Git stat cache unpopulated");
-            None
-        }
-    };
 
     Ok(StreamStageResult {
         batch_id,
@@ -980,8 +1060,8 @@ pub async fn stream_hash_file(
     clippy::too_many_arguments,
     reason = "streaming state is explicit to keep chunking and staging allocation-free"
 )]
-async fn stream_chunk_and_stage(
-    file: &mut tokio::fs::File,
+async fn stream_chunk_and_stage<R: AsyncRead + Unpin>(
+    file: &mut R,
     file_hash: &MerkleHash,
     staging: &StagingArea,
     batch_id: &crate::StagingBatchId,
@@ -1049,8 +1129,8 @@ async fn stream_chunk_and_stage(
     clippy::too_many_arguments,
     reason = "producer state stays explicit while writer lifecycle is owned by its caller"
 )]
-async fn stream_chunk_and_stage_producer(
-    file: &mut tokio::fs::File,
+async fn stream_chunk_and_stage_producer<R: AsyncRead + Unpin>(
+    file: &mut R,
     file_hash: &MerkleHash,
     staging: &StagingArea,
     batch_id: &crate::StagingBatchId,
@@ -1087,7 +1167,19 @@ async fn stream_chunk_and_stage_producer(
     loop {
         check_cancelled(cancel)?;
         let mut buf = BytesMut::with_capacity(READ_BUF_SIZE);
-        let n = file.read_buf(&mut buf).await?;
+        // Short packet/prefix reads must not retain a full allocation per
+        // fragment in zero-copy chunks. Fill one bounded block before CDC.
+        while buf.len() < READ_BUF_SIZE {
+            let n = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                read = file.read_buf(&mut buf) => read?,
+            };
+            if n == 0 {
+                break;
+            }
+        }
+        let n = buf.len();
         if n == 0 {
             break;
         }
@@ -2251,6 +2343,138 @@ mod tests {
 
         assert_eq!(count, STAGE_BATCH_CHUNKS);
         assert_eq!(bytes, STAGE_BATCH_CHUNKS as u64);
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_pending_stream_read_and_retires_attempt() {
+        use std::future::{Future, poll_fn};
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+        use tokio::io::ReadBuf;
+
+        struct StalledReader {
+            started: Arc<AtomicBool>,
+            supplied_prefix: bool,
+        }
+        impl AsyncRead for StalledReader {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                buffer: &mut ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                if !self.supplied_prefix {
+                    buffer.put_slice(&[17; 4096]);
+                    self.supplied_prefix = true;
+                    return Poll::Ready(Ok(()));
+                }
+                self.started.store(true, Relaxed);
+                Poll::Pending
+            }
+        }
+        let root = tempfile::tempdir().expect("staging root");
+        let staging = StagingArea::open(root.path().join("staging"))
+            .await
+            .expect("staging");
+        let started = Arc::new(AtomicBool::new(false));
+        let mut reader = StalledReader {
+            started: started.clone(),
+            supplied_prefix: false,
+        };
+        let cancel = CancellationToken::new();
+        let result = {
+            let stage = stage_reader_streaming(
+                &mut reader,
+                Path::new("stream.bin"),
+                &staging,
+                StreamStageProgress::default(),
+                &cancel,
+            );
+            tokio::pin!(stage);
+            poll_fn(|context| {
+                assert!(
+                    stage.as_mut().poll(context).is_pending(),
+                    "reader must still be waiting"
+                );
+                if started.load(Relaxed) {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            cancel.cancel();
+            tokio::time::timeout(Duration::from_secs(1), stage)
+                .await
+                .expect("cancellation must wake the read")
+        };
+        let health = staging.lifecycle_health().expect("health");
+        let files = staging.list_files().expect("files");
+        staging.close().await.expect("close");
+        assert!(
+            matches!(result, Err(CrabError::Cancelled))
+                && health.open_batches_without_publication == 0
+                && files.is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn nonseeking_stream_returns_durable_recipe_without_source_metadata() {
+        use tokio::io::AsyncWriteExt;
+
+        for prepared in [false, true] {
+            let root = tempfile::tempdir().expect("staging root");
+            let logical_path = root.path().join("never-created.bin");
+            let staging_path = root.path().join("staging");
+            let staging = StagingArea::open(staging_path.clone())
+                .await
+                .expect("staging");
+            let input = (0..2 * READ_BUF_SIZE)
+                .map(|index| ((index * 41) ^ (index >> 8)) as u8)
+                .collect::<Vec<_>>();
+            let expected = input.clone();
+            let (mut writer, mut reader) = tokio::io::duplex(4096);
+            let source = tokio::spawn(async move {
+                writer.write_all(&input).await.expect("pipe write");
+                writer.shutdown().await.expect("pipe EOF");
+            });
+            let result = stage_reader_streaming(
+                &mut reader,
+                &logical_path,
+                &staging,
+                StreamStageProgress {
+                    xorb_builder: prepared
+                        .then(|| StreamStageXorbBuilder::new(1, XorbBuilder::new)),
+                    ..StreamStageProgress::default()
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("ingest pipe");
+            source.await.expect("source task");
+            let hashes = recipe_pairs(&staging, &result)
+                .into_iter()
+                .map(|(hash, _)| hash)
+                .collect::<Vec<_>>();
+            // The API itself promises durability; do not call close's flush.
+            drop(staging);
+            let reopened = StagingArea::open(staging_path)
+                .await
+                .expect("recover returned version");
+            let actual = reopened
+                .get_chunks_batch(&hashes)
+                .await
+                .expect("durable bytes")
+                .into_iter()
+                .flat_map(|(_, data)| data)
+                .collect::<Vec<_>>();
+            reopened.close().await.expect("close recovered");
+            assert!(
+                actual == expected
+                    && result.file_hash == *blake3::hash(&expected).as_bytes()
+                    && result.index_stat.is_none()
+                    && !logical_path.exists()
+            );
+        }
     }
 
     #[tokio::test]

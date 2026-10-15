@@ -8,7 +8,7 @@ The harness exercises both user-facing staging paths:
 
 The large-file cases prove pointer staging, object-store publication, fresh
 clone, hydration, and byte identity. A separate ordinary-Git matrix proves
-missing/corrupt manifest handling, update/fetch, deletion, force and
+missing/corrupt metadata-root handling, update/fetch, deletion, force and
 non-fast-forward behavior, atomic rejection, tag following, shallow history,
 immutable-pack failures, and concurrent push serialization.
 
@@ -745,6 +745,20 @@ class AddCommitPushSmoke:
         finally:
             connection.close()
 
+    def assert_staging_retired(self, repo: Path, check_name: str) -> None:
+        record = self.run_crab(repo, ["staging", "stats", "--json"], name=check_name)
+        lifecycle = json.loads(self.read_stdout(record))["data"]["lifecycle"]
+        self.check(
+            check_name,
+            all(lifecycle[field] == 0 for field in (
+                "path_heads", "path_leases", "open_batches_without_publication",
+                "reclaimable_superseded_leases", "reclaimable_files",
+                "open_push_snapshots", "committed_push_snapshots", "payloads",
+                "current_head_prepared_bytes", "snapshot_pinned_prepared_bytes",
+            )),
+            lifecycle,
+        )
+
     def sqlite_cache_files(self) -> list[str]:
         return sorted(path.name for path in self.cache_dir.rglob("*.sqlite"))
 
@@ -850,19 +864,25 @@ class AddCommitPushSmoke:
             check=check,
         )
 
-    def run_missing_manifest_case(self) -> None:
-        case_name = "missing-manifest"
+    def run_missing_root_case(self) -> None:
+        case_name = "missing-root"
         _repo, remote_url, repo_prefix = self.prepare_git_repo(case_name)
+        root_key = f"{repo_prefix}/v2/root"
+        self.ls_remote(remote_url, name=f"{case_name} healthy list")
+        self.head_key(root_key)
         self.run_aws(
-            "delete canonical manifest fixture",
+            "delete canonical root fixture",
             [
                 "delete-object",
                 "--bucket",
                 self.args.bucket,
                 "--key",
-                f"{repo_prefix}/manifest",
+                root_key,
             ],
         )
+        status, _, _ = self.signed_s3_request("HEAD", root_key)
+        self.check(f"{case_name}-fixture-removed", status == 404,
+                   {"key": root_key, "status": status})
         listing = self.run_git(
             self.run_root,
             ["ls-remote", remote_url],
@@ -954,6 +974,17 @@ class AddCommitPushSmoke:
             {"expected": third},
         )
 
+        missing_tip = self.run_git(
+            contender,
+            ["cat-file", "-e", third],
+            name=f"{case_name} remote tip absent locally",
+            check=False,
+        )
+        self.check(
+            f"{case_name}-force-push-does-not-require-fetch",
+            missing_tip.exit_code != 0,
+            {"remote_tip": third},
+        )
         self.run_git(contender, ["push", "--force", "origin", "main"])
         self.check(
             f"{case_name}-force-push-updates-tip",
@@ -964,6 +995,20 @@ class AddCommitPushSmoke:
             {"expected": divergent},
         )
 
+        self.run_crab(
+            repo,
+            ["push", "--force", "origin", "main"],
+            name=f"{case_name} native force without fetching contender",
+        )
+        self.check(
+            f"{case_name}-native-force-push-updates-tip",
+            self.ls_remote(remote_url, name=f"{case_name} list after native force").get(
+                "refs/heads/main"
+            )
+            == third,
+            {"expected": third},
+        )
+        self.run_git(contender, ["push", "--force", "origin", "main"])
         self.run_git(contender, ["tag", "-a", "v1", "-m", "version one"])
         tag_oid = self.rev_parse(contender, "refs/tags/v1")
         self.run_git(contender, ["push", "--follow-tags", "origin", "main"])
@@ -1174,13 +1219,15 @@ class AddCommitPushSmoke:
             {"commit_count": full_depth},
         )
 
-    def run_corrupt_manifest_case(self) -> None:
-        case_name = "corrupt-manifest"
-        remote_url, repo_prefix = self.remote_for_case(case_name)
-        manifest_key = f"{repo_prefix}/manifest"
+    def run_corrupt_root_case(self) -> None:
+        case_name = "corrupt-root"
+        _repo, remote_url, repo_prefix = self.prepare_git_repo(case_name)
+        root_key = f"{repo_prefix}/v2/root"
+        self.ls_remote(remote_url, name=f"{case_name} healthy list")
+        self.head_key(root_key)
         status, _, response_body = self.signed_s3_request(
             "PUT",
-            manifest_key,
+            root_key,
             body=b'{"version":',
         )
         self.check(
@@ -1192,6 +1239,11 @@ class AddCommitPushSmoke:
                 "body": response_body.decode("utf-8", errors="replace")[:200],
             },
         )
+
+        status, _, body = self.signed_s3_request("GET", root_key)
+        self.check(f"{case_name}-fixture-overwritten",
+                   status == 200 and body == b'{"version":',
+                   {"key": root_key, "status": status})
 
         ls_remote = self.run_git(
             self.run_root,
@@ -1607,6 +1659,7 @@ class AddCommitPushSmoke:
             )
 
         self.head_repository_state(repo_prefix)
+        self.assert_staging_retired(repo, f"{case_name}-retires-published-staging-owners")
         after_xorbs = self.list_keys(".crab/xorbs/")
         after_shards = self.list_keys(".crab/shards/")
         new_xorbs = len(after_xorbs - before_xorbs)
@@ -2084,21 +2137,7 @@ class AddCommitPushSmoke:
             fsck_data,
         )
 
-        after_push_record = self.run_crab(
-            repo,
-            ["staging", "stats", "--json"],
-            name=f"{case_name} staging ownership after push",
-        )
-        after_push = json.loads(self.read_stdout(after_push_record))["data"]["lifecycle"]
-        self.check(
-            f"{case_name}-retires-both-pushed-version-owners",
-            after_push["path_heads"] == 0
-            and after_push["path_leases"] == 0
-            and after_push["open_batches_without_publication"] == 0
-            and after_push["reclaimable_superseded_leases"] == 0
-            and after_push["reclaimable_files"] == 0,
-            after_push,
-        )
+        self.assert_staging_retired(repo, f"{case_name}-retires-both-pushed-version-owners")
 
         clone_dir = self.run_root / case_name / "clone"
         self.run_cmd(
@@ -2233,8 +2272,8 @@ class AddCommitPushSmoke:
             self.write_report()
             return
         self.run_v1_hard_cutover_reset_case()
-        self.run_missing_manifest_case()
-        self.run_corrupt_manifest_case()
+        self.run_missing_root_case()
+        self.run_corrupt_root_case()
         self.run_ref_update_delete_force_and_tag_case()
         self.run_atomic_rejection_case()
         self.run_shallow_case()
