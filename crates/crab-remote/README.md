@@ -63,6 +63,15 @@ commit encoding, and Git object identities. `prepare` owns normalized packs and
 hydrated content artifacts used by remote commits and recovery. File bodies and
 caller admission policy stay outside the object helpers.
 
+Capsule publication preparation queries only outgoing file bindings and
+candidate shard/xorb identities from its captured catalog roots. All three key
+sets and their dependency pages share one query budget. Candidate identities
+still need collision checks when a new file reuses historical artifacts; they
+cannot be inferred only from existing file bindings. The caller retains its
+ref leases and GC fences through lookup, payload verification and commitment.
+This does not change physical content-proof limits or authorize a newer view.
+Full catalog inspection remains an explicit maintenance operation.
+
 The `local` feature owns explicit Git and Crab subprocesses, capabilities
 handshake, bounded I/O, cancellation, hook isolation, repository leases, filter
 configuration, and exact command-path quoting. `transfer` owns direct clone and

@@ -124,6 +124,107 @@ async fn fixed_file_and_chunk_queries_read_selected_closure_as_history_grows() {
 }
 
 #[tokio::test]
+async fn mixed_dependency_queries_keep_unrelated_history_cold() {
+    for count in [100, 20_000] {
+        let full = catalog(count);
+        let mut expected = PointerCatalog::new();
+        let file = format!("{:064x}", 42);
+        expected
+            .insert_file(file.clone(), full.files[&file].clone())
+            .unwrap();
+        for index in [7, 42] {
+            let hash = format!("{:064x}", 3_000_000 + index);
+            expected
+                .insert_shard(hash.clone(), full.shards[&hash].clone())
+                .unwrap();
+        }
+        for index in [7, 9, 42] {
+            let hash = format!("{:064x}", 1_000_000 + index);
+            expected
+                .insert_xorb(hash.clone(), full.xorbs[&hash].clone())
+                .unwrap();
+        }
+        let (layout, _, lookup, reads) = fixture(full, 512 * 1024).await;
+        let files = [file.clone(), file];
+        let shards = [format!("{:064x}", 3_000_007), "f".repeat(64)];
+        let xorbs = [format!("{:064x}", 1_000_009)];
+        let selected = lookup
+            .dependencies(layout.store(), &files, &shards, &xorbs)
+            .await
+            .unwrap();
+        assert_eq!(selected, expected);
+        let cold = reads.load(Ordering::SeqCst);
+        assert!(cold <= 24, "fixed mixed query exceeded its page bound");
+        lookup
+            .dependencies(layout.store(), &files, &shards, &xorbs)
+            .await
+            .unwrap();
+        assert_eq!(reads.load(Ordering::SeqCst), cold);
+    }
+}
+
+#[tokio::test]
+async fn explicit_identity_misses_do_not_hide_missing_file_dependencies() {
+    let (layout, _, lookup, _) = fixture(catalog(1), 1024 * 1024).await;
+    let missing = ["f".repeat(64)];
+    assert!(
+        lookup
+            .dependencies(layout.store(), &missing, &missing, &missing)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let mut delta = PointerCatalog::new();
+    delta
+        .insert_file(missing[0].clone(), FileCatalogEntry::new(7, "e".repeat(64)))
+        .unwrap();
+    let lookup = append_run(&layout, lookup, vec![delta]).await;
+    assert!(
+        lookup
+            .dependencies(layout.store(), &missing, &[], &[])
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn explicit_shard_selection_rejects_conflicting_visible_descriptors() {
+    let (layout, _, lookup, _) = fixture(catalog(1), 1024 * 1024).await;
+    let shard = format!("{:064x}", 3_000_000);
+    let mut delta = PointerCatalog::new();
+    delta
+        .insert_shard(
+            shard.clone(),
+            ShardCatalogEntry::new(81, vec![format!("{:064x}", 1_000_000)]),
+        )
+        .unwrap();
+    let lookup = append_run(&layout, lookup, vec![delta]).await;
+    assert!(
+        lookup
+            .dependencies(layout.store(), &[], &[shard], &[])
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn mixed_query_keys_share_admission_before_origin_reads() {
+    let (layout, _, lookup, reads) = fixture(catalog(1), 191).await;
+    assert!(
+        lookup
+            .dependencies(
+                layout.store(),
+                &[format!("{:064x}", 0)],
+                &[format!("{:064x}", 3_000_000)],
+                &[],
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn ordered_runs_override_file_bindings_but_preserve_descriptor_conflicts() {
     let (layout, _, lookup, _) = fixture(catalog(2), 1024 * 1024).await;
     let file = format!("{:064x}", 0);
