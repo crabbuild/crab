@@ -662,18 +662,8 @@ impl Store {
             return Ok(created);
         }
         let readback_path = self.write_path(path);
-        let (stored, _) = self.get_with_etag_bounded(&readback_path, maximum).await?;
-        let actual_hash = *blake3::hash(&stored).as_bytes();
-        if actual_hash != expected_hash {
-            return Err(StorageError::CorruptObject {
-                path: path.to_string(),
-                reason: format!(
-                    "expected blake3 {}, got {}",
-                    hex_lower(&expected_hash),
-                    hex_lower(&actual_hash)
-                ),
-            });
-        }
+        self.verify_bounded(&readback_path, &expected_hash, maximum)
+            .await?;
         Ok(created)
     }
 
@@ -746,18 +736,7 @@ impl Store {
         };
         if self.immutable_write_verification == ImmutableWriteVerification::ReadbackRequired {
             let maximum = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            let (stored, observed_identity) = self.get_with_etag_bounded(path, maximum).await?;
-            let actual_hash = *blake3::hash(&stored).as_bytes();
-            if actual_hash != expected_hash {
-                return Err(StorageError::CorruptObject {
-                    path: path.to_string(),
-                    reason: format!(
-                        "expected blake3 {}, got {}",
-                        hex_lower(&expected_hash),
-                        hex_lower(&actual_hash)
-                    ),
-                });
-            }
+            let (_, observed_identity) = self.verified_body(path, &expected_hash, maximum).await?;
             // Bind proof to the object version whose bytes were verified. A
             // later HEAD may observe a replacement with a different encoding.
             identity = observed_identity;
@@ -1486,13 +1465,27 @@ impl Store {
         expected_hash: &[u8; 32],
         max_bytes: u64,
     ) -> Result<Bytes> {
+        self.verified_body(path, expected_hash, max_bytes)
+            .await
+            .map(|(bytes, _)| bytes)
+    }
+
+    // Readback and standalone verification share the corruption retry. Replay
+    // only the GET: an acknowledged immutable PUT must not be repeated, and
+    // its receipt must name the response whose bytes passed verification.
+    async fn verified_body(
+        &self,
+        path: &Path,
+        expected_hash: &[u8; 32],
+        max_bytes: u64,
+    ) -> Result<(Bytes, ETag)> {
         retry(&self.retry, || {
             let path = path.clone();
             async move {
-                let (bytes, _etag) = self.get_with_etag_bounded(&path, max_bytes).await?;
+                let (bytes, identity) = self.get_with_etag_bounded(&path, max_bytes).await?;
                 let actual = *blake3::hash(&bytes).as_bytes();
                 if actual == *expected_hash {
-                    Ok(bytes)
+                    Ok((bytes, identity))
                 } else {
                     Err(StorageError::CorruptObject {
                         path: path.to_string(),
@@ -3767,6 +3760,7 @@ mod tests {
         BodyError,
         Range(Range<u64>),
         DistinctIdentities,
+        CorruptReads { bad_reads: u64, attempts: AtomicU64 },
     }
 
     #[derive(Debug)]
@@ -3852,6 +3846,20 @@ mod tests {
                     ReadFault::DistinctIdentities => {
                         response.meta.e_tag = Some("get-etag".to_owned());
                         response.meta.version = Some("get-version".to_owned());
+                    }
+                    ReadFault::CorruptReads {
+                        bad_reads,
+                        attempts,
+                    } => {
+                        let attempt = attempts.fetch_add(1, Ordering::Relaxed) + 1;
+                        response.meta.e_tag = Some(format!("get-{attempt}-etag"));
+                        response.meta.version = Some(format!("get-{attempt}-version"));
+                        if attempt <= *bad_reads {
+                            response.payload = object_store::GetResultPayload::Stream(
+                                futures_util::stream::iter([Ok(Bytes::from_static(b"changed!!"))])
+                                    .boxed(),
+                            );
+                        }
                     }
                 }
             }
@@ -4279,6 +4287,73 @@ mod tests {
             .await
             .expect_err("invalid bytes cannot acquire a verified identity");
         assert!(matches!(error, StorageError::CorruptObject { .. }));
+    }
+
+    #[tokio::test]
+    async fn logical_immutable_create_retries_one_corrupt_readback() {
+        let inner = Arc::new(ReadFaultStore {
+            inner: Arc::new(InMemory::new()),
+            fault: ReadFault::CorruptReads {
+                bad_reads: 1,
+                attempts: AtomicU64::new(0),
+            },
+        });
+        let store = memory_store_with_inner(inner);
+        let outcome = store
+            .create_or_read_immutable(
+                &Path::from("blobs/transient-corrupt-readback"),
+                Bytes::from_static(b"candidate"),
+                1024,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ImmutableCreateOutcome::Created(ETag {
+                e_tag: Some("get-2-etag".to_owned()),
+                version: Some("get-2-version".to_owned()),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn immutable_readback_retries_only_reads_and_still_rejects_persistent_corruption() {
+        for logical in [false, true] {
+            for bad_reads in 0..=2 {
+                let inner = Arc::new(crate::test_support::CountingObjectStore::new(Arc::new(
+                    ReadFaultStore {
+                        inner: Arc::new(InMemory::new()),
+                        fault: ReadFault::CorruptReads {
+                            bad_reads,
+                            attempts: AtomicU64::new(0),
+                        },
+                    },
+                )));
+                let store = memory_store_with_inner(inner.clone());
+                let path = Path::from("blobs/verified-create");
+                let body = Bytes::from_static(b"candidate");
+                let outcome = if logical {
+                    store
+                        .create_or_read_immutable(&path, body, 1024)
+                        .await
+                        .map(|_| ())
+                } else {
+                    store.put_if_absent_verified(&path, body).await.map(|_| ())
+                };
+                let success = outcome.is_ok();
+                let corrupt = matches!(outcome, Err(StorageError::CorruptObject { .. }));
+                assert_eq!(
+                    (success, corrupt, inner.put_requests(), inner.counts().full),
+                    (
+                        bad_reads < 2,
+                        bad_reads == 2,
+                        1,
+                        if bad_reads == 0 { 1 } else { 2 }
+                    ),
+                    "logical={logical}, bad_reads={bad_reads}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

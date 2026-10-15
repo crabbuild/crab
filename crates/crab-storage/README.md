@@ -52,6 +52,13 @@ observe another object version. Occupied-key bytes still require caller validati
 `Store::verify_bounded` combines that content-hash contract with pre-body size
 admission and streamed length checks. It uses one GET for a successful read;
 the limit applies to buffered encoded bytes, not the caller's decoded objects.
+Readback-required immutable writes use that same bounded verifier and corruption
+retry: one corrupt hash response permits one more GET, while persistent corruption
+still fails. An acknowledged PUT is not replayed during verification. A successful
+logical create carries the ETag and version from the hash-verified GET, including
+when that response follows a corrupt read. Checksum-qualified writes still skip
+readback, and occupied logical content addresses still return their body for
+caller validation rather than requiring the candidate's physical encoding.
 
 The admission token cancels pending admission, response headers, streamed
 body reads and pending listings without retrying the cancellation.
