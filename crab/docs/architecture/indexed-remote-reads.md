@@ -35,10 +35,13 @@ Xet files and unified local staging are subsequent workstreams.
 | 7 | Lifecycle and migration | Interrupted publication/builds, concurrent owners, GC retained roots/readers, stale caches and released-format migration qualification | Pending; also required in every earlier implementation |
 | 8 | Fuller Git blame semantics | Line-porcelain parity across merges/renames/repeated lines/recreation and each supported whitespace/ignored-revision option | Pending |
 
-Each implementation PR owns one delivery gate or a complete vertical slice within
-it. Tests alone are insufficient: user operations against a real S3-protocol store
-must produce independently verified results. Representative cloud latency remains
-a separate cell from local RustFS correctness.
+Development slices are consolidated into one integration PR targeting `crab-v2`.
+Earlier component PRs and revision-specific results below remain historical
+evidence; they are not separate merge prerequisites or proof for the final tree.
+The combined source must satisfy the outstanding gates before landing. Tests
+alone are insufficient: user operations against a real S3-protocol store must
+produce independently verified results. Representative cloud latency remains a
+separate cell from local RustFS correctness.
 
 ## Measurement contract
 
