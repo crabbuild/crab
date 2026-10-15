@@ -36,13 +36,14 @@ async fn main() -> Result<()> {
             [bucket, prefix, path] => (bucket, prefix, path, "all"),
             [bucket, prefix, path, selection] => (bucket, prefix, path, selection.as_str()),
             _ => return Err(io::Error::other(
-                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint|catalog|ref-point|resolve-oid|blame-history|blame-history-uncached]",
+                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint|catalog|catalog-current|ref-point|resolve-oid|blame-history|blame-history-uncached]",
             )
             .into()),
         };
     if selection != "all"
         && selection != "build-indexes"
         && selection != "catalog"
+        && selection != "catalog-current"
         && selection != "checkpoint"
         && selection != "graph-pages"
         && selection != "graph-ancestry"
@@ -100,6 +101,53 @@ async fn main() -> Result<()> {
         println!(
             "{}",
             json!({"kind":"result", "operation":"ref-point", "value":previous})
+        );
+    } else if selection == "catalog-current" {
+        let hash = crab_xet::hash::MerkleHash::from_hex(std::str::from_utf8(path.as_bytes())?)?;
+        let session = counters
+            .measure("open", "cold", async {
+                Ok(
+                    crab_metadata::file_index_lookup::FileIndexLookupSession::open_for_storage(
+                        layout.store(),
+                        layout.repo_prefix(),
+                    )
+                    .await?,
+                )
+            })
+            .await?;
+        let result: Result<_> = async {
+            let mut previous = None;
+            for cache in ["cold", "warm"] {
+                let selected = counters
+                    .measure("catalog-current", cache, async {
+                        Ok(session.lookup_batch(&[hash, hash]).await?)
+                    })
+                    .await?;
+                if previous.as_ref().is_some_and(|value| value != &selected) {
+                    return Err(io::Error::other("cold/warm current catalog results differ").into());
+                }
+                previous = Some(selected);
+            }
+            Ok(previous)
+        }
+        .await;
+        let closed = session.close().await;
+        let selected = result?;
+        closed?;
+        // Run the bulk maintenance oracle only after measured reads and close:
+        // it must not populate page caches before the cold selected query.
+        let full = crab_metadata::capsule_protocol::load_pointer_catalog(&layout).await?;
+        let expected = full
+            .files()
+            .get(&hash.hex())
+            .ok_or_else(|| io::Error::other("requested catalog file is absent"))?;
+        let expected = crab_xet::hash::MerkleHash::from_hex(expected.shard_hash())?;
+        if selected.as_ref() != Some(&vec![Some(expected), Some(expected)]) {
+            return Err(io::Error::other("current catalog batch differs from full catalog").into());
+        }
+        println!(
+            "{}",
+            json!({"kind":"result", "operation":"catalog-current", "files":2, "shard":expected.hex()})
         );
     } else if selection == "catalog" {
         let view = counters
