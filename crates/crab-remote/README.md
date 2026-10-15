@@ -58,6 +58,19 @@ The pinned-view outcome also reports the last inventory published by that pass,
 or the input inventory if neither phase published. It deliberately excludes
 later ref-head updates instead of rescanning them for CLI statistics.
 
+Capsule preparation resolves outgoing pointer files and only the prepared
+shard/xorb identities against a captured paged catalog. Ordinary Git and LFS-only
+uploads do not read historical Xet catalog pages. Selected dependencies retain
+complete closure, size and immutable-descriptor conflict checks.
+
+Scratch ownership does not freeze artifact bytes. Bounded reads revalidate the
+inspected raw Blake3 body identity before upload; Xet protocol identities retain
+their distinct word-ordered representation. Capsule commitment retains exact
+verified create/read identities with their source catalog, publishes rebuildable
+chunk hints only after proven ref visibility, and preserves a committed outcome
+if hint-index maintenance fails. Uncertain publication does not publish hints.
+Caller-owned ref leases and GC fences cover this complete operation.
+
 `objects` owns bounded tree reads, deterministic tree edits and encoding,
 commit encoding, and Git object identities. `prepare` owns normalized packs and
 hydrated content artifacts used by remote commits and recovery. File bodies and
