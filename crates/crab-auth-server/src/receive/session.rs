@@ -224,20 +224,13 @@ impl ReceiveContext {
                         },
                         other => other.into(),
                     })?;
-                let view = crab_read::capsule_protocol::open_view_from_root_with_control(
-                    &self.router,
-                    root,
-                    crab_read::capsule_protocol::CapsuleReadLimits {
-                        max_capsule_bytes: 2 * 1024 * 1024 * 1024,
-                        max_frontier_bytes: 2 * 1024 * 1024 * 1024,
-                    },
-                )
-                .await?;
+                let view = crab_read::capsule_protocol::open_ref_view_from_root(&self.router, root)
+                    .await?;
                 build_capsule_prepare_record(
                     &self.repo_prefix,
                     &self.push_id,
-                    view.root().root().generation(),
-                    view.root().digest(),
+                    view.root_snapshot().record().root().generation(),
+                    view.root_snapshot().record().digest(),
                     view.refs(),
                     view_ref_updates,
                     view_scope,
