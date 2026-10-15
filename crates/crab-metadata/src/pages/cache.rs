@@ -7,15 +7,50 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 const CACHE_BYTES: usize = 8 * 1024 * 1024;
 const CACHE_PAGES: usize = 256;
+const READ_AHEAD_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Default)]
-pub(crate) struct PageCache(Mutex<State>);
+pub(crate) struct PageCache {
+    state: Mutex<State>,
+    read_ahead: Option<std::ops::Range<u64>>,
+    block_reads: [tokio::sync::Mutex<()>; 4],
+}
 
 #[derive(Debug, Default)]
 struct State {
     pages: BTreeMap<(usize, u64), (Kind, PageRef, Arc<Page>)>,
-    order: VecDeque<(usize, u64)>,
+    order: VecDeque<Entry>,
     bytes: usize,
+    blocks: BTreeMap<u64, bytes::Bytes>,
+}
+
+#[derive(Debug)]
+enum Entry {
+    Page((usize, u64)),
+    Block(u64),
+}
+
+impl State {
+    fn evict_for(&mut self, weight: usize) {
+        while self.bytes.saturating_add(weight) > CACHE_BYTES
+            || self.pages.len() + self.blocks.len() >= CACHE_PAGES
+        {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            let removed = match oldest {
+                Entry::Page(key) => self
+                    .pages
+                    .remove(&key)
+                    .map_or(0, |(_, reference, page)| page_weight(&reference, &page)),
+                Entry::Block(offset) => self
+                    .blocks
+                    .remove(&offset)
+                    .map_or(0, |body| block_weight(&body)),
+            };
+            self.bytes = self.bytes.saturating_sub(removed);
+        }
+    }
 }
 
 pub(crate) struct PageWork {
@@ -25,11 +60,11 @@ pub(crate) struct PageWork {
 }
 
 impl PageWork {
-    fn admit(&mut self, layer: usize, offset: u64, reference: &PageRef) -> Result<()> {
+    fn admit(&mut self, layer: usize, offset: u64, bytes: u64) -> Result<()> {
         if self.seen.insert((layer, offset)) {
             self.bytes = self
                 .bytes
-                .checked_add(u64::from(reference.bytes))
+                .checked_add(bytes)
                 .ok_or_else(|| corruption("query byte count overflows"))?;
             if self.bytes > self.maximum {
                 return Err(corruption("metadata query exceeds its byte limit"));
@@ -40,6 +75,42 @@ impl PageWork {
 }
 
 impl PageCache {
+    pub(crate) fn for_region(region: std::ops::Range<u64>) -> Self {
+        Self {
+            read_ahead: Some(region),
+            ..Self::default()
+        }
+    }
+
+    fn blocks(&self, range: std::ops::Range<u64>) -> Vec<std::ops::Range<u64>> {
+        let Some(region) = self
+            .read_ahead
+            .as_ref()
+            .filter(|region| region.start <= range.start && range.end <= region.end)
+        else {
+            return vec![range];
+        };
+        let start =
+            region.start + (range.start - region.start) / READ_AHEAD_BYTES * READ_AHEAD_BYTES;
+        (start..range.end)
+            .step_by(READ_AHEAD_BYTES as usize)
+            .map(|start| start..start.saturating_add(READ_AHEAD_BYTES).min(region.end))
+            .collect()
+    }
+
+    fn admit(
+        &self,
+        work: &mut PageWork,
+        layer: usize,
+        offset: u64,
+        reference: &PageRef,
+    ) -> Result<()> {
+        for block in self.blocks(offset..offset + u64::from(reference.bytes)) {
+            work.admit(layer, block.start, block.end - block.start)?;
+        }
+        Ok(())
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "page lookup binds routing, origin and caller-owned aggregate admission"
@@ -70,7 +141,7 @@ impl PageCache {
         while !pending.is_empty() {
             for (reference, _) in &pending {
                 reference.validate(kind, source_bytes)?;
-                work.admit(layer, source.start + reference.offset, reference)?;
+                self.admit(work, layer, source.start + reference.offset, reference)?;
             }
             // Charge the entire wave before starting I/O, including warm pages.
             let pages = futures_util::stream::iter(std::mem::take(&mut pending))
@@ -140,7 +211,7 @@ impl PageCache {
         while !pending.is_empty() {
             for reference in &pending {
                 reference.validate(kind, source_bytes)?;
-                work.admit(layer, source.start + reference.offset, reference)?;
+                self.admit(work, layer, source.start + reference.offset, reference)?;
             }
             let pages = futures_util::stream::iter(std::mem::take(&mut pending))
                 .map(|reference| {
@@ -168,7 +239,7 @@ impl PageCache {
 
     // Guards protect local cache work only, never origin I/O.
     fn state(&self) -> Result<MutexGuard<'_, State>> {
-        self.0
+        self.state
             .lock()
             .map_err(|_| MetadataError::Internal("metadata page cache is poisoned".to_owned()))
     }
@@ -197,9 +268,21 @@ impl PageCache {
             }
             return Ok(page.clone());
         }
-        let bytes = store
-            .range_get(path, offset..offset + u64::from(reference.bytes))
-            .await?;
+        let range = offset..offset + u64::from(reference.bytes);
+        let bytes = if self.read_ahead.is_some() {
+            let mut bytes = Vec::with_capacity(reference.bytes as usize);
+            for block in self.blocks(range.clone()) {
+                let body = self.read_block(store, path, block.clone()).await?;
+                let start = range.start.max(block.start) - block.start;
+                let end = range.end.min(block.end) - block.start;
+                bytes.extend_from_slice(body.get(start as usize..end as usize).ok_or_else(
+                    || corruption("metadata read-ahead block does not cover its page"),
+                )?);
+            }
+            bytes::Bytes::from(bytes)
+        } else {
+            store.range_get(path, range).await?
+        };
         let page = Arc::new(decode(
             &bytes,
             reference,
@@ -216,24 +299,64 @@ impl PageCache {
                 }
                 return Ok(existing.clone());
             }
-            while cache.bytes.saturating_add(weight) > CACHE_BYTES
-                || cache.pages.len() >= CACHE_PAGES
-            {
-                let Some(oldest) = cache.order.pop_front() else {
-                    break;
-                };
-                if let Some((_, reference, old)) = cache.pages.remove(&oldest) {
-                    cache.bytes = cache.bytes.saturating_sub(page_weight(&reference, &old));
-                }
-            }
+            cache.evict_for(weight);
             cache.bytes += weight;
-            cache.order.push_back(key);
+            cache.order.push_back(Entry::Page(key));
             cache
                 .pages
                 .insert(key, (kind, reference.clone(), page.clone()));
         }
         Ok(page)
     }
+
+    async fn read_block(
+        &self,
+        store: &Store,
+        path: &object_store::path::Path,
+        block: std::ops::Range<u64>,
+    ) -> Result<bytes::Bytes> {
+        if let Some(body) = self.state()?.blocks.get(&block.start).cloned() {
+            return Ok(body);
+        }
+        // A page wave can request neighboring pages in the same proof block.
+        // Coalesce those reads so admission does not undercount duplicate I/O;
+        // warm hits stay independent of cold reads in the four fetch lanes.
+        let lane = (block.start / READ_AHEAD_BYTES) as usize % self.block_reads.len();
+        let _guard = self.block_reads[lane].lock().await;
+        if let Some(body) = self.state()?.blocks.get(&block.start).cloned() {
+            return Ok(body);
+        }
+        let body = store.range_get(path, block.clone()).await?;
+        if body.len() as u64 != block.end - block.start {
+            return Err(corruption("metadata read-ahead block is truncated"));
+        }
+        self.cache_block(block.start, body.clone())?;
+        Ok(body)
+    }
+
+    fn cache_block(&self, offset: u64, body: bytes::Bytes) -> Result<()> {
+        let mut cache = self.state()?;
+        if cache.blocks.contains_key(&offset) {
+            return Ok(());
+        }
+        if body.len() <= CACHE_BYTES {
+            let weight = block_weight(&body);
+            if weight > CACHE_BYTES {
+                return Ok(());
+            }
+            cache.evict_for(weight);
+            cache.bytes += weight;
+            cache.order.push_back(Entry::Block(offset));
+            cache.blocks.insert(offset, body);
+        }
+        Ok(())
+    }
+}
+
+fn block_weight(body: &bytes::Bytes) -> usize {
+    body.len()
+        .saturating_add(std::mem::size_of::<bytes::Bytes>())
+        .saturating_add(128)
 }
 
 fn page_weight(reference: &PageRef, page: &Page) -> usize {
@@ -243,4 +366,145 @@ fn page_weight(reference: &PageRef, page: &Page) -> usize {
         .saturating_add(reference.first.capacity())
         .saturating_add(reference.last.capacity())
         .saturating_add(128)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[tokio::test]
+    async fn coalesced_reads_stay_inside_proof_region_and_charge_cold_and_warm_work() {
+        let mut writer = Writer::default();
+        let root = writer
+            .tree(Kind::VisibilityChanges, vec![(vec![1; 20], vec![])])
+            .unwrap();
+        let bytes = Arc::new(AtomicU64::new(0));
+        let observed = bytes.clone();
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_read_byte_observer(Arc::new(move |count| {
+                observed.fetch_add(count, Ordering::SeqCst);
+            }));
+        let path = object_store::path::Path::from("proof");
+        let region = 128..128 + writer.bytes.len() as u64;
+        let mut body = vec![0; 128];
+        body.extend_from_slice(&writer.bytes);
+        body.extend_from_slice(&[0; 128]);
+        store.create_strict(&path, body.into()).await.unwrap();
+        let cache = PageCache::for_region(region.clone());
+        let mut work = PageWork {
+            maximum: u64::MAX,
+            bytes: 0,
+            seen: BTreeSet::new(),
+        };
+        cache
+            .lookup(
+                &store,
+                &path,
+                0,
+                region.clone(),
+                &root,
+                Kind::VisibilityChanges,
+                &[vec![1; 20]],
+                &mut work,
+            )
+            .await
+            .unwrap();
+        let cold = bytes.swap(0, Ordering::SeqCst);
+        let mut limited = PageWork {
+            maximum: cold - 1,
+            bytes: 0,
+            seen: BTreeSet::new(),
+        };
+        let rejected = cache
+            .lookup(
+                &store,
+                &path,
+                0,
+                region.clone(),
+                &root,
+                Kind::VisibilityChanges,
+                &[vec![1; 20]],
+                &mut limited,
+            )
+            .await
+            .is_err();
+        assert_eq!(
+            (cold, work.bytes, rejected, bytes.load(Ordering::SeqCst)),
+            (region.end - region.start, cold, true, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn prefetched_pages_still_require_their_own_authentication() {
+        let mut writer = Writer::default();
+        let first = writer
+            .tree(Kind::VisibilityChanges, vec![(vec![1; 20], vec![])])
+            .unwrap();
+        let second = writer
+            .tree(Kind::VisibilityChanges, vec![(vec![2; 20], vec![])])
+            .unwrap();
+        writer.bytes[second.offset as usize] ^= 1;
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let path = object_store::path::Path::from("proof");
+        let region = 0..writer.bytes.len() as u64;
+        store
+            .create_strict(&path, writer.bytes.into())
+            .await
+            .unwrap();
+        let cache = PageCache::for_region(region.clone());
+        cache
+            .fetch(
+                &store,
+                &path,
+                0,
+                region.clone(),
+                &first,
+                Kind::VisibilityChanges,
+            )
+            .await
+            .unwrap();
+        assert!(
+            cache
+                .fetch(&store, &path, 0, region, &second, Kind::VisibilityChanges)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn proof_blocks_and_decoded_pages_share_one_cache_bound() {
+        let region = 0..256 * READ_AHEAD_BYTES;
+        let cache = PageCache::for_region(region.clone());
+        for offset in 1..256 {
+            cache
+                .cache_block(
+                    offset * READ_AHEAD_BYTES,
+                    vec![0; READ_AHEAD_BYTES as usize].into(),
+                )
+                .unwrap();
+        }
+        let mut writer = Writer::default();
+        let root = writer
+            .tree(Kind::VisibilityChanges, vec![(vec![1; 20], vec![])])
+            .unwrap();
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let path = object_store::path::Path::from("proof");
+        writer.bytes.resize(region.end as usize, 0);
+        store
+            .create_strict(&path, writer.bytes.into())
+            .await
+            .unwrap();
+        let page = cache
+            .fetch(&store, &path, 0, region, &root, Kind::VisibilityChanges)
+            .await
+            .unwrap();
+        let mut state = cache.state().unwrap();
+        state.evict_for(MAX_BYTES);
+        assert!(
+            state.bytes + MAX_BYTES <= CACHE_BYTES
+                && state.pages.len() + state.blocks.len() <= CACHE_PAGES
+                && Arc::ptr_eq(&state.pages.get(&(0, root.offset)).unwrap().2, &page)
+        );
+    }
 }

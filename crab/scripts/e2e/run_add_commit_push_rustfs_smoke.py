@@ -254,7 +254,7 @@ def capsule_member_range(body: bytes, kind: str) -> tuple[int, int]:
     try:
         footer = json.loads(body[footer_start:-48])
         members = footer["git_packs"]
-        if footer["version"] != 4 or len(members) != 1:
+        if footer["version"] != 5 or len(members) != 1:
             raise SmokeError("fault fixture requires one current-format pack member")
         offset, length = members[0][kind]["offset"], members[0][kind]["length"]
     except (KeyError, TypeError, ValueError) as exc:

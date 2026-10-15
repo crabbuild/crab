@@ -216,7 +216,7 @@ class CanaryTerminationTests(unittest.TestCase):
 
 class CapsuleFaultRangeTests(unittest.TestCase):
     @staticmethod
-    def fixture(*, offset: int = 8, length: int = 9, version: int = 4) -> bytes:
+    def fixture(*, offset: int = 8, length: int = 9, version: int = 5) -> bytes:
         body = b"PACKbody\xfftOcindex"
         footer = json.dumps({
             "version": version,
@@ -240,7 +240,7 @@ class CapsuleFaultRangeTests(unittest.TestCase):
 
     def test_refuses_other_container_formats_and_malformed_trailers(self) -> None:
         body = self.fixture()
-        for malformed in (body[:-1], body[:20], self.fixture(version=3), body[:-48] + bytes(48)):
+        for malformed in (body[:-1], body[:20], self.fixture(version=3), self.fixture(version=4), body[:-48] + bytes(48)):
             with self.subTest(size=len(malformed)), self.assertRaises(SMOKE.SmokeError):
                 SMOKE.capsule_member_range(malformed, "pack")
 
