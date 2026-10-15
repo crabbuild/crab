@@ -1495,3 +1495,30 @@ features passes, as do CLI compilation, formatting and diff checks. The CLI test
 binary emits an Apple linker warning about unwind-table size; the eight tests
 still complete successfully. Installed CLI push/hydration and representative S3
 latency qualification remain separate required proof.
+### Run catalog occurrence index under implementation
+
+Run footer version 4 stores one embedded catalog index after capsule/index-pool
+bytes and before admission pages. Its descriptor commits four paged key roots,
+the exact capsule source-body extents, byte count and body hash. File, shard,
+xorb and reverse-chunk records retain disjoint capsule occurrence lists for each
+logical value variant. Equal shard/xorb values share a recipe even when their
+original catalog pages occupy different offsets. Distinct values keep separate
+membership, including conflicts in unselected capsules.
+
+Full verification reconstructs the canonical index from the original nested
+catalogs and checks exact bytes and roots; footer-only validation checks region
+coverage and source bindings without fetching index pages. An absent index must
+correspond to absent or canonically empty capsule catalogs. Tests cover relocated
+equal descriptors, conflicting file bindings, empty sections, compacted control
+parity, omitted roots and re-signed occurrence changes. This is a format/producer
+slice still under validation. Foreground lookup remains eager for deltas until
+selected run sources and their reconciled ordering are wired into the reader.
+
+Producer validation: 117 storage-enabled capsule tests, 98 payload-only capsule
+tests, 48 read-side capsule tests and 22 publication tests pass. Strict metadata
+Clippy with storage/remote-index features passes. These checks establish encoding,
+compaction and existing consumer integration; they do not establish lazy run
+lookups or the fixed-edit history-scaling gate. CLI publication qualification is
+pending. Its corrupt-catalog fixture currently attempts to publish malformed
+catalog bytes, which the new producer validates earlier; that boundary needs
+explicit qualification before this format change is ready to land.

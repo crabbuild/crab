@@ -69,6 +69,10 @@ pub(crate) enum Kind {
     CatalogChunks = 23,
     CatalogXorbChunks = 24,
     CatalogShardXorbs = 25,
+    RunCatalogFiles = 26,
+    RunCatalogShards = 27,
+    RunCatalogXorbs = 28,
+    RunCatalogChunks = 29,
 }
 
 impl Kind {
@@ -97,7 +101,11 @@ impl Kind {
             | Self::CatalogShards
             | Self::CatalogXorbs
             | Self::CatalogChunks
-            | Self::CatalogShardXorbs => 32,
+            | Self::CatalogShardXorbs
+            | Self::RunCatalogFiles
+            | Self::RunCatalogShards
+            | Self::RunCatalogXorbs
+            | Self::RunCatalogChunks => 32,
             Self::CommitOids
             | Self::RunAdmission
             | Self::VisibilityChanges
@@ -370,7 +378,7 @@ pub(crate) fn decode(
         Kind::RunAdmission | Kind::RunAdmissionCounts => "capsule_admission",
         Kind::VisibilityRefs | Kind::VisibilityChanges => "capsule_visibility",
         Kind::CheckpointObjects | Kind::CheckpointRefs | Kind::CheckpointSets | Kind::CheckpointTransitions => "checkpoint_visibility_pages",
-        Kind::CatalogFiles | Kind::CatalogShards | Kind::CatalogXorbs | Kind::CatalogChunks | Kind::CatalogXorbChunks | Kind::CatalogShardXorbs => "pointer_catalog_pages",
+        Kind::CatalogFiles | Kind::CatalogShards | Kind::CatalogXorbs | Kind::CatalogChunks | Kind::CatalogXorbChunks | Kind::CatalogShardXorbs | Kind::RunCatalogFiles | Kind::RunCatalogShards | Kind::RunCatalogXorbs | Kind::RunCatalogChunks => "pointer_catalog_pages",
         _ => "path_state",
     },
         decoded_bytes=bytes.len() as u64, "index page decoded");
