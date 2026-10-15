@@ -719,7 +719,7 @@ async fn publish_xorb_candidate(
         .create_or_read_immutable(&path, bytes, MAX_XORB_SIZE as u64)
         .await?
     {
-        crab_storage::ImmutableCreateOutcome::Created => {
+        crab_storage::ImmutableCreateOutcome::Created(_) => {
             if let (Some(cache), Some(bytes)) = (caching_store, cache_bytes) {
                 warm_published_cache_object(
                     cache,
@@ -731,7 +731,9 @@ async fn publish_xorb_candidate(
             }
             Ok((local_entry, local_placements, true))
         }
-        crab_storage::ImmutableCreateOutcome::Existing(existing) => {
+        crab_storage::ImmutableCreateOutcome::Existing {
+            bytes: existing, ..
+        } => {
             let verified = verify_external_xorb(&path, xorb_hash, &expected_refs, existing)?
                 .ok_or_else(|| CrabError::CorruptObject {
                     path: path.to_string(),
