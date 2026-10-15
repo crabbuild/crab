@@ -109,26 +109,57 @@ impl ChunkIndexStore {
         &self,
         hashes: &[MerkleHash],
     ) -> Result<crab_metadata::capsule_protocol::CapsuleChunkCandidates> {
+        use crab_metadata::capsule_protocol::capsule_chunk_head_key;
+        let requests = hashes
+            .iter()
+            .map(|hash| (*hash, capsule_chunk_head_key(&(*hash).into()), None))
+            .collect::<Vec<_>>();
+        self.capsule_candidate_records(&requests).await
+    }
+
+    /// Read immutable capsule placements selected during add, independent of newer heads.
+    pub(crate) async fn capsule_candidates_by_id(
+        &self,
+        candidates: &[(MerkleHash, [u8; 32])],
+    ) -> Result<crab_metadata::capsule_protocol::CapsuleChunkCandidates> {
+        let requests = candidates
+            .iter()
+            .map(|(hash, id)| {
+                (
+                    *hash,
+                    crab_metadata::key_codec::capsule_chunk_placement_key(id),
+                    Some(*id),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.capsule_candidate_records(&requests).await
+    }
+
+    async fn capsule_candidate_records(
+        &self,
+        requests: &[(MerkleHash, [u8; 33], Option<[u8; 32]>)],
+    ) -> Result<crab_metadata::capsule_protocol::CapsuleChunkCandidates> {
         use crab_metadata::capsule_protocol::{
             CapsuleChunkAnchor, CapsuleChunkCandidates, capsule_chunk_anchor_key,
-            capsule_chunk_head_key,
         };
         let mut output = CapsuleChunkCandidates::default();
         // Stay below Db's dense range-scan threshold: unrelated chunk history
         // must not turn an add-time point batch into a scan of the global index.
-        for hashes in hashes.chunks(GET_BATCH_TIER_CHUNK_LIMIT) {
-            let keys = hashes
+        for requests in requests.chunks(GET_BATCH_TIER_CHUNK_LIMIT) {
+            let keys = requests
                 .iter()
-                .map(|hash| Bytes::copy_from_slice(&capsule_chunk_head_key(&(*hash).into())))
+                .map(|(_, key, _)| Bytes::copy_from_slice(key))
                 .collect::<Vec<_>>();
             let values = self.db.get_batch(&keys).await?;
             let mut anchor_ids = HashSet::new();
-            for (hash, value) in hashes.iter().zip(values) {
+            for ((hash, _, expected_id), value) in requests.iter().zip(values) {
                 let Some(value) = value else {
                     continue;
                 };
                 let placement = CommittedChunkPlacement::decode(&value)?;
-                if placement.chunk_hash != <[u8; 32]>::from(*hash) {
+                if placement.chunk_hash != <[u8; 32]>::from(*hash)
+                    || expected_id.is_some_and(|id| placement.placement_id() != id)
+                {
                     return Err(CrabError::StagingCorrupt(
                         "capsule candidate hash differs from index key".to_owned(),
                     ));

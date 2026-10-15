@@ -42,6 +42,7 @@ pub(crate) async fn prepare_delta(
     staging: Option<&Arc<StagingAreaReadOnly>>,
     caching_store: Option<&crab_cache_store::CachingStore>,
     metrics: Option<&Metrics>,
+    metadb: &crate::core::config::MetaDbTomlConfig,
     upload_concurrency: usize,
     publish_gc_roots: bool,
     cancel: &CancellationToken,
@@ -66,7 +67,8 @@ pub(crate) async fn prepare_delta(
         },
     )
     .await?;
-    let lookup = view.pointer_catalog_lookup(layout, 2 * 1024 * 1024 * 1024)?;
+    let lookup =
+        view.pointer_catalog_lookup(layout, crab_metadata::capsule_protocol::MAX_CATALOG_BYTES)?;
     drop(view);
 
     let mut pointer_sizes = BTreeMap::<MerkleHash, u64>::new();
@@ -139,7 +141,7 @@ pub(crate) async fn prepare_delta(
     let mut prepared_files = Vec::with_capacity(unresolved.len());
     let mut prepared_candidates = Vec::<crab_staging::push_plan::PlannedXorb>::new();
     let mut candidate_indices = HashMap::<MerkleHash, usize>::new();
-    let mut external_candidates = HashMap::<MerkleHash, HashMap<MerkleHash, XorbRef>>::new();
+    let mut staged_candidates = HashMap::new();
 
     for (file_hash, file_size) in unresolved {
         check_cancelled(cancel)?;
@@ -208,11 +210,8 @@ pub(crate) async fn prepare_delta(
                             expected_size
                         )));
                     }
-                    let refs = external_candidates
-                        .entry(candidate.xorb_ref.xorb_hash)
-                        .or_default();
-                    match refs.insert(chunk_hash, candidate.xorb_ref) {
-                        Some(existing) if existing != candidate.xorb_ref => {
+                    match staged_candidates.insert(chunk_hash, candidate) {
+                        Some(existing) if existing != candidate => {
                             return Err(CrabError::StagingCorrupt(format!(
                                 "remote xorb authority disagrees for chunk {}",
                                 chunk_hash.hex()
@@ -265,15 +264,78 @@ pub(crate) async fn prepare_delta(
     drop(base_chunks);
     drop(needed_chunks);
 
-    let mut external_candidates = external_candidates
-        .into_iter()
-        .filter(|(hash, refs)| {
-            !xorb_entries.contains_key(hash)
-                && refs
-                    .keys()
-                    .any(|chunk_hash| !placements.contains_key(chunk_hash))
-        })
-        .collect::<Vec<_>>();
+    // The recipe retains the exact add-time IDs. Re-read their immutable
+    // records and current source roots before trusting any remote-only bytes.
+    staged_candidates.retain(|hash, _| !placements.contains_key(hash));
+    let planned_existing = staged_candidates.len();
+    let verified_staged =
+        super::push::revalidate_staged_remote_chunks(metadb, layout, &staged_candidates, cancel)
+            .await?;
+    tracing::debug!(
+        planned_existing,
+        stale_existing = planned_existing.saturating_sub(verified_staged.candidates.len()),
+        global_existing = 0,
+        "capsule staged remote proof adoption complete",
+    );
+    let mut reused_xorbs = verified_staged.xorbs.len();
+    let requested = requested_chunks
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    for (hash, (entry, origin)) in verified_staged.xorbs {
+        if xorb_entries
+            .get(&hash)
+            .is_some_and(|existing| existing != &entry)
+        {
+            return Err(CrabError::CorruptObject {
+                path: layout.xorb_path(&hash).to_string(),
+                reason: "verified xorb differs from the captured destination catalog".to_owned(),
+            });
+        }
+        // The authenticated closure also proves requested chunks whose rebuildable
+        // heads were absent during add. Expand only outgoing occurrences, so an
+        // incomplete global index cannot force repacking the same verified bytes.
+        for (index, chunk) in entry.chunks().iter().enumerate() {
+            if requested.contains(chunk.hash()) {
+                let chunk_hash = parse_merkle_hash(chunk.hash(), "verified catalog chunk")?;
+                placements.entry(chunk_hash).or_insert(ChunkPlacement {
+                    chunk_hash,
+                    xorb_hash: hash,
+                    chunk_index: u32::try_from(index).map_err(|_| {
+                        CrabError::Internal("verified xorb has too many chunks".to_owned())
+                    })?,
+                    uncompressed_size: chunk.uncompressed_size(),
+                });
+            }
+        }
+        xorb_entries.insert(hash, entry);
+        origins.insert(hash, origin);
+    }
+    drop(requested);
+    let mut external_candidates = HashMap::<MerkleHash, HashMap<MerkleHash, XorbRef>>::new();
+    for (hash, candidate) in verified_staged.candidates {
+        let xorb_ref = candidate.xorb_ref;
+        if xorb_entries.contains_key(&xorb_ref.xorb_hash) {
+            // Exact source membership and current provider identity already
+            // certify this descriptor. Re-reading payload would download a
+            // whole reused file despite the committed origin receipt.
+            placements.entry(hash).or_insert(ChunkPlacement {
+                chunk_hash: hash,
+                xorb_hash: xorb_ref.xorb_hash,
+                chunk_index: xorb_ref.chunk_index,
+                uncompressed_size: xorb_ref.uncompressed_size,
+            });
+        } else {
+            // Manifest receipts shipped in v1.2.4 lack capsule body descriptors.
+            // Full-body verification supplies that value when importing them
+            // into capsule publication.
+            external_candidates
+                .entry(xorb_ref.xorb_hash)
+                .or_default()
+                .insert(hash, xorb_ref);
+        }
+    }
+    let mut external_candidates = external_candidates.into_iter().collect::<Vec<_>>();
     external_candidates.sort_by_key(|(hash, _)| hash.hex());
     let external_reads =
         futures_util::stream::iter(external_candidates.into_iter().enumerate().map(
@@ -303,7 +365,6 @@ pub(crate) async fn prepare_delta(
         verified_external.push(result?);
     }
     verified_external.sort_by_key(|(ordinal, _)| *ordinal);
-    let mut reused_xorbs = 0_usize;
     for (_, verified) in verified_external {
         let Some((xorb_hash, entry, xorb_placements, origin)) = verified else {
             continue;
@@ -1237,6 +1298,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    &Default::default(),
                     4,
                     true,
                     &CancellationToken::new(),
@@ -1316,6 +1378,7 @@ mod tests {
             Some(&staging),
             None,
             None,
+            &Default::default(),
             4,
             true,
             &CancellationToken::new(),
@@ -1397,6 +1460,7 @@ mod tests {
                 Some(&staging),
                 None,
                 None,
+                &Default::default(),
                 1,
                 false,
                 &CancellationToken::new(),
@@ -1514,6 +1578,7 @@ mod tests {
                 Some(&staging),
                 None,
                 None,
+                &Default::default(),
                 concurrency,
                 false,
                 &CancellationToken::new(),
@@ -1557,6 +1622,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &Default::default(),
                 4,
                 true,
                 &CancellationToken::new(),
@@ -1620,6 +1686,7 @@ mod tests {
             None,
             None,
             None,
+            &Default::default(),
             4,
             true,
             &CancellationToken::new(),

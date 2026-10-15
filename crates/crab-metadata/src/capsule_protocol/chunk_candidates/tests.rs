@@ -38,7 +38,7 @@ fn capsule_candidates_preserve_distinct_digests_and_first_occurrence() {
             anchor.body_digest,
             anchor.origin.payload_digest
         ),
-        (2, 0, entry.body_digest().to_owned(), origin.payload_digest)
+        (3, 0, entry.body_digest().to_owned(), origin.payload_digest)
     );
 }
 

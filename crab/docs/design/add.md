@@ -212,6 +212,26 @@ source repository's current paged catalog, check each exact chunk position and
 size, then verify canonical origin identity. An absent source or changed
 physical descriptor cannot turn an index hint into authority.
 
+Each capsule placement is also stored under its immutable placement digest.
+Staged recipes retain that digest and the origin proof ID, so replacing a shared
+chunk head does not erase an add's chosen assertion. Capsule push re-reads those
+exact records, revalidates the source shard, and requires the recorded physical
+origin identity before adopting remote-only chunks. Warm payload/index caches
+cannot substitute for that identity check. The proof session is read-only and
+closed before publication opens the shared index writer.
+
+The revalidator returns caller-owned source descriptors and original receipts
+with the accepted candidates. Capsule preparation adopts those descriptors
+without a full xorb GET or decompression. Retained metadata shares one catalog
+byte allowance across source repositories; conflicting physical assertions fail
+explicitly. Released manifest receipts still use full-body verification when
+constructing a capsule descriptor that their older record does not contain.
+
+Canonical origin receipts belong to the trusted `global_prefix` of the same
+authorization scope as the repository. Managed and ACL-scoped views use their
+own supplied global root. Local staging and advisory caches only name candidates;
+they cannot issue canonical receipts or certify an origin identity.
+
 Direct publication and protected receive use the same bounded candidate
 encoder/writer. Protected promotion carries the canonical operation identity;
 client staging-prefix writes do not confer canonical origin proof. Every index
