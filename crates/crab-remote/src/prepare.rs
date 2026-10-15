@@ -1115,10 +1115,10 @@ async fn upload_capsule_content(
             )
             .await?
         {
-            crab_storage::ImmutableCreateOutcome::Created => local_entry.clone(),
-            crab_storage::ImmutableCreateOutcome::Existing(existing) => {
-                catalog_xorb_from_existing(&xorb_hash, local_entry, existing)?
-            }
+            crab_storage::ImmutableCreateOutcome::Created(_) => local_entry.clone(),
+            crab_storage::ImmutableCreateOutcome::Existing {
+                bytes: existing, ..
+            } => catalog_xorb_from_existing(&xorb_hash, local_entry, existing)?,
         };
         delta.insert_xorb(xorb_hash, entry)?;
     }

@@ -45,6 +45,10 @@ writes, bounded reads, byte/request observers, and provider-neutral
 `StorageError` values. `put_if_absent` distinguishes a new immutable object
 from an identical retry without a preceding HEAD, and streamed size/hash
 verification uses the GET response metadata instead of a separate HEAD.
+`create_or_read_immutable` retains both ETag and version from the successful
+PUT, verified readback, or occupied-key GET alongside its outcome. Origin proof
+consumers must carry that identity with the verified bytes; a later HEAD may
+observe another object version. Occupied-key bytes still require caller validation.
 `Store::verify_bounded` combines that content-hash contract with pre-body size
 admission and streamed length checks. It uses one GET for a successful read;
 the limit applies to buffered encoded bytes, not the caller's decoded objects.
