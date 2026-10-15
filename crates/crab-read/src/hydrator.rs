@@ -1211,7 +1211,7 @@ mod tests {
         );
         let (body, _) = router
             .store()
-            .get_with_etag(&router.shard_path(&shard_hash.into()))
+            .get_with_etag(&router.shard_path(&crab_xet::hash::MerkleHash::from(shard_hash)))
             .await
             .unwrap();
         let mut chunks = std::collections::BTreeMap::<_, Vec<_>>::new();
