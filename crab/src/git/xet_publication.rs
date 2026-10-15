@@ -140,7 +140,6 @@ pub(crate) async fn prepare_delta(
     let mut xorb_bytes_uploaded = 0_u64;
     let mut prepared_files = Vec::with_capacity(unresolved.len());
     let mut prepared_candidates = Vec::<crab_staging::push_plan::PlannedXorb>::new();
-    let mut candidate_indices = HashMap::<MerkleHash, usize>::new();
     let mut staged_candidates = HashMap::new();
 
     for (file_hash, file_size) in unresolved {
@@ -311,7 +310,6 @@ pub(crate) async fn prepare_delta(
         xorb_entries.insert(hash, entry);
         origins.insert(hash, origin);
     }
-    drop(requested);
     let mut external_candidates = HashMap::<MerkleHash, HashMap<MerkleHash, XorbRef>>::new();
     for (hash, candidate) in verified_staged.candidates {
         let xorb_ref = candidate.xorb_ref;
@@ -378,13 +376,11 @@ pub(crate) async fn prepare_delta(
     }
 
     let mut candidate_chunks = placements.keys().copied().collect::<HashSet<_>>();
+    let mut seen_candidates = HashMap::new();
     for (_, _, _, plan) in &prepared_files {
         for planned in &plan.prepared_xorbs {
             let planned_hash = planned.hash()?;
-            if let Some(index) = candidate_indices.get(&planned_hash).copied() {
-                let existing = prepared_candidates.get(index).ok_or_else(|| {
-                    CrabError::Internal("prepared xorb candidate index is invalid".to_owned())
-                })?;
+            if let Some(existing) = seen_candidates.insert(planned_hash, planned) {
                 if !planned_xorbs_match(existing, planned) {
                     return Err(CrabError::StagingCorrupt(format!(
                         "prepared xorb {} has conflicting plans",
@@ -401,10 +397,13 @@ pub(crate) async fn prepare_delta(
                 .iter()
                 .map(crab_staging::push_plan::PlannedPlacement::to_placement)
                 .collect::<crab_staging::Result<Vec<_>>>()?;
-            if planned_placements
-                .iter()
-                .all(|placement| candidate_chunks.contains(&placement.chunk_hash))
-            {
+            // Direct adoption is only for wholly new outgoing payloads. A
+            // single missing chunk must not upload an otherwise reused xorb;
+            // residual packing below reads only the still-needed chunks.
+            if !planned_placements.iter().all(|placement| {
+                requested.contains(placement.chunk_hash.hex().as_str())
+                    && !candidate_chunks.contains(&placement.chunk_hash)
+            }) {
                 continue;
             }
             candidate_chunks.extend(
@@ -412,10 +411,11 @@ pub(crate) async fn prepare_delta(
                     .iter()
                     .map(|placement| placement.chunk_hash),
             );
-            candidate_indices.insert(planned_hash, prepared_candidates.len());
             prepared_candidates.push(planned.clone());
         }
     }
+
+    drop(requested);
 
     let uploads = futures_util::stream::iter(prepared_candidates.into_iter().enumerate().map(
         |(ordinal, planned)| async move {
@@ -484,68 +484,77 @@ pub(crate) async fn prepare_delta(
         xorb_entries.insert(planned_hash, entry);
     }
 
-    for (file_ordinal, (file_hash, file_size, chunks, _)) in prepared_files.into_iter().enumerate()
-    {
-        check_cancelled(cancel)?;
-        let mut missing = Vec::new();
-        let mut seen = HashSet::new();
-        for (hash, _) in &chunks {
-            if !placements.contains_key(hash) && seen.insert(*hash) {
-                missing.push(*hash);
+    let mut missing = prepared_files
+        .iter()
+        .flat_map(|(_, _, chunks, _)| chunks.iter().map(|(hash, _)| *hash))
+        .filter(|hash| !placements.contains_key(hash))
+        .collect::<HashSet<_>>();
+    if !missing.is_empty() {
+        // The same prepared body can supply several files. Gather the whole
+        // residual schedule before reading, so its verified source opens once
+        // rather than once per file or fixed-size request page.
+        let mut read_plan = staging.begin_coalesced_chunk_read_plan()?;
+        let mut requests = Vec::with_capacity(256);
+        for (ordinal, (_, _, chunks, _)) in prepared_files.iter().enumerate() {
+            let context = u64::try_from(ordinal)
+                .map_err(|_| CrabError::Internal("pointer file ordinal overflowed".to_owned()))?;
+            for (hash, size) in chunks {
+                if !missing.remove(hash) {
+                    continue;
+                }
+                requests.push((*hash, *size, context));
+                if requests.len() == 256 {
+                    check_cancelled(cancel)?;
+                    read_plan.append(&requests)?;
+                    requests.clear();
+                }
             }
         }
-        if !missing.is_empty() {
-            let mut builder = XorbBuilder::new();
-            for batch in missing.chunks(256) {
-                let loaded = staging.get_chunks_batch(batch).await?;
-                let by_hash = loaded.into_iter().collect::<HashMap<_, _>>();
-                for hash in batch {
-                    let data = by_hash
-                        .get(hash)
-                        .cloned()
-                        .ok_or_else(|| CrabError::ChunkNotFound { hash: hash.hex() })?;
-                    builder.push(
-                        &Chunk { hash: *hash, data },
-                        RunId(u64::try_from(file_ordinal).map_err(|_| {
-                            CrabError::Internal("pointer file ordinal overflowed".to_owned())
-                        })?),
-                    )?;
-                    while let Some(result) = builder.take_completed() {
-                        let uploaded_bytes = publish_built_xorb(
-                            layout,
-                            caching_store,
-                            result,
-                            &mut placements,
-                            &mut xorb_entries,
-                            &mut uploaded_xorbs,
-                            &mut origins,
-                        )
-                        .await?;
-                        xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
-                        if let Some(metrics) = metrics {
-                            metrics.add_bytes_uploaded(uploaded_bytes);
-                        }
+        read_plan.append(&requests)?;
+        drop(missing);
+        let mut builder = XorbBuilder::new();
+        while let Some(payloads) = read_plan.read_next(256, 16 * 1024 * 1024).await? {
+            check_cancelled(cancel)?;
+            for (context, hash, data) in payloads {
+                builder.push(&Chunk { hash, data }, RunId(context))?;
+                while let Some(result) = builder.take_completed() {
+                    let uploaded_bytes = publish_built_xorb(
+                        layout,
+                        caching_store,
+                        result,
+                        &mut placements,
+                        &mut xorb_entries,
+                        &mut uploaded_xorbs,
+                        &mut origins,
+                    )
+                    .await?;
+                    xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
+                    if let Some(metrics) = metrics {
+                        metrics.add_bytes_uploaded(uploaded_bytes);
                     }
                 }
             }
-            for result in builder.finalize()? {
-                let uploaded_bytes = publish_built_xorb(
-                    layout,
-                    caching_store,
-                    result,
-                    &mut placements,
-                    &mut xorb_entries,
-                    &mut uploaded_xorbs,
-                    &mut origins,
-                )
-                .await?;
-                xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
-                if let Some(metrics) = metrics {
-                    metrics.add_bytes_uploaded(uploaded_bytes);
-                }
+        }
+        for result in builder.finalize()? {
+            let uploaded_bytes = publish_built_xorb(
+                layout,
+                caching_store,
+                result,
+                &mut placements,
+                &mut xorb_entries,
+                &mut uploaded_xorbs,
+                &mut origins,
+            )
+            .await?;
+            xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
+            if let Some(metrics) = metrics {
+                metrics.add_bytes_uploaded(uploaded_bytes);
             }
         }
+    }
 
+    for (file_hash, file_size, chunks, _) in prepared_files {
+        check_cancelled(cancel)?;
         let ordered_hashes = chunks.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
         let file_info = file_info_from_placements(file_hash, &ordered_hashes, &placements)?;
         let dependency_hashes = file_info
@@ -1485,6 +1494,8 @@ mod tests {
             );
         }
     }
+
+    mod residual_tests;
 
     #[derive(Default)]
     struct UploadObserver {
