@@ -4494,17 +4494,23 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
                     "remote add classifier failed: {error}"
                 )),
             })?;
+            // Keep index absence in the session's OnceCell: persisting one miss
+            // per chunk makes cache writes scale with the entire new file.
+            let cache = self
+                .candidate_cache
+                .as_ref()
+                .filter(|_| matches!(self.remote_chunk_index.get(), Some(Some(_))));
             let mut updates = Vec::with_capacity(misses.len());
             for chunk_hash in misses {
                 let candidate = fetched.get(&chunk_hash).copied();
-                if self.candidate_cache.is_some() {
+                if cache.is_some() {
                     updates.push((chunk_hash, candidate));
                 }
                 if let Some(candidate) = candidate {
                     candidates.insert(chunk_hash, candidate);
                 }
             }
-            if let Some(cache) = &self.candidate_cache {
+            if let Some(cache) = cache {
                 if let Err(error) = cache.memory_insert_batch(&updates) {
                     warn!(error = %error, "add remote candidate memory cache update failed");
                 }
@@ -22045,16 +22051,22 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn add_classifier_does_not_repeat_an_uninitialized_index_probe() {
-        let inner = Arc::new(object_store::memory::InMemory::new());
-        let reads = Arc::new(Mutex::new(Vec::new()));
-        let recording_store: Arc<dyn ObjectStore> = Arc::new(RecordingReadStore {
-            inner,
-            reads: Arc::clone(&reads),
-        });
-        let store = Store::new(recording_store);
-        let router = StoreLayout::new(store.clone(), "repo-add-uninitialized-index".to_owned());
+    fn add_classifier_with_private_cache(
+        store: &Store,
+        router: &StoreLayout,
+        cache_root: &std::path::Path,
+    ) -> (
+        AddRemoteChunkClassifier,
+        Arc<crate::cache::add_remote_candidates::AddRemoteCandidateCache>,
+    ) {
+        let cache_root = cache_root.join("cache");
+        crab_cache::ensure_private_cache_directory(&cache_root).expect("private cache root");
+        let candidate_cache = Arc::new(
+            crate::cache::add_remote_candidates::AddRemoteCandidateCache::open(
+                &cache_root.join("candidates.sqlite"),
+            )
+            .expect("open candidate cache"),
+        );
         let pipeline = PushPipeline::new(
             PushConfig::default(),
             Vec::new(),
@@ -22067,20 +22079,32 @@ mod tests {
             CancellationToken::new(),
             None,
         );
-        pipeline.install_metadb(build_push_metadb_guard(
-            &store,
-            &router,
-            None,
-            &crate::core::config::MetaDbTomlConfig::default(),
-            true,
-        ));
+        let mut config = crate::core::config::MetaDbTomlConfig::default();
+        config.chunk_index.local_path = Some(cache_root.join("chunks.sqlite"));
+        pipeline.install_metadb(build_push_metadb_guard(store, router, None, &config, true));
         let classifier = AddRemoteChunkClassifier {
             pipeline,
             remote_chunk_index: tokio::sync::OnceCell::new(),
-            candidate_cache: None,
+            candidate_cache: Some(Arc::clone(&candidate_cache)),
             candidate_cache_hits: std::sync::atomic::AtomicU64::new(0),
             candidate_cache_misses: std::sync::atomic::AtomicU64::new(0),
         };
+        (classifier, candidate_cache)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_classifier_keeps_uninitialized_index_absence_session_scoped() {
+        let cache_root = tempfile::tempdir().expect("private candidate cache");
+        let inner = Arc::new(object_store::memory::InMemory::new());
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let recording_store: Arc<dyn ObjectStore> = Arc::new(RecordingReadStore {
+            inner,
+            reads: Arc::clone(&reads),
+        });
+        let store = Store::new(recording_store);
+        let router = StoreLayout::new(store.clone(), "repo-add-uninitialized-index".to_owned());
+        let (classifier, candidate_cache) =
+            add_classifier_with_private_cache(&store, &router, cache_root.path());
         let first = crab_staging::push_plan::ExistingChunkLookup::lookup_existing_candidates(
             &classifier,
             &[(MerkleHash::from([1; 32]), 4)],
@@ -22118,6 +22142,45 @@ mod tests {
         assert!(matches!(cancelled, crab_staging::StagingError::Cancelled));
         assert_eq!(manifest_probes(), initial_probes);
         classifier.close().await;
+        assert!(
+            candidate_cache
+                .load_persistent(&[MerkleHash::from([1; 32]), MerkleHash::from([2; 32])])
+                .expect("inspect persisted candidates")
+                .is_empty(),
+            "an absent index must not write a per-chunk negative cache"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_classifier_persists_misses_from_an_initialized_index() {
+        let cache_root = tempfile::tempdir().expect("private candidate cache");
+        let (store, router) = test_store_router("repo-add-initialized-index");
+        let seed = build_push_metadb_guard(
+            &store,
+            &router,
+            None,
+            &crate::core::config::MetaDbTomlConfig::default(),
+            false,
+        );
+        seed.chunk_index_system_keys().await.expect("seed manifest");
+        seed.close().await.expect("close seed writer");
+        let (classifier, candidate_cache) =
+            add_classifier_with_private_cache(&store, &router, cache_root.path());
+        let hash = MerkleHash::from([4; 32]);
+        let lookup = crab_staging::push_plan::ExistingChunkLookup::lookup_existing_candidates(
+            &classifier,
+            &[(hash, 4)],
+        )
+        .await;
+        classifier.close().await;
+        lookup.expect("initialized-index lookup");
+        assert_eq!(
+            candidate_cache
+                .load_persistent(&[hash])
+                .expect("inspect persisted miss")
+                .get(&hash),
+            Some(&None)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

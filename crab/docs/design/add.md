@@ -224,6 +224,11 @@ repacking; push still revalidates every positive placement and origin proof.
 Cache failures, stale entries, and evictions are advisory misses; they cannot
 change the bytes selected for a push.
 
+An uninitialized global chunk index is remembered only for the current add
+session. It does not establish per-chunk absence, so it does not populate the
+persistent negative cache. Existing index snapshots keep their normal cache
+behavior; unavailable remote authority still leaves payload ownership local.
+
 Push reads remote candidates in bounded pages under a shared deadline. It
 retains completed pages and local cache hits if the deadline expires or a later
 remote page fails; every retained placement still crosses normal proof
