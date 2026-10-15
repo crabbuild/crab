@@ -4042,7 +4042,8 @@ pub async fn open_ref_view_from_root(
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
 ) -> Result<CapsuleRefView> {
     let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)
+        .map_err(metadata_control_error)?;
     Ok(CapsuleRefView {
         root: snapshot,
         refs: visible.refs,
@@ -4061,7 +4062,8 @@ pub async fn read_activity_from_root(
     snapshot: &crab_metadata::capsule_protocol::RootSnapshot,
 ) -> Result<CapsuleRepositoryActivity> {
     let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)
+        .map_err(metadata_control_error)?;
     let capsule_count = visible.pointers.iter().try_fold(0_u64, |total, pointer| {
         total
             .checked_add(u64::from(pointer.capsule_count()))
@@ -4102,7 +4104,8 @@ pub async fn open_ref_view_from_root_for_refs(
 ) -> Result<CapsuleRefView> {
     let (heads, active) =
         capture_selected_ref_heads(router, snapshot.record().root(), ref_names).await?;
-    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)
+        .map_err(metadata_control_error)?;
     Ok(CapsuleRefView {
         root: snapshot,
         refs: visible
@@ -4156,7 +4159,8 @@ pub async fn open_ref_view_from_root_for_push(
             ));
         }
     }
-    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)
+        .map_err(metadata_control_error)?;
     let push_ref_head_bases = ref_names
         .iter()
         .cloned()
@@ -4216,7 +4220,9 @@ pub async fn open_view_from_root_for_repack(
 ) -> Result<CapsuleRepositoryView> {
     let root = snapshot.record().root();
     let (heads, active) = capture_ref_heads(router, root).await?;
-    let pointers = materialize_visible_ref_heads(root, &heads, &active)?.pointers;
+    let pointers = materialize_visible_ref_heads(root, &heads, &active)
+        .map_err(metadata_control_error)?
+        .pointers;
     let frontier_bytes = pointers.iter().try_fold(0_u64, |total, pointer| {
         total
             .checked_add(pointer.size())
@@ -4451,7 +4457,8 @@ async fn assemble_view(
     }
     let mut refs = snapshot.record().root().refs().clone();
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
-    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)
+        .map_err(metadata_control_error)?;
     let expected_refs = visible.refs;
     let expected_peeled = visible.peeled_refs;
     let visible_ref_transactions = visible.transactions;
@@ -4664,7 +4671,8 @@ async fn assemble_layered_control_view(
     let footer_only = matches!(read, ControlRead::Fetch);
     let mut refs = snapshot.record().root().refs().clone();
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
-    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)
+        .map_err(metadata_control_error)?;
     let expected_refs = visible.refs;
     let expected_peeled = visible.peeled_refs;
     let visible_ref_transactions = visible.transactions;
@@ -4801,7 +4809,8 @@ async fn assemble_layered_control_view(
             capsule_run_sources.push(source);
         }
     }
-    let selected = select_ref_control_frontiers(snapshot.record().root(), &ref_frontiers, &runs)?;
+    let selected = select_ref_control_frontiers(snapshot.record().root(), &ref_frontiers, &runs)
+        .map_err(metadata_control_error)?;
     let mut root_capsules = selected.root_controls;
     let ref_capsule_counts = selected.counts;
     if footer_only {
@@ -4829,7 +4838,8 @@ async fn assemble_layered_control_view(
         });
     }
     let journal_capsules =
-        select_ref_journal_controls(snapshot.record().root(), &selected.required, &runs)?;
+        select_ref_journal_controls(snapshot.record().root(), &selected.required, &runs)
+            .map_err(metadata_control_error)?;
     let transaction_predecessors = selected.predecessors;
     let checkpoint_visibility = if matches!(read, ControlRead::Git) {
         checkpoint
@@ -4846,7 +4856,8 @@ async fn assemble_layered_control_view(
         let initial = match &checkpoint_visibility {
             Some(reader) => {
                 CapturedVisibility::from_checkpoint(router.store().clone(), reader.clone(), names)
-                    .await?
+                    .await
+                    .map_err(metadata_control_error)?
             }
             None => CapturedVisibility::new(
                 router.store().clone(),
@@ -4859,7 +4870,10 @@ async fn assemble_layered_control_view(
         VisibilityReconciliation::Complete(visibility_index_for_checkpoint(checkpoint.as_ref())?)
     };
     for capsule in &root_capsules {
-        visibility.apply(capsule).await?;
+        visibility
+            .apply(capsule)
+            .await
+            .map_err(metadata_control_error)?;
     }
     let ordered = order_ref_controls(
         snapshot.record().root().refs(),
@@ -4868,9 +4882,10 @@ async fn assemble_layered_control_view(
         &transaction_predecessors,
         journal_capsules,
     )
-    .await?;
+    .await
+    .map_err(metadata_control_error)?;
     for capsule in &ordered {
-        apply_control_refs(capsule, &mut refs, &mut peeled_refs)?;
+        apply_control_refs(capsule, &mut refs, &mut peeled_refs).map_err(metadata_control_error)?;
     }
     if refs != expected_refs || peeled_refs != expected_peeled {
         return Err(corrupt_path(
@@ -5126,20 +5141,16 @@ fn capsule_is_ready(
 ) -> Result<bool> {
     let transaction = capsule.transaction()?;
     let delta = capsule.visibility_delta()?;
-    Ok(visibility_is_ready(
-        &transaction,
-        delta.as_ref(),
-        refs,
-        visibility_index,
-    )?)
+    visibility_is_ready(&transaction, delta.as_ref(), refs, visibility_index)
+        .map_err(metadata_control_error)
 }
 
 fn apply_capsule_control_visibility_index(
     capsule: &CapsuleControl,
     index: &mut crab_metadata::git_visibility::GitVisibilityIndex,
 ) -> Result<()> {
-    apply_transaction_visibility_index(capsule.transaction(), capsule.visibility_delta()?, index)?;
-    Ok(())
+    apply_transaction_visibility_index(capsule.transaction(), capsule.visibility_delta()?, index)
+        .map_err(metadata_control_error)
 }
 
 fn apply_capsule_visibility_index(
@@ -5148,8 +5159,8 @@ fn apply_capsule_visibility_index(
 ) -> Result<()> {
     let transaction = capsule.transaction()?;
     let delta = capsule.visibility_delta()?;
-    apply_transaction_visibility_index(&transaction, delta.as_ref(), index)?;
-    Ok(())
+    apply_transaction_visibility_index(&transaction, delta.as_ref(), index)
+        .map_err(metadata_control_error)
 }
 
 fn apply_capsule_refs(
@@ -5247,28 +5258,31 @@ fn admit_frontier(pointers: &[CapsulePointer], limits: CapsuleReadLimits) -> Res
     Ok(())
 }
 
-async fn load_run(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> Result<CapsuleRun> {
-    match crab_metadata::capsule_protocol::load_capsule_run(router, pointer).await {
-        Ok(run) => Ok(run),
-        // Read callers distinguish malformed committed data from transport errors.
-        Err(crab_metadata::error::MetadataError::CorruptObject { path, reason }) => {
-            Err(ReadError::CorruptObject { path, reason })
+// Read consumers classify corrupt captured state separately from metadata I/O.
+// Keep that boundary when shared metadata code detects the same invalid control.
+fn metadata_control_error(error: crab_metadata::error::MetadataError) -> ReadError {
+    match error {
+        crab_metadata::error::MetadataError::CorruptObject { path, reason } => {
+            ReadError::CorruptObject { path, reason }
         }
-        Err(error) => Err(error.into()),
+        crab_metadata::error::MetadataError::Internal(reason) => ReadError::internal(reason),
+        error => error.into(),
     }
+}
+
+async fn load_run(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> Result<CapsuleRun> {
+    crab_metadata::capsule_protocol::load_capsule_run(router, pointer)
+        .await
+        .map_err(metadata_control_error)
 }
 
 async fn load_run_control(
     router: &StoreLayout<Store>,
     pointer: &CapsulePointer,
 ) -> Result<(CapsuleRunControl, Vec<CapsuleControl>)> {
-    match crab_metadata::capsule_protocol::load_capsule_run_control(router, pointer).await {
-        Ok(value) => Ok(value),
-        Err(crab_metadata::error::MetadataError::CorruptObject { path, reason }) => {
-            Err(ReadError::CorruptObject { path, reason })
-        }
-        Err(error) => Err(error.into()),
-    }
+    crab_metadata::capsule_protocol::load_capsule_run_control(router, pointer)
+        .await
+        .map_err(metadata_control_error)
 }
 
 fn corrupt(path: &object_store::path::Path, reason: impl Into<String>) -> ReadError {
