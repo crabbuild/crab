@@ -247,6 +247,52 @@ async fn descriptors_cannot_cross_captured_git_states() {
 }
 
 #[tokio::test]
+async fn retained_paths_cover_the_complete_body_without_loading_pages() {
+    let (manifest, inventory, entries) = inputs(10_000);
+    let state = "c".repeat(64);
+    let write = PagedGitObjectIndexWrite::build(&state, &manifest, &inventory, &entries).unwrap();
+    let reads = Arc::new(AtomicU64::new(0));
+    let observed = reads.clone();
+    let store = Store::new(Arc::new(InMemory::new())).with_read_byte_observer(Arc::new(move |n| {
+        observed.fetch_add(n, Ordering::Relaxed);
+    }));
+    let layout = StoreLayout::new(store.clone(), "retained-object-index".into());
+    let hash = write.upload(&store, &layout).await.unwrap();
+    reads.store(0, Ordering::Relaxed);
+    let paths = PagedGitObjectIndex::retained_paths(&store, &layout, &hash, &state, 256 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        (paths, reads.load(Ordering::Relaxed) <= MAX_DESCRIPTOR_BYTES),
+        (
+            [
+                layout.bulk_manifest_path("git-object-index", &hash),
+                body_path(&layout, &write.descriptor.body_hash)
+            ],
+            true
+        )
+    );
+}
+
+#[tokio::test]
+async fn retained_paths_require_the_captured_state_and_descriptor_budget() {
+    let (manifest, inventory, entries) = inputs(10);
+    let state = "c".repeat(64);
+    let write = PagedGitObjectIndexWrite::build(&state, &manifest, &inventory, &entries).unwrap();
+    let store = Store::new(Arc::new(InMemory::new()));
+    let layout = StoreLayout::new(store.clone(), "retained-object-binding".into());
+    let hash = write.upload(&store, &layout).await.unwrap();
+    let foreign = "d".repeat(64);
+    for (state, maximum) in [(&foreign, 256 * 1024), (&state, 1)] {
+        assert!(
+            PagedGitObjectIndex::retained_paths(&store, &layout, &hash, state, maximum)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
 async fn object_aliases_prefer_full_encodings_and_keep_every_physical_offset() {
     let (mut manifest, mut inventory, mut entries) = inputs(1);
     entries[0].1.metadata.delta_base_oid = Some(oid(0));

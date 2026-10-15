@@ -226,7 +226,6 @@ async fn capsule_gc_does_not_report_revalidated_retained_objects_as_deleted() {
         .unwrap();
         let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
         manifest.seal_git_validation();
-        let state_digest = "a".repeat(64);
         let outcome = sweep_capsule_objects(
             &GcArgs {
                 force,
@@ -236,7 +235,6 @@ async fn capsule_gc_does_not_report_revalidated_retained_objects_as_deleted() {
             &layout,
             &root,
             &[],
-            &state_digest,
             &manifest,
             &HashSet::new(),
             &CancellationToken::new(),

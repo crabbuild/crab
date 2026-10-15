@@ -118,7 +118,10 @@ requires complete verified pack coverage before publication; path completion
 retains that binding. Graph publication does not wait for path construction. The prior
 versions were never reachable from a release tag; maintenance rebuilds this derived
 record in place, without a legacy reader. Readers ignore stale
-records; absent indexes remain a readiness state. Rebuilding an immutable index
+records; absent indexes remain a readiness state. GC retains dependencies of the currently
+published readiness record even when newer refs make it unusable for new reads.
+Storage retention does not grant inventory membership or ref visibility.
+Rebuilding an immutable index
 verifies the generated content identity and repairs corrupt stored bytes only
 with a conditional update against the observed version, followed by readback.
 This applies to graph/path-state/physical-index descriptors and bodies, not Git/Xet data.
