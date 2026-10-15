@@ -4,13 +4,13 @@ use bytes::Bytes;
 use crab_metadata::capsule_protocol::{
     Capsule, CapsuleControl, CapsulePointer, CapsuleRun, CapsuleRunControl, CheckpointPointer,
     LayeredCheckpoint, PackMemberDescriptor, PackRange, PackSourceDescriptor, PackSourceKind,
-    PointerCatalog, RootRecord, load_root, visibility_object_set_digest,
+    PointerCatalog, RootRecord, capture_ref_heads, load_root, resolve_referenced_activations,
+    visibility_object_set_digest,
 };
 use crab_storage::{Store, StoreLayout};
 use futures_util::future::try_join_all;
 use futures_util::{StreamExt, TryStreamExt};
 use gix_hash::ObjectId;
-use object_store::ObjectMeta;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -5196,73 +5196,6 @@ fn materialize_visible_ref_heads(
     })
 }
 
-async fn load_ref_heads(
-    router: &StoreLayout<Store>,
-    objects: &[ObjectMeta],
-) -> Result<Option<Vec<crab_metadata::capsule_protocol::CapsuleRefHead>>> {
-    let loaded = futures_util::stream::iter(objects.iter().cloned().map(|object| async move {
-        let (body, etag) = router.store().get_with_etag(&object.location).await?;
-        let head = crab_metadata::capsule_protocol::CapsuleRefHead::decode(&body)?;
-        let expected = router.capsule_ref_head_path(
-            &crab_metadata::capsule_protocol::capsule_ref_name_key(head.ref_name()),
-        );
-        if expected != object.location {
-            return Err(corrupt(
-                &object.location,
-                "capsule ref-head key does not match its ref name",
-            ));
-        }
-        Ok::<_, ReadError>((head, listed_version_matches(&object, &etag)))
-    }))
-    .buffer_unordered(32)
-    .try_collect::<Vec<_>>()
-    .await?;
-    if loaded.iter().any(|(_, matched)| !matched) {
-        return Ok(None);
-    }
-    let mut heads = loaded.into_iter().map(|(head, _)| head).collect::<Vec<_>>();
-    heads.sort_unstable_by(|left, right| left.ref_name().cmp(right.ref_name()));
-    Ok(Some(heads))
-}
-
-async fn capture_ref_heads(
-    router: &StoreLayout<Store>,
-    root: &crab_metadata::capsule_protocol::RepositoryRoot,
-) -> Result<(
-    Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
-    BTreeSet<String>,
-)> {
-    for _ in 0..8 {
-        let before = list_ref_head_objects(router).await?;
-        let Some(heads) = load_ref_heads(router, &before).await? else {
-            continue;
-        };
-        let heads = heads
-            .into_iter()
-            .filter(|head| head.ref_epoch() == root.ref_epoch())
-            .collect::<Vec<_>>();
-        let active = resolve_referenced_activations(router, &heads).await?;
-        let after = list_ref_head_objects(router).await?;
-        if before != after {
-            continue;
-        }
-        for head in &heads {
-            let visible = head.visible(&active);
-            let base_oid = root.refs().get(head.ref_name()).map(String::as_str);
-            if visible.transaction_id().is_none() && visible.oid() != base_oid {
-                return Err(corrupt_path(
-                    "capsule-protocol ref heads",
-                    "capsule ref head without a transaction differs from the compacted root",
-                ));
-            }
-        }
-        return Ok((heads, active));
-    }
-    Err(ReadError::internal(
-        "capsule ref snapshot changed during every bounded capture attempt",
-    ))
-}
-
 async fn capture_selected_ref_heads(
     router: &StoreLayout<Store>,
     root: &crab_metadata::capsule_protocol::RepositoryRoot,
@@ -5331,80 +5264,6 @@ async fn load_selected_ref_heads(
         Ok(Some((head, etag, body)))
     }))
     .buffered(32)
-    .try_collect()
-    .await
-}
-
-async fn list_ref_head_objects(router: &StoreLayout<Store>) -> Result<Vec<ObjectMeta>> {
-    let mut objects = router
-        .store()
-        .list_prefix_bounded(
-            &router.capsule_ref_heads_prefix(),
-            crab_metadata::capsule_protocol::MAX_CAPSULE_REF_HEADS,
-        )
-        .await?
-        .ok_or_else(|| ReadError::internal("capsule ref-head limit exceeded"))?;
-    objects.sort_unstable_by(|left, right| left.location.cmp(&right.location));
-    Ok(objects)
-}
-
-fn listed_version_matches(object: &ObjectMeta, etag: &crab_storage::ETag) -> bool {
-    object
-        .e_tag
-        .as_ref()
-        .is_none_or(|listed| etag.e_tag.as_ref() == Some(listed))
-        && object
-            .version
-            .as_ref()
-            .is_none_or(|listed| etag.version.as_ref() == Some(listed))
-}
-
-async fn resolve_referenced_activations(
-    router: &StoreLayout<Store>,
-    heads: &[crab_metadata::capsule_protocol::CapsuleRefHead],
-) -> Result<BTreeSet<String>> {
-    let referenced = heads
-        .iter()
-        .filter_map(|head| head.prepared_activation_id())
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
-    futures_util::stream::iter(referenced.into_iter().map(|activation_id| async move {
-        let path = router.capsule_transaction_path(&activation_id);
-        let (body, _) = router
-            .store()
-            .get_with_etag_bounded(
-                &path,
-                crab_metadata::capsule_protocol::MAX_CAPSULE_TRANSACTION_RECORD_BYTES,
-            )
-            .await?;
-        let record = crab_metadata::capsule_protocol::CapsuleTransactionRecord::decode(&body)?;
-        if record.activation_id() != activation_id {
-            return Err(corrupt(
-                &path,
-                "capsule transaction record does not match its activation key",
-            ));
-        }
-        if heads.iter().any(|head| {
-            head.prepared_activation_id() == Some(activation_id.as_str())
-                && head
-                    .visible(&BTreeSet::from([activation_id.clone()]))
-                    .transaction_id()
-                    != Some(record.transaction_id())
-        }) {
-            return Err(corrupt(
-                &path,
-                "capsule transaction record does not match its prepared ref heads",
-            ));
-        }
-        Ok::<_, ReadError>((
-            activation_id,
-            record.status() == crab_metadata::capsule_protocol::CapsuleTransactionStatus::Committed,
-        ))
-    }))
-    .buffer_unordered(32)
-    .try_filter_map(
-        |(activation_id, committed)| async move { Ok(committed.then_some(activation_id)) },
-    )
     .try_collect()
     .await
 }
