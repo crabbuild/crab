@@ -95,6 +95,7 @@ pub struct StoreChecker {
 struct CapsuleFsckState {
     view: crab_read::capsule_protocol::CapsuleRepositoryView,
     catalog: crab_metadata::capsule_protocol::PointerCatalog,
+    source_lifetime: Arc<crab_metadata::capsule_protocol::RetainedCapsuleSources>,
 }
 
 impl StoreChecker {
@@ -134,13 +135,17 @@ impl StoreChecker {
         )
         .await?;
         let catalog = view.pointer_catalog().await?;
-        verify_capsule_history(&layout, view.root().root()).await?;
+        let source_lifetime = verify_capsule_history(&layout, view.root().root()).await?;
         Ok(Self {
             store,
             prefix,
             router,
             multipart_journal: None,
-            capsule: Some(CapsuleFsckState { view, catalog }),
+            capsule: Some(CapsuleFsckState {
+                view,
+                catalog,
+                source_lifetime: Arc::new(source_lifetime),
+            }),
         })
     }
 
@@ -221,6 +226,7 @@ impl StoreChecker {
             }
         }
 
+        self.check_capsule_root_stability(state).await?;
         Ok(issues)
     }
 
@@ -246,7 +252,7 @@ impl StoreChecker {
                     .to_owned(),
             ));
         }
-        Ok(())
+        require_current_source_lifetime(&layout, &state.source_lifetime).await
     }
 
     /// Prove source pointers against the exact catalog captured by a capsule view.
@@ -876,7 +882,7 @@ impl StoreChecker {
 async fn verify_capsule_history(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     root: &crab_metadata::capsule_protocol::RepositoryRoot,
-) -> Result<()> {
+) -> Result<crab_metadata::capsule_protocol::RetainedCapsuleSources> {
     let segments = match root.history() {
         Some(history) => {
             crab_metadata::capsule_protocol::load_history_chain(
@@ -969,7 +975,22 @@ async fn verify_capsule_history(
     .buffer_unordered(16)
     .try_collect::<Vec<_>>()
     .await?;
-    Ok(())
+    // Per-ref retirement and pruning can move without changing visible refs.
+    // Keep the capture for the later data/Git checks instead of rescanning history.
+    require_current_source_lifetime(layout, &retained).await?;
+    Ok(retained)
+}
+
+async fn require_current_source_lifetime(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    capture: &crab_metadata::capsule_protocol::RetainedCapsuleSources,
+) -> Result<()> {
+    if capture.is_current(layout).await? {
+        return Ok(());
+    }
+    Err(CrabError::Protocol(
+        "source lifetime changed during fsck; retry against one stable capture".to_owned(),
+    ))
 }
 
 fn insert_history_pointer<T: Clone + PartialEq>(

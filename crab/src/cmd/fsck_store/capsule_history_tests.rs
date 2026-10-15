@@ -5,8 +5,91 @@ use crab_metadata::capsule_protocol::{
     LayeredCheckpoint, PackLayer, PackSourceDescriptor, PointerCatalog, RootSnapshot,
 };
 use crab_storage::{StorageObservation, StorageObserver, StorageOperation};
-use object_store::{ObjectStoreExt, memory::InMemory};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory,
+    path::Path as ObjectPath,
+};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+#[derive(Debug)]
+struct CorruptLifetimeDuringRead {
+    inner: Arc<dyn ObjectStore>,
+    source: ObjectPath,
+    head: ObjectPath,
+    fired: AtomicBool,
+}
+
+impl std::fmt::Display for CorruptLifetimeDuringRead {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str("source lifetime corruption fixture")
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for CorruptLifetimeDuringRead {
+    async fn put_opts(
+        &self,
+        path: &ObjectPath,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        self.inner.put_opts(path, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        path: &ObjectPath,
+        options: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(path, options).await
+    }
+
+    async fn get_opts(
+        &self,
+        path: &ObjectPath,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        let full_body = !options.head && options.range.is_none();
+        let response = self.inner.get_opts(path, options).await?;
+        if full_body && *path == self.source && !self.fired.swap(true, Ordering::SeqCst) {
+            self.inner
+                .put(&self.head, Bytes::from_static(b"corrupt").into())
+                .await?;
+        }
+        Ok(response)
+    }
+
+    fn delete_stream(
+        &self,
+        paths: futures_util::stream::BoxStream<'static, object_store::Result<ObjectPath>>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<ObjectPath>> {
+        self.inner.delete_stream(paths)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
 
 async fn history_fixture() -> (
     crab_storage::StoreLayout<crab_storage::Store>,
@@ -102,6 +185,72 @@ async fn checkpoint(
 struct SourceReads {
     size: u64,
     count: AtomicUsize,
+}
+
+#[tokio::test]
+async fn fsck_rejects_lifetime_corruption_during_original_source_verification() {
+    let (layout, root, run) = history_fixture().await;
+    let pointer = run_pointer(&run, root.record().digest());
+    crab_metadata::capsule_protocol::retain_capsule_sources(
+        &layout,
+        "refs/heads/main",
+        0,
+        &[pointer],
+    )
+    .await
+    .unwrap();
+    let head = layout
+        .store()
+        .list_prefix(&layout.capsule_source_heads_prefix())
+        .await
+        .unwrap()
+        .remove(0)
+        .location;
+    let backend = Arc::new(CorruptLifetimeDuringRead {
+        inner: Arc::clone(layout.store().inner()),
+        source: layout.capsule_path(run.hash()),
+        head,
+        fired: AtomicBool::new(false),
+    });
+    let observed = crab_storage::StoreLayout::new(
+        crab_storage::Store::new(backend.clone()),
+        layout.repo_prefix().to_owned(),
+    );
+    let result = verify_capsule_history(&observed, root.record().root()).await;
+    assert!(backend.fired.load(Ordering::SeqCst));
+    assert!(
+        result.is_err(),
+        "fsck accepted corrupt lifetime metadata after its original source read: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn data_checks_reject_lifetime_movement_after_checker_construction() {
+    let (layout, root, run) = history_fixture().await;
+    let pointer = run_pointer(&run, root.record().digest());
+    crab_metadata::capsule_protocol::retain_capsule_sources(
+        &layout,
+        "refs/heads/main",
+        0,
+        &[pointer],
+    )
+    .await
+    .unwrap();
+    let checker = StoreChecker::for_capsule_repository(
+        crate::storage::store::Store::from_storage(layout.store().clone()),
+        layout.repo_prefix().to_owned(),
+        root,
+    )
+    .await
+    .unwrap();
+    assert!(checker.check_data_chain().await.unwrap().is_empty());
+    crab_metadata::capsule_protocol::prune_retained_capsule_sources(&layout, 0)
+        .await
+        .unwrap();
+    assert!(matches!(
+        checker.check_data_chain().await,
+        Err(CrabError::Protocol(reason)) if reason.contains("source lifetime changed")
+    ));
 }
 
 #[tokio::test]

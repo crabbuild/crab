@@ -76,6 +76,56 @@ async fn repeated_retirement_does_not_append_or_rewrite_lifetime() {
 }
 
 #[tokio::test]
+async fn source_snapshot_detects_appends_and_new_ref_heads() {
+    let layout = fixture();
+    let first = source(&layout, 1).await;
+    retain_capsule_sources(&layout, "refs/heads/main", 0, &[first])
+        .await
+        .unwrap();
+    let captured = load_retained_capsule_sources(&layout, &heads(&layout).await)
+        .await
+        .unwrap();
+    assert!(captured.is_current(&layout).await.unwrap());
+    let second = source(&layout, 2).await;
+    retain_capsule_sources(&layout, "refs/heads/main", 0, std::slice::from_ref(&second))
+        .await
+        .unwrap();
+    assert!(!captured.is_current(&layout).await.unwrap());
+    let captured = load_retained_capsule_sources(&layout, &heads(&layout).await)
+        .await
+        .unwrap();
+    retain_capsule_sources(&layout, "refs/heads/other", 0, &[second])
+        .await
+        .unwrap();
+    assert!(!captured.is_current(&layout).await.unwrap());
+}
+
+#[tokio::test]
+async fn source_snapshot_tracks_floor_without_rewriting_ref_heads() {
+    let layout = fixture();
+    let pointer = source(&layout, 1).await;
+    retain_capsule_sources(&layout, "refs/heads/main", 0, &[pointer])
+        .await
+        .unwrap();
+    let paths = heads(&layout).await;
+    let before = layout.store().get_with_etag(&paths[0]).await.unwrap();
+    let captured = load_retained_capsule_sources(&layout, &paths)
+        .await
+        .unwrap();
+    prune_retained_capsule_sources(&layout, 0).await.unwrap();
+    assert_eq!(
+        layout.store().get_with_etag(&paths[0]).await.unwrap(),
+        before
+    );
+    assert!(!captured.is_current(&layout).await.unwrap());
+    let captured = load_retained_capsule_sources(&layout, &paths)
+        .await
+        .unwrap();
+    prune_retained_capsule_sources(&layout, 0).await.unwrap();
+    assert!(captured.is_current(&layout).await.unwrap());
+}
+
+#[tokio::test]
 async fn independent_ref_heads_share_source_identity_without_sharing_cas() {
     let layout = fixture();
     let pointer = source(&layout, 1).await;
