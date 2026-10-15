@@ -1330,15 +1330,16 @@ mod tests {
     fn root_rejects_retired_or_implicit_checkpoint_formats() {
         let record = checkpointed_record();
         let payload = serde_json::to_string(record.root()).unwrap();
-        assert_eq!(payload.matches("\"format\":7,").count(), 1);
+        assert_eq!(payload.matches("\"format\":8,").count(), 1);
         for replacement in [
             "",
             "\"format\":3,",
             "\"format\":4,",
             "\"format\":5,",
             "\"format\":6,",
+            "\"format\":7,",
         ] {
-            let payload = payload.replace("\"format\":7,", replacement);
+            let payload = payload.replace("\"format\":8,", replacement);
             // Recompute the envelope digest so only format admission can fail.
             let mut bytes = ROOT_MAGIC.to_vec();
             bytes.extend_from_slice(&ROOT_VERSION.to_be_bytes());

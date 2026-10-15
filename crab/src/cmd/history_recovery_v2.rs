@@ -196,14 +196,19 @@ async fn verify_history(
 ) -> Result<VerifiedCapsuleHistory> {
     check_cancelled(cancel)?;
     let segment = select_history(layout, root, generation, digest).await?;
-    let checkpoint =
-        crab_metadata::capsule_protocol::load_layered_checkpoint(layout, segment.checkpoint())
-            .await?;
+    let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(
+        layout,
+        segment.checkpoint(),
+        u64::MAX,
+    )
+    .await?;
     let (source_count, source_bytes) =
         verify_history_sources(layout, &segment, &checkpoint, cancel).await?;
     check_cancelled(cancel)?;
 
-    let catalog = checkpoint.pointer_catalog()?;
+    let catalog = checkpoint
+        .pointer_catalog_from_store(layout, u64::MAX)
+        .await?;
     validate_visibility(&segment, &checkpoint)?;
     let workspace = verify_git_checkpoint(layout, &segment, &checkpoint).await?;
     let dependencies = crab_read::capsule_protocol::verify_installed_dependencies(
@@ -221,15 +226,15 @@ async fn verify_history(
     let xorb_count = u64::try_from(catalog.xorbs().len())
         .map_err(|_| CrabError::Internal("history xorb count overflowed".to_owned()))?;
     let dependency_objects = 2_u64
-        .checked_add(source_count)
+        .checked_add(u64::from(checkpoint.catalog().is_some()))
+        .and_then(|total| total.checked_add(source_count))
         .and_then(|total| total.checked_add(shard_count))
         .and_then(|total| total.checked_add(xorb_count))
         .and_then(|total| total.checked_add(dependencies.reachable_lfs_objects))
         .ok_or_else(|| CrabError::Internal("history dependency count overflowed".to_owned()))?;
     let segment_bytes = u64::try_from(segment.bytes().len())
         .map_err(|_| CrabError::Internal("history segment size overflowed".to_owned()))?;
-    let checkpoint_bytes = u64::try_from(checkpoint.bytes().len())
-        .map_err(|_| CrabError::Internal("history checkpoint size overflowed".to_owned()))?;
+    let checkpoint_bytes = checkpoint.encoded_metadata_bytes()?;
     let dependency_bytes = segment_bytes
         .checked_add(checkpoint_bytes)
         .and_then(|total| total.checked_add(source_bytes))
@@ -643,7 +648,10 @@ async fn restore_history(
         let current_catalog = view.pointer_catalog().await?;
         // Keep both catalogs: history may use a recipe no longer in the current
         // view, while newer content must remain available after a rollback.
-        let mut restored_catalog = verified.checkpoint.pointer_catalog()?;
+        let mut restored_catalog = verified
+            .checkpoint
+            .pointer_catalog_from_store(layout, u64::MAX)
+            .await?;
         restored_catalog.apply(&current_catalog)?;
         let outcome = crab_remote::checkpoint::publish_capsule_checkpoint_from_view(
             layout,

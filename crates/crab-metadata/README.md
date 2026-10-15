@@ -60,8 +60,18 @@ capsules can therefore appear in differently compacted ref frontiers without
 inflating pack counts or appearing to conflict; differing payload commitments
 remain rejected.
 
-Checkpoint format 7 (`CRBCKP07`) carries authenticated catalog page roots in
-its footer. `LayeredCheckpoint::pointer_catalog_lookup` captures these roots;
+Checkpoint format 8 (`CRBCKP08`) commits to a separate immutable catalog at
+`v2/catalogs/<partition>/<hash>`, including its exact size and authenticated
+page roots. Catalog durability precedes checkpoint/history writes and root CAS.
+Ref-only checkpoint publication and physical repacking reuse that commitment
+without decoding, re-encoding, reading or rewriting the catalog body. A visible
+catalog delta still uses the canonical ordered full assembly; incremental delta
+updates remain required. Full checkpoint loading verifies visibility and catalog
+commitments; explicit maintenance materializes and verifies the catalog body.
+GC follows catalog objects from current, historical and retained browse roots.
+Retained browse record format 2 carries the complete checkpoint pointer and
+catalog identity; loading authenticates the footer and rejects omitted or
+mismatched catalog/source dependencies. `LayeredCheckpoint::pointer_catalog_lookup` captures these roots;
 `PointerCatalogLookup` batches file/chunk/xorb keys through one bounded page
 cache and byte budget. Its `dependencies` query selects files plus explicit
 shard/xorb identities in one aggregate budget, including complete dependency
@@ -83,8 +93,11 @@ The current-state opener also captures authenticated catalog roots and leaves
 catalog bodies cold. Explicitly pinned callers pass their existing capture, while
 current-state sessions bind once to the first root they open. Catalog and Git
 views share stable ref capture, ref-frontier selection, visibility reconciliation
-and transaction ordering; neither path invents a separate precedence policy. All 19 audited local release tags omit these
-capsule checkpoint formats; unshipped format 6 is rejected without a fallback.
+and transaction ordering; neither path invents a separate precedence policy.
+All six upstream release tags audited for format 8 omit the capsule protocol
+codec. Earlier formats, including unshipped checkpoint format 7 and browse
+retention record format 1, are rejected explicitly. Unreleased fixtures must be
+recreated; no fallback reader or automatic authoritative conversion is provided.
 Checkpoint and selected run catalog roots share one lookup budget and page cache.
 CLI and shared capsule-publication preparation use these captured queries.
 Protected receive selects from separately authorized source/filtered captures.

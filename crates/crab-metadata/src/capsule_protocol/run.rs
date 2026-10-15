@@ -876,6 +876,12 @@ impl CapsuleControl {
         PointerCatalog::decode_delta(&bytes).map(Some)
     }
 
+    /// Report the presence of an authenticated catalog delta without loading its body.
+    #[must_use]
+    pub fn has_catalog_delta(&self) -> bool {
+        self.catalog_identity.is_some()
+    }
+
     /// Return this capsule's authenticated pack directory with capsule-relative ranges.
     pub fn git_packs(&self) -> &[PackMemberDescriptor] {
         &self.git_packs

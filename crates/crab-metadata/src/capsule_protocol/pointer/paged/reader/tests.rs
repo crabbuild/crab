@@ -57,6 +57,7 @@ async fn fixture(
         .unwrap()
         .source_descriptor()
         .unwrap();
+    let catalog_bytes = catalog.encode().unwrap();
     let checkpoint =
         LayeredCheckpoint::build(1, &"3".repeat(64), vec![source], catalog, None).unwrap();
     let reads = Arc::new(AtomicUsize::new(0));
@@ -66,6 +67,13 @@ async fn fixture(
             observed.fetch_add(1, Ordering::SeqCst);
         }));
     let layout = StoreLayout::new(store, "catalog-lookup".to_owned());
+    if let Some(source) = checkpoint.catalog() {
+        layout
+            .store()
+            .put_overwrite(&layout.capsule_catalog_path(source.hash()), catalog_bytes)
+            .await
+            .unwrap();
+    }
     layout
         .store()
         .put_overwrite(
@@ -293,11 +301,17 @@ async fn chunk_selection_uses_lowest_xorb_then_first_occurrence_across_sources()
 async fn missing_and_corrupted_pages_are_errors_instead_of_catalog_misses() {
     for missing in [false, true] {
         let (layout, checkpoint, lookup, _) = fixture(catalog(2), 1024 * 1024).await;
-        let path = layout.capsule_checkpoint_path(checkpoint.hash());
+        let path = layout.capsule_catalog_path(checkpoint.catalog().unwrap().hash());
         if missing {
             layout.store().delete(&path).await.unwrap();
         } else {
-            let mut bytes = checkpoint.bytes().to_vec();
+            let mut bytes = layout
+                .store()
+                .get_with_etag(&path)
+                .await
+                .unwrap()
+                .0
+                .to_vec();
             let source = lookup.checkpoint.as_ref().unwrap();
             let offset = source.range.offset() + source.descriptor.files.as_ref().unwrap().offset;
             bytes[offset as usize] ^= 1;

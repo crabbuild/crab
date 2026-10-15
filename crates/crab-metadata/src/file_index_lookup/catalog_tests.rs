@@ -73,6 +73,7 @@ pub(super) async fn capture(
             .unwrap(),
     )
     .unwrap();
+    let catalog_bytes = catalog.encode().unwrap();
     let checkpoint = LayeredCheckpoint::build(
         base.root().generation(),
         base.digest(),
@@ -81,6 +82,15 @@ pub(super) async fn capture(
         None,
     )
     .unwrap();
+    if let Some(source) = checkpoint.catalog() {
+        // Seed immutable fixture data without charging a publication readback
+        // to the reader-construction and selected-query measurements below.
+        layout
+            .store()
+            .put_overwrite(&layout.capsule_catalog_path(source.hash()), catalog_bytes)
+            .await
+            .unwrap();
+    }
     let pointer = CheckpointPointer::new_layered(
         checkpoint.hash(),
         checkpoint.bytes().len() as u64,
@@ -142,7 +152,10 @@ pub(super) async fn capture(
     .unwrap();
     (
         control.pointer_catalog_lookup(layout, maximum).unwrap(),
-        path,
+        checkpoint
+            .catalog()
+            .map(|catalog| layout.capsule_catalog_path(catalog.hash()))
+            .unwrap_or(path),
         root,
     )
 }

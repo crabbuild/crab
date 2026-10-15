@@ -6,6 +6,9 @@ pub type Result<T> = std::result::Result<T, MetadataError>;
 /// Errors raised by metadata schema and local index helpers.
 #[derive(thiserror::Error, Debug)]
 pub enum MetadataError {
+    /// Checkpoint metadata and its catalog exceed the caller's aggregate read budget.
+    #[error("checkpoint metadata uses {bytes} encoded bytes, exceeding its {maximum}-byte limit")]
+    CheckpointSize { bytes: u64, maximum: u64 },
     /// A constructed path-state index cannot be admitted by its intended reader.
     #[error("path-state index uses {bytes} encoded bytes, exceeding its {maximum}-byte limit")]
     PathStateSize { bytes: u64, maximum: u64 },

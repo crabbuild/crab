@@ -2434,3 +2434,43 @@ Published `v1.2.4` differs from the untouched local tag; both objects were check
 The unshipped run footer versions 1 through 4 are rejected without a fallback.
 Published v1 storage formats are unaffected. Runtime, corruption, resource-budget
 and affected-consumer validation must accompany this format change before push.
+
+
+### Independent checkpoint catalog lifetime
+
+Checkpoint format 8 (`CRBCKP08`) replaces the inline catalog section with an
+immutable `v2/catalogs/<partition>/<hash>` commitment containing the full body
+hash, encoded size and authenticated page roots. Selected queries keep the same
+bounded page reader and complete-or-error dependency closure. Checkpoint loading
+reads visibility and commitments; full catalog materialization is explicit.
+
+The shared writer verifies newly encoded catalog bytes before checkpoint or
+history publication and before root CAS. Logical ref-only checkpoints and
+physical repacking carry the existing catalog commitment when no selected
+capsule has a catalog delta. They do not read, decode, re-encode or upload that
+body. A selected catalog delta still invokes ordered full assembly: this slice
+establishes ownership and unchanged-catalog reuse, not bounded changed-catalog
+maintenance or bounded repository opening.
+
+GC marks the catalog from current and historical checkpoints. Retained browse
+record format 2 records the complete checkpoint pointer and catalog identity.
+Maintenance authenticates the checkpoint footer and rejects omitted or
+mismatched catalog/source dependencies before trusting the retention paths.
+A retained catalog survives replacement or deletion of its original checkpoint;
+its lifetime belongs directly to each referencing checkpoint or retained root.
+Full fsck and history verification authenticate the complete catalog body, and
+history byte/object accounting includes the external dependency.
+
+Release boundary: all six upstream release tags (v1.0.1 and v1.2.0 through
+v1.2.4) lack the capsule-protocol codec. Checkpoint format 7 and browse retention
+record format 1 are unshipped development formats and are rejected. Recreate
+unreleased qualification fixtures rather than adding an indefinite fallback or
+silently rewriting authoritative history. Earlier format-7 measurements in this
+document remain historical evidence, not format-8 qualification.
+
+Required proof for this slice: zero catalog body I/O on ref-only checkpointing;
+cold historical hydration after original checkpoint replacement; full-size
+admission before catalog reads; missing/corrupt pages; ordinary/restore
+publication failures; and current/history/retained-only catalog survival through
+GC with the existing grace period and fences. No format-8 10 GiB or hosted-S3
+performance acceptance is established by the earlier combined-format run.

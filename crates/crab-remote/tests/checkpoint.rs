@@ -100,6 +100,7 @@ async fn retained_checkpoint_view_requires_complete_metadata_and_exact_root_bind
     let layered = checkpointed.layered_checkpoint().unwrap();
     publish_blob(&layout, "later").await;
     let retained = crab_read::capsule_protocol::compacted_view_from_checkpoint(
+        &layout,
         checkpointed.root_snapshot().clone(),
         layered.clone(),
         LIMITS,
@@ -133,6 +134,7 @@ async fn retained_checkpoint_view_requires_complete_metadata_and_exact_root_bind
     .unwrap();
     assert!(
         crab_read::capsule_protocol::compacted_view_from_checkpoint(
+            &layout,
             checkpointed.root_snapshot().clone(),
             footer,
             LIMITS,
@@ -141,6 +143,7 @@ async fn retained_checkpoint_view_requires_complete_metadata_and_exact_root_bind
     );
     assert!(matches!(
         crab_read::capsule_protocol::compacted_view_from_checkpoint(
+            &layout,
             checkpointed.root_snapshot().clone(),
             layered.clone(),
             CapsuleReadLimits {
@@ -153,6 +156,7 @@ async fn retained_checkpoint_view_requires_complete_metadata_and_exact_root_bind
     let newer = checkpoint(&layout).await;
     assert!(
         crab_read::capsule_protocol::compacted_view_from_checkpoint(
+            &layout,
             newer.root_snapshot().clone(),
             layered.clone(),
             LIMITS,

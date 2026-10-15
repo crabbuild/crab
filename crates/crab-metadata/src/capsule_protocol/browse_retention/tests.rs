@@ -176,14 +176,29 @@ async fn integrity_fixture() -> (StoreLayout<Store>, Vec<object_store::path::Pat
         .await
         .unwrap();
     paths.push(layer_path);
+    let mut catalog = PointerCatalog::new();
+    catalog
+        .insert_shard(
+            "a".repeat(64),
+            super::super::ShardCatalogEntry::new(1, Vec::new()),
+        )
+        .unwrap();
+    catalog
+        .insert_file(
+            "b".repeat(64),
+            super::super::FileCatalogEntry::new(1, "a".repeat(64)),
+        )
+        .unwrap();
     let checkpoint = LayeredCheckpoint::build(
         1,
         &"c".repeat(64),
         vec![layer.source_descriptor().unwrap()],
-        PointerCatalog::new(),
+        catalog,
         None,
     )
     .unwrap();
+    checkpoint.publish_catalog(&layout).await.unwrap();
+    paths.push(layout.capsule_catalog_path(checkpoint.catalog().unwrap().hash()));
     let checkpoint_path = layout.capsule_checkpoint_path(checkpoint.hash());
     layout
         .store()
@@ -557,4 +572,41 @@ async fn retrying_completed_pruning_does_not_rewrite_the_lifetime_head() {
             .unwrap(),
         before
     );
+}
+
+#[tokio::test]
+#[cfg(feature = "remote-index")]
+async fn authenticated_retention_cannot_omit_checkpoint_dependencies() {
+    for corruption in ["catalog-omitted", "catalog-replaced", "source-omitted"] {
+        let (layout, _) = integrity_fixture().await;
+        let mut records = load_retained_browse_indexes(&layout).await.unwrap();
+        let mut payload = records.pop().unwrap().payload;
+        payload.previous = None;
+        match corruption {
+            "catalog-omitted" => payload.catalog = None,
+            "catalog-replaced" => payload.catalog = Some("f".repeat(64)),
+            _ => payload.sources.clear(),
+        }
+        // Rehash the malformed record: raw object integrity alone cannot
+        // prove that its dependency list owns the authenticated checkpoint.
+        let bytes = payload.encode().unwrap();
+        let head = Head::append(None, &bytes).unwrap();
+        layout
+            .store()
+            .put_overwrite(&layout.browse_retained_root_path(&head.hash), bytes)
+            .await
+            .unwrap();
+        layout
+            .store()
+            .put_overwrite(
+                &layout.browse_retained_head_path(),
+                Bytes::from(serde_json::to_vec(&head).unwrap()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            load_retained_browse_indexes(&layout).await.is_err(),
+            "{corruption}"
+        );
+    }
 }

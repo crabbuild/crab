@@ -57,9 +57,9 @@ pub use history::{
 #[cfg(feature = "storage")]
 pub use layered::LayeredVisibilityReader;
 pub use layered::{
-    LayeredCheckpoint, LayeredObjectMember, LayeredVisibilitySnapshot, PackLayer,
-    PackMemberDescriptor, PackRange, PackSourceDescriptor, PackSourceKind, source_catalog_digest,
-    visibility_object_set_digest,
+    CheckpointCatalog, LayeredCheckpoint, LayeredObjectMember, LayeredVisibilitySnapshot,
+    PackLayer, PackMemberDescriptor, PackRange, PackSourceDescriptor, PackSourceKind,
+    source_catalog_digest, visibility_object_set_digest,
 };
 #[cfg(feature = "storage")]
 pub use plan::{

@@ -483,6 +483,7 @@ async fn capsule_gc_lists_each_candidate_namespace_once() {
     let mut expected = [
         "v2/capsules/",
         "v2/checkpoints/",
+        "v2/catalogs/",
         "v2/pack-layers/",
         "v2/history/",
         "metadata/",
@@ -494,7 +495,7 @@ async fn capsule_gc_lists_each_candidate_namespace_once() {
     expected.sort();
     assert_eq!(
         (actual, outcome.list_requests, outcome.list_parallelism),
-        (expected, 7, 7)
+        (expected, 8, 8)
     );
 }
 
@@ -549,4 +550,107 @@ async fn capsule_gc_preserves_metadata_outside_owned_index_directories() {
         retained.is_ok(),
         "GC removed metadata outside its owned directories: {retained:?}"
     );
+}
+
+#[tokio::test]
+async fn checkpoint_catalog_gc_preserves_roots_and_grace_period() {
+    use crab_metadata::capsule_protocol::{FileCatalogEntry, PointerCatalog, ShardCatalogEntry};
+    let backend = Arc::new(AgedObjects {
+        inner: InMemory::new(),
+        paths: Mutex::new(HashSet::new()),
+        modified: SystemTime::now() - Duration::from_secs(7200),
+        list_calls: Mutex::new(Vec::new()),
+    });
+    let store = Store::new(backend.clone());
+    let layout = StoreLayout::new(
+        store.as_storage().clone(),
+        "org/checkpoint-catalog-gc".to_owned(),
+    );
+    crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+        .await
+        .unwrap();
+    publish_blob(&layout, "visible").await;
+    let mut catalog = PointerCatalog::new();
+    catalog
+        .insert_shard("a".repeat(64), ShardCatalogEntry::new(1, Vec::new()))
+        .unwrap();
+    catalog
+        .insert_file("b".repeat(64), FileCatalogEntry::new(1, "a".repeat(64)))
+        .unwrap();
+    let before = view(&layout).await;
+    crab_remote::checkpoint::publish_capsule_checkpoint_with_catalog_from_view(
+        &layout,
+        &before,
+        catalog.clone(),
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let first = view(&layout).await;
+    let source = first.layered_checkpoint().unwrap().catalog().unwrap();
+    let retained = layout.capsule_catalog_path(source.hash());
+    backend.paths.lock().unwrap().insert(retained.clone());
+    // Publish a different current catalog; the old one is now history-owned.
+    catalog
+        .insert_file("c".repeat(64), FileCatalogEntry::new(1, "a".repeat(64)))
+        .unwrap();
+    crab_remote::checkpoint::publish_capsule_checkpoint_with_catalog_from_view(
+        &layout,
+        &first,
+        catalog.clone(),
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let current = view(&layout).await;
+    let current_path = layout.capsule_catalog_path(
+        current
+            .layered_checkpoint()
+            .unwrap()
+            .catalog()
+            .unwrap()
+            .hash(),
+    );
+    backend.paths.lock().unwrap().insert(current_path.clone());
+    let mut orphans = Vec::new();
+    for (index, aged) in [(1, true), (2, false)] {
+        let bytes = Bytes::from(format!("unreferenced-{index}"));
+        let path = layout.capsule_catalog_path(&blake3::hash(&bytes).to_hex().to_string());
+        layout
+            .store()
+            .put_if_absent_verified(&path, bytes)
+            .await
+            .unwrap();
+        if aged {
+            backend.paths.lock().unwrap().insert(path.clone());
+        }
+        orphans.push(path);
+    }
+    let snapshot = current.git_snapshot().unwrap();
+    sweep_capsule_objects(
+        &GcArgs::default(),
+        &store,
+        &layout,
+        current.root().root(),
+        current.capsule_run_pointers(),
+        &snapshot.manifest,
+        &HashSet::new(),
+        &CancellationToken::new(),
+        SystemTime::now(),
+        Duration::from_secs(3600),
+        Instant::now(),
+    )
+    .await
+    .unwrap();
+    let mut existing = Vec::new();
+    for path in [&retained, &current_path, &orphans[0], &orphans[1]] {
+        existing.push(match layout.store().head(path).await {
+            Ok(_) => true,
+            Err(crab_storage::StorageError::NotFound { .. }) => false,
+            Err(error) => panic!("unexpected catalog HEAD failure: {error}"),
+        });
+    }
+    assert_eq!(existing, [true, true, false, true]);
 }

@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn history_rejects_unsupported_checkpoint_formats() {
-        for format in [0, 1, 2, 3, 4, 5, 6, 8, u32::MAX] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 7, 9, u32::MAX] {
             let segment = history_with_unvalidated_pointers(format, 1);
             let built = HistorySegment::build(
                 segment.checkpoint().clone(),
@@ -467,8 +467,8 @@ mod tests {
     fn history_rejects_implicit_checkpoint_format() {
         let segment = HistorySegment::build(checkpoint(), None, state()).unwrap();
         let body = std::str::from_utf8(segment.bytes()).unwrap();
-        assert_eq!(body.matches("\"format\":7,").count(), 1);
-        let bytes = Bytes::from(body.replace("\"format\":7,", ""));
+        assert_eq!(body.matches("\"format\":8,").count(), 1);
+        let bytes = Bytes::from(body.replace("\"format\":8,", ""));
 
         let error = HistorySegment::decode(bytes)
             .expect_err("an implicit retired checkpoint format must fail");

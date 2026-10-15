@@ -782,6 +782,21 @@ impl CapsuleRepositoryView {
         Ok(lookup.with_run_sources(sources.clone(), &order)?)
     }
 
+    /// Report authenticated catalog deltas not yet folded into the checkpoint.
+    pub fn has_catalog_deltas(&self) -> Result<bool> {
+        self.catalog_sources
+            .as_ref()
+            .ok_or(ReadError::IncompleteCatalogView)?;
+        Ok(self.capsules.iter().any(|capsule| {
+            capsule.sections().iter().any(|section| {
+                section.kind() == crab_metadata::capsule_protocol::CapsuleSectionKind::CatalogDelta
+            })
+        }) || self
+            .capsule_controls
+            .iter()
+            .any(CapsuleControl::has_catalog_delta))
+    }
+
     /// Materialize the complete generation-pinned external pointer catalog.
     ///
     /// Fetch-only captures return `ReadError::IncompleteCatalogView`.
@@ -789,23 +804,20 @@ impl CapsuleRepositoryView {
         self.catalog_sources
             .as_ref()
             .ok_or(ReadError::IncompleteCatalogView)?;
-        let base_catalog =
-            match self.checkpoint.as_ref() {
-                Some(checkpoint) if checkpoint.is_control_only() => {
-                    let layout = self.metadata_layout.as_ref().ok_or_else(|| {
-                        ReadError::internal("catalog materialization has no captured origin")
-                    })?;
-                    let pointer =
-                        self.root.record().root().checkpoint().ok_or_else(|| {
-                            ReadError::internal("captured checkpoint has no pointer")
-                        })?;
-                    crab_metadata::capsule_protocol::load_layered_checkpoint(layout, pointer)
-                        .await?
-                        .pointer_catalog()?
-                }
-                Some(checkpoint) => checkpoint.pointer_catalog()?,
-                None => PointerCatalog::new(),
-            };
+        let base_catalog = match self.checkpoint.as_ref() {
+            Some(checkpoint) => {
+                let layout = self.metadata_layout.as_ref().ok_or_else(|| {
+                    ReadError::internal("catalog materialization has no captured origin")
+                })?;
+                checkpoint
+                    .pointer_catalog_from_store(
+                        layout,
+                        crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
+                    )
+                    .await?
+            }
+            None => PointerCatalog::new(),
+        };
         let mut catalog = PointerCatalogAssembly::new(base_catalog);
         for capsule in &self.capsules {
             if let Some(delta) = capsule.pointer_catalog_delta()? {
@@ -4288,7 +4300,7 @@ pub async fn open_view_from_root_for_repack(
     .await
 }
 
-/// Load complete checkpoint catalog/visibility metadata and frontier controls.
+/// Load complete checkpoint visibility, catalog commitments and frontier controls.
 ///
 /// Pack bodies remain in their immutable sources. Before the first checkpoint,
 /// this view retains complete capsules for callers using the inline Git reader.
@@ -4331,14 +4343,16 @@ pub async fn open_compacted_view_from_root(
         .checkpoint()
         .ok_or_else(|| ReadError::internal("compacted view requires a layered checkpoint"))?;
     let checkpoint = load_layered_checkpoint(router, pointer, limits).await?;
-    compacted_view_from_checkpoint(snapshot, checkpoint, limits)
+    compacted_view_from_checkpoint(router, snapshot, checkpoint, limits)
 }
 
 /// Bind an already loaded complete checkpoint to its exact committed root.
 ///
 /// This performs the same pointer and visibility validation as a stored read,
-/// without I/O. It excludes newer ref heads and rejects footer-only metadata.
+/// without I/O. It excludes newer ref heads and rejects footer-only metadata;
+/// catalog bodies remain lazy and bound to the supplied origin.
 pub fn compacted_view_from_checkpoint(
+    router: &StoreLayout<Store>,
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     checkpoint: LayeredCheckpoint,
     limits: CapsuleReadLimits,
@@ -4356,7 +4370,7 @@ pub fn compacted_view_from_checkpoint(
             "compacted view requires the complete checkpoint authenticated by its root",
         ));
     }
-    if pointer.size() > limits.max_capsule_bytes {
+    if checkpoint.encoded_metadata_bytes()? > limits.max_capsule_bytes {
         return Err(ReadError::CapsuleReadLimit {
             resource: "layered checkpoint bytes",
             maximum: limits.max_capsule_bytes,
@@ -4378,7 +4392,7 @@ pub fn compacted_view_from_checkpoint(
         capsules: Vec::new(),
         capsule_controls: Vec::new(),
         tip_bound_transitions,
-        metadata_layout: None,
+        metadata_layout: Some(router.clone()),
         tip_bound_controls: Vec::new(),
         visible_ref_transactions: BTreeMap::new(),
         ref_capsule_counts: BTreeMap::new(),
@@ -5242,9 +5256,21 @@ async fn load_layered_checkpoint(
             maximum: limits.max_capsule_bytes,
         });
     }
-    crab_metadata::capsule_protocol::load_layered_checkpoint(router, pointer)
-        .await
-        .map_err(|error| corrupt_path("capsule-protocol layered checkpoint", error.to_string()))
+    crab_metadata::capsule_protocol::load_layered_checkpoint(
+        router,
+        pointer,
+        limits.max_capsule_bytes,
+    )
+    .await
+    .map_err(|error| match error {
+        crab_metadata::error::MetadataError::CheckpointSize { maximum, .. } => {
+            ReadError::CapsuleReadLimit {
+                resource: "layered checkpoint bytes",
+                maximum,
+            }
+        }
+        error => error.into(),
+    })
 }
 
 async fn load_layered_checkpoint_control(

@@ -289,3 +289,71 @@ async fn open_history_view(layout: &StoreLayout<Store>) -> CapsuleRepositoryView
     .await
     .unwrap()
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ref_only_checkpoints_reuse_catalog_without_body_io() {
+    let (layout, observations) = empty_fixture().await;
+    let mut catalog = PointerCatalog::new();
+    catalog
+        .insert_shard("a".repeat(64), ShardCatalogEntry::new(1, Vec::new()))
+        .unwrap();
+    for index in 0..10_000 {
+        catalog
+            .insert_file(
+                format!("{index:064x}"),
+                FileCatalogEntry::new(1, "a".repeat(64)),
+            )
+            .unwrap();
+    }
+    assert!(catalog.encode().unwrap().len() > 64 * 1024);
+    publish_history(&layout, catalog.clone()).await;
+    // Publication needs exact pack-member admission. The maintenance view
+    // supplies it while checkpoint catalog bodies remain cold.
+    let first = view(&layout).await;
+    crab_remote::checkpoint::publish_capsule_checkpoint_from_view(
+        &layout,
+        &first,
+        0,
+        64 * LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let first = open_history_view(&layout).await;
+    let original = first.layered_checkpoint().unwrap();
+    let identity = original.catalog().unwrap().clone();
+    publish_blob(&layout, "unrelated").await;
+    let before = view(&layout).await;
+    assert!(!before.has_catalog_deltas().unwrap());
+    observations.0.lock().unwrap().clear();
+    let result = crab_remote::checkpoint::publish_capsule_checkpoint_from_view(
+        &layout,
+        &before,
+        0,
+        64 * LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let io = observations.0.lock().unwrap().clone();
+    assert!(result.published);
+    assert!(
+        io.iter().map(|op| op.bytes_read).sum::<u64>() < 64 * 1024,
+        "catalog read on ref-only checkpoint: {io:?}"
+    );
+    assert!(
+        io.iter().map(|op| op.bytes_written).sum::<u64>() < 64 * 1024,
+        "catalog rewritten on ref-only checkpoint: {io:?}"
+    );
+    let after = open_history_view(&layout).await;
+    assert_eq!(
+        after.layered_checkpoint().unwrap().catalog(),
+        Some(&identity)
+    );
+    layout
+        .store()
+        .delete(&layout.capsule_checkpoint_path(original.hash()))
+        .await
+        .unwrap();
+    assert_eq!(after.pointer_catalog().await.unwrap(), catalog);
+}

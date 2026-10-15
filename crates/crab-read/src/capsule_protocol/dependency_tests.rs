@@ -438,6 +438,7 @@ async fn git_view_catalog_materialization_uses_the_captured_checkpoint_after_roo
             .unwrap(),
     )
     .unwrap();
+    checkpoint.publish_catalog(&layout).await.unwrap();
     layout
         .store()
         .put(
