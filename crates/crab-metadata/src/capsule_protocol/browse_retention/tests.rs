@@ -169,7 +169,7 @@ async fn an_expired_publisher_cannot_replace_a_successor_lifetime_head() {
 }
 
 #[tokio::test]
-async fn captures_keep_original_source_bodies_independently_of_current_packaging() {
+async fn captures_keep_ref_only_visibility_sources_independently_of_current_packaging() {
     use crate::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleRun, CapsuleTransaction};
     let layout = fixture();
     let transaction = CapsuleTransaction::new(
@@ -184,7 +184,17 @@ async fn captures_keep_original_source_bodies_independently_of_current_packaging
     .unwrap();
     let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
     let run = CapsuleRun::leaf(capsule).unwrap();
-    let source = PackSourceDescriptor::from_capsule_run(&run).unwrap();
+    let source = CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )
+    .unwrap();
     retain_browse_indexes(&layout, &indexes('a'), 1, None, &[source])
         .await
         .unwrap();

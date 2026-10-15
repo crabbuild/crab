@@ -122,8 +122,9 @@ records; absent indexes remain a readiness state. GC retains dependencies of the
 published readiness record even when newer refs make it unusable for new reads.
 Storage retention does not grant inventory membership or ref visibility.
 The separate `v2/browse-retention` CAS head owns a bounded chain of authenticated
-`metadata/browse-roots/` captures. Maintenance records original checkpoint and
-Git source identities before advertising replacement readiness. GC follows every
+`metadata/browse-roots/` captures. Maintenance records original checkpoint, Git source and all pending capsule-run
+identities before advertising replacement readiness. Ref-only visibility/catalog
+runs remain dependencies even when they contain no Git pack members. GC follows every
 retained capture's graph, path-state, physical pages and original source bodies;
 foreground reads still load only the current bounded readiness record. An
 unchanged capture does not append a node. Missing/corrupt lifetime dependencies
