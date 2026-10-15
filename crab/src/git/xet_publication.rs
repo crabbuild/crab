@@ -513,29 +513,46 @@ pub(crate) async fn prepare_delta(
         read_plan.append(&requests)?;
         drop(missing);
         let mut builder = XorbBuilder::new();
-        while let Some(payloads) = read_plan.read_next(256, 16 * 1024 * 1024).await? {
+        while let Some(payloads) = read_plan.read_next_bounded(256, 16 * 1024 * 1024).await? {
             check_cancelled(cancel)?;
-            for (context, hash, data) in payloads {
-                builder.push(&Chunk { hash, data }, RunId(context))?;
-                while let Some(result) = builder.take_completed() {
-                    let uploaded_bytes = publish_built_xorb(
-                        layout,
-                        caching_store,
-                        result,
-                        &mut placements,
-                        &mut xorb_entries,
-                        &mut uploaded_xorbs,
-                        &mut origins,
-                    )
-                    .await?;
-                    xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
-                    if let Some(metrics) = metrics {
-                        metrics.add_bytes_uploaded(uploaded_bytes);
+            // Compression runs on a bounded decoded batch so ref-lease and
+            // upload tasks remain schedulable while residual payloads are packed.
+            let packing_cancel = cancel.clone();
+            let (next_builder, completed) = tokio::task::spawn_blocking(move || {
+                let mut completed = Vec::new();
+                for (context, hash, data) in payloads {
+                    check_cancelled(&packing_cancel)?;
+                    builder.push(&Chunk { hash, data }, RunId(context))?;
+                    while let Some(result) = builder.take_completed() {
+                        completed.push(result);
                     }
+                }
+                Ok::<_, CrabError>((builder, completed))
+            })
+            .await
+            .map_err(std::io::Error::other)??;
+            builder = next_builder;
+            for result in completed {
+                let uploaded_bytes = publish_built_xorb(
+                    layout,
+                    caching_store,
+                    result,
+                    &mut placements,
+                    &mut xorb_entries,
+                    &mut uploaded_xorbs,
+                    &mut origins,
+                )
+                .await?;
+                xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
+                if let Some(metrics) = metrics {
+                    metrics.add_bytes_uploaded(uploaded_bytes);
                 }
             }
         }
-        for result in builder.finalize()? {
+        let finalized = tokio::task::spawn_blocking(move || builder.finalize())
+            .await
+            .map_err(std::io::Error::other)??;
+        for result in finalized {
             let uploaded_bytes = publish_built_xorb(
                 layout,
                 caching_store,
