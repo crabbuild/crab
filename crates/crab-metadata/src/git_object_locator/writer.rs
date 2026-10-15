@@ -33,7 +33,10 @@ const DB_LABEL: &str = "git_object_catalog_db";
 const MAX_BATCH_ROWS: usize = 25_000;
 const MAX_BATCH_LOGICAL_BYTES: usize = 2 * 1024 * 1024;
 const LOCATOR_L0_SST_BYTES: usize = 64 * 1024 * 1024;
-const LOCATOR_L0_MAX_SSTS: usize = 32;
+// The scheduler favors L0 until similarly sized sorted runs fill this fan-in.
+// Bound both frontiers so frequent checkpoint flushes cannot accumulate dozens
+// of runs while new L0 work continually takes the sole compaction slot.
+const LOCATOR_L0_MAX_SSTS: usize = 16;
 const LOCATOR_COMPACTION_TRIGGER_SSTS: usize = LOCATOR_L0_MAX_SSTS / 2;
 const LOCATOR_COMPACTION_MAX_CONCURRENT: usize = 1;
 const LOCATOR_COMPACTION_MAX_SUBCOMPACTIONS: usize = 1;
@@ -1596,6 +1599,10 @@ fn should_start_compactor(l0_ssts: usize, planned_object_rows: u64) -> bool {
 fn locator_settings(compact: bool) -> Settings {
     let compactor_options = compact.then(|| {
         let mut compactor = CompactorOptions {
+            // Flush backpressure waits for coordinator scheduling, not worker
+            // polling. Keep all three phases aligned so a full frontier does
+            // not idle for SlateDB's five-second default coordinator tick.
+            poll_interval: std::time::Duration::from_millis(500),
             commit_compacted_interval: std::time::Duration::from_millis(500),
             max_concurrent_compactions: LOCATOR_COMPACTION_MAX_CONCURRENT,
             ..CompactorOptions::default()
@@ -1969,7 +1976,7 @@ mod tests {
             .expect("locator compactor enabled");
         assert_eq!(
             compactor.poll_interval,
-            CompactorOptions::default().poll_interval
+            std::time::Duration::from_millis(500)
         );
         assert_eq!(
             compactor.commit_compacted_interval,

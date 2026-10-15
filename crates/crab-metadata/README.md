@@ -403,6 +403,13 @@ covered by their pinned repository snapshot, then open the named checkpoint for
 the actual lookup. A missing marker means publication is incomplete; malformed
 or name-mismatched marker content fails closed.
 
+Locator maintenance bounds the shared L0 frontier and compaction fan-in at 16.
+The coordinator, worker and result commit poll every 500 ms while maintenance
+is enabled. This prevents frequent checkpoint flushes from starving sorted-run
+compaction or waiting on the dependency's five-second coordinator default.
+Publication enables maintenance under measured L0 pressure; coverage-only and
+reader-repair writers keep their existing maintenance-free behavior.
+
 ### Snapshot identity
 
 `RepositorySnapshot` also captures the validated canonical layout descriptor.
