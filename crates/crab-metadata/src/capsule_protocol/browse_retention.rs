@@ -288,12 +288,13 @@ pub async fn load_retained_browse_indexes(
 /// Verify retained index/source integrity against stable lifetime and readiness heads.
 ///
 /// Maintenance decodes complete graph/path indexes and streams original source
-/// and physical-index bodies. This proves retained bytes, never ref visibility.
+/// and physical-index bodies. Retain the returned capture and recheck it after
+/// later phases. This proves retained bytes, never ref visibility.
 #[cfg(feature = "remote-index")]
 pub async fn verify_retained_browse_indexes(
     layout: &StoreLayout<Store>,
     maximum_bytes: u64,
-) -> Result<()> {
+) -> Result<BrowseRetentionCapture> {
     let head = load_head(layout).await?;
     let current = super::load_browse_indexes(layout).await?;
     let records = match &head {
@@ -363,12 +364,32 @@ pub async fn verify_retained_browse_indexes(
     }
     // Browse maintenance can change lifetime without moving a Git ref. A
     // concurrent prune/rebuild must yield a retry, never a clean mixed capture.
-    if load_head(layout).await? != head || super::load_browse_indexes(layout).await? != current {
+    let capture = BrowseRetentionCapture { head, current };
+    if !capture.is_current(layout).await? {
         return Err(corrupt(
             "browse retention changed during verification; retry fsck",
         ));
     }
-    Ok(())
+    Ok(capture)
+}
+
+/// Verified browse lifetime and readiness authority retained across maintenance phases.
+#[cfg(feature = "remote-index")]
+#[derive(Debug)]
+pub struct BrowseRetentionCapture {
+    head: Option<(Head, ETag)>,
+    current: Option<BrowseIndexes>,
+}
+
+#[cfg(feature = "remote-index")]
+impl BrowseRetentionCapture {
+    /// Revalidate control identity without decoding indexes or original sources again.
+    ///
+    /// Invalid records return an error; valid concurrent movement returns false.
+    pub async fn is_current(&self, layout: &StoreLayout<Store>) -> Result<bool> {
+        Ok(load_head(layout).await? == self.head
+            && super::load_browse_indexes(layout).await? == self.current)
+    }
 }
 
 /// Trim captured generations after authoritative history pruning commits.

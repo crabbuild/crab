@@ -96,6 +96,8 @@ struct CapsuleFsckState {
     view: crab_read::capsule_protocol::CapsuleRepositoryView,
     catalog: crab_metadata::capsule_protocol::PointerCatalog,
     source_lifetime: Arc<crab_metadata::capsule_protocol::RetainedCapsuleSources>,
+    browse_lifetime:
+        Arc<tokio::sync::OnceCell<crab_metadata::capsule_protocol::BrowseRetentionCapture>>,
 }
 
 impl StoreChecker {
@@ -145,6 +147,7 @@ impl StoreChecker {
                 view,
                 catalog,
                 source_lifetime: Arc::new(source_lifetime),
+                browse_lifetime: Arc::new(tokio::sync::OnceCell::new()),
             }),
         })
     }
@@ -163,11 +166,15 @@ impl StoreChecker {
         );
         // Current catalog health cannot prove cold captures still have their
         // original sources. Full fsck checks lifetime roots; mirror recipe probes stay narrow.
-        crab_metadata::capsule_protocol::verify_retained_browse_indexes(
-            &layout,
-            MAX_FSCK_FRONTIER_BYTES,
-        )
-        .await?;
+        state
+            .browse_lifetime
+            .get_or_try_init(|| {
+                crab_metadata::capsule_protocol::verify_retained_browse_indexes(
+                    &layout,
+                    MAX_FSCK_FRONTIER_BYTES,
+                )
+            })
+            .await?;
         let mut issues = Vec::new();
 
         for (hash, entry) in state.catalog.xorbs() {
@@ -264,7 +271,17 @@ impl StoreChecker {
                     .to_owned(),
             ));
         }
-        require_current_source_lifetime(&layout, &state.source_lifetime).await
+        require_current_source_lifetime(&layout, &state.source_lifetime).await?;
+        // Full fsck keeps browse authority through payload and final checks.
+        // Mirror recipe probes never initialize this expensive maintenance proof.
+        if let Some(capture) = state.browse_lifetime.get()
+            && !capture.is_current(&layout).await?
+        {
+            return Err(CrabError::Protocol(
+                "browse retention changed during fsck; retry against one stable capture".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Prove source pointers against the exact catalog captured by a capsule view.
@@ -1902,7 +1919,7 @@ mod tests {
         create_manifest(store, &router, &manifest).await.unwrap();
     }
 
-    async fn capsule_checker_fixture() -> (
+    pub(super) async fn capsule_checker_fixture() -> (
         Store,
         String,
         crab_metadata::capsule_protocol::RootSnapshot,
@@ -1930,7 +1947,8 @@ mod tests {
         let parser = XorbParser::parse(xorb_bytes.clone()).unwrap();
         assert_eq!(parser.num_chunks(), 1);
         let chunk = parser.chunk_meta(0).unwrap();
-        let file_hash = chunk.hash;
+        // File identity uses ordinary Blake3; Xet's chunk hash is keyed.
+        let file_hash = MerkleHash::from(*blake3::hash(&content).as_bytes());
         let placement = crab_xet::xorb::format::ChunkPlacement {
             chunk_hash: chunk.hash,
             xorb_hash,
