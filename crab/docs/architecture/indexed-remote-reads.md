@@ -2188,7 +2188,26 @@ two path heads, two leases, 65 payload records and 4,194,304 retained segment
 bytes remain. These receipts establish the oracle and staging component; they
 do not qualify the new integrated binary or catalog format.
 
-Combined-source CLI compilation and runtime qualification are still pending.
+Combined-source CLI compilation and the minimal release build pass. The frozen
+`0e84ca14b00` binary passes 163 commands and 84 checks across native/Git ingestion,
+exact post-push retirement, committed restaging before first push, ref/force
+updates and missing/corrupt roots. This is selected runtime proof, not complete
+provider or lifecycle qualification. Its integrated 10-GiB entropy run is active.
+
+The first smoke stopped at an obsolete pre-push assertion requiring two leases.
+Its database retained two published/history owners and two independently delegated
+handoffs. An independent probe pushes both versions, retires every eligible
+owner to zero and cold-reconstructs both versions byte-identically (16 commands,
+19 checks, remote fsck zero errors/repairs). The qualification now checks exact
+retained file-version coverage, recipe count and ownership health before push;
+exact zero retirement and both cold byte checks remain unchanged. The original
+failure and semantic probe are retained separately.
+
+The frozen staging predecessor `7abb53e0b85` also passes the full 10-GiB Git-first
+repeated and native-first zero workloads: 71 commands and 53 checks each, all
+eight historical byte checks, local storage bounds and Git/remote integrity.
+Those receipts use neither the combined catalog binary nor the newer exact
+retirement oracle and do not close the integrated gate.
 Remaining catalog consumers include shared/protected preparation, pinned
 hydration/mount lookup and the current-state file lookup opener. Complete
 inspection remains appropriate for fsck, compaction and GC; foreground lookups
