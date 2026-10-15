@@ -7,7 +7,8 @@ use crab_coordination::write_coordinator::{CommitOutcome, CoordinatedRefUpdate};
 use crab_metadata::capsule_protocol::{Capsule, CapsuleRun, CapsuleSection, CapsuleSectionKind};
 
 use super::capsule_dependencies::{
-    DependencyCopy, promote_dependency_copies, source_pointer_delta, verify_pointer_dependencies,
+    DependencyCopy, promote_dependency_copies, select_pointer_catalog, source_pointer_delta,
+    verify_pointer_dependencies,
 };
 use super::git_workspace::{materialize_capsule_source_push, verify_capsule_git_candidate};
 use super::{
@@ -331,8 +332,10 @@ pub(super) async fn verify_capsule_candidate(
         .source_root_digest
         .as_deref()
         .ok_or_else(|| invalid("capsule prepare record is missing its root digest"))?;
-    let source_view = crab_read::capsule_protocol::open_view(
+    let source_root = crab_metadata::capsule_protocol::load_root(ctx.router()).await?;
+    let source_view = crab_read::capsule_protocol::open_git_view_from_root(
         ctx.router(),
+        source_root,
         crab_read::capsule_protocol::CapsuleReadLimits {
             max_capsule_bytes: MAX_PROTECTED_CAPSULE_BYTES,
             max_frontier_bytes: MAX_PROTECTED_CAPSULE_BYTES,
@@ -354,15 +357,12 @@ pub(super) async fn verify_capsule_candidate(
         .ok_or_else(|| invalid("protected capsule run is empty"))?;
     validate_capsule_transaction(plan, candidate)?;
 
+    let candidate_delta = candidate.pointer_catalog_delta()?.unwrap_or_default();
     let (changed_paths, publication, replication_objects, dependency_copies) =
         match prepare.view_scope.as_ref() {
             None => {
                 if prepared_root != plan.base_root_digest {
                     return Err(conflict("capsule base root differs from prepare record"));
-                }
-                let mut catalog = source_view.pointer_catalog().await?;
-                if let Some(delta) = candidate.pointer_catalog_delta()? {
-                    catalog.apply(&delta)?;
                 }
                 let (changed_paths, pointers) = verify_capsule_git_candidate(
                     ctx.store(),
@@ -373,6 +373,15 @@ pub(super) async fn verify_capsule_candidate(
                     MAX_PROTECTED_CAPSULE_BYTES,
                 )
                 .await?;
+                let mut catalog = select_pointer_catalog(
+                    &source_view,
+                    ctx.router(),
+                    &pointers,
+                    &candidate_delta,
+                    MAX_PROTECTED_CAPSULE_BYTES,
+                )
+                .await?;
+                catalog.apply(&candidate_delta)?;
                 let (objects, copies) =
                     verify_pointer_dependencies(ctx, plan, &catalog, &pointers, None).await?;
                 (changed_paths, candidate.clone(), objects, copies)
@@ -383,8 +392,11 @@ pub(super) async fn verify_capsule_candidate(
                     scope.repo_prefix.clone(),
                     scope.global_prefix.clone(),
                 );
-                let filtered_view = crab_read::capsule_protocol::open_view(
+                let filtered_root =
+                    crab_metadata::capsule_protocol::load_root(&filtered_router).await?;
+                let filtered_view = crab_read::capsule_protocol::open_git_view_from_root(
                     &filtered_router,
+                    filtered_root,
                     crab_read::capsule_protocol::CapsuleReadLimits {
                         max_capsule_bytes: MAX_PROTECTED_CAPSULE_BYTES,
                         max_frontier_bytes: MAX_PROTECTED_CAPSULE_BYTES,
@@ -395,21 +407,36 @@ pub(super) async fn verify_capsule_candidate(
                     return Err(conflict("filtered capsule root changed since prepare"));
                 }
                 validate_ref_heads(&prepare.view_ref_updates, filtered_view.refs())?;
-                let candidate_delta = candidate.pointer_catalog_delta()?.unwrap_or_default();
-                let mut candidate_catalog = filtered_view.pointer_catalog().await?;
-                candidate_catalog.apply(&candidate_delta)?;
                 let materialized = materialize_capsule_source_push(
                     ctx.router(),
                     &source_view,
                     &filtered_view,
+                    &filtered_router,
                     candidate,
                     &plan.ref_updates,
                     &prepare.source_ref_updates,
-                    &plan.transaction_id,
                     MAX_PROTECTED_CAPSULE_BYTES,
                 )
                 .await?;
-                let source_catalog = source_view.pointer_catalog().await?;
+                // Source and filtered captures have different authority and namespaces.
+                // Select each independently; source-first file policy is applied below.
+                let mut candidate_catalog = select_pointer_catalog(
+                    &filtered_view,
+                    &filtered_router,
+                    &materialized.pointers,
+                    &candidate_delta,
+                    MAX_PROTECTED_CAPSULE_BYTES,
+                )
+                .await?;
+                candidate_catalog.apply(&candidate_delta)?;
+                let source_catalog = select_pointer_catalog(
+                    &source_view,
+                    ctx.router(),
+                    &materialized.pointers,
+                    &candidate_catalog,
+                    MAX_PROTECTED_CAPSULE_BYTES,
+                )
+                .await?;
                 let delta = source_pointer_delta(
                     &source_catalog,
                     &candidate_catalog,

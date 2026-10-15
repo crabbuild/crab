@@ -35,6 +35,20 @@ ref updates, staged Xet/Git objects, manifests, indexes, receipts, and
 active-active options. Its `Prepare`, `Verify`, and `Commit` commands make the
 publish boundary explicit; commit requires the verified plan digest.
 
+Capsule receive captures source and filtered Git/catalog views separately.
+Before source materialization, scoped candidates are verified using only the
+filtered view and incoming packs. Newly reachable Git objects must be visible
+under that capture or supplied by the candidate; retained physical objects do
+not grant access. Both receive paths share the graph/visibility verifier.
+Receive then queries pointer files and candidate shard/xorb identities under
+each capture and applies the candidate delta.
+File-only deltas can reference historical filtered artifacts; source-first
+file selection and immutable descriptor conflicts remain enforced. Prepare
+reads only ref authority. Git workspace intake combines captured packs and
+candidate packs under the existing byte and external-delta checks, including
+checkpoint-backed views. Physical shard/xorb verification and copy-before-ref
+publication remain unchanged.
+
 `crab-auth-view` materializes a filtered view using repeated `--read-path`
 and `--deny-path` rules, a scope hash, and a source repository URL. It builds
 the view's Git workspace and Crab metadata and reports the resulting prefixes,

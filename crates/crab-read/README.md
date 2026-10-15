@@ -61,6 +61,14 @@ work. `git_visibility_index`, `candidate_git_visibility` and
 `tip_bound_transitions` asynchronously materialize captured controls only when
 bulk inspection needs them. They do not recapture refs or switch origins.
 
+`install_git_packs_with_candidates_from_store` combines a captured view's
+origin-backed packs with verified candidate capsules. Candidates participate
+in the same pack intake limit and external-delta ordering, so protected receive
+can use a paged view without materializing its catalog. The caller binds each
+candidate to the captured root; installation does not grant visibility.
+The existing candidate-free installer delegates to this implementation and
+retains its cold-clone proof and cache behavior.
+
 `ShardHydrator` provides memory, file, and half-open byte-range reconstruction.
 Before full-file reconstruction it checks that the pointer's shard terms are
 covered; after reconstruction it verifies the requested file hash. A shared
