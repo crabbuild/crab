@@ -37,8 +37,9 @@ Replica selection reports readiness, generations, fallbacks, and routing
 choices so callers can distinguish an unavailable replica from a corrupt
 object.
 
-`capsule_protocol::open_git_view_from_root` captures complete refs and pointer
-catalogs while keeping frontier visibility and run OID admission paged. It validates
+`capsule_protocol::open_git_view_from_root` captures complete refs and catalog
+lookup roots while keeping catalog bodies, frontier visibility and run OID
+admission paged. It validates
 authenticated member counts and omits placement-hint dictionaries. CLI reads,
 HTTP browse/projection and S3 gateway reads use this view. Physical lookup uses
 the captured index; unindexed reads retain their existing pack-index path.
@@ -452,12 +453,17 @@ membership pages separately from retained-object presence. Complete visibility
 inspection is an explicit async operation. `CapsuleRepositoryView::pointer_catalog`
 is also async: hydration, publication and maintenance materialize the complete
 catalog from the captured checkpoint when its body was omitted during opening.
-Catalog indexing and bounded historical Xet lookup remain separate work.
+Shared preparation and hydration still need selected-lookup integration.
 
 `CapsuleRepositoryView::pointer_catalog_lookup` captures the checkpoint's paged
-catalog together with exactly the selected publication-ordered deltas. File
+catalog together with authenticated run roots and exactly the selected
+publication-ordered capsule occurrences. File
 bindings retain later-wins precedence with equal sizes; selected shard/xorb
 identities retain conflict checks across sources. Queries do not read a newer
-root. Checkpoint catalogs stay cold during lookup construction; visible deltas
-still materialize and need run-level indexed aggregation. The complete catalog
-API remains for explicit maintenance and integrity inspection.
+root. Checkpoint and run catalog pages stay cold during lookup construction and
+share one cache and aggregate query budget. The complete catalog API remains
+for explicit maintenance and integrity inspection. Fetch-only captures lack
+reconciled logical delta state; both catalog APIs return
+`ReadError::IncompleteCatalogView` before I/O rather than treating that state
+as an authenticated miss. A complete capture with an empty suffix can still
+return a legitimate miss.

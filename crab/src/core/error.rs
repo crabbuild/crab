@@ -1134,7 +1134,8 @@ impl From<crab_read::ReadError> for CrabError {
             | crab_read::ReadError::Runtime(_)
             | crab_read::ReadError::ResolutionTask(_)
             | crab_read::ReadError::ReadinessTask(_)
-            | crab_read::ReadError::Reconstruction { .. }) => Self::Read(ReadFailure(error)),
+            | crab_read::ReadError::Reconstruction { .. }
+            | crab_read::ReadError::IncompleteCatalogView) => Self::Read(ReadFailure(error)),
             crab_read::ReadError::UnauthorizedObject => {
                 Self::Protocol("requested object is outside the visible generation".to_owned())
             }
@@ -3985,6 +3986,20 @@ mod tests {
                 .unwrap();
             assert!(std::sync::Arc::ptr_eq(cause, &source));
         }
+    }
+
+    #[test]
+    fn incomplete_catalog_capture_survives_cli_conversion() {
+        use std::error::Error;
+        let error = CrabError::from(crab_read::ReadError::IncompleteCatalogView);
+        assert!(
+            std::iter::successors(error.source(), |source| (*source).source()).any(
+                |source| matches!(
+                    source.downcast_ref::<crab_read::ReadError>(),
+                    Some(crab_read::ReadError::IncompleteCatalogView)
+                )
+            )
+        );
     }
 
     #[tokio::test]
