@@ -254,6 +254,13 @@ filter reads must leave canonical object counts and bytes unchanged; generated
 response-pack cache and coordination objects are accounted for separately. This
 is not a claim that first-read repair works with read-only object-store credentials.
 
+The add/commit/push RustFS smoke exercises the current physical fault boundary:
+loss of a published capsule and corruption confined to its embedded Git pack
+or index range. Each rejection probe uses an empty cache and requires no local
+HEAD or checked-out payload. It compares the remote root and ref-head bytes
+before and after the fault; discovery can itself reject a damaged capsule,
+so successful `ls-remote` is not the mutation oracle.
+
 Direct pushes and protected/service publication paths publish visibility
 before the corresponding ref or manifest commit. Protected receive extracts
 the closure from the already-verified materialization ODB before that workspace
