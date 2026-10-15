@@ -910,6 +910,47 @@ impl Source<'_> {
         }
     }
 
+    fn prior_objects(&self, maximum: usize) -> Result<Vec<String>> {
+        let name = self.prior.as_ref().map(|(name, _)| name.as_str());
+        let Some(name) = name else {
+            return Err(Error::Request("Additive visibility has no captured base"));
+        };
+        match &self.proof {
+            Some(VisibilityProof::Materialized(proof)) => {
+                if proof.object_count_for_refs([name]) > maximum {
+                    return Err(Error::Request(
+                        "Visibility base exceeds the graph object limit",
+                    ));
+                }
+                proof.objects_for_ref(name).ok_or(Error::Request(
+                    "Visibility base is absent from its captured proof",
+                ))
+            }
+            Some(VisibilityProof::Catalog(proof)) => {
+                if proof.object_count_for_refs([name]) > maximum {
+                    return Err(Error::Request(
+                        "Visibility base exceeds the graph object limit",
+                    ));
+                }
+                let ordinals = proof.ordinals_for_refs([name]);
+                let objects = self
+                    .handle
+                    .block_on(self.operation.catalog_object_ids_by_ordinal(&ordinals))?;
+                if objects.len() != ordinals.len() || objects.iter().any(Option::is_none) {
+                    return Err(Error::Request(
+                        "Visibility base has missing catalog objects",
+                    ));
+                }
+                Ok(objects
+                    .into_iter()
+                    .flatten()
+                    .map(|oid| oid.to_string())
+                    .collect())
+            }
+            None => Err(Error::Request("Visibility base has no captured proof")),
+        }
+    }
+
     fn contains_ref(&self, name: &str) -> bool {
         match &self.proof {
             Some(VisibilityProof::Catalog(proof)) => proof.contains_ref(name),
@@ -1173,6 +1214,24 @@ where
                     || cancel.is_cancelled(),
                 )?;
                 let evidence = match proof {
+                    RefVisibility::Additive { added, .. }
+                        if update.old.is_none()
+                            || source
+                                .prior
+                                .as_ref()
+                                .is_some_and(|(name, _)| name != &update.name) =>
+                    {
+                        // A different ref can disappear before canonical replay.
+                        // Copy its pinned closure into replacement evidence so an
+                        // acknowledged ref never borrows that mutable lifetime.
+                        let mut objects = source.prior_objects(options.graph.max_graph_steps)?;
+                        objects.extend(added.into_iter().map(|oid| oid.to_string()));
+                        GitVisibilityEdit::from_replacement_objects(
+                            update.old.map(|oid| oid.to_string()),
+                            new.to_string(),
+                            objects,
+                        )
+                    }
                     RefVisibility::Additive { base, added } => {
                         GitVisibilityEdit::from_delta_objects(
                             Some(base.to_string()),

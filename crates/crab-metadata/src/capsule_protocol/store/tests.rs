@@ -589,35 +589,23 @@ async fn full_catalog_matches_selected_closure_across_independent_ref_dependenci
     )
     .await
     .unwrap();
-    let descriptors = CapsuleTransaction::new(
-        root.record().digest(),
-        vec![CapsuleRefEdit::new(
-            "refs/tags/source",
-            None,
-            Some("1".repeat(40)),
-            None,
-        )],
-    )
-    .unwrap();
-    let descriptor_id = descriptors.id().unwrap();
-    let mut binding = None;
-    for index in 0..256 {
-        let candidate = CapsuleTransaction::new(
+    let transaction = |name, tip| {
+        CapsuleTransaction::new(
             root.record().digest(),
-            vec![CapsuleRefEdit::new(
-                format!("refs/tags/consumer-{index}"),
-                None,
-                Some("2".repeat(40)),
-                None,
-            )],
+            vec![CapsuleRefEdit::new(name, None, Some(tip), None)],
         )
-        .unwrap();
-        if candidate.id().unwrap() < descriptor_id {
-            binding = Some(candidate);
-            break;
-        }
-    }
-    let binding = binding.expect("fixture must put its dependent binding first in hash order");
+        .unwrap()
+    };
+    let left = transaction("refs/tags/left", "1".repeat(40));
+    let right = transaction("refs/tags/right", "2".repeat(40));
+    // Assign roles after nonce generation; a bounded search against one random
+    // descriptor could fail before testing dependency assembly at all.
+    let (binding, descriptors) = if left.id().unwrap() < right.id().unwrap() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    assert!(binding.id().unwrap() < descriptors.id().unwrap());
     let file = "3".repeat(64);
     let shard = "4".repeat(64);
     let xorb = "5".repeat(64);

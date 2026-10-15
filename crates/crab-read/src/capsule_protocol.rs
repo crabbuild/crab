@@ -4649,9 +4649,7 @@ async fn assemble_view(
     }
     let mut visibility_index = visibility_index_for_checkpoint(checkpoint.as_ref())?;
     for capsule in &root_capsules {
-        if capsule.visibility_delta()?.is_some() {
-            apply_capsule_visibility_index(capsule, &mut visibility_index)?;
-        }
+        reconcile_capsule_visibility(capsule, &mut visibility_index)?;
     }
     let ordered = order_ref_capsules(
         snapshot.record().root().refs(),
@@ -5160,9 +5158,7 @@ fn order_ref_capsules(
             .remove(&ready)
             .ok_or_else(|| ReadError::internal("ready capsule disappeared"))?;
         apply_capsule_refs(&capsule, &mut refs, &mut peeled)?;
-        if capsule.visibility_delta()?.is_some() {
-            apply_capsule_visibility_index(&capsule, &mut visibility)?;
-        }
+        reconcile_capsule_visibility(&capsule, &mut visibility)?;
         applied.insert(capsule.transaction_id().to_owned());
         ordered.push(capsule);
     }
@@ -5196,6 +5192,27 @@ fn apply_capsule_visibility_index(
     let delta = capsule.visibility_delta()?;
     apply_transaction_visibility_index(&transaction, delta.as_ref(), index)
         .map_err(metadata_control_error)
+}
+
+fn reconcile_capsule_visibility(
+    capsule: &Capsule,
+    index: &mut crab_metadata::git_visibility::GitVisibilityIndex,
+) -> Result<()> {
+    let transaction = capsule.transaction()?;
+    let delta = capsule.visibility_delta()?;
+    if delta.is_some() {
+        return apply_transaction_visibility_index(&transaction, delta.as_ref(), index)
+            .map_err(metadata_control_error);
+    }
+    // Reconciliation permits metadata-only live edits; deep inspection still
+    // requires their evidence. Deletions revoke closures without an OID payload,
+    // or a later borrower could inherit a deleted ref.
+    for edit in transaction.edits() {
+        if edit.new_oid().is_none() {
+            index.remove_ref(edit.ref_name());
+        }
+    }
+    Ok(())
 }
 
 fn apply_capsule_refs(
@@ -7373,6 +7390,86 @@ mod tests {
         assert_eq!(
             full["refs/heads/feature"][0].old_oid.unwrap().to_string(),
             new_tip
+        );
+    }
+
+    #[test]
+    fn full_ref_ordering_cannot_borrow_from_a_deleted_ref() {
+        let tip = "1".repeat(40);
+        let mut pending = BTreeMap::new();
+        for (key, name, old, new, evidence) in [
+            (
+                "a-delete",
+                "refs/heads/transient",
+                Some(tip.clone()),
+                None,
+                None,
+            ),
+            (
+                "b-borrow",
+                "refs/heads/borrow",
+                None,
+                Some(tip.clone()),
+                Some(GitVisibilityEdit::from_delta_objects(
+                    Some(tip.clone()),
+                    tip.clone(),
+                    Vec::new(),
+                    Vec::new(),
+                )),
+            ),
+            (
+                "z-source",
+                "refs/heads/source",
+                None,
+                Some(tip.clone()),
+                Some(GitVisibilityEdit::from_replacement_objects(
+                    None,
+                    tip.clone(),
+                    vec![tip.clone()],
+                )),
+            ),
+        ] {
+            let transaction = CapsuleTransaction::new(
+                &"a".repeat(64),
+                vec![CapsuleRefEdit::new(name, old, new, None)],
+            )
+            .unwrap();
+            let sections = evidence
+                .map(|edit| {
+                    CapsuleSection::new(
+                        CapsuleSectionKind::VisibilityDelta,
+                        CapsuleVisibilityDelta::new(BTreeMap::from([(name.to_owned(), edit)]))
+                            .unwrap()
+                            .encode()
+                            .unwrap(),
+                    )
+                })
+                .into_iter()
+                .collect();
+            pending.insert(
+                key.to_owned(),
+                Capsule::build(&transaction, Vec::new(), sections).unwrap(),
+            );
+        }
+        let expected = ["a-delete", "z-source", "b-borrow"]
+            .map(|key| pending[key].transaction_id().to_owned());
+        let ordered = order_ref_capsules(
+            &BTreeMap::from([("refs/heads/transient".to_owned(), tip.clone())]),
+            &BTreeMap::new(),
+            visibility_index(BTreeMap::from([(
+                "refs/heads/transient".to_owned(),
+                vec![tip],
+            )])),
+            &BTreeMap::new(),
+            pending,
+        )
+        .unwrap();
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|capsule| capsule.transaction_id().to_owned())
+                .collect::<Vec<_>>(),
+            expected,
         );
     }
 
