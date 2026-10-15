@@ -2301,8 +2301,26 @@ indexed, matched, source-verified and payload-verified counts, with zero stale,
 mismatched or globally reclassified chunks. Five oracle tests pass; the original
 substring oracle rejected valid capsule proofs and accepted counters assembled
 from different events. This representation correction is not product E2E proof.
-Payload-only run tests pass (28), and strict minimal metadata Clippy passes.
+Payload-only run tests pass (28), candidate/key-codec/writer tests pass (19),
+existing origin/range siblings pass (12), and strict minimal and remote-index
+metadata Clippy pass. The production CLI binary build also passes.
 
-Current-source S3 cross-repository add/push/cold reconstruction, the shared
-`crab-remote` preparation consumer, final 10-GiB qualification, history scaling,
-provider latency, lifecycle and full blame semantics remain open gates.
+The current-source RustFS cross-repository fixture passes 34 commands and 32
+checks at 4 MiB (`capsule-exact-proof-r2-c6a202ae`, code head `098859c02f1`).
+The source worktree is clean, and its recorded source hashes remain unchanged
+throughout the run. Consumer add retains neither segment nor prepared payload;
+push revalidates all 58 exact placements with zero stale, mismatched or globally
+reclassified chunks and uploads no new xorb. Add and push each read two xorb
+ranges totaling 2,658 bytes (footer and chunk metadata), with no full xorb GET.
+A separate empty clone cache then performs a real remote payload GET during
+hydration and produces the original SHA-256. This is one local debug-profile
+correctness fixture, not a latency or history-scaling qualification.
+
+The binary SHA-256 is
+`5002c1c59f8e2d6d3fa82abed1c5686c67d46feb93f975c0c1d76c1930f3dc70`;
+the report SHA-256 is
+`36d6ec1b744a2f5545a9a998710271bc2fa092ceadf756dd56c95acf75eeff2f`.
+
+The shared `crab-remote` preparation consumer, final 10-GiB qualification,
+history scaling, provider latency, lifecycle and full blame semantics remain
+open gates.
