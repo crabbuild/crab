@@ -233,18 +233,7 @@ pub async fn open_repository(
     options: RepositoryOptions,
     cancel: &CancellationToken,
 ) -> Result<RemoteGitRepository> {
-    let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
-    let indexes = crab_metadata::capsule_protocol::load_browse_indexes(&layout).await?;
-    let view = crab_read::capsule_protocol::open_git_view_from_root(
-        &layout,
-        root,
-        crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
-            max_frontier_bytes: 2 * 1024 * 1024 * 1024,
-        },
-    )
-    .await?
-    .with_browse_indexes(indexes);
+    let view = capture_repository_view(&layout).await?;
     Ok(view
         .git_repository_from_store(
             layout,
@@ -255,6 +244,24 @@ pub async fn open_repository(
             cancel,
         )
         .await?)
+}
+
+pub async fn capture_repository_view(
+    layout: &StoreLayout<Store>,
+) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
+    let root = crab_metadata::capsule_protocol::load_root(layout).await?;
+    let indexes = crab_metadata::capsule_protocol::load_browse_indexes(layout).await?;
+    let view = crab_read::capsule_protocol::open_git_view_from_root(
+        layout,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+            max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+        },
+    )
+    .await?
+    .with_browse_indexes(indexes);
+    Ok(view)
 }
 
 #[cfg(test)]

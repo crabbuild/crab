@@ -95,6 +95,10 @@ Foreground qualification uses `open_git_view_from_root`; browse-index builders
 use the complete metadata entry point. Pack payloads stay in authenticated origin
 ranges before and after checkpoints. Checkpoint catalog/visibility decoding and
 ref capture remain measured opening work, not a completed bounded-opening gate.
+`capture-browse` captures the immutable view and readiness before its stdin
+handshake, then constructs the repository after external GC. Its separate
+`reader-open` measurement includes normal tip validation, keeping graph, physical
+and path pages cold until the external lifecycle transition completes.
 `qualify_remote <bucket> <prefix> <text-path> graph-pages` measures sampled
 ordinal/parent records and duplicate OID batches through `CommitGraphReader`.
 It verifies the derived graph's captured state and Git identity before reads.
