@@ -150,6 +150,9 @@ a per-ref head under `v2/history/source-heads/` and authenticated source-pointer
 segments under `v2/history/source-roots/`. Foreground catalog sessions stay
 read-only and keep their original source ranges. GC discovers these roots in its
 existing history enumeration; fsck authenticates their original run proofs.
+Fsck retains the decoded heads' CAS tokens and the pruning floor through later
+data and Git checks. It rechecks mutable authority without decoding history again;
+concurrent movement requests a retry, while invalid control bytes fail validation.
 Explicit history pruning advances a persistent generation floor after history
 CAS, trims older segments, and prevents expired publishers from restoring them.
 These new lifetime records do not change capsule, checkpoint, or catalog formats.

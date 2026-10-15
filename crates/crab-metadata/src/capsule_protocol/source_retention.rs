@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crab_storage::{ETag, Store, StoreLayout};
+use futures_util::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 
@@ -48,9 +49,12 @@ struct Segment {
 }
 
 /// Authenticated lifetime dependencies; they never authorize ref or object visibility.
+#[derive(Debug)]
 pub struct RetainedCapsuleSources {
     paths: Vec<Path>,
     runs: Vec<CapsulePointer>,
+    head_versions: BTreeMap<Path, ETag>,
+    floor: Option<(u64, ETag)>,
 }
 
 impl RetainedCapsuleSources {
@@ -64,6 +68,38 @@ impl RetainedCapsuleSources {
     #[must_use]
     pub fn runs(&self) -> &[CapsulePointer] {
         &self.runs
+    }
+
+    /// Check whether a complete capture still names the current lifetime authority.
+    ///
+    /// The loader must have received every source head. Invalid control records
+    /// return an error; valid concurrent movement returns false for caller retry.
+    pub async fn is_current(&self, layout: &StoreLayout<Store>) -> Result<bool> {
+        let heads = layout
+            .store()
+            .list_prefix(&layout.capsule_source_heads_prefix())
+            .await?;
+        if heads.len() != self.head_versions.len()
+            || heads
+                .iter()
+                .any(|meta| !self.head_versions.contains_key(&meta.location))
+        {
+            return Ok(false);
+        }
+        // LIST can omit version IDs. Compare the GET CAS tokens that bound
+        // decoded heads so versioned buckets keep the same stability proof.
+        let mut versions = futures_util::stream::iter(self.head_versions.clone())
+            .map(|(path, version)| async move {
+                let current = load_head(layout, &path).await?;
+                Ok::<_, MetadataError>(current.is_some_and(|(_, current)| current == version))
+            })
+            .buffer_unordered(16);
+        while let Some(current) = versions.try_next().await? {
+            if !current {
+                return Ok(false);
+            }
+        }
+        Ok(load_floor(layout).await?.as_ref() == self.floor.as_ref())
     }
 }
 
@@ -347,20 +383,22 @@ pub async fn load_retained_capsule_sources(
 ) -> Result<RetainedCapsuleSources> {
     let mut paths = BTreeSet::new();
     let mut runs = BTreeMap::new();
+    let mut head_versions = BTreeMap::new();
     let mut roots = 0usize;
     let mut bytes = 0u64;
     let floor = load_floor(layout).await?;
     if floor.is_some() {
         paths.insert(layout.capsule_source_floor_path());
     }
-    let minimum_generation = floor.map_or(0, |(floor, _)| floor);
+    let minimum_generation = floor.as_ref().map_or(0, |(floor, _)| *floor);
     for path in heads {
         if !paths.insert(path.clone()) {
             continue;
         }
-        let (head, _) = load_head(layout, path)
+        let (head, version) = load_head(layout, path)
             .await?
             .ok_or_else(|| corrupt("source lifetime head disappeared"))?;
+        head_versions.insert(path.clone(), version);
         if head.minimum_generation > minimum_generation {
             return Err(corrupt("source head exceeds the repository pruning floor"));
         }
@@ -392,6 +430,8 @@ pub async fn load_retained_capsule_sources(
     Ok(RetainedCapsuleSources {
         paths: paths.into_iter().collect(),
         runs: runs.into_values().collect(),
+        head_versions,
+        floor,
     })
 }
 
