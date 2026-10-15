@@ -1128,6 +1128,7 @@ async fn plan_with_operation(
     }
 
     let mut selected = HashSet::new();
+    let mut selected_commit = false;
     let mut object_ids = Vec::new();
     let mut shallow = HashSet::new();
     let mut unshallow = HashSet::new();
@@ -1141,7 +1142,11 @@ async fn plan_with_operation(
             let Some(item) = queue.pop_front() else {
                 break;
             };
-            if common_haves.contains(&item.oid) && request.deepen.is_none() {
+            if common_haves.contains(&item.oid)
+                && request.deepen.is_none()
+                && request.deepen_since.is_none()
+                && request.deepen_not.is_empty()
+            {
                 continue;
             }
             // Tree entries prove that blobs are leaves. Rejecting a known omitted blob here
@@ -1241,9 +1246,29 @@ async fn plan_with_operation(
                         invariant: "batched upload-pack read is missing an object",
                     })?
             };
-            if excluded_commits.contains(&item.oid) && !roots.contains(&item.oid) {
+            // Wants authorize access but do not override shallow selectors. Applying
+            // these before selection also prevents an excluded tip's tree leaking in.
+            if excluded_commits.contains(&item.oid) {
                 continue;
             }
+            if object.kind == gix_object::Kind::Commit
+                && let Some(since) = request.deepen_since
+            {
+                let commit = gix_object::CommitRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
+                    .map_err(|_| RemoteGitError::Corrupt {
+                        stage: CorruptionStage::Commit,
+                    })?;
+                let timestamp = commit
+                    .time()
+                    .map_err(|_| RemoteGitError::Corrupt {
+                        stage: CorruptionStage::Commit,
+                    })?
+                    .seconds;
+                if timestamp < since {
+                    continue;
+                }
+            }
+            selected_commit |= object.kind == gix_object::Kind::Commit;
             let encountered_client_have = matches!(visibility, VisibilitySource::TipBound { .. })
                 && client_haves.contains(&item.oid)
                 && object.kind == gix_object::Kind::Commit;
@@ -1276,6 +1301,10 @@ async fn plan_with_operation(
                 .await?;
             }
         }
+    }
+
+    if (request.deepen_since.is_some() || !request.deepen_not.is_empty()) && !selected_commit {
+        return Err(RemoteGitError::EmptyShallowSelection);
     }
 
     if request.include_tags {
@@ -2396,18 +2425,6 @@ async fn enqueue_children(
                 maximum_objects,
                 deduplicate_by_oid,
             )?;
-            if let Some(since) = request.deepen_since {
-                let timestamp = commit
-                    .time()
-                    .map_err(|_| RemoteGitError::Corrupt {
-                        stage: CorruptionStage::Commit,
-                    })?
-                    .seconds;
-                if timestamp < since {
-                    shallow.insert(item.oid);
-                    return Ok(());
-                }
-            }
             match item.depth {
                 TraversalDepth::RelativeBoundary => {
                     if existing_shallow.contains(&item.oid) {
