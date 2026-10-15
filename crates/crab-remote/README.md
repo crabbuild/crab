@@ -99,6 +99,10 @@ ref capture remain measured opening work, not a completed bounded-opening gate.
 handshake, then constructs the repository after external GC. Its separate
 `reader-open` measurement includes normal tip validation, keeping graph, physical
 and path pages cold until the external lifecycle transition completes.
+`capture-catalog` takes a word-ordered file hash instead of a text path. It holds
+the canonical current-state file-index session across the same stdin handshake,
+then measures cold/warm duplicate lookups before closing and running the bulk
+oracle. This tests catalog source lifetime without requiring browse indexes.
 `qualify_remote <bucket> <prefix> <text-path> graph-pages` measures sampled
 ordinal/parent records and duplicate OID batches through `CommitGraphReader`.
 It verifies the derived graph's captured state and Git identity before reads.

@@ -1,6 +1,8 @@
 //! Measure isolated cold/warm capsule reads and emit independent-oracle evidence.
 #[path = "support/captured_browse.rs"]
 mod captured_browse;
+#[path = "support/captured_catalog.rs"]
+mod captured_catalog;
 mod support;
 
 use std::io;
@@ -38,7 +40,7 @@ async fn main() -> Result<()> {
             [bucket, prefix, path] => (bucket, prefix, path, "all"),
             [bucket, prefix, path, selection] => (bucket, prefix, path, selection.as_str()),
             _ => return Err(io::Error::other(
-                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint|catalog|catalog-current|capture-browse|ref-point|resolve-oid|blame-history|blame-history-uncached]",
+                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint|catalog|catalog-current|capture-browse|capture-catalog|ref-point|resolve-oid|blame-history|blame-history-uncached]",
             )
             .into()),
         };
@@ -47,6 +49,7 @@ async fn main() -> Result<()> {
         && selection != "catalog"
         && selection != "catalog-current"
         && selection != "capture-browse"
+        && selection != "capture-catalog"
         && selection != "checkpoint"
         && selection != "graph-pages"
         && selection != "graph-ancestry"
@@ -77,7 +80,9 @@ async fn main() -> Result<()> {
         .with_storage_observer(counters.clone());
     let layout = StoreLayout::new(store, prefix.to_owned());
     let identity = RepositoryIdentity::new(format!("s3:{bucket}"), prefix.as_str(), 1)?;
-    if selection == "capture-browse" {
+    if selection == "capture-catalog" {
+        captured_catalog::qualify(&layout, &path, &counters).await?;
+    } else if selection == "capture-browse" {
         let runtime = Arc::new(RemoteGitRuntime::default());
         let result = captured_browse::qualify(
             &layout,
