@@ -396,6 +396,7 @@ async fn run_inner(
             .collect::<Vec<_>>()
     };
     let mut xet_stats = super::xet_publication::XetPublicationStats::default();
+    let mut pointer_delta = crab_metadata::capsule_protocol::PointerCatalog::new();
     let publication: Result<Option<Option<crab_coordination::write_coordinator::CommitOutcome>>> =
         async {
             // LFS bytes share the ref visibility boundary with Git and Xet data.
@@ -409,19 +410,21 @@ async fn run_inner(
                 cancel,
             )
             .await?;
-            let (pointer_delta, prepared_xet_stats) = super::xet_publication::prepare_delta(
-                &layout,
-                &base,
-                &prepared.pointers,
-                staging,
-                caching_store,
-                metrics,
-                config.upload_concurrency,
-                config.protected_push.is_none(),
-                cancel,
-            )
-            .await?;
+            let (prepared_pointer_delta, prepared_xet_stats) =
+                super::xet_publication::prepare_delta(
+                    &layout,
+                    &base,
+                    &prepared.pointers,
+                    staging,
+                    caching_store,
+                    metrics,
+                    config.upload_concurrency,
+                    config.protected_push.is_none(),
+                    cancel,
+                )
+                .await?;
             xet_stats = prepared_xet_stats;
+            pointer_delta = prepared_pointer_delta;
             if config.protected_push.is_none()
                 && let Some(replication) = config.active_active_replication.as_ref()
             {
@@ -477,6 +480,7 @@ async fn run_inner(
             }
             let result = if changes_namespace {
                 let commit_layout = layout.clone();
+                let commit_pointer_delta = &pointer_delta;
                 let commit_push_ref_head_bases = push_ref_head_bases.clone();
                 crab_write::with_ref_namespaces_wait(
                     layout.store(),
@@ -501,7 +505,7 @@ async fn run_inner(
                             base,
                             &transaction,
                             &capsule,
-                            &pointer_delta,
+                            commit_pointer_delta,
                             &lfs_objects,
                             &commit_push_ref_head_bases,
                         )
@@ -545,6 +549,58 @@ async fn run_inner(
         }
     };
     if let Some(active_active_commit) = committed {
+        if layout.store().staging_write_prefix().is_none() {
+            let mut index_config =
+                crab_metadata::remote_index::RemoteIndexConfig::for_repo_with_global_prefix(
+                    layout.repo_prefix(),
+                    layout.global_prefix(),
+                );
+            if let Some(path) = config.metadb.chunk_index.db.path.as_ref() {
+                index_config.chunk_index_path.clone_from(path);
+            }
+            // The ref is already committed. Index failures only remove acceleration;
+            // reporting an uncommitted push here would invite a duplicate publication.
+            match crab_metadata::remote_index::write_capsule_chunk_candidates(
+                Arc::clone(layout.store().inner()),
+                &index_config,
+                layout.repo_prefix(),
+                &pointer_delta,
+                &xet_stats.origins,
+            )
+            .await
+            {
+                Ok(()) => {
+                    let cache_path = crate::cache::add_remote_candidate_cache_path(
+                        &crate::cache::default_cache_root(),
+                        &store.bucket_identity(),
+                        layout.global_prefix(),
+                    );
+                    if cache_path.is_file() {
+                        let hashes = pointer_delta
+                            .xorbs()
+                            .values()
+                            .flat_map(|entry| entry.chunks())
+                            .filter_map(|chunk| MerkleHash::from_hex(chunk.hash()).ok())
+                            .collect::<Vec<_>>();
+                        let invalidation = tokio::task::spawn_blocking(move || {
+                            crate::cache::add_remote_candidates::AddRemoteCandidateCache::open(
+                                &cache_path,
+                            )
+                            .and_then(|cache| cache.forget_negatives(&hashes))
+                        })
+                        .await;
+                        if !matches!(invalidation, Ok(Ok(()))) {
+                            tracing::warn!(
+                                "capsule committed; candidate cache invalidation failed"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "capsule committed; chunk candidate index needs repair")
+                }
+            }
+        }
         if let Some(snapshot) = staging_snapshot
             && let Err(error) = snapshot.commit()
         {

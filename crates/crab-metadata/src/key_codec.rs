@@ -11,6 +11,8 @@
 //! - `0x03 || hash[32]` — latest committed chunk-receipt candidate.
 //! - `0x04 || proof_id[32]` — immutable xorb origin proof.
 //! - `0x05 || anchor_id[32]` — immutable source-shard anchor.
+//! - `0x06 || hash[32]` — point-readable capsule chunk candidate.
+//! - `0x07 || anchor_id[32]` — immutable capsule source/origin anchor.
 //! - `0xFF || b"sys:" || name` — system key (format_version, epoch,
 //!   created_at, gc_generation).
 //!
@@ -21,6 +23,9 @@
 use crab_xet::xorb::format::MerkleHash;
 
 use crate::error::{MetadataError, Result};
+
+/// Canonical metadata database format shared by all reader and writer adapters.
+pub const METADB_FORMAT_VERSION: u32 = 1;
 
 /// Prefix byte for content-addressed keys (file_hash or chunk_hash).
 pub const PREFIX_CONTENT: u8 = 0x01;
@@ -40,6 +45,23 @@ pub const PREFIX_ORIGIN_PROOF: u8 = 0x04;
 
 /// Prefix byte for immutable repository-shard source anchors.
 pub const PREFIX_SOURCE_ANCHOR: u8 = 0x05;
+
+/// Capsule candidates use distinct keys so released manifest readers cannot
+/// mistake capsule provenance for a manifest-generation assertion.
+const PREFIX_CAPSULE_CHUNK_HEAD: u8 = 0x06;
+const PREFIX_CAPSULE_CHUNK_ANCHOR: u8 = 0x07;
+
+/// Encode a point-readable capsule candidate key.
+#[must_use]
+pub fn capsule_chunk_head_key(hash: &[u8; 32]) -> [u8; 33] {
+    encode_proof_record_key(PREFIX_CAPSULE_CHUNK_HEAD, hash)
+}
+
+/// Encode an immutable capsule provenance key.
+#[must_use]
+pub fn capsule_chunk_anchor_key(hash: &[u8; 32]) -> [u8; 33] {
+    encode_proof_record_key(PREFIX_CAPSULE_CHUNK_ANCHOR, hash)
+}
 
 /// Prefix byte for the `sys:*` system-key namespace. Chosen as `0xFF`
 /// so it sorts after every content key and is trivial to filter out of

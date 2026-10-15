@@ -23,11 +23,12 @@ use crate::core::metrics::Metrics;
 // existing payload bound even when a caller requests more network concurrency.
 const MAX_IN_FLIGHT_XORBS: usize = 4;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct XetPublicationStats {
     pub xorbs_uploaded: u64,
     pub shards_uploaded: u64,
     pub xorb_bytes_uploaded: u64,
+    pub origins: HashMap<MerkleHash, crab_metadata::receipts::OriginReceipt>,
 }
 
 #[expect(
@@ -133,6 +134,7 @@ pub(crate) async fn prepare_delta(
     let mut shard_session = PushShardSession::new();
     let mut pending_files = Vec::with_capacity(unresolved.len());
     let mut uploaded_xorbs = HashSet::new();
+    let mut origins = HashMap::new();
     let mut xorb_bytes_uploaded = 0_u64;
     let mut prepared_files = Vec::with_capacity(unresolved.len());
     let mut prepared_candidates = Vec::<crab_staging::push_plan::PlannedXorb>::new();
@@ -278,18 +280,19 @@ pub(crate) async fn prepare_delta(
             |(ordinal, (expected_hash, expected_refs))| async move {
                 check_cancelled(cancel)?;
                 let path = layout.xorb_path(&expected_hash);
-                let bytes = match layout
+                let (bytes, identity) = match layout
                     .store()
                     .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
                     .await
                 {
-                    Ok((bytes, _)) => bytes,
+                    Ok(result) => result,
                     Err(crab_storage::StorageError::NotFound { .. }) => {
                         return Ok::<_, CrabError>((ordinal, None));
                     }
                     Err(error) => return Err(error.into()),
                 };
-                let verified = verify_external_xorb(&path, expected_hash, &expected_refs, bytes)?;
+                let verified =
+                    verify_external_xorb(&path, expected_hash, &expected_refs, bytes, identity)?;
                 Ok((ordinal, verified))
             },
         ))
@@ -302,10 +305,11 @@ pub(crate) async fn prepare_delta(
     verified_external.sort_by_key(|(ordinal, _)| *ordinal);
     let mut reused_xorbs = 0_usize;
     for (_, verified) in verified_external {
-        let Some((xorb_hash, entry, xorb_placements)) = verified else {
+        let Some((xorb_hash, entry, xorb_placements, origin)) = verified else {
             continue;
         };
         reused_xorbs += 1;
+        origins.insert(xorb_hash, origin);
         for placement in xorb_placements {
             placements.entry(placement.chunk_hash).or_insert(placement);
         }
@@ -375,7 +379,7 @@ pub(crate) async fn prepare_delta(
             let bytes = Bytes::from(bytes);
             let (entry, xorb_placements) =
                 verify_prepared_xorb(&path, planned_hash, &planned, bytes.clone())?;
-            let (entry, xorb_placements, created) = publish_xorb_candidate(
+            let (entry, xorb_placements, created, origin) = publish_xorb_candidate(
                 layout,
                 caching_store,
                 planned_hash,
@@ -391,6 +395,7 @@ pub(crate) async fn prepare_delta(
                 entry,
                 xorb_placements,
                 uploaded_bytes,
+                origin,
             ))
         },
     ))
@@ -400,8 +405,11 @@ pub(crate) async fn prepare_delta(
     while let Some(result) = uploads.next().await {
         verified_candidates.push(result?);
     }
-    verified_candidates.sort_by_key(|(ordinal, _, _, _, _)| *ordinal);
-    for (_, planned_hash, entry, xorb_placements, uploaded_bytes) in verified_candidates {
+    verified_candidates.sort_by_key(|(ordinal, _, _, _, _, _)| *ordinal);
+    for (_, planned_hash, entry, xorb_placements, uploaded_bytes, origin) in verified_candidates {
+        if let Some(origin) = origin {
+            origins.insert(planned_hash, origin);
+        }
         if uploaded_bytes > 0 {
             uploaded_xorbs.insert(planned_hash);
             xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
@@ -449,6 +457,7 @@ pub(crate) async fn prepare_delta(
                             &mut placements,
                             &mut xorb_entries,
                             &mut uploaded_xorbs,
+                            &mut origins,
                         )
                         .await?;
                         xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
@@ -466,6 +475,7 @@ pub(crate) async fn prepare_delta(
                     &mut placements,
                     &mut xorb_entries,
                     &mut uploaded_xorbs,
+                    &mut origins,
                 )
                 .await?;
                 xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
@@ -608,6 +618,7 @@ pub(crate) async fn prepare_delta(
             xorbs_uploaded: uploaded_xorbs.len() as u64,
             shards_uploaded,
             xorb_bytes_uploaded,
+            origins,
         },
     ))
 }
@@ -619,11 +630,12 @@ async fn publish_built_xorb(
     placements: &mut ChunkPlacementMap,
     xorb_entries: &mut HashMap<MerkleHash, crab_metadata::capsule_protocol::XorbCatalogEntry>,
     uploaded_xorbs: &mut HashSet<MerkleHash>,
+    origins: &mut HashMap<MerkleHash, crab_metadata::receipts::OriginReceipt>,
 ) -> Result<u64> {
     let encoded_size = result.bytes.len() as u64;
     let body_digest = blake3::hash(&result.bytes).to_hex().to_string();
     let entry = catalog_xorb_entry(result.bytes.len() as u64, body_digest, &result.placements)?;
-    let (entry, xorb_placements, created) = publish_xorb_candidate(
+    let (entry, xorb_placements, created, origin) = publish_xorb_candidate(
         layout,
         caching_store,
         result.hash,
@@ -632,6 +644,9 @@ async fn publish_built_xorb(
         result.placements,
     )
     .await?;
+    if let Some(origin) = origin {
+        origins.insert(result.hash, origin);
+    }
     if created {
         uploaded_xorbs.insert(result.hash);
     }
@@ -653,6 +668,7 @@ async fn publish_xorb_candidate(
     crab_metadata::capsule_protocol::XorbCatalogEntry,
     Vec<ChunkPlacement>,
     bool,
+    Option<crab_metadata::receipts::OriginReceipt>,
 )> {
     let path = layout.xorb_path(&xorb_hash);
     let staged = layout.store().staging_write_prefix().is_some();
@@ -691,16 +707,22 @@ async fn publish_xorb_candidate(
             .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
             .await
         {
-            Ok((existing, _)) => {
-                let verified = verify_external_xorb(&path, xorb_hash, &expected_refs, existing)?
-                    .ok_or_else(|| CrabError::CorruptObject {
-                        path: path.to_string(),
-                        reason: format!(
-                            "existing xorb {} does not authenticate as the requested logical content",
-                            xorb_hash.hex()
-                        ),
-                    })?;
-                return Ok((verified.1, verified.2, false));
+            Ok((existing, identity)) => {
+                let verified = verify_external_xorb(
+                    &path,
+                    xorb_hash,
+                    &expected_refs,
+                    existing,
+                    identity,
+                )?
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: path.to_string(),
+                    reason: format!(
+                        "existing xorb {} does not authenticate as the requested logical content",
+                        xorb_hash.hex()
+                    ),
+                })?;
+                return Ok((verified.1, verified.2, false, Some(verified.3)));
             }
             Err(crab_storage::StorageError::NotFound { .. }) => {}
             Err(error) => return Err(error.into()),
@@ -711,15 +733,18 @@ async fn publish_xorb_candidate(
         // canonical encoding above when present; otherwise record verified
         // staged bytes for service-owned promotion before ref publication.
         let created = layout.store().put_if_absent_verified(&path, bytes).await?;
-        return Ok((local_entry, local_placements, created));
+        return Ok((local_entry, local_placements, created, None));
     }
     let cache_bytes = caching_store.map(|_| bytes.clone());
+    // Local builder/prepared verification already authenticated these bytes.
+    // Carry the payload digest with the exact immutable PUT/readback identity.
+    let payload_digest = XorbParser::parse(bytes.clone())?.payload_digest();
     match layout
         .store()
         .create_or_read_immutable(&path, bytes, MAX_XORB_SIZE as u64)
         .await?
     {
-        crab_storage::ImmutableCreateOutcome::Created(_) => {
+        crab_storage::ImmutableCreateOutcome::Created(identity) => {
             if let (Some(cache), Some(bytes)) = (caching_store, cache_bytes) {
                 warm_published_cache_object(
                     cache,
@@ -729,20 +754,36 @@ async fn publish_xorb_candidate(
                 )
                 .await;
             }
-            Ok((local_entry, local_placements, true))
+            let origin = crab_metadata::receipts::OriginReceipt::new(
+                "canonical-origin".to_owned(),
+                path.to_string(),
+                xorb_hash.into(),
+                payload_digest,
+                local_entry.encoded_size(),
+                identity.e_tag,
+                identity.version,
+            );
+            Ok((local_entry, local_placements, true, Some(origin)))
         }
         crab_storage::ImmutableCreateOutcome::Existing {
-            bytes: existing, ..
+            bytes: existing,
+            identity,
         } => {
-            let verified = verify_external_xorb(&path, xorb_hash, &expected_refs, existing)?
-                .ok_or_else(|| CrabError::CorruptObject {
-                    path: path.to_string(),
-                    reason: format!(
-                        "existing xorb {} does not authenticate as the requested logical content",
-                        xorb_hash.hex()
-                    ),
-                })?;
-            Ok((verified.1, verified.2, false))
+            let verified = verify_external_xorb(
+                &path,
+                xorb_hash,
+                &expected_refs,
+                existing,
+                identity,
+            )?
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: path.to_string(),
+                reason: format!(
+                    "existing xorb {} does not authenticate as the requested logical content",
+                    xorb_hash.hex()
+                ),
+            })?;
+            Ok((verified.1, verified.2, false, Some(verified.3)))
         }
     }
 }
@@ -844,11 +885,13 @@ fn verify_external_xorb(
     expected_hash: MerkleHash,
     expected_refs: &HashMap<MerkleHash, XorbRef>,
     bytes: Bytes,
+    identity: crab_storage::ETag,
 ) -> Result<
     Option<(
         MerkleHash,
         crab_metadata::capsule_protocol::XorbCatalogEntry,
         Vec<ChunkPlacement>,
+        crab_metadata::receipts::OriginReceipt,
     )>,
 > {
     let encoded_size = bytes.len() as u64;
@@ -921,7 +964,16 @@ fn verify_external_xorb(
         }
     }
     let entry = catalog_xorb_entry(encoded_size, body_digest, &xorb_placements)?;
-    Ok(Some((expected_hash, entry, xorb_placements)))
+    let origin = crab_metadata::receipts::OriginReceipt::new(
+        "canonical-origin".to_owned(),
+        path.to_string(),
+        expected_hash.into(),
+        parser.payload_digest(),
+        encoded_size,
+        identity.e_tag,
+        identity.version,
+    );
+    Ok(Some((expected_hash, entry, xorb_placements, origin)))
 }
 
 fn verify_prepared_xorb(
@@ -1685,7 +1737,7 @@ mod tests {
                 layout.store().clone()
             };
             let layout = crab_storage::StoreLayout::new(store, "repo".to_owned());
-            let (entry, placements, created) = publish_xorb_candidate(
+            let (entry, placements, created, _origin) = publish_xorb_candidate(
                 &layout,
                 None,
                 candidate.hash,

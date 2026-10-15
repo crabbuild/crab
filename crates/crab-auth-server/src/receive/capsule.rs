@@ -1,6 +1,6 @@
 //! Protocol-v2 protected-push candidate verification.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crab_auth::PushRefUpdate;
 use crab_coordination::write_coordinator::{CommitOutcome, CoordinatedRefUpdate};
@@ -27,6 +27,7 @@ pub(super) struct VerifiedCapsuleCandidate {
     pub replication_objects: Vec<String>,
     pub publication: Capsule,
     dependency_copies: Vec<DependencyCopy>,
+    origins: HashMap<crab_xet::hash::MerkleHash, crab_metadata::receipts::OriginReceipt>,
 }
 
 pub(super) async fn commit_capsule_candidate(
@@ -102,9 +103,29 @@ pub(super) async fn commit_capsule_candidate(
         .map(Some);
     }
 
-    promote_staged_writes(ctx.store(), &plan.staged_objects).await?;
-    promote_dependency_copies(ctx, &verified.dependency_copies).await?;
-    if let Some(delta) = capsule.pointer_catalog_delta()? {
+    let mut origins = verified.origins;
+    let mut other_objects = Vec::new();
+    for object in &plan.staged_objects {
+        if crab_storage::content_hash_from_path(&object.canonical_key, "xorbs").is_some() {
+            let bytes = read_verified_staged_object(ctx.store(), object).await?;
+            let origin = super::capsule_dependencies::promote_xorb_origin(
+                ctx.store(),
+                &object.canonical_key,
+                bytes,
+            )
+            .await?;
+            origins.insert(
+                crab_xet::hash::MerkleHash::from(origin.content_hash),
+                origin,
+            );
+        } else {
+            other_objects.push(object.clone());
+        }
+    }
+    promote_staged_writes(ctx.store(), &other_objects).await?;
+    origins.extend(promote_dependency_copies(ctx, &verified.dependency_copies).await?);
+    let delta = capsule.pointer_catalog_delta()?.unwrap_or_default();
+    if !delta.is_empty() {
         crab_metadata::ref_registry::union_register_repo_shards(
             ctx.store(),
             ctx.router(),
@@ -122,12 +143,12 @@ pub(super) async fn commit_capsule_candidate(
         .iter()
         .any(|edit| edit.expected_old().is_none() != edit.new_oid().is_none());
     let base = view.root_snapshot().clone();
-    if changes_namespace {
+    let result = if changes_namespace {
         let layout = ctx.router().clone();
         let repo_prefix = ctx.repo_prefix().to_owned();
         let active_active = active_active.cloned();
         let replication_objects = replication_objects.to_vec();
-        return crab_write::with_ref_namespaces(
+        crab_write::with_ref_namespaces(
             ctx.store(),
             ctx.router(),
             &ref_names,
@@ -158,19 +179,38 @@ pub(super) async fn commit_capsule_candidate(
                 .await
             },
         )
-        .await;
+        .await
+    } else {
+        publish_verified_candidate(
+            ctx.store(),
+            ctx.router(),
+            ctx.repo_prefix(),
+            base,
+            &transaction,
+            &capsule,
+            active_active,
+            replication_objects,
+        )
+        .await
+    };
+    if result.is_ok() {
+        let config = crab_metadata::remote_index::RemoteIndexConfig::for_repo_with_global_prefix(
+            ctx.repo_prefix(),
+            ctx.router().global_prefix(),
+        );
+        if let Err(error) = crab_metadata::remote_index::write_capsule_chunk_candidates(
+            std::sync::Arc::clone(ctx.store().inner()),
+            &config,
+            ctx.repo_prefix(),
+            &delta,
+            &origins,
+        )
+        .await
+        {
+            tracing::warn!(%error, "capsule committed; chunk candidate index needs repair");
+        }
     }
-    publish_verified_candidate(
-        ctx.store(),
-        ctx.router(),
-        ctx.repo_prefix(),
-        base,
-        &transaction,
-        &capsule,
-        active_active,
-        replication_objects,
-    )
-    .await
+    result
 }
 
 async fn publish_verified_candidate(
@@ -358,7 +398,7 @@ pub(super) async fn verify_capsule_candidate(
     validate_capsule_transaction(plan, candidate)?;
 
     let candidate_delta = candidate.pointer_catalog_delta()?.unwrap_or_default();
-    let (changed_paths, publication, replication_objects, dependency_copies) =
+    let (changed_paths, publication, replication_objects, dependency_copies, origins) =
         match prepare.view_scope.as_ref() {
             None => {
                 if prepared_root != plan.base_root_digest {
@@ -382,9 +422,9 @@ pub(super) async fn verify_capsule_candidate(
                 )
                 .await?;
                 catalog.apply(&candidate_delta)?;
-                let (objects, copies) =
+                let (objects, copies, origins) =
                     verify_pointer_dependencies(ctx, plan, &catalog, &pointers, None).await?;
-                (changed_paths, candidate.clone(), objects, copies)
+                (changed_paths, candidate.clone(), objects, copies, origins)
             }
             Some(scope) => {
                 let filtered_router = crab_storage::StoreLayout::with_global_prefix(
@@ -445,7 +485,7 @@ pub(super) async fn verify_capsule_candidate(
                 )?;
                 let mut final_catalog = source_catalog;
                 final_catalog.apply(&delta)?;
-                let (objects, copies) = verify_pointer_dependencies(
+                let (objects, copies, origins) = verify_pointer_dependencies(
                     ctx,
                     plan,
                     &final_catalog,
@@ -465,7 +505,13 @@ pub(super) async fn verify_capsule_candidate(
                 }
                 let publication =
                     Capsule::build(&materialized.transaction, materialized.git_packs, sections)?;
-                (materialized.changed_paths, publication, objects, copies)
+                (
+                    materialized.changed_paths,
+                    publication,
+                    objects,
+                    copies,
+                    origins,
+                )
             }
         };
     let publication_transaction = publication.transaction()?;
@@ -496,6 +542,7 @@ pub(super) async fn verify_capsule_candidate(
         replication_objects: replication_objects.into_iter().collect(),
         publication,
         dependency_copies,
+        origins,
     })
 }
 

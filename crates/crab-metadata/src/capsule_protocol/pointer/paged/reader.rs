@@ -280,7 +280,7 @@ impl PointerCatalogLookup {
         )?;
         let hashes = requested(files, &mut work)?;
         let mut shards = requested(shards, &mut work)?;
-        let mut xorbs = requested(xorbs, &mut work)?;
+        let xorbs = requested(xorbs, &mut work)?;
         if hashes.is_empty() && shards.is_empty() && xorbs.is_empty() {
             return Ok(PointerCatalog::new());
         }
@@ -320,13 +320,43 @@ impl PointerCatalogLookup {
                 catalog.insert_file(hash.clone(), entry)?;
             }
         }
+        let selected = self.selected_shards(store, &shards, &mut work).await?;
+        for (hash, entry) in selected.shards {
+            catalog.insert_shard(hash, entry)?;
+        }
+        for (hash, entry) in selected.xorbs {
+            catalog.insert_xorb(hash, entry)?;
+        }
+        let selected = self.selected_xorbs(store, &xorbs, &mut work).await?;
+        for (hash, entry) in selected.xorbs {
+            catalog.insert_xorb(hash, entry)?;
+        }
+        catalog.validate(true, true)?;
+        Ok(catalog)
+    }
+
+    /// Select requested shard roots and their complete authenticated xorb closures.
+    pub async fn shards(&self, store: &Store, hashes: &[String]) -> Result<PointerCatalog> {
+        let mut work = self.work();
+        let hashes = requested(hashes, &mut work)?;
+        self.selected_shards(store, &hashes, &mut work).await
+    }
+
+    async fn selected_shards(
+        &self,
+        store: &Store,
+        shards: &BTreeSet<String>,
+        work: &mut PageWork,
+    ) -> Result<PointerCatalog> {
+        let mut catalog = PointerCatalog::new();
         let root = self
             .checkpoint
             .as_ref()
             .and_then(|s| s.descriptor.shards.as_ref());
         let rows = self
-            .rows(store, root, Kind::CatalogShards, &keys(&shards)?, &mut work)
+            .rows(store, root, Kind::CatalogShards, &keys(shards)?, work)
             .await?;
+        let mut xorbs = BTreeSet::new();
         for (hash, row) in shards.iter().zip(rows) {
             for value in row {
                 let row: ShardRow = from_json(&value.bytes)?;
@@ -336,7 +366,7 @@ impl PointerCatalogLookup {
                         &value.origin,
                         row.xorbs.as_ref(),
                         Kind::CatalogShardXorbs,
-                        &mut work,
+                        work,
                     )
                     .await?;
                 let closure = closure
@@ -352,20 +382,12 @@ impl PointerCatalogLookup {
                 verify_identity(&value, Kind::CatalogShards, &json(&entry)?)?;
                 catalog.insert_shard(hash.clone(), entry)?;
             }
+            let Some(entry) = catalog.shards.get(hash) else {
+                continue;
+            };
+            xorbs.extend(entry.xorb_hashes.iter().cloned());
         }
-        for file in catalog.files.values() {
-            catalog
-                .shards
-                .get(&file.shard_hash)
-                .ok_or_else(|| corrupt("selected file references an absent shard"))?;
-        }
-        xorbs.extend(
-            catalog
-                .shards
-                .values()
-                .flat_map(|entry| entry.xorb_hashes.iter().cloned()),
-        );
-        let selected = self.selected_xorbs(store, &xorbs, &mut work).await?;
+        let selected = self.selected_xorbs(store, &xorbs, work).await?;
         for (hash, entry) in selected.xorbs {
             catalog.insert_xorb(hash, entry)?;
         }

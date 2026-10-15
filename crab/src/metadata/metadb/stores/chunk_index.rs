@@ -104,6 +104,60 @@ impl ChunkIndexStore {
         self
     }
 
+    /// Load capsule hints without interpreting them as released manifest receipts.
+    pub(crate) async fn capsule_candidates(
+        &self,
+        hashes: &[MerkleHash],
+    ) -> Result<crab_metadata::capsule_protocol::CapsuleChunkCandidates> {
+        use crab_metadata::capsule_protocol::{
+            CapsuleChunkAnchor, CapsuleChunkCandidates, capsule_chunk_anchor_key,
+            capsule_chunk_head_key,
+        };
+        let mut output = CapsuleChunkCandidates::default();
+        // Stay below Db's dense range-scan threshold: unrelated chunk history
+        // must not turn an add-time point batch into a scan of the global index.
+        for hashes in hashes.chunks(GET_BATCH_TIER_CHUNK_LIMIT) {
+            let keys = hashes
+                .iter()
+                .map(|hash| Bytes::copy_from_slice(&capsule_chunk_head_key(&(*hash).into())))
+                .collect::<Vec<_>>();
+            let values = self.db.get_batch(&keys).await?;
+            let mut anchor_ids = HashSet::new();
+            for (hash, value) in hashes.iter().zip(values) {
+                let Some(value) = value else {
+                    continue;
+                };
+                let placement = CommittedChunkPlacement::decode(&value)?;
+                if placement.chunk_hash != <[u8; 32]>::from(*hash) {
+                    return Err(CrabError::StagingCorrupt(
+                        "capsule candidate hash differs from index key".to_owned(),
+                    ));
+                }
+                anchor_ids.insert(placement.source_anchor_id);
+                output.placements.insert(placement.chunk_hash, placement);
+            }
+            let ids = anchor_ids
+                .into_iter()
+                .filter(|id| !output.anchors.contains_key(id))
+                .collect::<Vec<_>>();
+            let keys = ids
+                .iter()
+                .map(|id| Bytes::copy_from_slice(&capsule_chunk_anchor_key(id)))
+                .collect::<Vec<_>>();
+            let values = self.db.get_batch(&keys).await?;
+            for (id, value) in ids.into_iter().zip(values) {
+                let value = value.ok_or_else(|| {
+                    CrabError::StagingCorrupt(
+                        "capsule candidate source anchor is absent".to_owned(),
+                    )
+                })?;
+                let anchor = CapsuleChunkAnchor::decode(&id, &value)?;
+                output.anchors.insert(id, anchor);
+            }
+        }
+        Ok(output)
+    }
+
     /// Look up a single chunk hash through all three tiers.
     ///
     /// Cache-first: in-memory → persistent, when available → remote.

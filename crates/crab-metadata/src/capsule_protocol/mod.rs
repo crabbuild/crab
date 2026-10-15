@@ -10,6 +10,7 @@ mod capsule;
 mod captured_visibility;
 #[cfg(feature = "storage")]
 mod catalog_capture;
+mod chunk_candidates;
 mod history;
 mod layered;
 #[cfg(feature = "storage")]
@@ -123,3 +124,9 @@ fn valid_ref_namespace<'a>(names: impl IntoIterator<Item = &'a str>) -> bool {
             .all(|(index, _)| !names.contains(&name[..index]))
     })
 }
+
+pub use chunk_candidates::{
+    CapsuleChunkAnchor, CapsuleChunkCandidates, capsule_chunk_anchor_key, capsule_chunk_head_key,
+};
+
+pub(crate) use chunk_candidates::capsule_chunk_candidate_rows;
