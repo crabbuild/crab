@@ -13,7 +13,7 @@ const READ_AHEAD_BYTES: u64 = 64 * 1024;
 pub(crate) struct PageCache {
     state: Mutex<State>,
     read_ahead: Option<std::ops::Range<u64>>,
-    block_reads: [tokio::sync::Mutex<()>; 4],
+    block_reads: [futures_util::lock::Mutex<()>; 4],
 }
 
 #[derive(Debug, Default)]
@@ -433,6 +433,33 @@ mod tests {
             (cold, work.bytes, rejected, bytes.load(Ordering::SeqCst)),
             (region.end - region.start, cold, true, 0)
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_queued_read_does_not_keep_the_cache_lane_locked() {
+        use futures_util::FutureExt;
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let path = object_store::path::Path::from("proof");
+        let expected = bytes::Bytes::from_static(b"block");
+        store.create_strict(&path, expected.clone()).await.unwrap();
+        let range = 0..expected.len() as u64;
+        let cache = PageCache::for_region(range.clone());
+        let held = cache.block_reads[0].lock().await;
+        // Dropping a queued read must unregister its waiter; otherwise a
+        // cancelled query can strand later cold reads sharing this lane.
+        let queued = cache
+            .read_block(&store, &path, range.clone())
+            .now_or_never()
+            .is_none();
+        drop(held);
+        let actual = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            cache.read_block(&store, &path, range),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!((queued, actual), (true, expected));
     }
 
     #[tokio::test]
