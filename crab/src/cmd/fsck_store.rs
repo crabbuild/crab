@@ -877,18 +877,32 @@ async fn verify_capsule_history(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     root: &crab_metadata::capsule_protocol::RepositoryRoot,
 ) -> Result<()> {
-    let Some(history) = root.history() else {
-        return Ok(());
+    let segments = match root.history() {
+        Some(history) => {
+            crab_metadata::capsule_protocol::load_history_chain(
+                layout,
+                history,
+                crab_metadata::capsule_protocol::MAX_HISTORY_CHAIN_SEGMENTS,
+                crab_metadata::capsule_protocol::MAX_HISTORY_CHAIN_BYTES,
+            )
+            .await?
+        }
+        None => Vec::new(),
     };
-    let segments = crab_metadata::capsule_protocol::load_history_chain(
-        layout,
-        history,
-        crab_metadata::capsule_protocol::MAX_HISTORY_CHAIN_SEGMENTS,
-        crab_metadata::capsule_protocol::MAX_HISTORY_CHAIN_BYTES,
-    )
-    .await?;
     let mut checkpoints = BTreeMap::new();
     let mut runs = BTreeMap::new();
+    let heads = layout
+        .store()
+        .list_prefix(&layout.capsule_source_heads_prefix())
+        .await?
+        .into_iter()
+        .map(|meta| meta.location)
+        .collect::<Vec<_>>();
+    let retained =
+        crab_metadata::capsule_protocol::load_retained_capsule_sources(layout, &heads).await?;
+    for run in retained.runs() {
+        insert_history_pointer(&mut runs, run.hash(), run.clone(), "retired capsule run")?;
+    }
     for segment in segments {
         insert_history_pointer(
             &mut checkpoints,

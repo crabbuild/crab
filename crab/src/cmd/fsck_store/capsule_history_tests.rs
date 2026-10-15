@@ -104,6 +104,66 @@ struct SourceReads {
     count: AtomicUsize,
 }
 
+#[tokio::test]
+async fn retired_sources_are_checked_without_checkpoint_history() {
+    let (layout, root, run) = history_fixture().await;
+    let pointer = run_pointer(&run, root.record().digest());
+    crab_metadata::capsule_protocol::retain_capsule_sources(
+        &layout,
+        "refs/heads/main",
+        0,
+        &[pointer],
+    )
+    .await
+    .unwrap();
+    verify_capsule_history(&layout, root.record().root())
+        .await
+        .unwrap();
+    layout
+        .store()
+        .delete(&layout.capsule_path(run.hash()))
+        .await
+        .unwrap();
+    assert!(
+        verify_capsule_history(&layout, root.record().root())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn retired_sources_share_full_body_verification_with_checkpoint_history() {
+    let (layout, root, run) = history_fixture().await;
+    let pointer = run_pointer(&run, root.record().digest());
+    crab_metadata::capsule_protocol::retain_capsule_sources(
+        &layout,
+        "refs/heads/main",
+        0,
+        std::slice::from_ref(&pointer),
+    )
+    .await
+    .unwrap();
+    let root = checkpoint(
+        &layout,
+        root,
+        PackSourceDescriptor::from_capsule_run(&run).unwrap(),
+        pointer,
+    )
+    .await;
+    let reads = Arc::new(SourceReads {
+        size: run.bytes().len() as u64,
+        count: AtomicUsize::new(0),
+    });
+    let observed = crab_storage::StoreLayout::new(
+        layout.store().clone().with_storage_observer(reads.clone()),
+        layout.repo_prefix().to_owned(),
+    );
+    verify_capsule_history(&observed, root.record().root())
+        .await
+        .unwrap();
+    assert_eq!(reads.count.load(Ordering::Relaxed), 1);
+}
+
 impl StorageObserver for SourceReads {
     fn started(&self, _operation: StorageOperation) {}
 

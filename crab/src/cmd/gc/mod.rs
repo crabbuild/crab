@@ -3265,6 +3265,18 @@ async fn sweep_capsule_objects(
         store.list_prefix(&browse_root_prefix),
         store.list_prefix(&manifests_prefix),
     )?;
+    let source_head_prefix = format!("{}/", layout.capsule_source_heads_prefix());
+    let source_heads = history
+        .iter()
+        .filter(|object| object.location.as_ref().starts_with(&source_head_prefix))
+        .map(|object| object.location.clone())
+        .collect::<Vec<_>>();
+    // Source lifetime is established by publishers, independent of optional
+    // browse readiness. Reuse the history enumeration rather than add another LIST.
+    let retained =
+        crab_metadata::capsule_protocol::load_retained_capsule_sources(layout, &source_heads)
+            .await?;
+    reachable.extend(retained.paths().iter().map(ToString::to_string));
     // One metadata scan covers derived index bodies. Lifetime roots belong to
     // protocol control; unrelated metadata never becomes a deletion candidate.
     let derived_index_objects = metadata_objects
