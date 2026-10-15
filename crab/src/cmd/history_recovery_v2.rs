@@ -459,7 +459,18 @@ async fn prune_history(
         let base = crab_write::capsule_protocol::open_root(layout).await?;
         let chain = history_chain(layout, &base).await?;
         let mut payload = prune_payload(&chain, args.keep_last, true);
+        let minimum = chain
+            .iter()
+            .take(args.keep_last)
+            .last()
+            .map(|segment| segment.checkpoint().covered_generation());
         if payload.roots_pruned == 0 {
+            // Retry capture cleanup after an earlier history CAS committed but
+            // its derived-retention update failed. Empty history has no cutoff.
+            if let Some(minimum) = minimum {
+                crab_metadata::capsule_protocol::prune_retained_browse_indexes(layout, minimum)
+                    .await?;
+            }
             return Ok(payload);
         }
         // Finish fallible local preparation before acquiring the root fence;
@@ -484,7 +495,18 @@ async fn prune_history(
         let replacement =
             crab_write::capsule_protocol::replace_history(layout, fenced.clone(), &rebuilt).await;
         let (primary, release_base) = match replacement {
-            Ok(root) => (None, root),
+            Ok(root) => {
+                let cleanup = match minimum {
+                    Some(minimum) => {
+                        crab_metadata::capsule_protocol::prune_retained_browse_indexes(
+                            layout, minimum,
+                        )
+                        .await
+                    }
+                    None => Ok(()),
+                };
+                (cleanup.err().map(CrabError::from), root)
+            }
             Err(error) => (Some(CrabError::from(error)), fenced),
         };
         let release = crab_write::capsule_protocol::end_gc(layout, release_base, &fence_id).await;

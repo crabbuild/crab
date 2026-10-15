@@ -188,6 +188,18 @@ impl<S> StoreLayout<S> {
         self.repo_path("v2/browse-indexes")
     }
 
+    /// Path to the mutable lifetime root for published browse captures.
+    #[must_use]
+    pub fn browse_retained_head_path(&self) -> ObjectPath {
+        self.repo_path("v2/browse-retention")
+    }
+
+    /// Path to one authenticated browse capture retained until explicit history pruning.
+    #[must_use]
+    pub fn browse_retained_root_path(&self, hash: &str) -> ObjectPath {
+        self.repo_path(&format!("metadata/browse-roots/{hash}"))
+    }
+
     /// Path to one immutable capsule-protocol capsule.
     #[must_use]
     pub fn capsule_path(&self, hash: &str) -> ObjectPath {

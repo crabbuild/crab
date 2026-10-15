@@ -2,7 +2,9 @@
 
 use std::{sync::Arc, time::Duration};
 
-use crab_metadata::capsule_protocol::{BrowseIndexes, MAX_BROWSE_INDEXES_BYTES, load_root};
+use crab_metadata::capsule_protocol::{
+    BrowseIndexes, MAX_BROWSE_INDEXES_BYTES, load_root, retain_browse_indexes,
+};
 use crab_read::capsule_protocol::{
     CapsuleReadLimits, open_view_from_root_with_metadata, read_activity_from_root,
 };
@@ -97,6 +99,12 @@ pub async fn ensure(
                 }
                 indexes = indexes.with_object_index(hash)?;
             }
+            // Lifetime publication precedes query readiness. If the later CAS
+            // loses, extra retained data is safe; the opposite order can strand readers.
+            retain_browse_indexes(
+                layout, &indexes, snapshot.manifest.generation, view.layered_checkpoint(),
+                view.capsule_run_sources(),
+            ).await?;
             if previous.as_ref() == Some(&indexes) && indexes.path_state_hash().is_some() {
                 ready = Some(indexes);
                 return Ok(());
@@ -111,7 +119,7 @@ pub async fn ensure(
             };
             // Bind the just-verified physical pages to this same view before path
             // construction. Reopening a fresh root could mix index and ref identities.
-            let repository = view.with_browse_indexes(Some(indexes.clone()))
+            let repository = view.clone().with_browse_indexes(Some(indexes.clone()))
                 .git_repository_from_store(layout.clone(), identity.clone(), runtime, options, max_bytes, cancel)
                 .await?;
             let complete = crab_write::generation::browse::build_path_state(
@@ -123,6 +131,10 @@ pub async fn ensure(
                 cancel,
             )
             .await?;
+            retain_browse_indexes(
+                layout, &complete, snapshot.manifest.generation, view.layered_checkpoint(),
+                view.capsule_run_sources(),
+            ).await?;
             if publish_current(layout, &complete, etag, cancel)
                 .await?
                 .is_some()

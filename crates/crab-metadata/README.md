@@ -121,6 +121,23 @@ record in place, without a legacy reader. Readers ignore stale
 records; absent indexes remain a readiness state. GC retains dependencies of the currently
 published readiness record even when newer refs make it unusable for new reads.
 Storage retention does not grant inventory membership or ref visibility.
+The separate `v2/browse-retention` CAS head owns a bounded chain of authenticated
+`metadata/browse-roots/` captures. Maintenance records original checkpoint and
+Git source identities before advertising replacement readiness. GC follows every
+retained capture's graph, path-state, physical pages and original source bodies;
+foreground reads still load only the current bounded readiness record. An
+unchanged capture does not append a node. Missing/corrupt lifetime dependencies
+stop GC before deletion. A valid readiness record without lifetime ownership
+requires background browse maintenance before GC; there is no scan fallback.
+
+Explicit history pruning trims superseded captures below the oldest retained
+checkpoint generation only after the authoritative history CAS succeeds. Current
+readiness and the newest lifetime capture remain rooted. A failed cleanup leaves
+extra retention and is retried even if the history chain already has the requested
+length. Pruning is the boundary that can invalidate captures from discarded
+generations; ordinary rebuilding, checkpointing and GC do not expire readers.
+The new lifetime format is version 1; no release tag contains capsule browse
+readiness, and its existing version 3 encoding remains unchanged.
 Rebuilding an immutable index
 verifies the generated content identity and repairs corrupt stored bytes only
 with a conditional update against the observed version, followed by readback.

@@ -3243,6 +3243,7 @@ async fn sweep_capsule_objects(
     let path_state_prefix = layout.repo_path("metadata/path-state/");
     let commit_graph_prefix = layout.repo_path("metadata/commit-graph/");
     let object_index_prefix = layout.repo_path("metadata/git-object-index/");
+    let browse_root_prefix = layout.repo_path("metadata/browse-roots/");
     let manifests_prefix = layout.repo_path("manifests/");
     let path_state_descriptor_prefix = layout.repo_path("manifests/path-state-");
     let commit_graph_descriptor_prefix = layout.repo_path("manifests/commit-graph-");
@@ -3255,6 +3256,7 @@ async fn sweep_capsule_objects(
         path_state_objects,
         commit_graph_objects,
         object_index_objects,
+        browse_root_objects,
         manifests,
     ) = tokio::try_join!(
         store.list_prefix(&capsule_prefix),
@@ -3264,12 +3266,14 @@ async fn sweep_capsule_objects(
         store.list_prefix(&path_state_prefix),
         store.list_prefix(&commit_graph_prefix),
         store.list_prefix(&object_index_prefix),
+        store.list_prefix(&browse_root_prefix),
         store.list_prefix(&manifests_prefix),
     )?;
     let derived_index_objects = path_state_objects
         .into_iter()
         .chain(commit_graph_objects)
         .chain(object_index_objects)
+        .chain(browse_root_objects)
         .chain(manifests.into_iter().filter(|object| {
             let key = object.location.as_ref();
             key.starts_with(path_state_descriptor_prefix.as_ref())
@@ -3365,8 +3369,8 @@ async fn sweep_capsule_objects(
         }
     }
     Ok(GcOutcome {
-        list_requests: 7,
-        list_parallelism: 7,
+        list_requests: 9,
+        list_parallelism: 9,
         list_wall_seconds: started.elapsed().as_secs_f64(),
         dry_run: args.dry_run,
         ..accounting
@@ -3379,9 +3383,27 @@ async fn mark_derived_index_objects(
     manifest: &crab_metadata::manifests::Manifest,
     reachable: &mut HashSet<String>,
 ) -> Result<()> {
-    if let Some(indexes) = crab_metadata::capsule_protocol::load_browse_indexes(layout).await? {
-        // Ref movement makes readiness stale for new queries, but existing
-        // readers still own that published root and may not have loaded pages.
+    let current = crab_metadata::capsule_protocol::load_browse_indexes(layout).await?;
+    let roots = crab_metadata::capsule_protocol::load_retained_browse_indexes(layout).await?;
+    if current
+        .as_ref()
+        .is_some_and(|current| !roots.iter().any(|root| root.indexes() == current))
+    {
+        return Err(CrabError::CorruptObject {
+            path: layout.capsule_browse_indexes_path().to_string(),
+            reason: "published browse indexes have no retained capture; rebuild browse indexes before GC".to_owned(),
+        });
+    }
+    // Captured readers own original source ranges as well as cold index
+    // pages. Repacking cannot substitute a new source behind those ranges.
+    for root in roots {
+        reachable.insert(layout.browse_retained_root_path(root.hash()).to_string());
+        reachable.extend(
+            root.source_paths(layout)
+                .into_iter()
+                .map(|path| path.to_string()),
+        );
+        let indexes = root.indexes();
         let graph_hash = indexes.commit_graph_hash();
         let graph_path = layout.bulk_manifest_path("commit-graph", graph_hash);
         let graph = crab_metadata::split_commit_graph::load_split_commit_graph_descriptor(
@@ -5791,6 +5813,15 @@ mod tests {
                     .unwrap()
                     .with_object_index(physical_hash.clone())
                     .unwrap();
+            crab_metadata::capsule_protocol::retain_browse_indexes(
+                &layout,
+                &indexes,
+                manifest.generation,
+                None,
+                &[],
+            )
+            .await
+            .unwrap();
             let index_path = layout.capsule_browse_indexes_path();
             let bytes = indexes.encode().unwrap();
             index_etag = Some(match index_etag {
