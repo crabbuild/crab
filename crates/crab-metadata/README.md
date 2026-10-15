@@ -130,6 +130,11 @@ foreground reads still load only the current bounded readiness record. An
 unchanged capture does not append a node. Missing/corrupt lifetime dependencies
 stop GC before deletion. A valid readiness record without lifetime ownership
 requires background browse maintenance before GC; there is no scan fallback.
+Full capsule fsck also authenticates the retained chain, decodes complete
+graph/path-state indexes, and verifies physical-index and original source bytes,
+including superseded ref-only runs. Shared captures stream each source body once
+during this phase. Lifetime/readiness movement during verification requires a retry;
+mirror pointer-recipe probes do not acquire this full maintenance workload.
 
 Explicit history pruning trims superseded captures below the oldest retained
 checkpoint generation only after the authoritative history CAS succeeds. Current

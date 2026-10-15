@@ -11,7 +11,7 @@ use super::{
 use crate::error::{MetadataError, Result};
 use crate::validation::{corrupt_object, validate_content_hash};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Head {
     version: u32,
@@ -283,6 +283,92 @@ pub async fn load_retained_browse_indexes(
         Some((head, _)) => load_chain(layout, &head).await,
         None => Ok(Vec::new()),
     }
+}
+
+/// Verify retained index/source integrity against stable lifetime and readiness heads.
+///
+/// Maintenance decodes complete graph/path indexes and streams original source
+/// and physical-index bodies. This proves retained bytes, never ref visibility.
+#[cfg(feature = "remote-index")]
+pub async fn verify_retained_browse_indexes(
+    layout: &StoreLayout<Store>,
+    maximum_bytes: u64,
+) -> Result<()> {
+    let head = load_head(layout).await?;
+    let current = super::load_browse_indexes(layout).await?;
+    let records = match &head {
+        Some((head, _)) => load_chain(layout, head).await?,
+        None => Vec::new(),
+    };
+    if current
+        .as_ref()
+        .is_some_and(|current| !records.iter().any(|record| record.indexes() == current))
+    {
+        return Err(corrupt("published browse indexes have no retained capture"));
+    }
+    let mut sources = BTreeSet::new();
+    for record in records {
+        let graph = crate::split_commit_graph::load_split_commit_graph(
+            layout.store(),
+            layout,
+            record.indexes().commit_graph_hash(),
+            maximum_bytes.min(crate::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES),
+        )
+        .await?;
+        if graph.descriptor.generation != record.generation() {
+            return Err(corrupt(
+                "retained graph generation differs from its capture",
+            ));
+        }
+        if let Some(hash) = record.indexes().path_state_hash() {
+            crate::path_state::load_path_state(
+                layout.store(),
+                layout,
+                hash,
+                &graph,
+                maximum_bytes.min(crate::path_state::DEFAULT_MAX_PATH_STATE_BYTES),
+            )
+            .await?;
+        }
+        if let Some(hash) = record.indexes().object_index_hash() {
+            crate::git_object_locator::PagedGitObjectIndex::verify_retained(
+                layout.store(),
+                layout,
+                hash,
+                record.indexes().state_digest(),
+                &graph.descriptor,
+                maximum_bytes,
+            )
+            .await?;
+        }
+        // Captures may share original multi-gigabyte sources. Authenticate each
+        // immutable body once, including ref-only sources absent from current history.
+        for path in record.source_paths(layout) {
+            if !sources.insert(path.clone()) {
+                continue;
+            }
+            let size = layout.store().head(&path).await?.size;
+            if size > maximum_bytes {
+                return Err(corrupt("retained source exceeds byte limit"));
+            }
+            let hash = path
+                .filename()
+                .and_then(|hash| blake3::Hash::from_hex(hash).ok())
+                .ok_or_else(|| corrupt("retained source path has no content identity"))?;
+            layout
+                .store()
+                .verify_size_and_hash(&path, size, hash.as_bytes())
+                .await?;
+        }
+    }
+    // Browse maintenance can change lifetime without moving a Git ref. A
+    // concurrent prune/rebuild must yield a retry, never a clean mixed capture.
+    if load_head(layout).await? != head || super::load_browse_indexes(layout).await? != current {
+        return Err(corrupt(
+            "browse retention changed during verification; retry fsck",
+        ));
+    }
+    Ok(())
 }
 
 /// Trim captured generations after authoritative history pruning commits.
