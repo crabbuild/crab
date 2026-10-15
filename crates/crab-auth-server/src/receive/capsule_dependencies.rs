@@ -22,6 +22,56 @@ pub(super) struct DependencyCopy {
     digest: String,
 }
 
+pub(super) async fn select_pointer_catalog(
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    pointers: &ReachablePointerScan,
+    candidate: &PointerCatalog,
+    maximum: u64,
+) -> Result<PointerCatalog> {
+    let files = pointers
+        .crab_pointers
+        .iter()
+        .map(|pointer| MerkleHash::from(pointer.file_hash).hex())
+        .chain(candidate.files().keys().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let shards = candidate
+        .shards()
+        .keys()
+        .cloned()
+        .chain(
+            candidate
+                .files()
+                .values()
+                .map(|file| file.shard_hash().to_owned()),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let xorbs = candidate
+        .xorbs()
+        .keys()
+        .cloned()
+        .chain(
+            candidate
+                .shards()
+                .values()
+                .flat_map(|shard| shard.xorb_hashes().iter().cloned()),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    // Delta references may be owned by history rather than carried by the delta.
+    // Query every candidate identity too, so selected reads retain collision checks.
+    view.pointer_catalog_lookup(layout, maximum)?
+        .dependencies(layout.store(), &files, &shards, &xorbs)
+        .await
+        .map_err(crab_read::ReadError::from)
+        .map_err(Into::into)
+}
+
 pub(super) fn source_pointer_delta(
     source: &PointerCatalog,
     candidate: &PointerCatalog,

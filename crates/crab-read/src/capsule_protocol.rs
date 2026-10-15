@@ -2150,24 +2150,59 @@ pub async fn install_git_packs_from_store(
     cache: Option<&crab_cache_store::CachingStore>,
     cancel: &CancellationToken,
 ) -> Result<InstalledGitPacks> {
-    if cancel.is_cancelled() {
-        return Err(ReadError::Cancelled);
-    }
-    if let Some(installed) = install_layered_cold_clone_packs_from_store(
+    install_git_packs_with_candidates_from_store(
         view,
+        &[],
         router,
         git_dir,
         max_input_bytes,
         cache,
         cancel,
     )
-    .await?
+    .await
+}
+
+/// Install a captured origin-backed view and verified candidate capsules together.
+///
+/// Candidates must be bound to the captured root by the caller. Base and candidate
+/// packs share intake limits and external-delta ordering; no catalog bodies are read.
+pub async fn install_git_packs_with_candidates_from_store(
+    view: &CapsuleRepositoryView,
+    candidates: &[Capsule],
+    router: &StoreLayout<Store>,
+    git_dir: &Path,
+    max_input_bytes: u64,
+    cache: Option<&crab_cache_store::CachingStore>,
+    cancel: &CancellationToken,
+) -> Result<InstalledGitPacks> {
+    if cancel.is_cancelled() {
+        return Err(ReadError::Cancelled);
+    }
+    // The cold-clone proof covers only the captured view. Candidate packs must
+    // join the same intake and delta-base ordering before anything is installed.
+    if candidates.is_empty()
+        && let Some(installed) = install_layered_cold_clone_packs_from_store(
+            view,
+            router,
+            git_dir,
+            max_input_bytes,
+            cache,
+            cancel,
+        )
+        .await?
     {
         return Ok(installed);
     }
     if view.layered_checkpoint().is_some()
         || (view.capsules.is_empty() && !view.capsule_run_sources.is_empty())
+        || !candidates.is_empty()
     {
+        let capsules = view
+            .capsules
+            .iter()
+            .chain(candidates)
+            .cloned()
+            .collect::<Vec<_>>();
         // Metadata views expose authenticated source ranges before the first
         // checkpoint too. Installing only resident capsules would drop their packs.
         let sources = view
@@ -2176,7 +2211,7 @@ pub async fn install_git_packs_from_store(
         let paths = install_layered_git_packs_from_store_selected_with_sources(
             sources,
             &view.capsule_run_sources,
-            &view.capsules,
+            &capsules,
             router,
             git_dir,
             max_input_bytes,

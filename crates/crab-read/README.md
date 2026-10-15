@@ -66,6 +66,14 @@ metadata's shared file lookup. A lookup loads only its selected file dependency
 closure, preserving the captured publication order and immutable descriptor
 checks. It never substitutes a later catalog or mutable file-index session.
 
+`install_git_packs_with_candidates_from_store` combines a captured view's
+origin-backed packs with verified candidate capsules. Candidates participate
+in the same pack intake limit and external-delta ordering, so protected receive
+can use a paged view without materializing its catalog. The caller binds each
+candidate to the captured root; installation does not grant visibility.
+The existing candidate-free installer delegates to this implementation and
+retains its cold-clone proof and cache behavior.
+
 `ShardHydrator` provides memory, file, and half-open byte-range reconstruction.
 Before full-file reconstruction it checks that the pointer's shard terms are
 covered; after reconstruction it verifies the requested file hash. A shared

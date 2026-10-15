@@ -10,6 +10,19 @@ async fn publish_dependent_blob(
     base: &[u8],
     target: &[u8],
 ) {
+    let (root, capsule) = dependent_blob_capsule(layout, name, base, target).await;
+    let transaction = capsule.transaction().unwrap();
+    crab_write::capsule_protocol::publish(layout, root, &transaction, &capsule)
+        .await
+        .unwrap();
+}
+
+async fn dependent_blob_capsule(
+    layout: &StoreLayout<Store>,
+    name: &str,
+    base: &[u8],
+    target: &[u8],
+) -> (crab_metadata::capsule_protocol::RootSnapshot, Capsule) {
     let kind = gix_object::Kind::Blob;
     let base_oid = crab_remote::objects::object_id(kind, base).unwrap();
     let target_oid = crab_remote::objects::object_id(kind, target).unwrap();
@@ -82,9 +95,111 @@ async fn publish_dependent_blob(
         )],
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(layout, root, &transaction, &capsule)
+    (root, capsule)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn candidate_install_shares_intake_and_resolves_captured_external_bases() {
+    for checkpointed in [false, true] {
+        let (layout, observations) = empty_fixture().await;
+        let base = (0..4096_u32)
+            .flat_map(|ordinal| *blake3::hash(&ordinal.to_le_bytes()).as_bytes())
+            .collect::<Vec<_>>();
+        let mut target = base.clone();
+        for byte in &mut target[..64 * 1024] {
+            *byte ^= 0xa5;
+        }
+        publish_blobs(&layout, &[("base", &base)]).await;
+        if checkpointed {
+            checkpoint(&layout).await;
+        }
+        let root = crab_write::capsule_protocol::open_root(&layout)
+            .await
+            .unwrap();
+        let captured = crab_read::capsule_protocol::open_git_view_from_root(&layout, root, LIMITS)
+            .await
+            .unwrap();
+        let (root, candidate) = dependent_blob_capsule(&layout, "candidate", &base, &target).await;
+        assert_eq!(root.record().digest(), captured.root().digest());
+        let candidate_size = candidate
+            .section_bytes(candidate.git_packs()[0].pack_section())
+            .unwrap()
+            .len() as u64;
+        let base_sizes = captured
+            .layered_checkpoint()
+            .into_iter()
+            .flat_map(|checkpoint| checkpoint.sources())
+            .chain(captured.capsule_run_sources())
+            .flat_map(|source| source.members())
+            .map(|member| (member.pack().blake3().to_owned(), member.pack().length()))
+            .collect::<BTreeMap<_, _>>();
+        let base_size = base_sizes.values().sum::<u64>();
+        let budget = 160 * 1024;
+        assert!(
+            base_size < budget && candidate_size < budget && base_size + candidate_size > budget
+        );
+        let bounded = tempfile::tempdir().unwrap();
+        crab_git::initialize_bare_git_dir(bounded.path()).unwrap();
+        let result = crab_read::capsule_protocol::install_git_packs_with_candidates_from_store(
+            &captured,
+            std::slice::from_ref(&candidate),
+            &layout,
+            bounded.path(),
+            budget,
+            None,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(crab_read::ReadError::CapsuleReadLimit {
+                resource: "Git pack intake",
+                ..
+            })
+        ));
+        let directory = tempfile::tempdir().unwrap();
+        crab_git::initialize_bare_git_dir(directory.path()).unwrap();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        observations.0.lock().unwrap().clear();
+        let result = crab_read::capsule_protocol::install_git_packs_with_candidates_from_store(
+            &captured,
+            std::slice::from_ref(&candidate),
+            &layout,
+            directory.path(),
+            LIMIT,
+            None,
+            &cancelled,
+        )
+        .await;
+        assert!(matches!(result, Err(crab_read::ReadError::Cancelled)));
+        assert!(observations.0.lock().unwrap().is_empty());
+        let installed = crab_read::capsule_protocol::install_git_packs_with_candidates_from_store(
+            &captured,
+            std::slice::from_ref(&candidate),
+            &layout,
+            directory.path(),
+            LIMIT,
+            None,
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
+        assert!(!installed.complete_visibility);
+        let oid = crab_remote::objects::object_id(gix_object::Kind::Blob, &target).unwrap();
+        let output = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(directory.path())
+            .args(["cat-file", "blob", &oid.to_string()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, target);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
