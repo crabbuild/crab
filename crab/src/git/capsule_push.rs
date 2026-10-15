@@ -742,6 +742,15 @@ fn prepare_visibility_delta(
 ) -> Result<Option<crab_metadata::capsule_protocol::CapsuleVisibilityDelta>> {
     let maximum = usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
         .map_err(|_| CrabError::Internal("Git visibility limit does not fit usize".to_owned()))?;
+    let rewritten_old_refs = edits
+        .iter()
+        .filter(|edit| edit.new_oid().is_some() && !fast_forward_refs.contains(edit.ref_name()))
+        .filter_map(|edit| {
+            edit.expected_old()
+                .map(|oid| (edit.ref_name().to_owned(), oid.to_owned()))
+        })
+        .collect();
+    let available_old_tips = locally_available_remote_tips(git_dir, &rewritten_old_refs)?;
     let mut visibility = BTreeMap::new();
     for edit in edits {
         let Some(new_oid) = edit.new_oid() else {
@@ -763,7 +772,8 @@ fn prepare_visibility_delta(
                 Vec::new(),
             )
         } else if let Some(old_oid) = edit.expected_old()
-            && fast_forward_refs.contains(edit.ref_name())
+            && (fast_forward_refs.contains(edit.ref_name())
+                || available_old_tips.iter().any(|tip| tip == old_oid))
         {
             let added = super::push::enumerate_visibility_difference(
                 git_dir,
@@ -772,11 +782,24 @@ fn prepare_visibility_delta(
                 maximum,
             )?
             .ok_or_else(|| visibility_limit_error(edit.ref_name()))?;
+            // Ancestry is already proven by the ref-update decision; old history is
+            // therefore still reachable, so walking `old - new` only repeats that proof.
+            let removed = if fast_forward_refs.contains(edit.ref_name()) {
+                Vec::new()
+            } else {
+                super::push::enumerate_visibility_difference(
+                    git_dir,
+                    old_oid,
+                    Some(new_oid),
+                    maximum.saturating_sub(added.len()),
+                )?
+                .ok_or_else(|| visibility_limit_error(edit.ref_name()))?
+            };
             crab_metadata::git_visibility::GitVisibilityEdit::from_delta_objects(
                 Some(old_oid.to_owned()),
                 new_oid.to_owned(),
                 added,
-                Vec::new(),
+                removed,
             )
         } else {
             // Rewrites may lack the old tip locally. A complete replacement

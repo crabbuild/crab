@@ -2140,7 +2140,8 @@ matched ref lease when receive policy permits rewrites. Stale leases and
 `receive.denyNonFastForwards` still reject; publication retains its expected-old
 conditional transition. Real ancestry-probe errors remain errors.
 
-Proven fast-forwards keep incremental visibility. Other updates publish the
+Proven fast-forwards and rewrites with an available prior tip keep incremental
+visibility. Rewrites lacking that tip publish the
 existing authenticated replacement-closure representation, walking only the
 new tip. This removes old objects from that ref's authorization without reading
 discarded history. Pack generation and LFS publication already exclude only
