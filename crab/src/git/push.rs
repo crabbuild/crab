@@ -11738,7 +11738,7 @@ impl PushPipeline {
             }
 
             while let Some(payloads) = read_plan
-                .read_next(batch_size, XORB_PACK_READ_PAYLOAD_LIMIT)
+                .read_next_bounded(batch_size, XORB_PACK_READ_PAYLOAD_LIMIT)
                 .await?
             {
                 check_cancelled(&self.cancel)?;

@@ -38,6 +38,7 @@
 //! `HashMap` lookups, never across `.await`.
 
 mod add_push_plan;
+mod coalesced_read;
 pub mod config;
 pub mod error;
 mod index;
@@ -67,6 +68,7 @@ mod prop_orphan_sweep_idempotence;
 #[path = "../tests/unit/prop_torn_tail_recovery.rs"]
 mod prop_torn_tail_recovery;
 
+pub use coalesced_read::CoalescedChunkReadPlan;
 pub use config::StagingConfig;
 pub use error::{Result, StagingError};
 pub use metrics::StagingMetrics;
@@ -1367,88 +1369,6 @@ pub(crate) struct StagedChunkLocator {
     pub locator: ChunkLocator,
 }
 
-enum CoalescedChunkAuthority {
-    Segments(Vec<(u64, StagedChunkLocator)>),
-    Prepared(Vec<(u64, MerkleHash, PreparedChunkLocator)>),
-}
-
-/// One bounded residual-read unit. Prepared units contain exactly one source xorb.
-struct CoalescedChunkReadGroup {
-    authority: CoalescedChunkAuthority,
-}
-
-/// Connection-local residual planner backed by SQLite temporary storage.
-///
-/// Appends are bounded by the caller's recipe page. Reads remove one bounded
-/// segment batch or one complete prepared source xorb at a time.
-pub struct CoalescedChunkReadPlan<'a> {
-    staging: &'a StagingAreaReadOnly,
-    next_sequence: u64,
-}
-
-impl CoalescedChunkReadPlan<'_> {
-    /// Append a bounded request page with an opaque caller context per chunk.
-    pub fn append(&mut self, requests: &[(MerkleHash, u64, u64)]) -> Result<()> {
-        let mut indexed = Vec::with_capacity(requests.len());
-        for (hash, size, context) in requests {
-            indexed.push((self.next_sequence, <[u8; 32]>::from(*hash), *size, *context));
-            self.next_sequence = self.next_sequence.checked_add(1).ok_or_else(|| {
-                StagingError::StagingCorrupt("residual request sequence overflow".to_owned())
-            })?;
-        }
-        lock_index(&self.staging.index)?.append_coalesced_read_requests(&indexed)
-    }
-
-    /// Read and remove the next bounded residual group.
-    pub async fn read_next(
-        &self,
-        max_segment_chunks: usize,
-        max_segment_bytes: u64,
-    ) -> Result<Option<Vec<(u64, MerkleHash, Bytes)>>> {
-        let group = lock_index(&self.staging.index)?
-            .take_coalesced_read_group(max_segment_chunks, max_segment_bytes)?
-            .map(|group| match group {
-                IndexedCoalescedReadGroup::Segments(chunks) => CoalescedChunkReadGroup {
-                    authority: CoalescedChunkAuthority::Segments(
-                        chunks
-                            .into_iter()
-                            .map(|(context, chunk)| (context, StagedChunkLocator::from(chunk)))
-                            .collect(),
-                    ),
-                },
-                IndexedCoalescedReadGroup::Prepared(chunks) => CoalescedChunkReadGroup {
-                    authority: CoalescedChunkAuthority::Prepared(
-                        chunks
-                            .into_iter()
-                            .map(|(context, hash, locator)| {
-                                (context, MerkleHash::from(hash), locator)
-                            })
-                            .collect(),
-                    ),
-                },
-            });
-        match group {
-            Some(group) => read_coalesced_chunk_group(
-                &self.staging.root,
-                &self.staging.readers,
-                self.staging.metrics.as_deref(),
-                group,
-            )
-            .await
-            .map(Some),
-            None => Ok(None),
-        }
-    }
-}
-
-impl Drop for CoalescedChunkReadPlan<'_> {
-    fn drop(&mut self) {
-        if let Ok(index) = lock_index(&self.staging.index) {
-            let _ = index.clear_coalesced_read_plan();
-        }
-    }
-}
-
 struct IndexedPreparedXorbStatsRef {
     payload_hash: [u8; 32],
     bytes: u64,
@@ -1539,6 +1459,74 @@ async fn read_staged_chunks_batch(
 
 type PreparedXorbIdentity = ([u8; 32], [u8; 32], u64);
 
+fn load_prepared_source(file: File, identity: PreparedXorbIdentity) -> Result<XorbParser> {
+    let (xorb_hash, payload_hash, expected_bytes) = identity;
+    if expected_bytes > MAX_XORB_SIZE as u64 {
+        return Err(StagingError::StagingCorrupt(format!(
+            "prepared xorb {} declares {expected_bytes} bytes above the {MAX_XORB_SIZE}-byte format bound",
+            MerkleHash::from(xorb_hash).hex()
+        )));
+    }
+    let file_bytes = file.metadata()?.len();
+    if file_bytes != expected_bytes {
+        return Err(StagingError::StagingCorrupt(format!(
+            "prepared xorb {} payload changed: expected {expected_bytes} bytes, found {file_bytes} bytes",
+            MerkleHash::from(xorb_hash).hex()
+        )));
+    }
+    let capacity = usize::try_from(expected_bytes).map_err(|_| {
+        StagingError::StagingCorrupt(format!(
+            "prepared xorb {} size does not fit memory",
+            MerkleHash::from(xorb_hash).hex()
+        ))
+    })?;
+    let mut payload = Vec::with_capacity(capacity);
+    file.take(expected_bytes.saturating_add(1))
+        .read_to_end(&mut payload)?;
+    let payload = Bytes::from(payload);
+    let actual_payload_hash = blake3::hash(&payload);
+    let size_matches = u64::try_from(payload.len()) == Ok(expected_bytes);
+    let hash_matches = *actual_payload_hash.as_bytes() == payload_hash;
+    if !size_matches || !hash_matches {
+        return Err(StagingError::StagingCorrupt(format!(
+            "prepared xorb {} payload changed: expected {} bytes/{}, found {} bytes/{} (size_matches={size_matches}, hash_matches={hash_matches})",
+            MerkleHash::from(xorb_hash).hex(),
+            expected_bytes,
+            MerkleHash::from(payload_hash).hex(),
+            payload.len(),
+            actual_payload_hash.to_hex()
+        )));
+    }
+    let parser = XorbParser::parse(payload)?;
+    if parser.hash() != MerkleHash::from(xorb_hash) {
+        return Err(StagingError::StagingCorrupt(format!(
+            "prepared xorb {} metadata hash changed",
+            MerkleHash::from(xorb_hash).hex()
+        )));
+    }
+    parser.verify_payload_digest()?;
+
+    Ok(parser)
+}
+
+fn decode_prepared_chunk(
+    parser: &XorbParser,
+    expected_hash: MerkleHash,
+    chunk_index: u32,
+    expected_size: u32,
+) -> Result<Bytes> {
+    let chunk = parser.get_chunk(chunk_index)?;
+    if chunk.hash != expected_hash || chunk.data.len() != expected_size as usize {
+        return Err(StagingError::StagingCorrupt(format!(
+            "prepared xorb chunk {} does not match its indexed placement",
+            expected_hash.hex()
+        )));
+    }
+    // Raw chunks can share the encoded body. Detach each result so a consumed
+    // batch cannot retain old source bodies while the caller packs another one.
+    Ok(Bytes::copy_from_slice(&chunk.data))
+}
+
 async fn read_prepared_staged_chunks_batch(
     root: &Path,
     metrics: Option<&dyn StagingMetrics>,
@@ -1568,59 +1556,17 @@ async fn read_prepared_staged_chunks_batch(
                     MerkleHash::from(xorb_hash).hex()
                 )));
             }
-            let file = File::open(&path)?;
-            let file_bytes = file.metadata()?.len();
-            if file_bytes != expected_bytes {
-                return Err(StagingError::StagingCorrupt(format!(
-                    "prepared xorb {} payload changed: expected {expected_bytes} bytes, found {file_bytes} bytes",
-                    MerkleHash::from(xorb_hash).hex()
-                )));
-            }
-            let capacity = usize::try_from(expected_bytes).map_err(|_| {
-                StagingError::StagingCorrupt(format!(
-                    "prepared xorb {} size does not fit memory",
-                    MerkleHash::from(xorb_hash).hex()
-                ))
-            })?;
-            let mut payload = Vec::with_capacity(capacity);
-            file.take(expected_bytes.saturating_add(1))
-                .read_to_end(&mut payload)?;
-            let payload = Bytes::from(payload);
-            let actual_payload_hash = blake3::hash(&payload);
-            let size_matches = u64::try_from(payload.len()) == Ok(expected_bytes);
-            let hash_matches = *actual_payload_hash.as_bytes() == payload_hash;
-            if !size_matches || !hash_matches {
-                return Err(StagingError::StagingCorrupt(format!(
-                    "prepared xorb {} payload changed: expected {} bytes/{}, found {} bytes/{} (size_matches={size_matches}, hash_matches={hash_matches})",
-                    MerkleHash::from(xorb_hash).hex(),
-                    expected_bytes,
-                    MerkleHash::from(payload_hash).hex(),
-                    payload.len(),
-                    actual_payload_hash.to_hex()
-                )));
-            }
-            let parser = XorbParser::parse(payload)?;
-            if parser.hash() != MerkleHash::from(xorb_hash) {
-                return Err(StagingError::StagingCorrupt(format!(
-                    "prepared xorb {} metadata hash changed",
-                    MerkleHash::from(xorb_hash).hex()
-                )));
-            }
-            parser.verify_payload_digest()?;
+            let parser = load_prepared_source(
+                File::open(&path)?,
+                (xorb_hash, payload_hash, expected_bytes),
+            )?;
 
             let mut decoded = Vec::with_capacity(wanted.len());
             for (position, expected_hash, chunk_index, expected_size) in wanted {
-                let chunk = parser.get_chunk(chunk_index)?;
-                if chunk.hash != expected_hash || chunk.data.len() != expected_size as usize {
-                    return Err(StagingError::StagingCorrupt(format!(
-                        "prepared xorb chunk {} does not match its indexed placement",
-                        expected_hash.hex()
-                    )));
-                }
-                // Parser chunks are slices of the full serialized xorb. The
-                // caller can retain this batch while packing other sources,
-                // so detach each requested chunk before dropping the parser.
-                decoded.push((position, Bytes::copy_from_slice(&chunk.data)));
+                decoded.push((
+                    position,
+                    decode_prepared_chunk(&parser, expected_hash, chunk_index, expected_size)?,
+                ));
             }
             Ok::<_, StagingError>((expected_bytes, decoded))
         });
@@ -1638,62 +1584,6 @@ async fn read_prepared_staged_chunks_batch(
         out.append(&mut decoded);
     }
     Ok(out)
-}
-
-async fn read_coalesced_chunk_group(
-    root: &Path,
-    readers: &ReaderPool,
-    metrics: Option<&dyn StagingMetrics>,
-    group: CoalescedChunkReadGroup,
-) -> Result<Vec<(u64, MerkleHash, Bytes)>> {
-    match group.authority {
-        CoalescedChunkAuthority::Segments(chunks) => {
-            let locators = chunks
-                .iter()
-                .map(|(_, locator)| *locator)
-                .collect::<Vec<_>>();
-            let payloads = read_located_staged_chunks_batch(
-                pin_segment_read_groups(readers, &locators)?,
-                metrics,
-                &locators,
-            )
-            .await?;
-            Ok(chunks
-                .into_iter()
-                .zip(payloads)
-                .map(|((position, locator), (_, payload))| (position, locator.hash, payload))
-                .collect())
-        }
-        CoalescedChunkAuthority::Prepared(chunks) => {
-            let contexts = chunks
-                .iter()
-                .map(|(context, _, _)| *context)
-                .collect::<Vec<_>>();
-            let indexed = chunks
-                .into_iter()
-                .enumerate()
-                .map(|(position, (_, hash, locator))| (position, hash, locator))
-                .collect::<Vec<_>>();
-            Ok(read_prepared_staged_chunks_batch(root, metrics, &indexed)
-                .await?
-                .into_iter()
-                .map(|(position, payload)| {
-                    indexed
-                        .get(position)
-                        .and_then(|(_, hash, _)| {
-                            contexts
-                                .get(position)
-                                .map(|context| (*context, *hash, payload))
-                        })
-                        .ok_or_else(|| {
-                            StagingError::Internal(
-                                "prepared read returned an unknown position".to_owned(),
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>>>()?)
-        }
-    }
 }
 
 async fn verify_pending_recipe_payload(
@@ -3927,11 +3817,7 @@ impl StagingAreaReadOnly {
 
     /// Begin one disk-backed residual plan for bounded recipe-page appends.
     pub fn begin_coalesced_chunk_read_plan(&self) -> Result<CoalescedChunkReadPlan<'_>> {
-        lock_index(&self.index)?.begin_coalesced_read_plan()?;
-        Ok(CoalescedChunkReadPlan {
-            staging: self,
-            next_sequence: 0,
-        })
+        CoalescedChunkReadPlan::new(self)
     }
 
     /// Check if a chunk exists in staging.
@@ -5464,8 +5350,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn prepared_residual_plan_reads_each_unique_source_once() {
+    async fn prepared_residual_fixture() -> (tempfile::TempDir, Vec<(MerkleHash, Vec<u8>)>, Bytes) {
         let chunks = (0..8)
             .map(|index| make_chunk(100 + index, 4096))
             .collect::<Vec<_>>();
@@ -5536,6 +5421,16 @@ mod tests {
                 .expect("remove pending segment authority");
         }
 
+        (tmp, chunks, xorb_bytes)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prepared_residual_plan_reads_each_unique_source_once() {
+        let (tmp, chunks, xorb_bytes) = prepared_residual_fixture().await;
+        let chunk_pairs = chunks
+            .iter()
+            .map(|(hash, data)| (*hash, data.len() as u64))
+            .collect::<Vec<_>>();
         let metrics = Arc::new(CountingMetrics::default());
         let mut staging = StagingAreaReadOnly::open(tmp.path().to_path_buf())
             .await
@@ -5572,6 +5467,132 @@ mod tests {
             (1, xorb_bytes.len() as u64, 1),
             "the complete prepared source is opened once under a one-reader bound"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bounded_prepared_reads_detach_batches_and_reopen_after_drop() {
+        let (tmp, chunks, xorb_bytes) = prepared_residual_fixture().await;
+        let metrics = Arc::new(CountingMetrics::default());
+        let mut staging = StagingAreaReadOnly::open(tmp.path().to_owned())
+            .await
+            .unwrap();
+        staging.set_metrics(metrics.clone());
+        for stop_early in [true, false] {
+            let mut plan = staging.begin_coalesced_chunk_read_plan().unwrap();
+            let requests = chunks
+                .iter()
+                .map(|(hash, data)| (*hash, data.len() as u64, 7))
+                .collect::<Vec<_>>();
+            plan.append(&requests).unwrap();
+            let mut actual = Vec::new();
+            let mut batch_sizes = Vec::new();
+            while let Some(batch) = plan.read_next_bounded(2, 8192).await.unwrap() {
+                batch_sizes.push(batch.len());
+                for (context, hash, data) in batch {
+                    assert_eq!(context, 7);
+                    assert!(
+                        data.is_unique(),
+                        "decoded batches cannot retain the source allocation"
+                    );
+                    actual.push((hash, data.to_vec()));
+                }
+                if stop_early {
+                    break;
+                }
+            }
+            if !stop_early {
+                assert_eq!((batch_sizes, actual), (vec![2; 4], chunks.clone()));
+            }
+        }
+        assert_eq!(
+            metrics.prepared_source_counts(),
+            (2, 2 * xorb_bytes.len() as u64, 1)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bounded_prepared_reads_reject_changed_payload_before_returning_chunks() {
+        let (tmp, chunks, _) = prepared_residual_fixture().await;
+        let staging = StagingAreaReadOnly::open(tmp.path().to_owned())
+            .await
+            .unwrap();
+        let mut plan = staging.begin_coalesced_chunk_read_plan().unwrap();
+        plan.append(&[(chunks[0].0, chunks[0].1.len() as u64, 0)])
+            .unwrap();
+        let files = std::fs::read_dir(tmp.path().join("push-plans/payloads"))
+            .unwrap()
+            .flat_map(|directory| std::fs::read_dir(directory.unwrap().path()).unwrap())
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 1);
+        let mut bytes = std::fs::read(&files[0]).unwrap();
+        bytes[0] ^= 1;
+        std::fs::write(&files[0], bytes).unwrap();
+        assert!(matches!(
+            plan.read_next_bounded(2, 8192).await,
+            Err(StagingError::StagingCorrupt(_))
+        ));
+    }
+
+    #[test]
+    fn cancelled_bounded_read_resumes_its_queued_source() {
+        use std::future::{Future, poll_fn};
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (tmp, chunks, _) = runtime.block_on(prepared_residual_fixture());
+        let staging = runtime
+            .block_on(StagingAreaReadOnly::open(tmp.path().to_owned()))
+            .unwrap();
+        let mut plan = staging.begin_coalesced_chunk_read_plan().unwrap();
+        let requests = chunks
+            .iter()
+            .map(|(hash, data)| (*hash, data.len() as u64, 0))
+            .collect::<Vec<_>>();
+        plan.append(&requests).unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (ready, started) = std::sync::mpsc::channel();
+        let blocker = runtime.handle().spawn_blocking(move || {
+            ready.send(()).unwrap();
+            let _ = wait.recv();
+        });
+        started.recv().unwrap();
+        runtime.block_on(async {
+            // Keep verification queued so cancellation occurs after source
+            // ownership is captured and before its worker can return a batch.
+            let mut read = Box::pin(plan.read_next_bounded(2, 8192));
+            poll_fn(|cx| {
+                assert!(read.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            drop(read);
+            #[cfg(unix)]
+            for directory in std::fs::read_dir(tmp.path().join("push-plans/payloads")).unwrap() {
+                for entry in std::fs::read_dir(directory.unwrap().path()).unwrap() {
+                    std::fs::remove_file(entry.unwrap().path()).unwrap();
+                }
+            }
+            release.send(()).unwrap();
+            let mut actual = Vec::new();
+            while let Some(batch) = plan.read_next_bounded(1, 4096).await.unwrap() {
+                assert_eq!(
+                    batch.len(),
+                    1,
+                    "resuming with a smaller budget must bound the queued result"
+                );
+                actual.extend(
+                    batch
+                        .into_iter()
+                        .map(|(_, hash, data)| (hash, data.to_vec())),
+                );
+            }
+            assert_eq!(actual, chunks);
+            blocker.await.unwrap();
+        });
     }
 
     fn insert_extra_prepared_xorb_row(
