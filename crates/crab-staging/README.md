@@ -79,8 +79,15 @@ fresh staging root and restaging, rather than an implicit compatibility reader.
 Native add owns its batches until its Git-index transaction succeeds or rolls
 back. Git-clean cannot acknowledge Git's subsequent index replacement. It
 instead delegates a complete verified lease after payload flush, before returning
-a pointer. Native `--defer` delegates the same way. Delegation does not create a
-published path head. Push discovers pointers in selected Git history, loads only
+a pointer. Native `--defer` delegates the same way. Delegation freezes the
+completed batch and requires all of its paths to be handed off, with no active
+preparation. It does not create a published path head.
+Explicit staging maintenance holds Git's index lock, checks bounded pointer
+blobs and publishes only batches whose every path matches the index. A missing
+or different index entry retains its lease, including native `--defer` work and
+older unpushed history. Publication consumes its delegation markers atomically.
+
+Push discovers pointers in selected Git history, loads only
 their published or delegated recipes, then captures exact eligible leases.
 Retirement releases only captured owners after remote publication; newer handoffs
 and active native transactions survive. Publishing a newer head never cancels

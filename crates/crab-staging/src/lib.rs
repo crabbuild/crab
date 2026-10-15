@@ -165,6 +165,15 @@ pub struct PublicationIntentEntry {
     pub previous_index_state: String,
 }
 
+/// Immutable external lease identity for Git-aware maintenance recovery.
+#[derive(Debug, Clone)]
+pub struct DelegatedPublication {
+    pub batch_id: StagingBatchId,
+    pub path_bytes: Vec<u8>,
+    pub file_hash: MerkleHash,
+    pub size: u64,
+}
+
 /// Durable unresolved publication state returned for product-layer recovery.
 #[derive(Debug, Clone)]
 pub struct UnresolvedPublicationIntent {
@@ -2626,7 +2635,8 @@ impl StagingArea {
 
     /// Persist a completed lease handoff without claiming that Git accepted it.
     ///
-    /// Payloads must already be flushed. Delegation excludes subsequent native
+    /// Payloads must already be flushed, and every path in a batch must be handed off.
+    /// Delegation freezes batch membership and excludes subsequent native
     /// index intents; an observed Git pointer permits push snapshot capture.
     pub fn delegate_publication(&self, entries: &[(&StagingBatchId, &Path)]) -> Result<()> {
         let entries = entries
@@ -2634,6 +2644,11 @@ impl StagingArea {
             .map(|(batch, path)| (batch.as_str().to_owned(), staging_path_bytes(path)))
             .collect::<Vec<_>>();
         lock_index(&self.index)?.delegate_publication(&entries)
+    }
+
+    /// List immutable delegated leases for explicit maintenance reconciliation.
+    pub fn delegated_publications(&self) -> Result<Vec<DelegatedPublication>> {
+        lock_index(&self.index)?.delegated_publications()
     }
 
     /// Mark a batch as published after its Git index replacement commits.
@@ -2830,7 +2845,10 @@ impl StagingArea {
 
     /// Return the ordered list of chunk hashes staged for a given file.
     pub fn chunks_for_file(&self, file_hash: &MerkleHash) -> Result<Vec<MerkleHash>> {
-        if let Some(recipe) = self.published_recipe_for_file(file_hash)? {
+        // Ordered occurrence visibility follows retained versions, including
+        // native/delegated preparations. It does not attest Git publication.
+        let recipe = lock_index(&self.index)?.retained_recipe_for_file(&(*file_hash).into())?;
+        if let Some(recipe) = recipe {
             return collect_recipe_chunks(&self.index, &recipe)
                 .map(|chunks| chunks.into_iter().map(|(hash, _)| hash).collect());
         }
@@ -2844,7 +2862,10 @@ impl StagingArea {
         &self,
         file_hash: &MerkleHash,
     ) -> Result<Vec<(MerkleHash, u64)>> {
-        if let Some(recipe) = self.published_recipe_for_file(file_hash)? {
+        // Ordered occurrence visibility follows retained versions, including
+        // native/delegated preparations. It does not attest Git publication.
+        let recipe = lock_index(&self.index)?.retained_recipe_for_file(&(*file_hash).into())?;
+        if let Some(recipe) = recipe {
             return collect_recipe_chunks(&self.index, &recipe);
         }
         let fh: [u8; 32] = (*file_hash).into();
@@ -3845,7 +3866,10 @@ impl StagingAreaReadOnly {
 
     /// Return the ordered list of chunk hashes staged for a given file.
     pub fn chunks_for_file(&self, file_hash: &MerkleHash) -> Result<Vec<MerkleHash>> {
-        if let Some(recipe) = self.published_recipe_for_file(file_hash)? {
+        // Ordered occurrence visibility follows retained versions, including
+        // native/delegated preparations. It does not attest Git publication.
+        let recipe = lock_index(&self.index)?.retained_recipe_for_file(&(*file_hash).into())?;
+        if let Some(recipe) = recipe {
             return collect_recipe_chunks(&self.index, &recipe)
                 .map(|chunks| chunks.into_iter().map(|(hash, _)| hash).collect());
         }
@@ -3859,7 +3883,10 @@ impl StagingAreaReadOnly {
         &self,
         file_hash: &MerkleHash,
     ) -> Result<Vec<(MerkleHash, u64)>> {
-        if let Some(recipe) = self.published_recipe_for_file(file_hash)? {
+        // Ordered occurrence visibility follows retained versions, including
+        // native/delegated preparations. It does not attest Git publication.
+        let recipe = lock_index(&self.index)?.retained_recipe_for_file(&(*file_hash).into())?;
+        if let Some(recipe) = recipe {
             return collect_recipe_chunks(&self.index, &recipe);
         }
         let fh: [u8; 32] = (*file_hash).into();

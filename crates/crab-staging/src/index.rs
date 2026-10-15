@@ -20,12 +20,13 @@ type ResidualAuthorityRow = (i64, Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>)
 
 /// Version 3 records leases handed to an external Git publisher.
 const LAYOUT_VERSION: &str = "3";
-const PUBLISHED_RECIPE_LOOKUP_BATCH_SIZE: usize = 512;
+const RECIPE_LOOKUP_BATCH_SIZE: usize = 512;
 
 #[derive(Clone, Copy)]
 enum RecipeOwner {
     Published,
     External,
+    Retained,
 }
 
 const CANONICAL_TABLES: &[&str] = &[
@@ -310,11 +311,12 @@ fn validate_chunk_index(expected: usize, actual: i64) -> Result<()> {
     Ok(())
 }
 
-fn ensure_recording_batch_open(
+fn ensure_batch_mutable(
     tx: &rusqlite::Transaction<'_>,
     batch_id: &str,
     operation: &str,
 ) -> Result<()> {
+    ensure_batch_not_delegated(tx, batch_id, operation)?;
     let batch_is_open: bool = tx
         .query_row(
             "SELECT EXISTS(
@@ -335,6 +337,24 @@ fn ensure_recording_batch_open(
     Err(StagingError::NotFound {
         path: format!("open staging batch {batch_id}"),
     })
+}
+
+fn ensure_batch_not_delegated(
+    tx: &rusqlite::Transaction<'_>,
+    batch_id: &str,
+    operation: &str,
+) -> Result<()> {
+    let delegated: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM external_publications WHERE batch_id = ?1)",
+        params![batch_id],
+        |row| row.get(0),
+    )?;
+    if delegated {
+        return Err(StagingError::StagingCorrupt(format!(
+            "{operation} cannot mutate delegated batch {batch_id}"
+        )));
+    }
+    Ok(())
 }
 
 fn publication_intent_batch_ids(
@@ -2355,6 +2375,7 @@ impl Index {
                    AND EXISTS (
                            SELECT 1 FROM staging_batches
                            WHERE batch_id = ?2 AND state = 'open'
+                             AND NOT EXISTS (SELECT 1 FROM external_publications WHERE batch_id = ?2)
                        )",
                 params![preparation_id, batch_id],
             )
@@ -2390,6 +2411,7 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|error| {
             StagingError::Internal(format!("failed to begin prepared claim batch: {error}"))
         })?;
+        ensure_batch_not_delegated(&tx, batch_id, "prepared authority")?;
         let valid_owner: bool = tx
             .query_row(
                 "SELECT EXISTS(
@@ -2652,6 +2674,7 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|error| {
             StagingError::Internal(format!("failed to begin prepared payload seal: {error}"))
         })?;
+        ensure_batch_not_delegated(&tx, owner_batch_id, "prepared authority")?;
         let recording: bool = tx
             .query_row(
                 "SELECT EXISTS(
@@ -3190,7 +3213,7 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|e| {
             StagingError::Internal(format!("failed to begin recipe recording append: {e}"))
         })?;
-        ensure_recording_batch_open(&tx, batch_id, "recipe")?;
+        ensure_batch_mutable(&tx, batch_id, "recipe")?;
         Self::append_recipe_recording_terms_in_tx(
             &tx,
             batch_id,
@@ -3484,7 +3507,7 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|error| {
             StagingError::Internal(format!("failed to begin recording batch append: {error}"))
         })?;
-        ensure_recording_batch_open(&tx, batch_id, "combined")?;
+        ensure_batch_mutable(&tx, batch_id, "combined")?;
         Self::append_recording_remote_chunks_in_tx(&tx, batch_id, remote_chunks)?;
         Self::append_recipe_recording_terms_in_tx(
             &tx,
@@ -3590,6 +3613,10 @@ impl Index {
             params![batch_id],
         )
         .map_err(|e| StagingError::Internal(format!("failed to replace path heads: {e}")))?;
+        tx.execute(
+            "DELETE FROM external_publications WHERE batch_id = ?1",
+            params![batch_id],
+        )?;
         // A new head cannot cancel another active caller or external writer.
         // Supersede only published leases; open owners release themselves.
         tx.execute(
@@ -3723,6 +3750,10 @@ impl Index {
                     JOIN staging_batches AS batch USING (batch_id)
                     JOIN verified_recipes USING (recipe_hash)
                     WHERE lease.batch_id = ?1 AND lease.path_bytes = ?2 AND batch.state = 'open'
+                      AND NOT EXISTS (SELECT 1 FROM recipe_recording_terms AS term WHERE term.batch_id = lease.batch_id)
+                      AND NOT EXISTS (SELECT 1 FROM recording_remote_chunks AS remote WHERE remote.batch_id = lease.batch_id)
+                      AND NOT EXISTS (SELECT 1 FROM add_preparation_batches AS preparation
+                                      WHERE preparation.batch_id = lease.batch_id)
                       AND NOT EXISTS (SELECT 1 FROM publication_intent_entries AS intent
                                       WHERE intent.batch_id = lease.batch_id)
                 )",
@@ -3731,15 +3762,94 @@ impl Index {
             )?;
             if !ready {
                 return Err(StagingError::StagingCorrupt(
-                    "external publication requires a verified open lease without a native intent"
+                    "external publication requires a complete verified batch without an active native publisher"
                         .to_owned(),
                 ));
             }
             tx.execute("INSERT OR IGNORE INTO external_publications (batch_id, path_bytes) VALUES (?1, ?2)",
                 params![batch_id, path_bytes])?;
         }
+        for batch_id in entries
+            .iter()
+            .map(|(batch, _)| batch)
+            .collect::<std::collections::HashSet<_>>()
+        {
+            let incomplete: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM path_leases AS lease
+                 WHERE lease.batch_id = ?1 AND NOT EXISTS (
+                     SELECT 1 FROM external_publications AS external
+                     WHERE external.batch_id = lease.batch_id AND external.path_bytes = lease.path_bytes
+                 ))",
+                params![batch_id], |row| row.get(0),
+            )?;
+            if incomplete {
+                return Err(StagingError::StagingCorrupt(
+                    "delegation must hand off every completed path in a batch".to_owned(),
+                ));
+            }
+        }
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn delegated_publications(&self) -> Result<Vec<super::DelegatedPublication>> {
+        let invalid: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM external_publications AS external
+             JOIN staging_batches AS batch USING (batch_id)
+             WHERE batch.state = 'open' AND (
+                 EXISTS (SELECT 1 FROM recipe_recording_terms AS term WHERE term.batch_id = external.batch_id) OR
+                 EXISTS (SELECT 1 FROM recording_remote_chunks AS remote WHERE remote.batch_id = external.batch_id) OR
+                 EXISTS (SELECT 1 FROM add_preparation_batches AS preparation
+                         WHERE preparation.batch_id = external.batch_id) OR
+                 NOT EXISTS (
+                     SELECT 1 FROM path_leases AS lease JOIN verified_recipes USING (recipe_hash)
+                     JOIN file_recipes AS recipe USING (recipe_hash)
+                     WHERE lease.batch_id = external.batch_id AND lease.path_bytes = external.path_bytes
+                       AND lease.file_hash = recipe.file_hash
+                 ) OR EXISTS (
+                     SELECT 1 FROM path_leases AS lease WHERE lease.batch_id = external.batch_id
+                     AND NOT EXISTS (SELECT 1 FROM external_publications AS sibling
+                         WHERE sibling.batch_id = lease.batch_id AND sibling.path_bytes = lease.path_bytes)
+                 )
+             ))", [], |row| row.get(0),
+        )?;
+        if invalid {
+            return Err(StagingError::StagingCorrupt(
+                "incomplete delegated batch ownership".to_owned(),
+            ));
+        }
+        let mut statement = self.conn.prepare_cached(
+            "SELECT lease.batch_id, lease.path_bytes, lease.file_hash, recipe.file_size
+             FROM external_publications AS external
+             JOIN path_leases AS lease
+               ON lease.batch_id = external.batch_id AND lease.path_bytes = external.path_bytes
+             JOIN staging_batches AS batch ON batch.batch_id = lease.batch_id
+             JOIN file_recipes AS recipe USING (recipe_hash)
+             JOIN verified_recipes USING (recipe_hash)
+             WHERE batch.state = 'open'
+             ORDER BY lease.batch_id, lease.path_bytes",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (batch_id, path_bytes, file_hash, size) = row?;
+            Ok(super::DelegatedPublication {
+                batch_id: super::StagingBatchId(batch_id),
+                path_bytes,
+                file_hash: crab_xet::hash::MerkleHash::from(decode_hash_blob(
+                    "delegated file hash",
+                    file_hash,
+                )?),
+                size: nonnegative_count("delegated file size", size)?,
+            })
+        })
+        .collect()
     }
 
     pub fn create_publication_intent(
@@ -4130,13 +4240,22 @@ impl Index {
         self.recipes_for_files(file_hashes, RecipeOwner::External)
     }
 
+    pub fn retained_recipe_for_file(
+        &self,
+        file_hash: &[u8; 32],
+    ) -> Result<Option<crate::recipe::FileRecipe>> {
+        let mut recipes =
+            self.recipes_for_files(std::slice::from_ref(file_hash), RecipeOwner::Retained)?;
+        Ok(recipes.remove(file_hash).flatten())
+    }
+
     fn recipes_for_files(
         &self,
         file_hashes: &[[u8; 32]],
         owner: RecipeOwner,
     ) -> Result<HashMap<[u8; 32], Option<crate::recipe::FileRecipe>>> {
         let mut recipes = HashMap::with_capacity(file_hashes.len());
-        for batch in file_hashes.chunks(PUBLISHED_RECIPE_LOOKUP_BATCH_SIZE) {
+        for batch in file_hashes.chunks(RECIPE_LOOKUP_BATCH_SIZE) {
             for file_hash in batch {
                 recipes.entry(*file_hash).or_insert(None);
             }
@@ -4146,12 +4265,12 @@ impl Index {
                     Some(Some(prior)) if prior == &recipe => {}
                     Some(Some(_)) => {
                         return Err(StagingError::StagingCorrupt(
-                            "one file hash has conflicting published recipes".to_owned(),
+                            "one file hash has conflicting stored recipes".to_owned(),
                         ));
                     }
                     None => {
                         return Err(StagingError::StagingCorrupt(
-                            "published recipe query returned an unexpected file hash".to_owned(),
+                            "stored recipe query returned an unexpected file hash".to_owned(),
                         ));
                     }
                 }
@@ -4177,6 +4296,16 @@ impl Index {
                  JOIN staging_batches AS batch USING (batch_id)
                  WHERE batch.state = 'published'"
             }
+            RecipeOwner::Retained => {
+                "WHERE (EXISTS (SELECT 1 FROM path_leases AS lease
+                               WHERE lease.file_hash = recipe.file_hash
+                                 AND lease.recipe_hash = recipe.recipe_hash)
+                     OR EXISTS (SELECT 1 FROM push_snapshots AS snapshot
+                                WHERE snapshot.state IN ('open', 'committed')
+                                  AND EXISTS (SELECT 1 FROM push_snapshot_recipes AS pin
+                                      WHERE pin.snapshot_id = snapshot.snapshot_id
+                                        AND pin.recipe_hash = recipe.recipe_hash)))"
+            }
             RecipeOwner::External => {
                 "JOIN path_leases AS lease USING (recipe_hash)
                  JOIN external_publications AS external
@@ -4196,7 +4325,7 @@ impl Index {
              ORDER BY recipe.file_hash, recipe.recipe_hash"
         );
         let mut statement = self.conn.prepare_cached(&query).map_err(|e| {
-            StagingError::Internal(format!("failed to prepare published recipe query: {e}"))
+            StagingError::Internal(format!("failed to prepare stored recipe query: {e}"))
         })?;
         let rows = statement
             .query_map(
@@ -4214,10 +4343,10 @@ impl Index {
                     ))
                 },
             )
-            .map_err(|e| StagingError::Internal(format!("failed to query published recipes: {e}")))?
+            .map_err(|e| StagingError::Internal(format!("failed to query stored recipes: {e}")))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| {
-                StagingError::Internal(format!("failed to collect published recipes: {e}"))
+                StagingError::Internal(format!("failed to collect stored recipes: {e}"))
             })?;
 
         let mut recipes = Vec::with_capacity(rows.len());
@@ -4232,8 +4361,8 @@ impl Index {
             policy_id,
         ) in rows
         {
-            let file_hash = decode_hash_blob("published recipe file hash", raw_file_hash)?;
-            let stored_recipe_hash = decode_hash_blob("published recipe hash", raw_recipe_hash)?;
+            let file_hash = decode_hash_blob("stored recipe file hash", raw_file_hash)?;
+            let stored_recipe_hash = decode_hash_blob("stored recipe hash", raw_recipe_hash)?;
             let recipe = self.load_stored_recipe(
                 &stored_recipe_hash,
                 &file_hash,
@@ -5280,6 +5409,9 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|e| {
             StagingError::Internal(format!("failed to begin recipe lease transaction: {e}"))
         })?;
+        // Delegation seals batch membership. Git-aware recovery can inspect
+        // identities outside this mutex only while those identities stay fixed.
+        ensure_batch_not_delegated(&tx, batch_id, "recipe lease")?;
         tx.execute("DELETE FROM temp.incoming_recipe_occurrences", [])
             .map_err(|e| {
                 StagingError::Internal(format!("failed to clear incoming recipe occurrences: {e}"))
@@ -8929,6 +9061,122 @@ mod tests {
             .expect("batch lookup");
         assert_eq!(recipes.get(&file_hash), Some(&Some(recipe)));
         assert_eq!(recipes.get(&missing_hash), Some(&None));
+    }
+
+    #[test]
+    fn delegation_freezes_recipe_membership_and_recording_terms() {
+        let idx = open_in_memory();
+        let path = b"model.bin";
+        let original = insert_test_recipe_lease(&idx, "original", path, 0x71, 0x72);
+        let replacement = insert_test_recipe_lease(&idx, "replacement", path, 0x73, 0x74);
+        idx.delegate_publication(&[("original".to_owned(), path.to_vec())])
+            .unwrap();
+        let replace = idx.insert_recipe_lease(
+            "original",
+            path,
+            &replacement,
+            RecipeVerification::CallerVerified,
+        );
+        let append = idx.append_recipe_recording_terms(
+            "original",
+            0,
+            0,
+            &[(crab_xet::hash::MerkleHash::from(test_hash(0x74)), 8)],
+        );
+        let leases = idx.delegated_publications().unwrap();
+        assert!(
+            replace.is_err()
+                && append.is_err()
+                && leases.len() == 1
+                && leases[0].file_hash == original.file_hash()
+        );
+    }
+
+    #[test]
+    fn delegation_rejects_unfinished_recording_and_active_preparation() {
+        for preparation in [false, true] {
+            let idx = open_in_memory();
+            let recipe = insert_test_recipe_lease(&idx, "unfinished", b"model", 0x75, 0x76);
+            if preparation {
+                idx.insert_add_preparation("active").unwrap();
+                idx.attach_add_preparation_batch("active", "unfinished")
+                    .unwrap();
+            } else {
+                idx.append_recipe_recording_terms(
+                    "unfinished",
+                    0,
+                    0,
+                    &[(crab_xet::hash::MerkleHash::from(test_hash(0x76)), 8)],
+                )
+                .unwrap();
+            }
+            let handed = idx.delegate_publication(&[("unfinished".to_owned(), b"model".to_vec())]);
+            assert!(
+                handed.is_err()
+                    && idx.delegated_publications().unwrap().is_empty()
+                    && idx.has_file_owner(&recipe.file_hash().into()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn delegation_requires_complete_batch_handoff_and_publication_consumes_markers() {
+        let idx = open_in_memory();
+        let first = insert_test_recipe_lease(&idx, "shared", b"first", 0x81, 0x82);
+        let second = insert_test_recipe_lease(&idx, "source", b"second", 0x83, 0x84);
+        idx.insert_recipe_lease(
+            "shared",
+            b"second",
+            &second,
+            RecipeVerification::CallerVerified,
+        )
+        .unwrap();
+        let partial = idx.delegate_publication(&[("shared".to_owned(), b"first".to_vec())]);
+        assert!(partial.is_err() && idx.delegated_publications().unwrap().is_empty());
+        idx.delegate_publication(&[
+            ("shared".to_owned(), b"first".to_vec()),
+            ("shared".to_owned(), b"second".to_vec()),
+        ])
+        .unwrap();
+        idx.mark_batch_published("shared").unwrap();
+        assert!(
+            idx.delegated_publications().unwrap().is_empty()
+                && idx
+                    .published_recipe_for_file(&first.file_hash().into())
+                    .unwrap()
+                    == Some(first)
+                && idx
+                    .published_recipe_for_file(&second.file_hash().into())
+                    .unwrap()
+                    == Some(second)
+        );
+    }
+
+    #[test]
+    fn delegated_listing_rejects_partial_or_unverified_ownership() {
+        for unverified in [false, true] {
+            let idx = open_in_memory();
+            let recipe = insert_test_recipe_lease(&idx, "shared", b"first", 0x91, 0x92);
+            if unverified {
+                idx.conn
+                    .execute(
+                        "DELETE FROM verified_recipes WHERE recipe_hash = ?1",
+                        params![recipe.hash().as_slice()],
+                    )
+                    .unwrap();
+            } else {
+                idx.insert_recipe_lease(
+                    "shared",
+                    b"second",
+                    &recipe,
+                    RecipeVerification::CallerVerified,
+                )
+                .unwrap();
+            }
+            idx.conn.execute("INSERT INTO external_publications (batch_id, path_bytes) VALUES ('shared', ?1)",
+                params![b"first".as_slice()]).unwrap();
+            assert!(idx.delegated_publications().is_err());
+        }
     }
 
     #[test]

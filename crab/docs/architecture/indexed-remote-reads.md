@@ -1927,3 +1927,57 @@ Clippy passes with the existing unfulfilled-expectation exception. The minimal
 product consumer passes the CI correctness/suspicious lint profile with existing
 warning debt; strict full-CLI lint cleanliness is not claimed. No production Rust
 changes accompany this follow-up test.
+
+### Delegated index acceptance during explicit staging maintenance
+
+A follow-up slice freezes delegated batch membership, rejects unfinished recording
+or preparation ownership, and requires every completed path to be handed off in
+one transaction. It keeps released mutable-open-batch behavior before delegation.
+The maintenance listing rejects partial or unverified ownership instead of
+publishing a subset of an ambiguous batch. Direct publication consumes delegation
+markers in the same transaction that installs canonical path heads.
+
+`crab staging clean` now checks delegated batches under Git's existing immediate
+index lock. It reloads immutable lease identities under that lock and retains the
+lock through promotions. Every batch path must have a regular-file index entry
+whose verified pointer blob matches its file hash and size. Object headers reject
+large raw blobs before loading their body; loaded small blobs are checked against
+their Git object ID and parsed with the shared pointer contract. Gix 0.83.0's
+`find_header` uses gix-odb 0.80.0's fixed loose-header buffer; locked gix-pack 0.70.0
+probes delta headers in 32 bytes. Header inspection does not prove full packed
+base reconstruction cost, and this is explicit maintenance rather than a new
+foreground query. Typed dependency causes are retained. Cancellation drops the
+owned Git lock and preserves batches not yet promoted.
+
+Missing/different entries retain their leases, including native `--defer` work
+and older unpushed history. Current index absence cannot establish that payloads
+are disposable. Full abandoned-handoff reclamation and termination qualification
+remain required; this slice does not add a silent age-based expiry or a ref-tip-only
+history scan. Normal push keeps its selected published/delegated batch lookup.
+
+Proof: the staging library passes 242 tests with one existing manual RSS test
+ignored. The Git-index module passes four tests, including three new real-Git
+cases covering acceptance, held index locks, complete multi-path batches, shared
+native ownership, invalid small blob identities and oversized raw-blob headers.
+The public occurrence regression also passes after the final ownership-query
+change. Consumer checks remain in progress at draft publication. The separate
+qualification worktree and release artifact remain pinned to #566.
+
+The follow-up occurrence audit reproduced `chunks_for_file` returning an empty
+list for a real prepared-only, verified open version: the public readers selected
+only published recipes, then consulted segment rows. The negative receipt is
+`retained-recipe-visibility-negative-r1.log`. Both writable and shared hash/size
+readers now use any retained verified immutable recipe, including native/delegated
+leases and push snapshot pins. Recipe conflicts still fail, and publication/push
+eligibility remains a separate, unchanged query. Unsealed segment enumeration
+keeps its released staging contract. The public regression compares against direct
+CDC, retains repeated occurrences and covers before/after delegation on both
+handle types. The corrected regression passes with snapshot-only retention after batch rollback
+and empty enumeration after the final snapshot release.
+
+The separate #566 release-artifact 10-GiB qualification completed native add and
+initial push, then Git-clean add and commit. Its next push failed with
+`CRAB-E0080`: the pointer file had no staged chunk recipe in publication assembly
+(`crab/src/git/xet_publication.rs`). The failed fixture retains both delegated
+leases. This maintenance/occurrence slice does not resolve that push blocker;
+full alternating-path and cold-reconstruction qualification remains incomplete.
