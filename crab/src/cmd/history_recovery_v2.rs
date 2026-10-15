@@ -462,7 +462,7 @@ async fn prune_history(
         let minimum = chain
             .iter()
             .take(args.keep_last)
-            .last()
+            .next_back()
             .map(|segment| segment.checkpoint().covered_generation());
         if payload.roots_pruned == 0 {
             // Retry capture cleanup after an earlier history CAS committed but

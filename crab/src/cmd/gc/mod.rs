@@ -3240,10 +3240,10 @@ async fn sweep_capsule_objects(
     let checkpoint_prefix = layout.repo_path("v2/checkpoints/");
     let pack_layer_prefix = layout.repo_path("v2/pack-layers/");
     let history_prefix = layout.repo_path("v2/history/");
-    let path_state_prefix = layout.repo_path("metadata/path-state/");
-    let commit_graph_prefix = layout.repo_path("metadata/commit-graph/");
-    let object_index_prefix = layout.repo_path("metadata/git-object-index/");
-    let browse_root_prefix = layout.repo_path("metadata/browse-roots/");
+    let metadata_prefix = layout.repo_path("metadata/");
+    let index_prefixes = ["path-state", "commit-graph", "git-object-index"]
+        .map(|kind| format!("{metadata_prefix}/{kind}/"));
+    let browse_root_prefix = layout.repo_path("v2/browse-roots/");
     let manifests_prefix = layout.repo_path("manifests/");
     let path_state_descriptor_prefix = layout.repo_path("manifests/path-state-");
     let commit_graph_descriptor_prefix = layout.repo_path("manifests/commit-graph-");
@@ -3253,9 +3253,7 @@ async fn sweep_capsule_objects(
         checkpoints,
         pack_layers,
         history,
-        path_state_objects,
-        commit_graph_objects,
-        object_index_objects,
+        metadata_objects,
         browse_root_objects,
         manifests,
     ) = tokio::try_join!(
@@ -3263,16 +3261,19 @@ async fn sweep_capsule_objects(
         store.list_prefix(&checkpoint_prefix),
         store.list_prefix(&pack_layer_prefix),
         store.list_prefix(&history_prefix),
-        store.list_prefix(&path_state_prefix),
-        store.list_prefix(&commit_graph_prefix),
-        store.list_prefix(&object_index_prefix),
+        store.list_prefix(&metadata_prefix),
         store.list_prefix(&browse_root_prefix),
         store.list_prefix(&manifests_prefix),
     )?;
-    let derived_index_objects = path_state_objects
+    // One metadata scan covers derived index bodies. Lifetime roots belong to
+    // protocol control; unrelated metadata never becomes a deletion candidate.
+    let derived_index_objects = metadata_objects
         .into_iter()
-        .chain(commit_graph_objects)
-        .chain(object_index_objects)
+        .filter(|object| {
+            index_prefixes
+                .iter()
+                .any(|prefix| object.location.as_ref().starts_with(prefix))
+        })
         .chain(browse_root_objects)
         .chain(manifests.into_iter().filter(|object| {
             let key = object.location.as_ref();
@@ -3369,8 +3370,8 @@ async fn sweep_capsule_objects(
         }
     }
     Ok(GcOutcome {
-        list_requests: 9,
-        list_parallelism: 9,
+        list_requests: 7,
+        list_parallelism: 7,
         list_wall_seconds: started.elapsed().as_secs_f64(),
         dry_run: args.dry_run,
         ..accounting
