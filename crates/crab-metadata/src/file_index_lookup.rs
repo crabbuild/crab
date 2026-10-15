@@ -1,4 +1,4 @@
-//! Read-only file-index lookup over a repository's SlateDB metadata.
+//! Snapshot-bound file/shard lookup over authenticated repository metadata.
 //!
 //! This Module owns the read Interface for `file_hash -> shard_hash` point
 //! lookups. It does not own metadata writes, CLI error presentation, metrics,
@@ -225,7 +225,6 @@ async fn lookup_committed_record(
 /// closes the underlying SlateDB reader when consumed.
 pub struct FileIndexLookupSession {
     catalog: Option<Arc<crate::capsule_protocol::PointerCatalogLookup>>,
-    static_entries: Option<Arc<HashMap<MerkleHash, MerkleHash>>>,
     reader: Option<Arc<slatedb::DbReader>>,
     anchor: Option<CommittedShardAnchor>,
     storage: crab_storage::Store,
@@ -246,7 +245,6 @@ impl FileIndexLookupSession {
     ) -> Result<Self> {
         Ok(Self {
             catalog: None,
-            static_entries: None,
             reader: None,
             anchor: CommittedShardAnchor::from_snapshot(snapshot)?,
             storage: router.store().clone(),
@@ -310,7 +308,6 @@ impl FileIndexLookupSession {
         let anchor = CommittedShardAnchor::from_snapshot(snapshot)?;
         Ok(Self {
             catalog: None,
-            static_entries: None,
             reader: None,
             anchor,
             storage: router.store().clone(),
@@ -371,7 +368,6 @@ impl FileIndexLookupSession {
         };
         Ok(Self {
             catalog: None,
-            static_entries: None,
             reader: None,
             anchor,
             storage: router.store().clone(),
@@ -393,33 +389,10 @@ impl FileIndexLookupSession {
                 // Only an absent root permits v1 lookup. Missing dependencies
                 // under a verified v2 root must not revive older v1 authority.
                 let catalog =
-                    crate::capsule_protocol::load_pointer_catalog_from_root(&router, &root).await?;
-                let entries = catalog
-                    .files()
-                    .iter()
-                    .map(|(file_hash, entry)| {
-                        Ok((
-                            MerkleHash::from_hex(file_hash).map_err(|error| {
-                                MetadataError::CorruptObject {
-                                    path: "capsule-protocol pointer catalog".to_owned(),
-                                    reason: format!("invalid file hash {file_hash}: {error}"),
-                                }
-                            })?,
-                            MerkleHash::from_hex(entry.shard_hash()).map_err(|error| {
-                                MetadataError::CorruptObject {
-                                    path: "capsule-protocol pointer catalog".to_owned(),
-                                    reason: format!(
-                                        "invalid shard hash {}: {error}",
-                                        entry.shard_hash()
-                                    ),
-                                }
-                            })?,
-                        ))
-                    })
-                    .collect::<Result<HashMap<_, _>>>()?;
+                    crate::capsule_protocol::load_pointer_catalog_lookup_from_root(&router, &root)
+                        .await?;
                 return Ok(Self {
-                    catalog: None,
-                    static_entries: Some(Arc::new(entries)),
+                    catalog: Some(Arc::new(catalog)),
                     reader: None,
                     anchor: None,
                     storage,
@@ -444,7 +417,6 @@ impl FileIndexLookupSession {
         };
         let mut session = Self {
             catalog: None,
-            static_entries: None,
             reader: None,
             anchor,
             storage,
@@ -490,9 +462,6 @@ impl FileIndexLookupSession {
                 .into_iter()
                 .next()
                 .flatten());
-        }
-        if let Some(entries) = &self.static_entries {
-            return Ok(entries.get(file_hash).copied());
         }
         if let Some(reader) = self.reader.as_ref()
             && let Some(record) =
@@ -543,13 +512,6 @@ impl FileIndexLookupSession {
                 })
                 .collect();
         }
-        if let Some(entries) = &self.static_entries {
-            return Ok(file_hashes
-                .iter()
-                .map(|file_hash| entries.get(file_hash).copied())
-                .collect());
-        }
-
         let records = self.lookup_committed_records_batch(file_hashes).await?;
         let mut out = records
             .into_iter()
@@ -799,7 +761,6 @@ impl LookupSource {
         match self {
             Self::Catalog { router, lookup } => Ok(FileIndexLookupSession {
                 catalog: Some(Arc::clone(lookup)),
-                static_entries: None,
                 reader: None,
                 anchor: None,
                 storage: router.store().clone(),
