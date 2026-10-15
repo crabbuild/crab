@@ -3639,13 +3639,9 @@ mod tests {
             .await
             .unwrap();
             if restore {
-                base = begin_gc(
-                    &seed,
-                    base,
-                    GcFence::new(&"e".repeat(64), u64::MAX).unwrap(),
-                )
-                .await
-                .unwrap();
+                base = begin_gc(&seed, base, GcFence::new("e".repeat(64), u64::MAX).unwrap())
+                    .await
+                    .unwrap();
             }
             let visibility = crab_metadata::git_visibility::GitVisibilityIndex::new(
                 0,
