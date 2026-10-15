@@ -69,7 +69,9 @@ counts contain no raw paths, OIDs, endpoints, content or credentials; separate
 oracle evidence contains the paths/OIDs needed to prove correctness.
 
 `/usr/bin/time` supplies process CPU and peak RSS. Those cover opening and both
-queries together; they are not per-query RSS. Index construction uses an explicit
+queries together; they are not per-query RSS. Catalog qualifier totals also
+include the complete inspection oracle, so they cannot establish selected-query
+memory bounds. Index construction uses an explicit
 `build-indexes` operation, outside measured reads, with its own requests, bytes,
 CPU and peak RSS. Read-only qualifications do not trigger maintenance.
 
@@ -2188,11 +2190,79 @@ two path heads, two leases, 65 payload records and 4,194,304 retained segment
 bytes remain. These receipts establish the oracle and staging component; they
 do not qualify the new integrated binary or catalog format.
 
-Combined-source CLI compilation and runtime qualification are still pending.
-Remaining catalog consumers include shared/protected preparation, pinned
-hydration/mount lookup and the current-state file lookup opener. Complete
+The combined release binary compiled and the focused RustFS smoke passed
+163 commands and 84 checks, including exact retirement, committed restaging
+before first push, both cold versions, force/ref updates and invalid roots.
+The integrated native-first entropy 10-GiB run passes 75 commands and 57 checks:
+all four pushes, exact retirement, eight cold historical SHA-256 checks, Git
+integrity and remote fsck with zero errors or repairs.
+Those receipts bind the earlier integrated source, not subsequent reader changes.
+
+Pinned hydration/mount lookup uses captured catalog pages in PR #581. PR #584
+extends this to current-state file lookup and shares ref ordering and captured
+visibility with Git readers. Metadata tests pass (458), as do all 47 read capsule-protocol tests after
+preserving corruption classification at the read boundary. CLI, runtime and
+retained-root lifecycle checks are required before readiness.
+A reproduced independent-ref fixture also requires complete inspection to
+validate dependencies after assembling the visible set, while publication-time
+delta validation remains strict.
+
+`qualify_remote ... <catalog-file-hash> catalog-current` measures the actual
+current-state lookup session. The argument uses Xet `MerkleHash::hex()` encoding,
+not the pointer wire format’s raw-byte hex. Hydration converts parsed pointer
+bytes with `MerkleHash::from(pointer.file_hash)` before lookup; the qualifier
+accepts that catalog identity directly. Opening, cold queries and warm queries are separate; the full
+inspection oracle runs after measured queries and explicit session close. This
+keeps unrelated catalog decoding out of cold-query preparation. Use a quiescent,
+dedicated fixture so the post-query full oracle has the same visible authority.
+Compare these
+receipts across fixed small edits and increasing distinct historical chunks,
+ref counts and uncompacted history; checkpoint row bounds alone are insufficient.
+
+Shared/protected preparation remains a separate integration boundary. Complete
 inspection remains appropriate for fsck, compaction and GC; foreground lookups
-must not inherit those scans. Carry forward applicable CLI range/cancellation
-contracts before final qualification. The complete integrated 10-GiB matrix,
-history scaling, lifecycle/migration, fuller blame and representative S3 gates
-remain open.
+must not inherit those scans. CLI snapshot reads still install all Git packs;
+carry forward the range/cancellation and cleanup contracts when removing that
+cost. The final combined 10-GiB matrix, history scaling, lifecycle/migration,
+fuller blame and representative S3 gates remain open.
+
+The GC regression passes with both existing cleanup tests (three tests total).
+It captures a 20,000-file checkpoint catalog without a file query, replaces it,
+and sweeps past the grace period. Actual orphan deletion is required; the old
+reader then fetches cold pages and resolves duplicated file requests, while a
+new session observes the replacement. Both checkpoints have a valid physical
+source descriptor/body. This is an in-memory metadata lifecycle proof, separate
+from payload hydration and concurrent real-store qualification.
+
+Current-state qualification against the four-version, two-file 10-GiB entropy
+history passes with the updated reader. Opening uses 28 backend operations and
+149,860 bytes. The duplicate-file cold query uses 497 range reads and 7,434,846
+bytes; the warm query repeats all 497 reads. Both results match full inspection,
+operations drain and no writes occur. These are one local debug-profile sample,
+not cloud latency or independent history-scaling proof. Repeated recipe metadata
+reads are a measured remaining performance gap, not a successful warm-cache gate.
+The first attempted receipt remains failed: it supplied pointer-wire hex where
+the qualifier requires the distinct catalog `MerkleHash::hex()` representation.
+
+A differential run of the same qualifier binary against a real 4-MiB file passes:
+five cold ranges / 3,755 bytes and zero warm backend operations. Combined with
+the unchanged captured lookup and the existing 256-page / 8-MiB FIFO page cache,
+this supports recipe-page eviction as the cause of repeated large-file warm
+reads. A bounded cache of already-verified file bindings is the next candidate;
+it must preserve the initial complete dependency proof, immutable capture,
+ordered duplicates/misses, error retry and shared close/cancellation contracts.
+
+The current reader's minimal CLI/NFS check and debug build pass. The force-push
+policy/visibility regression also passes after awaiting the now-async visibility
+API in its test caller; all six policy cases retain their assertions. Eleven
+Python fixture tests pass. The previously qualified staging-version assertion
+from the combined branch is carried forward with exact post-push retirement.
+
+The complete current-source RustFS CLI smoke remains failed (152 commands,
+61 checks). Its shallow-since case supplies an ISO date; the helper treats the
+remote-helper option as an integer wire timestamp and rejects it before clone.
+The harness still expects the earlier unsupported-option diagnostic. Git's
+remote-helper boundary passes date text through, while wire fetch uses a
+normalized timestamp. Fixing that adapter and qualifying dated boundaries
+against native Git are required; changing the expected message alone would
+hide the missing behavior. No full CLI E2E pass is claimed from this receipt.
