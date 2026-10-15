@@ -105,6 +105,10 @@ Captured revision, remote-mount and current-state hydration use the shared paged
 lookup. Control capture and selected closure queries are measured separately;
 complete opening and history-amplification qualification remain required.
 
+Ref deletion removes its live visibility closure even when the capsule has no
+visibility payload. Retained dictionary objects cannot supply a new ref's base;
+complete and paged reconciliation enforce the same deletion boundary.
+
 External pointer catalogs use `CRBPCP01` authenticated pages. A bounded descriptor
 commits file, shard, xorb and reverse-chunk directories; nested shard closures and
 ordered xorb chunk lists are paged too. Keys preserve canonical lowercase Xet hex

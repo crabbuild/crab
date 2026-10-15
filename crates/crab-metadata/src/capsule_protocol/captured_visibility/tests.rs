@@ -170,6 +170,51 @@ async fn removed_invisible_objects_do_not_supply_new_ref_bases() {
 }
 
 #[tokio::test]
+async fn deleted_ref_objects_remain_in_dictionary_but_cannot_supply_new_bases() {
+    let layout = StoreLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        "repositories/deleted".into(),
+    );
+    let mut lazy = CapturedVisibility::new(layout.store().clone(), initial(), std::iter::empty());
+    let create = control(
+        &layout,
+        "refs/heads/main",
+        None,
+        GitVisibilityEdit::from_replacement_objects(None, hex(1), vec![hex(1), hex(3)]),
+    )
+    .await;
+    lazy.apply(&create).await.unwrap();
+    let transaction = CapsuleTransaction::new(
+        &"1".repeat(64),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/main",
+            Some(hex(1)),
+            None,
+            None,
+        )],
+    )
+    .unwrap();
+    let run =
+        CapsuleRun::leaf(Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap()).unwrap();
+    let (_, mut controls) = run.verified_controls().unwrap();
+    lazy.apply(&controls.remove(0)).await.unwrap();
+    let branch = control(
+        &layout,
+        "refs/heads/feature",
+        None,
+        GitVisibilityEdit::from_delta_objects(Some(hex(3)), hex(4), vec![hex(4)], vec![]),
+    )
+    .await;
+    assert_eq!(
+        (
+            lazy.dictionary_contains(&[object(3)]).await.unwrap(),
+            lazy.ready(&branch, &BTreeMap::new()).await.unwrap()
+        ),
+        (vec![true], false)
+    );
+}
+
+#[tokio::test]
 async fn removal_outside_captured_prior_closure_is_rejected() {
     let layout = StoreLayout::new(
         Store::new(Arc::new(InMemory::new())),

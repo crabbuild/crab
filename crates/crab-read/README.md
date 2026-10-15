@@ -55,7 +55,9 @@ capsule-relative, while transport ranges stay on the captured run. Shared
 transactions deduplicate without discarding conflicting content evidence.
 Paged closure layers preserve
 the inherited base when its source ref later moves, and dictionary retention
-never supplies visibility for a new ref. Initial rooted additions use their
+never supplies visibility for a new ref. Deletion-only capsules remove their
+live ref closure even without an OID payload, in both full-body and control reads.
+Initial rooted additions use their
 authenticated count; differing actual delta additions/removals remain admitted
 work. `git_visibility_index`, `candidate_git_visibility` and
 `tip_bound_transitions` asynchronously materialize captured controls only when

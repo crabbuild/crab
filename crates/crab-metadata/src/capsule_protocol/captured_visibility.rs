@@ -42,7 +42,16 @@ impl VisibilityReconciliation {
                     index,
                 )
             }
-            Self::Complete(_) => Ok(()),
+            Self::Complete(index) => {
+                // A deletion-only capsule has no visibility payload. Its ref
+                // closure must still disappear before another control borrows it.
+                for edit in control.transaction().edits() {
+                    if edit.new_oid().is_none() {
+                        index.remove_ref(edit.ref_name());
+                    }
+                }
+                Ok(())
+            }
             Self::Paged(index) => index.apply(control).await,
         }
     }
@@ -335,6 +344,13 @@ impl CapturedVisibility {
     /// Apply one authenticated control without widening to mutable ref state.
     pub async fn apply(&mut self, control: &CapsuleControl) -> Result<()> {
         let Some((reader, headers)) = self.headers(control).await? else {
+            // No payload skips OID changes, not deletion of an entire ref.
+            // Keep historical dictionary entries separate from live closures.
+            for edit in control.transaction().edits() {
+                if edit.new_oid().is_none() {
+                    self.refs.remove(edit.ref_name());
+                }
+            }
             return Ok(());
         };
         for (edit, header) in control.transaction().edits().iter().zip(headers) {

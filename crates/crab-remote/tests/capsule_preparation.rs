@@ -196,11 +196,33 @@ async fn prepare(
     Arc<crab_remote_git::RemoteGitRuntime>,
     crab_remote::publication::PublicationLeases,
 ) {
+    let oid = gix_hash::ObjectId::from_hex(
+        String::from_utf8(git(directory, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .as_bytes(),
+    )
+    .unwrap();
+    prepare_update(layout, directory, content, "refs/heads/main", Some(oid)).await
+}
+
+async fn prepare_update(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    directory: &std::path::Path,
+    content: Option<PreparedContent>,
+    ref_name: &str,
+    new: Option<gix_hash::ObjectId>,
+) -> (
+    crab_remote::prepare::Prepared,
+    crab_read::capsule_protocol::CapsuleRepositoryView,
+    Arc<crab_remote_git::RemoteGitRuntime>,
+    crab_remote::publication::PublicationLeases,
+) {
     let cancel = CancellationToken::new();
     let leases = crab_remote::publication::acquire_leases(
         layout.store(),
         layout,
-        ["refs/heads/main".to_owned()],
+        [ref_name.to_owned()],
         crab_remote::publication::LeaseOptions::renewing(std::time::Duration::from_secs(60)),
         &cancel,
     )
@@ -231,24 +253,24 @@ async fn prepare(
         )
         .await
         .unwrap();
-    let oid = gix_hash::ObjectId::from_hex(
-        String::from_utf8(git(directory, &["rev-parse", "HEAD"]))
-            .unwrap()
-            .trim()
-            .as_bytes(),
-    )
-    .unwrap();
-    let mut revisions = String::from("HEAD\n");
-    if let Some(old) = view.refs().get("refs/heads/main") {
-        revisions.push_str(&format!("^{old}\n"));
-    }
-    let pack = git_input(
-        directory,
-        &["pack-objects", "--stdout", "--revs"],
-        revisions.as_bytes(),
-    );
-    let incoming = directory.join("incoming.pack");
-    std::fs::write(&incoming, pack).unwrap();
+    let incoming = if let Some(oid) = new {
+        let mut revisions = format!("{oid}\n");
+        for old in view.refs().values() {
+            revisions.push_str(&format!("^{old}\n"));
+        }
+        let pack = git_input(
+            directory,
+            &["pack-objects", "--stdout", "--revs"],
+            revisions.as_bytes(),
+        );
+        let incoming = directory.join("incoming.pack");
+        std::fs::write(&incoming, pack).unwrap();
+        Some(std::io::BufReader::new(
+            std::fs::File::open(incoming).unwrap(),
+        ))
+    } else {
+        None
+    };
     let limits = crab_git::incoming_pack::ReceiveLimits {
         max_pack_bytes: LIMIT,
         max_objects: 1024,
@@ -260,16 +282,14 @@ async fn prepare(
         repository,
         view.git_visibility_index().await.unwrap(),
         crab_git::incoming_pack::ScratchSpace::new(directory, limits),
-        Some(std::io::BufReader::new(
-            std::fs::File::open(incoming).unwrap(),
-        )),
+        incoming,
         vec![crab_git::receive_plan::RefUpdate {
-            name: "refs/heads/main".to_owned(),
+            name: ref_name.to_owned(),
             old: view
                 .refs()
-                .get("refs/heads/main")
+                .get(ref_name)
                 .map(|oid| gix_hash::ObjectId::from_hex(oid.as_bytes()).unwrap()),
-            new: Some(oid),
+            new,
         }],
         std::collections::BTreeMap::new(),
         &cancel,
@@ -619,3 +639,6 @@ async fn historical_pointer_lookup_preserves_declared_size_checks() {
         );
     }
 }
+
+#[path = "capsule_preparation/ref_visibility.rs"]
+mod ref_visibility;

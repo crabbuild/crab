@@ -60,6 +60,14 @@ struct BorrowingFixture {
     borrowed_shard: String,
 }
 
+// Fixed publication identities keep ordering coverage independent of nonce sampling.
+fn ordering_transaction(root: &RootSnapshot, edit: CapsuleRefEdit) -> CapsuleTransaction {
+    let edits = vec![edit];
+    let identity = blake3::hash(&serde_json::to_vec(&edits).unwrap());
+    CapsuleTransaction::for_protected_source(root.record().digest(), &identity.to_hex(), edits)
+        .unwrap()
+}
+
 async fn borrowing_fixture() -> BorrowingFixture {
     let layout = StoreLayout::new(
         Store::new(Arc::new(object_store::memory::InMemory::new())),
@@ -74,15 +82,14 @@ async fn borrowing_fixture() -> BorrowingFixture {
     .unwrap();
     let tip = "1".repeat(40);
     let transaction = |name: String| {
-        CapsuleTransaction::new(
-            root.record().digest(),
-            vec![CapsuleRefEdit::new(name, None, Some(tip.clone()), None)],
+        ordering_transaction(
+            &root,
+            CapsuleRefEdit::new(name, None, Some(tip.clone()), None),
         )
-        .unwrap()
     };
     let borrowed = (0..64)
         .map(|i| transaction(format!("refs/heads/borrow-{i}")))
-        .find(|t| t.id().unwrap().as_bytes()[0] < b'8')
+        .find(|t| (b'4'..b'8').contains(&t.id().unwrap().as_bytes()[0]))
         .unwrap();
     let borrowed_id = borrowed.id().unwrap();
     let mut producers = (0..256)
@@ -453,4 +460,125 @@ async fn independent_visibility_can_reorder_prior_borrowing_controls() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn deleting_a_visible_producer_can_delay_borrowing_controls() {
+    let mut fixture = borrowing_fixture().await;
+    let borrowed_id = fixture.borrowed.id().unwrap();
+    let original_id = fixture.original.id().unwrap();
+    let tip = fixture.original.edits()[0].new_oid().unwrap().to_owned();
+    let (producer, deletion) = (0..16_384)
+        .find_map(|i| {
+            let name = format!("refs/heads/transient-{i}");
+            let producer = ordering_transaction(
+                &fixture.root,
+                CapsuleRefEdit::new(name.clone(), None, Some(tip.clone()), None),
+            );
+            let deletion = ordering_transaction(
+                &fixture.root,
+                CapsuleRefEdit::new(name, Some(tip.clone()), None, None),
+            );
+            let producer_id = producer.id().unwrap();
+            let deletion_id = deletion.id().unwrap();
+            (producer_id < deletion_id && deletion_id < borrowed_id).then_some((producer, deletion))
+        })
+        .unwrap();
+    let producer_id = producer.id().unwrap();
+    let deletion_id = deletion.id().unwrap();
+    for (transaction, edits) in [
+        (
+            &producer,
+            BTreeMap::from([(
+                producer.edits()[0].ref_name().to_owned(),
+                GitVisibilityEdit::from_replacement_objects(None, tip.clone(), vec![tip.clone()]),
+            )]),
+        ),
+        (&deletion, BTreeMap::new()),
+    ] {
+        let sections = if edits.is_empty() {
+            Vec::new()
+        } else {
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                CapsuleVisibilityDelta::new(edits)
+                    .unwrap()
+                    .encode()
+                    .unwrap(),
+            )]
+        };
+        let run =
+            CapsuleRun::leaf(Capsule::build(transaction, Vec::new(), sections).unwrap()).unwrap();
+        fixture
+            .layout
+            .store()
+            .create_strict(
+                &fixture.layout.capsule_path(run.hash()),
+                run.bytes().clone(),
+            )
+            .await
+            .unwrap();
+        let (_, mut controls) = run.verified_controls().unwrap();
+        let id = transaction.id().unwrap();
+        fixture.controls.insert(id.clone(), controls.remove(0));
+        fixture.pointers.insert(
+            id,
+            CapsulePointer::new(
+                run.hash(),
+                run.bytes().len() as u64,
+                run.control_offset(),
+                run.control_size(),
+                run.footer_hash(),
+                run.level(),
+                run.transaction_ids(),
+                run.newest_base_root_digest(),
+            )
+            .unwrap(),
+        );
+    }
+    fixture.controls.remove(&fixture.earlier.id().unwrap());
+    let mut paged = BTreeMap::new();
+    for id in fixture.controls.keys() {
+        let (_, mut controls) =
+            load_capsule_run_git_control(&fixture.layout, &fixture.pointers[id])
+                .await
+                .unwrap();
+        paged.insert(id.clone(), controls.remove(0));
+    }
+    let mut observed = Vec::new();
+    for (is_paged, controls) in [(false, fixture.controls), (true, paged)] {
+        let index =
+            GitVisibilityIndex::new(0, "0".repeat(64), "0".repeat(64), BTreeMap::new()).unwrap();
+        let visibility = if is_paged {
+            VisibilityReconciliation::Paged(Box::new(
+                crate::capsule_protocol::CapturedVisibility::new(
+                    fixture.layout.store().clone(),
+                    index,
+                    std::iter::empty(),
+                ),
+            ))
+        } else {
+            VisibilityReconciliation::Complete(index)
+        };
+        let ordered = order_ref_controls(
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            visibility,
+            &BTreeMap::new(),
+            controls,
+        )
+        .await
+        .unwrap();
+        // The transient source disappears before borrowing wins admission.
+        // Treating visibility as monotone would incorrectly put borrowing
+        // before the surviving producer and reverse their file-binding winner.
+        observed.push(
+            ordered
+                .iter()
+                .map(|control| control.transaction_id().to_owned())
+                .collect::<Vec<_>>(),
+        );
+    }
+    let expected = vec![producer_id, deletion_id, original_id, borrowed_id];
+    assert_eq!(observed, vec![expected.clone(), expected]);
 }
