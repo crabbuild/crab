@@ -328,3 +328,153 @@ fn frontier_contract(reason: impl Into<String>) -> MetadataError {
         reason: reason.into(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capsule_protocol::{
+        Capsule, CapsuleRefEdit, CapsuleRun, CapsuleSection, CapsuleSectionKind,
+        CapsuleTransaction, CapsuleVisibilityDelta, CapturedVisibility,
+        load_capsule_run_git_control,
+    };
+    use crate::git_visibility::{GitVisibilityEdit, GitVisibilityIndex};
+    use crab_storage::{Store, StoreLayout};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn independent_visibility_can_reorder_prior_borrowing_controls() {
+        let tip = "1".repeat(40);
+        let transaction = |name: String| {
+            CapsuleTransaction::new(
+                &"1".repeat(64),
+                vec![CapsuleRefEdit::new(name, None, Some(tip.clone()), None)],
+            )
+            .unwrap()
+        };
+        let borrowed = (0..64)
+            .map(|index| transaction(format!("refs/heads/borrow-{index}")))
+            .find(|transaction| transaction.id().unwrap().as_bytes()[0] < b'8')
+            .unwrap();
+        let borrowed_id = borrowed.id().unwrap();
+        let mut producers = (0..256)
+            .map(|index| transaction(format!("refs/heads/source-{index}")))
+            .filter(|transaction| transaction.id().unwrap() > borrowed_id)
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(producers.len(), 2);
+        producers.sort_by_key(|transaction| transaction.id().unwrap());
+        let earlier = producers.remove(0);
+        let original = producers.remove(0);
+        let earlier_id = earlier.id().unwrap();
+        let original_id = original.id().unwrap();
+        let layout = StoreLayout::new(
+            Store::new(Arc::new(object_store::memory::InMemory::new())),
+            "ref-order".to_owned(),
+        );
+        let mut complete = BTreeMap::new();
+        let mut paged = BTreeMap::new();
+        for transaction in [original, borrowed, earlier] {
+            let id = transaction.id().unwrap();
+            let edit = if id == borrowed_id {
+                GitVisibilityEdit::from_delta_objects(
+                    Some(tip.clone()),
+                    tip.clone(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            } else {
+                GitVisibilityEdit::from_replacement_objects(None, tip.clone(), vec![tip.clone()])
+            };
+            let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+                transaction.edits()[0].ref_name().to_owned(),
+                edit,
+            )]))
+            .unwrap();
+            let capsule = Capsule::build(
+                &transaction,
+                Vec::new(),
+                vec![CapsuleSection::new(
+                    CapsuleSectionKind::VisibilityDelta,
+                    visibility.encode().unwrap(),
+                )],
+            )
+            .unwrap();
+            let run = CapsuleRun::leaf(capsule).unwrap();
+            layout
+                .store()
+                .put(&layout.capsule_path(run.hash()), run.bytes().clone())
+                .await
+                .unwrap();
+            let pointer = CapsulePointer::new(
+                run.hash(),
+                run.bytes().len() as u64,
+                run.control_offset(),
+                run.control_size(),
+                run.footer_hash(),
+                run.level(),
+                run.transaction_ids(),
+                run.newest_base_root_digest(),
+            )
+            .unwrap();
+            complete.insert(id.clone(), run.verified_controls().unwrap().1.remove(0));
+            paged.insert(
+                id,
+                load_capsule_run_git_control(&layout, &pointer)
+                    .await
+                    .unwrap()
+                    .1
+                    .remove(0),
+            );
+        }
+        for (is_paged, controls) in [(false, complete), (true, paged)] {
+            for with_earlier in [false, true] {
+                let index =
+                    GitVisibilityIndex::new(0, "0".repeat(64), "0".repeat(64), BTreeMap::new())
+                        .unwrap();
+                let visibility = if is_paged {
+                    VisibilityReconciliation::Paged(Box::new(CapturedVisibility::new(
+                        layout.store().clone(),
+                        index,
+                        std::iter::empty(),
+                    )))
+                } else {
+                    VisibilityReconciliation::Complete(index)
+                };
+                let pending = controls
+                    .iter()
+                    .filter(|(id, _)| with_earlier || **id != earlier_id)
+                    .map(|(id, control)| (id.clone(), control.clone()))
+                    .collect();
+                let ordered = order_ref_controls(
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    visibility,
+                    &BTreeMap::new(),
+                    pending,
+                )
+                .await
+                .unwrap();
+                // Borrowing waits for any visible source of its old tip. Adding
+                // another source can change old controls' relative replay order,
+                // so immutable per-run ranks cannot replace this reconciliation.
+                let expected = if with_earlier {
+                    vec![
+                        earlier_id.as_str(),
+                        borrowed_id.as_str(),
+                        original_id.as_str(),
+                    ]
+                } else {
+                    vec![original_id.as_str(), borrowed_id.as_str()]
+                };
+                assert_eq!(
+                    ordered
+                        .iter()
+                        .map(CapsuleControl::transaction_id)
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "paged={is_paged}, with_earlier={with_earlier}"
+                );
+            }
+        }
+    }
+}
