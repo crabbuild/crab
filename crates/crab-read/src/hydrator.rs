@@ -1209,10 +1209,94 @@ mod tests {
             hydrator.router.repo_prefix().to_owned(),
             hydrator.router.global_prefix().to_owned(),
         );
-        let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
-            router, &catalog,
+        let (body, _) = router
+            .store()
+            .get_with_etag(&router.shard_path(&shard_hash.into()))
+            .await
+            .unwrap();
+        let mut chunks = std::collections::BTreeMap::<_, Vec<_>>::new();
+        crab_xet::shard_parse::visit_xorb_chunks_from_reader(
+            &mut std::io::Cursor::new(&body),
+            |xorb, _, chunk, size| {
+                chunks.entry(xorb).or_default().push(
+                    crab_metadata::capsule_protocol::XorbChunkEntry::new(chunk.hex(), size),
+                );
+                Ok(())
+            },
         )
         .unwrap();
+        let xorb_hashes = chunks.keys().map(|hash| hash.hex()).collect();
+        catalog
+            .insert_shard(
+                crab_xet::hash::MerkleHash::from(shard_hash).hex(),
+                crab_metadata::capsule_protocol::ShardCatalogEntry::new(
+                    body.len() as u64,
+                    xorb_hashes,
+                ),
+            )
+            .unwrap();
+        for (hash, entries) in chunks {
+            let (body, _) = router
+                .store()
+                .get_with_etag(&router.xorb_path(&hash))
+                .await
+                .unwrap();
+            catalog
+                .insert_xorb(
+                    hash.hex(),
+                    crab_metadata::capsule_protocol::XorbCatalogEntry::new(
+                        body.len() as u64,
+                        blake3::hash(&body).to_hex().to_string(),
+                        entries,
+                    ),
+                )
+                .unwrap();
+        }
+        let pack = crab_metadata::capsule_protocol::CapsuleGitPack::new(
+            bytes::Bytes::from_static(b"pack"),
+            bytes::Bytes::from_static(b"index"),
+            bytes::Bytes::from_static(b"reverse"),
+            bytes::Bytes::from_static(b"locator"),
+            "1".repeat(40),
+            1,
+        )
+        .unwrap();
+        let source = crab_metadata::capsule_protocol::PackLayer::build(&pack)
+            .unwrap()
+            .source_descriptor()
+            .unwrap();
+        let checkpoint = crab_metadata::capsule_protocol::LayeredCheckpoint::build(
+            1,
+            &"3".repeat(64),
+            vec![source],
+            catalog,
+            None,
+        )
+        .unwrap();
+        router
+            .store()
+            .put_overwrite(
+                &router.capsule_checkpoint_path(checkpoint.hash()),
+                checkpoint.bytes().clone(),
+            )
+            .await
+            .unwrap();
+        let control = crab_metadata::capsule_protocol::LayeredCheckpoint::decode_control(
+            checkpoint
+                .bytes()
+                .slice(checkpoint.control_offset() as usize..),
+            checkpoint.bytes().len() as u64,
+            checkpoint.control_offset(),
+            checkpoint.hash(),
+            checkpoint.footer_hash(),
+        )
+        .unwrap();
+        let captured = control
+            .pointer_catalog_lookup(&router, 1024 * 1024)
+            .unwrap();
+        let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+            router, captured,
+        );
         let hydrator = hydrator.with_file_index_lookup(lookup);
 
         assert_eq!(

@@ -531,12 +531,12 @@ impl Inner {
             &self.cancel,
         )
         .await?;
-        let catalog = view.pointer_catalog().await?;
+        let catalog = view.pointer_catalog_lookup(&read_layout, maximum)?;
         let file_index_lookup =
             crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
                 read_layout,
-                &catalog,
-            )?;
+                catalog,
+            );
         Ok((resolved, git_dir, Some(file_index_lookup)))
     }
 

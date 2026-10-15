@@ -61,6 +61,11 @@ work. `git_visibility_index`, `candidate_git_visibility` and
 `tip_bound_transitions` asynchronously materialize captured controls only when
 bulk inspection needs them. They do not recapture refs or switch origins.
 
+Pinned hydration and remote-mount setup pass captured paged catalog roots into
+metadata's shared file lookup. A lookup loads only its selected file dependency
+closure, preserving the captured publication order and immutable descriptor
+checks. It never substitutes a later catalog or mutable file-index session.
+
 `ShardHydrator` provides memory, file, and half-open byte-range reconstruction.
 Before full-file reconstruction it checks that the pointer's shard terms are
 covered; after reconstruction it verifies the requested file hash. A shared

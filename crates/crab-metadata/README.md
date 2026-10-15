@@ -59,7 +59,13 @@ its footer. `LayeredCheckpoint::pointer_catalog_lookup` captures these roots;
 `PointerCatalogLookup` batches file/chunk/xorb keys through one bounded page
 cache and byte budget, validates selected dependency closure and keeps immutable
 descriptor conflicts distinct from absent keys. Full inspection remains an
-explicit maintenance operation. All 19 audited local release tags omit these
+explicit maintenance operation. `SharedFileIndexLookup::for_pointer_catalog`
+accepts captured lookup roots and resolves requested files with their authenticated
+shard/xorb closure. Point and batch calls share the page cache and retain the
+session read guard through I/O, so close waits for active reads. Missing catalog
+pages remain errors rather than reopening the mutable file-index database.
+The current-state opener still materializes a complete v2 catalog; callers with
+an authenticated view should pass its captured roots. All 19 audited local release tags omit these
 capsule checkpoint formats; unshipped format 6 is rejected without a fallback.
 Publication deltas are still materialized by the caller's captured view; their
 run-level aggregation and lazy capture remain required for the complete gate.

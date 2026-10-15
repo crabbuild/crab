@@ -2077,7 +2077,9 @@ async fn resolve_mount_read_context_from_remote_url(
             } else {
                 config.uploadpack_max_egress_bytes
             };
-            let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+            // The mount needs captured catalog roots, not complete checkpoint bodies.
+            // Keep pages cold until hydration requests their dependency closure.
+            let view = crab_read::capsule_protocol::open_git_view_from_root(
                 &read_layout,
                 root,
                 crab_read::capsule_protocol::CapsuleReadLimits {
@@ -2087,13 +2089,12 @@ async fn resolve_mount_read_context_from_remote_url(
             )
             .await
             .ok()?;
-            let catalog = view.pointer_catalog().await.ok()?;
+            let catalog = view.pointer_catalog_lookup(&read_layout, maximum).ok()?;
             Some(
                 crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
                     read_layout.clone(),
-                    &catalog,
-                )
-                .ok()?,
+                    catalog,
+                ),
             )
         }
         Err(crab_metadata::error::MetadataError::Storage {
