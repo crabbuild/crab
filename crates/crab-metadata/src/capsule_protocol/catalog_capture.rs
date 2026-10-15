@@ -298,7 +298,6 @@ mod tests {
             observations.push((count, reads.load(Ordering::SeqCst)));
             session.close().await.unwrap();
         }
-        eprintln!("compacted catalog opening read attempts: {observations:?}");
         assert!(
             observations.windows(2).all(|pair| pair[0].1 == pair[1].1),
             "provider reads should follow compacted proof blocks rather than logical edits: {observations:?}"
