@@ -124,7 +124,7 @@ async fn fixed_file_and_chunk_queries_read_selected_closure_as_history_grows() {
 }
 
 #[tokio::test]
-async fn ordered_deltas_override_file_bindings_but_preserve_descriptor_conflicts() {
+async fn ordered_runs_override_file_bindings_but_preserve_descriptor_conflicts() {
     let (layout, _, lookup, _) = fixture(catalog(2), 1024 * 1024).await;
     let file = format!("{:064x}", 0);
     let mut delta = PointerCatalog::new();
@@ -132,7 +132,7 @@ async fn ordered_deltas_override_file_bindings_but_preserve_descriptor_conflicts
     delta
         .insert_file(file.clone(), FileCatalogEntry::new(7, replacement.clone()))
         .unwrap();
-    let lookup = lookup.with_deltas(vec![delta]).unwrap();
+    let lookup = append_run(&layout, lookup, vec![delta]).await;
     assert_eq!(
         lookup
             .files(layout.store(), std::slice::from_ref(&file))
@@ -153,7 +153,7 @@ async fn ordered_deltas_override_file_bindings_but_preserve_descriptor_conflicts
             ),
         )
         .unwrap();
-    let lookup = lookup.with_deltas(vec![conflict]).unwrap();
+    let lookup = append_run(&layout, lookup, vec![conflict]).await;
     assert!(
         lookup
             .files(layout.store(), &[format!("{:064x}", 1)])
@@ -180,7 +180,7 @@ async fn chunk_selection_uses_lowest_xorb_then_first_occurrence_across_sources()
             ),
         )
         .unwrap();
-    let lookup = lookup.with_deltas(vec![delta]).unwrap();
+    let lookup = append_run(&layout, lookup, vec![delta]).await;
     let selected = lookup.chunks(layout.store(), &[chunk]).await.unwrap();
     assert_eq!(
         selected.xorbs.keys().collect::<Vec<_>>(),
@@ -222,7 +222,7 @@ async fn loaded_dependencies_and_chunk_placements_fail_closed() {
     delta
         .insert_file("f".repeat(64), FileCatalogEntry::new(7, "d".repeat(64)))
         .unwrap();
-    let lookup = lookup.with_deltas(vec![delta]).unwrap();
+    let lookup = append_run(&layout, lookup, vec![delta]).await;
     assert!(
         lookup
             .files(layout.store(), &["f".repeat(64)])
@@ -262,14 +262,227 @@ async fn loaded_dependencies_and_chunk_placements_fail_closed() {
 }
 
 #[tokio::test]
-async fn query_budget_applies_to_warm_pages_and_materialized_delta_dependencies() {
+async fn query_budget_applies_to_warm_pages_and_run_dependencies() {
     let (layout, _, mut lookup, _) = fixture(catalog(2), 1024 * 1024).await;
     let files = [format!("{:064x}", 0)];
     lookup.files(layout.store(), &files).await.unwrap();
     lookup.maximum = 1;
     assert!(lookup.files(layout.store(), &files).await.is_err());
-    let lookup = PointerCatalogLookup::empty(1)
-        .with_deltas(vec![catalog(2)])
-        .unwrap();
+    let lookup = append_run(&layout, PointerCatalogLookup::empty(1), vec![catalog(2)]).await;
     assert!(lookup.files(layout.store(), &files).await.is_err());
+}
+
+async fn run_source(
+    layout: &StoreLayout<Store>,
+    catalogs: Vec<PointerCatalog>,
+) -> (RunCatalogSource, Vec<String>) {
+    use crate::capsule_protocol::{
+        Capsule, CapsuleRefEdit, CapsuleRun, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
+    };
+    let mut runs: Vec<_> = catalogs
+        .into_iter()
+        .enumerate()
+        .map(|(position, catalog)| {
+            let transaction = CapsuleTransaction::new(
+                &"e".repeat(64),
+                vec![CapsuleRefEdit::new(
+                    format!("refs/tags/{position}"),
+                    None,
+                    Some("f".repeat(40)),
+                    None,
+                )],
+            )
+            .unwrap();
+            let capsule = Capsule::build(
+                &transaction,
+                Vec::new(),
+                vec![CapsuleSection::new(
+                    CapsuleSectionKind::CatalogDelta,
+                    catalog.encode_delta().unwrap(),
+                )],
+            )
+            .unwrap();
+            CapsuleRun::leaf(capsule).unwrap()
+        })
+        .collect();
+    let run = if runs.len() == 1 {
+        runs.pop().unwrap()
+    } else {
+        CapsuleRun::compact(runs).unwrap()
+    };
+    layout
+        .store()
+        .put_overwrite(&layout.capsule_path(run.hash()), run.bytes().clone())
+        .await
+        .unwrap();
+    let order = run
+        .capsules()
+        .iter()
+        .map(|capsule| capsule.hash().to_owned())
+        .collect();
+    let source = run.catalog_source(layout).unwrap().unwrap();
+    (source, order)
+}
+
+#[tokio::test]
+async fn selected_run_queries_keep_unselected_conflicts_out_of_the_view() {
+    let (layout, _, lookup, _) = fixture(catalog(2), 1024 * 1024).await;
+    let mut conflict = catalog(1);
+    conflict
+        .xorbs
+        .get_mut(&format!("{:064x}", 1_000_000))
+        .unwrap()
+        .encoded_size = 100;
+    let (source, order) = run_source(&layout, vec![catalog(1), conflict]).await;
+    let file = format!("{:064x}", 0);
+    let lookup = lookup
+        .with_run_sources(vec![source.clone()], &order[..1])
+        .unwrap();
+    assert_eq!(
+        lookup
+            .files(layout.store(), std::slice::from_ref(&file))
+            .await
+            .unwrap(),
+        catalog(1)
+    );
+    let lookup = PointerCatalogLookup::empty(1024 * 1024)
+        .with_run_sources(vec![source], &order)
+        .unwrap();
+    assert!(lookup.files(layout.store(), &[file]).await.is_err());
+}
+
+#[tokio::test]
+async fn selected_run_file_precedence_uses_logical_order_instead_of_physical_position() {
+    let (layout, _, lookup, _) = fixture(catalog(2), 1024 * 1024).await;
+    let file = format!("{:064x}", 0);
+    let mut older = PointerCatalog::new();
+    older
+        .insert_file(
+            file.clone(),
+            FileCatalogEntry::new(7, format!("{:064x}", 3_000_000)),
+        )
+        .unwrap();
+    let mut newer = PointerCatalog::new();
+    let replacement = format!("{:064x}", 3_000_001);
+    newer
+        .insert_file(file.clone(), FileCatalogEntry::new(7, replacement.clone()))
+        .unwrap();
+    let (source, order) = run_source(&layout, vec![newer, older]).await;
+    let lookup = lookup
+        .with_run_sources(vec![source], &[order[1].clone(), order[0].clone()])
+        .unwrap();
+    assert_eq!(
+        lookup
+            .files(layout.store(), std::slice::from_ref(&file))
+            .await
+            .unwrap()
+            .files[&file]
+            .shard_hash,
+        replacement
+    );
+}
+
+#[tokio::test]
+async fn run_lookup_reads_selected_pages_with_one_budget_and_warm_cache() {
+    for count in [100, 20_000] {
+        let (layout, _, _, reads) = fixture(PointerCatalog::new(), 512 * 1024).await;
+        let expected = catalog(count);
+        let (source, order) = run_source(&layout, vec![expected.clone()]).await;
+        let lookup = PointerCatalogLookup::empty(512 * 1024)
+            .with_run_sources(vec![source], &order)
+            .unwrap();
+        reads.store(0, Ordering::SeqCst);
+        let file = format!("{:064x}", 42);
+        let selected = lookup
+            .files(layout.store(), std::slice::from_ref(&file))
+            .await
+            .unwrap();
+        assert_eq!(selected.files.get(&file), expected.files.get(&file));
+        let chunks = lookup
+            .chunks(layout.store(), &[format!("{:064x}", 2_000_042)])
+            .await
+            .unwrap();
+        assert_eq!(chunks.xorbs, selected.xorbs);
+        let cold = reads.load(Ordering::SeqCst);
+        assert!(cold <= 16, "selected run query exceeded its page bound");
+        lookup.files(layout.store(), &[file]).await.unwrap();
+        assert_eq!(reads.load(Ordering::SeqCst), cold);
+    }
+}
+
+#[tokio::test]
+async fn run_chunks_choose_the_first_occurrence_in_the_lowest_selected_xorb() {
+    let (layout, _, lookup, _) = fixture(catalog(1), 1024 * 1024).await;
+    let chunk = format!("{:064x}", 2_000_000);
+    let mut delta = PointerCatalog::new();
+    delta
+        .insert_xorb(
+            "0".repeat(64),
+            XorbCatalogEntry::new(
+                88,
+                "e".repeat(64),
+                vec![
+                    XorbChunkEntry::new(chunk.clone(), 7),
+                    XorbChunkEntry::new(chunk.clone(), 7),
+                ],
+            ),
+        )
+        .unwrap();
+    let (source, order) = run_source(&layout, vec![delta]).await;
+    let lookup = lookup.with_run_sources(vec![source], &order).unwrap();
+    let selected = lookup.chunks(layout.store(), &[chunk]).await.unwrap();
+    assert_eq!(
+        selected.xorbs.keys().collect::<Vec<_>>(),
+        vec![&"0".repeat(64)]
+    );
+}
+
+async fn append_run(
+    layout: &StoreLayout<Store>,
+    mut lookup: PointerCatalogLookup,
+    catalogs: Vec<PointerCatalog>,
+) -> PointerCatalogLookup {
+    let (source, additional) = run_source(layout, catalogs).await;
+    let mut ranked = std::mem::take(&mut lookup.ranks)
+        .into_iter()
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|(_, rank)| *rank);
+    let mut order = ranked.into_iter().map(|(hash, _)| hash).collect::<Vec<_>>();
+    order.extend(additional);
+    let mut sources = std::mem::take(&mut lookup.runs);
+    sources.push(source);
+    lookup.with_run_sources(sources, &order).unwrap()
+}
+
+#[tokio::test]
+async fn equal_run_variants_reuse_unselected_physical_sources_without_losing_authority() {
+    let (layout, _, _, _) = fixture(PointerCatalog::new(), 1024 * 1024).await;
+    let (source, order) = run_source(&layout, vec![catalog(2), catalog(3)]).await;
+    let lookup = PointerCatalogLookup::empty(1024 * 1024)
+        .with_run_sources(vec![source], &order[1..])
+        .unwrap();
+    let selected = lookup
+        .files(layout.store(), &[format!("{:064x}", 0)])
+        .await
+        .unwrap();
+    assert_eq!(selected, catalog(1));
+}
+
+#[tokio::test]
+async fn query_page_budget_is_shared_across_runs_including_warm_sources() {
+    let (layout, _, _, _) = fixture(PointerCatalog::new(), 128 * 1024).await;
+    let mut lookup = append_run(
+        &layout,
+        PointerCatalogLookup::empty(128 * 1024),
+        vec![catalog(1000)],
+    )
+    .await;
+    let file = [format!("{:064x}", 42)];
+    lookup.files(layout.store(), &file).await.unwrap();
+    lookup = append_run(&layout, lookup, vec![catalog(1001)]).await;
+    let error = lookup.files(layout.store(), &file).await.unwrap_err();
+    assert!(
+        matches!(error, crate::error::MetadataError::CorruptObject { reason, .. }
+        if reason.contains("byte limit"))
+    );
 }

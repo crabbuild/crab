@@ -56,12 +56,12 @@ pub use root::{
     CapsulePointer, CheckpointPointer, GcFence, MAX_CAPSULE_FRONTIER, MAX_ROOT_BYTES,
     RepositoryRoot, RootRecord,
 };
-#[cfg(feature = "storage")]
-pub use run::CapsuleRunAdmissionReader;
 pub use run::{
     CapsuleControl, CapsuleControlLocation, CapsuleRun, CapsuleRunAdmission, CapsuleRunControl,
     MAX_CAPSULES_PER_RUN,
 };
+#[cfg(feature = "storage")]
+pub use run::{CapsuleRunAdmissionReader, RunCatalogSource};
 #[cfg(feature = "storage")]
 pub use store::{
     RootSnapshot, create_root, load_capsule_run, load_capsule_run_control,

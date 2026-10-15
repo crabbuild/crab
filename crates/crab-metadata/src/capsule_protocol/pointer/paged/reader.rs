@@ -1,9 +1,11 @@
-//! Selected dependency closure from captured checkpoint roots and ordered deltas.
+//! Selected dependency closure from captured checkpoint and run roots.
 use super::*;
-use crate::capsule_protocol::PackRange;
+use crate::capsule_protocol::run::catalog::{CatalogOrigin, CatalogValue};
+use crate::capsule_protocol::{PackRange, RunCatalogSource};
 use crate::pages::{PageCache, PageWork};
 use crab_storage::Store;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 #[cfg(test)]
 mod tests;
@@ -15,7 +17,8 @@ mod tests;
 #[derive(Debug)]
 pub struct PointerCatalogLookup {
     checkpoint: Option<CheckpointSource>,
-    deltas: Vec<PointerCatalog>,
+    runs: Vec<RunCatalogSource>,
+    ranks: BTreeMap<String, usize>,
     cache: PageCache,
     maximum: u64,
 }
@@ -44,22 +47,11 @@ impl PointerCatalogLookup {
                 range,
                 descriptor,
             }),
-            deltas: Vec::new(),
+            runs: Vec::new(),
+            ranks: BTreeMap::new(),
             cache: PageCache::default(),
             maximum,
         })
-    }
-
-    /// Capture publication-ordered deltas after the checkpoint represented here.
-    ///
-    /// Deltas must be the selected, deduplicated capsules of the same view.
-    /// This performs no mutable-root reads or dependency expansion.
-    pub fn with_deltas(mut self, deltas: Vec<PointerCatalog>) -> Result<Self> {
-        for delta in &deltas {
-            delta.validate(false, true)?;
-        }
-        self.deltas.extend(deltas);
-        Ok(self)
     }
 
     /// Start a lookup for a captured view that has no checkpoint catalog.
@@ -67,10 +59,36 @@ impl PointerCatalogLookup {
     pub fn empty(maximum: u64) -> Self {
         Self {
             checkpoint: None,
-            deltas: Vec::new(),
+            runs: Vec::new(),
+            ranks: BTreeMap::new(),
             cache: PageCache::default(),
             maximum,
         }
+    }
+
+    /// Capture physical runs and the exact selected logical-capsule publication order.
+    ///
+    /// Unselected occurrences contribute neither file precedence nor conflicts.
+    pub fn with_run_sources(
+        mut self,
+        runs: Vec<RunCatalogSource>,
+        order: &[String],
+    ) -> Result<Self> {
+        if !self.runs.is_empty() || !self.ranks.is_empty() {
+            return Err(corrupt("run catalog sources have already been captured"));
+        }
+        for (index, hash) in order.iter().enumerate() {
+            crate::validation::validate_content_hash(
+                hash,
+                "catalog capsule",
+                "capsule-protocol pointer catalog",
+            )?;
+            if self.ranks.insert(hash.clone(), index + 1).is_some() {
+                return Err(corrupt("selected catalog capsules are not unique"));
+            }
+        }
+        self.runs = runs;
+        Ok(self)
     }
 
     fn work(&self) -> PageWork {
@@ -88,30 +106,53 @@ impl PointerCatalogLookup {
         kind: Kind,
         keys: &[Vec<u8>],
         work: &mut PageWork,
-    ) -> Result<Vec<Option<Vec<u8>>>> {
-        let Some(source) = &self.checkpoint else {
-            return Ok(vec![None; keys.len()]);
-        };
-        let Some(root) = root else {
-            return Ok(vec![None; keys.len()]);
-        };
-        self.cache
-            .lookup(
-                store,
-                &source.path,
-                0,
-                source.range.offset()..source.range.offset() + source.descriptor.body_bytes,
-                root,
-                kind,
-                keys,
-                work,
-            )
-            .await
+    ) -> Result<Vec<Vec<CatalogValue>>> {
+        let mut output = (0..keys.len()).map(|_| Vec::new()).collect::<Vec<_>>();
+        if let (Some(source), Some(root)) = (&self.checkpoint, root) {
+            let origin = Arc::new(CatalogOrigin {
+                path: source.path.clone(),
+                range: source.range.offset()..source.range.offset() + source.descriptor.body_bytes,
+                layer: 0,
+            });
+            let rows = self
+                .cache
+                .lookup(
+                    store,
+                    &origin.path,
+                    origin.layer,
+                    origin.range.clone(),
+                    root,
+                    kind,
+                    keys,
+                    work,
+                )
+                .await?;
+            for (result, row) in output.iter_mut().zip(rows) {
+                if let Some(bytes) = row {
+                    result.push(CatalogValue {
+                        origin: origin.clone(),
+                        bytes,
+                        identity: None,
+                        rank: 0,
+                    });
+                }
+            }
+        }
+        for (index, run) in self.runs.iter().enumerate() {
+            let rows = run
+                .lookup(store, &self.cache, index + 1, &self.ranks, kind, keys, work)
+                .await?;
+            for (result, rows) in output.iter_mut().zip(rows) {
+                result.extend(rows);
+            }
+        }
+        Ok(output)
     }
 
     async fn scan(
         &self,
         store: &Store,
+        origin: &CatalogOrigin,
         root: Option<&PageRef>,
         kind: Kind,
         work: &mut PageWork,
@@ -119,16 +160,12 @@ impl PointerCatalogLookup {
         let Some(root) = root else {
             return Ok(Vec::new());
         };
-        let source = self
-            .checkpoint
-            .as_ref()
-            .ok_or_else(|| corrupt("catalog page has no source"))?;
         self.cache
             .scan(
                 store,
-                &source.path,
-                0,
-                source.range.offset()..source.range.offset() + source.descriptor.body_bytes,
+                &origin.path,
+                origin.layer,
+                origin.range.clone(),
                 root,
                 kind,
                 work,
@@ -152,10 +189,16 @@ impl PointerCatalogLookup {
             .await?;
         let mut catalog = PointerCatalog::new();
         for (hash, row) in hashes.iter().zip(rows) {
-            if let Some(row) = row {
-                let row: XorbRow = from_json(&row)?;
+            for value in row {
+                let row: XorbRow = from_json(&value.bytes)?;
                 let chunks = self
-                    .scan(store, Some(&row.chunks), Kind::CatalogXorbChunks, work)
+                    .scan(
+                        store,
+                        &value.origin,
+                        Some(&row.chunks),
+                        Kind::CatalogXorbChunks,
+                        work,
+                    )
                     .await?;
                 let chunks = chunks
                     .into_iter()
@@ -172,21 +215,9 @@ impl PointerCatalogLookup {
                         Ok(XorbChunkEntry::new(hex(&value[..32])?, size))
                     })
                     .collect::<Result<_>>()?;
-                catalog.insert_xorb(
-                    hash.clone(),
-                    XorbCatalogEntry::new(row.encoded_size, hex(&row.body_digest)?, chunks),
-                )?;
-            }
-            // Every matching immutable descriptor participates, even when a
-            // later source supplies the placement or file binding selected.
-            for delta in &self.deltas {
-                if let Some(entry) = delta.xorbs.get(hash) {
-                    admit(
-                        work,
-                        72u64.saturating_add((entry.chunks.len() as u64).saturating_mul(36)),
-                    )?;
-                    catalog.insert_xorb(hash.clone(), entry.clone())?;
-                }
+                let entry = XorbCatalogEntry::new(row.encoded_size, hex(&row.body_digest)?, chunks);
+                verify_identity(&value, Kind::CatalogXorbs, &json(&entry)?)?;
+                catalog.insert_xorb(hash.clone(), entry)?;
             }
         }
         catalog.validate(true, true)?;
@@ -214,28 +245,28 @@ impl PointerCatalogLookup {
         let mut catalog = PointerCatalog::new();
         let mut shards = BTreeSet::new();
         for (hash, row) in hashes.iter().zip(rows) {
-            let mut selected = row
-                .map(|value| {
-                    if value.len() != 40 {
-                        return Err(corrupt("catalog file row has an invalid byte length"));
-                    }
-                    let size = u64::from_be_bytes(
-                        value[..8]
-                            .try_into()
-                            .map_err(|_| corrupt("file size is truncated"))?,
-                    );
-                    Ok(FileCatalogEntry::new(size, hex(&value[8..])?))
-                })
-                .transpose()?;
-            for delta in &self.deltas {
-                if let Some(entry) = delta.files.get(hash) {
-                    if selected.as_ref().is_some_and(|old| old.size != entry.size) {
-                        return Err(corrupt("file has conflicting declared sizes"));
-                    }
-                    admit(&mut work, 40)?;
-                    selected = Some(entry.clone());
+            let mut selected: Option<(usize, FileCatalogEntry)> = None;
+            for value in row {
+                verify_identity(&value, Kind::CatalogFiles, &value.bytes)?;
+                if value.bytes.len() != 40 {
+                    return Err(corrupt("catalog file row has an invalid byte length"));
+                }
+                let size = u64::from_be_bytes(
+                    value.bytes[..8]
+                        .try_into()
+                        .map_err(|_| corrupt("file size is truncated"))?,
+                );
+                let entry = FileCatalogEntry::new(size, hex(&value.bytes[8..])?);
+                if let Some((rank, old)) = &selected
+                    && (old.size != entry.size || (*rank == value.rank && old != &entry))
+                {
+                    return Err(corrupt("file has conflicting declared sizes or ordering"));
+                }
+                if selected.as_ref().is_none_or(|(rank, _)| *rank < value.rank) {
+                    selected = Some((value.rank, entry));
                 }
             }
+            let selected = selected.map(|(_, entry)| entry);
             if let Some(entry) = selected {
                 shards.insert(entry.shard_hash.clone());
                 catalog.insert_file(hash.clone(), entry)?;
@@ -250,11 +281,12 @@ impl PointerCatalogLookup {
             .await?;
         let mut xorbs = BTreeSet::new();
         for (hash, row) in shards.iter().zip(rows) {
-            if let Some(row) = row {
-                let row: ShardRow = from_json(&row)?;
+            for value in row {
+                let row: ShardRow = from_json(&value.bytes)?;
                 let closure = self
                     .scan(
                         store,
+                        &value.origin,
                         row.xorbs.as_ref(),
                         Kind::CatalogShardXorbs,
                         &mut work,
@@ -269,19 +301,9 @@ impl PointerCatalogLookup {
                         hex(&key)
                     })
                     .collect::<Result<_>>()?;
-                catalog.insert_shard(
-                    hash.clone(),
-                    ShardCatalogEntry::new(row.encoded_size, closure),
-                )?;
-            }
-            for delta in &self.deltas {
-                if let Some(entry) = delta.shards.get(hash) {
-                    admit(
-                        &mut work,
-                        8u64.saturating_add((entry.xorb_hashes.len() as u64).saturating_mul(32)),
-                    )?;
-                    catalog.insert_shard(hash.clone(), entry.clone())?;
-                }
+                let entry = ShardCatalogEntry::new(row.encoded_size, closure);
+                verify_identity(&value, Kind::CatalogShards, &json(&entry)?)?;
+                catalog.insert_shard(hash.clone(), entry)?;
             }
             let entry = catalog
                 .shards
@@ -312,7 +334,9 @@ impl PointerCatalogLookup {
             .await?;
         let mut selected = BTreeMap::new();
         for (hash, row) in hashes.iter().zip(rows) {
-            if let Some(value) = row {
+            for row in row {
+                verify_identity(&row, Kind::CatalogChunks, &row.bytes)?;
+                let value = row.bytes;
                 if value.len() != 40 {
                     return Err(corrupt(
                         "catalog chunk placement has an invalid byte length",
@@ -329,24 +353,12 @@ impl PointerCatalogLookup {
                         .try_into()
                         .map_err(|_| corrupt("chunk size is truncated"))?,
                 );
-                selected.insert(hash.clone(), (xorb, index, size));
-            }
-        }
-        // Deltas are still materialized by the view owner. This scan is bounded
-        // to the post-checkpoint suffix; run-level indexing replaces it next.
-        for delta in &self.deltas {
-            for (xorb, entry) in &delta.xorbs {
-                for (index, chunk) in entry.chunks.iter().enumerate() {
-                    if !hashes.contains(&chunk.hash) {
-                        continue;
-                    }
-                    let candidate = (xorb.clone(), index as u32, chunk.uncompressed_size);
-                    let placement = selected
-                        .entry(chunk.hash.clone())
-                        .or_insert_with(|| candidate.clone());
-                    if candidate < *placement {
-                        *placement = candidate;
-                    }
+                let candidate = (xorb, index, size);
+                let placement = selected
+                    .entry(hash.clone())
+                    .or_insert_with(|| candidate.clone());
+                if candidate < *placement {
+                    *placement = candidate;
                 }
             }
         }
@@ -397,4 +409,16 @@ fn requested(hashes: &[String], work: &mut PageWork) -> Result<BTreeSet<String>>
         hash(value)?;
     }
     Ok(hashes.iter().cloned().collect())
+}
+
+fn verify_identity(value: &CatalogValue, kind: Kind, normalized: &[u8]) -> Result<()> {
+    if value
+        .identity
+        .is_some_and(|identity| identity != semantic_identity(kind, normalized))
+    {
+        return Err(corrupt(
+            "run catalog value differs from its semantic commitment",
+        ));
+    }
+    Ok(())
 }

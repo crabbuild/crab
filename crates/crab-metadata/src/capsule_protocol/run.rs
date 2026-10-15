@@ -14,7 +14,6 @@ const RUN_MAGIC: &[u8; 8] = b"CRBRUN01";
 const RUN_VERSION: u32 = 4;
 const RUN_TRAILER_BYTES: usize = 8 + 32 + RUN_MAGIC.len();
 pub(super) const MAX_RUN_FOOTER_BYTES: usize = 8 * 1024 * 1024;
-const MAX_INLINE_RUN_CONTROL_SECTION_BYTES: usize = 512 * 1024;
 /// Largest number of push capsules coalesced before a repository checkpoint.
 pub const MAX_CAPSULES_PER_RUN: usize = 512;
 
@@ -55,8 +54,6 @@ struct RunSectionLocation {
 struct RunControlSections {
     transaction: Vec<u8>,
     visibility_pages: Option<super::visibility::VisibilityPages>,
-    #[serde(default)]
-    catalog: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,12 +72,14 @@ struct CapsuleRunFooter {
 }
 
 mod admission;
-mod catalog;
+pub(in crate::capsule_protocol) mod catalog;
 use admission::AdmissionPages;
 pub use admission::CapsuleRunAdmission;
 #[cfg(feature = "storage")]
 pub use admission::CapsuleRunAdmissionReader;
 use catalog::CatalogPages;
+#[cfg(feature = "storage")]
+pub use catalog::RunCatalogSource;
 
 /// Immutable bounded run of complete push capsules.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +107,7 @@ pub struct CapsuleRunControl {
     index_pool: Option<RunSectionLocation>,
     admission: Option<CapsuleRunAdmission>,
     admission_info: Option<(RunSectionLocation, AdmissionPages)>,
+    catalog_info: Option<(RunSectionLocation, CatalogPages)>,
 }
 
 /// Ranges for the transaction and optional metadata sections of one capsule.
@@ -122,7 +122,6 @@ pub struct CapsuleControlLocation {
     catalog: Option<PackRange>,
     transaction_bytes: Bytes,
     visibility_pages: Option<super::visibility::VisibilityPages>,
-    catalog_bytes: Option<Bytes>,
 }
 
 /// Transaction and metadata sections needed to validate a run without reading
@@ -135,7 +134,11 @@ pub struct CapsuleControl {
     transaction: CapsuleTransaction,
     visibility: Option<ControlVisibility>,
     visibility_identity: Option<(u64, String, super::visibility::VisibilityPages)>,
+    #[cfg(feature = "storage")]
     catalog: Option<PointerCatalog>,
+    catalog_identity: Option<(u64, String)>,
+    #[cfg(feature = "storage")]
+    catalog_origin: Option<(object_store::path::Path, PackRange)>,
     git_packs: Vec<PackMemberDescriptor>,
 }
 
@@ -149,14 +152,14 @@ enum ControlVisibility {
 impl PartialEq for CapsuleControl {
     fn eq(&self, other: &Self) -> bool {
         // Transport origins and visibility materialization are not capsule
-        // identity. Compare the authenticated section commitment and roots so
+        // identity. Compare catalog/visibility commitments and roots so
         // compaction can relocate bytes without hiding conflicting evidence.
         self.hash == other.hash
             && self.transaction_id == other.transaction_id
             && self.base_root_digest == other.base_root_digest
             && self.transaction == other.transaction
             && self.visibility_identity == other.visibility_identity
-            && self.catalog == other.catalog
+            && self.catalog_identity == other.catalog_identity
             && self.git_packs == other.git_packs
     }
 }
@@ -340,17 +343,11 @@ impl CapsuleRunControl {
                     ));
                 }
             }
-            let catalog_bytes = location.control.catalog.clone().map(Bytes::from);
             let catalog_range = location
                 .catalog
                 .as_ref()
                 .map(|range| PackRange::from_parts(range.offset, range.length, range.hash.clone()))
                 .transpose()?;
-            verify_embedded_control_section(
-                catalog_range.as_ref(),
-                catalog_bytes.as_ref(),
-                "catalog",
-            )?;
             controls.push(CapsuleControlLocation {
                 hash: location.hash.clone(),
                 capsule_range: location.offset
@@ -365,7 +362,6 @@ impl CapsuleRunControl {
                 catalog: catalog_range,
                 transaction_bytes,
                 visibility_pages: location.control.visibility_pages.clone(),
-                catalog_bytes,
             });
             expected_offset = location
                 .offset
@@ -447,7 +443,35 @@ impl CapsuleRunControl {
             index_pool: footer.index_pool,
             admission,
             admission_info,
+            catalog_info: footer.catalog.zip(footer.catalog_pages),
         })
+    }
+
+    #[cfg(feature = "storage")]
+    /// Capture run catalog roots and capsule sources without loading their pages.
+    pub fn catalog_source(
+        &self,
+        layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    ) -> Result<Option<RunCatalogSource>> {
+        self.catalog_info
+            .as_ref()
+            .map(|(range, pages)| {
+                let capsules = self
+                    .capsules
+                    .iter()
+                    .map(|capsule| {
+                        (
+                            capsule.hash.clone(),
+                            capsule
+                                .catalog
+                                .as_ref()
+                                .map(|range| range.offset()..range.offset() + range.length()),
+                        )
+                    })
+                    .collect();
+                RunCatalogSource::new(layout, &self.hash, range, pages.clone(), capsules)
+            })
+            .transpose()
     }
 
     #[cfg(feature = "storage")]
@@ -558,56 +582,75 @@ impl CapsuleRunControl {
         &self,
         external_controls: &std::collections::BTreeMap<(String, CapsuleSectionKind), Bytes>,
     ) -> Result<Vec<CapsuleControl>> {
-        self.materialize_controls(external_controls, |location| {
-            let visibility_bytes = external_controls
-                .get(&(location.hash.clone(), CapsuleSectionKind::VisibilityDelta))
-                .cloned();
-            if visibility_bytes
-                .as_ref()
-                .map(|bytes| super::visibility::VisibilityPages::decode(bytes))
-                .transpose()?
-                != location.visibility_pages
-            {
-                return Err(corrupt(
-                    "visibility page descriptor differs from its run footer",
-                ));
-            }
-            let delta = visibility_bytes
-                .as_ref()
-                .map(|bytes| CapsuleVisibilityDelta::decode(bytes))
-                .transpose()?;
-            verify_control_section(
-                location.visibility.as_ref(),
-                visibility_bytes.as_ref(),
-                "visibility",
-            )?;
-            Ok(delta.map(|delta| ControlVisibility::Complete(std::sync::Arc::new(delta))))
-        })
+        self.materialize_controls(
+            |location| {
+                let visibility_bytes = external_controls
+                    .get(&(location.hash.clone(), CapsuleSectionKind::VisibilityDelta))
+                    .cloned();
+                if visibility_bytes
+                    .as_ref()
+                    .map(|bytes| super::visibility::VisibilityPages::decode(bytes))
+                    .transpose()?
+                    != location.visibility_pages
+                {
+                    return Err(corrupt(
+                        "visibility page descriptor differs from its run footer",
+                    ));
+                }
+                let delta = visibility_bytes
+                    .as_ref()
+                    .map(|bytes| CapsuleVisibilityDelta::decode(bytes))
+                    .transpose()?;
+                verify_control_section(
+                    location.visibility.as_ref(),
+                    visibility_bytes.as_ref(),
+                    "visibility",
+                )?;
+                Ok(delta.map(|delta| ControlVisibility::Complete(std::sync::Arc::new(delta))))
+            },
+            |location| {
+                let bytes = external_controls
+                    .get(&(location.hash.clone(), CapsuleSectionKind::CatalogDelta));
+                verify_control_section(location.catalog.as_ref(), bytes, "catalog")?;
+                bytes
+                    .map(|bytes| PointerCatalog::decode_delta(bytes))
+                    .transpose()
+            },
+        )
     }
 
     #[cfg(feature = "storage")]
     pub(crate) fn materialize_capsules_with_paged_visibility(
         &self,
         layout: &crab_storage::StoreLayout<crab_storage::Store>,
-        external_controls: &std::collections::BTreeMap<(String, CapsuleSectionKind), Bytes>,
     ) -> Result<Vec<CapsuleControl>> {
-        self.materialize_controls(external_controls, |location| {
-            self.visibility_reader(
-                layout,
-                &location.hash,
-                crate::git_visibility::MAX_GIT_VISIBILITY_INDEX_BYTES,
-            )
-            .map(|reader| {
-                reader.map(|reader| ControlVisibility::Paged(std::sync::Arc::new(reader)))
-            })
-        })
+        let mut controls = self.materialize_controls(
+            |location| {
+                self.visibility_reader(
+                    layout,
+                    &location.hash,
+                    crate::git_visibility::MAX_GIT_VISIBILITY_INDEX_BYTES,
+                )
+                .map(|reader| {
+                    reader.map(|reader| ControlVisibility::Paged(std::sync::Arc::new(reader)))
+                })
+            },
+            |_| Ok(None),
+        )?;
+        for (control, location) in controls.iter_mut().zip(&self.capsules) {
+            control.catalog_origin = location
+                .catalog
+                .as_ref()
+                .map(|range| (layout.capsule_path(&self.hash), range.clone()));
+        }
+        Ok(controls)
     }
 
     #[cfg(any(feature = "storage", test))]
     fn materialize_controls(
         &self,
-        external_controls: &std::collections::BTreeMap<(String, CapsuleSectionKind), Bytes>,
         visibility: impl Fn(&CapsuleControlLocation) -> Result<Option<ControlVisibility>>,
+        catalog: impl Fn(&CapsuleControlLocation) -> Result<Option<PointerCatalog>>,
     ) -> Result<Vec<CapsuleControl>> {
         let pack_directories = self.capsule_pack_directories()?;
         self.capsules
@@ -620,26 +663,15 @@ impl CapsuleRunControl {
                     "transaction",
                 )?;
                 let visibility = visibility(location)?;
-                let catalog_bytes = location.catalog_bytes.clone().or_else(|| {
-                    external_controls
-                        .get(&(location.hash.clone(), CapsuleSectionKind::CatalogDelta))
-                        .cloned()
-                });
-                verify_control_section(
-                    location.catalog.as_ref(),
-                    catalog_bytes.as_ref(),
-                    "catalog",
-                )?;
                 let transaction = CapsuleTransaction::decode(&location.transaction_bytes)?;
                 if transaction.id()? != location.transaction_id
                     || transaction.base_root_digest() != location.base_root_digest
                 {
                     return Err(corrupt("capsule run transaction does not match its footer"));
                 }
-                let catalog = catalog_bytes
-                    .as_ref()
-                    .map(|bytes| PointerCatalog::decode_delta(bytes))
-                    .transpose()?;
+                let catalog = catalog(location)?;
+                #[cfg(not(feature = "storage"))]
+                drop(catalog);
                 Ok(CapsuleControl {
                     hash: location.hash.clone(),
                     transaction_id: location.transaction_id.clone(),
@@ -653,7 +685,14 @@ impl CapsuleRunControl {
                         .map(|(section, pages)| {
                             (section.length(), section.blake3().to_owned(), pages.clone())
                         }),
+                    #[cfg(feature = "storage")]
                     catalog,
+                    catalog_identity: location
+                        .catalog
+                        .as_ref()
+                        .map(|range| (range.length(), range.blake3().to_owned())),
+                    #[cfg(feature = "storage")]
+                    catalog_origin: None,
                     git_packs,
                 })
             })
@@ -765,9 +804,25 @@ impl CapsuleControl {
         Ok(control)
     }
 
-    /// Return the pointer catalog delta, when present.
-    pub fn pointer_catalog_delta(&self) -> Option<&PointerCatalog> {
-        self.catalog.as_ref()
+    #[cfg(feature = "storage")]
+    /// Materialize catalog bytes only for explicit bulk inspection of this captured control.
+    pub async fn materialize_catalog(
+        &self,
+        store: &crab_storage::Store,
+    ) -> Result<Option<PointerCatalog>> {
+        if let Some(catalog) = &self.catalog {
+            return Ok(Some(catalog.clone()));
+        }
+        let Some((path, range)) = &self.catalog_origin else {
+            return Ok(None);
+        };
+        let end = range
+            .offset()
+            .checked_add(range.length())
+            .ok_or_else(|| corrupt("catalog materialization range overflows"))?;
+        let bytes = store.range_get(path, range.offset()..end).await?;
+        verify_control_section(Some(range), Some(&bytes), "catalog")?;
+        PointerCatalog::decode_delta(&bytes).map(Some)
     }
 
     /// Return this capsule's authenticated pack directory with capsule-relative ranges.
@@ -827,18 +882,13 @@ impl CapsuleControlLocation {
                 )
             })
             .into_iter()
-            .chain(
-                self.catalog
-                    .as_ref()
-                    .filter(|_| self.catalog_bytes.is_none())
-                    .map(|range| {
-                        (
-                            self.hash.clone(),
-                            CapsuleSectionKind::CatalogDelta,
-                            range.clone(),
-                        )
-                    }),
-            )
+            .chain(self.catalog.as_ref().map(|range| {
+                (
+                    self.hash.clone(),
+                    CapsuleSectionKind::CatalogDelta,
+                    range.clone(),
+                )
+            }))
     }
 }
 
@@ -921,9 +971,6 @@ impl CapsuleRun {
                 section_bytes_for_kind(capsule, CapsuleSectionKind::VisibilityDelta)?
                     .map(|bytes| super::visibility::VisibilityPages::decode(&bytes))
                     .transpose()?;
-            let inline_catalog = section_bytes_for_kind(capsule, CapsuleSectionKind::CatalogDelta)?
-                .filter(|bytes| bytes.len() <= MAX_INLINE_RUN_CONTROL_SECTION_BYTES)
-                .map(|bytes| bytes.to_vec());
             locations.push(RunCapsuleLocation {
                 offset,
                 length,
@@ -936,7 +983,6 @@ impl CapsuleRun {
                 control: RunControlSections {
                     transaction: capsule.section_bytes(0)?.to_vec(),
                     visibility_pages,
-                    catalog: inline_catalog,
                 },
             });
         }
@@ -1002,7 +1048,7 @@ impl CapsuleRun {
                 ))
             })
             .transpose()?;
-        let footer_bytes = loop {
+        let footer_bytes = {
             let footer = CapsuleRunFooter {
                 version: RUN_VERSION,
                 level,
@@ -1023,31 +1069,12 @@ impl CapsuleRun {
             let footer_bytes = serde_json::to_vec(&footer).map_err(|source| {
                 MetadataError::Internal(format!("capsule run serialization failed: {source}"))
             })?;
-            if footer_bytes.len() <= MAX_RUN_FOOTER_BYTES {
-                break footer_bytes;
-            }
-
-            let largest = locations
-                .iter()
-                .enumerate()
-                .filter_map(|(index, location)| {
-                    location
-                        .control
-                        .catalog
-                        .as_ref()
-                        .map(|bytes| (index, bytes.len()))
-                })
-                .max_by_key(|(_, length)| *length);
-            let Some((index, _)) = largest else {
+            if footer_bytes.len() > MAX_RUN_FOOTER_BYTES {
                 return Err(contract_error(format!(
                     "capsule run footer exceeds {MAX_RUN_FOOTER_BYTES} bytes"
                 )));
-            };
-            locations
-                .get_mut(index)
-                .ok_or_else(|| contract_error("capsule run control disappeared"))?
-                .control
-                .catalog = None;
+            }
+            footer_bytes
         };
         let footer_length = u64::try_from(footer_bytes.len())
             .map_err(|_| contract_error("capsule run footer length cannot be represented"))?;
@@ -1242,6 +1269,36 @@ impl CapsuleRun {
         }
         let capsules = control.materialize_capsules_with_external_controls(&detached)?;
         Ok((control, capsules))
+    }
+
+    #[cfg(feature = "storage")]
+    /// Capture catalog lookup sources from this already verified run.
+    pub fn catalog_source(
+        &self,
+        layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    ) -> Result<Option<RunCatalogSource>> {
+        self.footer
+            .catalog
+            .as_ref()
+            .zip(self.footer.catalog_pages.as_ref())
+            .map(|(range, pages)| {
+                let capsules = self
+                    .footer
+                    .capsules
+                    .iter()
+                    .map(|capsule| {
+                        (
+                            capsule.hash.clone(),
+                            capsule
+                                .catalog
+                                .as_ref()
+                                .map(|range| range.offset..range.offset + range.length),
+                        )
+                    })
+                    .collect();
+                RunCatalogSource::new(layout, &self.hash, range, pages.clone(), capsules)
+            })
+            .transpose()
     }
 
     /// Return the BLAKE3 object identity of the run.
@@ -1530,8 +1587,6 @@ fn validate_control_bundle(capsule: &Capsule, location: &RunCapsuleLocation) -> 
             "visibility page descriptor differs from its capsule",
         ));
     }
-    let embedded_catalog = location.control.catalog.clone().map(Bytes::from);
-    verify_embedded_control_section(catalog_range.as_ref(), embedded_catalog.as_ref(), "catalog")?;
     Ok(())
 }
 
@@ -1674,17 +1729,6 @@ fn verify_control_section(
         (Some(_), None) | (None, Some(_)) => Err(corrupt(format!(
             "capsule run {label} control section presence does not match"
         ))),
-    }
-}
-
-fn verify_embedded_control_section(
-    expected: Option<&PackRange>,
-    actual: Option<&Bytes>,
-    label: &str,
-) -> Result<()> {
-    match (expected, actual) {
-        (Some(_), None) => Ok(()),
-        _ => verify_control_section(expected, actual, label),
     }
 }
 

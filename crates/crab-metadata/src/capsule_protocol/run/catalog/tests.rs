@@ -206,3 +206,77 @@ fn authenticated_occurrence_changes_still_fail_full_capsule_binding() {
         matches!(error, MetadataError::CorruptObject { reason, .. } if reason.contains("nested capsules"))
     );
 }
+
+#[cfg(feature = "storage")]
+#[tokio::test]
+async fn selected_run_reads_reject_corrupt_index_pages_and_source_recipes() {
+    use crate::capsule_protocol::PointerCatalogLookup;
+    use crab_storage::{Store, StoreLayout};
+    use std::sync::Arc;
+    for index_page in [false, true] {
+        let run = CapsuleRun::leaf(capsule(0, Some(catalog(&"d".repeat(64), false)))).unwrap();
+        let layout = StoreLayout::new(
+            Store::new(Arc::new(object_store::memory::InMemory::new())),
+            "run-corruption".into(),
+        );
+        let source = run.catalog_source(&layout).unwrap().unwrap();
+        let lookup = PointerCatalogLookup::empty(1024 * 1024)
+            .with_run_sources(vec![source], &[run.capsules()[0].hash().to_owned()])
+            .unwrap();
+        let mut bytes = run.bytes().to_vec();
+        let offset = if index_page {
+            run.footer.catalog.as_ref().unwrap().offset
+                + run.footer.catalog_pages.as_ref().unwrap().roots[0]
+                    .as_ref()
+                    .unwrap()
+                    .offset
+        } else {
+            // Nested chunk recipes remain range-addressed in their original
+            // catalog body; the aggregate cannot bypass their page hashes.
+            let section = run.footer.capsules[0].catalog.as_ref().unwrap();
+            section.offset
+        };
+        bytes[offset as usize] ^= 1;
+        layout
+            .store()
+            .put_overwrite(&layout.capsule_path(run.hash()), bytes.into())
+            .await
+            .unwrap();
+        assert!(
+            lookup
+                .files(layout.store(), &["b".repeat(64)])
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[cfg(feature = "storage")]
+#[tokio::test]
+async fn catalog_control_identity_is_independent_of_materialization() {
+    use crab_storage::{Store, StoreLayout};
+    use std::sync::Arc;
+    let expected = catalog(&"d".repeat(64), false);
+    let run = CapsuleRun::leaf(capsule(0, Some(expected.clone()))).unwrap();
+    let layout = StoreLayout::new(
+        Store::new(Arc::new(object_store::memory::InMemory::new())),
+        "catalog-identity".into(),
+    );
+    layout
+        .store()
+        .put_overwrite(&layout.capsule_path(run.hash()), run.bytes().clone())
+        .await
+        .unwrap();
+    let (control, full) = run.verified_controls().unwrap();
+    let paged = control
+        .materialize_capsules_with_paged_visibility(&layout)
+        .unwrap();
+    assert_eq!(paged, full);
+    assert_eq!(
+        paged[0].materialize_catalog(layout.store()).await.unwrap(),
+        Some(expected)
+    );
+    let mut conflicting = paged[0].clone();
+    conflicting.catalog_identity.as_mut().unwrap().1 = "f".repeat(64);
+    assert_ne!(conflicting, full[0]);
+}

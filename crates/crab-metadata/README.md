@@ -468,7 +468,16 @@ key directories retain exact capsule occurrences and group equal immutable
 values by a semantic commitment that excludes physical page offsets. Full run
 verification rebuilds the index from nested capsules, so re-signed membership
 changes cannot invent catalog authority. Footer-only reads admit the index
-region and source spans without fetching its body. Foreground catalog lookup
-still uses materialized deltas; selected run-index reads remain unfinished.
+region and source spans without fetching its body. Captured run sources feed
+batched file, shard, xorb and reverse-chunk lookup through the checkpoint
+reader's shared cache and aggregate budget. Exact selected capsule ordering
+controls file precedence; unselected occurrences cannot introduce conflicts.
+Nested recipes retain authenticated page references into their original catalog
+sections and must match the aggregate's logical-value commitment.
+Git controls retain catalog section commitments and captured origins rather
+than loading catalog bytes. Full maintenance inspection materializes those
+captured sections explicitly. Run footers contain catalog roots, never inline
+catalog bodies. This reader wiring is under qualification; it does not establish
+the complete history-scaling, lifecycle or 10 GiB acceptance gates.
 The affected run format is absent from the audited release tags; unshipped
 version 3 is rejected rather than retained through a fallback.

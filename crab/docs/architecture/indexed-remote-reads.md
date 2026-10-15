@@ -1522,3 +1522,86 @@ lookups or the fixed-edit history-scaling gate. CLI publication qualification is
 pending. Its corrupt-catalog fixture currently attempts to publish malformed
 catalog bytes, which the new producer validates earlier; that boundary needs
 explicit qualification before this format change is ready to land.
+
+The next reader slice captures run catalog roots and original source extents
+from already authenticated run footers. Selected queries retain exact logical
+capsule order across physical sources. File bindings select the latest visible
+occurrence with consistent size; shard/xorb conflicts include every selected
+variant; reverse chunks select the lowest xorb and its first occurrence.
+All selected pages, including nested original recipes and warm cache hits,
+share one query byte budget. Nested shard/xorb values must match the aggregate
+semantic commitment after expansion.
+
+The Git metadata view now captures these sources without decoding delta
+catalogs. Run-v4 footers no longer inline catalog bodies, and the materialized
+delta lookup API is removed. Bulk maintenance retains explicit materialization
+of captured sections with their length/hash checks. Complete and paged capsule
+controls compare the same catalog section commitment, preserving logical
+identity across compaction.
+
+Reader tests cover selected/unselected conflicts, logical order independent of
+physical order, equal variants reusing an unselected source, repeated chunks,
+page corruption, and fixed requests against 100 versus 20,000 catalog entries.
+A read-view integration test holds one file query fixed against 100 versus
+10,000 entries and checks bounded opening/query bytes, warm origin silence and
+the full maintenance oracle. The storage-enabled metadata capsule suite passes
+123 tests, including selected-run queries and corruption. A separately added
+regression proves one aggregate page budget applies across two runs even when
+the first run is warm. Metadata/read compilation and strict all-target Clippy
+with storage/remote-index features pass. The additional control-identity case
+also passes from the newly compiled metadata test binary: complete and paged
+controls compare equally, explicit materialization matches the catalog, and a
+changed catalog commitment is unequal. These establish 125 distinct metadata
+checks. The 49 read-side and 22 writer capsule tests pass, including the new
+read-view integration. The payload-only suite passes 99 tests; it exposed one
+new unused catalog-field warning. That internal field is now storage-gated,
+while pure decoding still validates the catalog before discarding it. The
+minimal-feature suite passes all 99 tests again after that correction; strict
+metadata/read all-target Clippy with storage/remote-index also passes. Four
+other payload-only warnings predate this slice. A source guard covers 445 Rust
+files in the CLI, metadata and read crates; the feature-gating correction is
+the only intentional source change after the initial capture.
+
+The producer-only CLI run completed with seven passing tests and one setup
+failure: the corrupt-catalog fixture attempted publication, and the producer
+rejected it before `prepare_delta`. Its replacement exercises publication
+directly and checks both the root digest and visible refs remain unchanged.
+Selected-reader corruption remains covered independently. The replacement CLI
+test passes in the fresh CLI run: all eight publication tests pass. The old
+producer-only failure remains a rejected receipt, not a passing gate. The fresh
+test binary reports the existing Apple unwind-table-size linker warning.
+
+### Installed checkpoint-reader qualification
+
+Normal `make install` completed from frozen revision `8090eb68df1` with a
+private installation prefix. It built the no-FUSE CLI, FUSE helper, cache
+server and remote-helper symlink. Both installed CLI variants pass the 4-MiB
+native/Git managed-file workflows: 74 commands and 58 checks each. Coverage
+includes staging/push, clone/hydration, Git/remote fsck, checkpoint publication
+and independent cold checkpoint hydration with byte-identical payloads. Raw
+stored root/checkpoint inspection confirms format 7 and nonempty catalog roots
+for both workflows. All 1,215 guarded Rust/manifest files remain unchanged.
+
+The no-FUSE CLI SHA-256 is
+`ce23afdd3054a8c95ac5d117a2a216a9f76baeeedd4709c866246b7ee2f17794`;
+the FUSE helper SHA-256 is
+`a92a7bcd74322300d4b51f76da73ddceb27936ada8267d60d3e08b616b111b25`.
+External receipts are `catalog-lookup-installed-live-r1/receipt.json` and
+`catalog-lookup-fuse-managed-live-r1/receipt.json`. These qualify the frozen
+checkpoint-reader slice; they do not qualify the newer run-v4 reader, the
+10-GiB matrix or representative S3 latency.
+
+The separate default broad harness stopped after 50 commands and 38 checks at
+`missing-manifest-list-fails-closed`: it deletes `/manifest`, while the current
+initializer publishes only the capsule `/v2/root`. The initializer contract is
+explicitly tested by `remote_initialization_publishes_only_the_capsule_root`;
+listing still succeeds through the intact v2 authority. The broad run remains
+failed and requires canonical-root corruption fixtures. Its expectation has
+not been weakened or suppressed, and the focused receipts do not replace it.
+A separate canonical-root live probe passes 34 commands and 18 checks. Listing
+and clone reject missing roots with `CRAB-E0032` and corrupt roots with
+`CRAB-E0020`; restoring each exact root restores the original branch tip. Its
+receipt is `catalog-root-failures-live-r2/receipt.json`. The first probe stopped
+on a driver assertion against unborn `HEAD`; the corrected probe commits and
+pushes a real fixture before fault injection. Neither probe changes the broad
+harness's failed status.

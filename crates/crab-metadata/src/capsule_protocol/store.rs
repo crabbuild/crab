@@ -393,7 +393,7 @@ pub async fn load_capsule_run_control(
             "capsule pointer footer hash does not match the authenticated run suffix",
         ));
     }
-    let detached = load_detached_control_sections(router, &path, &control, true).await?;
+    let detached = load_detached_control_sections(router, &path, &control).await?;
     let capsules = control.materialize_capsules_with_external_controls(&detached)?;
     Ok((control, capsules))
 }
@@ -434,8 +434,7 @@ pub async fn load_capsule_run_git_control(
             ));
         }
     }
-    let detached = load_detached_control_sections(router, &path, &control, false).await?;
-    let capsules = control.materialize_capsules_with_paged_visibility(router, &detached)?;
+    let capsules = control.materialize_capsules_with_paged_visibility(router)?;
     Ok((control, capsules))
 }
 
@@ -443,13 +442,11 @@ async fn load_detached_control_sections(
     router: &StoreLayout<Store>,
     path: &object_store::path::Path,
     control: &CapsuleRunControl,
-    complete_visibility: bool,
 ) -> Result<BTreeMap<(String, CapsuleSectionKind), bytes::Bytes>> {
     let ranges = control
         .capsule_locations()
         .iter()
         .flat_map(|location| location.detached_controls())
-        .filter(|(_, kind, _)| complete_visibility || *kind != CapsuleSectionKind::VisibilityDelta)
         .collect::<Vec<_>>();
     futures_util::stream::iter(ranges.into_iter().map(|(hash, kind, range)| async move {
         let end = range
