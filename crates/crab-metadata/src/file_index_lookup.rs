@@ -557,14 +557,17 @@ impl FileIndexLookupSession {
                 })
                 .transpose()?;
         }
-        if !missing.is_empty() && missing.len() <= MAX_VERIFIED_CATALOG_FILES {
+        if !missing.is_empty() {
             let mut cache = self.resolved_files.lock().await;
-            let cached = cache.found.len().saturating_add(cache.missing.len());
-            if cached.saturating_add(missing.len()) > MAX_VERIFIED_CATALOG_FILES {
-                cache.found.clear();
-                cache.missing.clear();
-            }
             for (index, hash) in missing {
+                if cache.found.contains_key(&hash) || cache.missing.contains(&hash) {
+                    continue;
+                }
+                // Duplicate occurrences consume input budget, but retain one fact.
+                if cache.found.len() + cache.missing.len() == MAX_VERIFIED_CATALOG_FILES {
+                    cache.found.clear();
+                    cache.missing.clear();
+                }
                 match output[index] {
                     Some(shard) => {
                         cache.found.insert(hash, shard);

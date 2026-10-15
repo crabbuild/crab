@@ -347,20 +347,45 @@ async fn repeated_large_recipe_binding_queries_reuse_verified_results() {
         .unwrap();
     let (captured, _, _) = capture(&layout, catalog, 16 * 1024 * 1024).await;
     let lookup = SharedFileIndexLookup::for_pointer_catalog(layout, captured);
-    let cold = lookup.lookup(&file).await;
+    let duplicates = vec![file; super::MAX_VERIFIED_CATALOG_FILES + 1];
+    let cold = lookup.lookup_batch(&duplicates).await;
     let cold_reads = reads.load(Ordering::SeqCst);
     let warm = lookup.lookup_batch(&[file, file]).await;
     let warm_reads = reads.load(Ordering::SeqCst);
     lookup.close().await.unwrap();
     assert_eq!(
         (cold.unwrap(), warm.unwrap()),
-        (Some(shard), vec![Some(shard), Some(shard)])
+        (
+            vec![Some(shard); duplicates.len()],
+            vec![Some(shard), Some(shard)]
+        )
     );
     assert!(cold_reads > 0);
     assert_eq!(
         warm_reads, cold_reads,
         "verified immutable bindings must not re-read the large recipe"
     );
+}
+
+#[tokio::test]
+async fn binding_cache_stays_bounded_for_distinct_misses() {
+    let layout = crab_storage::StoreLayout::new(
+        crab_storage::Store::new(Arc::new(InMemory::new())),
+        "bounded-binding-cache".to_owned(),
+    );
+    let (captured, _, _) = capture(&layout, PointerCatalog::new(), 16 * 1024 * 1024).await;
+    let lookup = SharedFileIndexLookup::for_pointer_catalog(layout, captured);
+    let files = (0..super::MAX_VERIFIED_CATALOG_FILES * 2)
+        .map(|index| super::tests::hash_from_seed(index as u64))
+        .collect::<Vec<_>>();
+    lookup.lookup_batch(&files).await.unwrap();
+    let retained = {
+        let session = lookup.session().await.unwrap();
+        let cache = session.resolved_files.lock().await;
+        cache.found.len() + cache.missing.len()
+    };
+    lookup.close().await.unwrap();
+    assert!(retained <= super::MAX_VERIFIED_CATALOG_FILES);
 }
 
 #[tokio::test]

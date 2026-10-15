@@ -77,7 +77,8 @@ using the same result-cache owner as canonical shard lookup. Cold queries still
 validate the full selected dependency closure before publishing cache entries;
 errors are never cached as absence. Cached inputs retain the original admission
 charge. Catalog cache locks cover memory work only, so unrelated warm lookups can finish
-while a cold origin read is paused. Large cold batches do not retain their results.
+while a cold origin read is paused. Retention counts distinct file identities;
+duplicate occurrences do not consume additional entries or prevent caching.
 The current-state opener also captures authenticated catalog roots and leaves
 catalog bodies cold. Explicitly pinned callers pass their existing capture, while
 current-state sessions bind once to the first root they open. Catalog and Git
