@@ -2324,3 +2324,47 @@ the report SHA-256 is
 The shared `crab-remote` preparation consumer, final 10-GiB qualification,
 history scaling, provider latency, lifecycle and full blame semantics remain
 open gates.
+
+
+## Shared capsule preparation in progress
+
+The shared `Prepared::upload_capsule` caller in HTTP receive now uses captured
+file, shard and xorb lookups instead of materializing unrelated historical
+catalogs. An ordinary Git upload with no new Crab pointer performs zero catalog
+reads. Selected pointer and prepared-content closures preserve size, membership
+and descriptor conflict checks. Capsule-specific implementation lives in
+`crates/crab-remote/src/prepare/capsule.rs`; its public API remains under
+`crab_remote::prepare`.
+
+Four regressions failed before the change and pass afterward: one redundant
+historical-catalog read for a Git-only upload; Xet-word-order formatting of a raw
+body digest; acceptance of rewritten xorb/shard scratch bodies after inspection;
+and no shared chunk candidate index after a successful native-content commit.
+The initial Git-only fixture sent an all-history pack containing an old pointer;
+its corrected incremental pack excludes the advertised tip before measuring.
+No weakened assertion or production failure is inferred from that fixture issue.
+
+Six public-API integration tests and strict all-target Clippy pass. The tests use
+native Git packs, real Xet artifacts, explicit publication leases, exact origin
+and source-anchor checks, complete file reconstruction, and a noncanonical index
+fault that must leave committed refs successful. The SlateDB test dependency uses
+the same pinned 0.15.0 release already used by metadata; the lockfile adds only
+that test dependency edge. Production dependency versions do not change.
+
+The dedicated RustFS public-API test passes for both newly created and occupied
+xorb keys. It uses native Git preparation, real S3 publication, cold source and
+origin-anchor checks, and complete file-hash reconstruction. The historical
+pointer integration also accepts the correct declared size and rejects a
+conflicting one. The final source passes strict all-target Clippy and the
+no-default-feature check.
+
+Eight HTTP receive/fault tests pass. Three dedicated real-RustFS cells also pass:
+the public native-content API, native Git push/fetch and browser editing over the
+HTTP listener, and the six receive-fault/restart scenarios. Source hashes remain
+unchanged throughout these runs. The API test-binary SHA-256 is
+`fe8a75004fd4ef7ec0946b999d32a829b83b28f94b51317a9c34e9990e9ebf5d`; the HTTP test-binary SHA-256 is
+`92318648278160dd57f96f35dbcffc01f44799a75a43b84442251965c07fef51`. These are small correctness fixtures, separate from the required
+large-file, growth and latency cells.
+
+The final combined 10-GiB matrix, unrelated-history/ref/frontier scaling, broader
+lifecycle/provider proof and fuller blame semantics still prevent completion.
