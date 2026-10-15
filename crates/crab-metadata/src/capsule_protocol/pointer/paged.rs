@@ -10,7 +10,7 @@ pub use reader::PointerCatalogLookup;
 const MAGIC: &[u8; 8] = b"CRBPCP01";
 const TRAILER_BYTES: usize = 12;
 const MAX_DESCRIPTOR_BYTES: usize = 4096;
-const MAX_CATALOG_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub(in crate::capsule_protocol) const MAX_CATALOG_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

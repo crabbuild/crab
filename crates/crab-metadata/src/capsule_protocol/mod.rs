@@ -4,12 +4,18 @@ use bstr::ByteSlice;
 
 mod browse;
 mod capsule;
+#[cfg(feature = "storage")]
+mod captured_visibility;
+#[cfg(feature = "storage")]
+mod catalog_capture;
 mod history;
 mod layered;
 #[cfg(feature = "storage")]
 mod plan;
 mod pointer;
 mod ref_head;
+#[cfg(feature = "storage")]
+mod ref_view;
 mod root;
 mod run;
 #[cfg(feature = "storage")]
@@ -25,6 +31,13 @@ pub use capsule::{
     Capsule, CapsuleGitPack, CapsuleGitPackDescriptor, CapsuleSection, CapsuleSectionKind,
     CapsuleSectionLocation,
 };
+#[cfg(feature = "storage")]
+pub use captured_visibility::{
+    CapturedVisibility, VisibilityReconciliation, apply_transaction_visibility_index,
+    visibility_is_ready,
+};
+#[cfg(feature = "storage")]
+pub use catalog_capture::load_pointer_catalog_lookup_from_root;
 pub use history::{
     HistorySegment, HistorySegmentPointer, HistorySegmentState, MAX_HISTORY_CHAIN_BYTES,
     MAX_HISTORY_CHAIN_SEGMENTS, MAX_HISTORY_SEGMENT_BYTES,
@@ -45,12 +58,18 @@ pub use plan::{
 #[cfg(feature = "storage")]
 pub use pointer::PointerCatalogLookup;
 pub use pointer::{
-    FileCatalogEntry, PointerCatalog, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
+    FileCatalogEntry, PointerCatalog, PointerCatalogAssembly, ShardCatalogEntry, XorbCatalogEntry,
+    XorbChunkEntry,
 };
 pub use ref_head::{
     CAPSULE_REF_COMPACTION_FAN_IN, CAPSULE_REF_ROLLUP_WINDOW, CapsuleRefHead, CapsuleRefState,
     MAX_CAPSULE_REF_FRONTIER, MAX_CAPSULE_REF_HEADS, capsule_ref_name_from_key,
     capsule_ref_name_key,
+};
+#[cfg(feature = "storage")]
+pub use ref_view::{
+    RefControlFrontiers, VisibleRefHeads, apply_control_refs, materialize_visible_ref_heads,
+    order_ref_controls, select_ref_control_frontiers, select_ref_journal_controls,
 };
 pub use root::{
     CapsulePointer, CheckpointPointer, GcFence, MAX_CAPSULE_FRONTIER, MAX_ROOT_BYTES,

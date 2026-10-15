@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::capsule_protocol::{
-    CapsuleRefEdit, CapsuleRefState, CapsuleTransaction, RepositoryRoot,
+    Capsule, CapsuleRefEdit, CapsuleRefState, CapsuleTransaction, RepositoryRoot,
 };
 use std::sync::Arc;
 
@@ -570,4 +570,140 @@ async fn ref_capture_rejects_uncommitted_base_changes_only_in_the_active_epoch()
             assert!(matches!(result, Err(MetadataError::CorruptObject { .. })));
         }
     }
+}
+
+#[tokio::test]
+async fn full_catalog_matches_selected_closure_across_independent_ref_dependencies() {
+    use crate::capsule_protocol::{
+        CapsulePointer, CapsuleSection, FileCatalogEntry, ShardCatalogEntry, XorbCatalogEntry,
+        XorbChunkEntry, load_pointer_catalog_lookup_from_root,
+    };
+    let layout = StoreLayout::new(
+        Store::new(Arc::new(object_store::memory::InMemory::new())),
+        "repositories/catalog-order".to_owned(),
+    );
+    let root = create_root(
+        &layout,
+        RootRecord::encode(RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let descriptors = CapsuleTransaction::new(
+        root.record().digest(),
+        vec![CapsuleRefEdit::new(
+            "refs/tags/source",
+            None,
+            Some("1".repeat(40)),
+            None,
+        )],
+    )
+    .unwrap();
+    let descriptor_id = descriptors.id().unwrap();
+    let mut binding = None;
+    for index in 0..256 {
+        let candidate = CapsuleTransaction::new(
+            root.record().digest(),
+            vec![CapsuleRefEdit::new(
+                format!("refs/tags/consumer-{index}"),
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        if candidate.id().unwrap() < descriptor_id {
+            binding = Some(candidate);
+            break;
+        }
+    }
+    let binding = binding.expect("fixture must put its dependent binding first in hash order");
+    let file = "3".repeat(64);
+    let shard = "4".repeat(64);
+    let xorb = "5".repeat(64);
+    let mut complete = PointerCatalog::new();
+    complete
+        .insert_xorb(
+            xorb.clone(),
+            XorbCatalogEntry::new(
+                99,
+                "6".repeat(64),
+                vec![XorbChunkEntry::new("7".repeat(64), 16)],
+            ),
+        )
+        .unwrap();
+    complete
+        .insert_shard(shard.clone(), ShardCatalogEntry::new(80, vec![xorb]))
+        .unwrap();
+    let mut file_delta = PointerCatalog::new();
+    file_delta
+        .insert_file(file.clone(), FileCatalogEntry::new(16, shard))
+        .unwrap();
+    for (transaction, delta) in [(&descriptors, &complete), (&binding, &file_delta)] {
+        let capsule = Capsule::build(
+            transaction,
+            vec![],
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::CatalogDelta,
+                delta.encode_delta().unwrap(),
+            )],
+        )
+        .unwrap();
+        let run = CapsuleRun::leaf(capsule).unwrap();
+        layout
+            .store()
+            .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let pointer = CapsulePointer::new(
+            run.hash(),
+            run.bytes().len() as u64,
+            run.control_offset(),
+            run.control_size(),
+            run.footer_hash(),
+            run.level(),
+            run.transaction_ids(),
+            run.newest_base_root_digest(),
+        )
+        .unwrap();
+        let edit = &transaction.edits()[0];
+        let head = CapsuleRefHead::from_root(
+            edit.ref_name(),
+            root.record().root().ref_epoch().to_owned(),
+            None,
+            None,
+        )
+        .unwrap();
+        let state = head
+            .successor_state(
+                &BTreeSet::new(),
+                edit.new_oid().map(str::to_owned),
+                None,
+                transaction.id().unwrap(),
+                vec![pointer],
+            )
+            .unwrap();
+        layout
+            .store()
+            .create_strict(
+                &layout.capsule_ref_head_path(&capsule_ref_name_key(edit.ref_name())),
+                head.commit(state).unwrap().encode().unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    complete.apply(&file_delta).unwrap();
+    let selected = load_pointer_catalog_lookup_from_root(&layout, &root)
+        .await
+        .unwrap()
+        .files(layout.store(), &[file])
+        .await
+        .unwrap();
+    assert_eq!(selected, complete);
+    assert_eq!(
+        load_pointer_catalog_from_root(&layout, &root)
+            .await
+            .unwrap(),
+        selected
+    );
 }

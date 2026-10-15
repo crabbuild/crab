@@ -2,10 +2,15 @@
 
 use bytes::Bytes;
 use crab_metadata::capsule_protocol::{
-    Capsule, CapsuleControl, CapsulePointer, CapsuleRun, CapsuleRunControl, CheckpointPointer,
-    LayeredCheckpoint, PackMemberDescriptor, PackRange, PackSourceDescriptor, PackSourceKind,
-    PointerCatalog, RootRecord, capture_ref_heads, load_root, resolve_referenced_activations,
-    visibility_object_set_digest,
+    Capsule, CapsuleControl, CapsulePointer, CapsuleRun, CapsuleRunControl, CapturedVisibility,
+    CheckpointPointer, LayeredCheckpoint, PackMemberDescriptor, PackRange, PackSourceDescriptor,
+    PackSourceKind, PointerCatalog, PointerCatalogAssembly, RootRecord, VisibilityReconciliation,
+    apply_transaction_visibility_index, capture_ref_heads, load_root,
+    resolve_referenced_activations, visibility_is_ready, visibility_object_set_digest,
+};
+use crab_metadata::capsule_protocol::{
+    apply_control_refs, materialize_visible_ref_heads, order_ref_controls,
+    select_ref_control_frontiers, select_ref_journal_controls,
 };
 use crab_storage::{Store, StoreLayout};
 use futures_util::future::try_join_all;
@@ -18,7 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{ReadError, Result};
 
-mod visibility;
+#[cfg(test)]
+mod visibility_tests;
 
 const LAYERED_SIDECAR_COALESCE_GAP_BYTES: u64 = 64 * 1024;
 const LAYERED_SIDECAR_MAX_EXTRA_BYTES: u64 = 4 * 1024 * 1024;
@@ -783,7 +789,7 @@ impl CapsuleRepositoryView {
         self.catalog_sources
             .as_ref()
             .ok_or(ReadError::IncompleteCatalogView)?;
-        let mut catalog =
+        let base_catalog =
             match self.checkpoint.as_ref() {
                 Some(checkpoint) if checkpoint.is_control_only() => {
                     let layout = self.metadata_layout.as_ref().ok_or_else(|| {
@@ -800,6 +806,7 @@ impl CapsuleRepositoryView {
                 Some(checkpoint) => checkpoint.pointer_catalog()?,
                 None => PointerCatalog::new(),
             };
+        let mut catalog = PointerCatalogAssembly::new(base_catalog);
         for capsule in &self.capsules {
             if let Some(delta) = capsule.pointer_catalog_delta()? {
                 catalog.apply(&delta)?;
@@ -813,7 +820,7 @@ impl CapsuleRepositoryView {
                 catalog.apply(&delta)?;
             }
         }
-        Ok(catalog)
+        Ok(catalog.finish()?)
     }
 
     /// Open the authenticated embedded Git packs as a filesystem-free repository.
@@ -4553,7 +4560,7 @@ async fn assemble_view(
     let mut required_transactions = BTreeSet::new();
     let mut transaction_predecessors = BTreeMap::<String, BTreeSet<String>>::new();
     let mut ref_capsule_counts = BTreeMap::new();
-    for (ref_name, (checkpoint_transaction_id, frontier)) in &ref_frontiers {
+    for (ref_name, (start, frontier)) in &ref_frontiers {
         let transaction_ids = frontier
             .iter()
             .map(|pointer| {
@@ -4564,34 +4571,12 @@ async fn assemble_view(
             .into_iter()
             .flat_map(|run| run.capsules().iter().map(Capsule::transaction_id))
             .collect::<Vec<_>>();
-        let start = match snapshot
-            .record()
-            .root()
-            .compacted_ref_transactions()
-            .get(ref_name)
-        {
-            Some(compacted) => match transaction_ids
-                .iter()
-                .position(|transaction_id| *transaction_id == compacted)
-            {
-                Some(index) => index + 1,
-                None if checkpoint_transaction_id.as_deref() == Some(compacted.as_str()) => 0,
-                None => {
-                    return Err(corrupt_path(
-                        "capsule-protocol ref heads",
-                        format!("ref {ref_name} does not extend its compacted transaction"),
-                    ));
-                }
-            },
-            None if checkpoint_transaction_id.is_none() => 0,
-            None => {
-                return Err(corrupt_path(
-                    "capsule-protocol ref heads",
-                    format!("ref {ref_name} names a checkpoint absent from the repository root"),
-                ));
-            }
-        };
-        let required = &transaction_ids[start..];
+        let required = transaction_ids.get(*start..).ok_or_else(|| {
+            corrupt_path(
+                "capsule-protocol ref heads",
+                "captured frontier offset exceeds its validated transaction count",
+            )
+        })?;
         ref_capsule_counts.insert(
             ref_name.clone(),
             u32::try_from(required.len())
@@ -4851,95 +4836,9 @@ async fn assemble_layered_control_view(
             capsule_run_sources.push(source);
         }
     }
-    let root_transactions = snapshot
-        .record()
-        .root()
-        .capsule_frontier()
-        .iter()
-        .flat_map(|pointer| pointer.transaction_ids().iter().cloned())
-        .collect::<BTreeSet<_>>();
-    let mut required_transactions = BTreeSet::new();
-    let mut transaction_predecessors = BTreeMap::<String, BTreeSet<String>>::new();
-    let mut ref_capsule_counts = BTreeMap::new();
-    for (ref_name, (checkpoint_transaction_id, frontier)) in &ref_frontiers {
-        let transaction_ids = frontier
-            .iter()
-            .map(|pointer| {
-                runs.get(pointer.hash())
-                    .ok_or_else(|| ReadError::internal("loaded capsule run control disappeared"))
-            })
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flat_map(|(_, capsules)| capsules.iter().map(|capsule| capsule.transaction_id()))
-            .collect::<Vec<_>>();
-        let start = match snapshot
-            .record()
-            .root()
-            .compacted_ref_transactions()
-            .get(ref_name)
-        {
-            Some(compacted) => match transaction_ids
-                .iter()
-                .position(|transaction_id| *transaction_id == compacted)
-            {
-                Some(index) => index + 1,
-                None if checkpoint_transaction_id.as_deref() == Some(compacted.as_str()) => 0,
-                None => {
-                    return Err(corrupt_path(
-                        "capsule-protocol ref heads",
-                        format!("ref {ref_name} does not extend its compacted transaction"),
-                    ));
-                }
-            },
-            None if checkpoint_transaction_id.is_none() => 0,
-            None => {
-                return Err(corrupt_path(
-                    "capsule-protocol ref heads",
-                    format!("ref {ref_name} names a checkpoint absent from the repository root"),
-                ));
-            }
-        };
-        let required = &transaction_ids[start..];
-        ref_capsule_counts.insert(
-            ref_name.clone(),
-            u32::try_from(required.len())
-                .map_err(|_| ReadError::internal("ref capsule count overflowed"))?,
-        );
-        required_transactions.extend(
-            required
-                .iter()
-                .map(|transaction_id| (*transaction_id).to_owned()),
-        );
-        for pair in required.windows(2) {
-            transaction_predecessors
-                .entry(pair[1].to_owned())
-                .or_default()
-                .insert(pair[0].to_owned());
-        }
-    }
-    let mut root_capsules = Vec::new();
-    let mut root_capsule_identities = BTreeMap::new();
-    for pointer in snapshot.record().root().capsule_frontier() {
-        let (_, capsules) = runs
-            .get(pointer.hash())
-            .ok_or_else(|| ReadError::internal("loaded root capsule run control disappeared"))?;
-        for capsule in capsules {
-            match root_capsule_identities.get(capsule.transaction_id()) {
-                Some(existing) if existing != capsule => {
-                    return Err(corrupt_path(
-                        "capsule-protocol root frontier",
-                        "transaction identity names conflicting capsules",
-                    ));
-                }
-                Some(_) => {}
-                None => {
-                    root_capsule_identities
-                        .insert(capsule.transaction_id().to_owned(), capsule.clone());
-                    root_capsules.push(capsule.clone());
-                }
-            }
-        }
-    }
+    let selected = select_ref_control_frontiers(snapshot.record().root(), &ref_frontiers, &runs)?;
+    let mut root_capsules = selected.root_controls;
+    let ref_capsule_counts = selected.counts;
     if footer_only {
         return Ok(CapsuleRepositoryView {
             root: snapshot,
@@ -4964,28 +4863,9 @@ async fn assemble_layered_control_view(
             frontier_object_admission,
         });
     }
-    let mut journal_capsules = BTreeMap::new();
-    for (_, capsules) in runs.values() {
-        for capsule in capsules {
-            if root_transactions.contains(capsule.transaction_id())
-                || !required_transactions.contains(capsule.transaction_id())
-            {
-                continue;
-            }
-            match journal_capsules.get(capsule.transaction_id()) {
-                Some(existing) if existing != capsule => {
-                    return Err(corrupt_path(
-                        "capsule-protocol ref heads",
-                        "transaction identity names conflicting capsules",
-                    ));
-                }
-                Some(_) => {}
-                None => {
-                    journal_capsules.insert(capsule.transaction_id().to_owned(), capsule.clone());
-                }
-            }
-        }
-    }
+    let journal_capsules =
+        select_ref_journal_controls(snapshot.record().root(), &selected.required, &runs)?;
+    let transaction_predecessors = selected.predecessors;
     let checkpoint_visibility = if matches!(read, ControlRead::Git) {
         checkpoint
             .as_ref()
@@ -5000,22 +4880,18 @@ async fn assemble_layered_control_view(
         let names = snapshot.record().root().refs().keys().cloned();
         let initial = match &checkpoint_visibility {
             Some(reader) => {
-                visibility::Visibility::from_checkpoint(
-                    router.store().clone(),
-                    reader.clone(),
-                    names,
-                )
-                .await?
+                CapturedVisibility::from_checkpoint(router.store().clone(), reader.clone(), names)
+                    .await?
             }
-            None => visibility::Visibility::new(
+            None => CapturedVisibility::new(
                 router.store().clone(),
                 visibility_index_for_checkpoint(None)?,
                 names,
             ),
         };
-        visibility::Reconciliation::Paged(Box::new(initial))
+        VisibilityReconciliation::Paged(Box::new(initial))
     } else {
-        visibility::Reconciliation::Complete(visibility_index_for_checkpoint(checkpoint.as_ref())?)
+        VisibilityReconciliation::Complete(visibility_index_for_checkpoint(checkpoint.as_ref())?)
     };
     for capsule in &root_capsules {
         visibility.apply(capsule).await?;
@@ -5139,14 +5015,6 @@ fn extend_frontier_object_admission(
     }
 }
 
-struct VisibleRefHeads {
-    refs: BTreeMap<String, String>,
-    peeled_refs: BTreeMap<String, String>,
-    transactions: BTreeMap<String, String>,
-    frontiers: BTreeMap<String, (Option<String>, Vec<CapsulePointer>)>,
-    pointers: Vec<CapsulePointer>,
-}
-
 fn state_digest(root: &RootRecord, transactions: &BTreeMap<String, String>) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"crab capsule repository view v2\0");
@@ -5157,78 +5025,6 @@ fn state_digest(root: &RootRecord, transactions: &BTreeMap<String, String>) -> S
         hasher.update(transaction_id.as_bytes());
     }
     hasher.finalize().to_hex().to_string()
-}
-
-fn materialize_visible_ref_heads(
-    root: &crab_metadata::capsule_protocol::RepositoryRoot,
-    heads: &[crab_metadata::capsule_protocol::CapsuleRefHead],
-    active: &BTreeSet<String>,
-) -> Result<VisibleRefHeads> {
-    let mut refs = root.refs().clone();
-    let mut peeled_refs = root.peeled_refs().clone();
-    let mut transactions = BTreeMap::new();
-    let mut frontiers = BTreeMap::new();
-    let mut pointers = root.capsule_frontier().to_vec();
-    for head in heads {
-        let state = head.visible(active);
-        if let Some(transaction_id) = state.transaction_id() {
-            transactions.insert(head.ref_name().to_owned(), transaction_id.to_owned());
-        }
-        if state.transaction_id()
-            == root
-                .compacted_ref_transactions()
-                .get(head.ref_name())
-                .map(String::as_str)
-        {
-            continue;
-        }
-        match state.oid() {
-            Some(oid) => {
-                refs.insert(head.ref_name().to_owned(), oid.to_owned());
-                match state.peeled_oid() {
-                    Some(peeled) => {
-                        peeled_refs.insert(head.ref_name().to_owned(), peeled.to_owned());
-                    }
-                    None => {
-                        peeled_refs.remove(head.ref_name());
-                    }
-                }
-            }
-            None => {
-                refs.remove(head.ref_name());
-                peeled_refs.remove(head.ref_name());
-            }
-        }
-        for pointer in state.frontier() {
-            match pointers
-                .iter()
-                .find(|candidate| candidate.hash() == pointer.hash())
-            {
-                Some(candidate) if candidate != pointer => {
-                    return Err(corrupt_path(
-                        "capsule-protocol ref heads",
-                        "capsule run identity has conflicting authenticated metadata",
-                    ));
-                }
-                Some(_) => {}
-                None => pointers.push(pointer.clone()),
-            }
-        }
-        frontiers.insert(
-            head.ref_name().to_owned(),
-            (
-                state.checkpoint_transaction_id().map(str::to_owned),
-                state.frontier().to_vec(),
-            ),
-        );
-    }
-    Ok(VisibleRefHeads {
-        refs,
-        peeled_refs,
-        transactions,
-        frontiers,
-        pointers,
-    })
 }
 
 async fn capture_selected_ref_heads(
@@ -5358,175 +5154,6 @@ fn order_ref_capsules(
     Ok(ordered)
 }
 
-async fn order_ref_controls(
-    base_refs: &BTreeMap<String, String>,
-    base_peeled: &BTreeMap<String, String>,
-    mut visibility: visibility::Reconciliation,
-    predecessors: &BTreeMap<String, BTreeSet<String>>,
-    mut pending: BTreeMap<String, CapsuleControl>,
-) -> Result<Vec<CapsuleControl>> {
-    let mut refs = base_refs.clone();
-    let mut peeled = base_peeled.clone();
-    let tracked = pending.keys().cloned().collect::<BTreeSet<_>>();
-    let mut applied = BTreeSet::new();
-    let mut ordered = Vec::with_capacity(pending.len());
-    while !pending.is_empty() {
-        let mut ready = None;
-        for (id, capsule) in &pending {
-            if predecessors
-                .get(capsule.transaction_id())
-                .is_some_and(|required| {
-                    required
-                        .iter()
-                        .any(|id| tracked.contains(id) && !applied.contains(id))
-                })
-            {
-                continue;
-            }
-            if visibility.ready(capsule, &refs).await? {
-                ready = Some(id.clone());
-                break;
-            }
-        }
-        let id = ready.ok_or_else(|| {
-            corrupt_path(
-                "capsule-protocol ref heads",
-                "capsule ref history is cyclic or does not extend the compacted root",
-            )
-        })?;
-        let capsule = pending
-            .remove(&id)
-            .ok_or_else(|| ReadError::internal("ready capsule control disappeared"))?;
-        apply_control_refs(&capsule, &mut refs, &mut peeled)?;
-        visibility.apply(&capsule).await?;
-        applied.insert(capsule.transaction_id().to_owned());
-        ordered.push(capsule);
-    }
-    Ok(ordered)
-}
-
-fn control_is_ready(
-    capsule: &CapsuleControl,
-    refs: &BTreeMap<String, String>,
-    visibility_index: &crab_metadata::git_visibility::GitVisibilityIndex,
-) -> Result<bool> {
-    visibility_is_ready(
-        capsule.transaction(),
-        capsule.visibility_delta()?,
-        refs,
-        visibility_index,
-    )
-}
-
-fn visibility_is_ready(
-    transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
-    delta: Option<&crab_metadata::capsule_protocol::CapsuleVisibilityDelta>,
-    refs: &BTreeMap<String, String>,
-    visibility_index: &crab_metadata::git_visibility::GitVisibilityIndex,
-) -> Result<bool> {
-    if transaction
-        .edits()
-        .iter()
-        .any(|edit| refs.get(edit.ref_name()).map(String::as_str) != edit.expected_old())
-    {
-        return Ok(false);
-    }
-    let Some(delta) = delta else {
-        return Ok(true);
-    };
-    // Transactions have unique refs. Count matched rows without copying OID lists;
-    // unmatched evidence still fails before it can authorize a publication.
-    let evidence = delta.edits();
-    let mut matched = 0;
-    for edit in transaction.edits() {
-        let Some(new_oid) = edit.new_oid() else {
-            if evidence.get(edit.ref_name()).is_some() {
-                return Err(corrupt_path(
-                    "capsule Git visibility",
-                    "deleted ref has visibility evidence",
-                ));
-            }
-            continue;
-        };
-        let Some(visibility) = evidence.get(edit.ref_name()) else {
-            return Err(corrupt_path(
-                "capsule Git visibility",
-                "live ref edit has no visibility evidence",
-            ));
-        };
-        matched += 1;
-        visibility.validate()?;
-        if visibility.new_oid != new_oid {
-            return Err(corrupt_path(
-                "capsule Git visibility",
-                "visibility evidence does not match its ref edit",
-            ));
-        }
-        match edit.expected_old() {
-            Some(expected_old) => {
-                if visibility.old_oid.as_deref() != Some(expected_old) {
-                    return Err(corrupt_path(
-                        "capsule Git visibility",
-                        "visibility evidence does not match the expected old ref",
-                    ));
-                }
-                if !visibility_index.contains_ref(edit.ref_name()) {
-                    return Ok(false);
-                }
-            }
-            None if visibility.replaces => {}
-            None => {
-                let Some(old_oid) = visibility.old_oid.as_deref() else {
-                    continue;
-                };
-                if !visibility_index.contains_hex_in_any_ref(old_oid) {
-                    return Ok(false);
-                }
-            }
-        }
-    }
-    if evidence.len() != matched {
-        return Err(corrupt_path(
-            "capsule Git visibility",
-            "visibility evidence contains an uncommitted ref",
-        ));
-    }
-    Ok(true)
-}
-
-fn apply_control_refs(
-    capsule: &CapsuleControl,
-    refs: &mut BTreeMap<String, String>,
-    peeled_refs: &mut BTreeMap<String, String>,
-) -> Result<()> {
-    for edit in capsule.transaction().edits() {
-        if refs.get(edit.ref_name()).map(String::as_str) != edit.expected_old() {
-            return Err(corrupt_path(
-                "capsule-protocol ref heads",
-                "capsule expected-old ref does not match its parent state",
-            ));
-        }
-        match edit.new_oid() {
-            Some(oid) => {
-                refs.insert(edit.ref_name().to_owned(), oid.to_owned());
-                match edit.peeled_oid() {
-                    Some(peeled) => {
-                        peeled_refs.insert(edit.ref_name().to_owned(), peeled.to_owned());
-                    }
-                    None => {
-                        peeled_refs.remove(edit.ref_name());
-                    }
-                }
-            }
-            None => {
-                refs.remove(edit.ref_name());
-                peeled_refs.remove(edit.ref_name());
-            }
-        }
-    }
-    Ok(())
-}
-
 fn capsule_is_ready(
     capsule: &Capsule,
     refs: &BTreeMap<String, String>,
@@ -5534,68 +5161,19 @@ fn capsule_is_ready(
 ) -> Result<bool> {
     let transaction = capsule.transaction()?;
     let delta = capsule.visibility_delta()?;
-    visibility_is_ready(&transaction, delta.as_ref(), refs, visibility_index)
+    Ok(visibility_is_ready(
+        &transaction,
+        delta.as_ref(),
+        refs,
+        visibility_index,
+    )?)
 }
 
 fn apply_capsule_control_visibility_index(
     capsule: &CapsuleControl,
     index: &mut crab_metadata::git_visibility::GitVisibilityIndex,
 ) -> Result<()> {
-    apply_transaction_visibility_index(capsule.transaction(), capsule.visibility_delta()?, index)
-}
-
-fn apply_transaction_visibility_index(
-    transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
-    delta: Option<&crab_metadata::capsule_protocol::CapsuleVisibilityDelta>,
-    index: &mut crab_metadata::git_visibility::GitVisibilityIndex,
-) -> Result<()> {
-    let evidence = delta.map(|delta| delta.edits());
-    let mut matched = 0;
-    for edit in transaction.edits() {
-        let Some(new_oid) = edit.new_oid() else {
-            if evidence
-                .and_then(|rows| rows.get(edit.ref_name()))
-                .is_some()
-            {
-                return Err(corrupt_path(
-                    "capsule Git visibility",
-                    "deleted ref has visibility evidence",
-                ));
-            }
-            index.remove_ref(edit.ref_name());
-            continue;
-        };
-        let visibility = evidence
-            .and_then(|rows| rows.get(edit.ref_name()))
-            .ok_or_else(|| {
-                corrupt_path(
-                    "capsule Git visibility",
-                    "live ref edit has no visibility evidence",
-                )
-            })?;
-        matched += 1;
-        if visibility.new_oid != new_oid {
-            return Err(corrupt_path(
-                "capsule Git visibility",
-                "visibility evidence does not match its ref edit",
-            ));
-        }
-        if let Some(expected_old) = edit.expected_old()
-            && visibility.old_oid.as_deref() != Some(expected_old)
-        {
-            return Err(corrupt_path(
-                "capsule Git visibility",
-                "visibility evidence does not match the expected old ref",
-            ));
-        }
-        index.apply_ref_edit(edit.ref_name().to_owned(), visibility)?;
-    }
-    if evidence.is_some_and(|rows| rows.len() != matched) {
-        return Err(corrupt_path(
-            "capsule Git visibility",
-            "visibility evidence contains an uncommitted ref",
-        ));
-    }
+    apply_transaction_visibility_index(capsule.transaction(), capsule.visibility_delta()?, index)?;
     Ok(())
 }
 
@@ -5605,7 +5183,8 @@ fn apply_capsule_visibility_index(
 ) -> Result<()> {
     let transaction = capsule.transaction()?;
     let delta = capsule.visibility_delta()?;
-    apply_transaction_visibility_index(&transaction, delta.as_ref(), index)
+    apply_transaction_visibility_index(&transaction, delta.as_ref(), index)?;
+    Ok(())
 }
 
 fn apply_capsule_refs(
@@ -7670,7 +7249,13 @@ mod tests {
             assert_eq!(
                 (
                     capsule_is_ready(&capsule, &refs, &index).is_err(),
-                    control_is_ready(&controls[0], &refs, &index).is_err(),
+                    visibility_is_ready(
+                        controls[0].transaction(),
+                        controls[0].visibility_delta().unwrap(),
+                        &refs,
+                        &index
+                    )
+                    .is_err(),
                     apply_capsule_visibility_index(&capsule, &mut index.clone()).is_err(),
                     apply_capsule_control_visibility_index(&controls[0], &mut index.clone())
                         .is_err(),
