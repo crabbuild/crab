@@ -9964,7 +9964,7 @@ impl PushPipeline {
         &self,
         refs: &HashMap<MerkleHash, XorbRef>,
     ) -> Result<HashMap<MerkleHash, XorbRef>> {
-        self.verify_xorb_refs_with_committed_receipts(refs, &HashMap::new())
+        self.verify_xorb_refs_with_committed_receipts(refs, &HashMap::new(), false)
             .await
     }
 
@@ -9972,6 +9972,7 @@ impl PushPipeline {
         &self,
         refs: &HashMap<MerkleHash, XorbRef>,
         committed_receipts: &HashMap<XorbHash, crab_metadata::receipts::OriginReceipt>,
+        require_committed_receipt: bool,
     ) -> Result<HashMap<MerkleHash, XorbRef>> {
         use futures_util::StreamExt;
 
@@ -10001,7 +10002,7 @@ impl PushPipeline {
             let cache = self.remote_full_xorb_ref_cache.lock().await;
             refs.values()
                 .map(|xorb_ref| xorb_ref.xorb_hash)
-                .filter(|xorb_hash| cache.contains(xorb_hash))
+                .filter(|xorb_hash| !require_committed_receipt && cache.contains(xorb_hash))
                 .collect::<HashSet<_>>()
         };
         {
@@ -10012,7 +10013,8 @@ impl PushPipeline {
                         .entry(xorb_ref.xorb_hash)
                         .or_default()
                         .push((*chunk_hash, *xorb_ref));
-                } else if chunk_ref_cache.contains(&RemoteChunkRefKey::new(*chunk_hash, *xorb_ref))
+                } else if !require_committed_receipt
+                    && chunk_ref_cache.contains(&RemoteChunkRefKey::new(*chunk_hash, *xorb_ref))
                 {
                     verified.insert(*chunk_hash, *xorb_ref);
                     cached_xorb_hashes.insert(xorb_ref.xorb_hash);
@@ -10051,7 +10053,7 @@ impl PushPipeline {
         {
             let index_cache = self.remote_xorb_index_cache.lock().await;
             for xorb_hash in refs_by_xorb.keys().copied() {
-                if let Some(index) = index_cache.get(&xorb_hash) {
+                if !require_committed_receipt && let Some(index) = index_cache.get(&xorb_hash) {
                     verified_xorbs.insert(xorb_hash, index.clone());
                 } else {
                     planned_hashes.push(xorb_hash);
@@ -10179,6 +10181,14 @@ impl PushPipeline {
                     return None;
                 }
                 Some(async move {
+                    // Capsule assertions bind the exact origin selected at add.
+                    // Cached payload validity cannot certify a replaced object.
+                    if require_committed_receipt && !committed_receipt.as_ref().zip(object_meta.as_ref())
+                        .is_some_and(|(receipt, meta)| committed_origin_receipt_matches_remote(
+                            receipt, &xorb_hash, &path, &index, meta,
+                        )) {
+                        return Ok((Vec::new(), None, None, Vec::new()));
+                    }
                     if is_full_cached {
                         let xorb_info = build_xorb_info_from_remote_index(&index)?;
                         return Ok((valid_refs, Some((xorb_hash, xorb_info)), None, Vec::new()));
@@ -10355,19 +10365,19 @@ impl PushPipeline {
     async fn revalidate_add_plan_existing_candidates(
         &self,
         planned: &HashMap<MerkleHash, crab_staging::push_plan::ExistingChunkCandidate>,
-    ) -> Result<HashMap<MerkleHash, XorbRef>> {
+    ) -> Result<VerifiedRemoteCandidates> {
         if planned.is_empty() {
-            return Ok(HashMap::new());
+            return Ok(VerifiedRemoteCandidates::default());
         }
         let chunk_store = {
             let guard = self.metadb.lock().await;
             let Some(guard) = guard.as_ref() else {
-                return Ok(HashMap::new());
+                return Ok(VerifiedRemoteCandidates::default());
             };
             match guard.chunk_index().await {
                 Ok(store) => store,
                 Err(error) if error.is_metadb_read_only_uninitialized() => {
-                    return Ok(HashMap::new());
+                    return Ok(VerifiedRemoteCandidates::default());
                 }
                 Err(error) => return Err(error),
             }
@@ -10376,8 +10386,47 @@ impl PushPipeline {
             .iter()
             .map(|(chunk_hash, candidate)| (*chunk_hash, candidate.placement_id))
             .collect::<Vec<_>>();
-        let remote_candidates = tokio::time::timeout(
-            GLOBAL_CHUNK_LOOKUP_BUDGET,
+        let deadline = tokio::time::Instant::now() + GLOBAL_CHUNK_LOOKUP_BUDGET;
+        let (capsule, capsule_indexed, capsule_matched) =
+            tokio::time::timeout_at(deadline, async {
+                let mut candidates = chunk_store
+                    .capsule_candidates_by_id(&exact_candidates)
+                    .await?;
+                let indexed = candidates.placements.len();
+                candidates.placements.retain(|hash, placement| {
+                    planned
+                        .get(&MerkleHash::from(*hash))
+                        .is_some_and(|candidate| {
+                            candidate.placement_id == placement.placement_id()
+                                && candidate.origin_proof_id == placement.origin_proof_id
+                                && candidate.xorb_ref
+                                    == XorbRef {
+                                        xorb_hash: MerkleHash::from(placement.xorb_hash),
+                                        chunk_index: placement.chunk_index,
+                                        uncompressed_size: placement.uncompressed_size,
+                                    }
+                        })
+                });
+                let matched = candidates.placements.len();
+                let verified = self.verify_capsule_chunk_candidates(candidates).await?;
+                Ok::<_, CrabError>((verified, indexed, matched))
+            })
+            .await
+            .map_err(|_| {
+                CrabError::NetworkTransient(object_store::Error::Generic {
+                    store: "chunk_index_db",
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "staged capsule-proof revalidation budget exhausted",
+                    )),
+                })
+            })??;
+        let exact_candidates = exact_candidates
+            .into_iter()
+            .filter(|(hash, _)| !capsule.candidates.contains_key(hash))
+            .collect::<Vec<_>>();
+        let remote_candidates = tokio::time::timeout_at(
+            deadline,
             chunk_store.get_committed_candidates_by_id_batch(&exact_candidates),
         )
         .await
@@ -10426,26 +10475,30 @@ impl PushPipeline {
         let committed_receipts = self.validate_committed_chunk_receipts(&refs).await;
         let validated = self.verified_committed_chunk_receipts.lock().await.clone();
         let verified = self
-            .verify_xorb_refs_with_committed_receipts(&refs, &committed_receipts)
+            .verify_xorb_refs_with_committed_receipts(&refs, &committed_receipts, false)
             .await?;
         debug!(
             planned = planned.len(),
-            indexed = indexed_candidates,
-            matched = refs.len(),
+            indexed = indexed_candidates + capsule_indexed,
+            matched = refs.len() + capsule_matched,
             generation_verified = validated.len(),
-            payload_verified = verified.len(),
+            capsule_source_verified = capsule.candidates.len(),
+            payload_verified = verified.len() + capsule.candidates.len(),
             placement_mismatches,
             origin_proof_mismatches,
             "revalidated staged remote placement proofs"
         );
-        Ok(verified
-            .into_iter()
-            .filter(|(chunk_hash, _)| {
-                placement_ids
-                    .get(chunk_hash)
-                    .is_some_and(|placement_id| validated.get(chunk_hash) == Some(placement_id))
-            })
-            .collect())
+        let mut output = capsule;
+        output
+            .candidates
+            .extend(verified.into_iter().filter_map(|(hash, _)| {
+                let placement = placement_ids.get(&hash)?;
+                (validated.get(&hash) == Some(placement))
+                    .then(|| planned.get(&hash).copied())
+                    .flatten()
+                    .map(|candidate| (hash, candidate))
+            }));
+        Ok(output)
     }
 
     async fn prove_all_origin_xorbs_for_publish(&self) -> Result<()> {
@@ -10954,7 +11007,7 @@ impl PushPipeline {
             // executor stack. This path owns several repository-sized maps;
             // heap-pinning the future avoids inflating the default test stack.
             match Box::pin(self.revalidate_add_plan_existing_candidates(&candidate_refs)).await {
-                Ok(refs) => refs,
+                Ok(verified) => verified.into_refs(),
                 Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
                 Err(error) => return Err(error),
             }
@@ -15015,8 +15068,17 @@ impl PushPipeline {
         chunk_store: &crate::metadata::ChunkIndexStore,
     ) -> Result<HashMap<MerkleHash, crab_staging::push_plan::ExistingChunkCandidate>> {
         let candidates = chunk_store.capsule_candidates(hashes).await?;
+        self.verify_capsule_chunk_candidates(candidates)
+            .await
+            .map(|verified| verified.candidates)
+    }
+
+    async fn verify_capsule_chunk_candidates(
+        &self,
+        candidates: crab_metadata::capsule_protocol::CapsuleChunkCandidates,
+    ) -> Result<VerifiedRemoteCandidates> {
         let Some(store) = &self.store else {
-            return Ok(HashMap::new());
+            return Ok(VerifiedRemoteCandidates::default());
         };
         #[derive(Default)]
         struct SourceCandidates<'a> {
@@ -15034,6 +15096,14 @@ impl PushPipeline {
         let mut refs = HashMap::new();
         let mut origins = HashMap::new();
         let mut proofs = HashMap::new();
+        let mut bindings: HashMap<
+            MerkleHash,
+            (
+                crab_metadata::capsule_protocol::XorbCatalogEntry,
+                crab_metadata::receipts::OriginReceipt,
+            ),
+        > = HashMap::new();
+        let mut retained_bytes = 0_u64;
         for (repo, source) in by_repo {
             check_cancelled(&self.cancel)?;
             let layout = crab_storage::StoreLayout::with_global_prefix(
@@ -15072,6 +15142,49 @@ impl PushPipeline {
                 {
                     continue;
                 }
+                let entry = catalog.xorbs().get(&xorb_hash.hex()).ok_or_else(|| {
+                    CrabError::Internal(
+                        "validated capsule placement lost its descriptor".to_owned(),
+                    )
+                })?;
+                if let Some((prior, origin)) = bindings.get(&xorb_hash) {
+                    // Observation time may differ; physical assertions for the
+                    // same immutable xorb cannot disagree or certify one another.
+                    if prior != entry
+                        || origin.etag != anchor.origin.etag
+                        || origin.object_version != anchor.origin.object_version
+                        || origin.payload_digest != anchor.origin.payload_digest
+                        || origin.size != anchor.origin.size
+                    {
+                        return Err(CrabError::CorruptObject {
+                            path: path.to_string(),
+                            reason: "conflicting canonical xorb assertions".to_owned(),
+                        });
+                    }
+                } else {
+                    let metadata_bytes = std::mem::size_of_val(entry.chunks()) as u64
+                        + entry
+                            .chunks()
+                            .iter()
+                            .map(|chunk| chunk.hash().len() as u64)
+                            .sum::<u64>()
+                        + entry.body_digest().len() as u64
+                        + serde_json::to_vec(&anchor.origin)
+                            .map_err(|error| CrabError::Io(std::io::Error::other(error)))?
+                            .len() as u64;
+                    retained_bytes =
+                        retained_bytes.checked_add(metadata_bytes).ok_or_else(|| {
+                            CrabError::Internal("selected xorb metadata size overflows".to_owned())
+                        })?;
+                    if retained_bytes > crab_metadata::capsule_protocol::MAX_CATALOG_BYTES {
+                        return Err(CrabError::CorruptObject {
+                            path: "capsule chunk candidates".to_owned(),
+                            reason: "selected xorb metadata exceeds the catalog byte limit"
+                                .to_owned(),
+                        });
+                    }
+                    bindings.insert(xorb_hash, (entry.clone(), anchor.origin.clone()));
+                }
                 let hash = MerkleHash::from(placement.chunk_hash);
                 refs.insert(
                     hash,
@@ -15085,12 +15198,18 @@ impl PushPipeline {
                 proofs.insert(hash, (placement.placement_id(), placement.origin_proof_id));
             }
         }
-        // Source catalogs establish commitment; the existing origin verifier
-        // binds payload/index checks to the exact object version in the receipt.
+        // Source catalogs establish commitment. Receipts belong to the trusted
+        // scope's canonical global index; fresh provider identity binds their
+        // verified bytes, while cache or staged IDs alone cannot certify reuse.
         let verified = self
-            .verify_xorb_refs_with_committed_receipts(&refs, &origins)
+            .verify_xorb_refs_with_committed_receipts(&refs, &origins, true)
             .await?;
-        Ok(verified
+        let accepted_xorbs = verified
+            .values()
+            .map(|reference| reference.xorb_hash)
+            .collect::<HashSet<_>>();
+        bindings.retain(|hash, _| accepted_xorbs.contains(hash));
+        let candidates = verified
             .into_iter()
             .filter_map(|(hash, xorb_ref)| {
                 let (placement_id, origin_proof_id) = proofs.get(&hash).copied()?;
@@ -15103,7 +15222,11 @@ impl PushPipeline {
                     },
                 ))
             })
-            .collect())
+            .collect();
+        Ok(VerifiedRemoteCandidates {
+            candidates,
+            xorbs: bindings,
+        })
     }
 
     async fn lookup_proven_remote_chunks_for_add(
@@ -15171,7 +15294,7 @@ impl PushPipeline {
             .validate_committed_chunk_candidates(&refs, candidates)
             .await;
         let verified = self
-            .verify_xorb_refs_with_committed_receipts(&refs, &validated.origins)
+            .verify_xorb_refs_with_committed_receipts(&refs, &validated.origins, false)
             .await?;
         capsule.extend(verified.into_iter().filter_map(|(chunk_hash, xorb_ref)| {
             let (placement_id, origin_proof_id) = proof_ids.get(&chunk_hash).copied()?;
@@ -15279,7 +15402,7 @@ impl PushPipeline {
 
         let committed_receipts = Box::pin(self.validate_committed_chunk_receipts(&hits)).await;
         let refs = self
-            .verify_xorb_refs_with_committed_receipts(&hits, &committed_receipts)
+            .verify_xorb_refs_with_committed_receipts(&hits, &committed_receipts, false)
             .await?;
         let stale_hashes = hits
             .keys()
@@ -17051,6 +17174,77 @@ impl PushPipeline {
         })
     }
 }
+#[derive(Debug, Default)]
+pub(crate) struct VerifiedRemoteCandidates {
+    pub candidates: HashMap<MerkleHash, crab_staging::push_plan::ExistingChunkCandidate>,
+    pub xorbs: HashMap<
+        MerkleHash,
+        (
+            crab_metadata::capsule_protocol::XorbCatalogEntry,
+            crab_metadata::receipts::OriginReceipt,
+        ),
+    >,
+}
+
+impl VerifiedRemoteCandidates {
+    fn into_refs(self) -> HashMap<MerkleHash, XorbRef> {
+        self.candidates
+            .into_iter()
+            .map(|(hash, candidate)| (hash, candidate.xorb_ref))
+            .collect()
+    }
+}
+
+// Capsule preparation owns this read-only session through revalidation and close.
+// Reusing the planner's verifier keeps released manifest and capsule proofs on
+// the same origin checks without opening a writer during payload preparation.
+pub(crate) async fn revalidate_staged_remote_chunks(
+    metadb: &crate::core::config::MetaDbTomlConfig,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    planned: &HashMap<MerkleHash, crab_staging::push_plan::ExistingChunkCandidate>,
+    cancel: &CancellationToken,
+) -> Result<VerifiedRemoteCandidates> {
+    if planned.is_empty() {
+        return Ok(VerifiedRemoteCandidates::default());
+    }
+    check_cancelled(cancel)?;
+    let store = Store::from_storage(layout.store().clone());
+    let router = StoreLayout::with_global_prefix(
+        store.clone(),
+        layout.repo_prefix().to_owned(),
+        layout.global_prefix().to_owned(),
+    );
+    let config = PushConfig {
+        metadb: metadb.clone(),
+        ..Default::default()
+    };
+    let pipeline = PushPipeline::new(
+        config,
+        Vec::new(),
+        Some(store.clone()),
+        None,
+        None,
+        router.repo_prefix().to_owned(),
+        router.clone(),
+        None,
+        cancel.clone(),
+        None,
+    );
+    pipeline.install_metadb(build_push_metadb_guard_with_object_store(
+        &store, None, &router, None, metadb, true,
+    ));
+    let result = Box::pin(pipeline.revalidate_add_plan_existing_candidates(planned)).await;
+    let guard = { pipeline.metadb.lock().await.take() };
+    let closed = match guard {
+        Some(guard) => guard.close().await,
+        None => Ok(()),
+    };
+    let verified = result?;
+    closed?;
+    check_cancelled(cancel)?;
+    Ok(verified)
+}
+
 /// Run the push pipeline for a batch of push specs.
 ///
 /// This is the main entry point called by the remote helper when Git
@@ -20699,6 +20893,7 @@ mod tests {
     struct RangeCountingStore {
         inner: object_store::memory::InMemory,
         range_gets: Arc<AtomicUsize>,
+        full_xorb_gets: AtomicUsize,
         head_e_tag: Option<Arc<Mutex<String>>>,
     }
 
@@ -20707,6 +20902,7 @@ mod tests {
             Self {
                 inner: object_store::memory::InMemory::new(),
                 range_gets,
+                full_xorb_gets: AtomicUsize::new(0),
                 head_e_tag: None,
             }
         }
@@ -20718,6 +20914,7 @@ mod tests {
             Self {
                 inner: object_store::memory::InMemory::new(),
                 range_gets,
+                full_xorb_gets: AtomicUsize::new(0),
                 head_e_tag: Some(head_e_tag),
             }
         }
@@ -20754,6 +20951,9 @@ mod tests {
             options: GetOptions,
         ) -> object_store::Result<GetResult> {
             let is_head = options.head;
+            if !is_head && options.range.is_none() && location.as_ref().contains("/xorbs/") {
+                self.full_xorb_gets.fetch_add(1, Ordering::Relaxed);
+            }
             if options.range.is_some() {
                 self.range_gets.fetch_add(1, Ordering::Relaxed);
             }
@@ -22156,134 +22356,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn capsule_push_exposes_committed_chunks_to_cold_cross_repository_add() {
-        use crab_staging::push_plan::ExistingChunkLookup;
-        use crab_staging::stream::{StreamStageProgress, stage_reader_streaming};
-
-        let _git_env = CleanGitEnvGuard::new();
-        let source = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            let output = Command::new("git")
-                .args(args)
-                .current_dir(source.path())
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        };
-        git(&["init", "-b", "main"]);
-        let staging_root = source.path().join("staging");
-        let staging = crab_staging::StagingArea::open(staging_root.clone())
-            .await
-            .unwrap();
-        let staged = stage_reader_streaming(
-            &mut std::io::Cursor::new(b"shared capsule payload"),
-            std::path::Path::new("model.bin"),
-            &staging,
-            StreamStageProgress::default(),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        let chunks = staging
-            .recipe_page(&staged.recipe, 0)
-            .unwrap()
-            .chunks
-            .into_iter()
-            .map(|chunk| (chunk.chunk_hash, chunk.len))
-            .collect::<Vec<_>>();
-        staging
-            .delegate_publication(&[(&staged.batch_id, std::path::Path::new("model.bin"))])
-            .unwrap();
-        let pointer = crab_types::pointer::Pointer {
-            file_hash: staged.file_hash,
-            size: staged.size,
-            shard_hint: None,
-        };
-        std::fs::write(source.path().join("model.bin"), pointer.serialize()).unwrap();
-        git(&["add", "model.bin"]);
-        git(&["commit", "-m", "shared payload"]);
-        staging.close().await.unwrap();
-        let staging = Arc::new(
-            crab_staging::StagingAreaReadOnly::open(staging_root)
-                .await
-                .unwrap(),
-        );
-        let (store, source_router) = test_store_router("repos/source");
-        let layout =
-            crab_storage::StoreLayout::new(store.as_storage().clone(), "repos/source".to_owned());
-        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
-            .await
-            .unwrap();
-        let config = PushConfig {
-            git_dir: Some(source.path().join(".git")),
-            ..Default::default()
-        };
-        let (result, _) = super::super::capsule_push::run(
-            &config,
-            &[crate::git::remote_helper::PushSpec {
-                force: false,
-                src: "refs/heads/main".to_owned(),
-                dst: "refs/heads/main".to_owned(),
-            }],
-            &store,
-            &source_router,
-            None,
-            &[],
-            Some(&staging),
-            None,
-            None,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        assert!(result.all_ok(), "source publication failed: {result:?}");
-        drop(staging);
-
-        let router = StoreLayout::new(store.clone(), "repos/consumer".to_owned());
-        let pipeline = PushPipeline::new(
-            PushConfig::default(),
-            Vec::new(),
-            Some(store.clone()),
-            None,
-            None,
-            router.repo_prefix().to_owned(),
-            router.clone(),
-            None,
-            CancellationToken::new(),
-            None,
-        );
-        let cache_root = tempfile::tempdir().unwrap();
-        let mut metadata = crate::core::config::MetaDbTomlConfig::default();
-        metadata.chunk_index.local_path = Some(cache_root.path().join("chunks.sqlite"));
-        pipeline.install_metadb(build_push_metadb_guard(
-            &store, &router, None, &metadata, true,
-        ));
-        // No advisory caches or source-repository state can manufacture a hit.
-        // This exercises the real publisher-to-classifier authority boundary.
-        let classifier = AddRemoteChunkClassifier {
-            pipeline,
-            remote_chunk_index: tokio::sync::OnceCell::new(),
-            candidate_cache: None,
-            candidate_cache_hits: std::sync::atomic::AtomicU64::new(0),
-            candidate_cache_misses: std::sync::atomic::AtomicU64::new(0),
-        };
-        let candidates = classifier.lookup_existing_candidates(&chunks).await;
-        classifier.close().await;
-        let candidates = candidates.unwrap();
-        assert!(
-            !candidates.is_empty() && candidates.iter().all(Option::is_some),
-            "committed source chunks must be reusable from a cold consumer: {candidates:?}"
-        );
-    }
+    mod capsule_chunk_tests;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn add_classifier_does_not_repeat_an_uninitialized_index_probe() {
@@ -30767,7 +30840,11 @@ mod tests {
 
         range_gets.store(0, Ordering::Relaxed);
         let verified = pipeline
-            .verify_xorb_refs_with_committed_receipts(&refs, &HashMap::from([(xorb_hash, receipt)]))
+            .verify_xorb_refs_with_committed_receipts(
+                &refs,
+                &HashMap::from([(xorb_hash, receipt)]),
+                false,
+            )
             .await
             .expect("verify refs from committed origin receipt");
 

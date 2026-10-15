@@ -59,8 +59,8 @@ pub use plan::{
 #[cfg(feature = "storage")]
 pub use pointer::PointerCatalogLookup;
 pub use pointer::{
-    FileCatalogEntry, PointerCatalog, PointerCatalogAssembly, ShardCatalogEntry, XorbCatalogEntry,
-    XorbChunkEntry,
+    FileCatalogEntry, MAX_CATALOG_BYTES, PointerCatalog, PointerCatalogAssembly, ShardCatalogEntry,
+    XorbCatalogEntry, XorbChunkEntry,
 };
 pub use ref_head::{
     CAPSULE_REF_COMPACTION_FAN_IN, CAPSULE_REF_ROLLUP_WINDOW, CapsuleRefHead, CapsuleRefState,
@@ -113,4 +113,5 @@ pub use chunk_candidates::{
     CapsuleChunkAnchor, CapsuleChunkCandidates, capsule_chunk_anchor_key, capsule_chunk_head_key,
 };
 
+#[cfg(feature = "remote-index")]
 pub(crate) use chunk_candidates::capsule_chunk_candidate_rows;

@@ -224,6 +224,7 @@ impl Descriptor {
     }
 }
 
+#[cfg(feature = "storage")]
 impl VisibilityEditHeader {
     /// Return the prior tip used by the edit.
     pub fn old_oid(&self) -> Option<&str> {
@@ -260,7 +261,9 @@ impl VisibilityEditHeader {
             _ => false,
         }
     }
+}
 
+impl VisibilityEditHeader {
     fn decode(key: &[u8], bytes: &[u8], body_bytes: u64) -> Result<Self> {
         let row: Self = serde_json::from_slice(bytes)
             .map_err(|error| MetadataError::CapsuleVisibilityRecord { source: error })?;
