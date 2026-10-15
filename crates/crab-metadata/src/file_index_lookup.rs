@@ -19,6 +19,9 @@ use crate::manifest_store::RepositorySnapshot;
 use crate::value_codec::{CommittedFileRecord, decode_committed_file_record};
 use crab_xet::xorb::format::MerkleHash;
 
+mod catalog_session;
+use catalog_session::CatalogSession;
+
 const DB_LABEL: &str = "file_index_db";
 const GET_BATCH_CONCURRENCY: usize = 256;
 const SHARD_SEARCH_CONCURRENCY: usize = 4;
@@ -224,7 +227,7 @@ async fn lookup_committed_record(
 /// Opens the repo's `file_index_db` once, serves one or many point lookups, and
 /// closes the underlying SlateDB reader when consumed.
 pub struct FileIndexLookupSession {
-    catalog: Option<Arc<crate::capsule_protocol::PointerCatalogLookup>>,
+    catalog: Option<CatalogSession>,
     reader: Option<Arc<slatedb::DbReader>>,
     anchor: Option<CommittedShardAnchor>,
     storage: crab_storage::Store,
@@ -392,7 +395,7 @@ impl FileIndexLookupSession {
                     crate::capsule_protocol::load_pointer_catalog_lookup_from_root(&router, &root)
                         .await?;
                 return Ok(Self {
-                    catalog: Some(Arc::new(catalog)),
+                    catalog: Some(CatalogSession::new(Arc::new(catalog))),
                     reader: None,
                     anchor: None,
                     storage,
@@ -488,29 +491,8 @@ impl FileIndexLookupSession {
         if file_hashes.is_empty() {
             return Ok(Vec::new());
         }
-        if let Some(lookup) = &self.catalog {
-            let hashes = file_hashes.iter().map(MerkleHash::hex).collect::<Vec<_>>();
-            let selected = lookup.files(&self.storage, &hashes).await?;
-            return hashes
-                .iter()
-                .map(|hash| {
-                    selected
-                        .files()
-                        .get(hash)
-                        .map(|entry| {
-                            MerkleHash::from_hex(entry.shard_hash()).map_err(|source| {
-                                MetadataError::CorruptObject {
-                                    path: "capsule-protocol pointer catalog".to_owned(),
-                                    reason: format!(
-                                        "invalid shard hash {}: {source}",
-                                        entry.shard_hash()
-                                    ),
-                                }
-                            })
-                        })
-                        .transpose()
-                })
-                .collect();
+        if let Some(catalog) = &self.catalog {
+            return catalog.lookup_batch(&self.storage, file_hashes).await;
         }
         let records = self.lookup_committed_records_batch(file_hashes).await?;
         let mut out = records
@@ -760,7 +742,7 @@ impl LookupSource {
     async fn open(&self) -> Result<FileIndexLookupSession> {
         match self {
             Self::Catalog { router, lookup } => Ok(FileIndexLookupSession {
-                catalog: Some(Arc::clone(lookup)),
+                catalog: Some(CatalogSession::new(Arc::clone(lookup))),
                 reader: None,
                 anchor: None,
                 storage: router.store().clone(),

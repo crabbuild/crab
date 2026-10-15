@@ -286,3 +286,124 @@ async fn current_state_opener_keeps_catalog_pages_selected_and_pins_its_first_ro
         latest.close().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn verified_bindings_survive_recipe_page_eviction() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observed = reads.clone();
+    let storage = crab_storage::Store::new(Arc::new(InMemory::new())).with_read_request_observer(
+        Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+    let layout = crab_storage::StoreLayout::new(storage, "wide-recipe".to_owned());
+    let file = super::tests::hash_from_seed(0);
+    let missing = super::tests::hash_from_seed(1);
+    let shard = super::tests::hash_from_seed(2);
+    let mut catalog = PointerCatalog::new();
+    let mut xorbs = Vec::new();
+    // More nested recipe pages than the page cache can retain. A validated
+    // file binding remains small even when its dependency proof is large.
+    for index in 0..300 {
+        let xorb = super::tests::hash_from_seed(1_000 + index);
+        xorbs.push(xorb.hex());
+        catalog
+            .insert_xorb(
+                xorb.hex(),
+                XorbCatalogEntry::new(
+                    99,
+                    "e".repeat(64),
+                    vec![XorbChunkEntry::new(
+                        super::tests::hash_from_seed(2_000 + index).hex(),
+                        16,
+                    )],
+                ),
+            )
+            .unwrap();
+    }
+    catalog
+        .insert_shard(shard.hex(), ShardCatalogEntry::new(80, xorbs))
+        .unwrap();
+    catalog
+        .insert_file(file.hex(), FileCatalogEntry::new(4_800, shard.hex()))
+        .unwrap();
+    let (captured, _, _) = capture(&layout, catalog).await;
+    let lookup = SharedFileIndexLookup::for_pointer_catalog(layout, captured);
+    let batch = [file, missing, file];
+    let first = lookup.lookup_batch(&batch).await;
+    reads.store(0, Ordering::SeqCst);
+    let second = lookup.lookup_batch(&batch).await;
+    let repeated_reads = reads.load(Ordering::SeqCst);
+    lookup.close().await.unwrap();
+    let expected = vec![Some(shard), None, Some(shard)];
+    assert_eq!(first.unwrap(), expected);
+    assert_eq!(second.unwrap(), expected);
+    assert_eq!(
+        repeated_reads, 0,
+        "verified bindings must not rebuild an evicted recipe proof"
+    );
+}
+
+#[tokio::test]
+async fn large_catalog_batches_preserve_answers_beyond_the_binding_cache() {
+    let layout = crab_storage::StoreLayout::new(
+        crab_storage::Store::new(Arc::new(InMemory::new())),
+        "large-batch".to_owned(),
+    );
+    let mut rows = catalog(1);
+    let entry = rows.files().values().next().unwrap().clone();
+    let files = (0..5_000)
+        .map(super::tests::hash_from_seed)
+        .collect::<Vec<_>>();
+    for file in &files[1..] {
+        rows.insert_file(file.hex(), entry.clone()).unwrap();
+    }
+    capture(&layout, rows).await;
+    // Use the production current-state budget. The pinned fixture deliberately
+    // caps fixed small queries at 512 KiB, including requested-key admission.
+    let lookup = SharedFileIndexLookup::new_for_storage(layout.store(), layout.repo_prefix());
+    let result = lookup.lookup_batch(&files).await;
+    lookup.close().await.unwrap();
+    let shard = MerkleHash::from_hex(entry.shard_hash()).unwrap();
+    assert_eq!(result.unwrap(), vec![Some(shard); files.len()]);
+}
+
+#[tokio::test]
+async fn failed_catalog_proofs_do_not_cache_absence() {
+    let layout = crab_storage::StoreLayout::new(
+        crab_storage::Store::new(Arc::new(InMemory::new())),
+        "retry-proof".to_owned(),
+    );
+    let (captured, path, _) = capture(&layout, catalog(100)).await;
+    let (body, _) = layout.store().get_with_etag(&path).await.unwrap();
+    layout.store().delete(&path).await.unwrap();
+    let lookup = SharedFileIndexLookup::for_pointer_catalog(layout.clone(), captured);
+    let file = super::tests::hash_from_seed(42);
+    assert!(lookup.lookup(&file).await.is_err());
+    layout.store().put_overwrite(&path, body).await.unwrap();
+    let result = lookup.lookup(&file).await;
+    lookup.close().await.unwrap();
+    assert_eq!(
+        result.unwrap(),
+        Some(super::tests::hash_from_seed(1_000_042))
+    );
+}
+
+#[tokio::test]
+async fn cached_catalog_bindings_preserve_requested_key_admission() {
+    let layout = crab_storage::StoreLayout::new(
+        crab_storage::Store::new(Arc::new(InMemory::new())),
+        "cached-admission".to_owned(),
+    );
+    let (captured, _, _) = capture(&layout, catalog(1)).await;
+    let file = super::tests::hash_from_seed(0);
+    let expected = captured
+        .files(layout.store(), &vec![file.hex(); 6_000])
+        .await
+        .unwrap_err();
+    let lookup = SharedFileIndexLookup::for_pointer_catalog(layout, captured);
+    lookup.lookup(&file).await.unwrap();
+    let result = lookup.lookup_batch(&vec![file; 6_000]).await;
+    lookup.close().await.unwrap();
+    assert_eq!(result.unwrap_err().to_string(), expected.to_string());
+}

@@ -231,6 +231,13 @@ impl PointerCatalogLookup {
         self.selected_xorbs(store, &hashes, &mut work).await
     }
 
+    // Cached binding batches must still admit their input before allocating answers.
+    #[cfg(feature = "file-index-reader")]
+    pub(crate) fn admit_file_queries(&self, count: usize) -> Result<()> {
+        let mut work = self.work();
+        admit_key_count(&mut work, count)
+    }
+
     /// Select requested files and their complete shard/xorb dependency closure.
     pub async fn files(&self, store: &Store, hashes: &[String]) -> Result<PointerCatalog> {
         let mut work = self.work();
@@ -403,8 +410,12 @@ fn admit(work: &mut PageWork, bytes: u64) -> Result<()> {
     Ok(())
 }
 
+fn admit_key_count(work: &mut PageWork, count: usize) -> Result<()> {
+    admit(work, (count as u64).saturating_mul(96))
+}
+
 fn requested(hashes: &[String], work: &mut PageWork) -> Result<BTreeSet<String>> {
-    admit(work, (hashes.len() as u64).saturating_mul(96))?;
+    admit_key_count(work, hashes.len())?;
     for value in hashes {
         hash(value)?;
     }

@@ -67,9 +67,16 @@ cache and byte budget, validates selected dependency closure and keeps immutable
 descriptor conflicts distinct from absent keys. Full inspection remains an
 explicit maintenance operation. `SharedFileIndexLookup::for_pointer_catalog`
 accepts captured lookup roots and resolves requested files with their authenticated
-shard/xorb closure. Point and batch calls share the page cache and retain the
-session read guard through I/O, so close waits for active reads. Missing catalog
-pages remain errors rather than reopening the mutable file-index database.
+shard/xorb closure. Once that proof succeeds, the session retains up to 4,096
+file-to-shard answers or authenticated misses. These compact results survive
+recipe-page eviction without retaining full recipes. Evicted bindings are
+revalidated against the same capture; large batches still return every result.
+Cached batches retain requested-key admission. A batch containing any uncached
+binding uses the original full-batch dependency proof and aggregate byte budget.
+Errors never populate the binding cache, and its lock is released before origin
+I/O. Point and batch calls retain the session read guard through I/O, so close
+waits for active reads. Missing catalog pages on uncached queries remain errors
+rather than reopening the mutable file-index database.
 The current-state opener also captures authenticated catalog roots and leaves
 catalog bodies cold. Explicitly pinned callers pass their existing capture, while
 current-state sessions bind once to the first root they open. Catalog and Git
