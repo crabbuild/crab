@@ -53,6 +53,36 @@ impl PagedGitObjectIndex {
         ])
     }
 
+    /// Authenticate a retained body's bytes and graph binding without granting visibility.
+    ///
+    /// The caller supplies an authenticated graph descriptor from the same capture.
+    pub async fn verify_retained(
+        store: &Store,
+        layout: &StoreLayout<Store>,
+        hash: &str,
+        state_digest: &str,
+        graph: &crate::split_commit_graph::CommitGraphDescriptor,
+        maximum: u64,
+    ) -> Result<()> {
+        let (descriptor, _) = Self::descriptor(store, layout, hash, maximum).await?;
+        if descriptor.state_digest != state_digest
+            || descriptor.generation != graph.generation
+            || descriptor.pack_index_hash != graph.pack_index_hash
+            || descriptor.git_validation_digest != graph.git_validation_digest
+            || descriptor.body_bytes > maximum
+        {
+            return bad("retained object index does not match graph or byte limit");
+        }
+        store
+            .verify_size_and_hash(
+                &body_path(layout, &descriptor.body_hash),
+                descriptor.body_bytes,
+                &hash_bytes(&descriptor.body_hash)?,
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn descriptor(
         store: &Store,
         layout: &StoreLayout<Store>,

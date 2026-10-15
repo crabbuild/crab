@@ -31,6 +31,8 @@ mod visibility;
 #[cfg(feature = "storage")]
 pub use browse::load_browse_indexes;
 pub use browse::{BrowseIndexes, MAX_BROWSE_INDEXES_BYTES};
+#[cfg(feature = "remote-index")]
+pub use browse_retention::verify_retained_browse_indexes;
 #[cfg(feature = "storage")]
 pub use browse_retention::{
     RetainedBrowseIndexes, load_retained_browse_indexes, prune_retained_browse_indexes,
