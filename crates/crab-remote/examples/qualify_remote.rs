@@ -1,4 +1,6 @@
 //! Measure isolated cold/warm capsule reads and emit independent-oracle evidence.
+#[path = "support/captured_browse.rs"]
+mod captured_browse;
 mod support;
 
 use std::io;
@@ -36,7 +38,7 @@ async fn main() -> Result<()> {
             [bucket, prefix, path] => (bucket, prefix, path, "all"),
             [bucket, prefix, path, selection] => (bucket, prefix, path, selection.as_str()),
             _ => return Err(io::Error::other(
-                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint|catalog|catalog-current|ref-point|resolve-oid|blame-history|blame-history-uncached]",
+                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint|catalog|catalog-current|capture-browse|ref-point|resolve-oid|blame-history|blame-history-uncached]",
             )
             .into()),
         };
@@ -44,6 +46,7 @@ async fn main() -> Result<()> {
         && selection != "build-indexes"
         && selection != "catalog"
         && selection != "catalog-current"
+        && selection != "capture-browse"
         && selection != "checkpoint"
         && selection != "graph-pages"
         && selection != "graph-ancestry"
@@ -74,7 +77,20 @@ async fn main() -> Result<()> {
         .with_storage_observer(counters.clone());
     let layout = StoreLayout::new(store, prefix.to_owned());
     let identity = RepositoryIdentity::new(format!("s3:{bucket}"), prefix.as_str(), 1)?;
-    if selection == "ref-point" {
+    if selection == "capture-browse" {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let result = captured_browse::qualify(
+            &layout,
+            &identity,
+            runtime.clone(),
+            options,
+            &path,
+            &counters,
+        )
+        .await;
+        runtime.shutdown().await;
+        result?;
+    } else if selection == "ref-point" {
         let root = counters
             .measure("open", "cold", async {
                 Ok(crab_metadata::capsule_protocol::load_root(&layout).await?)

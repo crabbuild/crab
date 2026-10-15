@@ -3,6 +3,8 @@
 use bstr::ByteSlice;
 
 mod browse;
+#[cfg(feature = "storage")]
+mod browse_retention;
 mod capsule;
 #[cfg(feature = "storage")]
 mod captured_visibility;
@@ -27,6 +29,11 @@ mod visibility;
 #[cfg(feature = "storage")]
 pub use browse::load_browse_indexes;
 pub use browse::{BrowseIndexes, MAX_BROWSE_INDEXES_BYTES};
+#[cfg(feature = "storage")]
+pub use browse_retention::{
+    RetainedBrowseIndexes, load_retained_browse_indexes, prune_retained_browse_indexes,
+    retain_browse_indexes,
+};
 pub use capsule::{
     Capsule, CapsuleGitPack, CapsuleGitPackDescriptor, CapsuleSection, CapsuleSectionKind,
     CapsuleSectionLocation,
