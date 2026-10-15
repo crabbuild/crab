@@ -1105,7 +1105,11 @@ where
 
         match cmd {
             HelperCommand::Option { key, value } => {
-                handle_option(&key, &value, options, writer).await?;
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+                    result = handle_option(&key, &value, options, writer) => result?,
+                }
             }
             HelperCommand::Capabilities => {
                 return Ok(Some(Batch::Capabilities));
@@ -1223,22 +1227,39 @@ async fn handle_option<W: tokio::io::AsyncWrite + Unpin>(
             }
         },
         "deepen-since" => {
-            let timestamp = value
-                .parse::<i64>()
-                .map_err(|_| CrabError::Protocol(format!("invalid deepen-since value: {value}")))?;
-            if options
-                .fetch_options
-                .deepen_since
-                .replace(timestamp)
-                .is_some()
-            {
+            if options.fetch_options.deepen_since.is_some() {
                 return Err(CrabError::Protocol(
                     "duplicate deepen-since option".to_owned(),
                 ));
             }
+            // Helpers receive Git date expressions; only upload-pack wire requests
+            // contain epoch seconds. Use Git's approxidate parser for the same grammar.
+            let date = decode_option_value(value)?;
+            let output = tokio::process::Command::new("git")
+                .arg("rev-parse")
+                .arg(format!("--since={date}"))
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output()
+                .await?;
+            if !output.status.success() {
+                return Err(CrabError::Protocol(format!(
+                    "cannot parse deepen-since date: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            let timestamp = std::str::from_utf8(&output.stdout)
+                .ok()
+                .and_then(|line| line.trim().strip_prefix("--max-age="))
+                .and_then(|seconds| seconds.parse::<i64>().ok())
+                .ok_or_else(|| {
+                    CrabError::Protocol("invalid Git deepen-since timestamp".to_owned())
+                })?;
+            options.fetch_options.deepen_since = Some(timestamp);
             writer.write_all(b"ok\n").await?;
         }
         "deepen-not" => {
+            let value = decode_option_value(value)?;
             if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_whitespace()) {
                 return Err(CrabError::Protocol(
                     "deepen-not requires one non-empty reference".to_owned(),
@@ -1248,9 +1269,9 @@ async fn handle_option<W: tokio::io::AsyncWrite + Unpin>(
                 .fetch_options
                 .deepen_not
                 .iter()
-                .any(|name| name == value)
+                .any(|name| name == &value)
             {
-                options.fetch_options.deepen_not.push(value.to_owned());
+                options.fetch_options.deepen_not.push(value);
             }
             writer.write_all(b"ok\n").await?;
         }
@@ -1356,19 +1377,25 @@ async fn handle_option<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
-fn parse_ref_lease(value: &str) -> Result<(String, Option<String>)> {
+fn decode_option_value(value: &str) -> Result<String> {
     if value.starts_with('"') && !value.ends_with('"') {
         return Err(CrabError::Protocol(
-            "unterminated quoted ref lease".to_owned(),
+            "unterminated quoted helper option".to_owned(),
         ));
     }
     let (decoded, consumed) = gix_quote::ansi_c::undo(value.as_bytes().into())
-        .map_err(|error| CrabError::Protocol(format!("invalid quoted ref lease: {error}")))?;
+        .map_err(|error| CrabError::Protocol(format!("invalid quoted helper option: {error}")))?;
     if consumed != value.len() {
-        return Err(CrabError::Protocol("trailing data in ref lease".to_owned()));
+        return Err(CrabError::Protocol(
+            "trailing data in helper option".to_owned(),
+        ));
     }
-    let decoded = std::str::from_utf8(decoded.as_ref())
-        .map_err(|error| CrabError::Protocol(format!("ref lease is not UTF-8: {error}")))?;
+    String::from_utf8(decoded.to_vec())
+        .map_err(|error| CrabError::Protocol(format!("helper option is not UTF-8: {error}")))
+}
+
+fn parse_ref_lease(value: &str) -> Result<(String, Option<String>)> {
+    let decoded = decode_option_value(value)?;
     let (name, oid) = decoded
         .rsplit_once(':')
         .ok_or_else(|| CrabError::Protocol("ref lease requires ref:oid".to_owned()))?;
@@ -5732,7 +5759,7 @@ mod tests {
         let (source, store, router, commits, _tag) = capsule_history_fixture().await;
         let cutoff = String::from_utf8(run_git(
             source.path(),
-            &["show", "-s", "--format=%ct", &commits[1]],
+            &["show", "-s", "--format=%cI", &commits[1]],
         ))
         .expect("commit timestamp is utf8")
         .trim()
@@ -5762,6 +5789,40 @@ mod tests {
         assert!(git_object_exists(target.path(), tip));
         assert!(git_object_exists(target.path(), &commits[1]));
         assert!(!git_object_exists(target.path(), &commits[0]));
+    }
+
+    #[tokio::test]
+    async fn classic_capsule_empty_shallow_selectors_install_nothing() {
+        let (_source, store, router, commits, _tag) = capsule_history_fixture().await;
+        for selector in ["deepen-since 1893456000", "deepen-not main"] {
+            let target = tempfile::tempdir().expect("target repository");
+            run_git(target.path(), &["init", "-q"]);
+            let git_dir = target.path().join(".git");
+            let _guard = GitEnvCwdGuard::set(target.path(), &git_dir, target.path());
+            let tip = commits.last().expect("history tip");
+            let input = format!("option {selector}\nfetch {tip} refs/heads/main\n\n");
+            let context = test_context(
+                store.clone(),
+                router.repo_prefix(),
+                target.path().join("push-state"),
+            );
+            let (_, result) =
+                run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
+            let error = result.expect_err("empty shallow selection must fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("no commits selected for shallow requests")
+            );
+            assert_eq!(
+                (
+                    git_object_exists(target.path(), tip),
+                    git_dir.join("shallow").exists()
+                ),
+                (false, false),
+                "{selector} must fail before pack installation or shallow publication"
+            );
+        }
     }
 
     #[tokio::test]
@@ -7386,6 +7447,9 @@ mod tests {
 
     #[tokio::test]
     async fn shallow_selectors_are_accepted_without_degrading_to_full_fetch() {
+        let target = tempfile::tempdir().expect("target repository");
+        run_git(target.path(), &["init", "-q"]);
+        let _guard = GitEnvCwdGuard::set(target.path(), &target.path().join(".git"), target.path());
         let mut options = HelperOptions::default();
         let mut output = Vec::new();
         handle_option("deepen-since", "1700000000", &mut options, &mut output)
@@ -7402,6 +7466,30 @@ mod tests {
         assert_eq!(options.fetch_options.deepen_since, Some(1_700_000_000));
         assert_eq!(options.fetch_options.deepen_not, ["refs/heads/archive"]);
         assert_eq!(String::from_utf8(output).unwrap(), "ok\nok\n");
+    }
+
+    #[tokio::test]
+    async fn option_shallow_since_normalizes_git_dates_and_quoting() {
+        let target = tempfile::tempdir().expect("target repository");
+        run_git(target.path(), &["init", "-q"]);
+        let _guard = GitEnvCwdGuard::set(target.path(), &target.path().join(".git"), target.path());
+        for date in [
+            "1700000000",
+            "2023-11-14T22:13:20Z",
+            "2023-11-14T23:13:20+01:00",
+            "\"2023-11-14 22:13:20 +0000\"",
+        ] {
+            let mut options = HelperOptions::default();
+            let mut output = Vec::new();
+            handle_option("deepen-since", date, &mut options, &mut output)
+                .await
+                .unwrap();
+            assert_eq!(
+                (options.fetch_options.deepen_since, output),
+                (Some(1_700_000_000), b"ok\n".to_vec()),
+                "{date}"
+            );
+        }
     }
 
     #[tokio::test]

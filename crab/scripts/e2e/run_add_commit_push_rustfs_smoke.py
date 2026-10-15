@@ -1097,53 +1097,70 @@ class AddCommitPushSmoke:
     def run_shallow_case(self) -> None:
         case_name = "shallow-history"
         repo, remote_url, _repo_prefix = self.prepare_git_repo(case_name)
-        first = self.commit_text(repo, "history.txt", "one\n", "one")
-        self.commit_text(repo, "history.txt", "two\n", "two")
-        self.commit_text(repo, "history.txt", "three\n", "three")
-        self.run_git(repo, ["push", "-u", "origin", "main"])
+        commits = []
+        for index, text in enumerate(("one", "two", "three"), start=1):
+            (repo / "history.txt").write_text(text + "\n", encoding="utf-8")
+            self.run_git(repo, ["add", "history.txt"])
+            date = f"2023-11-{14 + index:02d}T22:13:20Z"
+            self.run_cmd(
+                f"{case_name} dated commit {text}",
+                ["git", "commit", "-m", text],
+                repo,
+                extra_env={"GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date},
+            )
+            commits.append(self.rev_parse(repo, "HEAD"))
+        first = commits[0]
+        self.run_git(repo, ["tag", "archive", first])
+        self.run_git(repo, ["push", "-u", "origin", "main", "--tags"])
 
-        selector_clone = self.run_root / case_name / "shallow-since-clone"
-        selector_result = self.clone_git(
-            remote_url,
-            selector_clone,
-            name=f"{case_name} unsupported shallow-since clone",
-            extra_args=["--shallow-since", "2100-01-01T00:00:00Z"],
-            check=False,
+        # Match native upload-pack before asserting Crab's selector behavior.
+        # Fixed dates separate date parsing from commit-boundary selection.
+        selectors = (
+            ("since", ["--shallow-since", "2023-11-16T22:13:20Z"]),
+            ("exclude", ["--shallow-exclude", "archive"]),
+            ("future", ["--shallow-since", "2030-01-01T00:00:00Z"]),
+            ("exclude-all", ["--shallow-exclude", "main"]),
         )
-        selector_stderr = Path(selector_result.stderr_log).read_text(
-            encoding="utf-8", errors="replace"
-        )
-        self.check(
-            f"{case_name}-shallow-since-fails-explicitly",
-            selector_result.exit_code != 0
-            and "deepen-since is not supported" in selector_stderr
-            and not (selector_clone / "history.txt").exists(),
-            {
-                "exit_code": selector_result.exit_code,
-                "stderr_log": selector_result.stderr_log,
-            },
-        )
-        exclude_clone = self.run_root / case_name / "shallow-exclude-clone"
-        exclude_result = self.clone_git(
-            remote_url,
-            exclude_clone,
-            name=f"{case_name} unsupported shallow-exclude clone",
-            extra_args=["--shallow-exclude", "main"],
-            check=False,
-        )
-        exclude_stderr = Path(exclude_result.stderr_log).read_text(
-            encoding="utf-8", errors="replace"
-        )
-        self.check(
-            f"{case_name}-shallow-exclude-fails-explicitly",
-            exclude_result.exit_code != 0
-            and "deepen-not is not supported" in exclude_stderr
-            and not (exclude_clone / "history.txt").exists(),
-            {
-                "exit_code": exclude_result.exit_code,
-                "stderr_log": exclude_result.stderr_log,
-            },
-        )
+        for selector, arguments in selectors:
+            expected_success = selector in ("since", "exclude")
+            transports = (
+                ("native", repo.resolve().as_uri(), []),
+                ("crab-v2", remote_url, ["--config", "protocol.version=2"]),
+                ("crab-classic", remote_url, ["--config", "protocol.version=0"]),
+            )
+            for transport, url, protocol in transports:
+                clone = self.run_root / case_name / f"{transport}-{selector}-clone"
+                result = self.clone_git(
+                    url, clone,
+                    name=f"{case_name} {transport} {selector} clone",
+                    extra_args=[*protocol, *arguments], check=False,
+                )
+                detail = {"exit_code": result.exit_code, "stderr_log": result.stderr_log}
+                if not expected_success:
+                    diagnostic = Path(result.stderr_log).read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                    self.check(
+                        f"{case_name}-{transport}-{selector}-rejects-empty-selection",
+                        result.exit_code != 0
+                        and "no commits selected for shallow requests" in diagnostic
+                        and not (clone / "history.txt").exists(),
+                        detail,
+                    )
+                    continue
+                self.check(
+                    f"{case_name}-{transport}-{selector}-clone-succeeds",
+                    result.exit_code == 0, detail,
+                )
+                selected = self.read_stdout(self.run_git(clone, ["rev-list", "HEAD"]))
+                boundary = (clone / ".git" / "shallow").read_text().splitlines()
+                self.check(
+                    f"{case_name}-{transport}-{selector}-exact-history-and-boundary",
+                    selected.splitlines() == list(reversed(commits[1:]))
+                    and boundary == [commits[1]]
+                    and (clone / "history.txt").read_text() == "three\n",
+                    {"commits": selected.splitlines(), "boundary": boundary},
+                )
 
         raw_fetch = self.run_root / case_name / "raw-fetch"
         raw_fetch.mkdir()
