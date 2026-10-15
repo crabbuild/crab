@@ -325,9 +325,12 @@ files from a different main/owner identity. This changes checkpoint cadence,
 not the schema or public cache configuration.
 
 The pre-fix regression fails for repeated reservations and immediate release.
-Post-fix qualification passes 46 catalog tests and 128 private-filesystem,
-lifecycle and local-cache tests, plus strict local-cache all-target Clippy.
-Native-platform coverage and the failed 1,024-file push rerun remain required.
+Post-fix qualification passes all 309 library tests and three credential
+integration tests with local-cache, Xet chunk cache and remote-client enabled.
+The corrupt-main fixture checkpoints before damage so committed WAL cannot
+supply its supposedly corrupted header; its original assertions remain.
+Strict combined-feature all-target Clippy also passes. Native-platform coverage
+and the failed 1,024-file push rerun remain required.
 
 The pinned SQLite 3.49.1 also falls in the affected range of the upstream
 [WAL-reset race](https://www.sqlite.org/wal.html#walreset). A matched Crab and
