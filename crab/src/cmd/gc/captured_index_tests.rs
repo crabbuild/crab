@@ -600,7 +600,19 @@ async fn checkpoint_catalog_gc_preserves_roots_and_grace_period() {
     )
     .await
     .unwrap();
-    let first = view(&layout).await;
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let first = crab_read::capsule_protocol::open_view_from_root_with_metadata(
+        &layout,
+        root,
+        CapsuleReadLimits {
+            max_capsule_bytes: LIMIT,
+            max_frontier_bytes: LIMIT,
+        },
+    )
+    .await
+    .unwrap();
     let source = first.layered_checkpoint().unwrap().catalog().unwrap();
     let retained = layout.capsule_catalog_path(source.hash());
     backend.paths.lock().unwrap().insert(retained.clone());
