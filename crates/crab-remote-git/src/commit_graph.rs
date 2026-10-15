@@ -13,7 +13,7 @@ use crate::{BudgetDimension, CorruptionStage, Error, OperationContext, RemoteGit
 #[derive(Debug)]
 enum Graph {
     Manifest(SplitCommitGraph),
-    Capsule(CommitGraphReader),
+    Capsule(Box<CommitGraphReader>),
 }
 
 /// Validated positional graph bound to captured ref roots, never physical retention.
@@ -60,7 +60,7 @@ impl CommitGraphIndex {
                 if descriptor.version == 1 {
                     load_split_commit_graph(store, layout, content_hash, max_bytes).await.map(Graph::Manifest)
                 } else {
-                    CommitGraphReader::load(store, layout, content_hash, max_bytes).await.map(Graph::Capsule)
+                    CommitGraphReader::load(store, layout, content_hash, max_bytes).await.map(Box::new).map(Graph::Capsule)
                 }
             } => result?,
         };

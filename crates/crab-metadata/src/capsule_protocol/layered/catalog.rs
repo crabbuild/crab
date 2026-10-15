@@ -79,7 +79,7 @@ impl CheckpointCatalog {
 
 pub(super) enum CatalogInput {
     New(PointerCatalog),
-    Retained(Option<CheckpointCatalog>),
+    Retained(Option<Box<CheckpointCatalog>>),
 }
 
 impl CatalogInput {
@@ -90,7 +90,7 @@ impl CatalogInput {
                 if let Some(source) = &source {
                     source.validate()?;
                 }
-                return Ok((source, None));
+                return Ok((source.map(|source| *source), None));
             }
         };
         if catalog.is_empty() {

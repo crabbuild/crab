@@ -1012,7 +1012,7 @@ impl LayeredCheckpoint {
             covered_generation,
             covered_root_digest,
             sources,
-            CatalogInput::Retained(catalog),
+            CatalogInput::Retained(catalog.map(Box::new)),
             visibility,
         )
     }

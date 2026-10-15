@@ -394,7 +394,7 @@ pub async fn publish_capsule_checkpoint_with_catalog_from_view(
 
 enum CatalogWrite {
     New(PointerCatalog),
-    Retained(Option<crab_metadata::capsule_protocol::CheckpointCatalog>),
+    Retained(Option<Box<crab_metadata::capsule_protocol::CheckpointCatalog>>),
 }
 
 async fn catalog_for_checkpoint(
@@ -408,7 +408,8 @@ async fn catalog_for_checkpoint(
     Ok(CatalogWrite::Retained(
         view.layered_checkpoint()
             .and_then(LayeredCheckpoint::catalog)
-            .cloned(),
+            .cloned()
+            .map(Box::new),
     ))
 }
 
@@ -521,7 +522,7 @@ async fn repack_checkpoint_from_view(
     let Some(selected_start) = layered_suffix_start(checkpoint.sources())? else {
         return Ok(CheckpointPublication::default());
     };
-    let catalog = CatalogWrite::Retained(checkpoint.catalog().cloned());
+    let catalog = CatalogWrite::Retained(checkpoint.catalog().cloned().map(Box::new));
     let consolidation = consolidate_layered_suffix(
         layout,
         view,
@@ -588,7 +589,7 @@ async fn publish_layered_sources(
             generation,
             root_digest,
             sources,
-            catalog,
+            catalog.map(|catalog| *catalog),
             Some(visibility),
         )?,
     };
