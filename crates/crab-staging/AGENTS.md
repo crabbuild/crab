@@ -62,6 +62,11 @@ Trace one path: `crab/src/cmd/add.rs` (`close_staging_before_indexing`) →
   active native owners. Layout v3 upgrades released v1 atomically and rejects the
   unreleased v2 prototype. Sources: `index.rs`, `lib.rs`, and crate README.
 
+- `StagingPushSnapshot` owns reader fencing and exact snapshot cleanup. Product
+  callers establish remote commit; the guard retains deferred committed journals
+  and preserves unpublished leases on cancellation. Read `src/push_snapshot.rs`
+  and the capsule consumer before changing this boundary.
+
 ## Features and platform
 
 No declared Cargo features. Requires writable local filesystem/SQLite and platform lock semantics. Scale tests under `crates/crab-staging/tests` need dedicated disk/time budgets; do not run them as an incidental unit check.

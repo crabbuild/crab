@@ -1607,6 +1607,20 @@ class AddCommitPushSmoke:
             )
 
         self.head_repository_state(repo_prefix)
+        ownership = self.run_crab(
+            repo, ["staging", "stats", "--json"],
+            name=f"{case_name} staging ownership after push",
+        )
+        lifecycle = json.loads(self.read_stdout(ownership))["data"]["lifecycle"]
+        self.check(
+            f"{case_name}-retires-published-staging-owners",
+            all(lifecycle[field] == 0 for field in (
+                "path_heads", "path_leases", "open_push_snapshots",
+                "committed_push_snapshots", "payloads",
+                "current_head_prepared_bytes", "snapshot_pinned_prepared_bytes",
+            )),
+            lifecycle,
+        )
         after_xorbs = self.list_keys(".crab/xorbs/")
         after_shards = self.list_keys(".crab/shards/")
         new_xorbs = len(after_xorbs - before_xorbs)

@@ -94,6 +94,19 @@ and active native transactions survive. Publishing a newer head never cancels
 another caller's open lease. Failed Git conversion can leave a retained handoff;
 reconciliation and abandoned-handoff reclamation still need qualification.
 
+`StagingPushSnapshot::begin` fences retirement before recipe selection;
+`capture` pins exact selected leases. Call `commit` only after confirmed remote
+publication. It records a committed journal before retiring captured owners.
+Drop clears the reader marker and discards an uncommitted snapshot when no
+sibling reader prevents cleanup. Deferred journals remain for exclusive
+maintenance; native and uncaptured leases remain owned throughout.
+
+Native intent recovery may preserve caller-attested committed recipes under
+canonical history owners before rolling back an old Git index state.
+`preserve_publication_history` accepts only verified recipe roots belonging to
+that unresolved intent. It leaves the original intent intact on cancellation or
+error, so interrupted preservation can be retried before rollback.
+
 ## Recovery contract
 
 Opening writable staging runs recovery before creating or reusing its writer.

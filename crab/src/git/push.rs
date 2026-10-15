@@ -9716,6 +9716,7 @@ impl PushPipeline {
             crate::git::index::reconcile_publication_intents(
                 staging,
                 &worktree.current_worktree_root,
+                &self.cancel,
             )
             .await?;
         }

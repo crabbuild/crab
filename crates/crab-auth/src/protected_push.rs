@@ -162,6 +162,17 @@ pub fn validate_push_finalize_response(response: &PushFinalizeResponse) -> Resul
         return invalid_finalize_response("partial active-active commit metadata");
     }
 
+    // A successful finalize authorizes releasing the client's local payloads.
+    // Pending or aborted coordinator state cannot attest remote publication.
+    if let Some(state) = response.commit_state
+        && !matches!(
+            state,
+            PushTransactionState::Committed | PushTransactionState::Materialized
+        )
+    {
+        return invalid_finalize_response("active-active push has not committed");
+    }
+
     if let Some(operation_id) = response.operation_id.as_deref()
         && operation_id.trim().is_empty()
     {
@@ -558,6 +569,39 @@ mod tests {
         let err = validate_push_finalize_response(&response).unwrap_err();
 
         assert!(err.to_string().contains("partial active-active"));
+    }
+
+    #[test]
+    fn finalize_success_requires_committed_coordinator_state() {
+        for state in [
+            PushTransactionState::Pending,
+            PushTransactionState::ObjectsUploaded,
+            PushTransactionState::Committed,
+            PushTransactionState::Materialized,
+            PushTransactionState::Aborted,
+        ] {
+            let outcome = CommitOutcome {
+                operation_id: "operation".to_owned(),
+                coordinator_epoch: 1,
+                writer: "writer".to_owned(),
+                region: "region".to_owned(),
+                manifest_generation: 1,
+                commit_sequence: 1,
+                state,
+            };
+            let response = PushFinalizeResponse::updated_with_commit_outcome(
+                vec![valid_ref_update()],
+                Some(&outcome),
+            );
+            assert_eq!(
+                validate_push_finalize_response(&response).is_ok(),
+                matches!(
+                    state,
+                    PushTransactionState::Committed | PushTransactionState::Materialized
+                ),
+                "state={state:?}",
+            );
+        }
     }
 
     #[test]

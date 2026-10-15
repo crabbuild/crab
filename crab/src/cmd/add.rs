@@ -1050,7 +1050,7 @@ async fn execute_add(
     // pointers published by the process that just released the staging lock.
     let staging_root = worktree_ctx.shared_staging_dir();
     let lock_wait_start = Instant::now();
-    let staging = Arc::new(open_add_staging(&staging_root, &repo_root).await?);
+    let staging = Arc::new(open_add_staging(&staging_root, &repo_root, cancel).await?);
     let lock_wait_duration_ms = lock_wait_start.elapsed().as_millis() as u64;
     let (candidates, clean_skipped) =
         filter_clean_indexed_candidates(&repo_root, candidates, jobs, cancel).await?;
@@ -1656,12 +1656,16 @@ async fn execute_add(
     Ok(summary)
 }
 
-async fn open_add_staging(staging_root: &Path, repo_root: &Path) -> Result<StagingArea> {
+async fn open_add_staging(
+    staging_root: &Path,
+    repo_root: &Path,
+    cancel: &CancellationToken,
+) -> Result<StagingArea> {
     let staging =
         StagingArea::open_blocking(staging_root.to_path_buf(), ADD_STAGING_LOCK_WAIT_BUDGET)
             .await
             .map_err(CrabError::from)?;
-    reconcile_publication_intents_writer(&staging, repo_root)?;
+    reconcile_publication_intents_writer(&staging, repo_root, cancel)?;
     Ok(staging)
 }
 
@@ -5891,7 +5895,8 @@ mod tests {
             let repo_root = repo_root.clone();
             let path = path.clone();
             async move {
-                let staging = open_add_staging(&root, &repo_root).await?;
+                let staging =
+                    open_add_staging(&root, &repo_root, &CancellationToken::new()).await?;
                 let filtered = filter_clean_indexed_candidates(
                     &repo_root,
                     vec![(path, data.len() as u64)],
@@ -6225,7 +6230,9 @@ mod tests {
         assert!(intent.is_some());
         staging.close().await.unwrap();
 
-        let recovered = open_add_staging(&staging_root, &repo).await.unwrap();
+        let recovered = open_add_staging(&staging_root, &repo, &CancellationToken::new())
+            .await
+            .unwrap();
 
         assert!(
             recovered
@@ -6271,7 +6278,7 @@ mod tests {
         staging.close().await.unwrap();
 
         let recovered = StagingAreaReadOnly::open(staging_root).await.unwrap();
-        reconcile_publication_intents(&recovered, &repo)
+        reconcile_publication_intents(&recovered, &repo, &CancellationToken::new())
             .await
             .unwrap();
 
@@ -6323,14 +6330,19 @@ mod tests {
             let (error, intents, bytes) = if read_only {
                 staging.close().await.unwrap();
                 let staging = StagingAreaReadOnly::open(root).await.unwrap();
-                let result = reconcile_publication_intents(&staging, &repo).await;
+                let result =
+                    reconcile_publication_intents(&staging, &repo, &CancellationToken::new()).await;
                 (
                     result.unwrap_err(),
                     staging.unresolved_publication_intents().unwrap().len(),
                     staging.get_chunk(&compute_data_hash(data)).await.unwrap(),
                 )
             } else {
-                let result = reconcile_publication_intents_writer(&staging, &repo);
+                let result = reconcile_publication_intents_writer(
+                    &staging,
+                    &repo,
+                    &CancellationToken::new(),
+                );
                 let state = (
                     result.unwrap_err(),
                     staging.unresolved_publication_intents().unwrap().len(),
@@ -6428,7 +6440,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let blocked = reconcile_publication_intents(&staging, repo)
+        let blocked = reconcile_publication_intents(&staging, repo, &CancellationToken::new())
             .await
             .unwrap_err();
         let retained = staging.unresolved_publication_intents().unwrap().len() == 1
@@ -6450,7 +6462,9 @@ mod tests {
         .await
         .unwrap();
         assert!(status.success(), "Git index installation failed");
-        reconcile_publication_intents(&staging, repo).await.unwrap();
+        reconcile_publication_intents(&staging, repo, &CancellationToken::new())
+            .await
+            .unwrap();
         assert!(
             matches!(blocked, CrabError::Io(_))
                 && retained
@@ -6510,7 +6524,7 @@ mod tests {
         staging.close().await.unwrap();
 
         let recovered = StagingAreaReadOnly::open(staging_root).await.unwrap();
-        let error = reconcile_publication_intents(&recovered, &repo)
+        let error = reconcile_publication_intents(&recovered, &repo, &CancellationToken::new())
             .await
             .expect_err("mixed publication state must fail closed");
 

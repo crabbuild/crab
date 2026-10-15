@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Qualify repeated 10-GiB edits through both Git clean and native Crab push.
 
-Two copy-on-write files start with identical, non-sparse deterministic entropy.
+Two copy-on-write files start with identical, non-sparse deterministic content.
+Choose entropy, a repeated one-MiB block, or zero-filled bytes.
 Edits diverge at the beginning, middle and end. Each committed version must
 hydrate byte-identically from a fresh cache after the source repository is removed.
 Only this invocation's disposable data is released; logs and receipts remain.
@@ -77,9 +78,15 @@ def qualify(runner: AddCommitPushSmoke, proxy: RequestCountingProxy) -> None:
     repo, remote, prefix = runner.prepare_repo("source")
     cap_cache(repo)
     paths = [repo / "model-a.bin", repo / "model-b.bin"]
+    repeated_block = None
+    if args.pattern == "zero":
+        repeated_block = bytes(MIB)
+    elif args.pattern == "repeated":
+        repeated_block = hashlib.shake_256(b"large-edits:repeated").digest(MIB)
     with paths[0].open("wb") as output:
         for block in range(args.file_mib):
-            output.write(hashlib.shake_256(f"large-edits:{block}".encode()).digest(MIB))
+            output.write(repeated_block if repeated_block is not None else
+                         hashlib.shake_256(f"large-edits:{block}".encode()).digest(MIB))
     clone_flag = "-c" if sys.platform == "darwin" else "--reflink=always"
     runner.run_cmd("copy-on-write second large file",
                    ["cp", clone_flag, str(paths[0]), str(paths[1])], repo)
@@ -89,13 +96,13 @@ def qualify(runner: AddCommitPushSmoke, proxy: RequestCountingProxy) -> None:
         (code / f"module-{index:05}.rs").write_text(f"pub const VALUE: u64 = {index};\n")
     runner.check("workload", all(path.stat().st_size == size for path in paths),
                  {"file_bytes": size, "files": 2, "initial_unique_bytes": size,
-                  "versions": 4, "code_files": args.code_files})
+                  "versions": 4, "code_files": args.code_files, "pattern": args.pattern})
     history = []
     phases = []
 
     def record() -> None:
         receipt = runner.artifacts / "large-file-edits.json"
-        receipt.write_text(json.dumps({"history": history, "phases": phases,
+        receipt.write_text(json.dumps({"history": history, "phases": phases, "pattern": args.pattern,
                                       "transport": proxy.snapshot()}, indent=2) + "\n")
         runner.report.artifacts["large_file_edits"] = str(receipt)
         runner.write_report()
@@ -194,6 +201,7 @@ def main() -> None:
     parser.add_argument("--endpoint-url", required=True)
     parser.add_argument("--file-mib", type=int, default=10240)
     parser.add_argument("--code-files", type=int, default=5000)
+    parser.add_argument("--pattern", choices=("entropy", "repeated", "zero"), default="entropy")
     args = parser.parse_args()
     if args.file_mib < 16 or args.code_files < 1 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.run_id):
         parser.error("require >=16 MiB/file, positive code files and a safe run id")

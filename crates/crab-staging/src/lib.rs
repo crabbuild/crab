@@ -44,6 +44,7 @@ mod index;
 pub mod metrics;
 pub mod multipart_resume;
 pub mod push_plan;
+mod push_snapshot;
 pub mod recipe;
 mod recovery;
 mod segment;
@@ -69,6 +70,7 @@ mod prop_torn_tail_recovery;
 pub use config::StagingConfig;
 pub use error::{Result, StagingError};
 pub use metrics::StagingMetrics;
+pub use push_snapshot::StagingPushSnapshot;
 pub use stats::{
     CompactionStats, RetireStats, StagingCleanStats, StagingLifecycleHealth, StagingStats,
     StagingVerifyStats,
@@ -254,6 +256,97 @@ fn unresolved_publication_intents(
             })
         })
         .collect()
+}
+
+fn publish_verified_recipe_owner(
+    root: &Path,
+    index: &Mutex<Index>,
+    owner: &Path,
+    recipe: &crate::recipe::FileRecipe,
+    display_path: Option<&str>,
+) -> Result<StagingBatchId> {
+    let batch_id = new_staging_batch_id();
+    let file_hash: [u8; 32] = recipe.file_hash().into();
+    let result = (|| {
+        let guard = lock_index(index)?;
+        guard.insert_batch(batch_id.as_str())?;
+        guard.insert_file(&file_hash, recipe.file_size())?;
+        guard.insert_recipe_lease(
+            batch_id.as_str(),
+            &staging_path_bytes(owner),
+            recipe,
+            RecipeVerification::CallerVerified,
+        )?;
+        if let Some(display_path) = display_path {
+            guard.insert_file_path(&file_hash, display_path)?;
+        }
+        guard.mark_batch_published(batch_id.as_str())
+    })();
+    if let Err(error) = result.and_then(|unleased| remove_indexed_files(root, index, &unleased)) {
+        let unowned = lock_index(index).and_then(|guard| {
+            guard.rollback_batch(batch_id.as_str())?;
+            guard.has_file_owner(&file_hash).map(|owned| !owned)
+        });
+        if matches!(unowned, Ok(true)) {
+            let _ = remove_indexed_files(root, index, &[file_hash]);
+        }
+        return Err(error);
+    }
+    Ok(batch_id)
+}
+
+fn preserve_publication_history(
+    root: &Path,
+    index: &Mutex<Index>,
+    intent_id: &PublicationIntentId,
+    recipe_hashes: &[MerkleHash],
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    if cancel.is_cancelled() {
+        return Err(StagingError::Cancelled);
+    }
+    let intent = unresolved_publication_intents(index)?
+        .into_iter()
+        .find(|intent| &intent.intent_id == intent_id)
+        .ok_or_else(|| StagingError::NotFound {
+            path: format!("publication intent {}", intent_id.as_str()),
+        })?;
+    let members = intent
+        .entries
+        .iter()
+        .map(|entry| entry.recipe_hash)
+        .collect::<std::collections::HashSet<_>>();
+    let recipes = {
+        let guard = lock_index(index)?;
+        recipe_hashes
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|hash| {
+                if !members.contains(&hash) {
+                    return Err(StagingError::StagingCorrupt(
+                        "history recipe is not owned by publication intent".to_owned(),
+                    ));
+                }
+                guard.verified_local_recipe(&hash.into())?.ok_or_else(|| {
+                    StagingError::StagingCorrupt(
+                        "publication history recipe is not verified".to_owned(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+    // Commit every history owner before rollback can remove native leases.
+    // An interruption leaves the original intent and its remaining payloads owned.
+    for recipe in recipes {
+        if cancel.is_cancelled() {
+            return Err(StagingError::Cancelled);
+        }
+        let owner = PathBuf::from(".crab/history").join(recipe.file_hash().hex());
+        publish_verified_recipe_owner(root, index, &owner, &recipe, None)?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -2707,6 +2800,16 @@ impl StagingArea {
         unresolved_publication_intents(&self.index)
     }
 
+    /// Preserve caller-attested committed recipe roots before rolling back a native intent.
+    pub fn preserve_publication_history(
+        &self,
+        intent_id: &PublicationIntentId,
+        recipe_hashes: &[MerkleHash],
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        preserve_publication_history(&self.root, &self.index, intent_id, recipe_hashes, cancel)
+    }
+
     /// Atomically remove an unresolved intent and every open batch it owns.
     pub fn rollback_publication_intent(
         &self,
@@ -2726,31 +2829,13 @@ impl StagingArea {
         path: &Path,
         recipe: &crate::recipe::FileRecipe,
     ) -> Result<StagingBatchId> {
-        self.publish_verified_recipe_owner(path, recipe, Some(&path.to_string_lossy()))
-    }
-
-    fn publish_verified_recipe_owner(
-        &self,
-        owner: &Path,
-        recipe: &crate::recipe::FileRecipe,
-        display_path: Option<&str>,
-    ) -> Result<StagingBatchId> {
-        let batch_id = self.create_batch()?;
-        let file_hash = recipe.file_hash();
-        let publish = (|| -> Result<()> {
-            self.pre_register_file(&file_hash, recipe.file_size())?;
-            self.record_verified_recipe_lease(&batch_id, owner, recipe)?;
-            if let Some(display_path) = display_path {
-                self.record_file_path(&file_hash, display_path)?;
-            }
-            self.mark_batch_published(&batch_id)
-        })();
-        if let Err(error) = publish {
-            let _ = self.rollback_batch(&batch_id);
-            let _ = self.retire_file_if_unleased(&file_hash);
-            return Err(error);
-        }
-        Ok(batch_id)
+        publish_verified_recipe_owner(
+            &self.root,
+            &self.index,
+            path,
+            recipe,
+            Some(&path.to_string_lossy()),
+        )
     }
 
     /// Publish one immutable recipe needed by not-yet-pushed Git history.
@@ -2763,7 +2848,7 @@ impl StagingArea {
         recipe: &crate::recipe::FileRecipe,
     ) -> Result<StagingBatchId> {
         let owner = PathBuf::from(".crab/history").join(recipe.file_hash().hex());
-        self.publish_verified_recipe_owner(&owner, recipe, None)
+        publish_verified_recipe_owner(&self.root, &self.index, &owner, recipe, None)
     }
 
     /// Preserve a locally published recipe referenced by not-yet-pushed Git history.
@@ -4134,6 +4219,16 @@ impl StagingAreaReadOnly {
         Ok(())
     }
 
+    /// Preserve caller-attested committed recipe roots before rolling back a native intent.
+    pub fn preserve_publication_history(
+        &self,
+        intent_id: &PublicationIntentId,
+        recipe_hashes: &[MerkleHash],
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        preserve_publication_history(&self.root, &self.index, intent_id, recipe_hashes, cancel)
+    }
+
     /// Atomically remove an unresolved intent and every open batch it owns.
     pub async fn rollback_publication_intent(
         &self,
@@ -4165,6 +4260,10 @@ impl StagingAreaReadOnly {
 
     /// Retire the exact recipe ownership pinned by one committed push snapshot.
     pub async fn retire_push_snapshot(&self, push_id: &str) -> Result<Vec<RetireStats>> {
+        self.retire_push_snapshot_now(push_id)
+    }
+
+    fn retire_push_snapshot_now(&self, push_id: &str) -> Result<Vec<RetireStats>> {
         let unleased = lock_index(&self.index)?.retire_push_snapshot(push_id)?;
         remove_indexed_files(&self.root, &self.index, &unleased)
     }

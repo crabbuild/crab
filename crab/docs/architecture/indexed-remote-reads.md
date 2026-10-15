@@ -2016,3 +2016,58 @@ therefore do not qualify capsule lifecycle. A separate follow-up must bind exact
 selected owners before publication and release only proven committed owners,
 including cancellation, partial/ref-CAS failure and concurrent readers. Until that
 is implemented and tested, local post-push reclamation is not qualified.
+
+### Capsule snapshot lifecycle follow-up
+
+Capsule push fences retirement before selecting local recipes, pins selected
+published/delegated owners, and retains that snapshot through upload and ref
+publication. Confirmed remote commit precedes the local committed journal and
+exact retirement. Local cleanup errors leave maintenance work and preserve the
+successful remote result. Ref rejection or failure retains unpublished leases.
+
+`StagingPushSnapshot` owns marker/snapshot cleanup on drop, including task abort.
+Sibling readers defer retirement to exclusive maintenance. It shares the existing
+index and physical-payload implementation with the released asynchronous API;
+there is no storage-format or dependency change. Guard tests cover drop, task
+abort, shared native ownership, sibling deferral and local journal failure.
+
+Native publication-intent recovery now runs in capsule push before snapshot
+admission. Recovery uses Git's immediate index lock. If the complete prior index
+state is restored, a bounded-memory local Git object walk checks refs and reflogs
+before native rollback. Recipes still referenced there acquire canonical history
+owners before native leases are released. Cancellation or an incomplete history
+walk fails without authorizing rollback. Ordinary pushes without unresolved
+intents do not perform this history scan; this does not replace the historical
+remote-catalog indexing workstream.
+
+Both exclusive native-add recovery and shared push recovery use this ownership
+rule. The shared staging helper validates all requested recipes against the
+intent before adding history owners, preserves the original intent across an
+interrupted prefix, and permits an idempotent retry. Prepared-only recovery tests
+cover subset retention, full reconstruction and physical xorb deletion only after
+confirmed snapshot commit.
+
+Both protected finalize clients use the shared auth response validator. A response
+with coordinator metadata must attest `Committed` or `Materialized` before it can
+permit local retirement. `Pending`, `ObjectsUploaded` and `Aborted` are rejected;
+the existing successful response without coordinator metadata remains supported.
+The minimal protected-push suite passes 30 tests.
+
+The existing managed-file smoke checks post-push owners, snapshots, raw payloads
+and prepared ownership bytes for native and Git helper push. The frozen #566 CLI
+baseline completes native add/commit/push and verifies the remote tip, then fails
+the retirement assertion with retained owners/prepared payload. Corrected CLI
+proof and final-source 10-GiB qualification remain required.
+
+The large-file harness adds `--pattern entropy|repeated|zero`; entropy preserves
+its original seed/default. Repeated input uses a deterministic one-MiB block;
+zero input writes real blocks. All patterns retain four alternating native/Git
+versions, beginning/middle/end edits, two-file identity checks, source removal and
+cold historical reconstruction. Syntax checks pass; the new patterns are unrun.
+
+The frozen #570 release build succeeds with `simd-accel,gix-pathmatch` and no
+default features. Its binary hash is recorded externally. Resumed workload
+`unified-ingestion-10g-r3` passes the formerly failing v1 Git-clean push and the
+subsequent v2 native push, with 2,216,109 and 2,133,870 incremental xorb bytes.
+The full workload is still running; cold historical reconstruction is unproven.
+This artifact precedes the lifecycle and finalize-contract changes above.
