@@ -88,7 +88,12 @@ the upstream BG4 reader would buffer before reaching a caller's sink. Decoder
 block buffers, vector capacity, and the BG4 regrouping allocation are additional
 memory costs, so this is not a whole-process memory limit.
 
-The builder and parser share the `u32` decoded-offset limit. Range assembly
+The builder and parser share the `u32` decoded-offset and Xet chunk-count
+limits. The builder seals before a new unique chunk would exceed either limit,
+including when the payload is still below its target size. Serial,
+precompressed, batch and admitted streaming writes share this boundary;
+deduplication happens first, and denied rollover admission leaves staged data
+unsealed for retry. Range assembly
 grows after validating decoded chunks instead of reserving an untrusted
 advertised total. These format checks are separate from request admission and
 whole-process memory limits.
