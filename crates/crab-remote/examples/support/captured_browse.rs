@@ -7,7 +7,7 @@ use crab_storage::{Store, StoreLayout};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use super::support::{Measurements, Result, open_repository};
+use super::support::{Measurements, Result, capture_repository_view};
 
 pub async fn qualify(
     layout: &StoreLayout<Store>,
@@ -18,24 +18,19 @@ pub async fn qualify(
     counters: &Measurements,
 ) -> Result<()> {
     let cancel = CancellationToken::new();
-    let repository = counters
-        .measure(
-            "open",
-            "cold",
-            open_repository(layout.clone(), identity.clone(), runtime, options, &cancel),
-        )
+    let view = counters
+        .measure("open", "cold", capture_repository_view(layout))
         .await?;
-    let head = repository
+    let head = view
         .refs()
-        .head
-        .as_ref()
+        .get(view.head())
         .ok_or_else(|| io::Error::other("repository has no HEAD"))?;
-    let revision = Revision::Reference(head.name.clone());
-    // Do not resolve a commit or read a directory here: that would warm the
-    // exact physical/graph/path pages whose lifetime this experiment measures.
+    let revision = Revision::Reference(view.head().to_owned());
+    // Repository construction proves visible tips through graph pages. Delay
+    // it until after GC so even those pages stay cold in the captured view.
     println!(
         "{}",
-        json!({"kind":"captured", "schema":1, "commit":head.target.to_string(), "generation":repository.generation()})
+        json!({"kind":"captured", "schema":1, "commit":head, "generation":view.root().root().generation()})
     );
     io::stdout().flush()?;
     let command = tokio::task::spawn_blocking(|| -> io::Result<String> {
@@ -50,6 +45,20 @@ pub async fn qualify(
         )
         .into());
     }
+    let repository = counters
+        .measure("reader-open", "after-external-gc", async {
+            Ok(view
+                .git_repository_from_store(
+                    layout.clone(),
+                    identity.clone(),
+                    runtime,
+                    options,
+                    2 * 1024 * 1024 * 1024,
+                    &cancel,
+                )
+                .await?)
+        })
+        .await?;
     for name in ["blob", "attribution", "path-history"] {
         let value = counters
             .measure(
