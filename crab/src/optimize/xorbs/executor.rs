@@ -476,8 +476,10 @@ async fn upload_destination(
         () = cancel.cancelled() => return Err(CrabError::Cancelled),
     };
     match publication {
-        crab_storage::ImmutableCreateOutcome::Created => {}
-        crab_storage::ImmutableCreateOutcome::Existing(existing) => {
+        crab_storage::ImmutableCreateOutcome::Created(_) => {}
+        crab_storage::ImmutableCreateOutcome::Existing {
+            bytes: existing, ..
+        } => {
             let parser = XorbParser::parse(existing).map_err(CrabError::from)?;
             if parser.hash() != destination_hash {
                 return Err(CrabError::CorruptObject {
