@@ -54,6 +54,16 @@ capsules can therefore appear in differently compacted ref frontiers without
 inflating pack counts or appearing to conflict; differing payload commitments
 remain rejected.
 
+Checkpoint format 7 (`CRBCKP07`) carries authenticated catalog page roots in
+its footer. `LayeredCheckpoint::pointer_catalog_lookup` captures these roots;
+`PointerCatalogLookup` batches file/chunk/xorb keys through one bounded page
+cache and byte budget, validates selected dependency closure and keeps immutable
+descriptor conflicts distinct from absent keys. Full inspection remains an
+explicit maintenance operation. All 19 audited local release tags omit these
+capsule checkpoint formats; unshipped format 6 is rejected without a fallback.
+Publication deltas are still materialized by the caller's captured view; their
+run-level aggregation and lazy capture remain required for the complete gate.
+
 External pointer catalogs use `CRBPCP01` authenticated pages. A bounded descriptor
 commits file, shard, xorb and reverse-chunk directories; nested shard closures and
 ordered xorb chunk lists are paged too. Keys preserve canonical lowercase Xet hex

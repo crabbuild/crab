@@ -2,6 +2,11 @@
 use super::*;
 use crate::pages::{Kind, PageRef, Rows, Writer};
 
+#[cfg(feature = "storage")]
+mod reader;
+#[cfg(feature = "storage")]
+pub use reader::PointerCatalogLookup;
+
 const MAGIC: &[u8; 8] = b"CRBPCP01";
 const TRAILER_BYTES: usize = 12;
 const MAX_DESCRIPTOR_BYTES: usize = 4096;
@@ -9,7 +14,7 @@ const MAX_CATALOG_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Descriptor {
+pub(in crate::capsule_protocol) struct Descriptor {
     version: u32,
     body_bytes: u64,
     body_hash: [u8; 32],
@@ -259,7 +264,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<PointerCatalog> {
 }
 
 impl Descriptor {
-    pub(super) fn decode(bytes: &[u8]) -> Result<Self> {
+    pub(in crate::capsule_protocol) fn decode(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < TRAILER_BYTES
             || bytes.len() as u64 > MAX_CATALOG_BYTES
             || bytes.get(bytes.len() - 8..) != Some(MAGIC.as_slice())
@@ -286,7 +291,7 @@ impl Descriptor {
         Ok(descriptor)
     }
 
-    fn validate(&self, length: u64) -> Result<()> {
+    pub(in crate::capsule_protocol) fn validate(&self, length: u64) -> Result<()> {
         let header = json(self)?;
         if self.version != 1
             || header.len() > MAX_DESCRIPTOR_BYTES

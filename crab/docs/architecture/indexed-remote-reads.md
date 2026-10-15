@@ -1417,3 +1417,66 @@ outside the checkout under `capsule-origin-fixed-live-r1/` in the dedicated
 qualification directory. The qualifier exercises the shared metadata reader
 used by maintenance; a newly installed CLI `metadb owner` invocation and broader
 CI remain pending. No indexed-catalog performance claim follows from this fix.
+
+
+### Selected checkpoint catalog lookup
+
+Checkpoint format 7 (`CRBCKP07`) authenticates `CRBPCP01` catalog roots in its
+footer. The catalog payload format stays unchanged. A fresh audit of all 19
+local release tags found neither affected codec path; format 6 belongs only to
+the unmerged stack and is rejected explicitly rather than retained as a reader
+fallback. Root/history format tests now identify 7 as the current contract and
+reject 6.
+
+The metadata owner batches requested file hashes, reverse chunk keys and xorb
+identities. One page cache and aggregate query byte budget cover file rows,
+shard closures, xorb recipes and reverse-placement validation. Missing keys
+remain misses; missing pages, invalid ranges, mismatched chunk ordinals and
+conflicting immutable descriptors fail. File bindings preserve publication
+order and consistent declared sizes. Page cache hits still consume admission.
+Pages remain embedded in the existing checkpoint object, so its retention
+already retains every catalog page without a new GC object namespace.
+
+The read view constructs lookup from its captured checkpoint and exactly the
+same selected/deduplicated ordered capsule deltas used by full materialization.
+CLI `prepare_delta` uses the paged Git view and selects outgoing file and chunk
+closures, then checks only its candidate xorb descriptors against the base.
+The native and Git remote-helper publication path share this preparation.
+Protected receive/shared remote preparation, hydration/file-index wiring and
+maintenance migration still need their own consumer proof before the gate can
+close. Explicit maintenance retains complete inspection.
+
+This is a checkpoint lookup slice, not the complete historical-catalog gate.
+Deltas are still materialized and their chunk suffix is still scanned. Run-level
+key aggregation must retain exact selected-capsule membership and publication
+order; whole-run overlays would replay checkpoint-covered capsules or widen
+visible state. Until that is implemented and qualified, unrelated uncheckpointed
+history can still increase opening and query work. No end-to-end constant-work
+or latency claim is justified yet.
+
+The next run-index slice must batch each requested key once per captured run,
+then filter descriptor occurrences by the exact selected capsule set. Immutable
+shard/xorb variants need occurrence membership so an unselected conflicting
+capsule cannot change the selected catalog; equivalent descriptors can share
+one recipe even when their physical page offsets differ. File bindings choose
+the last selected occurrence in the view's reconciled publication order. Required
+negative fixtures include checkpoint-covered run prefixes, overlapping multi-ref
+runs, conflicting selected variants and retained but unselected variants. These
+are implementation requirements, not completed qualification.
+
+The first CLI publication test pass reached eight tests: seven passed, while the
+old JSON corruption fixture panicked during UTF-8 conversion before calling
+production. The fixture also exists on the paged-format parent branch. It is
+retired in favor of known-pointer tests that corrupt an actual chunk-page byte
+or truncate the catalog trailer inside an otherwise authenticated capsule.
+Both must produce a typed catalog corruption error before staging is consulted;
+no JSON reader or production validation bypass is introduced.
+
+`catalog-lookup-fixed-live-r1` published format 7 and matched selected file,
+shard, xorb and reverse-chunk metadata against complete inspection on RustFS.
+Opening decoded no catalog pages. Cold lookup fetched six ranges (9,132 bytes),
+while warm lookup fetched zero origin bytes. The run exposed duplicate decode
+instrumentation in the cache wrapper; the shared page decoder already emits
+that event. The duplicate event is removed, and corrected measured qualification
+remains pending. This four-MiB fixture is functional evidence, not the required
+10-GiB/increasing-history performance gate.

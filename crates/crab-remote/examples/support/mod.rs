@@ -26,8 +26,8 @@ pub struct Measurements {
     written_bytes: AtomicU64,
     active: AtomicU64,
     comparison_work: [AtomicU64; 2],
-    decoded_blocks: [AtomicU64; 7],
-    decoded_bytes: [AtomicU64; 7],
+    decoded_blocks: [AtomicU64; 8],
+    decoded_bytes: [AtomicU64; 8],
 }
 
 #[derive(Clone, Copy)]
@@ -37,8 +37,8 @@ struct Snapshot {
     read_bytes: u64,
     written_bytes: u64,
     comparison_work: [u64; 2],
-    decoded_blocks: [u64; 7],
-    decoded_bytes: [u64; 7],
+    decoded_blocks: [u64; 8],
+    decoded_bytes: [u64; 8],
 }
 
 impl StorageObserver for Measurements {
@@ -78,6 +78,7 @@ impl tracing::field::Visit for DecodeEvent {
                 "capsule_visibility" => Some(4),
                 "checkpoint_visibility" => Some(5),
                 "checkpoint_visibility_pages" => Some(6),
+                "pointer_catalog_pages" => Some(7),
                 _ => None,
             };
         }
@@ -192,6 +193,7 @@ impl Measurements {
             "capsule_visibility",
             "checkpoint_visibility",
             "checkpoint_visibility_pages",
+            "pointer_catalog_pages",
         ]
         .into_iter()
         .enumerate()
@@ -277,13 +279,14 @@ mod tests {
             tracing::debug!(target:"crab_metadata::index_decode", index_format="checkpoint_visibility_pages", decoded_bytes=43_u64);
             tracing::debug!(target:"crab_remote_git::blame_comparison", cache_hit=false);
             tracing::debug!(target:"crab_remote_git::blame_comparison", cache_hit=true);
+            tracing::debug!(target:"crab_metadata::index_decode", index_format="pointer_catalog_pages", decoded_bytes=47_u64);
             tracing::debug!(target:"unrelated", index_format="path_state", decoded_bytes=999_u64);
         });
         let snapshot = counters.snapshot();
         assert_eq!(snapshot.comparison_work, [1, 1]);
         assert_eq!(
             (snapshot.decoded_blocks, snapshot.decoded_bytes),
-            ([1, 1, 1, 1, 1, 1, 1], [41, 123, 67, 29, 31, 37, 43])
+            ([1, 1, 1, 1, 1, 1, 1, 1], [41, 123, 67, 29, 31, 37, 43, 47])
         );
     }
 

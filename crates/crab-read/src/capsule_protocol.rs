@@ -738,6 +738,37 @@ impl CapsuleRepositoryView {
         })
     }
 
+    /// Capture batched catalog lookup against this view's checkpoint and selected deltas.
+    ///
+    /// Checkpoint pages stay cold. Publication deltas still use the view's
+    /// authenticated materialization; unrelated checkpoint history is never decoded.
+    pub fn pointer_catalog_lookup(
+        &self,
+        layout: &StoreLayout<Store>,
+        maximum: u64,
+    ) -> Result<crab_metadata::capsule_protocol::PointerCatalogLookup> {
+        let lookup = self
+            .checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.pointer_catalog_lookup(layout, maximum))
+            .transpose()?
+            .unwrap_or_else(|| {
+                crab_metadata::capsule_protocol::PointerCatalogLookup::empty(maximum)
+            });
+        let mut deltas = Vec::new();
+        for capsule in &self.capsules {
+            if let Some(delta) = capsule.pointer_catalog_delta()? {
+                deltas.push(delta);
+            }
+        }
+        deltas.extend(
+            self.capsule_controls
+                .iter()
+                .filter_map(|capsule| capsule.pointer_catalog_delta().cloned()),
+        );
+        Ok(lookup.with_deltas(deltas)?)
+    }
+
     /// Materialize the complete generation-pinned external pointer catalog.
     pub async fn pointer_catalog(&self) -> Result<PointerCatalog> {
         let mut catalog =

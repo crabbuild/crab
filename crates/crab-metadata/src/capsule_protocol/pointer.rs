@@ -9,7 +9,9 @@ use crate::validation::validate_content_hash;
 
 const POINTER_CATALOG_VERSION: u32 = 1;
 
-mod paged;
+pub(super) mod paged;
+#[cfg(feature = "storage")]
+pub use paged::PointerCatalogLookup;
 
 /// One file identity and the canonical shard that reconstructs it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

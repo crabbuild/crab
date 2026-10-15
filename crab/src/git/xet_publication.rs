@@ -56,7 +56,7 @@ pub(crate) async fn prepare_delta(
         return Ok((PointerCatalog::new(), XetPublicationStats::default()));
     }
     let concurrency = upload_concurrency.clamp(1, MAX_IN_FLIGHT_XORBS);
-    let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+    let view = crab_read::capsule_protocol::open_git_view_from_root(
         layout,
         base.clone(),
         crab_read::capsule_protocol::CapsuleReadLimits {
@@ -65,7 +65,8 @@ pub(crate) async fn prepare_delta(
         },
     )
     .await?;
-    let base_catalog = view.pointer_catalog().await?;
+    let lookup = view.pointer_catalog_lookup(layout, 2 * 1024 * 1024 * 1024)?;
+    drop(view);
 
     let mut pointer_sizes = BTreeMap::<MerkleHash, u64>::new();
     for pointer in pointers {
@@ -82,9 +83,14 @@ pub(crate) async fn prepare_delta(
         }
     }
 
+    let file_hashes = pointer_sizes
+        .keys()
+        .map(|hash| hash.hex())
+        .collect::<Vec<_>>();
+    let base_files = lookup.files(layout.store(), &file_hashes).await?;
     let unresolved = pointer_sizes
         .iter()
-        .filter_map(|(hash, size)| match base_catalog.files().get(&hash.hex()) {
+        .filter_map(|(hash, size)| match base_files.files().get(&hash.hex()) {
             Some(entry) if entry.size() == *size => None,
             Some(entry) => Some(Err(CrabError::CorruptObject {
                 path: "capsule-protocol pointer catalog".to_owned(),
@@ -97,6 +103,7 @@ pub(crate) async fn prepare_delta(
             None => Some(Ok((*hash, *size))),
         })
         .collect::<Result<Vec<_>>>()?;
+    drop(base_files);
     if unresolved.is_empty() {
         return Ok((PointerCatalog::new(), XetPublicationStats::default()));
     }
@@ -193,14 +200,15 @@ pub(crate) async fn prepare_delta(
         prepared_files.push((file_hash, file_size, chunks, plan));
     }
 
-    // Catalog decoding already validates every descriptor. Retain placements
-    // only for outgoing recipes, so a small edit does not duplicate the entire
-    // historical chunk index and unrelated xorb descriptors in memory.
+    // Query only the outgoing recipes. Selected xorb recipes are verified
+    // against the reverse chunk index before any staged payload is reused.
     let mut needed_chunks = prepared_files
         .iter()
         .flat_map(|(_, _, chunks, _)| chunks.iter().map(|(hash, _)| hash.hex()))
         .collect::<HashSet<_>>();
-    for (hash, entry) in base_catalog.xorbs() {
+    let requested_chunks = needed_chunks.iter().cloned().collect::<Vec<_>>();
+    let base_chunks = lookup.chunks(layout.store(), &requested_chunks).await?;
+    for (hash, entry) in base_chunks.xorbs() {
         if needed_chunks.is_empty() {
             break;
         }
@@ -227,6 +235,7 @@ pub(crate) async fn prepare_delta(
             xorb_entries.insert(parse_merkle_hash(hash, "base xorb")?, entry.clone());
         }
     }
+    drop(base_chunks);
     drop(needed_chunks);
 
     let mut external_candidates = external_candidates
@@ -503,6 +512,22 @@ pub(crate) async fn prepare_delta(
         .await?;
     }
 
+    let dependency_hashes = pending_files
+        .iter()
+        .flat_map(|(_, _, _, hashes)| hashes.iter().map(|hash| hash.hex()))
+        .collect::<Vec<_>>();
+    let base_xorbs = lookup.xorbs(layout.store(), &dependency_hashes).await?;
+    for (hash, entry) in base_xorbs.xorbs() {
+        if xorb_entries
+            .get(&parse_merkle_hash(hash, "base xorb")?)
+            .is_some_and(|candidate| candidate != entry)
+        {
+            return Err(CrabError::CorruptObject {
+                path: "capsule-protocol pointer catalog".to_owned(),
+                reason: format!("xorb {hash} has conflicting descriptors"),
+            });
+        }
+    }
     let mut shard_closures = vec![HashSet::new(); shards.len()];
     for (file_hash, _, shard_index, dependency_hashes) in &pending_files {
         let closure = shard_closures.get_mut(*shard_index).ok_or_else(|| {
@@ -520,7 +545,7 @@ pub(crate) async fn prepare_delta(
             .collect::<Vec<_>>();
         closure.sort();
         for xorb_hash in &closure {
-            if base_catalog.xorbs().contains_key(xorb_hash) {
+            if base_xorbs.xorbs().contains_key(xorb_hash) {
                 continue;
             }
             let hash = parse_merkle_hash(xorb_hash, "file xorb")?;
@@ -1360,32 +1385,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn known_pointers_do_not_bypass_catalog_validation() {
+    async fn known_pointers_reject_corrupted_catalog_pages() {
         let (catalog, pointer) = pointer_catalog(1, 1);
-        let chunk_hash = catalog.xorbs().values().next().unwrap().chunks()[0].hash();
-        let bytes = String::from_utf8(catalog.encode().unwrap().to_vec())
-            .unwrap()
-            .replace(
-                &format!("\"hash\":\"{chunk_hash}\""),
-                "\"hash\":\"invalid\"",
-            );
-        let (layout, base) = publish_catalog(Bytes::from(bytes)).await;
-        let error = prepare_delta(
-            &layout,
-            &base,
-            &[pointer],
-            None,
-            None,
-            None,
-            4,
-            true,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            matches!(error, CrabError::CorruptObject { reason, .. } if reason.contains("chunk"))
-        );
+        let encoded = catalog.encode().unwrap();
+        for truncate in [false, true] {
+            let mut bytes = encoded.to_vec();
+            if truncate {
+                bytes.pop();
+            } else {
+                // Corrupt the first chunk's hash while the outer capsule still
+                // authenticates these bytes. A known file cannot bypass pages.
+                bytes[22] ^= 1;
+            }
+            let (layout, base) = publish_catalog(Bytes::from(bytes)).await;
+            let error = prepare_delta(
+                &layout,
+                &base,
+                std::slice::from_ref(&pointer),
+                None,
+                None,
+                None,
+                4,
+                true,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error, CrabError::CorruptObject { path, reason }
+                if path == "capsule-protocol pointer catalog" && reason.contains("catalog")));
+        }
     }
 
     #[tokio::test]
