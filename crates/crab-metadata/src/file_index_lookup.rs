@@ -22,6 +22,7 @@ use crab_xet::xorb::format::MerkleHash;
 const DB_LABEL: &str = "file_index_db";
 const GET_BATCH_CONCURRENCY: usize = 256;
 const SHARD_SEARCH_CONCURRENCY: usize = 4;
+const MAX_VERIFIED_CATALOG_FILES: usize = 4096;
 static SHARD_SCANS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(SHARD_SEARCH_CONCURRENCY)));
 
@@ -145,7 +146,7 @@ impl CommittedShardAnchor {
 }
 
 #[derive(Debug, Default)]
-struct ManifestFallbackCache {
+struct FileLookupCache {
     found: HashMap<MerkleHash, MerkleHash>,
     missing: HashSet<MerkleHash>,
     shard_visits: usize,
@@ -230,7 +231,7 @@ pub struct FileIndexLookupSession {
     storage: crab_storage::Store,
     router: crab_storage::StoreLayout<crab_storage::Store>,
     parsers: tokio_util::task::TaskTracker,
-    manifest_fallback: tokio::sync::Mutex<ManifestFallbackCache>,
+    resolved_files: tokio::sync::Mutex<FileLookupCache>,
     limits: FileIndexLookupLimits,
 }
 
@@ -250,7 +251,7 @@ impl FileIndexLookupSession {
             storage: router.store().clone(),
             router,
             parsers: tokio_util::task::TaskTracker::new(),
-            manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+            resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
             limits: FileIndexLookupLimits::CURRENT_STATE,
         })
     }
@@ -313,7 +314,7 @@ impl FileIndexLookupSession {
             storage: router.store().clone(),
             router: router.clone(),
             parsers: tokio_util::task::TaskTracker::new(),
-            manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+            resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
             limits,
         })
     }
@@ -373,7 +374,7 @@ impl FileIndexLookupSession {
             storage: router.store().clone(),
             router: router.clone(),
             parsers: tokio_util::task::TaskTracker::new(),
-            manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+            resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
             limits,
         })
     }
@@ -398,7 +399,7 @@ impl FileIndexLookupSession {
                     storage,
                     router,
                     parsers: tokio_util::task::TaskTracker::new(),
-                    manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+                    resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
                     limits: FileIndexLookupLimits::CURRENT_STATE,
                 });
             }
@@ -422,7 +423,7 @@ impl FileIndexLookupSession {
             storage,
             router,
             parsers: tokio_util::task::TaskTracker::new(),
-            manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+            resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
             limits: FileIndexLookupLimits::CURRENT_STATE,
         };
         if use_acceleration {
@@ -489,28 +490,7 @@ impl FileIndexLookupSession {
             return Ok(Vec::new());
         }
         if let Some(lookup) = &self.catalog {
-            let hashes = file_hashes.iter().map(MerkleHash::hex).collect::<Vec<_>>();
-            let selected = lookup.files(&self.storage, &hashes).await?;
-            return hashes
-                .iter()
-                .map(|hash| {
-                    selected
-                        .files()
-                        .get(hash)
-                        .map(|entry| {
-                            MerkleHash::from_hex(entry.shard_hash()).map_err(|source| {
-                                MetadataError::CorruptObject {
-                                    path: "capsule-protocol pointer catalog".to_owned(),
-                                    reason: format!(
-                                        "invalid shard hash {}: {source}",
-                                        entry.shard_hash()
-                                    ),
-                                }
-                            })
-                        })
-                        .transpose()
-                })
-                .collect();
+            return self.catalog_lookup_batch(lookup, file_hashes).await;
         }
         let records = self.lookup_committed_records_batch(file_hashes).await?;
         let mut out = records
@@ -531,6 +511,71 @@ impl FileIndexLookupSession {
             out[index] = shard_hash;
         }
         Ok(out)
+    }
+
+    async fn catalog_lookup_batch(
+        &self,
+        lookup: &crate::capsule_protocol::PointerCatalogLookup,
+        hashes: &[MerkleHash],
+    ) -> Result<Vec<Option<MerkleHash>>> {
+        let mut output = vec![None; hashes.len()];
+        let missing = {
+            let cache = self.resolved_files.lock().await;
+            hashes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, hash)| {
+                    if let Some(shard) = cache.found.get(hash) {
+                        output[index] = Some(*shard);
+                        return None;
+                    }
+                    (!cache.missing.contains(hash)).then_some((index, *hash))
+                })
+                .collect::<Vec<_>>()
+        };
+        let keys = missing
+            .iter()
+            .map(|(_, hash)| hash.hex())
+            .collect::<Vec<_>>();
+        let cached_files = hashes.len() - missing.len();
+        // Verified bindings belong to this immutable capture. Keep only the
+        // small result, but admit every input and validate cold dependency closure.
+        let selected = lookup
+            .files_for_lookup(&self.storage, &keys, cached_files)
+            .await?;
+        for (index, hash) in &missing {
+            output[*index] = selected
+                .files()
+                .get(&hash.hex())
+                .map(|entry| {
+                    MerkleHash::from_hex(entry.shard_hash()).map_err(|source| {
+                        MetadataError::CorruptObject {
+                            path: "capsule-protocol pointer catalog".to_owned(),
+                            reason: format!("invalid shard hash {}: {source}", entry.shard_hash()),
+                        }
+                    })
+                })
+                .transpose()?;
+        }
+        if !missing.is_empty() && missing.len() <= MAX_VERIFIED_CATALOG_FILES {
+            let mut cache = self.resolved_files.lock().await;
+            let cached = cache.found.len().saturating_add(cache.missing.len());
+            if cached.saturating_add(missing.len()) > MAX_VERIFIED_CATALOG_FILES {
+                cache.found.clear();
+                cache.missing.clear();
+            }
+            for (index, hash) in missing {
+                match output[index] {
+                    Some(shard) => {
+                        cache.found.insert(hash, shard);
+                    }
+                    None => {
+                        cache.missing.insert(hash);
+                    }
+                }
+            }
+        }
+        Ok(output)
     }
 
     /// Return only generation-pinned acceleration hits, without invoking the
@@ -581,7 +626,7 @@ impl FileIndexLookupSession {
         let Some(anchor) = self.anchor.as_ref() else {
             return Ok(vec![None; file_hashes.len()]);
         };
-        let mut cache = self.manifest_fallback.lock().await;
+        let mut cache = self.resolved_files.lock().await;
         let unresolved = file_hashes
             .iter()
             .filter(|file_hash| {
@@ -766,7 +811,7 @@ impl LookupSource {
                 storage: router.store().clone(),
                 router: router.clone(),
                 parsers: tokio_util::task::TaskTracker::new(),
-                manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+                resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
                 limits: FileIndexLookupLimits::CURRENT_STATE,
             }),
             Self::Current {

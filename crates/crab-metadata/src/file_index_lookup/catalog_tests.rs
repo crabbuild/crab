@@ -12,6 +12,7 @@ use std::sync::atomic::AtomicUsize;
 pub(super) async fn capture(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     catalog: PointerCatalog,
+    maximum: u64,
 ) -> (PointerCatalogLookup, object_store::path::Path, RootRecord) {
     let pack = CapsuleGitPack::new(
         Bytes::from_static(b"pack"),
@@ -140,7 +141,7 @@ pub(super) async fn capture(
     )
     .unwrap();
     (
-        control.pointer_catalog_lookup(layout, 512 * 1024).unwrap(),
+        control.pointer_catalog_lookup(layout, maximum).unwrap(),
         path,
         root,
     )
@@ -185,7 +186,7 @@ async fn pinned_batches_preserve_order_misses_and_page_bounds_as_history_grows()
                 observed.fetch_add(1, Ordering::SeqCst);
             }));
         let layout = crab_storage::StoreLayout::new(storage, "pinned-lookup".to_owned());
-        let (captured, _, _) = capture(&layout, catalog(count)).await;
+        let (captured, _, _) = capture(&layout, catalog(count), 512 * 1024).await;
         let lookup = SharedFileIndexLookup::for_pointer_catalog(layout.clone(), captured);
         assert_eq!(
             reads.load(Ordering::SeqCst),
@@ -193,7 +194,7 @@ async fn pinned_batches_preserve_order_misses_and_page_bounds_as_history_grows()
             "construction must leave pages cold"
         );
         // A later authenticated catalog must not change an existing capture.
-        capture(&layout, catalog(count + 1)).await;
+        capture(&layout, catalog(count + 1), 512 * 1024).await;
         let file = super::tests::hash_from_seed(42);
         let later = super::tests::hash_from_seed(count as u64);
         let shard = super::tests::hash_from_seed(1_000_042);
@@ -224,15 +225,29 @@ async fn missing_captured_pages_are_errors_even_when_a_new_catalog_exists() {
         crab_storage::Store::new(Arc::new(InMemory::new())),
         "missing-page".to_owned(),
     );
-    let (captured, path, _) = capture(&layout, catalog(100)).await;
-    capture(&layout, catalog(101)).await;
+    let (captured, path, _) = capture(&layout, catalog(100), 512 * 1024).await;
+    let (original, _) = layout
+        .store()
+        .get_with_etag_bounded(&path, 512 * 1024)
+        .await
+        .unwrap();
+    capture(&layout, catalog(101), 512 * 1024).await;
     layout.store().delete(&path).await.unwrap();
-    let lookup = SharedFileIndexLookup::for_pointer_catalog(layout, captured);
+    let lookup = SharedFileIndexLookup::for_pointer_catalog(layout.clone(), captured);
     assert!(
         lookup
             .lookup(&super::tests::hash_from_seed(42))
             .await
             .is_err()
+    );
+    layout.store().put_overwrite(&path, original).await.unwrap();
+    assert_eq!(
+        lookup
+            .lookup(&super::tests::hash_from_seed(42))
+            .await
+            .unwrap(),
+        Some(super::tests::hash_from_seed(1_000_042)),
+        "failed closure reads must not cache absence"
     );
     lookup.close().await.unwrap();
 }
@@ -253,7 +268,7 @@ async fn current_state_opener_keeps_catalog_pages_selected_and_pins_its_first_ro
                 observed_bytes.fetch_add(size, Ordering::SeqCst);
             }));
         let layout = crab_storage::StoreLayout::new(storage.clone(), "current-catalog".to_owned());
-        let (_, _, root) = capture(&layout, catalog(count)).await;
+        let (_, _, root) = capture(&layout, catalog(count), 512 * 1024).await;
         assert_eq!(root.root().generation(), 1);
         let lookup = SharedFileIndexLookup::new_for_storage(&storage, layout.repo_prefix());
         assert_eq!(reads.load(Ordering::SeqCst), 0);
@@ -269,7 +284,7 @@ async fn current_state_opener_keeps_catalog_pages_selected_and_pins_its_first_ro
             reads.load(Ordering::SeqCst),
             bytes.load(Ordering::SeqCst)
         );
-        let (_, _, later_root) = capture(&layout, catalog(count + 1)).await;
+        let (_, _, later_root) = capture(&layout, catalog(count + 1), 512 * 1024).await;
         layout
             .store()
             .put_overwrite(&layout.capsule_root_path(), later_root.bytes().clone())
@@ -285,4 +300,93 @@ async fn current_state_opener_keeps_catalog_pages_selected_and_pins_its_first_ro
         lookup.close().await.unwrap();
         latest.close().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn repeated_large_recipe_binding_queries_reuse_verified_results() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observed = reads.clone();
+    let storage = crab_storage::Store::new(Arc::new(InMemory::new())).with_read_request_observer(
+        Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+    let layout = crab_storage::StoreLayout::new(storage, "large-recipe-binding".to_owned());
+    let file = super::tests::hash_from_seed(42);
+    let shard = super::tests::hash_from_seed(1_000_042);
+    let mut catalog = PointerCatalog::new();
+    let mut xorbs = Vec::new();
+    for index in 0..160_u64 {
+        let xorb = super::tests::hash_from_seed(2_000_000 + index).hex();
+        let chunks = (0..1024)
+            .map(|offset| {
+                XorbChunkEntry::new(
+                    super::tests::hash_from_seed(3_000_000 + index * 1024 + offset).hex(),
+                    64 * 1024,
+                )
+            })
+            .collect();
+        catalog
+            .insert_xorb(
+                xorb.clone(),
+                XorbCatalogEntry::new(64 * 1024 * 1024, "e".repeat(64), chunks),
+            )
+            .unwrap();
+        xorbs.push(xorb);
+    }
+    catalog
+        .insert_shard(shard.hex(), ShardCatalogEntry::new(80, xorbs))
+        .unwrap();
+    // This is metadata for a 10 GiB recipe, not a payload reconstruction fixture.
+    // Its verified closure outgrows the ordinary decoded-page cache.
+    catalog
+        .insert_file(
+            file.hex(),
+            FileCatalogEntry::new(10 * 1024 * 1024 * 1024, shard.hex()),
+        )
+        .unwrap();
+    let (captured, _, _) = capture(&layout, catalog, 16 * 1024 * 1024).await;
+    let lookup = SharedFileIndexLookup::for_pointer_catalog(layout, captured);
+    let cold = lookup.lookup(&file).await;
+    let cold_reads = reads.load(Ordering::SeqCst);
+    let warm = lookup.lookup_batch(&[file, file]).await;
+    let warm_reads = reads.load(Ordering::SeqCst);
+    lookup.close().await.unwrap();
+    assert_eq!(
+        (cold.unwrap(), warm.unwrap()),
+        (Some(shard), vec![Some(shard), Some(shard)])
+    );
+    assert!(cold_reads > 0);
+    assert_eq!(
+        warm_reads, cold_reads,
+        "verified immutable bindings must not re-read the large recipe"
+    );
+}
+
+#[tokio::test]
+async fn cached_binding_batches_keep_the_original_input_admission() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observed = reads.clone();
+    let storage = crab_storage::Store::new(Arc::new(InMemory::new())).with_read_request_observer(
+        Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+    let layout = crab_storage::StoreLayout::new(storage, "cached-admission".to_owned());
+    let file = super::tests::hash_from_seed(42);
+    let (captured, _, _) = capture(&layout, catalog(100), 512 * 1024).await;
+    let queries = vec![file; 10_000];
+    let keys = queries.iter().map(MerkleHash::hex).collect::<Vec<_>>();
+    assert!(captured.files(layout.store(), &keys).await.is_err());
+    let lookup = SharedFileIndexLookup::for_pointer_catalog(layout, captured);
+    lookup.lookup(&file).await.unwrap().unwrap();
+    let cold_reads = reads.load(Ordering::SeqCst);
+    let result = lookup.lookup_batch(&queries).await;
+    lookup.close().await.unwrap();
+    assert!(matches!(result, Err(MetadataError::CorruptObject { .. })));
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        cold_reads,
+        "cached input rejection must precede I/O"
+    );
 }

@@ -72,6 +72,12 @@ accepts captured lookup roots and resolves requested files with their authentica
 shard/xorb closure. Point and batch calls share the page cache and retain the
 session read guard through I/O, so close waits for active reads. Missing catalog
 pages remain errors rather than reopening the mutable file-index database.
+A session caches at most 4,096 verified catalog bindings or authenticated misses,
+using the same result-cache owner as canonical shard lookup. Cold queries still
+validate the full selected dependency closure before publishing cache entries;
+errors are never cached as absence. Cached inputs retain the original admission
+charge. Catalog cache locks cover memory work only, so unrelated warm lookups can finish
+while a cold origin read is paused. Large cold batches do not retain their results.
 The current-state opener also captures authenticated catalog roots and leaves
 catalog bodies cold. Explicitly pinned callers pass their existing capture, while
 current-state sessions bind once to the first root they open. Catalog and Git

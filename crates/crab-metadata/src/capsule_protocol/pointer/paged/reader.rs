@@ -10,6 +10,8 @@ use std::sync::Arc;
 #[cfg(test)]
 mod tests;
 
+const QUERY_KEY_BYTES: u64 = 96;
+
 /// Snapshot-bound catalog queries with one cache and aggregate byte budget.
 ///
 /// The owner retains the captured objects against GC. Missing keys return an
@@ -236,6 +238,17 @@ impl PointerCatalogLookup {
         self.dependencies(store, hashes, &[], &[]).await
     }
 
+    #[cfg(feature = "file-index-reader")]
+    pub(crate) async fn files_for_lookup(
+        &self,
+        store: &Store,
+        hashes: &[String],
+        cached_files: usize,
+    ) -> Result<PointerCatalog> {
+        self.dependencies_with_admission(store, hashes, &[], &[], cached_files)
+            .await
+    }
+
     /// Select files and explicit shard/xorb identities with their complete closure.
     ///
     /// All keys and dependency pages share one query budget. Absent requested
@@ -247,10 +260,30 @@ impl PointerCatalogLookup {
         shards: &[String],
         xorbs: &[String],
     ) -> Result<PointerCatalog> {
+        self.dependencies_with_admission(store, files, shards, xorbs, 0)
+            .await
+    }
+
+    async fn dependencies_with_admission(
+        &self,
+        store: &Store,
+        files: &[String],
+        shards: &[String],
+        xorbs: &[String],
+        cached_files: usize,
+    ) -> Result<PointerCatalog> {
         let mut work = self.work();
+        // Cached bindings skip page decoding, not the aggregate input budget.
+        admit(
+            &mut work,
+            (cached_files as u64).saturating_mul(QUERY_KEY_BYTES),
+        )?;
         let hashes = requested(files, &mut work)?;
         let mut shards = requested(shards, &mut work)?;
         let mut xorbs = requested(xorbs, &mut work)?;
+        if hashes.is_empty() && shards.is_empty() && xorbs.is_empty() {
+            return Ok(PointerCatalog::new());
+        }
         let root = self
             .checkpoint
             .as_ref()
@@ -425,7 +458,7 @@ fn admit(work: &mut PageWork, bytes: u64) -> Result<()> {
 }
 
 fn requested(hashes: &[String], work: &mut PageWork) -> Result<BTreeSet<String>> {
-    admit(work, (hashes.len() as u64).saturating_mul(96))?;
+    admit(work, (hashes.len() as u64).saturating_mul(QUERY_KEY_BYTES))?;
     for value in hashes {
         hash(value)?;
     }
