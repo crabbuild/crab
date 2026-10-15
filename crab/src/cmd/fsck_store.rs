@@ -156,6 +156,18 @@ impl StoreChecker {
     }
 
     async fn check_capsule_data_chain(&self, state: &CapsuleFsckState) -> Result<Vec<FsckIssue>> {
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            self.store.as_storage().clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        // Current catalog health cannot prove cold captures still have their
+        // original sources. Full fsck checks lifetime roots; mirror recipe probes stay narrow.
+        crab_metadata::capsule_protocol::verify_retained_browse_indexes(
+            &layout,
+            MAX_FSCK_FRONTIER_BYTES,
+        )
+        .await?;
         let mut issues = Vec::new();
 
         for (hash, entry) in state.catalog.xorbs() {
@@ -2079,6 +2091,23 @@ mod tests {
 
         let shard_issues = checker.check_shard_list_divergence().await.unwrap();
         assert!(shard_issues.is_empty());
+    }
+
+    #[tokio::test]
+    async fn capsule_data_check_rejects_corrupt_browse_lifetime() {
+        let (store, prefix, root, _, _) = capsule_checker_fixture().await;
+        let checker = StoreChecker::for_capsule_repository(store.clone(), prefix, root)
+            .await
+            .unwrap();
+        assert!(checker.check_data_chain().await.unwrap().is_empty());
+        store
+            .put(
+                &checker.router.repo_path("v2/browse-retention"),
+                bytes::Bytes::from_static(b"corrupt"),
+            )
+            .await
+            .unwrap();
+        assert!(checker.check_data_chain().await.is_err());
     }
 
     #[tokio::test]
