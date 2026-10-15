@@ -462,3 +462,13 @@ must decide whether that candidate actually changed the requested path. Full
 loads, resumable construction, compaction and maintenance scans retain markers.
 The retired unreleased version 5 is rebuilt by existing maintenance, never read
 through an alternate codec.
+
+Run footer version 4 adds an embedded `CRBRCG01` catalog index. Its four paged
+key directories retain exact capsule occurrences and group equal immutable
+values by a semantic commitment that excludes physical page offsets. Full run
+verification rebuilds the index from nested capsules, so re-signed membership
+changes cannot invent catalog authority. Footer-only reads admit the index
+region and source spans without fetching its body. Foreground catalog lookup
+still uses materialized deltas; selected run-index reads remain unfinished.
+The affected run format is absent from the audited release tags; unshipped
+version 3 is rejected rather than retained through a fallback.

@@ -47,6 +47,66 @@ fn from_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|source| MetadataError::PointerCatalogRecord { source })
 }
 
+pub(in crate::capsule_protocol) struct CatalogIndexRow {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+    pub identity: [u8; 32],
+}
+
+// Run aggregation retains physical page references but groups immutable values
+// by logical content. Page offsets can change without changing a descriptor.
+pub(in crate::capsule_protocol) fn index_rows(
+    bytes: &[u8],
+) -> Result<(u64, [Vec<CatalogIndexRow>; 4])> {
+    let catalog = PointerCatalog::decode_delta(bytes)?;
+    let descriptor = Descriptor::decode(bytes)?;
+    let body = &bytes[..descriptor.body_bytes as usize];
+    let mut output = std::array::from_fn(|_| Vec::new());
+    let mut visited = BTreeMap::new();
+    for (position, (root, kind)) in [
+        (descriptor.files.as_ref(), Kind::CatalogFiles),
+        (descriptor.shards.as_ref(), Kind::CatalogShards),
+        (descriptor.xorbs.as_ref(), Kind::CatalogXorbs),
+        (descriptor.chunks.as_ref(), Kind::CatalogChunks),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let Some(root) = root else {
+            continue;
+        };
+        for (key, value) in
+            crate::pages::scan(body, root, kind, "pointer catalog pages", &mut visited)?
+        {
+            let normalized = match kind {
+                Kind::CatalogShards => json(
+                    catalog
+                        .shards
+                        .get(&hex(&key)?)
+                        .ok_or_else(|| corrupt("indexed shard is absent"))?,
+                )?,
+                Kind::CatalogXorbs => json(
+                    catalog
+                        .xorbs
+                        .get(&hex(&key)?)
+                        .ok_or_else(|| corrupt("indexed xorb is absent"))?,
+                )?,
+                _ => value.clone(),
+            };
+            let mut identity = blake3::Hasher::new();
+            identity.update(b"crab.catalog.value.v1\0");
+            identity.update(&[kind as u8]);
+            identity.update(&normalized);
+            output[position].push(CatalogIndexRow {
+                key,
+                value,
+                identity: *identity.finalize().as_bytes(),
+            });
+        }
+    }
+    Ok((descriptor.body_bytes, output))
+}
+
 fn hash(value: &str) -> Result<[u8; 32]> {
     let bytes = value.as_bytes();
     // Binary keys cannot distinguish hex aliases. Reject them instead of silently

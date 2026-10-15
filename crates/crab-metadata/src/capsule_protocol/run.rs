@@ -11,7 +11,7 @@ use crate::error::{MetadataError, Result};
 use crate::validation::validate_content_hash;
 
 const RUN_MAGIC: &[u8; 8] = b"CRBRUN01";
-const RUN_VERSION: u32 = 3;
+const RUN_VERSION: u32 = 4;
 const RUN_TRAILER_BYTES: usize = 8 + 32 + RUN_MAGIC.len();
 pub(super) const MAX_RUN_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INLINE_RUN_CONTROL_SECTION_BYTES: usize = 512 * 1024;
@@ -70,13 +70,17 @@ struct CapsuleRunFooter {
     #[serde(default)]
     admission: Option<RunSectionLocation>,
     admission_pages: Option<AdmissionPages>,
+    catalog: Option<RunSectionLocation>,
+    catalog_pages: Option<CatalogPages>,
 }
 
 mod admission;
+mod catalog;
 use admission::AdmissionPages;
 pub use admission::CapsuleRunAdmission;
 #[cfg(feature = "storage")]
 pub use admission::CapsuleRunAdmissionReader;
+use catalog::CatalogPages;
 
 /// Immutable bounded run of complete push capsules.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,6 +373,7 @@ impl CapsuleRunControl {
                 .ok_or_else(|| corrupt("capsule run range overflowed"))?;
         }
         expected_offset = validate_index_pool(&footer, expected_offset, control_offset)?;
+        expected_offset = validate_catalog(&footer, expected_offset, control_offset)?;
         if expected_offset != control_offset {
             return Err(corrupt(
                 "capsule run controls do not cover its complete body",
@@ -960,6 +965,15 @@ impl CapsuleRun {
         } else {
             None
         };
+        let catalog = CatalogPages::build(&capsules)?.map(|(bytes, descriptor)| {
+            let range = RunSectionLocation {
+                offset: body.len() as u64,
+                length: bytes.len() as u64,
+                hash: blake3::hash(&bytes).to_hex().to_string(),
+            };
+            body.extend_from_slice(&bytes);
+            (range, descriptor)
+        });
         let admission = admission
             .filter(|admission| !admission.members.is_empty())
             .map(|admission| {
@@ -995,6 +1009,8 @@ impl CapsuleRun {
                 capsules: locations.clone(),
                 git_packs: git_packs.clone(),
                 index_pool: index_pool.clone(),
+                catalog: catalog.as_ref().map(|(range, _)| range.clone()),
+                catalog_pages: catalog.as_ref().map(|(_, descriptor)| descriptor.clone()),
                 admission: admission.as_ref().map(|(_, range)| range.clone()),
                 admission_pages: admission
                     .as_ref()
@@ -1125,7 +1141,16 @@ impl CapsuleRun {
                 }
             }
         }
-        expected_offset = pool_end;
+        expected_offset = validate_catalog(&footer, pool_end, footer_start as u64)?;
+        if let (Some(range), Some(pages)) = (&footer.catalog, &footer.catalog_pages) {
+            let body = bytes
+                .get(range.offset as usize..expected_offset as usize)
+                .ok_or_else(|| corrupt("run catalog is outside its object"))?;
+            if blake3::hash(body).to_hex().as_str() != range.hash {
+                return Err(corrupt("run catalog hash differs"));
+            }
+            pages.verify(body, &capsules)?;
+        }
         if footer.admission.is_some() != footer.admission_pages.is_some() {
             return Err(corrupt(
                 "capsule run admission descriptor presence differs from its body",
@@ -1569,8 +1594,9 @@ fn validate_index_pool(
         return Ok(capsule_end);
     };
     let end = footer
-        .admission
+        .catalog
         .as_ref()
+        .or(footer.admission.as_ref())
         .map_or(control_offset, |range| range.offset);
     validate_body_range(pool, capsule_end, end)?;
     let length = footer.git_packs.iter().try_fold(0_u64, |total, member| {
@@ -1584,6 +1610,23 @@ fn validate_index_pool(
         ));
     }
     Ok(end)
+}
+
+fn validate_catalog(footer: &CapsuleRunFooter, offset: u64, control_offset: u64) -> Result<u64> {
+    CatalogPages::validate_presence(footer.catalog_pages.as_ref(), &footer.capsules)?;
+    match (&footer.catalog, &footer.catalog_pages) {
+        (None, None) => Ok(offset),
+        (Some(range), Some(pages)) => {
+            let end = footer
+                .admission
+                .as_ref()
+                .map_or(control_offset, |range| range.offset);
+            validate_body_range(range, offset, end)?;
+            pages.validate_region(range.length, footer.capsules.len())?;
+            Ok(end)
+        }
+        _ => Err(corrupt("run catalog section and page roots differ")),
+    }
 }
 
 fn validate_body_range(
@@ -1909,7 +1952,7 @@ mod tests {
     #[test]
     fn unsupported_run_footer_versions_are_rejected() {
         let run = CapsuleRun::leaf(capsule('1', '2')).unwrap();
-        for version in [0, 1, 2, 4, 5, 6, 7] {
+        for version in [0, 1, 2, 3, 5, 6, 7] {
             let mut footer = run.footer.clone();
             footer.version = version;
             let footer = serde_json::to_vec(&footer).unwrap();
