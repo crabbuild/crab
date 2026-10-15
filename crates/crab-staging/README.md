@@ -101,6 +101,17 @@ Drop clears the reader marker and discards an uncommitted snapshot when no
 sibling reader prevents cleanup. Deferred journals remain for exclusive
 maintenance; native and uncaptured leases remain owned throughout.
 
+The coalesced residual reader uses `CoalescedChunkReadPlan::read_next_bounded` after all
+selected requests are appended. One prepared source is opened and fully verified
+once, then retained as a format-bounded serialized body while decoded batches obey
+the caller's count and byte limits. A single oversized chunk may exceed the byte
+target to make progress; its format limit still applies. Returned chunks own their
+allocations. Source descriptors are pinned before worker admission, and cancelling
+a pending read preserves its result for the next call. The public `read_next`
+method retains the complete-source behavior shipped in v1.2.4; it shares the same
+source and chunk verification. Canonical callers should migrate to the bounded
+method; removing the released method requires a breaking library release.
+
 Native intent recovery may preserve caller-attested committed recipes under
 canonical history owners before rolling back an old Git index state.
 `preserve_publication_history` accepts only verified recipe roots belonging to
