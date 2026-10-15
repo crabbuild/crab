@@ -15,6 +15,9 @@ use crate::error::Result;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod catalog_order_tests;
+
 /// A verified stored root and the provider token protecting its next update.
 #[derive(Debug, Clone)]
 pub struct RootSnapshot {
