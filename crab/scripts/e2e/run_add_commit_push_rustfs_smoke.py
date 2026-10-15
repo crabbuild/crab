@@ -1110,7 +1110,18 @@ class AddCommitPushSmoke:
             )
             commits.append(self.rev_parse(repo, "HEAD"))
         first = commits[0]
-        self.run_git(repo, ["tag", "archive", first])
+        # Exclude the first commit through a side tip, keeping that ancestor
+        # unadvertised for the raw-SHA policy check below.
+        archive = self.read_stdout(self.run_cmd(
+            f"{case_name} archive side tip",
+            ["git", "commit-tree", f"{first}^{{tree}}", "-p", first, "-m", "archive"],
+            repo,
+            extra_env={
+                "GIT_AUTHOR_DATE": "2023-11-15T23:13:20Z",
+                "GIT_COMMITTER_DATE": "2023-11-15T23:13:20Z",
+            },
+        ))
+        self.run_git(repo, ["tag", "archive", archive])
         self.run_git(repo, ["push", "-u", "origin", "main", "--tags"])
 
         # Match native upload-pack before asserting Crab's selector behavior.
