@@ -332,8 +332,14 @@ supply its supposedly corrupted header; its original assertions remain.
 Strict combined-feature all-target Clippy also passes. Native-platform coverage
 and the failed 1,024-file push rerun remain required.
 
-The pinned SQLite 3.49.1 also falls in the affected range of the upstream
-[WAL-reset race](https://www.sqlite.org/wal.html#walreset). A matched Crab and
-Cellule dependency upgrade to a fixed SQLite release is a prerequisite for
-release qualification; these focused tests do not establish immunity to that
-race. No dependency or lockfile change is included in this optimization.
+The workspace selects SQLite 3.51.3 through rusqlite 0.39 and the matched
+[Cellule backport](https://github.com/crabbuild/cellule/pull/78). The earlier
+SQLite 3.49.1 was affected by the upstream
+[WAL-reset race](https://www.sqlite.org/wal.html#walreset). This dependency
+upgrade preserves unsigned conversion checks and rejects progress-hook
+installation failures before shard-hint inspection. The checkpoint policy
+and dependency change are separate reviewable commits. Private-VFS, cache,
+affected-consumer and native workflow qualification must run against this
+linked SQLite version before release. The combined cache suite has been
+repeated on this dependency: 309 library tests and three credential tests
+pass; native workflow and affected-consumer gates remain open.
