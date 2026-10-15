@@ -345,3 +345,66 @@ async fn concurrent_close_waits_for_reader_checkpoint_cleanup() {
         "concurrent close returned before reader cleanup"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn captured_catalog_close_waits_for_active_reads_and_abandonment_releases_them() {
+    for abandon in [false, true] {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(inner.clone());
+        let router = crab_storage::StoreLayout::new(storage, "pinned/close".to_owned());
+        let (catalog, path) =
+            super::catalog_tests::capture(&router, super::catalog_tests::catalog(10_000)).await;
+        let store = Arc::new(PausedLookupStore {
+            inner,
+            shard: path,
+            paused: AtomicBool::new(true),
+            pause_write: AtomicBool::new(false),
+            entered: Notify::new(),
+            release: Semaphore::new(0),
+        });
+        let router = crab_storage::StoreLayout::new(
+            crab_storage::Store::new(store.clone()),
+            "pinned/close".to_owned(),
+        );
+        let lookup = SharedFileIndexLookup::for_pointer_catalog(router, catalog);
+        let file = hash_from_seed(0);
+        lookup.lookup(&file).await.unwrap().unwrap();
+        store.paused.store(false, Ordering::Release);
+        let cold_file = hash_from_seed(9_999);
+        let task = tokio::spawn({
+            let lookup = lookup.clone();
+            async move { lookup.lookup_batch(&[cold_file]).await }
+        });
+        timeout(Duration::from_secs(5), store.entered.notified())
+            .await
+            .expect("query reached captured page");
+        let warm = timeout(Duration::from_secs(2), lookup.lookup(&file))
+            .await
+            .expect("a cold page read must not serialize a warm query")
+            .unwrap();
+        assert_eq!(warm, Some(hash_from_seed(1_000_000)));
+        let close = lookup.clone().close();
+        tokio::pin!(close);
+        assert!(futures_util::poll!(close.as_mut()).is_pending());
+        assert!(matches!(
+            lookup.lookup(&file).await,
+            Err(MetadataError::Internal(_))
+        ));
+        if abandon {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        } else {
+            store.release.add_permits(1);
+            let result = timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(result, vec![Some(hash_from_seed(1_009_999))]);
+        }
+        timeout(Duration::from_secs(5), close)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}

@@ -137,13 +137,17 @@ fn dependency_limits() -> crab_read::dependency_proof::DependencyProofLimits {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn fixed_pointer_publication_keeps_unrelated_catalog_history_cold() {
+async fn fixed_pointer_publication_and_hydration_keep_unrelated_history_cold() {
     for count in [100, 10_000] {
         for checkpointed in [false, true] {
             for supplied in [false, true] {
                 let (layout, observations) = empty_fixture().await;
                 let directory = tempfile::tempdir().unwrap();
                 let (content, pointer, file_hash) = native_content(&layout, directory.path()).await;
+                let expected_shard = MerkleHash::from_hex(
+                    content.pointer_catalog().files()[&file_hash].shard_hash(),
+                )
+                .unwrap();
                 let mut catalog = PointerCatalog::new();
                 for index in 0..count {
                     let shard = format!("{:064x}", index + 1_000_000);
@@ -229,6 +233,9 @@ async fn fixed_pointer_publication_keeps_unrelated_catalog_history_cold() {
                         ).await?;
                         assert_eq!(prepared.plan().pointers().len(), 1);
                         if supplied { prepared = prepared.attach_content(content)?; }
+                        let captured_lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+                            layout.clone(), view.pointer_catalog_lookup(&layout, 256 * 1024)?,
+                        );
                         observations.0.lock().unwrap().clear();
                         let artifacts = prepared.upload_capsule(&view, dependency_limits(), &cancel).await?;
                         let requests = observations.0.lock().unwrap().clone();
@@ -239,7 +246,24 @@ async fn fixed_pointer_publication_keeps_unrelated_catalog_history_cold() {
                         assert!(matches!(outcome, crab_remote::prepare::CapsuleCommitOutcome::Committed { .. }));
                         let after = open_history_view(&layout).await;
                         assert_eq!(after.refs()[&target], oid);
-                        assert!(after.pointer_catalog_lookup(&layout, LIMIT)?.files(layout.store(), std::slice::from_ref(&file_hash)).await?.files().contains_key(&file_hash));
+                        let file = MerkleHash::from_hex(&file_hash).unwrap();
+                        let captured_result = captured_lookup.lookup(&file).await;
+                        captured_lookup.close().await?;
+                        assert_eq!(captured_result?, if supplied { None } else { Some(expected_shard) }, "captured hydration must not follow a later publication");
+                        observations.0.lock().unwrap().clear();
+                        let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+                            layout.clone(), after.pointer_catalog_lookup(&layout, 256 * 1024)?,
+                        );
+                        assert!(observations.0.lock().unwrap().is_empty(), "hydration lookup construction read catalog bodies");
+                        let file = MerkleHash::from_hex(&file_hash).unwrap();
+                        let missing = MerkleHash::from_hex(&"f".repeat(64)).unwrap();
+                        let result = lookup.lookup_batch(&[file, missing, file]).await;
+                        lookup.close().await?;
+                        assert_eq!(result?, vec![Some(expected_shard), None, Some(expected_shard)]);
+                        let requests = observations.0.lock().unwrap().clone();
+                        assert!(requests.len() <= 24 && requests.iter().map(|r| r.bytes_read).sum::<u64>() <= 256 * 1024,
+                            "fixed hydration lookup exceeds bounds: count={count}, checkpoint={checkpointed}, supplied={supplied}");
+                        assert!(requests.iter().all(|r| r.operation == StorageOperation::Range), "captured hydration must not read mutable state or write checkpoints");
                         drop(prepared);
                         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
                     },

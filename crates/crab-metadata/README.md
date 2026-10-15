@@ -72,8 +72,9 @@ capsule checkpoint formats; unshipped format 6 is rejected without a fallback.
 Captured run-v4 roots provide the same selected lookup over exact logical
 capsule occurrences; catalog bodies remain cold until their keys are selected.
 CLI and shared capsule-publication preparation use these captured queries.
-Protected receive selects from separately authorized source/filtered captures;
-hydration still requires consumer integration.
+Protected receive selects from separately authorized source/filtered captures.
+Captured revision and remote-mount hydration pass the same paged lookup to the
+shared hydrator; current-state hydration still requires capture integration.
 
 External pointer catalogs use `CRBPCP01` authenticated pages. A bounded descriptor
 commits file, shard, xorb and reverse-chunk directories; nested shard closures and
