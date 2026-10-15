@@ -42,6 +42,12 @@ entries are bypassed even when eviction fails; corrupt origin bytes return
 `CacheStoreError::OriginIntegrity` with their verification error retained.
 Transport retry policy remains owned by `crab-storage`.
 
+Catalog replacement also fails closed: a live generation lease prevents
+rebinding, and retained recovery files still prevent rebinding after that lease
+closes. Verified origin reads remain available without changing the replacement
+or replaying an unrelated WAL. A quiescent empty replacement can initialize
+after the old lease closes; adapter reads do not repair ambiguous databases.
+
 `git_pack::read_pack_ranges` supplies the file-backed native-pack path. It
 uses the caller's selected origin, even when the cache was constructed around
 another store. A verified local hit copies the immutable pack body and reads
