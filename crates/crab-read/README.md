@@ -453,3 +453,11 @@ inspection is an explicit async operation. `CapsuleRepositoryView::pointer_catal
 is also async: hydration, publication and maintenance materialize the complete
 catalog from the captured checkpoint when its body was omitted during opening.
 Catalog indexing and bounded historical Xet lookup remain separate work.
+
+`CapsuleRepositoryView::pointer_catalog_lookup` captures the checkpoint's paged
+catalog together with exactly the selected publication-ordered deltas. File
+bindings retain later-wins precedence with equal sizes; selected shard/xorb
+identities retain conflict checks across sources. Queries do not read a newer
+root. Checkpoint catalogs stay cold during lookup construction; visible deltas
+still materialize and need run-level indexed aggregation. The complete catalog
+API remains for explicit maintenance and integrity inspection.

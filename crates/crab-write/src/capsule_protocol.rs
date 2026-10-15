@@ -3253,7 +3253,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(restored.record().root().checkpoint().unwrap().format(), 6);
+        assert_eq!(restored.record().root().checkpoint().unwrap().format(), 7);
         assert_eq!(
             restored.record().root().generation(),
             fenced.record().root().generation() + 1

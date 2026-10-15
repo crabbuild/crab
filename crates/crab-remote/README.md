@@ -103,3 +103,11 @@ chosen repository; use a dedicated qualification prefix. Run `build-indexes`
 afterward, then repeat the same native-Git query oracles. This separates
 checkpoint maintenance costs from foreground opening and prevents a no-op
 maintenance command from standing in for checkpoint qualification.
+
+`qualify_remote <bucket> <prefix> <file-hash-hex> catalog` measures selected file
+and chunk dependency lookup against a captured paged Git view, cold and warm.
+The hash argument uses Xet's word-ordered catalog-key hex, as produced by
+`crab_xet::hash::merkle_hex_from_bytes` from the pointer's raw hash bytes.
+Its complete-catalog maintenance oracle runs outside measured lookup work.
+`pointer_catalog_pages` reports parsed checkpoint catalog pages separately;
+opening still includes eager publication deltas and ref/visibility metadata.

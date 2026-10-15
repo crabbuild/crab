@@ -15,8 +15,8 @@ mod visibility_pages;
 #[cfg(feature = "storage")]
 pub use visibility_pages::LayeredVisibilityReader;
 
-const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP06";
-pub(super) const CHECKPOINT_VERSION: u32 = 6;
+const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP07";
+pub(super) const CHECKPOINT_VERSION: u32 = 7;
 const LAYER_MAGIC: &[u8; 8] = b"CRBPKL01";
 const LAYER_VERSION: u32 = 1;
 const TRAILER_BYTES: usize = 8 + 32 + 8;
@@ -933,6 +933,7 @@ struct CheckpointFooter {
     #[serde(default)]
     visibility_transitions: BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>,
     visibility_pages: Option<visibility_pages::Descriptor>,
+    catalog_pages: Option<super::pointer::paged::Descriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1046,6 +1047,15 @@ impl LayeredCheckpoint {
                 )
             })
             .transpose()?;
+        let catalog_pages = sections
+            .iter()
+            .find(|section| section.kind == CapsuleSectionKind::CatalogDelta)
+            .map(|section| {
+                super::pointer::paged::Descriptor::decode(
+                    &body[section.offset as usize..(section.offset + section.length) as usize],
+                )
+            })
+            .transpose()?;
         let control_offset = 0_u64;
         let footer = CheckpointFooter {
             version: CHECKPOINT_VERSION,
@@ -1058,6 +1068,7 @@ impl LayeredCheckpoint {
             cold_clone_object_count,
             visibility_transitions,
             visibility_pages,
+            catalog_pages,
         };
         validate_source_inventory(&footer.sources)?;
         for source in &footer.sources {
@@ -1188,6 +1199,31 @@ impl LayeredCheckpoint {
         .map(Some)
     }
 
+    /// Capture catalog page roots without reading the checkpoint catalog body.
+    #[cfg(feature = "storage")]
+    pub fn pointer_catalog_lookup(
+        &self,
+        layout: &crab_storage::StoreLayout<crab_storage::Store>,
+        maximum: u64,
+    ) -> Result<super::PointerCatalogLookup> {
+        let Some(descriptor) = &self.footer.catalog_pages else {
+            return Ok(super::PointerCatalogLookup::empty(maximum));
+        };
+        let section = self
+            .footer
+            .sections
+            .iter()
+            .find(|section| section.kind == CapsuleSectionKind::CatalogDelta)
+            .ok_or_else(|| corrupt("checkpoint catalog pages have no section"))?;
+        let range = PackRange::from_parts(section.offset, section.length, section.blake3.clone())?;
+        super::PointerCatalogLookup::checkpoint(
+            layout.capsule_checkpoint_path(&self.hash),
+            range,
+            descriptor.clone(),
+            maximum,
+        )
+    }
+
     /// Return the complete checkpoint bytes.
     #[must_use]
     pub fn bytes(&self) -> &Bytes {
@@ -1309,6 +1345,13 @@ impl LayeredCheckpoint {
         let Some(section) = self.section(CapsuleSectionKind::CatalogDelta)? else {
             return Ok(PointerCatalog::new());
         };
+        if Some(&super::pointer::paged::Descriptor::decode(&section)?)
+            != self.footer.catalog_pages.as_ref()
+        {
+            return Err(corrupt(
+                "checkpoint catalog body roots differ from its authenticated footer",
+            ));
+        }
         PointerCatalog::decode(&section)
     }
 
@@ -1549,6 +1592,20 @@ fn validate_checkpoint_footer(
             ));
         }
     }
+    let catalogs = footer
+        .sections
+        .iter()
+        .filter(|section| section.kind == CapsuleSectionKind::CatalogDelta)
+        .collect::<Vec<_>>();
+    match (&footer.catalog_pages, catalogs.as_slice()) {
+        (Some(descriptor), [section]) => descriptor.validate(section.length)?,
+        (None, []) => {}
+        _ => {
+            return Err(corrupt(
+                "checkpoint catalog section and footer roots differ",
+            ));
+        }
+    }
     let mut expected_offset = 0_u64;
     for section in &footer.sections {
         if !matches!(
@@ -1701,6 +1758,45 @@ mod tests {
             assert!(
                 corrupt.validate().is_err(),
                 "conflicting {field} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_control_requires_catalog_roots_for_exactly_one_section() {
+        let source = PackLayer::build(&pack())
+            .unwrap()
+            .source_descriptor()
+            .unwrap();
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_shard(
+                "a".repeat(64),
+                crate::capsule_protocol::ShardCatalogEntry::new(10, Vec::new()),
+            )
+            .unwrap();
+        catalog
+            .insert_file(
+                "b".repeat(64),
+                crate::capsule_protocol::FileCatalogEntry::new(0, "a".repeat(64)),
+            )
+            .unwrap();
+        let checkpoint =
+            LayeredCheckpoint::build(0, &"3".repeat(64), vec![source], catalog, None).unwrap();
+        for remove_section in [false, true] {
+            let mut footer = checkpoint.footer.clone();
+            if remove_section {
+                footer.sections.clear();
+            } else {
+                footer.catalog_pages = None;
+            }
+            assert!(
+                validate_checkpoint_footer(
+                    &footer,
+                    checkpoint.control_offset(),
+                    checkpoint.bytes.len() as u64
+                )
+                .is_err()
             );
         }
     }

@@ -36,12 +36,13 @@ async fn main() -> Result<()> {
             [bucket, prefix, path] => (bucket, prefix, path, "all"),
             [bucket, prefix, path, selection] => (bucket, prefix, path, selection.as_str()),
             _ => return Err(io::Error::other(
-                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint|ref-point|resolve-oid|blame-history|blame-history-uncached]",
+                "usage: qualify_remote <bucket> <prefix> <text-path> [operation|all|build-indexes|checkpoint|catalog|ref-point|resolve-oid|blame-history|blame-history-uncached]",
             )
             .into()),
         };
     if selection != "all"
         && selection != "build-indexes"
+        && selection != "catalog"
         && selection != "checkpoint"
         && selection != "graph-pages"
         && selection != "graph-ancestry"
@@ -99,6 +100,61 @@ async fn main() -> Result<()> {
         println!(
             "{}",
             json!({"kind":"result", "operation":"ref-point", "value":previous})
+        );
+    } else if selection == "catalog" {
+        let view = counters
+            .measure("open", "cold", async {
+                let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
+                Ok(crab_read::capsule_protocol::open_git_view_from_root(
+                    &layout,
+                    root,
+                    crab_read::capsule_protocol::CapsuleReadLimits {
+                        max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                        max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+                    },
+                )
+                .await?)
+            })
+            .await?;
+        // Like resolve-oid, this selection interprets the path argument as an
+        // immutable identity. The bulk maintenance oracle stays outside timing.
+        let hash = std::str::from_utf8(path.as_bytes())?.to_owned();
+        let lookup = view.pointer_catalog_lookup(&layout, 128 * 1024 * 1024)?;
+        let full = view.pointer_catalog().await?;
+        let expected_file = full
+            .files()
+            .get(&hash)
+            .ok_or_else(|| io::Error::other("requested catalog file is absent"))?;
+        let mut previous = None;
+        for cache in ["cold", "warm"] {
+            let selected = counters.measure("catalog", cache, async {
+                let files = lookup.files(layout.store(), std::slice::from_ref(&hash)).await?;
+                if files.files().get(&hash) != Some(expected_file) {
+                    return Err(io::Error::other("file binding differs from complete catalog").into());
+                }
+                for (key, entry) in files.shards() {
+                    if full.shards().get(key) != Some(entry) { return Err(io::Error::other("selected shard differs").into()); }
+                }
+                for (key, entry) in files.xorbs() {
+                    if full.xorbs().get(key) != Some(entry) { return Err(io::Error::other("selected xorb differs").into()); }
+                }
+                let chunks = files.xorbs().values().flat_map(|entry| entry.chunks().iter().map(|chunk| chunk.hash().to_owned())).collect::<Vec<_>>();
+                let placements = lookup.chunks(layout.store(), &chunks).await?;
+                for chunk in &chunks {
+                    let expected = full.xorbs().iter().find(|(_, entry)| entry.chunks().iter().any(|item| item.hash() == chunk));
+                    let selected = placements.xorbs().iter().find(|(_, entry)| entry.chunks().iter().any(|item| item.hash() == chunk));
+                    if expected != selected { return Err(io::Error::other("chunk placement differs from complete catalog").into()); }
+                }
+                Ok(json!({"files":files.files().len(), "shards":files.shards().len(), "xorbs":files.xorbs().len(), "chunks":chunks.len()}))
+            }).await?;
+            if previous.as_ref().is_some_and(|value| value != &selected) {
+                return Err(io::Error::other("cold/warm catalog results differ").into());
+            }
+            previous = Some(selected);
+        }
+        println!(
+            "{}",
+            json!({"kind":"result", "operation":"catalog", "value":previous})
         );
     } else if selection == "checkpoint" {
         counters
