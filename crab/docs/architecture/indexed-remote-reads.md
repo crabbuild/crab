@@ -2399,3 +2399,38 @@ Raw before/after evidence remains outside the checkout in
 representative S3 latency, additional history/ref scaling and fuller Git blame
 semantics remain open gates. Earlier component receipts retain their original
 source identities and are not final combined-source proof.
+
+
+### Co-located visibility proof reads
+
+The isolated current-catalog opening fixture holds one ref, one physical run and
+an empty catalog fixed. Before this change, 2, 8 and 32 logical edits require 8,
+20 and 68 provider read attempts. Compaction preserves complete nested capsules,
+so detached visibility headers and change pages otherwise remain separated by
+arbitrary Git payload spans. A run-wide cache alone cannot safely read ahead
+across those payloads.
+
+Run footer version 5 adds a contiguous visibility-proof pool after the Git index
+pool and before the aggregate catalog. Only compacted runs duplicate those
+sections; leaf readers keep their original section coordinates. Full inspection
+verifies the pool digest and each section against the original capsule identity.
+Footer-only readers validate exact region coverage and original section lengths.
+Their shared page cache reads 64 KiB blocks clipped to that proof-only region,
+with one 8 MiB / 256-entry budget for opaque blocks and authenticated decoded
+pages. Every selected page verifies its existing root commitment. Cold and warm
+query admission charges the complete block spans before starting I/O.
+
+This change preserves visibility reconciliation, including expected-old values,
+borrowed captured closures, removal validity, canonical transaction/catalog
+ordering and the ten-million-distinct-object proof limit. It removes the isolated
+per-edit request pattern for compacted small proofs. It does not yet remove
+logical control replay, full addition enumeration for distinct dictionary counts,
+or growth in the number of physical runs. Those remain required opening and
+history-scaling work; a passing request-count test is insufficient to close them.
+
+A fresh release audit inspected the six published tag objects and 19 known local
+tag objects. None contains the current capsule-run modules or magic values.
+Published `v1.2.4` differs from the untouched local tag; both objects were checked.
+The unshipped run footer versions 1 through 4 are rejected without a fallback.
+Published v1 storage formats are unaffected. Runtime, corruption, resource-budget
+and affected-consumer validation must accompany this format change before push.

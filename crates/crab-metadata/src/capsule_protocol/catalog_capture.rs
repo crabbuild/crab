@@ -173,3 +173,132 @@ fn corrupt(reason: impl Into<String>) -> MetadataError {
         reason: reason.into(),
     }
 }
+
+#[cfg(all(test, feature = "file-index-reader"))]
+#[expect(clippy::unwrap_used, reason = "test assertions")]
+mod tests {
+    use super::*;
+    use crate::capsule_protocol::{
+        Capsule, CapsulePointer, CapsuleRefEdit, CapsuleRefHead, CapsuleRun, CapsuleSection,
+        CapsuleSectionKind, CapsuleTransaction, CapsuleVisibilityDelta, RepositoryRoot, RootRecord,
+        capsule_ref_name_key, create_root,
+    };
+    use crate::file_index_lookup::FileIndexLookupSession;
+    use crate::git_visibility::GitVisibilityEdit;
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn current_catalog_opening_reads_follow_compacted_runs() {
+        let mut observations = Vec::new();
+        // Metadata-only history keeps the catalog empty. One physical run
+        // isolates visibility replay from run fan-out and payload lookup.
+        for count in [2, 8, 32] {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let observed = reads.clone();
+            let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+                .with_read_request_observer(Arc::new(move |_| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }));
+            let layout = StoreLayout::new(store, "catalog-opening".to_owned());
+            let root = create_root(
+                &layout,
+                RootRecord::encode(
+                    RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            let mut leaves = Vec::new();
+            let mut previous = None;
+            for version in 1..=count {
+                let oid = format!("{version:040x}");
+                let transaction = CapsuleTransaction::new(
+                    root.record().digest(),
+                    vec![CapsuleRefEdit::new(
+                        "refs/heads/main",
+                        previous.clone(),
+                        Some(oid.clone()),
+                        None,
+                    )],
+                )
+                .unwrap();
+                let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+                    "refs/heads/main".to_owned(),
+                    GitVisibilityEdit::from_delta_objects(
+                        previous,
+                        oid.clone(),
+                        vec![oid.clone()],
+                        Vec::new(),
+                    ),
+                )]))
+                .unwrap();
+                let capsule = Capsule::build(
+                    &transaction,
+                    Vec::new(),
+                    vec![CapsuleSection::new(
+                        CapsuleSectionKind::VisibilityDelta,
+                        visibility.encode().unwrap(),
+                    )],
+                )
+                .unwrap();
+                leaves.push(CapsuleRun::leaf(capsule).unwrap());
+                previous = Some(oid);
+            }
+            let run = CapsuleRun::compact(leaves).unwrap();
+            layout
+                .store()
+                .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+                .await
+                .unwrap();
+            let pointer = CapsulePointer::new(
+                run.hash(),
+                run.bytes().len() as u64,
+                run.control_offset(),
+                run.control_size(),
+                run.footer_hash(),
+                run.level(),
+                run.transaction_ids(),
+                run.newest_base_root_digest(),
+            )
+            .unwrap();
+            let head = CapsuleRefHead::from_root(
+                "refs/heads/main",
+                root.record().root().ref_epoch().to_owned(),
+                None,
+                None,
+            )
+            .unwrap();
+            let state = head
+                .successor_state(
+                    &BTreeSet::new(),
+                    previous,
+                    None,
+                    run.transaction_ids().last().unwrap().clone(),
+                    vec![pointer],
+                )
+                .unwrap();
+            layout
+                .store()
+                .create_strict(
+                    &layout.capsule_ref_head_path(&capsule_ref_name_key("refs/heads/main")),
+                    head.commit(state).unwrap().encode().unwrap(),
+                )
+                .await
+                .unwrap();
+            reads.store(0, Ordering::SeqCst);
+            let session =
+                FileIndexLookupSession::open_for_storage(layout.store(), "catalog-opening")
+                    .await
+                    .unwrap();
+            observations.push((count, reads.load(Ordering::SeqCst)));
+            session.close().await.unwrap();
+        }
+        eprintln!("compacted catalog opening read attempts: {observations:?}");
+        assert!(
+            observations.windows(2).all(|pair| pair[0].1 == pair[1].1),
+            "provider reads should follow compacted proof blocks rather than logical edits: {observations:?}"
+        );
+    }
+}
