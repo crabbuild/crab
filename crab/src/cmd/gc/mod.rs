@@ -22,6 +22,8 @@ pub mod parallel_enum;
 
 #[cfg(test)]
 mod capsule_cleanup_tests;
+#[cfg(test)]
+mod captured_index_tests;
 
 use std::collections::HashSet;
 #[cfg(test)]
@@ -3134,14 +3136,12 @@ async fn run_capsule_gc(
             )
             .await?;
             let snapshot = view.git_snapshot()?;
-            let state_digest = view.state_digest().to_owned();
             sweep_capsule_objects(
                 args,
                 store,
                 &layout,
                 fenced.record().root(),
                 view.capsule_run_pointers(),
-                &state_digest,
                 &snapshot.manifest,
                 coordinator_protected_keys,
                 cancel,
@@ -3183,7 +3183,6 @@ async fn sweep_capsule_objects(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     root: &crab_metadata::capsule_protocol::RepositoryRoot,
     capsule_runs: &[crab_metadata::capsule_protocol::CapsulePointer],
-    state_digest: &str,
     manifest: &crab_metadata::manifests::Manifest,
     coordinator_protected_keys: &HashSet<String>,
     cancel: &CancellationToken,
@@ -3235,14 +3234,7 @@ async fn sweep_capsule_objects(
         }
     }
     reachable.extend(coordinator_protected_keys.iter().cloned());
-    mark_derived_index_objects(
-        store.as_storage(),
-        layout,
-        state_digest,
-        manifest,
-        &mut reachable,
-    )
-    .await?;
+    mark_derived_index_objects(store.as_storage(), layout, manifest, &mut reachable).await?;
 
     let capsule_prefix = layout.repo_path("v2/capsules/");
     let checkpoint_prefix = layout.repo_path("v2/checkpoints/");
@@ -3384,13 +3376,12 @@ async fn sweep_capsule_objects(
 async fn mark_derived_index_objects(
     store: &crab_storage::Store,
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
-    state_digest: &str,
     manifest: &crab_metadata::manifests::Manifest,
     reachable: &mut HashSet<String>,
 ) -> Result<()> {
-    if let Some(indexes) = crab_metadata::capsule_protocol::load_browse_indexes(layout).await?
-        && indexes.state_digest() == state_digest
-    {
+    if let Some(indexes) = crab_metadata::capsule_protocol::load_browse_indexes(layout).await? {
+        // Ref movement makes readiness stale for new queries, but existing
+        // readers still own that published root and may not have loaded pages.
         let graph_hash = indexes.commit_graph_hash();
         let graph_path = layout.bulk_manifest_path("commit-graph", graph_hash);
         let graph = crab_metadata::split_commit_graph::load_split_commit_graph_descriptor(
@@ -3409,23 +3400,15 @@ async fn mark_derived_index_objects(
         );
 
         if let Some(hash) = indexes.object_index_hash() {
-            let index = crab_metadata::git_object_locator::PagedGitObjectIndex::load(
+            let paths = crab_metadata::git_object_locator::PagedGitObjectIndex::retained_paths(
                 store,
                 layout,
                 hash,
-                state_digest,
-                manifest,
+                indexes.state_digest(),
                 crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
             )
             .await?;
-            // Every authenticated physical page lives in this immutable body.
-            // Retain it with readiness so pruning cannot strand future delta reads.
-            reachable.insert(
-                layout
-                    .bulk_manifest_path("git-object-index", hash)
-                    .to_string(),
-            );
-            reachable.insert(index.body_path().to_string());
+            reachable.extend(paths.into_iter().map(|path| path.to_string()));
         }
 
         if let Some(path_state_hash) = indexes.path_state_hash() {
@@ -5517,7 +5500,6 @@ mod tests {
         .await
         .unwrap();
         let snapshot = current_view.git_snapshot().unwrap();
-        let state_digest = current_view.state_digest().to_owned();
         assert_eq!(
             root.record().root().compacted_ref_transactions(),
             captured.visible_ref_transactions()
@@ -5558,7 +5540,6 @@ mod tests {
                 &layout,
                 root.record().root(),
                 &[],
-                &state_digest,
                 &snapshot.manifest,
                 &protected,
                 &CancellationToken::new(),
@@ -5586,7 +5567,6 @@ mod tests {
             &layout,
             root.record().root(),
             &[],
-            &state_digest,
             &snapshot.manifest,
             &protected,
             &CancellationToken::new(),
@@ -5821,15 +5801,9 @@ mod tests {
                     .unwrap(),
             });
             let mut retained = HashSet::new();
-            mark_derived_index_objects(
-                store.as_storage(),
-                &layout,
-                &state_digest,
-                &manifest,
-                &mut retained,
-            )
-            .await
-            .unwrap();
+            mark_derived_index_objects(store.as_storage(), &layout, &manifest, &mut retained)
+                .await
+                .unwrap();
             assert!(
                 retained.contains(
                     &layout
@@ -5957,7 +5931,6 @@ mod tests {
             &layout,
             root.record().root(),
             &[],
-            &state_digest,
             &manifest,
             &HashSet::new(),
             &CancellationToken::new(),
@@ -5975,7 +5948,6 @@ mod tests {
             &layout,
             root.record().root(),
             &[],
-            &state_digest,
             &manifest,
             &HashSet::new(),
             &CancellationToken::new(),

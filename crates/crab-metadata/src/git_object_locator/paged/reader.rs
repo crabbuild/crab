@@ -12,6 +12,53 @@ impl PagedGitObjectIndex {
         manifest: &Manifest,
         maximum: u64,
     ) -> Result<Self> {
+        let (descriptor, descriptor_bytes) = Self::descriptor(store, layout, hash, maximum).await?;
+        if descriptor.state_digest != state_digest
+            || descriptor.generation != manifest.generation
+            || descriptor.pack_index_hash != manifest.pack_index_hash
+            || descriptor.git_validation_digest != manifest.git_validation_digest
+        {
+            return bad("object index does not match captured state");
+        }
+        let path = body_path(layout, &descriptor.body_hash);
+        Ok(Self {
+            descriptor,
+            descriptor_bytes,
+            path,
+            origin: Arc::clone(layout.store().inner()),
+            global_prefix: layout.global_prefix().to_owned(),
+            maximum,
+            cache: PageCache::default(),
+        })
+    }
+
+    /// Resolve retained readiness to its authenticated descriptor and complete page body.
+    ///
+    /// The state digest must come from the retained root. This proves storage
+    /// dependencies for GC, not current inventory membership or ref visibility.
+    pub async fn retained_paths(
+        store: &Store,
+        layout: &StoreLayout<Store>,
+        hash: &str,
+        state_digest: &str,
+        maximum: u64,
+    ) -> Result<[object_store::path::Path; 2]> {
+        let (descriptor, _) = Self::descriptor(store, layout, hash, maximum).await?;
+        if descriptor.state_digest != state_digest {
+            return bad("retained object index does not match captured state");
+        }
+        Ok([
+            layout.bulk_manifest_path("git-object-index", hash),
+            body_path(layout, &descriptor.body_hash),
+        ])
+    }
+
+    async fn descriptor(
+        store: &Store,
+        layout: &StoreLayout<Store>,
+        hash: &str,
+        maximum: u64,
+    ) -> Result<(Descriptor, u64)> {
         validate_content_hash(hash, "object index descriptor", "Git object index")?;
         let expected = hash_bytes(hash)?;
         let bytes = store
@@ -24,23 +71,7 @@ impl PagedGitObjectIndex {
         let descriptor: Descriptor = serde_json::from_slice(&bytes)
             .map_err(|source| crate::error::MetadataError::GitObjectIndexRecord { source })?;
         descriptor.validate()?;
-        if descriptor.state_digest != state_digest
-            || descriptor.generation != manifest.generation
-            || descriptor.pack_index_hash != manifest.pack_index_hash
-            || descriptor.git_validation_digest != manifest.git_validation_digest
-        {
-            return bad("object index does not match captured state");
-        }
-        let path = body_path(layout, &descriptor.body_hash);
-        Ok(Self {
-            descriptor,
-            descriptor_bytes: bytes.len() as u64,
-            path,
-            origin: Arc::clone(layout.store().inner()),
-            global_prefix: layout.global_prefix().to_owned(),
-            maximum,
-            cache: PageCache::default(),
-        })
+        Ok((descriptor, bytes.len() as u64))
     }
 
     /// Check captured state and in-process origin before attaching lookup to a repository.
