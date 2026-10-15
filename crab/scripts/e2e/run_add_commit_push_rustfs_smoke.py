@@ -102,6 +102,44 @@ class SmokeReport:
     updated_at: str = ""
 
 
+def capsule_staged_proof_complete(stderr: str, count: int) -> bool:
+    """Require complete direct reuse evidence for the capsule duplicate fixture."""
+    if type(count) is not int or count <= 0:
+        return False
+    proof_message = "revalidated staged remote placement proofs"
+    adoption_message = "capsule staged remote proof adoption complete"
+    events = []
+    for line in stderr.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        fields = record.get("fields") if isinstance(record, dict) else None
+        if isinstance(fields, dict) and fields.get("message") in (
+            proof_message, adoption_message
+        ):
+            events.append(fields)
+    # This fixture makes one push with one direct-proof batch. Counts from
+    # different batches cannot jointly prove that every planned chunk survived.
+    if len(events) != 2:
+        return False
+    proof, adoption = events
+    if proof.get("message") != proof_message or adoption.get("message") != adoption_message:
+        return False
+    expected = {
+        "planned": count, "indexed": count, "matched": count,
+        "capsule_source_verified": count, "generation_verified": 0,
+        "payload_verified": count, "placement_mismatches": 0,
+        "origin_proof_mismatches": 0,
+    }
+    adopted = {"planned_existing": count, "stale_existing": 0, "global_existing": 0}
+    return all(
+        type(event.get(key)) is int and event[key] == value
+        for event, counters in [(proof, expected), (adoption, adopted)]
+        for key, value in counters.items()
+    )
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -2031,13 +2069,7 @@ class AddCommitPushSmoke:
         remote_chunk_count = inventory["recipe_remote_chunks"]
         self.check(
             f"{case_name}-push-revalidates-staged-proof-directly",
-            "revalidated staged remote placement proofs" in push_stderr
-            and f'"planned":{remote_chunk_count}' in push_stderr
-            and f'"matched":{remote_chunk_count}' in push_stderr
-            and f'"generation_verified":{remote_chunk_count}' in push_stderr
-            and f'"payload_verified":{remote_chunk_count}' in push_stderr
-            and '"stale_existing":0' in push_stderr
-            and '"global_existing":0' in push_stderr,
+            capsule_staged_proof_complete(push_stderr, remote_chunk_count),
             {"remote_chunks": remote_chunk_count},
         )
         self.head_repository_state(consumer_prefix)
@@ -2052,12 +2084,19 @@ class AddCommitPushSmoke:
         )
 
         clone_dir = self.run_root / case_name / "consumer-clone"
+        clone_cache = self.run_root / case_name / "consumer-clone-cache"
+        self.check(f"{case_name}-clone-cache-starts-empty", not clone_cache.exists())
+        clone_env = {"CRAB_CACHE_DIR": str(clone_cache)}
         self.run_cmd(
             f"{case_name} consumer clone",
             [self.crab_bin, "clone", consumer_url, str(clone_dir), "--jsonl"],
             self.run_root,
+            extra_env=clone_env,
         )
-        self.run_crab(clone_dir, ["hydrate", "--all"], name=f"{case_name} hydrate")
+        self.run_crab(
+            clone_dir, ["hydrate", "--all"], name=f"{case_name} hydrate",
+            extra_env=clone_env,
+        )
         self.check(
             f"{case_name}-fresh-hydrate-is-byte-identical",
             sha256_file(clone_dir / "model.bin") == expected_sha256,

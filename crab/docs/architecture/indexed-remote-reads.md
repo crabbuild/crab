@@ -2266,3 +2266,43 @@ remote-helper boundary passes date text through, while wire fetch uses a
 normalized timestamp. Fixing that adapter and qualifying dated boundaries
 against native Git are required; changing the expected message alone would
 hide the missing behavior. No full CLI E2E pass is claimed from this receipt.
+
+
+## Capsule chunk authority and exact staged reuse in progress
+
+PR #593 publishes rebuildable global chunk candidates after capsule ref
+publication. Each candidate names a source shard in the source repository's
+current authenticated catalog and a canonical origin receipt in the caller's
+trusted global scope. A physical xorb alone is insufficient: its catalog shard
+must retain the payload through the existing GC contract. Direct CLI publication
+and protected receive share the metadata encoder and writer. Protected receive's
+80 native-Git/in-memory tests pass; this is not real-S3 qualification.
+
+The follow-up stores each placement under its immutable digest as well as the
+replaceable chunk head. Push re-reads the exact add-time placement and origin
+IDs, validates source membership, and requires current provider identity even
+with warm payload caches. Its read-only proof session closes before publication
+opens the global writer. Verified source descriptors and original receipts stay
+caller-owned, with one retained-metadata byte allowance across source repositories.
+Conflicting descriptors or physical assertions fail explicitly.
+
+A regression measured one redundant full xorb GET after otherwise successful
+source/origin proof. Adopting the authenticated descriptor removes that GET:
+the first before/after pair fails at one versus zero body reads, then passes the
+unchanged zero-read bound. Final-source validation passes all 10 focused CLI/Xet tests, including partial
+add-time hints and mixed stale/fresh origin assertions. The cold source fixture
+uses native Git and real staging with an in-memory object store.
+Released v1.2.4 manifest receipts lack these capsule descriptors and still require
+full-body verification when imported into capsule publication.
+
+The dedicated cross-repository smoke oracle now requires one complete capsule
+source-proof event and its matching adoption event. It checks exact planned,
+indexed, matched, source-verified and payload-verified counts, with zero stale,
+mismatched or globally reclassified chunks. Five oracle tests pass; the original
+substring oracle rejected valid capsule proofs and accepted counters assembled
+from different events. This representation correction is not product E2E proof.
+Payload-only run tests pass (28), and strict minimal metadata Clippy passes.
+
+Current-source S3 cross-repository add/push/cold reconstruction, the shared
+`crab-remote` preparation consumer, final 10-GiB qualification, history scaling,
+provider latency, lifecycle and full blame semantics remain open gates.
