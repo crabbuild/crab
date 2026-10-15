@@ -228,6 +228,31 @@ impl<S> StoreLayout<S> {
         self.repo_path(&format!("v2/history/{partition}/{hash}"))
     }
 
+    /// Prefix of per-ref source-lifetime heads, separate from ref visibility.
+    #[must_use]
+    pub fn capsule_source_heads_prefix(&self) -> ObjectPath {
+        self.repo_path("v2/history/source-heads/")
+    }
+
+    /// Path to the source-lifetime generation floor committed by explicit pruning.
+    #[must_use]
+    pub fn capsule_source_floor_path(&self) -> ObjectPath {
+        self.repo_path("v2/history/source-floor")
+    }
+
+    /// Path to one per-ref source-lifetime head.
+    #[must_use]
+    pub fn capsule_source_head_path(&self, ref_key: &str) -> ObjectPath {
+        self.repo_path(&format!("v2/history/source-heads/{ref_key}.json"))
+    }
+
+    /// Path to one immutable source-lifetime history segment.
+    #[must_use]
+    pub fn capsule_source_segment_path(&self, hash: &str) -> ObjectPath {
+        let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
+        self.repo_path(&format!("v2/history/source-roots/{partition}/{hash}"))
+    }
+
     /// Prefix containing independently mutable capsule-protocol ref heads.
     #[must_use]
     pub fn capsule_ref_heads_prefix(&self) -> ObjectPath {

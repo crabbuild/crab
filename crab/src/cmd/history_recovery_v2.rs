@@ -468,8 +468,7 @@ async fn prune_history(
             // Retry capture cleanup after an earlier history CAS committed but
             // its derived-retention update failed. Empty history has no cutoff.
             if let Some(minimum) = minimum {
-                crab_metadata::capsule_protocol::prune_retained_browse_indexes(layout, minimum)
-                    .await?;
+                prune_capture_sources(layout, minimum).await?;
             }
             return Ok(payload);
         }
@@ -497,12 +496,7 @@ async fn prune_history(
         let (primary, release_base) = match replacement {
             Ok(root) => {
                 let cleanup = match minimum {
-                    Some(minimum) => {
-                        crab_metadata::capsule_protocol::prune_retained_browse_indexes(
-                            layout, minimum,
-                        )
-                        .await
-                    }
+                    Some(minimum) => prune_capture_sources(layout, minimum).await,
                     None => Ok(()),
                 };
                 (cleanup.err().map(CrabError::from), root)
@@ -525,6 +519,16 @@ async fn prune_history(
         (Ok(payload), Ok(())) => Ok(payload),
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
+}
+
+async fn prune_capture_sources(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    minimum_generation: u64,
+) -> crab_metadata::error::Result<()> {
+    crab_metadata::capsule_protocol::prune_retained_browse_indexes(layout, minimum_generation)
+        .await?;
+    crab_metadata::capsule_protocol::prune_retained_capsule_sources(layout, minimum_generation)
+        .await
 }
 
 fn prune_payload(chain: &[HistorySegment], keep_last: usize, applied: bool) -> HistoryPrunePayload {

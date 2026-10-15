@@ -311,6 +311,141 @@ async fn gc_preserves_cold_captures_after_readiness_replacement() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn gc_preserves_cold_catalog_sessions_without_browse_indexes() {
+    use crab_metadata::capsule_protocol::{
+        CAPSULE_REF_COMPACTION_FAN_IN, FileCatalogEntry, PointerCatalog, ShardCatalogEntry,
+        XorbCatalogEntry, XorbChunkEntry,
+    };
+    let backend = Arc::new(AgedObjects {
+        inner: InMemory::new(),
+        paths: Mutex::new(HashSet::new()),
+        modified: SystemTime::now() - Duration::from_secs(7200),
+        list_calls: Mutex::new(Vec::new()),
+    });
+    let store = Store::new(backend.clone());
+    let layout = StoreLayout::new(store.as_storage().clone(), "org/catalog-gc".to_owned());
+    let root =
+        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+    let file_hash = MerkleHash::from([10; 32]);
+    let shard_hash = MerkleHash::from([13; 32]);
+    let mut catalog = PointerCatalog::new();
+    catalog
+        .insert_xorb(
+            "a".repeat(64),
+            XorbCatalogEntry::new(
+                1,
+                "b".repeat(64),
+                vec![XorbChunkEntry::new("c".repeat(64), 5)],
+            ),
+        )
+        .unwrap();
+    catalog
+        .insert_shard(
+            shard_hash.hex(),
+            ShardCatalogEntry::new(1, vec!["a".repeat(64)]),
+        )
+        .unwrap();
+    catalog
+        .insert_file(file_hash.hex(), FileCatalogEntry::new(5, shard_hash.hex()))
+        .unwrap();
+    let mut previous = None;
+    let mut session = None;
+    let mut original = None;
+    for sequence in 0..=CAPSULE_REF_COMPACTION_FAN_IN {
+        let oid = format!("{:040x}", sequence + 1);
+        let transaction = CapsuleTransaction::new(
+            root.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                previous.clone(),
+                Some(oid.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            GitVisibilityEdit::from_replacement_objects(
+                previous.clone(),
+                oid.clone(),
+                vec![oid.clone()],
+            ),
+        )]))
+        .unwrap();
+        let mut sections = vec![CapsuleSection::new(
+            CapsuleSectionKind::VisibilityDelta,
+            visibility.encode().unwrap(),
+        )];
+        if sequence == 0 {
+            sections.push(CapsuleSection::new(
+                CapsuleSectionKind::CatalogDelta,
+                catalog.encode_delta().unwrap(),
+            ));
+        }
+        let capsule = Capsule::build(&transaction, Vec::new(), sections).unwrap();
+        crab_write::capsule_protocol::publish(&layout, root.clone(), &transaction, &capsule)
+            .await
+            .unwrap();
+        previous = Some(oid);
+        if sequence == 0 {
+            let captured = view(&layout).await;
+            let path = layout.capsule_path(captured.capsule_run_pointers()[0].hash());
+            backend.paths.lock().unwrap().insert(path.clone());
+            original = Some(path);
+            // Opening the canonical session captures controls only. Its first
+            // selected catalog-page query must survive source replacement and GC.
+            session = Some(
+                crab_metadata::file_index_lookup::FileIndexLookupSession::open_for_storage(
+                    layout.store(),
+                    layout.repo_prefix(),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+    }
+    let current = view(&layout).await;
+    let original = original.unwrap();
+    assert!(
+        current
+            .capsule_run_pointers()
+            .iter()
+            .all(|pointer| layout.capsule_path(pointer.hash()) != original)
+    );
+    assert!(
+        crab_metadata::capsule_protocol::load_browse_indexes(&layout)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let snapshot = current.git_snapshot().unwrap();
+    sweep_capsule_objects(
+        &GcArgs::default(),
+        &store,
+        &layout,
+        current.root().root(),
+        current.capsule_run_pointers(),
+        &snapshot.manifest,
+        &HashSet::new(),
+        &CancellationToken::new(),
+        SystemTime::now(),
+        Duration::from_secs(3600),
+        Instant::now(),
+    )
+    .await
+    .unwrap();
+    let session = session.unwrap();
+    let result = session.lookup_batch(&[file_hash, file_hash]).await;
+    session.close().await.unwrap();
+    assert!(
+        matches!(result, Ok(ref values) if values == &[Some(shard_hash), Some(shard_hash)]),
+        "cold catalog capture lost after real run compaction and GC: {result:?}"
+    );
+}
+
 #[tokio::test]
 async fn capsule_gc_lists_each_candidate_namespace_once() {
     let backend = Arc::new(AgedObjects {

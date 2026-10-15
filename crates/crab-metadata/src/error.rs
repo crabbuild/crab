@@ -21,6 +21,11 @@ pub enum MetadataError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("invalid capsule source-retention JSON")]
+    SourceRetentionRecord {
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("Git object index record encoding is invalid")]
     GitObjectIndexRecord {
         #[source]

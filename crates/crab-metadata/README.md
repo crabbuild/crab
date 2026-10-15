@@ -139,6 +139,17 @@ length. Pruning is the boundary that can invalidate captures from discarded
 generations; ordinary rebuilding, checkpointing and GC do not expire readers.
 The new lifetime format is version 1; no release tag contains capsule browse
 readiness, and its existing version 3 encoding remains unchanged.
+Compaction also retains replaced capsule sources independently of browse
+readiness. Before publishing a replacement frontier, the ref owner CAS-publishes
+a per-ref head under `v2/history/source-heads/` and authenticated source-pointer
+segments under `v2/history/source-roots/`. Foreground catalog sessions stay
+read-only and keep their original source ranges. GC discovers these roots in its
+existing history enumeration; fsck authenticates their original run proofs.
+Explicit history pruning advances a persistent generation floor after history
+CAS, trims older segments, and prevents expired publishers from restoring them.
+These new lifetime records do not change capsule, checkpoint, or catalog formats.
+They cover sources retired by updated publishers; backfill/rollout qualification
+for previously compacted unreleased repositories remains a release gate.
 Rebuilding an immutable index
 verifies the generated content identity and repairs corrupt stored bytes only
 with a conditional update against the observed version, followed by readback.

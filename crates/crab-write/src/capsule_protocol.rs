@@ -283,7 +283,14 @@ pub async fn prepare_publication_with_ref_head_bases(
     let run = capsule_leaf_run(capsule)?;
     let prepared = try_join_all(transaction.edits().iter().zip(snapshots).map(
         |(edit, snapshot)| {
-            prepare_ref_successor(router, snapshot, edit, &transaction_id, run.clone())
+            prepare_ref_successor(
+                router,
+                snapshot,
+                edit,
+                &transaction_id,
+                run.clone(),
+                base.record().root().generation(),
+            )
         },
     ))
     .await?;
@@ -560,6 +567,7 @@ pub async fn materialize_coordinated_repair(
                 edit,
                 &descriptor.transaction_id,
                 run.clone(),
+                base.record().root().generation(),
             )
         },
     ))
@@ -1093,6 +1101,7 @@ async fn prepare_ref_successor(
     edit: &crab_metadata::capsule_protocol::CapsuleRefEdit,
     transaction_id: &str,
     leaf: CapsuleRun,
+    generation: u64,
 ) -> Result<(PreparedRefHead, Option<CapsuleRun>)> {
     let mut frontier = snapshot.visible.frontier().to_vec();
     frontier.push(CapsulePointer::new(
@@ -1106,6 +1115,28 @@ async fn prepare_ref_successor(
         leaf.newest_base_root_digest(),
     )?);
     let compacted = compact_ref_frontier(router, &mut frontier, &leaf).await?;
+    if compacted.is_some() {
+        let remaining = frontier
+            .iter()
+            .map(CapsulePointer::hash)
+            .collect::<std::collections::BTreeSet<_>>();
+        let retired = snapshot
+            .visible
+            .frontier()
+            .iter()
+            .filter(|pointer| !remaining.contains(pointer.hash()))
+            .cloned()
+            .collect::<Vec<_>>();
+        // Captured catalog/visibility readers still address the old immutable
+        // bodies. Publish their lifetime before any replacement ref CAS can hide them.
+        crab_metadata::capsule_protocol::retain_capsule_sources(
+            router,
+            edit.ref_name(),
+            generation,
+            &retired,
+        )
+        .await?;
+    }
     let state = snapshot.visible.successor(
         edit.new_oid().map(str::to_owned),
         edit.peeled_oid().map(str::to_owned),
@@ -2748,6 +2779,7 @@ mod tests {
             &transaction.edits()[0],
             &transaction_id,
             leaf,
+            base.record().root().generation(),
         )
         .await
         .unwrap();
@@ -2872,8 +2904,26 @@ mod tests {
                 .iter()
                 .filter(|operation| **operation == StorageOperation::Put)
                 .count(),
-            3
+            // Source lifetime adds one immutable segment and its per-ref CAS
+            // before the ref can stop exposing the original bodies to GC.
+            5
         );
+
+        let source_heads = router
+            .store()
+            .list_prefix(&router.capsule_source_heads_prefix())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|object| object.location)
+            .collect::<Vec<_>>();
+        let retained =
+            crab_metadata::capsule_protocol::load_retained_capsule_sources(&router, &source_heads)
+                .await
+                .unwrap();
+        let mut expected_sources = prior_frontier.clone();
+        expected_sources.sort_by(|left, right| left.hash().cmp(right.hash()));
+        assert_eq!(retained.runs(), expected_sources);
 
         let head = read_ref_head(&router, published.record().root(), "refs/heads/main")
             .await

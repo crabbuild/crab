@@ -21,6 +21,8 @@ mod ref_view;
 mod root;
 mod run;
 #[cfg(feature = "storage")]
+mod source_retention;
+#[cfg(feature = "storage")]
 mod store;
 mod transaction;
 mod transaction_record;
@@ -88,6 +90,11 @@ pub use run::{
 };
 #[cfg(feature = "storage")]
 pub use run::{CapsuleRunAdmissionReader, RunCatalogSource};
+#[cfg(feature = "storage")]
+pub use source_retention::{
+    RetainedCapsuleSources, load_retained_capsule_sources, prune_retained_capsule_sources,
+    retain_capsule_sources,
+};
 #[cfg(feature = "storage")]
 pub use store::{
     RootSnapshot, capture_ref_heads, create_root, load_capsule_run, load_capsule_run_control,
