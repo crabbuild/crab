@@ -2,21 +2,48 @@ use super::*;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn acknowledged_branch_survives_source_deletion() {
-    branch_survives_source_deletion(false).await;
+    branch_survives_source_deletion(layout().await.0, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn prepared_branch_survives_source_deletion_before_commit() {
-    branch_survives_source_deletion(true).await;
+    branch_survives_source_deletion(layout().await.0, true).await;
 }
 
-async fn branch_survives_source_deletion(delete_before_commit: bool) {
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires CRAB_E2E_FLAT_BUCKET and explicit scratch S3 credentials"]
+async fn live_branch_survives_source_deletion_and_source_removal() {
+    let bucket = std::env::var("CRAB_E2E_FLAT_BUCKET").expect("explicit scratch bucket required");
+    let store =
+        crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
+            .unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    for before_commit in [false, true] {
+        let prefix = format!("ref-lifetime/{nonce}/{before_commit}");
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.clone(),
+            format!("{prefix}/repo"),
+            format!("{prefix}/global"),
+        );
+        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        branch_survives_source_deletion(layout, before_commit).await;
+    }
+}
+
+async fn branch_survives_source_deletion(
+    layout: crab_storage::StoreLayout<crab_storage::Store>,
+    delete_before_commit: bool,
+) {
     use crab_metadata::capsule_protocol::{CapsuleRefEdit, CapsuleTransaction};
     use crab_remote::prepare::CapsuleCommitOutcome;
     let cancel = CancellationToken::new();
     let (directory, content) = content_fixture().await;
     source_commit(directory.path(), &content);
-    let (layout, _) = layout().await;
     let (prepared, view, runtime, leases) = prepare(&layout, directory.path(), Some(content)).await;
     let artifacts = prepared
         .upload_capsule(&view, proof_limits(), &cancel)
@@ -47,6 +74,21 @@ async fn branch_survives_source_deletion(delete_before_commit: bool) {
     .map(str::to_owned)
     .collect::<Vec<_>>();
     expected_objects.sort_unstable();
+    let expected_bodies = expected_objects
+        .iter()
+        .map(|oid| {
+            let kind = String::from_utf8(git(directory.path(), &["cat-file", "-t", oid])).unwrap();
+            (
+                gix_hash::ObjectId::from_hex(oid.as_bytes()).unwrap(),
+                git(directory.path(), &["cat-file", kind.trim(), oid]),
+            )
+        })
+        .collect::<Vec<_>>();
+    let crab_git::pointer_detect::PointerKind::Crab(pointer) = crab_git::pointer_detect::classify(
+        &std::fs::read(directory.path().join("model.bin")).unwrap(),
+    ) else {
+        panic!("fixture pointer");
+    };
     let borrowed = "refs/heads/borrowed";
     let (prepared, view, runtime, leases) =
         prepare_update(&layout, directory.path(), None, borrowed, Some(tip)).await;
@@ -102,9 +144,9 @@ async fn branch_survives_source_deletion(delete_before_commit: bool) {
         .iter()
         .find(|head| head.ref_name() == borrowed)
         .unwrap();
-    let pointer = &head.visible(&active).frontier()[0];
+    let capsule_pointer = &head.visible(&active).frontier()[0];
     let (_, controls) =
-        crab_metadata::capsule_protocol::load_capsule_run_git_control(&layout, pointer)
+        crab_metadata::capsule_protocol::load_capsule_run_git_control(&layout, capsule_pointer)
             .await
             .unwrap();
     let control = controls[0]
@@ -122,6 +164,7 @@ async fn branch_survives_source_deletion(delete_before_commit: bool) {
     let root = crab_write::capsule_protocol::open_root(&layout)
         .await
         .unwrap();
+    std::fs::remove_dir_all(directory.path()).unwrap();
     let limits = crab_read::capsule_protocol::CapsuleReadLimits {
         max_capsule_bytes: LIMIT,
         max_frontier_bytes: LIMIT,
@@ -159,6 +202,50 @@ async fn branch_survives_source_deletion(delete_before_commit: bool) {
                 Some(expected_objects.clone())
             ),
         );
+        let runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
+        let repository = view
+            .git_repository_from_store(
+                layout.clone(),
+                crab_remote_git::RepositoryIdentity::new("qualification", "branch", 1).unwrap(),
+                runtime.clone(),
+                crab_remote_git::RepositoryOptions::default(),
+                LIMIT,
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let operation = repository
+            .operation(crab_remote_git::OperationKind::Repository, &cancel)
+            .await
+            .unwrap();
+        let oids = expected_bodies
+            .iter()
+            .map(|(oid, _)| *oid)
+            .collect::<Vec<_>>();
+        let result = operation.read_objects(&oids).await;
+        let result = operation.finish(result).await;
+        runtime.shutdown().await;
+        assert_eq!(
+            result
+                .unwrap()
+                .into_iter()
+                .map(|object| (object.oid, object.data.to_vec()))
+                .collect::<Vec<_>>(),
+            expected_bodies,
+            "cold {mode} object bytes after source removal",
+        );
+        let catalog = view.pointer_catalog().await.unwrap();
+        let file_hash = crab_xet::hash::merkle_hex_from_bytes(&pointer.file_hash);
+        let shard = MerkleHash::from_hex(catalog.files()[&file_hash].shard_hash()).unwrap();
+        crab_read::pointer_proof::verify_crab_pointer(
+            &layout,
+            &pointer,
+            shard,
+            proof_limits().content,
+            &cancel,
+        )
+        .await
+        .unwrap();
     }
 }
 
