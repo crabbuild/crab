@@ -1,11 +1,13 @@
 //! Staging availability for native push admission.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crab_staging::{StagingAreaReadOnly, StagingError};
+use crab_staging::{StagingAreaReadOnly, StagingError, recipe::FileRecipe};
+use crab_xet::hash::MerkleHash;
 
-use crate::core::error::Result;
+use crate::core::error::{CrabError, Result};
 
 /// A push reader or the precise reason no reader is available.
 #[derive(Clone)]
@@ -42,6 +44,35 @@ impl PushStaging {
             Self::Missing | Self::Locked { .. } => None,
         }
     }
+}
+
+/// Select published or delegated recipes for verified pointers discovered in Git.
+pub(crate) fn recipes_for_selected_pointers(
+    staging: &StagingAreaReadOnly,
+    file_hashes: &[MerkleHash],
+) -> Result<HashMap<MerkleHash, Option<FileRecipe>>> {
+    let mut selected_recipes = staging.published_recipes_for_files(file_hashes)?;
+    let delegated_recipes = staging.external_recipes_for_files(file_hashes)?;
+    // Pointer discovery supplies Git reachability evidence. Delegated
+    // filter/defer leases are eligible only for these selected identities;
+    // unrelated or active native leases never become push-visible here.
+    for (file_hash, delegated) in delegated_recipes {
+        let slot = selected_recipes.get_mut(&file_hash).ok_or_else(|| {
+            CrabError::StagingCorrupt(
+                "delegated recipe lookup returned an unrequested identity".to_owned(),
+            )
+        })?;
+        match (slot.as_ref(), delegated) {
+            (Some(published), Some(delegated)) if *published != delegated => {
+                return Err(CrabError::StagingCorrupt(
+                    "published and delegated recipes disagree for one file identity".to_owned(),
+                ));
+            }
+            (None, Some(delegated)) => *slot = Some(delegated),
+            _ => {}
+        }
+    }
+    Ok(selected_recipes)
 }
 
 #[cfg(test)]

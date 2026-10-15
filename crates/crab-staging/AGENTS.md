@@ -33,6 +33,15 @@ Trace one path: `crab/src/cmd/add.rs` (`close_staging_before_indexing`) →
   Source: `crates/crab-staging/src/lib.rs`.
 - File-version reads must include all ordered chunk occurrences, even when chunk bytes deduplicate; inspect recipe consumers before changing index membership.
   Source: `crates/crab-staging/src/index.rs`.
+  Prepared-only versions remain enumerable through open/delegated leases and
+  push-snapshot pins. Chunk enumeration must not imply Git publication; push
+  admission uses its separate published/delegated selection.
+
+- Segment payload lifetime follows canonical inventory, including recording and
+  sealed recipe owners. Compaction transfers inventory and occurrence locators
+  together; reads capture handles before releasing locator ownership. Layout v3
+  upgrades released v1 locators transactionally before admission.
+  Sources: `crates/crab-staging/src/index.rs`, `crates/crab-staging/src/lib.rs`.
 - Recovery distinguishes confirmed absence from filesystem lookup errors; only absence permits dropping pending locators. It rejects missing/undersized sealed segments; current-segment truncation and index cleanup must agree on the surviving durable data.
   Source: `crates/crab-staging/src/recovery.rs`.
 
@@ -45,6 +54,18 @@ Trace one path: `crab/src/cmd/add.rs` (`close_staging_before_indexing`) →
 
 - Multipart abandonment scans reject unrepresentable clock values; never convert a failed time conversion into an expired-lease cutoff. Provider cleanup still requires claiming the observed row revision.
   Source: `crates/crab-staging/src/multipart_resume.rs`.
+
+- Completed Git-clean and native `--defer` batches delegate publication only after
+  flush and verification. Delegation seals all batch paths and rejects further membership/recording edits.
+  Delegation is not Git-index acceptance. Push may capture
+  only selected pointer identities; retirement preserves uncaptured handoffs and
+  active native owners. Layout v3 upgrades released v1 atomically and rejects the
+  unreleased v2 prototype. Sources: `index.rs`, `lib.rs`, and crate README.
+
+- `StagingPushSnapshot` owns reader fencing and exact snapshot cleanup. Product
+  callers establish remote commit; the guard retains deferred committed journals
+  and preserves unpublished leases on cancellation. Read `src/push_snapshot.rs`
+  and the capsule consumer before changing this boundary.
 
 ## Features and platform
 

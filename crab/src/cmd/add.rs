@@ -35,6 +35,9 @@ use crate::core::error::{self, CrabError, Result};
 use crate::core::output::event_payloads::{FileDonePayload, ProgressPayload};
 use crate::core::output::{JsonlStream, OutputMode, emit_json};
 use crate::core::pattern::{PatternFilter, build_filter};
+#[cfg(test)]
+use crate::git::index::reconcile_publication_intents;
+use crate::git::index::{git_index_path_state, reconcile_publication_intents_writer};
 use crate::git::progress::{format_bytes, format_rate, is_tty, render_bar};
 use crate::git::push::PushConfig;
 use crab_staging::{PublicationIntentEntry, PublicationIntentId, StagingArea, StagingAreaReadOnly};
@@ -1047,7 +1050,7 @@ async fn execute_add(
     // pointers published by the process that just released the staging lock.
     let staging_root = worktree_ctx.shared_staging_dir();
     let lock_wait_start = Instant::now();
-    let staging = Arc::new(open_add_staging(&staging_root, &repo_root).await?);
+    let staging = Arc::new(open_add_staging(&staging_root, &repo_root, cancel).await?);
     let lock_wait_duration_ms = lock_wait_start.elapsed().as_millis() as u64;
     let (candidates, clean_skipped) =
         filter_clean_indexed_candidates(&repo_root, candidates, jobs, cancel).await?;
@@ -1389,6 +1392,37 @@ async fn execute_add(
     }
 
     let publish_git_index = should_publish_git_index(args, &summary, staged_entries.len());
+    if args.skip_git_add && summary.files_failed == 0 {
+        let handoffs = staged_entries
+            .iter()
+            .filter_map(|entry| {
+                entry.batch_id.as_ref().map(|batch| {
+                    (
+                        batch,
+                        entry
+                            .abs_path
+                            .strip_prefix(&repo_root)
+                            .unwrap_or(&entry.abs_path),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        // --defer hands completed versions to a later Git writer. Active
+        // native index transactions stay caller-owned and cannot be retired
+        // merely because another push sees the same file hash.
+        if let Err(error) = staging.delegate_publication(&handoffs) {
+            let cleanup = rollback_unpublished_open_entries(
+                &staging,
+                &mut summary,
+                &mut staged_entries,
+                "external publication handoff failed",
+            );
+            stop_progress_ticker(ticker.take(), &ticker_cancel).await;
+            cleanup?;
+            return Err(error.into());
+        }
+    }
+
     if publish_git_index
         && let Err(error) =
             pin_committed_recipes_before_path_replacement(&staging, &repo_root, &staged_entries)
@@ -1622,12 +1656,16 @@ async fn execute_add(
     Ok(summary)
 }
 
-async fn open_add_staging(staging_root: &Path, repo_root: &Path) -> Result<StagingArea> {
+async fn open_add_staging(
+    staging_root: &Path,
+    repo_root: &Path,
+    cancel: &CancellationToken,
+) -> Result<StagingArea> {
     let staging =
         StagingArea::open_blocking(staging_root.to_path_buf(), ADD_STAGING_LOCK_WAIT_BUDGET)
             .await
             .map_err(CrabError::from)?;
-    reconcile_publication_intents_writer(&staging, repo_root)?;
+    reconcile_publication_intents_writer(&staging, repo_root, cancel)?;
     Ok(staging)
 }
 
@@ -3622,121 +3660,6 @@ fn write_pointer_blob_to_repo(repo: &gix::Repository, payload: &[u8]) -> Result<
         .write_blob(payload)
         .map_err(|e| CrabError::Internal(format!("failed to write pointer blob: {e}")))?;
     Ok(oid.to_string())
-}
-
-fn git_index_path_state(index: &gix_index::File, path: &bstr::BStr) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"crab git index path state v1\0");
-    if let Some(range) = index.entry_range(path) {
-        for entry in &index.entries()[range] {
-            hasher.update(&entry.flags.bits().to_le_bytes());
-            hasher.update(&entry.mode.bits().to_le_bytes());
-            hasher.update(entry.id.as_bytes());
-        }
-    }
-    hasher.finalize().to_hex().to_string()
-}
-
-pub(crate) async fn reconcile_publication_intents(
-    staging: &StagingAreaReadOnly,
-    repo_root: &Path,
-) -> Result<()> {
-    for action in
-        publication_recovery_actions(staging.unresolved_publication_intents()?, repo_root)?
-    {
-        match action {
-            PublicationRecoveryAction::Publish(intent_id) => {
-                staging.publish_publication_intent(&intent_id)?;
-            }
-            PublicationRecoveryAction::Rollback(intent_id) => {
-                staging.rollback_publication_intent(&intent_id).await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn reconcile_publication_intents_writer(staging: &StagingArea, repo_root: &Path) -> Result<()> {
-    for action in
-        publication_recovery_actions(staging.unresolved_publication_intents()?, repo_root)?
-    {
-        match action {
-            PublicationRecoveryAction::Publish(intent_id) => {
-                staging.publish_publication_intent(&intent_id)?;
-            }
-            PublicationRecoveryAction::Rollback(intent_id) => {
-                staging.rollback_publication_intent(&intent_id)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-enum PublicationRecoveryAction {
-    Publish(PublicationIntentId),
-    Rollback(PublicationIntentId),
-}
-
-fn publication_recovery_actions(
-    intents: Vec<crab_staging::UnresolvedPublicationIntent>,
-    repo_root: &Path,
-) -> Result<Vec<PublicationRecoveryAction>> {
-    use bstr::ByteSlice;
-    use gix_index::{File, decode, entry};
-
-    if intents.is_empty() {
-        return Ok(Vec::new());
-    }
-    let index_path =
-        crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)?.index_path();
-    let index = File::at_or_default(
-        &index_path,
-        gix_hash::Kind::Sha1,
-        false,
-        decode::Options::default(),
-    )
-    .map_err(|error| {
-        CrabError::Internal(format!(
-            "failed to read Git index for add publication recovery: {error}"
-        ))
-    })?;
-
-    let mut actions = Vec::with_capacity(intents.len());
-    for intent in intents {
-        let new_matches = intent
-            .entries
-            .iter()
-            .filter(|expected| {
-                index
-                    .entry_by_path_and_stage(
-                        expected.path_bytes.as_bstr(),
-                        entry::Stage::Unconflicted,
-                    )
-                    .is_some_and(|actual| actual.id.to_string() == expected.expected_pointer_oid)
-            })
-            .count();
-        let old_matches = intent
-            .entries
-            .iter()
-            .filter(|expected| {
-                git_index_path_state(&index, expected.path_bytes.as_bstr())
-                    == expected.previous_index_state
-            })
-            .count();
-        if new_matches == intent.entries.len() {
-            actions.push(PublicationRecoveryAction::Publish(intent.intent_id));
-        } else if old_matches == intent.entries.len() {
-            actions.push(PublicationRecoveryAction::Rollback(intent.intent_id));
-        } else {
-            return Err(CrabError::StagingCorrupt(format!(
-                "add publication {} has an ambiguous Git index state ({new_matches}/{} new paths, {old_matches}/{} prior paths); restore one complete index state, then retry",
-                intent.intent_id.as_str(),
-                intent.entries.len(),
-                intent.entries.len(),
-            )));
-        }
-    }
-    Ok(actions)
 }
 
 #[cfg(test)]
@@ -5972,7 +5895,8 @@ mod tests {
             let repo_root = repo_root.clone();
             let path = path.clone();
             async move {
-                let staging = open_add_staging(&root, &repo_root).await?;
+                let staging =
+                    open_add_staging(&root, &repo_root, &CancellationToken::new()).await?;
                 let filtered = filter_clean_indexed_candidates(
                     &repo_root,
                     vec![(path, data.len() as u64)],
@@ -6306,7 +6230,9 @@ mod tests {
         assert!(intent.is_some());
         staging.close().await.unwrap();
 
-        let recovered = open_add_staging(&staging_root, &repo).await.unwrap();
+        let recovered = open_add_staging(&staging_root, &repo, &CancellationToken::new())
+            .await
+            .unwrap();
 
         assert!(
             recovered
@@ -6352,7 +6278,7 @@ mod tests {
         staging.close().await.unwrap();
 
         let recovered = StagingAreaReadOnly::open(staging_root).await.unwrap();
-        reconcile_publication_intents(&recovered, &repo)
+        reconcile_publication_intents(&recovered, &repo, &CancellationToken::new())
             .await
             .unwrap();
 
@@ -6368,6 +6294,187 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "exact prior index state must roll back the unpublished recipe"
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_recovery_preserves_attempt_while_git_index_is_locked() {
+        for read_only in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path().join("repo");
+            std::fs::create_dir(&repo).unwrap();
+            assert!(init_git_repo(&repo));
+            let root = repo.join(".crab/staging");
+            let staging = StagingArea::open(root.clone()).await.unwrap();
+            let path = PathBuf::from("model.bin");
+            let data = b"Git has not installed its pointer yet";
+            let (batch_id, file_hash) = stage_publication_recipe(&staging, &path, data).await;
+            let index = read_test_index(&repo);
+            staging
+                .create_publication_intent(&[PublicationIntentEntry {
+                    batch_id,
+                    path: path.clone(),
+                    expected_pointer_oid: "1111111111111111111111111111111111111111".to_owned(),
+                    previous_index_state: git_index_path_state(
+                        &index,
+                        git_index_path_bstring(&path).as_bstr(),
+                    ),
+                }])
+                .unwrap();
+            let lock = gix_lock::Marker::acquire_to_hold_resource(
+                repo.join(".git/index"),
+                gix_lock::acquire::Fail::Immediately,
+                None,
+            )
+            .unwrap();
+            let (error, intents, bytes) = if read_only {
+                staging.close().await.unwrap();
+                let staging = StagingAreaReadOnly::open(root).await.unwrap();
+                let result =
+                    reconcile_publication_intents(&staging, &repo, &CancellationToken::new()).await;
+                (
+                    result.unwrap_err(),
+                    staging.unresolved_publication_intents().unwrap().len(),
+                    staging.get_chunk(&compute_data_hash(data)).await.unwrap(),
+                )
+            } else {
+                let result = reconcile_publication_intents_writer(
+                    &staging,
+                    &repo,
+                    &CancellationToken::new(),
+                );
+                let state = (
+                    result.unwrap_err(),
+                    staging.unresolved_publication_intents().unwrap().len(),
+                    staging.get_chunk(&compute_data_hash(data)).await.unwrap(),
+                );
+                staging.close().await.unwrap();
+                state
+            };
+            let owns_lock = repo.join(".git/index.lock").exists();
+            drop(lock);
+            assert!(
+                matches!(error, CrabError::Io(_))
+                    && intents == 1
+                    && bytes.as_deref() == Some(data.as_slice())
+                    && owns_lock,
+                "{file_hash}: recovery must preserve the attempt and other owner's lock"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn publication_recovery_waits_for_real_git_clean_index_installation() {
+        struct GitWriter(std::process::Child, PathBuf);
+        impl Drop for GitWriter {
+            fn drop(&mut self) {
+                // Release the child filter as well as the Git parent on panic.
+                let _ = std::fs::write(&self.1, b"");
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        assert!(init_git_repo(repo));
+        let root = repo.join(".crab/staging");
+        let staging = StagingArea::open(root.clone()).await.unwrap();
+        let path = PathBuf::from("model.bin");
+        let data = b"real Git clean has not returned its pointer";
+        let (batch_id, file_hash) = stage_publication_recipe(&staging, &path, data).await;
+        let pointer = Pointer {
+            file_hash: file_hash.into(),
+            size: data.len() as u64,
+            shard_hint: None,
+        }
+        .serialize();
+        let expected_pointer_oid = write_pointer_blob(repo, &pointer).unwrap();
+        staging
+            .create_publication_intent(&[PublicationIntentEntry {
+                batch_id,
+                path: path.clone(),
+                expected_pointer_oid,
+                previous_index_state: git_index_path_state(
+                    &read_test_index(repo),
+                    git_index_path_bstring(&path).as_bstr(),
+                ),
+            }])
+            .unwrap();
+        staging.close().await.unwrap();
+        let staging = StagingAreaReadOnly::open(root).await.unwrap();
+        std::fs::write(repo.join(&path), data).unwrap();
+        std::fs::write(
+            repo.join(".gitattributes"),
+            b"model.bin filter=paused -text\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("filter.pointer"), pointer).unwrap();
+        std::fs::write(repo.join("filter.sh"),
+            b"cat > /dev/null\n: > filter.ready\nwhile test ! -e filter.release; do sleep 0.01; done\ncat filter.pointer\n"
+        ).unwrap();
+        let mut git = GitWriter(
+            std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "filter.paused.clean=sh filter.sh",
+                    "-c",
+                    "filter.paused.required=true",
+                    "add",
+                    "--",
+                    "model.bin",
+                ])
+                .current_dir(repo)
+                .spawn()
+                .unwrap(),
+            repo.join("filter.release"),
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !repo.join("filter.ready").exists() {
+                assert!(
+                    git.0.try_wait().unwrap().is_none(),
+                    "Git exited before cleaning"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let blocked = reconcile_publication_intents(&staging, repo, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        let retained = staging.unresolved_publication_intents().unwrap().len() == 1
+            && staging
+                .get_chunk(&compute_data_hash(data))
+                .await
+                .unwrap()
+                .as_deref()
+                == Some(data.as_slice());
+        std::fs::write(repo.join("filter.release"), b"").unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(status) = git.0.try_wait().unwrap() {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(status.success(), "Git index installation failed");
+        reconcile_publication_intents(&staging, repo, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(
+            matches!(blocked, CrabError::Io(_))
+                && retained
+                && staging.unresolved_publication_intents().unwrap().is_empty()
+                && staging
+                    .published_recipe_for_file(&file_hash)
+                    .unwrap()
+                    .is_some()
+                && !repo.join(".git/index.lock").exists(),
+            "recovery must retain bytes during clean and publish after Git installs the pointer"
         );
     }
 
@@ -6417,7 +6524,7 @@ mod tests {
         staging.close().await.unwrap();
 
         let recovered = StagingAreaReadOnly::open(staging_root).await.unwrap();
-        let error = reconcile_publication_intents(&recovered, &repo)
+        let error = reconcile_publication_intents(&recovered, &repo, &CancellationToken::new())
             .await
             .expect_err("mixed publication state must fail closed");
 

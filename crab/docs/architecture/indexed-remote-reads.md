@@ -1688,3 +1688,511 @@ strict local-cache all-target Clippy. The full failed workload still needs a
 rerun. The pinned SQLite 3.49.1 is also affected by the upstream WAL-reset
 race; a matched Crab/Cellule dependency upgrade is required before release
 qualification. Remaining consumer, lifecycle and 10 GiB gates still apply.
+
+
+## Prepared reuse retains payloads before recipe sealing
+
+The unified-staging inventory exposed a reproducible ownership gap in
+`Index::claim_prepared_chunks`. A direct-stream preparation could select an
+existing prepared Xorb without retaining it. Rolling back the original recipe
+then removed the canonical placement and physical body before the incoming
+recipe sealed. The negative control returned `ChunkNotFound` from a real staged
+payload read; its receipt is `prepared-reuse-retention-negative.log`.
+
+Selection now inserts the existing `preparation_payloads` pin in the same
+SQLite transaction, once per distinct Xorb in the bounded claim batch. Existing
+recipe sealing, finalization, abort, replacement and retirement paths already
+respect this ownership table. No schema, public API, chunk precedence, format,
+dependency version or configuration changes. Production growth is thirteen
+lines at the owner boundary; tests cover actual payload survival and release.
+
+The regression streams real bytes through CDC and the prepared-Xorb writer,
+selects them for another preparation, and rolls back their original recipe.
+Both abort and seal/publish/release branches verify byte-identical reads while
+owned and absence after final retirement. A separate transaction regression
+injects an insertion failure and a later size conflict; neither leaves pins,
+and the insertion error retains its typed SQLite cause. The pinned rusqlite
+0.34.0 transaction implementation defaults to rollback on drop.
+
+Proof: 35 focused prepared-payload cases and 29 streaming lifecycle cases pass;
+the existing manual 128-MiB RSS case remains ignored. Selected formatting and
+all-targets staging Clippy pass with the repository CI exception for unfulfilled
+lint expectations. The unrestricted Clippy attempt fails only on two unchanged
+`double_must_use` expectations in `add_push_plan.rs`; its failed receipt remains
+preserved. No lint annotations or gate inventories are changed in this slice.
+
+This slice is a prerequisite, not completion of unified staging. Segment-backed
+reuse needs separate retention, lookup and compaction proof: claims consult
+`chunk_payloads`, while ordinary readers still consult committed/pending
+occurrence rows. Git-clean retains its separate streaming implementation.
+Unifying ingestion requires preserving every occurrence, native rollback and
+clean flush-before-pointer ordering, followed by the alternating 10-GiB
+multi-edit/push/read qualification. Representative S3 qualification and the
+remaining indexed history/catalog/lifecycle/blame gates remain open.
+
+## Segment reuse has independent payload ownership
+
+The sibling audit reproduced `ChunkNotFound` after a direct-stream recording
+selected segment-backed chunks and their original recipe rolled back. It also
+found stale canonical locators after compaction: the previous compactor moved
+file occurrence rows while leaving `chunk_payloads` at the original position.
+The negative receipt is `segment-reuse-negative.log`.
+
+Segment point/batch reads, deduplication and registration now share canonical
+payload inventory. Cleanup retains inventory while any raw occurrence, recording
+term or sealed recipe owns the chunk. Recordings therefore survive original-file
+retirement before sealing, without copying segment bytes or fabricating file
+occurrences. Batch rollback releases its recording retention. Sealed recipes keep
+all ordered occurrences, including repeats, independently of physical deduplication.
+
+Compaction counts and copies each retained physical payload once, moves inventory
+and committed/pending locators in one transaction, and retires the old segment
+registry entry before unlink. Output allocation is provisional within that
+transaction; failures cannot publish a second current segment. Durable output
+installation precedes locator transfer. Exclusive-open recovery removes orphan
+compaction bodies only when neither registry nor canonical inventory references
+them; a referenced unregistered body fails as corruption and remains intact.
+Current-segment recovery includes retained recipe payload boundaries. Segment
+handles are captured with locators before releasing the owner lock, so compaction
+and reader-pool eviction cannot invalidate captured reads. No synchronous guard
+crosses an await. Abandoned cleanup preserves writer-to-index lock ordering.
+
+Release inspection confirms staging layout v1 and the old compactor in v1.2.4.
+Layout v2 repairs stale inventory from the committed/pending locators released
+readers used, with committed precedence, then updates admission atomically.
+Both writable and shared handles can perform this metadata-only upgrade under
+their existing SQLite serialization contract. Old binaries reject v2 admission.
+Tables, index inventories, payload encoding and public Rust APIs are unchanged.
+Upgrade failures retain v1 admission and old locators; missing retained segment
+dependencies fail explicitly. Normal v2 opening does not repeat the migration
+scan. Migration cannot reconstruct bytes already deleted by an older binary.
+
+The released corrupt-prepared-plan repair contract still uses surviving segment
+occurrences. Coalesced planning preserves that source preference with batched hash
+lookups, while prepared-only source groups stay bounded to one Xorb. Canonical
+inventory retention is not confused with the presence of those old occurrence
+rows. The stricter recipe-page occurrence proof used by product plan repair is
+unchanged; it is not a new permissive fallback or a claim of unified ingestion.
+
+Real file cases cover recording versus sealed reuse, current versus compacted
+segments, original rollback, ordered repeated chunks, captured reads after pool
+eviction/unlink, close/reopen and final release. SQLite cases cover two recording
+owners, incomplete transfer rollback, writable/shared released-shape upgrade and
+early/late upgrade failure with typed causes. A real failed-compaction case checks
+one current segment, byte-identical recovery and orphan cleanup. The existing
+compaction property fixture follows the changed private transaction API; its
+read assertions are preserved. Failed receipts remain recorded.
+
+Proof: the final staging run passes 233 cases with the existing manual RSS case
+ignored. Selected formatting and all-targets Clippy pass with the repository's
+existing unfulfilled-expectation exception. Seven product push-plan cases pass,
+including corrupt-body segment repair, stale remote placements, global dedup and
+prepared reuse without rereading. The minimal CLI consumer profile emits its
+existing disabled-feature warnings; this is not a clean CLI-wide lint claim.
+Production code before test modules shrinks by 146 lines across the three changed
+Rust modules. Public dependency manifests, lockfiles and gate inventories are
+unchanged. Broader CI and real-provider performance qualification remain required.
+
+Unified byte ingestion, native/Git-clean crossover publication policy and the
+10-GiB alternating multi-edit/push/read grid remain required. Representative S3
+qualification, pending pack-layout gate approval and the remaining indexed
+history/catalog/lifecycle/blame gates also remain open.
+
+### Shared byte-ingestion foundation
+
+Native descriptor staging now delegates to an `AsyncRead + Unpin` ingestion
+engine. `stage_reader_streaming` exposes that same engine for non-seeking byte
+sources; it does not open or stat its logical lease path. Native wrappers retain
+descriptor/path identity validation and changed-file detection. CDC, hashing,
+ordered recipes, preparation ownership and failure cleanup stay in one engine.
+Pending segment authority flushes before the returned version lease is recorded.
+The result retains an open batch; callers still own publication or rollback.
+
+A bounded pipe test covers both segment and prepared-Xorb modes, closes no
+staging handle before recovery, and verifies reconstructed bytes, file identity
+and absent source metadata. Cancellation of a pending read previously timed out;
+the retained negative receipt is `unified-stream-cancel-negative.log`. A token
+branch now wakes that read and runs attempt cleanup. Tokio 1.53.1 documents
+`read_buf` as cancellation-safe when another `select!` branch wins. The focused
+stream run passes 31 cases with the existing manual RSS case ignored.
+
+This is a draft foundation, not completed native/Git-clean unification. Packet
+transport wiring, exact prepared-recipe replay, deferred Git-index publication
+and crossover failure/10-GiB qualification remain required. The separate
+10-GiB run uses the preceding segment-lifecycle binary; it is not evidence for
+this extraction. Per-file flush cost and short-read performance remain unmeasured.
+
+### Git-index publication recovery serialization
+
+The unified-staging audit reproduced recovery returning success while another
+writer still held Git's index lock. Recovery previously inspected the prior
+index without serialization and could roll back a still-active publication.
+The negative receipt is `index-recovery-lock-negative.log`; its source patch is
+retained separately. Git 2.50.1's [add implementation](https://github.com/git/git/blob/v2.50.1/builtin/add.c)
+holds that lock during cleaning, then installs the index after conversion.
+Filter success therefore cannot attest to index publication.
+
+Publication recovery now belongs to `crab/src/git/index.rs`, shared by native
+add and push. It uses gix-lock 23.0.1's non-writing Marker to acquire the exact
+index lock, reads the index and fresh intent list under that lock, and keeps the
+marker until staging publication/rollback finishes. Lock acquisition fails
+immediately to avoid waiting in the inverse Git-index/staging order used by
+Git and its filter child. The typed lock error remains an I/O source. Drop
+releases only the marker acquired by recovery; no index replacement is written.
+Existing exact-new, exact-prior and ambiguous-state decisions are preserved.
+No schema, path encoding, intent format or dependency changes are required.
+
+The regressions cover both exclusive and shared staging handles. A real Git
+child pauses inside a controlled clean filter: recovery must retain the recipe
+and payload until Git finishes installing its pointer, then publish on retry.
+The test releases its filter and reaps Git on exit. Two publication-focused
+runs each pass 26 tests, including both handle variants and the real Git child.
+The production Clippy contract from `.github/workflows/rust.yml` passes with
+the minimal consumer profile and existing warnings. The broader all-test
+invocation fails on existing test lint debt; new test `expect` calls were
+corrected without changing assertions or adding suppressions. Both successful
+and failed receipts remain retained. This fixes the recovery boundary; routing
+Crab's clean stream through shared ingestion and deferring its recipe
+publication remain required.
+
+### Unified production byte ingestion and external publication handoffs
+
+Production Git-clean now routes ordinary bytes and changed prepared streams through
+`crab-staging::stream::stage_reader_streaming`, the same engine native add uses.
+Packet adaptation consumes exactly one filter request and preserves its terminal
+flush. It restores typed framing errors after ingestion cleanup. The synchronous
+filter runs on its existing blocking thread; this does not promise interruption
+of a stalled underlying blocking stdin read. Short reads coalesce before CDC to
+avoid retaining a full read allocation per small packet. Exact prepared inputs
+are verified without CDC or rewriting payloads. Changed inputs replay bounded
+verified chunks from a pinned recipe, then continue with the supplied stream.
+Late edits still pay prefix reread/CDC cost; no speedup is claimed without measurement.
+
+Git's filter success precedes its index installation. A new durable handoff owner
+therefore distinguishes externally delegated leases from active native batches
+and published path heads. Git-clean and native `--defer` delegate only complete,
+verified recipes with durable payloads. Native atomic index publication retains
+its existing intent and rollback protocol. Pointer discovery precedes batched
+published/delegated recipe selection in push. Snapshots capture exact eligible
+leases and retire only captured owners after remote publication, preserving active
+native owners and handoffs created after capture. Both direct and intent publication
+supersede only published leases; another caller's open lease remains its property.
+The old test requiring deletion of an open prepared owner was removed because its
+behavior violated this invariant; the new regression covers both publication paths.
+
+Layout v3 adds the handoff table with a cascading composite lease foreign key.
+Released v1 schema creation, locator repair and admission update commit together;
+upgrade failure preserves the released shape. The unreleased v2 prototype is
+rejected rather than receiving a compatibility reader. The released v1.2.4 public
+custom `ChunkStager` API retains its adapter until a breaking library release;
+production local ingestion uses the canonical engine. No dependency or lockfile
+changes are required.
+
+This remains draft work. New-path 10-GiB multi-edit/push/reconstruction, representative
+S3 performance, Git termination and abandoned-handoff reconciliation/reclamation,
+full failure injection and broad CI remain required. The concurrent 10-GiB run is
+pinned to the older segment-lifecycle binary and cannot qualify these changes.
+
+The final expanded local clean consumer run passes 57 tests. The six-version
+crossover exercises both native/Git orders, an unchanged transition, middle/tail
+edits, append and truncation. It compares physical prepared-body names and sizes
+on the unchanged transition and bounds retained physical growth for small edits,
+besides reconstructing every ordered recipe exactly. Staging passes 238 tests
+with one existing manual RSS test ignored. Packet/push/publication and lint
+receipts remain pending; these local cases do not establish the 10-GiB gate.
+
+CI on `ffcc26edd0d` fails the existing pack-layout architecture assertion in
+`crab/src/read/mod.rs`, requiring the retired direct installer symbol. The failing
+job is `116161095860` in run `38654549030`. The previously proposed gate update
+remains pending approval; no baseline or gate inventory has been changed.
+
+The follow-up real-staging malformed-input case passes: a complete changed payload
+without Git's terminal flush returns the original typed EOF error, retains the
+prior prepared recipe and leaves exactly its original batch/lease ownership.
+Both the temporary prepared-prefix pin and reader attempt are released. This
+adds failure proof through the production adapter, rather than only a mocked
+stager or packet reader. Two packet tests, one delegated push-admission test,
+seven prepared-plan tests and 26 publication tests also pass. Staging all-targets
+Clippy passes with the existing unfulfilled-expectation exception. The minimal
+product consumer passes the CI correctness/suspicious lint profile with existing
+warning debt; strict full-CLI lint cleanliness is not claimed. No production Rust
+changes accompany this follow-up test.
+
+### Delegated index acceptance during explicit staging maintenance
+
+A follow-up slice freezes delegated batch membership, rejects unfinished recording
+or preparation ownership, and requires every completed path to be handed off in
+one transaction. It keeps released mutable-open-batch behavior before delegation.
+The maintenance listing rejects partial or unverified ownership instead of
+publishing a subset of an ambiguous batch. Direct publication consumes delegation
+markers in the same transaction that installs canonical path heads.
+
+`crab staging clean` now checks delegated batches under Git's existing immediate
+index lock. It reloads immutable lease identities under that lock and retains the
+lock through promotions. Every batch path must have a regular-file index entry
+whose verified pointer blob matches its file hash and size. Object headers reject
+large raw blobs before loading their body; loaded small blobs are checked against
+their Git object ID and parsed with the shared pointer contract. Gix 0.83.0's
+`find_header` uses gix-odb 0.80.0's fixed loose-header buffer; locked gix-pack 0.70.0
+probes delta headers in 32 bytes. Header inspection does not prove full packed
+base reconstruction cost, and this is explicit maintenance rather than a new
+foreground query. Typed dependency causes are retained. Cancellation drops the
+owned Git lock and preserves batches not yet promoted.
+
+Missing/different entries retain their leases, including native `--defer` work
+and older unpushed history. Current index absence cannot establish that payloads
+are disposable. Full abandoned-handoff reclamation and termination qualification
+remain required; this slice does not add a silent age-based expiry or a ref-tip-only
+history scan. Normal push keeps its selected published/delegated batch lookup.
+
+Proof: the staging library passes 242 tests with one existing manual RSS test
+ignored. The Git-index module passes four tests, including three new real-Git
+cases covering acceptance, held index locks, complete multi-path batches, shared
+native ownership, invalid small blob identities and oversized raw-blob headers.
+The public occurrence regression also passes after the final ownership-query
+change. Consumer checks remain in progress at draft publication. The separate
+qualification worktree and release artifact remain pinned to #566.
+
+The follow-up occurrence audit reproduced `chunks_for_file` returning an empty
+list for a real prepared-only, verified open version: the public readers selected
+only published recipes, then consulted segment rows. The negative receipt is
+`retained-recipe-visibility-negative-r1.log`. Both writable and shared hash/size
+readers now use any retained verified immutable recipe, including native/delegated
+leases and push snapshot pins. Recipe conflicts still fail, and publication/push
+eligibility remains a separate, unchanged query. Unsealed segment enumeration
+keeps its released staging contract. The public regression compares against direct
+CDC, retains repeated occurrences and covers before/after delegation on both
+handle types. The corrected regression passes with snapshot-only retention after batch rollback
+and empty enumeration after the final snapshot release.
+
+The separate #566 release-artifact 10-GiB qualification completed native add and
+initial push, then Git-clean add and commit. Its next push failed with
+`CRAB-E0080`: the pointer file had no staged chunk recipe in publication assembly
+(`crab/src/git/xet_publication.rs`). The failed fixture retains both delegated
+leases. This maintenance/occurrence slice does not resolve that push blocker;
+full alternating-path and cold-reconstruction qualification remains incomplete.
+
+### Capsule publication uses selected delegated recipes
+
+The preserved 10-GiB failure identifies a verified delegated recipe with 166,469
+ordered occurrences and a 10,737,418,240-byte size. Public occurrence enumeration
+was fixed in #569, but capsule assembly still loaded prepared plans and remote
+chunk authority through published-only queries. That would reconstruct delegated
+files and rebuild their xorbs instead of using their ingestion proof.
+
+A minimized real-staging regression also demonstrates capsule assembly accepting
+an active native batch before handoff. The negative run completes with the
+assertion `unaccepted or inconsistent recipe became publishable` in
+`capsule-handoff-negative-r1.log`; its source patch is captured separately.
+
+The follow-up moves the existing published/delegated merge rule into
+`crab/src/git/push_staging.rs`, shared by pipeline admission and capsule assembly.
+Capsule assembly requires a selected verified recipe with the pointer's exact
+size, reads its ordered pages, and batches prepared authority by recipe identity.
+It reads remote authority from that same recipe. Physical xorbs still undergo
+body, logical-hash and placement verification before they become dependencies.
+There is no admission path for an unrelated active native lease.
+
+The new regression covers native rejection, delegated size mismatch, and exact
+preservation of a non-default prepared encoding. All nine publication tests pass, including the new three-case regression and
+existing protected-publication, catalog-integrity, deduplication and concurrency
+cases. Real 10-GiB retry and cold historical reconstruction remain pending.
+The historical catalog scan in `prepare_delta` remains stage 6 work.
+
+The caller audit confirms `crab/src/cmd/push.rs` and the remote helper both use
+`capsule_push::run`. Neither those success paths nor capsule publication currently
+captures or retires staging push snapshots. The legacy pipeline's snapshot tests
+therefore do not qualify capsule lifecycle. A separate follow-up must bind exact
+selected owners before publication and release only proven committed owners,
+including cancellation, partial/ref-CAS failure and concurrent readers. Until that
+is implemented and tested, local post-push reclamation is not qualified.
+
+### Capsule snapshot lifecycle follow-up
+
+Capsule push fences retirement before selecting local recipes, pins selected
+published/delegated owners, and retains that snapshot through upload and ref
+publication. Confirmed remote commit precedes the local committed journal and
+exact retirement. Local cleanup errors leave maintenance work and preserve the
+successful remote result. Ref rejection or failure retains unpublished leases.
+
+`StagingPushSnapshot` owns marker/snapshot cleanup on drop, including task abort.
+Sibling readers defer retirement to exclusive maintenance. It shares the existing
+index and physical-payload implementation with the released asynchronous API;
+there is no storage-format or dependency change. Guard tests cover drop, task
+abort, shared native ownership, sibling deferral and local journal failure.
+
+Native publication-intent recovery now runs in capsule push before snapshot
+admission. Recovery uses Git's immediate index lock. If the complete prior index
+state is restored, a bounded-memory local Git object walk checks refs and reflogs
+before native rollback. Recipes still referenced there acquire canonical history
+owners before native leases are released. Cancellation or an incomplete history
+walk fails without authorizing rollback. Ordinary pushes without unresolved
+intents do not perform this history scan; this does not replace the historical
+remote-catalog indexing workstream.
+
+The minimum Git 2.30 dependency contract supports the selected walk flags and
+includes other worktrees with `--all --reflog` by default
+([revision options](https://github.com/git/git/blob/v2.30.0/Documentation/rev-list-options.txt)).
+Its transport allowlist takes precedence over configured transport permissions
+([transport implementation](https://github.com/git/git/blob/v2.30.0/transport.c));
+the empty allowlist prevents an implicit fetch during local recovery. Windows
+startup sets stdout to binary mode, matching the OID parser's LF delimiter
+([MinGW startup](https://github.com/git/git/blob/v2.30.0/compat/mingw.c)).
+
+Both exclusive native-add recovery and shared push recovery use this ownership
+rule. The shared staging helper validates all requested recipes against the
+intent before adding history owners, preserves the original intent across an
+interrupted prefix, and permits an idempotent retry. Prepared-only recovery tests
+cover subset retention, full reconstruction and physical xorb deletion only after
+confirmed snapshot commit.
+
+Both protected finalize clients use the shared auth response validator. A response
+with coordinator metadata must attest `Committed` or `Materialized` before it can
+permit local retirement. `Pending`, `ObjectsUploaded` and `Aborted` are rejected;
+the existing successful response without coordinator metadata remains supported.
+The minimal protected-push suite passes 30 tests.
+
+The existing managed-file smoke checks post-push owners, snapshots, raw payloads
+and prepared ownership bytes for native and Git helper push. The frozen #566 CLI
+baseline completes native add/commit/push and verifies the remote tip, then fails
+the retirement assertion with retained owners/prepared payload. Corrected CLI
+proof and final-source 10-GiB qualification remain required.
+
+The large-file harness adds `--pattern entropy|repeated|zero`; entropy preserves
+its original seed/default. Repeated input uses a deterministic one-MiB block;
+zero input writes real blocks. All patterns retain four alternating native/Git
+versions, beginning/middle/end edits, two-file identity checks, source removal and
+cold historical reconstruction. Syntax checks pass; the new patterns are unrun.
+
+The frozen #570 release build succeeds with `simd-accel,gix-pathmatch` and no
+default features. Its binary hash is recorded externally. Resumed workload
+`unified-ingestion-10g-r3` passes the formerly failing v1 Git-clean push and the
+subsequent v2 native push, with 2,216,109 and 2,133,870 incremental xorb bytes.
+The full workload is still running; cold historical reconstruction is unproven.
+This artifact precedes the lifecycle and finalize-contract changes above.
+
+
+The 10-GiB harness also selects `--first-ingestion native|git`, covering both
+native→clean→native and clean→native→clean. Receipts include the selected order
+and each add's ingestion path. After each add, the harness rejects local
+segment/prepared storage (including temporary stream bodies) beyond one initial
+representation, cumulative edited
+bytes and metadata allowance (10% of source size, at least 32 MiB). This detects
+the observed extra full 10-GiB representation; it is not a latency target or a
+claim that all allowed overhead is necessary. Existing runs retain their
+original harness identity and cannot prove these newly added checks.
+
+The local history dependency probe additionally reproduces exit zero with a
+missing reflog commit and an omitted expected pointer. Git reports that partial
+walk only through diagnostics; its
+[reflog traversal implementation](https://github.com/git/git/blob/v2.30.0/revision.c)
+confirms that contract. Recovery therefore requires a diagnostic-free successful
+walk before accepting absence. A warning retains the unresolved intent and its
+payloads; there is no log-message matching or alternate deletion path. Both a
+missing reflog tip and a missing referenced tree are regression cases. Earlier
+consumer builds do not qualify this tightened scanner until rerun.
+
+An extracted-source probe compiles the exact helper and canonical subprocess
+owner against the frozen release's actual error/dependency types. The old helper
+accepts the incomplete walk (negative runtime exits 1); the tightened helper
+preserves the healthy reflog result and rejects the missing tip (positive runtime
+exits 0). Source hashes are recorded with both probes. This is function-level
+runtime proof; the full updated consumer still needs its own Cargo/CLI run.
+
+
+Reduced crossover qualification passes with the frozen #570 release: Git-first
+repeated data and native-first zero data, each with two 128-MiB files, four
+versions, source removal, eight cold file digests and remote fsck. Each run records
+71 commands and 53 passing checks. An older debug binary fails the new storage
+assertion after its first native-to-clean switch: 67,156,162 prepared bytes plus
+68,224,532 segment bytes exceed the 102,760,448-byte bound for its 64-MiB input.
+These runs qualify the order/storage oracle; they do not qualify the final
+lifecycle source or replace the full 10-GiB matrix. The later inclusion of
+stream-temporary bytes in the accounting remains part of that final matrix.
+
+The dedicated #572 provider run passes its provider contract and the initial
+native cutover push's retirement check, then stops at the old missing-manifest
+fixture. It deleted a retired key while `v2/root` remained authoritative. Missing
+and corrupt fixtures now initialize a healthy repository, attest the live root,
+and verify their deletion/overwrite took effect before requiring list/clone to
+fail. Corruption still requires the integrity error; expectations were not
+relaxed. Both updated fixtures pass against the unchanged #570 root consumer
+(23 commands, 23 checks), and the 11 source-isolation tests pass. The explicit
+v1 upgrade/reset fixtures remain separate. Full final-source canary proof is
+still pending.
+
+## Forced publication without a local remote tip
+
+A clone can diverge after another writer advances the remote. Its explicit
+force push must not require fetching the discarded tip. Capsule admission now
+allows an unavailable ancestry result only for an explicitly forced update or
+matched ref lease when receive policy permits rewrites. Stale leases and
+`receive.denyNonFastForwards` still reject; publication retains its expected-old
+conditional transition. Real ancestry-probe errors remain errors.
+
+Proven fast-forwards and rewrites with an available prior tip keep incremental
+visibility. Rewrites lacking that tip publish the
+existing authenticated replacement-closure representation, walking only the
+new tip. This removes old objects from that ref's authorization without reading
+discarded history. Pack generation and LFS publication already exclude only
+remote tips present in the local object database. Both native CLI and Git
+remote-helper publication use this capsule owner.
+
+The regression matrix covers ordinary, forced, matched/stale lease and denied
+updates with the old remote commit absent locally. Successful rewrites verify
+the remote tip, revoke old-tip visibility, install packs into an independent
+repository and run Git connectivity checks. The existing RustFS ref matrix
+also exercises native and remote-helper force pushes without fetching first.
+These tests remain pending until the updated-source CI run completes.
+
+## Packed-object qualification fault fixture
+
+The Git-current protocol canary stopped before corruption injection because the
+LFS pointer blob was packed, while the fixture opened a loose-object pathname.
+The same failure reproduces locally after `git repack -ad`.
+
+The fixture now exports its small disposable source history and unpacks it into
+an empty object database before injection. Healthy packed duplicates cannot
+mask the corrupt loose blob. The original object database is moved aside and
+restored in `finally`; the success check compares every original object-file
+hash, the pointer, source/remote refs and working bytes. The caller deliberately
+packs its source first so the previous failure remains a regression case.
+The checksum mismatch and successful restored dry run remain required.
+
+This changes qualification setup only. Full Git-current CI remains required;
+a source-layout repair does not establish a product-level compatibility result.
+
+Local proof with the unchanged #572 release: the repaired packed-source mirror
+workflow passes 66 commands and 13 checks; deliberate assertion failure after
+the verified checksum rejection restores every original object-file hash and
+passes strict Git fsck (34 commands, three checks; cleanup scope only). Seventeen
+existing log/source-isolation tests pass. These are selected fixture and mirror
+receipts, not a full final-source protocol qualification.
+
+## Combined indexed-catalog and staging qualification
+
+The integration branch uses `4ebfc3dcece` as its base: captured catalog lookups,
+run/checkpoint pages, persistent cache WAL policy and the fixed SQLite runtime.
+It applies the canonical staging, recovery, exact snapshot retirement and force
+publication work through `033bc5042cf`. Catalog encoding and visibility owners
+remain those of the indexed branch; no hybrid format or alternate reader is
+introduced. The two benchmark audit reports remain excluded.
+
+The large-file harness now checks exact staging retirement after every push.
+Managed smokes, committed-history smokes and the multi-edit harness share the
+same assertion for heads, leases, unpublished batches, reclaimable ownership,
+snapshot journals and payload references. Existing check names remain intact.
+The stronger oracle passes 83 commands and 65 checks with the frozen #572
+release. Its negative control rejects #570 after a successful publication:
+two path heads, two leases, 65 payload records and 4,194,304 retained segment
+bytes remain. These receipts establish the oracle and staging component; they
+do not qualify the new integrated binary or catalog format.
+
+Combined-source CLI compilation and runtime qualification are still pending.
+Remaining catalog consumers include shared/protected preparation, pinned
+hydration/mount lookup and the current-state file lookup opener. Complete
+inspection remains appropriate for fsck, compaction and GC; foreground lookups
+must not inherit those scans. Carry forward applicable CLI range/cancellation
+contracts before final qualification. The complete integrated 10-GiB matrix,
+history scaling, lifecycle/migration, fuller blame and representative S3 gates
+remain open.

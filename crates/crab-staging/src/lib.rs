@@ -1,6 +1,6 @@
 //! Segment-based staging area for chunks awaiting upload.
 //!
-//! Canonical layout (v1):
+//! Canonical layout (v3, with transactional upgrade from released v1):
 //! ```text
 //! {root}/
 //! ├── segments/
@@ -44,6 +44,7 @@ mod index;
 pub mod metrics;
 pub mod multipart_resume;
 pub mod push_plan;
+mod push_snapshot;
 pub mod recipe;
 mod recovery;
 mod segment;
@@ -69,6 +70,7 @@ mod prop_torn_tail_recovery;
 pub use config::StagingConfig;
 pub use error::{Result, StagingError};
 pub use metrics::StagingMetrics;
+pub use push_snapshot::StagingPushSnapshot;
 pub use stats::{
     CompactionStats, RetireStats, StagingCleanStats, StagingLifecycleHealth, StagingStats,
     StagingVerifyStats,
@@ -92,7 +94,7 @@ use self::index::{
     ExistingChunkWrite, FileChunkLocator, Index, IndexedCoalescedReadGroup, PendingRow,
     PreparedChunkLocator, PreparedXorbPlacementWrite, PreparedXorbWrite, RecipeVerification,
 };
-use self::segment::{ChunkLocator, PreparedRecord, ReaderPool, SegmentWriter};
+use self::segment::{ChunkLocator, PreparedRecord, ReaderPool, SegmentReader, SegmentWriter};
 
 /// Default flush threshold in bytes (256 MiB). When pending bytes exceed
 /// this, the current durability boundary is recorded or the segment is sealed.
@@ -163,6 +165,15 @@ pub struct PublicationIntentEntry {
     pub path: PathBuf,
     pub expected_pointer_oid: String,
     pub previous_index_state: String,
+}
+
+/// Immutable external lease identity for Git-aware maintenance recovery.
+#[derive(Debug, Clone)]
+pub struct DelegatedPublication {
+    pub batch_id: StagingBatchId,
+    pub path_bytes: Vec<u8>,
+    pub file_hash: MerkleHash,
+    pub size: u64,
 }
 
 /// Durable unresolved publication state returned for product-layer recovery.
@@ -245,6 +256,97 @@ fn unresolved_publication_intents(
             })
         })
         .collect()
+}
+
+fn publish_verified_recipe_owner(
+    root: &Path,
+    index: &Mutex<Index>,
+    owner: &Path,
+    recipe: &crate::recipe::FileRecipe,
+    display_path: Option<&str>,
+) -> Result<StagingBatchId> {
+    let batch_id = new_staging_batch_id();
+    let file_hash: [u8; 32] = recipe.file_hash().into();
+    let result = (|| {
+        let guard = lock_index(index)?;
+        guard.insert_batch(batch_id.as_str())?;
+        guard.insert_file(&file_hash, recipe.file_size())?;
+        guard.insert_recipe_lease(
+            batch_id.as_str(),
+            &staging_path_bytes(owner),
+            recipe,
+            RecipeVerification::CallerVerified,
+        )?;
+        if let Some(display_path) = display_path {
+            guard.insert_file_path(&file_hash, display_path)?;
+        }
+        guard.mark_batch_published(batch_id.as_str())
+    })();
+    if let Err(error) = result.and_then(|unleased| remove_indexed_files(root, index, &unleased)) {
+        let unowned = lock_index(index).and_then(|guard| {
+            guard.rollback_batch(batch_id.as_str())?;
+            guard.has_file_owner(&file_hash).map(|owned| !owned)
+        });
+        if matches!(unowned, Ok(true)) {
+            let _ = remove_indexed_files(root, index, &[file_hash]);
+        }
+        return Err(error);
+    }
+    Ok(batch_id)
+}
+
+fn preserve_publication_history(
+    root: &Path,
+    index: &Mutex<Index>,
+    intent_id: &PublicationIntentId,
+    recipe_hashes: &[MerkleHash],
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    if cancel.is_cancelled() {
+        return Err(StagingError::Cancelled);
+    }
+    let intent = unresolved_publication_intents(index)?
+        .into_iter()
+        .find(|intent| &intent.intent_id == intent_id)
+        .ok_or_else(|| StagingError::NotFound {
+            path: format!("publication intent {}", intent_id.as_str()),
+        })?;
+    let members = intent
+        .entries
+        .iter()
+        .map(|entry| entry.recipe_hash)
+        .collect::<std::collections::HashSet<_>>();
+    let recipes = {
+        let guard = lock_index(index)?;
+        recipe_hashes
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|hash| {
+                if !members.contains(&hash) {
+                    return Err(StagingError::StagingCorrupt(
+                        "history recipe is not owned by publication intent".to_owned(),
+                    ));
+                }
+                guard.verified_local_recipe(&hash.into())?.ok_or_else(|| {
+                    StagingError::StagingCorrupt(
+                        "publication history recipe is not verified".to_owned(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+    // Commit every history owner before rollback can remove native leases.
+    // An interruption leaves the original intent and its remaining payloads owned.
+    for recipe in recipes {
+        if cancel.is_cancelled() {
+            return Err(StagingError::Cancelled);
+        }
+        let owner = PathBuf::from(".crab/history").join(recipe.file_hash().hex());
+        publish_verified_recipe_owner(root, index, &owner, &recipe, None)?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1379,47 +1481,42 @@ async fn read_staged_chunks_batch(
 
     let hash_bytes: Vec<[u8; 32]> = hashes.iter().map(|h| <[u8; 32]>::from(*h)).collect();
 
-    let (locators, prepared_locators) = {
+    let (segment_chunks, segment_positions, prepared_chunks, pinned_groups) = {
         let idx = lock_index(index)?;
-        (
-            idx.locate_batch(&hash_bytes)?,
-            idx.locate_prepared_batch(&hash_bytes)?,
-        )
+        let locators = idx.locate_batch(&hash_bytes)?;
+        let prepared_locators = idx.locate_prepared_batch(&hash_bytes)?;
+        let mut segment_chunks = Vec::new();
+        let mut segment_positions = Vec::new();
+        let mut prepared_chunks = Vec::new();
+        for (position, ((hash, locator), prepared)) in hashes
+            .iter()
+            .zip(locators)
+            .zip(prepared_locators)
+            .enumerate()
+        {
+            if let Some(locator) = locator {
+                segment_positions.push(position);
+                segment_chunks.push(StagedChunkLocator {
+                    hash: *hash,
+                    size: u64::from(locator.length),
+                    locator,
+                });
+            } else if let Some(locator) = prepared {
+                prepared_chunks.push((position, *hash, locator));
+            } else {
+                return Err(StagingError::ChunkNotFound { hash: hash.hex() });
+            }
+        }
+        // Capture file handles before releasing locator ownership. A compact
+        // or sweep can unlink the old name, but cannot invalidate these reads.
+        let groups = pin_segment_read_groups(readers, &segment_chunks)?;
+        (segment_chunks, segment_positions, prepared_chunks, groups)
     };
-
-    for (i, (locator, prepared)) in locators.iter().zip(&prepared_locators).enumerate() {
-        if locator.is_none() && prepared.is_none() {
-            return Err(StagingError::ChunkNotFound {
-                hash: hashes[i].hex(),
-            });
-        }
-    }
-
-    let mut segment_chunks = Vec::new();
-    let mut segment_positions = Vec::new();
-    let mut prepared_chunks = Vec::new();
-    for (position, ((hash, locator), prepared)) in hashes
-        .iter()
-        .zip(locators)
-        .zip(prepared_locators)
-        .enumerate()
-    {
-        if let Some(locator) = locator {
-            segment_positions.push(position);
-            segment_chunks.push(StagedChunkLocator {
-                hash: *hash,
-                size: u64::from(locator.length),
-                locator,
-            });
-        } else if let Some(locator) = prepared {
-            prepared_chunks.push((position, *hash, locator));
-        }
-    }
 
     let mut out = vec![None; hashes.len()];
     for (position, (_, data)) in segment_positions
         .into_iter()
-        .zip(read_located_staged_chunks_batch(readers, metrics, &segment_chunks).await?)
+        .zip(read_located_staged_chunks_batch(pinned_groups, metrics, &segment_chunks).await?)
     {
         out[position] = Some(data);
     }
@@ -1555,7 +1652,12 @@ async fn read_coalesced_chunk_group(
                 .iter()
                 .map(|(_, locator)| *locator)
                 .collect::<Vec<_>>();
-            let payloads = read_located_staged_chunks_batch(readers, metrics, &locators).await?;
+            let payloads = read_located_staged_chunks_batch(
+                pin_segment_read_groups(readers, &locators)?,
+                metrics,
+                &locators,
+            )
+            .await?;
             Ok(chunks
                 .into_iter()
                 .zip(payloads)
@@ -1711,15 +1813,12 @@ async fn complete_recipe_payload_validation(
     lock_index(index)?.finish_recipe_payload_validation()
 }
 
-async fn read_located_staged_chunks_batch(
-    readers: &ReaderPool,
-    metrics: Option<&dyn StagingMetrics>,
-    chunks: &[StagedChunkLocator],
-) -> Result<Vec<(MerkleHash, Bytes)>> {
-    if chunks.is_empty() {
-        return Ok(Vec::new());
-    }
+type SegmentReadGroup = (SegmentReader, Vec<(usize, u64, u32)>);
 
+fn pin_segment_read_groups(
+    readers: &ReaderPool,
+    chunks: &[StagedChunkLocator],
+) -> Result<Vec<SegmentReadGroup>> {
     let mut by_segment: HashMap<u64, Vec<(usize, u64, u32)>> = HashMap::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let loc = chunk.locator;
@@ -1732,10 +1831,20 @@ async fn read_located_staged_chunks_batch(
         group.sort_by_key(|&(_, offset, _)| offset);
     }
 
+    by_segment
+        .into_iter()
+        .map(|(segment_id, group)| Ok((readers.get(segment_id)?, group)))
+        .collect()
+}
+
+async fn read_located_staged_chunks_batch(
+    groups: Vec<SegmentReadGroup>,
+    metrics: Option<&dyn StagingMetrics>,
+    chunks: &[StagedChunkLocator],
+) -> Result<Vec<(MerkleHash, Bytes)>> {
     let mut out: Vec<Option<Bytes>> = (0..chunks.len()).map(|_| None).collect();
-    let mut tasks = Vec::with_capacity(by_segment.len());
-    for (segment_id, group) in by_segment {
-        let reader = readers.get(segment_id)?;
+    let mut tasks = Vec::with_capacity(groups.len());
+    for (reader, group) in groups {
         tasks.push(tokio::task::spawn_blocking(move || {
             reader.read_many_sorted(&group)
         }));
@@ -2329,9 +2438,16 @@ impl StagingArea {
                     .locate_prepared_batch(&[hash_bytes])?
                     .first()
                     .is_some_and(Option::is_some);
-            (locator, prepared_exists)
+            let located = locator
+                .map(|locator| {
+                    self.readers
+                        .get(locator.segment_id)
+                        .map(|reader| (locator, reader))
+                })
+                .transpose()?;
+            (located, prepared_exists)
         };
-        let Some(locator) = locator else {
+        let Some((locator, reader)) = locator else {
             if !prepared_exists {
                 return Ok(None);
             }
@@ -2340,9 +2456,6 @@ impl StagingArea {
                 .await
                 .map(|mut chunks| chunks.pop().map(|(_, data)| data));
         };
-
-        // Get a reader from the pool.
-        let reader = self.readers.get(locator.segment_id)?;
 
         // pread + CRC verification in spawn_blocking.
         let offset = locator.offset;
@@ -2613,6 +2726,24 @@ impl StagingArea {
         Ok(())
     }
 
+    /// Persist a completed lease handoff without claiming that Git accepted it.
+    ///
+    /// Payloads must already be flushed, and every path in a batch must be handed off.
+    /// Delegation freezes batch membership and excludes subsequent native
+    /// index intents; an observed Git pointer permits push snapshot capture.
+    pub fn delegate_publication(&self, entries: &[(&StagingBatchId, &Path)]) -> Result<()> {
+        let entries = entries
+            .iter()
+            .map(|(batch, path)| (batch.as_str().to_owned(), staging_path_bytes(path)))
+            .collect::<Vec<_>>();
+        lock_index(&self.index)?.delegate_publication(&entries)
+    }
+
+    /// List immutable delegated leases for explicit maintenance reconciliation.
+    pub fn delegated_publications(&self) -> Result<Vec<DelegatedPublication>> {
+        lock_index(&self.index)?.delegated_publications()
+    }
+
     /// Mark a batch as published after its Git index replacement commits.
     pub fn mark_batch_published(&self, batch_id: &StagingBatchId) -> Result<()> {
         let unleased = lock_index(&self.index)?.mark_batch_published(batch_id.as_str())?;
@@ -2669,6 +2800,16 @@ impl StagingArea {
         unresolved_publication_intents(&self.index)
     }
 
+    /// Preserve caller-attested committed recipe roots before rolling back a native intent.
+    pub fn preserve_publication_history(
+        &self,
+        intent_id: &PublicationIntentId,
+        recipe_hashes: &[MerkleHash],
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        preserve_publication_history(&self.root, &self.index, intent_id, recipe_hashes, cancel)
+    }
+
     /// Atomically remove an unresolved intent and every open batch it owns.
     pub fn rollback_publication_intent(
         &self,
@@ -2688,31 +2829,13 @@ impl StagingArea {
         path: &Path,
         recipe: &crate::recipe::FileRecipe,
     ) -> Result<StagingBatchId> {
-        self.publish_verified_recipe_owner(path, recipe, Some(&path.to_string_lossy()))
-    }
-
-    fn publish_verified_recipe_owner(
-        &self,
-        owner: &Path,
-        recipe: &crate::recipe::FileRecipe,
-        display_path: Option<&str>,
-    ) -> Result<StagingBatchId> {
-        let batch_id = self.create_batch()?;
-        let file_hash = recipe.file_hash();
-        let publish = (|| -> Result<()> {
-            self.pre_register_file(&file_hash, recipe.file_size())?;
-            self.record_verified_recipe_lease(&batch_id, owner, recipe)?;
-            if let Some(display_path) = display_path {
-                self.record_file_path(&file_hash, display_path)?;
-            }
-            self.mark_batch_published(&batch_id)
-        })();
-        if let Err(error) = publish {
-            let _ = self.rollback_batch(&batch_id);
-            let _ = self.retire_file_if_unleased(&file_hash);
-            return Err(error);
-        }
-        Ok(batch_id)
+        publish_verified_recipe_owner(
+            &self.root,
+            &self.index,
+            path,
+            recipe,
+            Some(&path.to_string_lossy()),
+        )
     }
 
     /// Publish one immutable recipe needed by not-yet-pushed Git history.
@@ -2725,7 +2848,7 @@ impl StagingArea {
         recipe: &crate::recipe::FileRecipe,
     ) -> Result<StagingBatchId> {
         let owner = PathBuf::from(".crab/history").join(recipe.file_hash().hex());
-        self.publish_verified_recipe_owner(&owner, recipe, None)
+        publish_verified_recipe_owner(&self.root, &self.index, &owner, recipe, None)
     }
 
     /// Preserve a locally published recipe referenced by not-yet-pushed Git history.
@@ -2807,7 +2930,10 @@ impl StagingArea {
 
     /// Return the ordered list of chunk hashes staged for a given file.
     pub fn chunks_for_file(&self, file_hash: &MerkleHash) -> Result<Vec<MerkleHash>> {
-        if let Some(recipe) = self.published_recipe_for_file(file_hash)? {
+        // Ordered occurrence visibility follows retained versions, including
+        // native/delegated preparations. It does not attest Git publication.
+        let recipe = lock_index(&self.index)?.retained_recipe_for_file(&(*file_hash).into())?;
+        if let Some(recipe) = recipe {
             return collect_recipe_chunks(&self.index, &recipe)
                 .map(|chunks| chunks.into_iter().map(|(hash, _)| hash).collect());
         }
@@ -2821,7 +2947,10 @@ impl StagingArea {
         &self,
         file_hash: &MerkleHash,
     ) -> Result<Vec<(MerkleHash, u64)>> {
-        if let Some(recipe) = self.published_recipe_for_file(file_hash)? {
+        // Ordered occurrence visibility follows retained versions, including
+        // native/delegated preparations. It does not attest Git publication.
+        let recipe = lock_index(&self.index)?.retained_recipe_for_file(&(*file_hash).into())?;
+        if let Some(recipe) = recipe {
             return collect_recipe_chunks(&self.index, &recipe);
         }
         let fh: [u8; 32] = (*file_hash).into();
@@ -3022,8 +3151,8 @@ impl StagingArea {
 
     /// Register a file and its chunks in the index.
     ///
-    /// For each chunk in the list, verifies it exists in `chunks` or
-    /// `pending_chunks`, then links the file to those locators in
+    /// For each chunk in the list, verifies canonical segment authority,
+    /// then links the file to those locators in
     /// `chunks`. Segment `live_chunk_count` accounting is updated in
     /// the same transaction that replaces the chunk rows.
     ///
@@ -3285,34 +3414,28 @@ impl StagingArea {
             }
         }
 
-        let (current_id, current_write_offset) = {
-            let writer = self.writer.lock().await;
-            (writer.segment_id(), writer.write_offset())
-        };
-
+        let mut writer = self.writer.lock().await;
+        let current_id = writer.segment_id();
+        let current_write_offset = writer.write_offset();
         let segments_dir = self.root.join("segments");
-
-        let (candidates, current_is_abandoned) = {
-            let idx = lock_index(&self.index)?;
-            let candidates = idx.abandoned_segments(current_id)?;
-            // The current segment counts as abandoned only when it has
-            // no locator rows at all and still has bytes on disk. Pending
-            // rows may back a pointer already written to Git's index, so
-            // preserve them until retire_file removes them explicitly.
-            let committed = idx.segment_committed_chunk_count(current_id)?;
-            let pending = idx.segment_pending_chunk_count(current_id)?;
-            let (persisted_size, _) = idx.segment_info(current_id).unwrap_or((0, 0));
-            let current_size = persisted_size.max(current_write_offset);
-            let current_is_abandoned = committed == 0 && pending == 0 && current_size > 0;
-            (candidates, current_is_abandoned)
-        };
+        // Preserve writer -> index lock ordering. Capture and deletion stay in
+        // one synchronous section so a new claim cannot race reclamation.
+        let idx = lock_index(&self.index)?;
+        let candidates = idx.abandoned_segments(current_id)?;
+        let committed = idx.segment_committed_chunk_count(current_id)?;
+        let pending = idx.segment_pending_chunk_count(current_id)?;
+        let current_size = idx.segment_info(current_id)?.0.max(current_write_offset);
+        let current_is_abandoned = committed == 0
+            && pending == 0
+            && !idx.segment_has_payloads(current_id)?
+            && current_size > 0;
 
         let mut segments_removed: u64 = 0;
         let mut bytes_reclaimed: u64 = 0;
         let mut pending_removed: u64 = 0;
 
         for (seg_id, size_bytes) in &candidates {
-            let n = lock_index(&self.index)?.delete_pending_for_segment(*seg_id)?;
+            let n = idx.delete_pending_for_segment(*seg_id)?;
             pending_removed += n;
 
             let seg_path = segments_dir.join(format!("{seg_id:016x}.seg"));
@@ -3322,7 +3445,7 @@ impl StagingArea {
                 Err(e) => return Err(e.into()),
             }
 
-            lock_index(&self.index)?.drop_segment(*seg_id)?;
+            idx.drop_segment(*seg_id)?;
 
             segments_removed += 1;
             bytes_reclaimed += size_bytes;
@@ -3332,14 +3455,9 @@ impl StagingArea {
         // locator rows. Keep the writer running by rolling it onto a
         // fresh segment id with an empty `current.seg`.
         if current_is_abandoned {
-            let (old_size, n_pending) = {
-                let idx = lock_index(&self.index)?;
-                let persisted_size = idx.segment_info(current_id).map(|(s, _)| s).unwrap_or(0);
-                let size = persisted_size.max(current_write_offset);
-                let n = idx.delete_pending_for_segment(current_id)?;
-                idx.drop_segment(current_id)?;
-                (size, n)
-            };
+            let old_size = current_size;
+            let n_pending = idx.delete_pending_for_segment(current_id)?;
+            idx.drop_segment(current_id)?;
 
             // Drop the existing current.seg, reallocate a fresh id
             // under the writer lock, and rotate the writer onto it.
@@ -3350,14 +3468,8 @@ impl StagingArea {
                 Err(e) => return Err(e.into()),
             }
 
-            let new_id = {
-                let idx = lock_index(&self.index)?;
-                let id = idx.allocate_segment_id()?;
-                idx.register_current_segment(id)?;
-                id
-            };
-
-            let mut writer = self.writer.lock().await;
+            let new_id = idx.allocate_segment_id()?;
+            idx.register_current_segment(new_id)?;
             *writer = SegmentWriter::new(
                 &segments_dir,
                 new_id,
@@ -3387,10 +3499,7 @@ impl StagingArea {
         // a previous run that missed the pending cleanup. Safe because
         // no segment row → no .seg file → no way to ever read those
         // chunks back.
-        let orphan_pending = {
-            let idx = lock_index(&self.index)?;
-            idx.delete_orphan_pending_rows()?
-        };
+        let orphan_pending = idx.delete_orphan_pending_rows()?;
         pending_removed += orphan_pending;
 
         debug!(
@@ -3511,14 +3620,20 @@ impl StagingArea {
         old_segment_id: u64,
         segments_dir: &Path,
     ) -> Result<CompactionStats> {
-        let live_chunks = lock_index(&self.index)?.live_chunks_for_segment(old_segment_id)?;
+        // Keep capture, locator transfer and unlink under one owner lock.
+        // Writers/retirement cannot invalidate the captured payload set while
+        // the physical records are copied; no await occurs in this section.
+        let index = lock_index(&self.index)?;
+        let live_chunks = index.live_chunks_for_segment(old_segment_id)?;
 
         if live_chunks.is_empty() {
             return Ok(CompactionStats::default());
         }
 
         // Allocate a new segment id for the compacted output.
-        let new_segment_id = lock_index(&self.index)?.allocate_segment_id()?;
+        // Allocation is provisional until durable bytes and every locator move
+        // commit together. A copy/SQL failure cannot publish a second current.
+        let (transaction, new_segment_id) = index.begin_compaction()?;
 
         // Open the old segment for reading.
         let old_reader = self.readers.get(old_segment_id)?;
@@ -3535,25 +3650,16 @@ impl StagingArea {
             .open(&tmp_path)?;
 
         let mut new_offset: u64 = 0;
-        let mut updates: Vec<([u8; 32], [u8; 32], i64, u64)> =
-            Vec::with_capacity(live_chunks.len());
+        let mut updates = Vec::with_capacity(live_chunks.len());
 
-        for (chunk_hash, file_hash, chunk_index, size, old_offset) in &live_chunks {
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "size is always non-negative and bounded by segment hard cap"
-            )]
-            let length = *size as u32;
-
-            // Read the full record from the old segment (CRC-verified).
-            let data = old_reader.read(*old_offset, length)?;
+        for (chunk_hash, locator) in &live_chunks {
+            let data = old_reader.read(locator.offset, locator.length)?;
 
             // Re-encode and write to the new segment.
             let record = segment::encode_record(&data);
             std::io::Write::write_all(&mut new_file, &record)?;
 
-            updates.push((*chunk_hash, *file_hash, *chunk_index, new_offset));
+            updates.push((*chunk_hash, new_offset));
 
             new_offset += record.len() as u64;
         }
@@ -3570,7 +3676,8 @@ impl StagingArea {
         dir_fd.sync_all()?;
 
         // Atomic locator swap in SQLite.
-        lock_index(&self.index)?.swap_locators(
+        Index::swap_locators(
+            transaction,
             old_segment_id,
             new_segment_id,
             new_offset,
@@ -3590,9 +3697,6 @@ impl StagingArea {
         // fsync directory after unlink.
         let dir_fd = File::open(segments_dir)?;
         dir_fd.sync_all()?;
-
-        // Drop the old segment from the index (it has 0 live chunks now).
-        lock_index(&self.index)?.drop_segment(old_segment_id)?;
 
         let bytes_reclaimed = old_size.saturating_sub(new_offset);
 
@@ -3754,9 +3858,16 @@ impl StagingAreaReadOnly {
                     .locate_prepared_batch(&[hash_bytes])?
                     .first()
                     .is_some_and(Option::is_some);
-            (locator, prepared_exists)
+            let located = locator
+                .map(|locator| {
+                    self.readers
+                        .get(locator.segment_id)
+                        .map(|reader| (locator, reader))
+                })
+                .transpose()?;
+            (located, prepared_exists)
         };
-        let Some(locator) = locator else {
+        let Some((locator, reader)) = locator else {
             if !prepared_exists {
                 return Ok(None);
             }
@@ -3766,7 +3877,6 @@ impl StagingAreaReadOnly {
                 .map(|mut chunks| chunks.pop().map(|(_, data)| data));
         };
 
-        let reader = self.readers.get(locator.segment_id)?;
         let offset = locator.offset;
         let length = locator.length;
         let data = tokio::task::spawn_blocking(move || reader.read(offset, length))
@@ -3841,7 +3951,10 @@ impl StagingAreaReadOnly {
 
     /// Return the ordered list of chunk hashes staged for a given file.
     pub fn chunks_for_file(&self, file_hash: &MerkleHash) -> Result<Vec<MerkleHash>> {
-        if let Some(recipe) = self.published_recipe_for_file(file_hash)? {
+        // Ordered occurrence visibility follows retained versions, including
+        // native/delegated preparations. It does not attest Git publication.
+        let recipe = lock_index(&self.index)?.retained_recipe_for_file(&(*file_hash).into())?;
+        if let Some(recipe) = recipe {
             return collect_recipe_chunks(&self.index, &recipe)
                 .map(|chunks| chunks.into_iter().map(|(hash, _)| hash).collect());
         }
@@ -3855,7 +3968,10 @@ impl StagingAreaReadOnly {
         &self,
         file_hash: &MerkleHash,
     ) -> Result<Vec<(MerkleHash, u64)>> {
-        if let Some(recipe) = self.published_recipe_for_file(file_hash)? {
+        // Ordered occurrence visibility follows retained versions, including
+        // native/delegated preparations. It does not attest Git publication.
+        let recipe = lock_index(&self.index)?.retained_recipe_for_file(&(*file_hash).into())?;
+        if let Some(recipe) = recipe {
             return collect_recipe_chunks(&self.index, &recipe);
         }
         let fh: [u8; 32] = (*file_hash).into();
@@ -3932,6 +4048,22 @@ impl StagingAreaReadOnly {
             .published_recipes_for_files(&raw_hashes)?
             .into_iter()
             .map(|(file_hash, recipe)| (MerkleHash::from(file_hash), recipe))
+            .collect())
+    }
+
+    /// Load delegated recipes only for the Git pointers selected by the caller.
+    pub fn external_recipes_for_files(
+        &self,
+        file_hashes: &[MerkleHash],
+    ) -> Result<HashMap<MerkleHash, Option<crate::recipe::FileRecipe>>> {
+        let hashes = file_hashes
+            .iter()
+            .map(|hash| (*hash).into())
+            .collect::<Vec<[u8; 32]>>();
+        Ok(lock_index(&self.index)?
+            .external_recipes_for_files(&hashes)?
+            .into_iter()
+            .map(|(hash, recipe)| (MerkleHash::from(hash), recipe))
             .collect())
     }
 
@@ -4087,6 +4219,16 @@ impl StagingAreaReadOnly {
         Ok(())
     }
 
+    /// Preserve caller-attested committed recipe roots before rolling back a native intent.
+    pub fn preserve_publication_history(
+        &self,
+        intent_id: &PublicationIntentId,
+        recipe_hashes: &[MerkleHash],
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        preserve_publication_history(&self.root, &self.index, intent_id, recipe_hashes, cancel)
+    }
+
     /// Atomically remove an unresolved intent and every open batch it owns.
     pub async fn rollback_publication_intent(
         &self,
@@ -4118,6 +4260,10 @@ impl StagingAreaReadOnly {
 
     /// Retire the exact recipe ownership pinned by one committed push snapshot.
     pub async fn retire_push_snapshot(&self, push_id: &str) -> Result<Vec<RetireStats>> {
+        self.retire_push_snapshot_now(push_id)
+    }
+
+    fn retire_push_snapshot_now(&self, push_id: &str) -> Result<Vec<RetireStats>> {
         let unleased = lock_index(&self.index)?.retire_push_snapshot(push_id)?;
         remove_indexed_files(&self.root, &self.index, &unleased)
     }
@@ -4814,6 +4960,369 @@ mod tests {
             ),
             "unexpected error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn released_upgrade_and_failed_compaction_preserve_real_payload_reads() {
+        for fail_commit in [false, true] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let root = temp.path().join("staging");
+            let staging = StagingArea::open(root.clone()).await.expect("staging");
+            let (hash, data) = make_chunk(123, 4096);
+            let file = MerkleHash::from(*blake3::hash(&data).as_bytes());
+            staging
+                .pre_register_file(&file, data.len() as u64)
+                .expect("file");
+            staging
+                .stage_chunks_batch(&[(&hash, data.as_slice())], &file, 0)
+                .await
+                .expect("payload");
+            staging
+                .register_file(&file, data.len() as u64, &[(hash, data.len() as u64)])
+                .expect("promote");
+            let (dead_hash, dead_data) = make_chunk(124, 8192);
+            let dead_file = MerkleHash::from(*blake3::hash(&dead_data).as_bytes());
+            staging
+                .pre_register_file(&dead_file, dead_data.len() as u64)
+                .expect("dead file");
+            staging
+                .stage_chunks_batch(&[(&dead_hash, dead_data.as_slice())], &dead_file, 0)
+                .await
+                .expect("dead payload");
+            let old = lock_index(&staging.index)
+                .expect("index")
+                .locate(&hash.into())
+                .expect("locator")
+                .expect("old payload");
+            {
+                let mut writer = staging.writer.lock().await;
+                seal_current_segment_blocking(
+                    staging.root(),
+                    &staging.index,
+                    &staging.cfg,
+                    None,
+                    &mut writer,
+                )
+                .expect("seal");
+            }
+            staging
+                .unregister_file(&dead_file)
+                .expect("retire dead file");
+            if fail_commit {
+                lock_index(&staging.index).expect("index").connection().execute_batch(
+                "CREATE TEMP TRIGGER reject_compaction BEFORE UPDATE ON chunk_payloads BEGIN SELECT RAISE(ABORT, 'compaction failure'); END;"
+            ).expect("inject commit failure");
+            }
+            let result = staging.compact_force().await;
+            let expected_outcome = if fail_commit {
+                matches!(result, Err(StagingError::Io(ref source)) if source.get_ref().is_some_and(|source| source.is::<rusqlite::Error>()))
+            } else {
+                result.is_ok_and(|stats| stats.segments_compacted == 1)
+            };
+            let currents = lock_index(&staging.index)
+                .expect("index")
+                .all_segments()
+                .expect("segments")
+                .into_iter()
+                .filter(|(_, sealed, _)| sealed.is_none())
+                .count();
+            staging.close().await.expect("close");
+            if !fail_commit {
+                let connection =
+                    rusqlite::Connection::open(root.join("index.db")).expect("released database");
+                connection.execute("UPDATE chunk_payloads SET segment_id = ?1, segment_offset = ?2 WHERE chunk_hash = ?3", rusqlite::params![old.segment_id, old.offset, <[u8; 32]>::from(hash).as_slice()]).expect("released stale inventory");
+                connection
+                    .execute_batch("DROP TABLE external_publications;")
+                    .unwrap();
+                connection
+                    .execute(
+                        "UPDATE staging_meta SET value = '1' WHERE key = 'layout_version'",
+                        [],
+                    )
+                    .expect("released admission");
+            }
+            let actual = if fail_commit {
+                let reopened = StagingArea::open(root.clone())
+                    .await
+                    .expect("recover failed compaction");
+                let bytes = reopened
+                    .get_chunk(&hash)
+                    .await
+                    .expect("read original bytes");
+                reopened.close().await.expect("close recovered");
+                bytes
+            } else {
+                let upgraded = StagingAreaReadOnly::open(root.clone())
+                    .await
+                    .expect("upgrade shared reader");
+                upgraded
+                    .get_chunk(&hash)
+                    .await
+                    .expect("read upgraded bytes")
+            };
+            let sealed_files = std::fs::read_dir(root.join("segments"))
+                .expect("segments")
+                .map(|entry| entry.expect("entry").file_name())
+                .filter(|name| {
+                    name.to_str()
+                        .is_some_and(|name| name.len() == 20 && name.ends_with(".seg"))
+                })
+                .count();
+            assert!(
+                expected_outcome
+                    && currents == 1
+                    && sealed_files == 1
+                    && actual.as_ref().is_some_and(|bytes| bytes.as_ref() == data)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn segment_reuse_survives_retirement_compaction_and_reopen() {
+        for (seal_before_retirement, compact) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let source = tmp.path().join("source.bin");
+            let content = b"segment reuse lifetime".repeat(64 * 1024);
+            std::fs::write(&source, &content).expect("source");
+            let root = tmp.path().join("staging");
+            let staging = StagingArea::open(root.clone()).await.expect("staging");
+            let first = stream::stage_file_streaming(
+                &source,
+                tmp.path(),
+                &staging,
+                stream::StreamStageProgress::default(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("source recipe");
+            if compact {
+                let mut writer = staging.writer.lock().await;
+                seal_current_segment_blocking(
+                    staging.root(),
+                    &staging.index,
+                    &staging.cfg,
+                    None,
+                    &mut writer,
+                )
+                .expect("seal source segment");
+            }
+            let term = staging.recipe_page(&first.recipe, 0).expect("page").chunks[0];
+            let bytes = &content[term.offset as usize..(term.offset + term.len) as usize];
+            let incoming = bytes.repeat(2);
+            let file_hash = MerkleHash::from(*blake3::hash(&incoming).as_bytes());
+            let mut recorder = recipe::RecipeRecorder::new(first.recipe.policy());
+            recorder
+                .record(term.chunk_hash, term.len)
+                .expect("first occurrence");
+            recorder
+                .record(term.chunk_hash, term.len)
+                .expect("repeat occurrence");
+            let recipe = recorder
+                .seal(file_hash, incoming.len() as u64)
+                .expect("recipe");
+            let preparation = staging.create_add_preparation().expect("preparation");
+            let batch = staging.create_batch().expect("batch");
+            staging
+                .attach_add_preparation_batch(&preparation, &batch)
+                .expect("attach");
+            staging
+                .append_recipe_recording_terms(&batch, 0, 0, &[(term.chunk_hash, term.len); 2])
+                .expect("occurrences");
+            let claims = staging
+                .claim_prepared_chunks(&preparation, &batch, &[(term.chunk_hash, term.len); 2])
+                .expect("segment claims");
+            if seal_before_retirement {
+                staging
+                    .pre_register_file(&file_hash, recipe.file_size())
+                    .expect("file");
+                staging
+                    .record_verified_recipe_lease(&batch, Path::new("reuse.bin"), &recipe)
+                    .expect("seal incoming");
+                staging
+                    .finalize_add_preparation(&preparation)
+                    .expect("finalize");
+            }
+            staging
+                .rollback_batch(&first.batch_id)
+                .expect("retire original");
+            let read = staging
+                .get_chunks_batch(&[term.chunk_hash; 2])
+                .await
+                .expect("read retained payload");
+            if !seal_before_retirement {
+                staging
+                    .pre_register_file(&file_hash, recipe.file_size())
+                    .expect("file");
+                staging
+                    .record_verified_recipe_lease(&batch, Path::new("reuse.bin"), &recipe)
+                    .expect("seal incoming");
+                staging
+                    .finalize_add_preparation(&preparation)
+                    .expect("finalize");
+            }
+            staging.mark_batch_published(&batch).expect("publish");
+            staging
+                .clean_abandoned(true)
+                .await
+                .expect("preserve owned segment");
+            let reader_pool = ReaderPool::new(staging.root().join("segments"), 1);
+            let locators = {
+                let index = lock_index(&staging.index).expect("index");
+                let locator = index
+                    .locate(&term.chunk_hash.into())
+                    .expect("locator")
+                    .expect("payload");
+                [StagedChunkLocator {
+                    hash: term.chunk_hash,
+                    size: term.len,
+                    locator,
+                }; 2]
+            };
+            let pinned = pin_segment_read_groups(&reader_pool, &locators).expect("pin readers");
+            let compacted = staging.compact_force().await.expect("compact");
+            let current_id = staging.writer.lock().await.segment_id();
+            reader_pool.get(current_id).expect("evict old pool entry");
+            let captured_read = read_located_staged_chunks_batch(pinned, None, &locators)
+                .await
+                .expect("read captured bytes after unlink");
+            let after_compaction = staging
+                .get_chunks_batch(&[term.chunk_hash; 2])
+                .await
+                .expect("read compacted");
+            staging.close().await.expect("close");
+            let reopened = StagingArea::open(root).await.expect("reopen");
+            let recovered = reopened
+                .get_chunks_batch(&[term.chunk_hash; 2])
+                .await
+                .expect("read recovered");
+            reopened
+                .release_published_path(Path::new("reuse.bin"), &file_hash)
+                .expect("release final owner");
+            reopened.sweep_orphans().expect("sweep retired bytes");
+            let retired = reopened
+                .get_chunk(&term.chunk_hash)
+                .await
+                .expect("retired lookup");
+            reopened.close().await.expect("close recovered");
+            assert!(
+                claims
+                    .iter()
+                    .all(|claim| matches!(claim, index::PreparedChunkClaim::Segment))
+                    && read.iter().all(|(_, data)| data.as_ref() == bytes)
+                    && after_compaction == read
+                    && captured_read == read
+                    && recovered == read
+                    && compacted.segments_compacted == u64::from(compact)
+                    && retired.is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_reuse_survives_original_rollback_until_new_owner_retires() {
+        for publish in [false, true] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("first.bin");
+            let content = b"prepared reuse lifetime".repeat(64 * 1024);
+            std::fs::write(&path, &content).expect("source file");
+            let staging = StagingArea::open(tmp.path().join("staging"))
+                .await
+                .expect("staging");
+            let first = stream::stage_file_streaming(
+                &path,
+                tmp.path(),
+                &staging,
+                stream::StreamStageProgress {
+                    xorb_builder: Some(stream::StreamStageXorbBuilder::new(
+                        1,
+                        crab_xet::xorb::builder::XorbBuilder::new,
+                    )),
+                    ..stream::StreamStageProgress::default()
+                },
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("first prepared recipe");
+            let terms = staging
+                .recipe_page(&first.recipe, 0)
+                .expect("recipe page")
+                .chunks;
+            let chunks = terms
+                .iter()
+                .map(|term| (term.chunk_hash, term.len))
+                .collect::<Vec<_>>();
+            let preparation = staging
+                .create_add_preparation()
+                .expect("reusing preparation");
+            let batch = staging.create_batch().expect("reusing batch");
+            staging
+                .attach_add_preparation_batch(&preparation, &batch)
+                .expect("attach batch");
+            staging
+                .append_recipe_recording_terms(&batch, 0, 0, &chunks)
+                .expect("record occurrences");
+            let claims = staging
+                .claim_prepared_chunks(&preparation, &batch, &chunks)
+                .expect("claim reusable bytes");
+            staging
+                .rollback_batch(&first.batch_id)
+                .expect("retire original recipe");
+            let hashes = chunks.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+            let retained = staging.get_chunks_batch(&hashes).await;
+            let sealed_retained = if publish {
+                let file_hash = first.recipe.file_hash();
+                staging
+                    .pre_register_file(&file_hash, first.recipe.file_size())
+                    .expect("register reused file");
+                staging
+                    .record_verified_recipe_lease(&batch, Path::new("second.bin"), &first.recipe)
+                    .expect("seal reused recipe");
+                staging
+                    .finalize_add_preparation(&preparation)
+                    .expect("transfer preparation ownership");
+                staging
+                    .mark_batch_published(&batch)
+                    .expect("publish reused recipe");
+                let sealed = staging
+                    .get_chunks_batch(&hashes)
+                    .await
+                    .expect("published reused bytes");
+                let unchanged = sealed == *retained.as_ref().expect("retained reusable bytes");
+                staging
+                    .release_published_path(Path::new("second.bin"), &file_hash)
+                    .expect("release published owner");
+                unchanged
+            } else {
+                staging
+                    .abort_add_preparation(&preparation)
+                    .expect("abort reusing preparation");
+                true
+            };
+            let retired = staging
+                .get_chunk(&hashes[0])
+                .await
+                .expect("read after retirement");
+            staging.close().await.expect("close staging");
+            let expected = terms
+                .iter()
+                .map(|term| &content[term.offset as usize..(term.offset + term.len) as usize])
+                .collect::<Vec<_>>();
+            assert!(
+                claims
+                    .iter()
+                    .all(|claim| matches!(claim, index::PreparedChunkClaim::Prepared(_)))
+                    && retained
+                        .expect("reused payload must survive original rollback")
+                        .iter()
+                        .map(|(_, bytes)| bytes.as_ref())
+                        .collect::<Vec<_>>()
+                        == expected
+                    && sealed_retained
+                    && retired.is_none()
+            );
+        }
     }
 
     fn prepared_plan_for_first_chunk(

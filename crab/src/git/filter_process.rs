@@ -2107,6 +2107,89 @@ impl<R: Read> PktLineReader<R> {
     }
 }
 
+/// Bounded byte view of one filter request, preserving the terminal flush.
+pub(crate) struct PktLineByteStream<'a, R: Read> {
+    reader: &'a mut PktLineReader<R>,
+    pending: Bytes,
+    finished: bool,
+    error: Option<CrabError>,
+    cancel: &'a tokio_util::sync::CancellationToken,
+}
+
+impl<R: Read> PktLineReader<R> {
+    /// Join a consumed pointer probe with the remaining request's packet bytes.
+    pub(crate) fn byte_stream<'a>(
+        &'a mut self,
+        prefix: Vec<u8>,
+        reached_flush: bool,
+        cancel: &'a tokio_util::sync::CancellationToken,
+    ) -> PktLineByteStream<'a, R> {
+        PktLineByteStream {
+            reader: self,
+            pending: prefix.into(),
+            finished: reached_flush,
+            error: None,
+            cancel,
+        }
+    }
+}
+
+impl<R: Read> PktLineByteStream<'_, R> {
+    /// Recover the original framing error after the ingestion engine cleans up.
+    pub(crate) fn take_error(&mut self) -> Option<CrabError> {
+        self.error.take()
+    }
+}
+
+impl<R: Read> tokio::io::AsyncRead for PktLineByteStream<'_, R> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        output: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = output.filled().len();
+        while output.remaining() > 0 {
+            if this.error.is_some() {
+                // AsyncRead cannot report an error after appending bytes in
+                // the same poll. Return that prefix first, then fail the next
+                // read; the product boundary restores the original error.
+                if output.filled().len() == before {
+                    return std::task::Poll::Ready(Err(io::Error::other(
+                        "filter packet input failed",
+                    )));
+                }
+                break;
+            }
+            if this.cancel.is_cancelled() {
+                this.error = Some(CrabError::Cancelled);
+                continue;
+            }
+            if !this.pending.is_empty() {
+                let take = this.pending.len().min(output.remaining());
+                output.put_slice(&this.pending[..take]);
+                this.pending = this.pending.slice(take..);
+                continue;
+            }
+            if this.finished {
+                break;
+            }
+            match this.reader.read_packet() {
+                Ok(Some(packet)) => {
+                    let take = packet.len().min(output.remaining());
+                    output.put_slice(&packet[..take]);
+                    if take < packet.len() {
+                        this.pending = Bytes::copy_from_slice(&packet[take..]);
+                    }
+                }
+                Ok(None) => this.finished = true,
+                Err(error) => this.error = Some(error),
+            }
+        }
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
 impl<'a> PktLineReader<&'a [u8]> {
     /// Construct a reader from an in-memory byte slice.
     ///
@@ -3932,6 +4015,63 @@ size 1048576\n";
             let mut expected = Vec::new();
             handshake(&mut &build_handshake_input()[..], &mut expected).unwrap();
             assert!(result.is_err() && output == expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn packet_byte_stream_preserves_bytes_and_next_command_boundary() {
+        use tokio::io::AsyncReadExt;
+
+        let payload = (0..2 * 1024 * 1024 + 17)
+            .map(|index| ((index * 41) ^ (index >> 8)) as u8)
+            .collect::<Vec<_>>();
+        for output_size in [1, PKT_LINE_MAX_BODY, crab_staging::stream::READ_BUF_SIZE] {
+            let prefix_len = 137;
+            let mut framed = Vec::new();
+            for packet in payload[prefix_len..].chunks(4093) {
+                framed.extend(pkt_data(packet));
+            }
+            framed.extend(pkt_flush());
+            let boundary = framed.len() as u64;
+            framed.extend(pkt_text("command=clean"));
+            let mut cursor = std::io::Cursor::new(framed);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let mut actual = Vec::new();
+            {
+                let mut reader = PktLineReader::from_read(&mut cursor);
+                let mut stream = reader.byte_stream(payload[..prefix_len].to_vec(), false, &cancel);
+                let mut buffer = vec![0; output_size];
+                loop {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    actual.extend_from_slice(&buffer[..count]);
+                }
+                assert!(stream.take_error().is_none());
+            }
+            assert!(actual == payload && cursor.position() == boundary);
+        }
+    }
+
+    #[tokio::test]
+    async fn packet_byte_stream_rejects_framing_failure_after_valid_prefix() {
+        use tokio::io::AsyncReadExt;
+
+        for suffix in [b"zzzz".as_slice(), b"0008abc", b"0001"] {
+            let mut input = pkt_data(b"valid prefix");
+            input.extend_from_slice(suffix);
+            let mut reader = PktLineReader::from_slice(&input);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let mut stream = reader.byte_stream(Vec::new(), false, &cancel);
+            let mut actual = Vec::new();
+            let result = stream.read_to_end(&mut actual).await;
+            let original = stream.take_error();
+            assert!(
+                result.is_err()
+                    && actual == b"valid prefix"
+                    && matches!(original, Some(CrabError::Io(_)))
+            );
         }
     }
 

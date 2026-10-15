@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use crab_staging::StagingAreaReadOnly;
+use crab_xet::hash::MerkleHash;
 use gix_object::{Exists, Find, FindHeader};
 use tokio_util::sync::CancellationToken;
 
@@ -256,12 +257,18 @@ async fn run_inner(
             } else {
                 is_ancestor(&common_git_dir, old_oid, &new_oid)?
             };
-            let Some(is_fast_forward) = is_fast_forward else {
-                outcomes.insert(
-                    spec.dst.clone(),
-                    RefPushOutcome::Rejected(PushRejectReason::StaleInfo),
-                );
-                continue;
+            let is_fast_forward = match is_fast_forward {
+                Some(proven) => proven,
+                // A forced rewrite need not have fetched the remote tip. The ref
+                // lease was checked above; publication still compares the old tip.
+                None if update.force && !config.receive_deny_non_fast_forwards => false,
+                None => {
+                    outcomes.insert(
+                        spec.dst.clone(),
+                        RefPushOutcome::Rejected(PushRejectReason::StaleInfo),
+                    );
+                    continue;
+                }
             };
             let decision = if !is_fast_forward && config.receive_deny_non_fast_forwards {
                 Err(PushRejectReason::DenyNonFastForward)
@@ -322,6 +329,25 @@ async fn run_inner(
         config.force_full_graph,
     )
     .await?;
+    if !prepared.pointers.is_empty()
+        && let Some(staging) = staging
+        && !staging.unresolved_publication_intents()?.is_empty()
+    {
+        // A native add can install Git's pointer before its local publication
+        // acknowledgement. Recover under the canonical index lock before admission.
+        let worktree = gix::open(&git_dir)
+            .map_err(|error| CrabError::Io(std::io::Error::other(error)))?
+            .workdir()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                CrabError::StagingCorrupt(
+                    "native publication recovery requires a Git working tree".to_owned(),
+                )
+            })?;
+        super::index::reconcile_publication_intents(staging, &worktree, cancel).await?;
+    }
+
+    let staging_snapshot = capture_staging_snapshot(staging, &prepared.pointers)?;
     let visibility_delta = prepare_visibility_delta(
         &common_git_dir,
         &edits,
@@ -519,6 +545,11 @@ async fn run_inner(
         }
     };
     if let Some(active_active_commit) = committed {
+        if let Some(snapshot) = staging_snapshot
+            && let Err(error) = snapshot.commit()
+        {
+            tracing::warn!(%error, "capsule committed; local staging cleanup needs maintenance");
+        }
         for ref_name in ref_names {
             outcomes.insert(ref_name, RefPushOutcome::Ok);
         }
@@ -542,6 +573,41 @@ async fn run_inner(
         );
     }
     Ok((PushResult::new(outcomes), None))
+}
+
+fn capture_staging_snapshot(
+    staging: Option<&Arc<StagingAreaReadOnly>>,
+    pointers: &[crab_types::pointer::Pointer],
+) -> Result<Option<crab_staging::StagingPushSnapshot>> {
+    let Some(staging) = staging.filter(|_| !pointers.is_empty()) else {
+        return Ok(None);
+    };
+    // Fence sibling retirement before selecting local roots; snapshot pins
+    // then protect exactly those leases through upload and the ref transition.
+    let snapshot = crab_staging::StagingPushSnapshot::begin(
+        Arc::clone(staging),
+        uuid::Uuid::now_v7().to_string(),
+    )?;
+    let hashes = pointers
+        .iter()
+        .map(|pointer| MerkleHash::from(pointer.file_hash))
+        .collect::<Vec<_>>();
+    let selected = super::push_staging::recipes_for_selected_pointers(staging, &hashes)?;
+    for pointer in pointers {
+        if let Some(Some(recipe)) = selected.get(&MerkleHash::from(pointer.file_hash))
+            && recipe.file_size() != pointer.size
+        {
+            return Err(CrabError::StagingCorrupt(
+                "selected push recipe disagrees with pointer size".to_owned(),
+            ));
+        }
+    }
+    let recipes = selected.into_values().flatten().collect::<Vec<_>>();
+    if recipes.is_empty() {
+        return Ok(None);
+    }
+    snapshot.capture(&recipes)?;
+    Ok(Some(snapshot))
 }
 
 enum CapsulePublishAttempt {
@@ -676,6 +742,15 @@ fn prepare_visibility_delta(
 ) -> Result<Option<crab_metadata::capsule_protocol::CapsuleVisibilityDelta>> {
     let maximum = usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
         .map_err(|_| CrabError::Internal("Git visibility limit does not fit usize".to_owned()))?;
+    let rewritten_old_refs = edits
+        .iter()
+        .filter(|edit| edit.new_oid().is_some() && !fast_forward_refs.contains(edit.ref_name()))
+        .filter_map(|edit| {
+            edit.expected_old()
+                .map(|oid| (edit.ref_name().to_owned(), oid.to_owned()))
+        })
+        .collect();
+    let available_old_tips = locally_available_remote_tips(git_dir, &rewritten_old_refs)?;
     let mut visibility = BTreeMap::new();
     for edit in edits {
         let Some(new_oid) = edit.new_oid() else {
@@ -696,7 +771,10 @@ fn prepare_visibility_delta(
                 pack_objects.iter().map(ToString::to_string).collect(),
                 Vec::new(),
             )
-        } else if let Some(old_oid) = edit.expected_old() {
+        } else if let Some(old_oid) = edit.expected_old()
+            && (fast_forward_refs.contains(edit.ref_name())
+                || available_old_tips.iter().any(|tip| tip == old_oid))
+        {
             let added = super::push::enumerate_visibility_difference(
                 git_dir,
                 new_oid,
@@ -724,11 +802,13 @@ fn prepare_visibility_delta(
                 removed,
             )
         } else {
+            // Rewrites may lack the old tip locally. A complete replacement
+            // closure revokes its visibility without fetching discarded history.
             let objects =
                 super::push::enumerate_visibility_difference(git_dir, new_oid, None, maximum)?
                     .ok_or_else(|| visibility_limit_error(edit.ref_name()))?;
             crab_metadata::git_visibility::GitVisibilityEdit::from_replacement_objects(
-                None,
+                edit.expected_old().map(str::to_owned),
                 new_oid.to_owned(),
                 objects,
             )
@@ -1349,6 +1429,156 @@ mod tests {
                 .uploaded_objects
                 .contains(&layout.capsule_plan_intent_path(&plan_id).to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn force_rewrite_without_local_remote_tip_preserves_policy_and_visibility() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        for (name, force, lease, deny, succeeds) in [
+            ("ordinary", false, None, false, false),
+            ("force", true, None, false, true),
+            ("lease", false, Some(true), false, true),
+            ("stale-lease", true, Some(false), false, false),
+            ("deny-force", true, None, true, false),
+            ("deny-lease", false, Some(true), true, false),
+        ] {
+            let source = tempfile::tempdir().expect("source repository");
+            git(source.path(), &["init", "-b", "main"]);
+            git(source.path(), &["config", "user.name", "Crab Test"]);
+            git(
+                source.path(),
+                &["config", "user.email", "crab@example.invalid"],
+            );
+            let first = commit(source.path(), "first");
+            let contender_root = tempfile::tempdir().expect("contender directory");
+            let contender = contender_root.path().join("repo");
+            git(
+                contender_root.path(),
+                &[
+                    "clone",
+                    "--no-local",
+                    source.path().to_str().unwrap(),
+                    "repo",
+                ],
+            );
+            git(&contender, &["config", "user.name", "Crab Test"]);
+            git(
+                &contender,
+                &["config", "user.email", "crab@example.invalid"],
+            );
+            let second = commit(source.path(), "second");
+            let divergent = commit(&contender, "divergent");
+            let git_dir = contender.join(".git");
+            assert_eq!(
+                is_ancestor(&git_dir, &second, &divergent).unwrap(),
+                None,
+                "{name}"
+            );
+
+            let store = crate::storage::store::Store::from_storage(crab_storage::Store::new(
+                Arc::new(InMemory::new()),
+            ));
+            let router = crate::storage::StoreLayout::new(store.clone(), "repos/test".to_owned());
+            let layout =
+                crab_storage::StoreLayout::new(store.as_storage().clone(), "repos/test".to_owned());
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+            let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 16 * 1024 * 1024,
+                max_frontier_bytes: 16 * 1024 * 1024,
+            };
+            let spec = PushSpec {
+                force: false,
+                src: "refs/heads/main".to_owned(),
+                dst: "refs/heads/main".to_owned(),
+            };
+            let config = PushConfig {
+                git_dir: Some(source.path().join(".git")),
+                ..PushConfig::default()
+            };
+            let (initial, _) = run(
+                &config,
+                std::slice::from_ref(&spec),
+                &store,
+                &router,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert!(initial.all_ok(), "{name}: initial publication");
+            let mut config = PushConfig {
+                git_dir: Some(git_dir),
+                receive_deny_non_fast_forwards: deny,
+                ..PushConfig::default()
+            };
+            if let Some(matches) = lease {
+                config.expected_refs.insert(
+                    "refs/heads/main".to_owned(),
+                    Some(if matches { second.clone() } else { first }),
+                );
+            }
+            let spec = PushSpec { force, ..spec };
+            let (result, _) = run(
+                &config,
+                &[spec],
+                &store,
+                &router,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.all_ok(), succeeds, "{name}");
+            let view = crab_read::capsule_protocol::open_view(&layout, limits)
+                .await
+                .unwrap();
+            assert_eq!(
+                view.refs()["refs/heads/main"],
+                if succeeds {
+                    divergent.clone()
+                } else {
+                    second.clone()
+                },
+                "{name}: remote tip"
+            );
+            if succeeds {
+                let visibility = view.git_visibility_index().unwrap();
+                let refs = visibility.ref_closures();
+                let closure = &refs["refs/heads/main"];
+                assert!(
+                    closure.binary_search(&divergent).is_ok()
+                        && closure.binary_search(&second).is_err(),
+                    "{name}: rewrite must retire old visibility"
+                );
+                let destination = tempfile::tempdir().unwrap();
+                git(destination.path(), &["init", "--bare"]);
+                crab_read::capsule_protocol::install_git_packs_from_store(
+                    &view,
+                    &layout,
+                    destination.path(),
+                    16 * 1024 * 1024,
+                    None,
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+                git(
+                    destination.path(),
+                    &["cat-file", "-e", &format!("{divergent}^{{commit}}")],
+                );
+                git(destination.path(), &["fsck", "--connectivity-only"]);
+            }
+        }
     }
 
     #[test]
@@ -1999,6 +2229,153 @@ mod tests {
             repack_requests <= 12,
             "repack used {repack_requests} requests: {repack_operations:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capsule_push_retires_staging_only_after_confirmed_ref_publication() {
+        use bstr::ByteSlice;
+        use crab_staging::stream::{StreamStageProgress, stage_reader_streaming};
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        for (stale, native_intent, restored_index) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (false, true, true),
+        ] {
+            let source = tempfile::tempdir().unwrap();
+            git(source.path(), &["init", "-b", "main"]);
+            git(source.path(), &["config", "user.name", "Crab Test"]);
+            git(
+                source.path(),
+                &["config", "user.email", "crab@example.invalid"],
+            );
+            let first = commit(source.path(), "initial");
+            let staging_root = source.path().join(".crab/staging");
+            let staging = crab_staging::StagingArea::open(staging_root.clone())
+                .await
+                .unwrap();
+            let staged = stage_reader_streaming(
+                &mut std::io::Cursor::new(b"capsule payload"),
+                Path::new("model.bin"),
+                &staging,
+                StreamStageProgress::default(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            if !native_intent {
+                staging
+                    .delegate_publication(&[(&staged.batch_id, Path::new("model.bin"))])
+                    .unwrap();
+            }
+            let pointer = crab_types::pointer::Pointer {
+                file_hash: staged.file_hash,
+                size: staged.size,
+                shard_hint: None,
+            };
+            std::fs::write(source.path().join("model.bin"), pointer.serialize()).unwrap();
+            if native_intent {
+                let index = gix_index::File::at_or_default(
+                    source.path().join(".git/index"),
+                    gix_hash::Kind::Sha1,
+                    false,
+                    gix_index::decode::Options::default(),
+                )
+                .unwrap();
+                let previous_index_state =
+                    super::super::index::git_index_path_state(&index, b"model.bin".as_bstr());
+                staging
+                    .create_publication_intent(&[crab_staging::PublicationIntentEntry {
+                        batch_id: staged.batch_id.clone(),
+                        path: "model.bin".into(),
+                        expected_pointer_oid: git(
+                            source.path(),
+                            &["hash-object", "-w", "model.bin"],
+                        ),
+                        previous_index_state,
+                    }])
+                    .unwrap();
+            }
+            git(source.path(), &["add", "model.bin"]);
+            git(source.path(), &["commit", "-m", "managed payload"]);
+            let tip = git(source.path(), &["rev-parse", "HEAD"]);
+            if restored_index {
+                git(source.path(), &["read-tree", "HEAD^"]);
+            }
+            staging.close().await.unwrap();
+            let staging = Arc::new(StagingAreaReadOnly::open(staging_root).await.unwrap());
+            let storage = crab_storage::Store::new(Arc::new(InMemory::new()));
+            let store = crate::storage::store::Store::from_storage(storage);
+            let router = crate::storage::StoreLayout::new(store.clone(), "repos/test".to_owned());
+            let layout =
+                crab_storage::StoreLayout::new(store.as_storage().clone(), "repos/test".to_owned());
+            let root = crab_write::capsule_protocol::initialize(
+                &layout,
+                &"1".repeat(64),
+                "refs/heads/main",
+            )
+            .await
+            .unwrap();
+            let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 16 * 1024 * 1024,
+                max_frontier_bytes: 16 * 1024 * 1024,
+            };
+            let initial = crab_read::capsule_protocol::open_view_from_root(&layout, root, limits)
+                .await
+                .unwrap();
+            if stale {
+                publish_ref_edits_with_visibility(
+                    &layout,
+                    &source.path().join(".git"),
+                    vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                        "refs/heads/main",
+                        None,
+                        Some(first.clone()),
+                        None,
+                    )],
+                )
+                .await;
+            }
+            let config = PushConfig {
+                git_dir: Some(source.path().join(".git")),
+                ..Default::default()
+            };
+            let (result, _) = run(
+                &config,
+                &[PushSpec {
+                    force: false,
+                    src: "refs/heads/main".to_owned(),
+                    dst: "refs/heads/main".to_owned(),
+                }],
+                &store,
+                &router,
+                Some(initial.into()),
+                &[],
+                Some(&staging),
+                None,
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            let health = staging.lifecycle_health().unwrap();
+            let view = crab_read::capsule_protocol::open_view(&layout, limits)
+                .await
+                .unwrap();
+            assert!(
+                result.all_ok() != stale
+                    && view.refs().get("refs/heads/main")
+                        == Some(if stale { &first } else { &tip })
+                    && health.path_leases == u64::from(stale)
+                    && health.payloads == u64::from(stale)
+                    && health.open_push_snapshots == 0
+                    && health.committed_push_snapshots == 0
+                    && health.unresolved_publications == 0
+                    && staging.list_inflight().unwrap().is_empty(),
+                "stale={stale}, native_intent={native_intent}, restored_index={restored_index}, health={health:?}"
+            );
+        }
     }
 
     #[tokio::test]
