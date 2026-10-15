@@ -1,30 +1,46 @@
 //! Captured visibility closure layers; physical presence never grants membership.
-use super::*;
-use crab_metadata::capsule_protocol::{
-    CapsuleVisibilityReader, LayeredVisibilityReader, VisibilityChange, VisibilityEditHeader,
+use crate::capsule_protocol::{
+    CapsuleControl, CapsuleTransaction, CapsuleVisibilityDelta, CapsuleVisibilityReader,
+    LayeredVisibilityReader, VisibilityChange, VisibilityEditHeader,
 };
-use crab_metadata::git_visibility::{GitVisibilityIndex, MAX_GIT_VISIBILITY_OBJECTS};
+use crate::error::{MetadataError, Result};
+use crate::git_visibility::{GitVisibilityIndex, MAX_GIT_VISIBILITY_OBJECTS, decode_oid};
+use crab_storage::Store;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-pub(super) enum Reconciliation {
+/// Reconcile captured controls against complete or paged visibility evidence.
+pub enum VisibilityReconciliation {
     Complete(GitVisibilityIndex),
-    Paged(Box<Visibility>),
+    Paged(Box<CapturedVisibility>),
 }
 
-impl Reconciliation {
-    pub(super) async fn ready(
+impl VisibilityReconciliation {
+    /// Check expected ref values and captured prior-closure availability.
+    pub async fn ready(
         &self,
         control: &CapsuleControl,
         refs: &BTreeMap<String, String>,
     ) -> Result<bool> {
         match self {
-            Self::Complete(index) => control_is_ready(control, refs, index),
+            Self::Complete(index) => visibility_is_ready(
+                control.transaction(),
+                control.visibility_delta()?,
+                refs,
+                index,
+            ),
             Self::Paged(index) => index.ready(control, refs).await,
         }
     }
-    pub(super) async fn apply(&mut self, control: &CapsuleControl) -> Result<()> {
+    /// Apply one authenticated control without widening to mutable ref state.
+    pub async fn apply(&mut self, control: &CapsuleControl) -> Result<()> {
         match self {
             Self::Complete(index) if control.has_visibility() => {
-                apply_capsule_control_visibility_index(control, index)
+                apply_transaction_visibility_index(
+                    control.transaction(),
+                    control.visibility_delta()?,
+                    index,
+                )
             }
             Self::Complete(_) => Ok(()),
             Self::Paged(index) => index.apply(control).await,
@@ -77,7 +93,8 @@ impl Initial {
     }
 }
 
-pub(super) struct Visibility {
+/// Retain immutable prior ref closures while applying authenticated visibility edits.
+pub struct CapturedVisibility {
     store: Store,
     initial: Initial,
     layers: Vec<Layer>,
@@ -87,16 +104,10 @@ pub(super) struct Visibility {
     dictionary_count: u64,
 }
 
-fn oid(value: &str) -> Result<[u8; 20]> {
-    ObjectId::from_hex(value.as_bytes())
-        .map_err(|_| corrupt_path("capsule Git visibility", "invalid object identity"))?
-        .as_bytes()
-        .try_into()
-        .map_err(|_| corrupt_path("capsule Git visibility", "object format is unsupported"))
-}
-
-impl Visibility {
-    pub(super) fn new(
+impl CapturedVisibility {
+    /// Seed captured closures from complete authenticated visibility evidence.
+    #[must_use]
+    pub fn new(
         store: Store,
         initial: GitVisibilityIndex,
         names: impl Iterator<Item = String>,
@@ -107,7 +118,8 @@ impl Visibility {
         Self::seed(store, Initial::Complete(initial), names)
     }
 
-    pub(super) async fn from_checkpoint(
+    /// Seed captured closures from the checkpoint's authenticated visibility pages.
+    pub async fn from_checkpoint(
         store: Store,
         reader: Arc<LayeredVisibilityReader>,
         names: impl Iterator<Item = String>,
@@ -285,7 +297,8 @@ impl Visibility {
         Ok(Some((reader.clone(), headers)))
     }
 
-    pub(super) async fn ready(
+    /// Check expected ref values and captured prior-closure availability.
+    pub async fn ready(
         &self,
         control: &CapsuleControl,
         refs: &BTreeMap<String, String>,
@@ -311,7 +324,7 @@ impl Visibility {
             if edit.expected_old().is_none()
                 && !header.replaces()
                 && let Some(old) = header.old_oid()
-                && self.first_ref(oid(old)?).await?.is_none()
+                && self.first_ref(decode_oid(old)?).await?.is_none()
             {
                 return Ok(false);
             }
@@ -319,7 +332,8 @@ impl Visibility {
         Ok(true)
     }
 
-    pub(super) async fn apply(&mut self, control: &CapsuleControl) -> Result<()> {
+    /// Apply one authenticated control without widening to mutable ref state.
+    pub async fn apply(&mut self, control: &CapsuleControl) -> Result<()> {
         let Some((reader, headers)) = self.headers(control).await? else {
             return Ok(());
         };
@@ -333,17 +347,17 @@ impl Visibility {
                 && !header.replaces()
                 && let Some(old) = header.old_oid()
             {
-                parent = self.first_ref(oid(old)?).await?;
+                parent = self.first_ref(decode_oid(old)?).await?;
             }
             if let Some(old) = header.old_oid()
-                && !self.contains(parent, &[oid(old)?]).await?[0]
+                && !self.contains(parent, &[decode_oid(old)?]).await?[0]
             {
                 return Err(corrupt_path(
                     "capsule Git visibility",
                     "visibility delta prior closure does not contain its old ref tip",
                 ));
             }
-            let new = oid(header.new_oid())?;
+            let new = decode_oid(header.new_oid())?;
             let change = reader
                 .lookup(&self.store, edit.ref_name(), &[new])
                 .await?
@@ -420,315 +434,145 @@ impl Visibility {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crab_metadata::capsule_protocol::{
-        CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
-        CapsuleVisibilityDelta,
+/// Validate publication evidence and check its prior ref dependencies.
+pub fn visibility_is_ready(
+    transaction: &CapsuleTransaction,
+    delta: Option<&CapsuleVisibilityDelta>,
+    refs: &BTreeMap<String, String>,
+    visibility_index: &crate::git_visibility::GitVisibilityIndex,
+) -> Result<bool> {
+    if transaction
+        .edits()
+        .iter()
+        .any(|edit| refs.get(edit.ref_name()).map(String::as_str) != edit.expected_old())
+    {
+        return Ok(false);
+    }
+    let Some(delta) = delta else {
+        return Ok(true);
     };
-    use crab_metadata::git_visibility::GitVisibilityEdit;
-    use object_store::memory::InMemory;
-
-    fn hex(value: u8) -> String {
-        format!("{value:040x}")
-    }
-    fn object(value: u8) -> [u8; 20] {
-        let mut oid = [0; 20];
-        oid[19] = value;
-        oid
-    }
-    async fn control(
-        layout: &StoreLayout<Store>,
-        name: &str,
-        expected: Option<u8>,
-        edit: GitVisibilityEdit,
-    ) -> CapsuleControl {
-        let transaction = CapsuleTransaction::new(
-            &"1".repeat(64),
-            vec![CapsuleRefEdit::new(
-                name,
-                expected.map(hex),
-                Some(edit.new_oid.clone()),
-                None,
-            )],
-        )
-        .unwrap();
-        let delta = CapsuleVisibilityDelta::new(BTreeMap::from([(name.to_owned(), edit)])).unwrap();
-        let capsule = Capsule::build(
-            &transaction,
-            Vec::new(),
-            vec![CapsuleSection::new(
-                CapsuleSectionKind::VisibilityDelta,
-                delta.encode().unwrap(),
-            )],
-        )
-        .unwrap();
-        let run = CapsuleRun::leaf(capsule).unwrap();
-        layout
-            .store()
-            .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
-            .await
-            .unwrap();
-        let pointer = CapsulePointer::new(
-            run.hash(),
-            run.bytes().len() as u64,
-            run.control_offset(),
-            run.control_size(),
-            run.footer_hash(),
-            run.level(),
-            run.transaction_ids(),
-            run.newest_base_root_digest(),
-        )
-        .unwrap();
-        let (_, mut controls) =
-            crab_metadata::capsule_protocol::load_capsule_run_git_control(layout, &pointer)
-                .await
-                .unwrap();
-        controls.remove(0)
-    }
-    fn initial() -> GitVisibilityIndex {
-        GitVisibilityIndex::new(0, "0".repeat(64), "0".repeat(64), BTreeMap::new()).unwrap()
-    }
-
-    #[tokio::test]
-    async fn initial_replacement_opens_without_materializing_its_oid_set() {
-        use crab_metadata::capsule_protocol::{RepositoryRoot, RootRecord};
-        use std::sync::atomic::{AtomicU64, Ordering};
-        let bytes = Arc::new(AtomicU64::new(0));
-        let observed = bytes.clone();
-        let store =
-            Store::new(Arc::new(InMemory::new())).with_read_byte_observer(Arc::new(move |size| {
-                observed.fetch_add(size, Ordering::Relaxed);
-            }));
-        let layout = StoreLayout::new(store, "repositories/large-root".into());
-        let initial = RootRecord::encode(
-            RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
-        )
-        .unwrap();
-        crab_metadata::capsule_protocol::create_root(&layout, initial.clone())
-            .await
-            .unwrap();
-        let objects = (0u32..10000)
-            .map(|index| format!("{index:040x}"))
-            .collect::<Vec<_>>();
-        let tip = objects[9000].clone();
-        let transaction = CapsuleTransaction::new(
-            initial.digest(),
-            vec![CapsuleRefEdit::new(
-                "refs/heads/main",
-                None,
-                Some(tip.clone()),
-                None,
-            )],
-        )
-        .unwrap();
-        let delta = CapsuleVisibilityDelta::new(BTreeMap::from([(
-            "refs/heads/main".into(),
-            GitVisibilityEdit::from_replacement_objects(None, tip.clone(), objects),
-        )]))
-        .unwrap();
-        let capsule = Capsule::build(
-            &transaction,
-            Vec::new(),
-            vec![CapsuleSection::new(
-                CapsuleSectionKind::VisibilityDelta,
-                delta.encode().unwrap(),
-            )],
-        )
-        .unwrap();
-        let run = CapsuleRun::leaf(capsule).unwrap();
-        layout
-            .store()
-            .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
-            .await
-            .unwrap();
-        let pointer = CapsulePointer::new(
-            run.hash(),
-            run.bytes().len() as u64,
-            run.control_offset(),
-            run.control_size(),
-            run.footer_hash(),
-            run.level(),
-            run.transaction_ids(),
-            run.newest_base_root_digest(),
-        )
-        .unwrap();
-        let next = RootRecord::encode(
-            initial
-                .root()
-                .advance(
-                    initial.digest(),
-                    BTreeMap::from([("refs/heads/main".into(), tip)]),
-                    BTreeMap::new(),
-                    vec![pointer],
-                    transaction.id().unwrap().as_str(),
-                )
-                .unwrap(),
-        )
-        .unwrap();
-        layout
-            .store()
-            .put_overwrite(&layout.capsule_root_path(), next.bytes().clone())
-            .await
-            .unwrap();
-        let root = crab_metadata::capsule_protocol::load_root(&layout)
-            .await
-            .unwrap();
-        bytes.store(0, Ordering::Relaxed);
-        let view = open_git_view_from_root(
-            &layout,
-            root,
-            CapsuleReadLimits {
-                max_capsule_bytes: 1024 * 1024,
-                max_frontier_bytes: 1024 * 1024,
-            },
-        )
-        .await
-        .unwrap();
-        assert!(
-            bytes.load(Ordering::Relaxed) < 64 * 1024
-                && view.capsule_controls[0].visibility_delta().is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn layered_closures_match_complete_edits_and_preserve_captured_bases() {
-        let layout = StoreLayout::new(
-            Store::new(Arc::new(InMemory::new())),
-            "repositories/layers".into(),
-        );
-        let mut full = initial();
-        let mut lazy = Visibility::new(layout.store().clone(), full.clone(), std::iter::empty());
-        let edits = [
-            (
-                "refs/heads/main",
-                None,
-                GitVisibilityEdit::from_replacement_objects(
-                    None,
-                    hex(1),
-                    vec![hex(1), hex(2), hex(3)],
-                ),
-            ),
-            (
-                "refs/heads/feature",
-                None,
-                GitVisibilityEdit::from_delta_objects(
-                    Some(hex(1)),
-                    hex(2),
-                    vec![hex(4)],
-                    vec![hex(3)],
-                ),
-            ),
-            (
-                "refs/heads/main",
-                Some(1),
-                GitVisibilityEdit::from_delta_objects(
-                    Some(hex(1)),
-                    hex(5),
-                    vec![hex(5)],
-                    vec![hex(3)],
-                ),
-            ),
-        ];
-        for (name, expected, edit) in edits {
-            let control = control(&layout, name, expected, edit.clone()).await;
-            full.apply_ref_edit(name.to_owned(), &edit).unwrap();
-            lazy.apply(&control).await.unwrap();
+    // Transactions have unique refs. Count matched rows without copying OID lists;
+    // unmatched evidence still fails before it can authorize a publication.
+    let evidence = delta.edits();
+    let mut matched = 0;
+    for edit in transaction.edits() {
+        let Some(new_oid) = edit.new_oid() else {
+            if evidence.get(edit.ref_name()).is_some() {
+                return Err(corrupt_path(
+                    "capsule Git visibility",
+                    "deleted ref has visibility evidence",
+                ));
+            }
+            continue;
+        };
+        let Some(visibility) = evidence.get(edit.ref_name()) else {
+            return Err(corrupt_path(
+                "capsule Git visibility",
+                "live ref edit has no visibility evidence",
+            ));
+        };
+        matched += 1;
+        visibility.validate()?;
+        if visibility.new_oid != new_oid {
+            return Err(corrupt_path(
+                "capsule Git visibility",
+                "visibility evidence does not match its ref edit",
+            ));
         }
-        let requested = (1..7).map(object).collect::<Vec<_>>();
-        let mut actual = BTreeMap::new();
-        for (name, index) in &lazy.refs {
-            actual.insert(
-                name.clone(),
-                lazy.contains(Some(*index), &requested).await.unwrap(),
-            );
+        match edit.expected_old() {
+            Some(expected_old) => {
+                if visibility.old_oid.as_deref() != Some(expected_old) {
+                    return Err(corrupt_path(
+                        "capsule Git visibility",
+                        "visibility evidence does not match the expected old ref",
+                    ));
+                }
+                if !visibility_index.contains_ref(edit.ref_name()) {
+                    return Ok(false);
+                }
+            }
+            None if visibility.replaces => {}
+            None => {
+                let Some(old_oid) = visibility.old_oid.as_deref() else {
+                    continue;
+                };
+                if !visibility_index.contains_hex_in_any_ref(old_oid) {
+                    return Ok(false);
+                }
+            }
         }
-        let expected = lazy
-            .refs
-            .keys()
-            .map(|name| {
-                (
-                    name.clone(),
-                    requested
-                        .iter()
-                        .map(|oid| full.contains_in_ref(name, oid))
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        assert_eq!(
-            (actual, lazy.dictionary_count),
-            (expected, full.objects().len() as u64)
-        );
     }
-
-    #[tokio::test]
-    async fn removed_invisible_objects_do_not_supply_new_ref_bases() {
-        let layout = StoreLayout::new(
-            Store::new(Arc::new(InMemory::new())),
-            "repositories/invisible".into(),
-        );
-        let mut lazy = Visibility::new(layout.store().clone(), initial(), std::iter::empty());
-        let create = control(
-            &layout,
-            "refs/heads/main",
-            None,
-            GitVisibilityEdit::from_replacement_objects(None, hex(1), vec![hex(1), hex(3)]),
-        )
-        .await;
-        lazy.apply(&create).await.unwrap();
-        let remove = control(
-            &layout,
-            "refs/heads/main",
-            Some(1),
-            GitVisibilityEdit::from_delta_objects(Some(hex(1)), hex(2), vec![hex(2)], vec![hex(3)]),
-        )
-        .await;
-        lazy.apply(&remove).await.unwrap();
-        let branch = control(
-            &layout,
-            "refs/heads/feature",
-            None,
-            GitVisibilityEdit::from_delta_objects(Some(hex(3)), hex(4), vec![hex(4)], vec![]),
-        )
-        .await;
-        assert_eq!(
-            (
-                lazy.dictionary_contains(&[object(3)]).await.unwrap(),
-                lazy.ready(
-                    &branch,
-                    &BTreeMap::from([("refs/heads/main".into(), hex(2))])
-                )
-                .await
-                .unwrap()
-            ),
-            (vec![true], false)
-        );
+    if evidence.len() != matched {
+        return Err(corrupt_path(
+            "capsule Git visibility",
+            "visibility evidence contains an uncommitted ref",
+        ));
     }
+    Ok(true)
+}
 
-    #[tokio::test]
-    async fn removal_outside_captured_prior_closure_is_rejected() {
-        let layout = StoreLayout::new(
-            Store::new(Arc::new(InMemory::new())),
-            "repositories/bad-removal".into(),
-        );
-        let mut lazy = Visibility::new(layout.store().clone(), initial(), std::iter::empty());
-        let create = control(
-            &layout,
-            "refs/heads/main",
-            None,
-            GitVisibilityEdit::from_replacement_objects(None, hex(1), vec![hex(1)]),
-        )
-        .await;
-        lazy.apply(&create).await.unwrap();
-        let bad = control(
-            &layout,
-            "refs/heads/main",
-            Some(1),
-            GitVisibilityEdit::from_delta_objects(Some(hex(1)), hex(2), vec![hex(2)], vec![hex(9)]),
-        )
-        .await;
-        assert!(lazy.apply(&bad).await.is_err());
+/// Apply transaction-bound visibility evidence to a complete captured index.
+pub fn apply_transaction_visibility_index(
+    transaction: &CapsuleTransaction,
+    delta: Option<&CapsuleVisibilityDelta>,
+    index: &mut crate::git_visibility::GitVisibilityIndex,
+) -> Result<()> {
+    let evidence = delta.map(|delta| delta.edits());
+    let mut matched = 0;
+    for edit in transaction.edits() {
+        let Some(new_oid) = edit.new_oid() else {
+            if evidence
+                .and_then(|rows| rows.get(edit.ref_name()))
+                .is_some()
+            {
+                return Err(corrupt_path(
+                    "capsule Git visibility",
+                    "deleted ref has visibility evidence",
+                ));
+            }
+            index.remove_ref(edit.ref_name());
+            continue;
+        };
+        let visibility = evidence
+            .and_then(|rows| rows.get(edit.ref_name()))
+            .ok_or_else(|| {
+                corrupt_path(
+                    "capsule Git visibility",
+                    "live ref edit has no visibility evidence",
+                )
+            })?;
+        matched += 1;
+        if visibility.new_oid != new_oid {
+            return Err(corrupt_path(
+                "capsule Git visibility",
+                "visibility evidence does not match its ref edit",
+            ));
+        }
+        if let Some(expected_old) = edit.expected_old()
+            && visibility.old_oid.as_deref() != Some(expected_old)
+        {
+            return Err(corrupt_path(
+                "capsule Git visibility",
+                "visibility evidence does not match the expected old ref",
+            ));
+        }
+        index.apply_ref_edit(edit.ref_name().to_owned(), visibility)?;
+    }
+    if evidence.is_some_and(|rows| rows.len() != matched) {
+        return Err(corrupt_path(
+            "capsule Git visibility",
+            "visibility evidence contains an uncommitted ref",
+        ));
+    }
+    Ok(())
+}
+
+fn corrupt_path(path: impl Into<String>, reason: impl Into<String>) -> MetadataError {
+    MetadataError::CorruptObject {
+        path: path.into(),
+        reason: reason.into(),
     }
 }
+
+#[cfg(test)]
+mod tests;

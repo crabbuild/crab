@@ -49,8 +49,9 @@ Current-epoch activation and checkpoint-chain errors still fail closed.
 `capture_ref_heads` and `resolve_referenced_activations` own that stable capture
 for metadata and read orchestration. Transactionless heads must match the
 compacted root; selected-ref capture reuses the same activation validator while
-keeping its targeted ETag probes. This extraction does not yet remove the eager
-current-state file-lookup catalog loader.
+keeping its targeted ETag probes. Current-state catalog lookups reuse that owner together with the shared
+control-selection and visibility machinery; full maintenance materialization
+remains explicit.
 Run controls retain each capsule's own pack directory in capsule-relative
 coordinates. The run directory keeps physical transport coordinates separately.
 Logical capsule equality compares authenticated visibility section identities
@@ -69,11 +70,15 @@ accepts captured lookup roots and resolves requested files with their authentica
 shard/xorb closure. Point and batch calls share the page cache and retain the
 session read guard through I/O, so close waits for active reads. Missing catalog
 pages remain errors rather than reopening the mutable file-index database.
-The current-state opener still materializes a complete v2 catalog; callers with
-an authenticated view should pass its captured roots. All 19 audited local release tags omit these
+The current-state opener also captures authenticated catalog roots and leaves
+catalog bodies cold. Explicitly pinned callers pass their existing capture, while
+current-state sessions bind once to the first root they open. Catalog and Git
+views share stable ref capture, ref-frontier selection, visibility reconciliation
+and transaction ordering; neither path invents a separate precedence policy. All 19 audited local release tags omit these
 capsule checkpoint formats; unshipped format 6 is rejected without a fallback.
-Publication deltas are still materialized by the caller's captured view; their
-run-level aggregation and lazy capture remain required for the complete gate.
+Checkpoint and selected run catalog roots share one lookup budget and page cache.
+Control capture and selected closure queries are measured separately; complete
+opening and history-amplification qualification remain required.
 
 External pointer catalogs use `CRBPCP01` authenticated pages. A bounded descriptor
 commits file, shard, xorb and reverse-chunk directories; nested shard closures and
@@ -82,11 +87,17 @@ ordering, including the previous lowest-xorb/first-occurrence placement rule.
 Complete inspection verifies the body hash, complete dependency closure and
 canonical page layout. Delta inspection defers base-owned closure to `apply`,
 which retains later file bindings at equal size and rejects immutable shard/xorb
-conflicts. Encoded catalogs are limited to 2 GiB and descriptors to 4 KiB.
+conflicts.
+Full inspection of a captured visible set uses `PointerCatalogAssembly`: binding
+order need not be dependency order across independent refs. Rows and immutable
+conflicts are checked while collecting deltas, then the complete closure is
+checked before returning the catalog. Publication-time `PointerCatalog::apply`
+still requires each delta's dependencies to exist in its base. Encoded catalogs are limited to 2 GiB and descriptors to 4 KiB.
 The retired monolithic JSON encoding was absent from all 19 audited release tags
-and is rejected. This format foundation still uses complete materialization in
-foreground callers; lazy lookup and bounded historical amplification remain
-unfinished and must not be inferred from the page representation alone.
+and is rejected. Shared file lookup uses paged capture for pinned and current-state sessions.
+Other catalog materializers remain explicit callers; complete consumer,
+historical amplification and lifecycle qualification must not be inferred from
+the page representation alone.
 
 `v2/browse-indexes` is a bounded, mutable derived record, not ref authority.
 Its version 3 record binds a durable immutable commit graph, optional complete

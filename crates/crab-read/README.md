@@ -61,6 +61,12 @@ work. `git_visibility_index`, `candidate_git_visibility` and
 `tip_bound_transitions` asynchronously materialize captured controls only when
 bulk inspection needs them. They do not recapture refs or switch origins.
 
+Metadata owns the stable ref capture, control selection, visibility reconciliation
+and transaction ordering used by Git views and current-state catalog lookup.
+Current-state file sessions capture their first root once and query selected
+file/shard/xorb pages; they do not materialize the complete catalog or open
+SlateDB under a v2 root. Full maintenance inspection remains explicit.
+
 Pinned hydration and remote-mount setup pass captured paged catalog roots into
 metadata's shared file lookup. A lookup loads only its selected file dependency
 closure, preserving the captured publication order and immutable descriptor
