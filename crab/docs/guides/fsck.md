@@ -13,6 +13,12 @@ crab fsck [OPTIONS]
 `crab fsck` cross-checks Crab manifests, pack/index presence, the shard/xorb
 data chain, and coordination state against the object store.
 
+For protocol-v2 repositories, the check pins an authenticated root, verifies
+Git connectivity, and follows every reachable Crab or Git LFS pointer to its
+origin payload. Crab files must reconstruct to the pointer's exact Blake3 hash
+and size; LFS objects must match their SHA-256 identity and size. Full checking
+reads the payload bytes, even when a local cache already contains them.
+
 With `--repair`, it can automatically fix certain categories of issues.
 
 ## Options
@@ -104,7 +110,7 @@ crab fsck: 1 error(s), 0 info, 1 repaired, 0 repair failure(s)
 
 ## Verification Boundaries
 
-- The Git-object check currently confirms that ref-journal records are
+- For legacy layouts, the Git-object check confirms that ref-journal records are
   readable; it does not reconstruct the current repository and run full Git
   reachability for missing commits, trees, or blobs. Use `crab recover history
   verify <generation>` for strict Git fsck of a selected historical root, and

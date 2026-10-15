@@ -91,13 +91,13 @@ pub struct StoreChecker {
     capsule: Option<CapsuleFsckState>,
 }
 
-#[derive(Clone)]
 struct CapsuleFsckState {
     view: crab_read::capsule_protocol::CapsuleRepositoryView,
     catalog: crab_metadata::capsule_protocol::PointerCatalog,
     source_lifetime: Arc<crab_metadata::capsule_protocol::RetainedCapsuleSources>,
     browse_lifetime:
         Arc<tokio::sync::OnceCell<crab_metadata::capsule_protocol::BrowseRetentionCapture>>,
+    git_workspace: tokio::sync::OnceCell<tempfile::TempDir>,
 }
 
 impl StoreChecker {
@@ -148,6 +148,7 @@ impl StoreChecker {
                 catalog,
                 source_lifetime: Arc::new(source_lifetime),
                 browse_lifetime: Arc::new(tokio::sync::OnceCell::new()),
+                git_workspace: tokio::sync::OnceCell::new(),
             }),
         })
     }
@@ -245,6 +246,25 @@ impl StoreChecker {
             }
         }
 
+        if issues.is_empty() {
+            // Keep the authenticated Git database across phases. Catalog bodies
+            // alone cannot prove reachable pointer coverage or whole-file/LFS bytes.
+            let workspace = state
+                .git_workspace
+                .get_or_try_init(|| {
+                    check_capsule_git_connectivity(&self.store, &self.router, state)
+                })
+                .await?;
+            crab_read::capsule_protocol::verify_installed_dependencies(
+                &layout,
+                workspace.path(),
+                state.view.refs(),
+                &state.catalog,
+                CAPSULE_GIT_SCAN_LIMITS,
+                &CancellationToken::new(),
+            )
+            .await?;
+        }
         self.check_capsule_root_stability(state).await?;
         Ok(issues)
     }
@@ -1214,10 +1234,10 @@ async fn install_capsule_git_packs(
 }
 
 async fn check_capsule_git_connectivity(
-    store: Store,
-    router: StoreLayout,
-    state: CapsuleFsckState,
-) -> Result<()> {
+    store: &Store,
+    router: &StoreLayout,
+    state: &CapsuleFsckState,
+) -> Result<tempfile::TempDir> {
     let workspace = tempfile::tempdir()?;
     crab_git::initialize_bare_git_dir(workspace.path())?;
     let storage = store.as_storage().clone();
@@ -1233,7 +1253,7 @@ async fn check_capsule_git_connectivity(
         .map(|(name, oid)| (name.clone(), oid.clone()))
         .collect::<Vec<_>>();
     install_capsule_git_packs(
-        state.view,
+        state.view.clone(),
         layout,
         workspace.path().to_owned(),
         MAX_FSCK_FRONTIER_BYTES,
@@ -1247,7 +1267,8 @@ async fn check_capsule_git_connectivity(
     .await
     .map_err(|error| CrabError::Internal(format!("Git connectivity scan failed: {error}")))??;
     crab_git::batch::verify_git_dir_blobs(workspace.path(), &scan.unchecked_blobs, &|| false)
-        .map_err(CrabError::Io)
+        .map_err(CrabError::Io)?;
+    Ok(workspace)
 }
 
 impl FsckChecker for StoreChecker {
@@ -1257,13 +1278,15 @@ impl FsckChecker for StoreChecker {
         let store = self.store.clone();
         let router = self.router.clone();
         let prefix = self.prefix.clone();
-        let capsule = self.capsule.clone();
         Box::pin(async move {
-            if let Some(state) = capsule {
+            if let Some(state) = &self.capsule {
                 // Pack installation validates every advertised pack. The reachable
                 // walker then proves each ref's commit/tree/blob closure instead of
                 // treating an authenticated ref OID as sufficient evidence.
-                check_capsule_git_connectivity(store, router, state).await?;
+                state
+                    .git_workspace
+                    .get_or_try_init(|| check_capsule_git_connectivity(&store, &router, state))
+                    .await?;
                 return Ok(Vec::new());
             }
             // Git-object connectivity requires a local git repo and gix-fsck.
@@ -1756,6 +1779,9 @@ mod verification_tests;
 
 #[cfg(test)]
 mod capsule_history_tests;
+
+#[cfg(test)]
+mod pointer_data_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
