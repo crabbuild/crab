@@ -100,6 +100,73 @@ pub async fn write_index_entries(
     close_result
 }
 
+/// Publish rebuildable capsule chunk hints using origin receipts captured during byte verification.
+///
+/// Call after ref visibility. Every opened database is closed on success or error;
+/// callers must await this future through completion. Readers still revalidate source
+/// visibility and exact origin identity, so partial batches never confer authority.
+pub async fn write_capsule_chunk_candidates(
+    store: Arc<dyn ObjectStore>,
+    config: &RemoteIndexConfig,
+    repo_prefix: &str,
+    catalog: &crate::capsule_protocol::PointerCatalog,
+    origins: &HashMap<MerkleHash, OriginReceipt>,
+) -> Result<()> {
+    let mut source_shards = HashMap::new();
+    for (shard_hash, shard) in catalog.shards() {
+        for xorb in shard.xorb_hashes() {
+            source_shards
+                .entry(xorb.as_str())
+                .or_insert(shard_hash.as_str());
+        }
+    }
+    let mut selected = Vec::new();
+    for (hash, entry) in catalog.xorbs().iter().rev() {
+        let parsed = MerkleHash::from_hex(hash).map_err(|_| MetadataError::CorruptObject {
+            path: CHUNK_INDEX_DB_LABEL.to_owned(),
+            reason: "invalid capsule xorb hash".to_owned(),
+        })?;
+        if let Some(origin) = origins.get(&parsed) {
+            selected.push((hash, parsed, entry, origin));
+        }
+    }
+    if selected.is_empty() {
+        return Ok(());
+    }
+    for (hash, _, _, _) in &selected {
+        if !source_shards.contains_key(hash.as_str()) {
+            return Err(MetadataError::CorruptObject {
+                path: CHUNK_INDEX_DB_LABEL.to_owned(),
+                reason: "capsule xorb candidate has no source shard root".to_owned(),
+            });
+        }
+    }
+    let writer = RemoteIndexWriter::open(store, config, false, true).await?;
+    let result = async {
+        // Last-write heads choose the lowest canonical xorb and first occurrence.
+        for (hash, parsed, entry, origin) in selected {
+            let source_shard = source_shards.get(hash.as_str()).ok_or_else(|| {
+                MetadataError::Internal(
+                    "admitted capsule candidate lost its source shard".to_owned(),
+                )
+            })?;
+            let rows = crate::capsule_protocol::capsule_chunk_candidate_rows(
+                repo_prefix,
+                source_shard,
+                parsed,
+                entry,
+                origin,
+            )?;
+            writer.write_capsule_candidates(&rows).await?;
+        }
+        Ok::<_, MetadataError>(())
+    }
+    .await;
+    let close = writer.close().await;
+    result?;
+    close
+}
+
 /// Long-lived writer for caller-bounded remote index batches.
 ///
 /// Writes buffer data without waiting for durability. Always await [`Self::close`]
@@ -162,6 +229,33 @@ impl RemoteIndexWriter {
             committed_chunk_entries,
         )
         .await
+    }
+
+    /// Buffer a bounded set of capsule candidate rows; close remains the durability barrier.
+    async fn write_capsule_candidates(&self, rows: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+        let db = self
+            .chunk_db
+            .as_ref()
+            .ok_or_else(|| MetadataError::Internal("chunk index was not opened".to_owned()))?;
+        for rows in rows.chunks(4096) {
+            let mut batch = slatedb::WriteBatch::new();
+            for (key, value) in rows {
+                batch.put(key.as_slice(), value.as_slice());
+            }
+            db.write_with_options(
+                batch,
+                &slatedb::config::WriteOptions {
+                    await_durable: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|source| MetadataError::SlateDbWrite {
+                db: CHUNK_INDEX_DB_LABEL.to_owned(),
+                source,
+            })?;
+        }
+        Ok(())
     }
 
     /// Flush and close every database opened by this writer.
@@ -474,6 +568,34 @@ async fn open_writer(
     path: &str,
     db: &'static str,
 ) -> Result<slatedb::Db> {
+    let fresh = match open_reader(Arc::clone(&store), path, db).await? {
+        None => true,
+        Some(reader) => {
+            let key = crate::key_codec::encode_system_key(crate::key_codec::SYS_FORMAT_VERSION);
+            let validation = async {
+                let value =
+                    reader
+                        .get(&key)
+                        .await
+                        .map_err(|source| MetadataError::SlateDbRead {
+                            db: db.to_owned(),
+                            source,
+                        })?;
+                validate_writer_format(value.as_deref(), db)
+            }
+            .await;
+            let close = reader
+                .close()
+                .await
+                .map_err(|source| MetadataError::SlateDbClose {
+                    db: db.to_owned(),
+                    source,
+                });
+            validation?;
+            close?;
+            false
+        }
+    };
     let l0_sst_size_bytes = usize::try_from(DEFAULT_CHUNK_INDEX_L0_SST_SIZE_BYTES)
         .map_err(|error| MetadataError::Internal(format!("L0 SST size unsupported: {error}")))?;
     let settings = slatedb::config::Settings {
@@ -484,7 +606,7 @@ async fn open_writer(
         l0_sst_size_bytes,
         ..slatedb::config::Settings::default()
     };
-    slatedb::Db::builder(ObjectPath::from(path), store)
+    let writer = slatedb::Db::builder(ObjectPath::from(path), store)
         .with_settings(settings)
         .build()
         .await
@@ -492,7 +614,61 @@ async fn open_writer(
             db: db.to_owned(),
             path: path.to_owned(),
             source,
-        })
+        })?;
+    if fresh {
+        let initialized = async {
+            let key = crate::key_codec::encode_system_key(crate::key_codec::SYS_FORMAT_VERSION);
+            let value = writer
+                .get(&key)
+                .await
+                .map_err(|source| MetadataError::SlateDbRead {
+                    db: db.to_owned(),
+                    source,
+                })?;
+            if let Some(value) = value {
+                return validate_writer_format(Some(&value), db);
+            }
+            let mut batch = slatedb::WriteBatch::new();
+            batch.put(key, crate::key_codec::METADB_FORMAT_VERSION.to_le_bytes());
+            writer
+                .write_with_options(
+                    batch,
+                    &slatedb::config::WriteOptions {
+                        await_durable: false,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map(|_| ())
+                .map_err(|source| MetadataError::SlateDbWrite {
+                    db: db.to_owned(),
+                    source,
+                })
+        }
+        .await;
+        if let Err(error) = initialized {
+            let _ = close_writer(Some(writer), db).await;
+            return Err(error);
+        }
+    }
+    Ok(writer)
+}
+
+fn validate_writer_format(value: Option<&[u8]>, db: &str) -> Result<()> {
+    if value
+        != Some(
+            crate::key_codec::METADB_FORMAT_VERSION
+                .to_le_bytes()
+                .as_slice(),
+        )
+    {
+        return Err(MetadataError::CorruptObject {
+            path: db.to_owned(),
+            reason: "metadata database is missing or has an unsupported canonical format marker"
+                .to_owned(),
+        });
+    }
+    Ok(())
 }
 
 async fn open_reader(
@@ -790,3 +966,6 @@ mod tests {
         assert_eq!(config.chunk_index_path, ".crab/chunk_index_db/");
     }
 }
+
+#[cfg(test)]
+mod capsule_tests;
