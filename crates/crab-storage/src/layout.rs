@@ -197,7 +197,7 @@ impl<S> StoreLayout<S> {
     /// Path to one authenticated browse capture retained until explicit history pruning.
     #[must_use]
     pub fn browse_retained_root_path(&self, hash: &str) -> ObjectPath {
-        self.repo_path(&format!("metadata/browse-roots/{hash}"))
+        self.repo_path(&format!("v2/browse-roots/{hash}"))
     }
 
     /// Path to one immutable capsule-protocol capsule.

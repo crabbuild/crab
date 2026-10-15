@@ -32,6 +32,7 @@ struct AgedObjects {
     inner: InMemory,
     paths: Mutex<HashSet<Path>>,
     modified: SystemTime,
+    list_calls: Mutex<Vec<Path>>,
 }
 
 impl std::fmt::Display for AgedObjects {
@@ -75,6 +76,9 @@ impl ObjectStore for AgedObjects {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        if let Some(prefix) = prefix {
+            self.list_calls.lock().unwrap().push(prefix.clone());
+        }
         let paths = self.paths.lock().unwrap().clone();
         let modified = self.modified;
         Box::pin(self.inner.list(prefix).map_ok(move |mut meta| {
@@ -193,6 +197,7 @@ async fn cold_capture_after_gc(replace_readiness: bool) -> crab_metadata::error:
         inner: InMemory::new(),
         paths: Mutex::new(HashSet::new()),
         modified: SystemTime::now() - Duration::from_secs(7200),
+        list_calls: Mutex::new(Vec::new()),
     });
     let store = Store::new(backend.clone());
     let layout = StoreLayout::new(store.as_storage().clone(), "org/captured-gc".to_owned());
@@ -303,5 +308,110 @@ async fn gc_preserves_cold_captures_after_readiness_replacement() {
     assert!(
         matches!(result, Ok(true)),
         "cold capture lost after readiness replacement: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn capsule_gc_lists_each_candidate_namespace_once() {
+    let backend = Arc::new(AgedObjects {
+        inner: InMemory::new(),
+        paths: Mutex::new(HashSet::new()),
+        modified: SystemTime::now(),
+        list_calls: Mutex::new(Vec::new()),
+    });
+    let store = Store::new(backend.clone());
+    let layout = StoreLayout::new(store.as_storage().clone(), "org/gc-listing".to_owned());
+    let root =
+        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+    let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+    manifest.seal_git_validation();
+    backend.list_calls.lock().unwrap().clear();
+    let outcome = sweep_capsule_objects(
+        &GcArgs::default(),
+        &store,
+        &layout,
+        root.record().root(),
+        &[],
+        &manifest,
+        &HashSet::new(),
+        &CancellationToken::new(),
+        SystemTime::now(),
+        Duration::from_secs(3600),
+        Instant::now(),
+    )
+    .await
+    .unwrap();
+    let mut actual = backend.list_calls.lock().unwrap().clone();
+    actual.sort();
+    let mut expected = [
+        "v2/capsules/",
+        "v2/checkpoints/",
+        "v2/pack-layers/",
+        "v2/history/",
+        "metadata/",
+        "v2/browse-roots/",
+        "manifests/",
+    ]
+    .map(|suffix| layout.repo_path(suffix))
+    .to_vec();
+    expected.sort();
+    assert_eq!(
+        (actual, outcome.list_requests, outcome.list_parallelism),
+        (expected, 7, 7)
+    );
+}
+
+#[tokio::test]
+async fn capsule_gc_preserves_metadata_outside_owned_index_directories() {
+    let backend = Arc::new(AgedObjects {
+        inner: InMemory::new(),
+        paths: Mutex::new(HashSet::new()),
+        modified: SystemTime::now() - Duration::from_secs(7200),
+        list_calls: Mutex::new(Vec::new()),
+    });
+    let store = Store::new(backend.clone());
+    let layout = StoreLayout::new(store.as_storage().clone(), "org/gc-metadata".to_owned());
+    let root =
+        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+    let unrelated = [
+        "unrelated/keep",
+        "path-state-backups/keep",
+        "commit-graph-backups/keep",
+        "git-object-index-backups/keep",
+    ]
+    .map(|suffix| layout.repo_path(&format!("metadata/{suffix}")));
+    for path in &unrelated {
+        store
+            .put(path, Bytes::from_static(b"unowned metadata"))
+            .await
+            .unwrap();
+        backend.paths.lock().unwrap().insert(path.clone());
+    }
+    let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+    manifest.seal_git_validation();
+    sweep_capsule_objects(
+        &GcArgs::default(),
+        &store,
+        &layout,
+        root.record().root(),
+        &[],
+        &manifest,
+        &HashSet::new(),
+        &CancellationToken::new(),
+        SystemTime::now(),
+        Duration::from_secs(3600),
+        Instant::now(),
+    )
+    .await
+    .unwrap();
+    let retained =
+        futures_util::future::try_join_all(unrelated.iter().map(|path| store.head(path))).await;
+    assert!(
+        retained.is_ok(),
+        "GC removed metadata outside its owned directories: {retained:?}"
     );
 }

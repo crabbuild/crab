@@ -53,7 +53,7 @@ pub async fn ensure(
                 max_capsule_bytes: max_bytes,
                 max_frontier_bytes: max_bytes,
             };
-            let view = open_view_from_root_with_metadata(layout, root, limits).await?;
+            let mut view = open_view_from_root_with_metadata(layout, root, limits).await?;
             let snapshot = view.git_snapshot()?;
             if snapshot.manifest.refs.is_empty() {
                 return Ok(());
@@ -119,8 +119,8 @@ pub async fn ensure(
             };
             // Bind the just-verified physical pages to this same view before path
             // construction. Reopening a fresh root could mix index and ref identities.
-            let repository = view.clone().with_browse_indexes(Some(indexes.clone()))
-                .git_repository_from_store(layout.clone(), identity.clone(), runtime, options, max_bytes, cancel)
+            view = view.with_browse_indexes(Some(indexes.clone()));
+            let repository = view.git_repository_from_store(layout.clone(), identity.clone(), runtime, options, max_bytes, cancel)
                 .await?;
             let complete = crab_write::generation::browse::build_path_state(
                 layout,
