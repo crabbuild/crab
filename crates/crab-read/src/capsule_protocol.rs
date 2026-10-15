@@ -88,7 +88,9 @@ pub struct CapsuleRepositoryView {
     ref_capsule_counts: BTreeMap<String, u32>,
     capsule_run_pointers: Vec<CapsulePointer>,
     capsule_run_sources: Vec<PackSourceDescriptor>,
-    catalog_sources: Vec<crab_metadata::capsule_protocol::RunCatalogSource>,
+    // Fetch-only captures omit reconciled logical deltas. Distinguish that
+    // state from a proven empty suffix so catalog absence cannot hide data.
+    catalog_sources: Option<Vec<crab_metadata::capsule_protocol::RunCatalogSource>>,
     capsule_run_bytes: BTreeMap<String, Bytes>,
     capsule_run_indexes: BTreeMap<String, Vec<PackRange>>,
     capsule_run_member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
@@ -743,11 +745,16 @@ impl CapsuleRepositoryView {
     ///
     /// Checkpoint and run pages stay cold until selected dependency queries;
     /// exact logical-capsule order excludes unrelated physical run occurrences.
+    /// Fetch-only captures return `ReadError::IncompleteCatalogView`.
     pub fn pointer_catalog_lookup(
         &self,
         layout: &StoreLayout<Store>,
         maximum: u64,
     ) -> Result<crab_metadata::capsule_protocol::PointerCatalogLookup> {
+        let sources = self
+            .catalog_sources
+            .as_ref()
+            .ok_or(ReadError::IncompleteCatalogView)?;
         let lookup = self
             .checkpoint
             .as_ref()
@@ -766,11 +773,16 @@ impl CapsuleRepositoryView {
                     .map(|capsule| capsule.hash().to_owned()),
             )
             .collect::<Vec<_>>();
-        Ok(lookup.with_run_sources(self.catalog_sources.clone(), &order)?)
+        Ok(lookup.with_run_sources(sources.clone(), &order)?)
     }
 
     /// Materialize the complete generation-pinned external pointer catalog.
+    ///
+    /// Fetch-only captures return `ReadError::IncompleteCatalogView`.
     pub async fn pointer_catalog(&self) -> Result<PointerCatalog> {
+        self.catalog_sources
+            .as_ref()
+            .ok_or(ReadError::IncompleteCatalogView)?;
         let mut catalog =
             match self.checkpoint.as_ref() {
                 Some(checkpoint) if checkpoint.is_control_only() => {
@@ -4324,7 +4336,7 @@ pub fn compacted_view_from_checkpoint(
         ref_capsule_counts: BTreeMap::new(),
         capsule_run_pointers: Vec::new(),
         capsule_run_sources: Vec::new(),
-        catalog_sources: Vec::new(),
+        catalog_sources: Some(Vec::new()),
         capsule_run_bytes: BTreeMap::new(),
         capsule_run_indexes: BTreeMap::new(),
         capsule_run_member_oids: BTreeMap::new(),
@@ -4460,13 +4472,14 @@ async fn assemble_view(
         .into_iter()
         .map(|run| (run.hash().to_owned(), run))
         .collect::<BTreeMap<_, _>>();
-    let catalog_sources = runs
-        .values()
-        .map(|run| run.catalog_source(router))
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+    let catalog_sources = Some(
+        runs.values()
+            .map(|run| run.catalog_source(router))
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
+    );
     let mut capsule_run_sources = Vec::new();
     let mut capsule_run_indexes = BTreeMap::new();
     let mut capsule_run_member_oids = BTreeMap::new();
@@ -4721,13 +4734,18 @@ async fn assemble_layered_control_view(
         }
         runs.insert(hash, (control, capsules));
     }
-    let catalog_sources = runs
-        .values()
-        .map(|(control, _)| control.catalog_source(router))
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+    let catalog_sources = if footer_only {
+        None
+    } else {
+        Some(
+            runs.values()
+                .map(|(control, _)| control.catalog_source(router))
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect(),
+        )
+    };
     let all_capsule_controls = runs
         .values()
         .flat_map(|(_, capsules)| capsules.iter().cloned())
@@ -6500,6 +6518,57 @@ mod tests {
                 }
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn fetch_only_catalog_capture_is_distinct_from_an_authenticated_miss() {
+        for frontier in [false, true] {
+            let inner = Arc::new(InMemory::new());
+            let observer = Arc::new(RecordingObserver::default());
+            let store = Store::new(inner.clone()).with_storage_observer(observer.clone());
+            let router = StoreLayout::new(store, "repositories/test".into());
+            if frontier {
+                seed_one_capsule(inner, None).await;
+            } else {
+                let root = RootRecord::encode(
+                    RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+                )
+                .unwrap();
+                router
+                    .store()
+                    .create_strict(&router.capsule_root_path(), root.bytes().clone())
+                    .await
+                    .unwrap();
+            }
+            let root = load_root(&router).await.unwrap();
+            let fetch =
+                open_view_from_root_with_layered_control(&router, root.clone(), TEST_LIMITS)
+                    .await
+                    .unwrap();
+            observer.observations.lock().unwrap().clear();
+            assert!(matches!(
+                fetch.pointer_catalog_lookup(&router, 1024 * 1024),
+                Err(ReadError::IncompleteCatalogView)
+            ));
+            assert!(matches!(
+                fetch.pointer_catalog().await,
+                Err(ReadError::IncompleteCatalogView)
+            ));
+            assert!(observer.observations.lock().unwrap().is_empty());
+            let complete = open_git_view_from_root(&router, root, TEST_LIMITS)
+                .await
+                .unwrap();
+            let lookup = complete
+                .pointer_catalog_lookup(&router, 1024 * 1024)
+                .unwrap();
+            assert!(
+                lookup
+                    .files(router.store(), &["f".repeat(64)])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[tokio::test]

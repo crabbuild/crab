@@ -1605,3 +1605,86 @@ receipt is `catalog-root-failures-live-r2/receipt.json`. The first probe stopped
 on a driver assertion against unborn `HEAD`; the corrected probe commits and
 pushes a real fixture before fault injection. Neither probe changes the broad
 harness's failed status.
+
+### Reject incomplete catalog captures
+
+Fetch-only views retain physical pack/visibility evidence while intentionally
+omitting reconciled logical delta controls. Treating their missing controls as
+an empty suffix would let either catalog API return a checkpoint-only result.
+The guard represents catalog capture as an optional source set:
+`None` means incomplete; `Some(empty)` means a complete capture with no indexed
+delta contribution. Both selected lookup and full inspection reject incomplete
+captures before origin I/O with `ReadError::IncompleteCatalogView`. CLI
+conversion retains this typed failure in its standard source chain.
+
+The regression covers unborn and populated fetch-only views, verifies no I/O
+on rejection, and contrasts both with an authenticated miss from a complete
+Git metadata view. All 50 read-side capsule tests pass, including this guard,
+and strict read all-target Clippy passes. The CLI source-chain regression
+and CLI compile check also pass. This guard is not included in the frozen run-v4
+installation build at commit `2d78b341010`.
+
+### Run-v4 native and Git workflow qualification
+
+The full-feature release binary at `2d78b341010` passes the existing managed
+RustFS workflow: 74 commands and 58 checks across native add/push and Git
+add/push. Each uses an actual 4 MiB file and duplicate, then verifies lazy
+clone, byte-identical hydration, dehydrate/rehydrate, cold checkpoint clone,
+Git connectivity and remote integrity. The input is the existing read-only
+100-commit fixture; this is correctness smoke, not history-scaling evidence.
+
+Independent inspection confirms both stored publication runs use footer v4
+and contain `CRBRCG01` indexes with nonempty roots. Both resulting checkpoints
+use format 7 with file-catalog roots. The binary SHA-256 remains
+`5171cfee26d393c0121cc3fb02891312f5825b8f22b4434db8abbc7b37cd07c8`,
+and all 1,218 guarded source/manifest files are unchanged. External receipt:
+`run-catalog-fuse-live-r1/receipt.json`. The incomplete-capture guard above is
+not part of this frozen binary. Normal installation, fixed edits against
+increasing history, new 10 GiB qualification, consumer/lifecycle integration
+and representative S3 latency remain outstanding.
+
+### Published run-reader CI coverage
+
+The protocol workflow at published head `2d78b341010` completed successfully:
+[Git protocol qualification run 38669011348](https://github.com/crabbuild/crab/actions/runs/38669011348).
+Its unit logs include the catalog-history growth regression, read-view lazy
+catalog regression, shared cross-run warm budget regression and complete/paged
+control identity regression. The workflow also passes native Git compatibility
+for 2.30, 2.40, 2.45 and current Git, macOS/Windows protocol contracts, and the
+released-shape RustFS partial-clone lifecycle. Architecture Gates at the same
+head also pass. These results cover the published revision; they do not cover
+the local incomplete-capture guard or replace the remaining 10 GiB,
+history-scaling, consumer and lifecycle acceptance gates. The external log and
+revision-bound receipt are `run-catalog-ci-protocol-unit.log` and
+`run-catalog-ci-proof.json`.
+
+### Fixed-edit qualification exposed cache close cost
+
+`run-catalog-fixed-edit-r1` holds a 4 MiB file and 4 KiB edit fixed against
+16 versus 1,024 unrelated 64 KiB managed files. The 16-file case passes cold
+byte-identical reconstruction, strict Git integrity and remote fsck with zero
+errors. The larger case fails during its history push at the 900-second
+command deadline; it never reaches the fixed edit. This is a failed scaling
+qualification, not evidence that the new catalog passes its acceptance gate.
+
+Two stack samples and offline symbolization identify the observed hot path:
+`CacheCatalog::reserve_sync` drops its private database, rusqlite closes the
+connection, and SQLite checkpoints the last WAL connection. The second sample
+records 753 of 788 blocking-worker samples in `fcntl`; disassembly identifies
+`File::sync_all` using macOS `F_FULLFSYNC`. The pinned SQLite source documents
+this default close/checkpoint behavior. These observations identify cache
+close cost during the failure; a bounded session/checkpoint fix still needs a
+deterministic regression, security/lifetime proof and a full rerun. No sync
+or payload durability policy has been relaxed.
+
+A fresh read after timeout confirms the 1,024-file repository's published ref
+still names its initial commit (`run-catalog-timeout-inspection-r1`, eight
+commands/fourteen checks). Failed logs, samples, symbols and dependency proof
+remain in `run-catalog-fixed-push-diagnostic.json` and the original run report.
+The separate `codex/cache-catalog-io` change retains WAL at all three catalog
+writer boundaries. Its regression fails before the fix and passes afterward;
+46 catalog and 128 private-filesystem/lifecycle/local-cache tests pass, as does
+strict local-cache all-target Clippy. The full failed workload still needs a
+rerun. The pinned SQLite 3.49.1 is also affected by the upstream WAL-reset
+race; a matched Crab/Cellule dependency upgrade is required before release
+qualification. Remaining consumer, lifecycle and 10 GiB gates still apply.
