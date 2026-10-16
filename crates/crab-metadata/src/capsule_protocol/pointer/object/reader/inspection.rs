@@ -3,8 +3,7 @@ use super::*;
 use crate::pages::object::Node;
 use std::sync::Arc;
 
-mod join;
-use join::{Join, Record};
+use crate::capsule_protocol::pointer::relations::{Join, Record};
 
 type Seen = BTreeMap<[u8; 32], (Kind, Reference)>;
 
@@ -25,6 +24,65 @@ impl CatalogPages {
             .object_dependencies()
             .map(|(hash, bytes)| (self.pages.path(hash), bytes))
             .collect())
+    }
+
+    pub(in crate::capsule_protocol) async fn inspect_into(
+        &self,
+        store: &Store,
+        maximum: u64,
+        output: &mut crate::capsule_protocol::pointer::inspection::Inspector,
+    ) -> Result<()> {
+        // The complete physical proof includes reverse placement and alias checks.
+        // Streaming logical rows must not hide corruption in an unselected column.
+        self.inspected_objects(store, maximum).await?;
+        let mut work = PageWork::new(maximum, 0);
+        for kind in [Kind::CatalogFiles, Kind::CatalogShards, Kind::CatalogXorbs] {
+            let mut pending = self.root(kind)?.cloned().into_iter().collect();
+            while let Some((_, node)) = self
+                .pages
+                .next_page(store, &mut pending, kind, &mut work)
+                .await?
+            {
+                if let Node::Leaf(rows) = node.as_ref() {
+                    for (key, value) in rows {
+                        let identity = hex(key)?;
+                        // The physical pass admits the whole closure. Only this
+                        // typed recipe survives until spill; cumulative row
+                        // admission would reject copies already released.
+                        let mut recipe_work = PageWork::new(maximum, 0);
+                        match kind {
+                            Kind::CatalogFiles => {
+                                output.file(&identity, file_from_bytes(value)?, 0).await?
+                            }
+                            Kind::CatalogShards => {
+                                output
+                                    .shard(
+                                        &identity,
+                                        self.shard(store, value, &mut recipe_work).await?,
+                                        0,
+                                    )
+                                    .await?
+                            }
+                            Kind::CatalogXorbs => {
+                                output
+                                    .xorb(
+                                        &identity,
+                                        self.xorb(store, value, &mut recipe_work).await?,
+                                        0,
+                                    )
+                                    .await?
+                            }
+                            _ => {
+                                return Err(corrupt(
+                                    "logical inspection selected an invalid column",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn inspect(&self, store: &Store, work: &mut PageWork, join: &mut Join) -> Result<()> {

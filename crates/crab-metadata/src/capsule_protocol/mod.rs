@@ -67,12 +67,12 @@ pub use plan::{
     publish_capsule_plan_receipt, publish_capsule_plan_repair_receipt, read_capsule_plan_intent,
     resolve_capsule_plan_receipt,
 };
-#[cfg(feature = "storage")]
-pub use pointer::PointerCatalogLookup;
 pub use pointer::{
     FileCatalogEntry, MAX_CATALOG_BYTES, PointerCatalog, PointerCatalogAssembly, ShardCatalogEntry,
     XorbCatalogEntry, XorbChunkEntry,
 };
+#[cfg(feature = "storage")]
+pub use pointer::{PointerCatalogLookup, inspect_pointer_catalog_shard_hashes};
 pub use ref_head::{
     CAPSULE_REF_COMPACTION_FAN_IN, CAPSULE_REF_ROLLUP_WINDOW, CapsuleRefHead, CapsuleRefState,
     MAX_CAPSULE_REF_FRONTIER, MAX_CAPSULE_REF_HEADS, capsule_ref_name_from_key,

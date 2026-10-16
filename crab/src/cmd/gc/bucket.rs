@@ -1137,10 +1137,10 @@ async fn capsule_repository_roots(
     )
     .await?;
     let root_digest = view.state_digest();
-    let catalog = view.pointer_catalog().await?;
+    let shard_hashes = view.pointer_catalog_shard_hashes().await?;
     Ok(Some(CapsuleRepositoryRoots {
         root_digest,
-        shard_hashes: catalog.shards().keys().cloned().collect(),
+        shard_hashes,
     }))
 }
 
@@ -3231,6 +3231,29 @@ mod tests {
         assert!(registry.is_complete_for_destructive_gc());
         assert!(registry.complete_repos.contains("org/a"));
         assert!(registry.complete_repos.contains("org/b"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires CRAB_E2E_FLAT_BUCKET and explicit scratch S3 credentials"]
+    async fn live_capsule_shard_inspection_reads_published_catalog_without_gc() {
+        let bucket = std::env::var("CRAB_E2E_FLAT_BUCKET").unwrap();
+        let storage =
+            crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
+                .unwrap();
+        let store = Store::from_storage(storage);
+        let repo = format!("catalog-shard-inspection/{}", uuid::Uuid::now_v7());
+        let (expected, _) = publish_capsule_pointer_catalog(&store, &repo).await;
+        let roots = capsule_repository_roots(&store, &repo)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(roots.shard_hashes, vec![expected]);
+        // Root capture only: this fixture must never invoke a bucket sweep.
+        let again = capsule_repository_roots(&store, &repo)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.root_digest, roots.root_digest);
     }
 
     #[tokio::test]

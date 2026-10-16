@@ -1,6 +1,6 @@
 use super::*;
-use crab_storage::scratch::{ScratchFile, ScratchSpace};
-use std::collections::VecDeque;
+use crate::capsule_protocol::pointer::spill::{Cursor, Reducer, Row};
+use crab_storage::scratch::ScratchSpace;
 
 const MAGIC: &[u8; 8] = b"CRBCSJ01";
 const BLOCK_ROWS: usize = 4096;
@@ -62,7 +62,7 @@ impl Record {
         Ok(())
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         match self.key[0] {
             0 | 1 if !self.required || self.defined => Ok(()),
             2 if self.expected.is_some() && self.actual == self.expected => Ok(()),
@@ -82,43 +82,6 @@ impl Record {
         );
         bytes.extend_from_slice(&self.expected.unwrap_or([0; 40]));
         bytes.extend_from_slice(&self.actual.unwrap_or([0; 40]));
-    }
-}
-
-struct Run {
-    files: Vec<ScratchFile>,
-}
-
-struct Cursor {
-    files: VecDeque<ScratchFile>,
-    rows: std::vec::IntoIter<Record>,
-    previous: Option<[u8; 33]>,
-}
-
-impl Cursor {
-    fn new(run: Run) -> Self {
-        Self {
-            files: run.files.into(),
-            rows: Vec::new().into_iter(),
-            previous: None,
-        }
-    }
-
-    async fn next(&mut self, space: &ScratchSpace) -> Result<Option<Record>> {
-        loop {
-            if let Some(row) = self.rows.next() {
-                if self.previous.is_some_and(|previous| previous >= row.key) {
-                    return Err(corrupt("inspection spill rows are not strictly ordered"));
-                }
-                self.previous = Some(row.key);
-                return Ok(Some(row));
-            }
-            let Some(file) = self.files.pop_front() else {
-                return Ok(None);
-            };
-            let body = space.read(&file, MAX_BLOCK_BYTES).await?;
-            self.rows = decode(&body)?.into_iter();
-        }
     }
 }
 
@@ -193,131 +156,49 @@ fn decode(bytes: &[u8]) -> Result<Vec<Record>> {
         .collect()
 }
 
-pub(super) struct Join {
+impl Row for Record {
+    const TARGET_BYTES: usize = BLOCK_ROWS * ROW_BYTES;
+    const MAX_BYTES: u64 = MAX_BLOCK_BYTES;
+    fn key(&self) -> &[u8; 33] {
+        &self.key
+    }
+    fn bytes(&self) -> usize {
+        ROW_BYTES
+    }
+    fn merge(&mut self, other: Self) -> Result<()> {
+        Record::merge(self, other)
+    }
+    fn encode(rows: &[Self]) -> Result<Bytes> {
+        encode(rows)
+    }
+    fn decode(bytes: Bytes) -> Result<Vec<Self>> {
+        decode(&bytes)
+    }
+}
+
+pub(in crate::capsule_protocol) struct Join {
     space: ScratchSpace,
-    buffer: Vec<Record>,
-    levels: Vec<Option<Run>>,
+    rows: Reducer<Record>,
 }
 
 impl Join {
     pub(super) fn new(space: ScratchSpace) -> Self {
         Self {
             space,
-            buffer: Vec::with_capacity(BLOCK_ROWS),
-            levels: Vec::new(),
+            rows: Reducer::new(),
         }
     }
 
     pub(super) async fn add(&mut self, row: Record) -> Result<()> {
-        self.buffer.push(row);
-        if self.buffer.len() == BLOCK_ROWS {
-            self.flush().await?;
-        }
-        Ok(())
+        self.rows.add(&self.space, row).await
     }
 
-    async fn flush(&mut self) -> Result<()> {
-        if self.buffer.is_empty() {
-            return Ok(());
-        }
-        let mut rows = std::mem::replace(&mut self.buffer, Vec::with_capacity(BLOCK_ROWS));
-        rows.sort_unstable_by_key(|row| row.key);
-        let mut grouped: Vec<Record> = Vec::with_capacity(rows.len());
-        for row in rows {
-            match grouped.last_mut().filter(|prior| prior.key == row.key) {
-                Some(prior) => prior.merge(row)?,
-                None => grouped.push(row),
-            }
-        }
-        let mut run = Run {
-            files: vec![self.space.write(encode(&grouped)?).await?],
-        };
-        let mut level = 0;
-        loop {
-            if level == self.levels.len() {
-                self.levels.push(None);
-            }
-            match self.levels[level].take() {
-                Some(prior) => run = self.merge(prior, run).await?,
-                None => {
-                    self.levels[level] = Some(run);
-                    return Ok(());
-                }
-            }
-            level += 1;
-        }
-    }
-
-    async fn merge(&self, left: Run, right: Run) -> Result<Run> {
-        let retired = left
-            .files
-            .iter()
-            .chain(&right.files)
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut left = Cursor::new(left);
-        let mut right = Cursor::new(right);
-        let mut a = left.next(&self.space).await?;
-        let mut b = right.next(&self.space).await?;
-        let mut rows = Vec::with_capacity(BLOCK_ROWS);
-        let mut output = Run { files: Vec::new() };
-        while a.is_some() || b.is_some() {
-            let take_left = match (&a, &b) {
-                (Some(a), Some(b)) => a.key <= b.key,
-                (Some(_), None) => true,
-                _ => false,
-            };
-            let row = if take_left {
-                let mut row = a
-                    .take()
-                    .ok_or_else(|| corrupt("spill merge lost its left row"))?;
-                a = left.next(&self.space).await?;
-                if b.as_ref().is_some_and(|other| other.key == row.key) {
-                    row.merge(
-                        b.take()
-                            .ok_or_else(|| corrupt("spill merge lost its right row"))?,
-                    )?;
-                    b = right.next(&self.space).await?;
-                }
-                row
-            } else {
-                let row = b
-                    .take()
-                    .ok_or_else(|| corrupt("spill merge lost its right row"))?;
-                b = right.next(&self.space).await?;
-                row
-            };
-            rows.push(row);
-            if rows.len() == BLOCK_ROWS {
-                output.files.push(self.space.write(encode(&rows)?).await?);
-                rows.clear();
-            }
-        }
-        if !rows.is_empty() {
-            output.files.push(self.space.write(encode(&rows)?).await?);
-        }
-        for file in retired {
-            self.space.remove(file).await?;
-        }
-        Ok(output)
-    }
-
-    pub(super) async fn finish(mut self, prior: Result<()>) -> Result<()> {
+    pub(super) async fn finish(self, prior: Result<()>) -> Result<()> {
         let result: Result<()> = async {
             prior?;
-            self.flush().await?;
-            let mut combined = None;
-            for run in std::mem::take(&mut self.levels).into_iter().flatten() {
-                combined = Some(match combined.take() {
-                    Some(prior) => self.merge(prior, run).await?,
-                    None => run,
-                });
-            }
-            if let Some(run) = combined {
-                let mut cursor = Cursor::new(run);
-                while let Some(row) = cursor.next(&self.space).await? {
-                    row.validate()?;
-                }
+            let mut cursor = Cursor::<Record>::new(self.rows.finish(&self.space).await?);
+            while let Some(row) = cursor.next(&self.space).await? {
+                row.validate()?;
             }
             Ok(())
         }

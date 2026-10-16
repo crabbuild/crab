@@ -50,7 +50,7 @@ impl CheckpointCatalog {
     }
 
     #[cfg(feature = "storage")]
-    fn reader(
+    pub(in crate::capsule_protocol) fn reader(
         &self,
         layout: &crab_storage::StoreLayout<crab_storage::Store>,
     ) -> Result<CatalogPages> {

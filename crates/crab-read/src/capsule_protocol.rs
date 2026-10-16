@@ -847,6 +847,33 @@ impl CapsuleRepositoryView {
         Ok(catalog.finish()?)
     }
 
+    /// Inspect complete captured catalog dependencies without retaining the merged catalog.
+    ///
+    /// File bindings and immutable conflicts retain capture order. Fetch-only
+    /// captures remain incomplete; origin state is never recaptured or written.
+    /// The caller retains these captured sources against GC through completion.
+    pub async fn pointer_catalog_shard_hashes(&self) -> Result<Vec<String>> {
+        self.catalog_sources
+            .as_ref()
+            .ok_or(ReadError::IncompleteCatalogView)?;
+        let layout = self
+            .metadata_layout
+            .as_ref()
+            .ok_or_else(|| ReadError::internal("catalog inspection has no captured origin"))?;
+        Ok(
+            crab_metadata::capsule_protocol::inspect_pointer_catalog_shard_hashes(
+                layout,
+                self.checkpoint
+                    .as_ref()
+                    .and_then(LayeredCheckpoint::catalog),
+                &self.capsules,
+                &self.capsule_controls,
+                crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
+            )
+            .await?,
+        )
+    }
+
     /// Open the authenticated embedded Git packs as a filesystem-free repository.
     ///
     /// The returned handle is pinned to this exact root and uses a private
@@ -6096,10 +6123,21 @@ mod tests {
                 fetch.pointer_catalog().await,
                 Err(ReadError::IncompleteCatalogView)
             ));
+            assert!(matches!(
+                fetch.pointer_catalog_shard_hashes().await,
+                Err(ReadError::IncompleteCatalogView)
+            ));
             assert!(observer.observations.lock().unwrap().is_empty());
             let complete = open_git_view_from_root(&router, root, TEST_LIMITS)
                 .await
                 .unwrap();
+            assert!(
+                complete
+                    .pointer_catalog_shard_hashes()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
             let lookup = complete
                 .pointer_catalog_lookup(&router, 1024 * 1024)
                 .unwrap();
@@ -6312,6 +6350,10 @@ mod tests {
             observer.observations.lock().unwrap().clear();
             lookup.files(router.store(), &[file]).await.unwrap();
             assert!(observer.observations.lock().unwrap().is_empty());
+            assert_eq!(
+                view.pointer_catalog_shard_hashes().await.unwrap(),
+                catalog.shards().keys().cloned().collect::<Vec<_>>()
+            );
             assert_eq!(view.pointer_catalog().await.unwrap(), catalog);
         }
     }

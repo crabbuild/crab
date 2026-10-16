@@ -2521,10 +2521,29 @@ spill growth; cleanup drains blocking workers. The existing temporary-directory
 setting controls placement, with no new config/env surface or dependency.
 Historical fsck uses the same streaming integrity inspection before checking
 pack sources, including catalogs replaced by an empty current catalog. It does
-not retain complete historical recipe maps. Current fsck payload verification,
-restore accounting, GC shard discovery and catalog-rewriting tools still use
-full logical catalogs and remain separate conversion work. Materialization
-admission continues to protect those callers retaining recipe copies.
+not retain complete historical recipe maps. GC shard discovery now streams a
+captured checkpoint and folds selected publication deltas through the same
+private spill reducer. Capture rank selects the final file binding; all file
+size and immutable descriptor conflicts still fail. A deferred relation join
+checks final file-to-shard and shard-to-xorb closure before returning any shard
+roots, including dependencies supplied by later refs. The checkpoint's physical
+integrity inspection runs first, including reverse placement and alias checks.
+No origin writes or snapshot recapture occur during this operation.
+
+The checkpoint reader retains page identities and bounded row windows, plus
+one decoded recipe at a time. Complete physical admission precedes logical
+reduction; each live recipe has separate materialization admission because its
+copies are released before the next recipe. Normal materializers keep their
+aggregate row budgets. Sorted runs use 512 KiB/4,096-row blocks (one
+larger recipe may occupy its own block), binary merge levels and a live spill
+ceiling of sixteen times the admitted catalog byte limit. The returned shard
+list remains output-sized. This is bounded external reduction, not constant
+space: physical page identities, spill handles, the largest recipe and output
+roots still consume memory. Each selected packed delta still uses its existing
+format-bounded decoder individually; streaming those deltas remains follow-up
+work. Current fsck payload verification, restore accounting and catalog-rewriting
+tools also retain full logical catalogs. Materialization admission continues to
+protect those callers retaining recipe copies.
 
 Release audit: all six upstream published tag objects were checked again before
 this change; none contains the capsule codec. Unshipped checkpoint formats

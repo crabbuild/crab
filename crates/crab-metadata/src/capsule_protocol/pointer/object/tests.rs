@@ -323,6 +323,16 @@ async fn maintenance_streams_shared_recipes_without_materializing_the_catalog() 
         .map(|(hash, body)| (pages.pages.path(&hash), body.len() as u64))
         .collect::<BTreeMap<_, _>>();
     assert_eq!(actual.into_iter().collect::<BTreeMap<_, _>>(), expected);
+    let cold = CatalogPages::new(
+        object_store::path::Path::from("catalog"),
+        pages.descriptor.clone(),
+        *blake3::hash(&body).as_bytes(),
+        body.len() as u64,
+    )
+    .unwrap();
+    let mut logical = crate::capsule_protocol::pointer::inspection::Inspector::new(maximum);
+    let checked = cold.inspect_into(&store, maximum, &mut logical).await;
+    assert!(logical.finish(checked).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -507,6 +517,12 @@ async fn streamed_inspection_rejects_resigned_broken_dependency_edges() {
             forged.inspected_objects(&store, 1024 * 1024).await.is_err(),
             "stream: {scenario}"
         );
+        let mut logical = crate::capsule_protocol::pointer::inspection::Inspector::new(1024 * 1024);
+        let checked = forged.inspect_into(&store, 1024 * 1024, &mut logical).await;
+        assert!(
+            logical.finish(checked).await.is_err(),
+            "logical: {scenario}"
+        );
     }
 }
 
@@ -573,4 +589,22 @@ async fn streamed_inspection_bounds_io_for_distinct_recipes_beyond_the_page_cach
         streamed <= 4 * full,
         "streaming must not trade catalog-sized memory for repeated cold joins: {streamed} versus {full}"
     );
+    observations.0.lock().unwrap().clear();
+    let cold = CatalogPages::new(
+        object_store::path::Path::from("catalog"),
+        pages.descriptor.clone(),
+        *blake3::hash(&body).as_bytes(),
+        body.len() as u64,
+    )
+    .unwrap();
+    let mut logical = crate::capsule_protocol::pointer::inspection::Inspector::new(maximum);
+    let checked = cold.inspect_into(&store, maximum, &mut logical).await;
+    assert!(logical.finish(checked).await.unwrap().is_empty());
+    let io = observations.0.lock().unwrap();
+    let logical = io.iter().map(|op| op.bytes_read).sum::<u64>();
+    eprintln!(
+        "distinct recipe logical maintenance: {logical} origin bytes; full materializer: {full}"
+    );
+    assert!(logical <= 4 * full, "{logical} versus {full}");
+    assert!(io.iter().all(|op| op.bytes_written == 0));
 }

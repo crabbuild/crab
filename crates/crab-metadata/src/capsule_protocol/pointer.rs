@@ -9,8 +9,16 @@ use crate::validation::validate_content_hash;
 
 const POINTER_CATALOG_VERSION: u32 = 1;
 
+#[cfg(feature = "storage")]
+pub(super) mod inspection;
 pub(in crate::capsule_protocol) mod object;
 pub(super) mod paged;
+#[cfg(feature = "storage")]
+mod relations;
+#[cfg(feature = "storage")]
+pub(super) mod spill;
+#[cfg(feature = "storage")]
+pub use inspection::inspect_pointer_catalog_shard_hashes;
 pub use paged::MAX_CATALOG_BYTES;
 #[cfg(feature = "storage")]
 pub use paged::PointerCatalogLookup;
@@ -304,16 +312,10 @@ impl PointerCatalog {
             self.insert_shard(hash.clone(), entry.clone())?;
         }
         for (hash, entry) in &delta.files {
-            match self.files.get(hash) {
-                Some(existing) if existing.size != entry.size => {
-                    return Err(contract_error(format!(
-                        "file {hash} has conflicting declared sizes"
-                    )));
-                }
-                _ => {
-                    self.files.insert(hash.clone(), entry.clone());
-                }
+            if let Some(existing) = self.files.get(hash) {
+                validate_binding_size(hash, existing.size, entry.size)?;
             }
+            self.files.insert(hash.clone(), entry.clone());
         }
         Ok(())
     }
@@ -434,12 +436,31 @@ fn insert_consistent<T: PartialEq>(
     entry: T,
     kind: &str,
 ) -> Result<()> {
-    if map.get(&hash).is_some_and(|existing| existing != &entry) {
+    validate_consistent(map.get(&hash), &entry, &hash, kind)?;
+    map.insert(hash, entry);
+    Ok(())
+}
+
+fn validate_binding_size(hash: &str, previous: u64, incoming: u64) -> Result<()> {
+    if previous != incoming {
+        return Err(contract_error(format!(
+            "file {hash} has conflicting declared sizes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_consistent<T: PartialEq + ?Sized>(
+    previous: Option<&T>,
+    incoming: &T,
+    hash: &str,
+    kind: &str,
+) -> Result<()> {
+    if previous.is_some_and(|previous| previous != incoming) {
         return Err(contract_error(format!(
             "{kind} {hash} has conflicting descriptors"
         )));
     }
-    map.insert(hash, entry);
     Ok(())
 }
 
