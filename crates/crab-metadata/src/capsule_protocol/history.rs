@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn history_rejects_unsupported_checkpoint_formats() {
-        for format in [0, 1, 2, 3, 4, 5, 6, 7, 9, u32::MAX] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, u32::MAX] {
             let segment = history_with_unvalidated_pointers(format, 1);
             let built = HistorySegment::build(
                 segment.checkpoint().clone(),
