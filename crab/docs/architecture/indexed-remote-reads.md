@@ -2630,3 +2630,20 @@ reclaimed bytes. The regression holds an accepted delete independently of its
 client future, cancels on a sibling deletion and requires admission to remain
 fenced until the held response completes. Successor writer admission must then
 be available after the cancelled sweep returns.
+
+
+## Auth-issued view-local hint maintenance
+
+Repository GC sweeps capsule hint pages only when its store carries the matching
+validated storage scope: both repository and global prefixes must match the
+layout, and global content must be private to that repository. Explicit layout
+strings alone do not establish ownership. The auth credential-response validator
+and managed-grant builder issue that prefix pair.
+
+Destructive sweeps acquire the view-local global lease before the repository
+lease, matching all hint publishers. They authenticate the current hint root and
+every page before selecting garbage, preserve live pages and exact placement IDs,
+and retain immutable-object grace even with force. Missing or corrupt current
+pages abort before deletion. Admitted delete responses drain before either
+lease releases; failed repository admission still releases the global lease.
+Default shared-global hints remain owned by bucket maintenance.

@@ -1,3 +1,9 @@
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "test setup and assertions"
+)]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -24,6 +30,7 @@ use super::{GcArgs, sweep_capsule_objects};
 use crate::storage::store::Store;
 
 mod cancellation;
+mod scoped_hints;
 
 const LIMIT: u64 = 8 * 1024 * 1024;
 

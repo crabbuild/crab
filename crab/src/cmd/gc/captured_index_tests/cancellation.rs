@@ -42,7 +42,12 @@ impl DeleteGate {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capsule_gc_drains_admitted_deletes_before_releasing_its_fence() {
-    assert_gc_drains(Arc::new(InMemory::new()), "org/cancel-gc").await;
+    assert_gc_drains(Arc::new(InMemory::new()), "org/cancel-gc", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_capsule_gc_drains_deletes_before_releasing_either_domain() {
+    assert_gc_drains(Arc::new(InMemory::new()), "org/scoped-cancel-gc", true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -52,11 +57,13 @@ async fn live_capsule_gc_drains_admitted_deletes_before_releasing_its_fence() {
     let store =
         crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
             .unwrap();
-    let prefix = format!("gc-drain/{}", uuid::Uuid::now_v7());
-    assert_gc_drains(store.inner().clone(), &prefix).await;
+    for scoped in [false, true] {
+        let prefix = format!("gc-drain/{}", uuid::Uuid::now_v7());
+        assert_gc_drains(store.inner().clone(), &prefix, scoped).await;
+    }
 }
 
-async fn assert_gc_drains(inner: Arc<dyn ObjectStore>, prefix: &str) {
+async fn assert_gc_drains(inner: Arc<dyn ObjectStore>, prefix: &str, scoped: bool) {
     let blocked = Path::from(format!("{prefix}/v2/capsules/{}", "1".repeat(64)));
     let trigger = Path::from(format!("{prefix}/v2/capsules/{}", "2".repeat(64)));
     let cancel = CancellationToken::new();
@@ -75,7 +82,18 @@ async fn assert_gc_drains(inner: Arc<dyn ObjectStore>, prefix: &str) {
         modified: SystemTime::now() - Duration::from_secs(7200),
         list_calls: Mutex::new(Vec::new()),
     });
-    let store = Store::new(backend);
+    let global = format!("{prefix}/.crab");
+    let mut domains = vec![prefix];
+    let mut store = Store::new(backend);
+    if scoped {
+        store = store.with_storage_scope(crab_types::storage::StorageScope {
+            repo_prefix: prefix.to_owned(),
+            global_prefix: global.clone(),
+            source_repo: prefix.to_owned(),
+            scope_hash: "1".repeat(64),
+        });
+        domains.push(&global);
+    }
     let router = crate::storage::StoreLayout::new(store.clone(), prefix.to_owned());
     let layout = StoreLayout::new(store.as_storage().clone(), prefix.to_owned());
     crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
@@ -115,15 +133,21 @@ async fn assert_gc_drains(inner: Arc<dyn ObjectStore>, prefix: &str) {
         completed = Some(result);
     }
     let returned_early = completed.is_some();
-    let writer = crab_coordination::GcFenceLease::acquire_writer(
-        store.inner(),
-        prefix,
-        Duration::from_secs(60),
-    )
-    .await;
-    let fenced = writer.is_err();
-    if let Ok(writer) = writer {
-        writer.release().await.unwrap();
+    let mut fenced = true;
+    for domain in &domains {
+        let writer = crab_coordination::GcFenceLease::acquire_writer(
+            store.inner(),
+            domain,
+            Duration::from_secs(60),
+        )
+        .await;
+        fenced &= matches!(
+            &writer,
+            Err(crab_coordination::error::CoordinationError::GcFenceHeld { sweep: true, .. })
+        );
+        if let Ok(writer) = writer {
+            writer.release().await.unwrap();
+        }
     }
     gate.release.notify_one();
     let result = match completed {
@@ -141,12 +165,14 @@ async fn assert_gc_drains(inner: Arc<dyn ObjectStore>, prefix: &str) {
         result,
         Err(crate::core::error::CrabError::Cancelled)
     ));
-    let writer = crab_coordination::GcFenceLease::acquire_writer(
-        store.inner(),
-        prefix,
-        Duration::from_secs(60),
-    )
-    .await
-    .unwrap();
-    writer.release().await.unwrap();
+    for domain in domains {
+        let writer = crab_coordination::GcFenceLease::acquire_writer(
+            store.inner(),
+            domain,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        writer.release().await.unwrap();
+    }
 }

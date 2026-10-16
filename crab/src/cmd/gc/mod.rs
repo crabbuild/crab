@@ -3056,7 +3056,29 @@ pub async fn run_repo_remote_gc(
     grace_period: Duration,
     _jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
 ) -> Result<GcOutcome> {
-    run_capsule_gc(
+    if args.resume_run_id.is_some() {
+        return Err(CrabError::Configuration {
+            key: "gc.resume".to_owned(),
+            origin: "protocol-v2 GC completes under one root fence and has no journal resume mode"
+                .to_owned(),
+        });
+    }
+    if args.force && !confirm_force(args)? {
+        return Ok(GcOutcome::default());
+    }
+    check_cancelled(cancel)?;
+    // Auth-issued view-local content has one repository owner. Its hint pages
+    // need global admission before the repository sweep, matching publisher order.
+    // An arbitrary explicit layout does not establish that ownership.
+    let global = if !args.dry_run && owns_scoped_hint_pages(store, router) {
+        Some(
+            crate::maintenance::GcSweepLease::acquire(store, router.global_prefix(), cancel)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let operation = run_capsule_gc(
         args,
         store,
         router,
@@ -3064,7 +3086,24 @@ pub async fn run_repo_remote_gc(
         cancel,
         grace_period,
     )
-    .await
+    .await;
+    let release = match global {
+        Some(lease) => lease.release().await,
+        None => Ok(()),
+    };
+    match (operation, release) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn owns_scoped_hint_pages<S>(store: &Store, layout: &crab_storage::StoreLayout<S>) -> bool {
+    store.storage_scope().is_some_and(|scope| {
+        !scope.repo_prefix.is_empty()
+            && scope.repo_prefix == layout.repo_prefix()
+            && scope.global_prefix == layout.global_prefix()
+            && scope.global_prefix == format!("{}/.crab", scope.repo_prefix)
+    })
 }
 
 async fn run_capsule_gc(
@@ -3077,17 +3116,6 @@ async fn run_capsule_gc(
 ) -> Result<GcOutcome> {
     const FENCE_TTL: Duration = Duration::from_secs(60 * 60);
 
-    if args.resume_run_id.is_some() {
-        return Err(CrabError::Configuration {
-            key: "gc.resume".to_owned(),
-            origin: "protocol-v2 GC completes under one root fence and has no journal resume mode"
-                .to_owned(),
-        });
-    }
-    if args.force && !confirm_force(args)? {
-        return Ok(GcOutcome::default());
-    }
-    check_cancelled(cancel)?;
     let started = Instant::now();
     let snapshot_at = SystemTime::now();
     let layout = crab_storage::StoreLayout::with_global_prefix(
@@ -3251,6 +3279,22 @@ async fn sweep_capsule_objects(
     )
     .await?;
 
+    let scoped_hints = owns_scoped_hint_pages(store, layout);
+    let hint_pages = if scoped_hints {
+        // Authenticate the entire current page closure before selecting garbage.
+        // Destructive sweeps hold global admission against hint-root publication.
+        let (_, live) = crab_metadata::capsule_protocol::CapsuleChunkIndex::new(layout)
+            .objects(layout.store(), u64::MAX)
+            .await?;
+        reachable.extend(live.into_iter().map(|(path, _)| path.to_string()));
+        store
+            .list_prefix(&layout.capsule_chunk_pages_prefix())
+            .await?
+    } else {
+        Vec::new()
+    };
+    check_cancelled(cancel)?;
+
     let capsule_prefix = layout.repo_path("v2/capsules/");
     let checkpoint_prefix = layout.repo_path("v2/checkpoints/");
     let catalog_prefix = layout.capsule_catalog_prefix();
@@ -3305,6 +3349,7 @@ async fn sweep_capsule_objects(
                 .any(|prefix| object.location.as_ref().starts_with(prefix))
         })
         .chain(browse_root_objects)
+        .chain(hint_pages)
         .chain(manifests.into_iter().filter(|object| {
             let key = object.location.as_ref();
             key.starts_with(path_state_descriptor_prefix.as_ref())
@@ -3406,7 +3451,7 @@ async fn sweep_capsule_objects(
         accounting.bytes_reclaimed = deleted.bytes_reclaimed;
     }
     Ok(GcOutcome {
-        list_requests: 8,
+        list_requests: 8 + u64::from(scoped_hints),
         list_parallelism: 8,
         list_wall_seconds: started.elapsed().as_secs_f64(),
         dry_run: args.dry_run,
