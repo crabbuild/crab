@@ -208,3 +208,8 @@ awaiting future is dropped. `close` drains those workers before removing the roo
 callers retain primary validation errors while reporting cleanup failures. Drop
 performs best-effort off-thread cleanup after the last owner exits. No SlateDB,
 SQLite, new dependency or additional configuration is introduced by this transport.
+
+The `test-support` `CountingObjectStore::cancel_after_put` hook arms one
+cancellation after a successful PUT beneath a selected component prefix. It
+leaves failed writes and unrelated keys untouched, so publication tests can
+separate immutable-preparation cancellation from cancellation after visibility.

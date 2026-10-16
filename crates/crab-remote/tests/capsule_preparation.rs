@@ -384,37 +384,13 @@ async fn verify_indexed_publication(
         result.unwrap(),
         crab_remote::prepare::CapsuleCommitOutcome::Committed { .. }
     ));
-    let config = crab_metadata::remote_index::RemoteIndexConfig::for_repo_with_global_prefix(
-        layout.repo_prefix(),
-        layout.global_prefix(),
-    );
-    let reader =
-        slatedb::DbReader::builder(config.chunk_index_path, Arc::clone(layout.store().inner()))
-            .build()
-            .await
-            .expect("shared publication must populate cold native-add candidates");
     let hash = MerkleHash::from_hex(&chunk).unwrap();
-    let candidate = reader
-        .get(crab_metadata::key_codec::capsule_chunk_head_key(
-            &hash.into(),
-        ))
+    let candidates = crab_metadata::capsule_protocol::CapsuleChunkIndex::new(&layout)
+        .candidates(layout.store(), &[hash], LIMIT)
         .await
-        .unwrap()
-        .expect("published payload candidate");
-    let placement = crab_metadata::receipts::CommittedChunkPlacement::decode(&candidate).unwrap();
-    let anchor = reader
-        .get(crab_metadata::key_codec::capsule_chunk_anchor_key(
-            &placement.source_anchor_id,
-        ))
-        .await
-        .unwrap()
-        .unwrap();
-    let anchor = crab_metadata::capsule_protocol::CapsuleChunkAnchor::decode(
-        &placement.source_anchor_id,
-        &anchor,
-    )
-    .unwrap();
-    reader.close().await.unwrap();
+        .expect("shared publication must populate cold native-add candidates");
+    let placement = candidates.placements[&<[u8; 32]>::from(hash)].clone();
+    let anchor = candidates.anchors[&placement.source_anchor_id].clone();
     let path = layout.xorb_path(&MerkleHash::from(placement.xorb_hash));
     let (body, identity) = layout.store().get_with_etag(&path).await.unwrap();
     let root = crab_write::capsule_protocol::open_root(&layout)
@@ -546,21 +522,18 @@ async fn git_only_capsule_upload_does_not_read_historical_catalog() {
 async fn committed_capsule_survives_candidate_index_failure() {
     let (directory, content) = content_fixture().await;
     source_commit(directory.path(), &content);
+    let file = content.files()[0].clone();
     let (layout, _) = layout().await;
-    let config = crab_metadata::remote_index::RemoteIndexConfig::for_repo_with_global_prefix(
-        layout.repo_prefix(),
-        layout.global_prefix(),
-    );
-    let db = slatedb::Db::open(config.chunk_index_path, Arc::clone(layout.store().inner()))
+    // Inject the failure in the capsule owner. A retired manifest database
+    // no longer participates in this publication or proves a repair boundary.
+    layout
+        .store()
+        .put_exact(
+            &layout.capsule_chunk_index_path(),
+            Bytes::from_static(b"invalid capsule hint root"),
+        )
         .await
         .unwrap();
-    db.put(
-        crab_metadata::key_codec::encode_system_key(crab_metadata::key_codec::SYS_FORMAT_VERSION),
-        2u32.to_le_bytes(),
-    )
-    .await
-    .unwrap();
-    db.close().await.unwrap();
     let (prepared, view, runtime, leases) = prepare(&layout, directory.path(), Some(content)).await;
     let artifacts = prepared
         .upload_capsule(&view, proof_limits(), &CancellationToken::new())
@@ -582,6 +555,37 @@ async fn committed_capsule_survives_candidate_index_failure() {
         ),
         "repairable hint-index failure must not reject committed refs"
     );
+    assert!(
+        crab_metadata::capsule_protocol::CapsuleChunkIndex::new(&layout)
+            .available(layout.store(), LIMIT)
+            .await
+            .is_err()
+    );
+    let tip = String::from_utf8(git(directory.path(), &["rev-parse", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_eq!(
+        crab_read::capsule_protocol::read_visible_refs(&layout)
+            .await
+            .unwrap()
+            .get("refs/heads/main"),
+        Some(&tip)
+    );
+    let crab_git::pointer_detect::PointerKind::Crab(pointer) = crab_git::pointer_detect::classify(
+        &std::fs::read(directory.path().join("model.bin")).unwrap(),
+    ) else {
+        panic!("fixture pointer");
+    };
+    crab_read::pointer_proof::verify_crab_pointer(
+        &layout,
+        &pointer,
+        MerkleHash::from(*file.shard_hash()),
+        proof_limits().content,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -642,3 +646,6 @@ async fn historical_pointer_lookup_preserves_declared_size_checks() {
 
 #[path = "capsule_preparation/ref_visibility.rs"]
 mod ref_visibility;
+
+#[path = "capsule_preparation/cancellation.rs"]
+mod cancellation;

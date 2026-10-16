@@ -479,9 +479,24 @@ async fn run_inner(
                 .await?;
                 return Ok(Some(outcome));
             }
+            let payload_objects = if config.active_active_replication.is_some() {
+                pointer_delta
+                    .xorbs()
+                    .keys()
+                    .map(|hash| layout.xorb_path(hash).to_string())
+                    .chain(
+                        pointer_delta
+                            .shards()
+                            .keys()
+                            .map(|hash| layout.shard_path(hash).to_string()),
+                    )
+                    .chain(lfs_objects)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             let result = if changes_namespace {
                 let commit_layout = layout.clone();
-                let commit_pointer_delta = &pointer_delta;
                 let commit_push_ref_head_bases = push_ref_head_bases.clone();
                 crab_write::with_ref_namespaces_wait(
                     layout.store(),
@@ -506,9 +521,9 @@ async fn run_inner(
                             base,
                             &transaction,
                             &capsule,
-                            commit_pointer_delta,
-                            &lfs_objects,
+                            &payload_objects,
                             &commit_push_ref_head_bases,
+                            &scoped,
                         )
                         .await
                     },
@@ -521,9 +536,9 @@ async fn run_inner(
                     base,
                     &transaction,
                     &capsule,
-                    &pointer_delta,
-                    &lfs_objects,
+                    &payload_objects,
                     &push_ref_head_bases,
+                    cancel,
                 )
                 .await
             };
@@ -561,13 +576,25 @@ async fn run_inner(
         None => Ok(()),
     };
     let committed = match (publication, release) {
-        (Ok(committed), Ok(())) => committed,
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
-        (Err(error), Err(release_error)) => {
-            tracing::warn!(
-                error = %release_error,
-                "capsule-protocol GC admission release failed after push failure"
-            );
+        (Ok(Some(committed)), release) => {
+            // Visibility already owns the uploaded payload. Late cancellation
+            // or fence cleanup failure cannot turn that commit into rejection.
+            if let Err(error) = release {
+                tracing::warn!(%error, "capsule committed; GC admission cleanup requires repair");
+            }
+            Some(committed)
+        }
+        (Ok(None), release) => {
+            release?;
+            None
+        }
+        (Err(error), release) => {
+            if let Err(release_error) = release {
+                tracing::warn!(
+                    error = %release_error,
+                    "capsule-protocol GC admission release failed after push failure"
+                );
+            }
             return Err(error);
         }
     };
@@ -671,20 +698,30 @@ async fn publish_capsule(
     base: crab_metadata::capsule_protocol::RootSnapshot,
     transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
     capsule: &crab_metadata::capsule_protocol::Capsule,
-    pointer_delta: &crab_metadata::capsule_protocol::PointerCatalog,
-    lfs_objects: &[String],
+    payload_objects: &[String],
     push_ref_head_bases: &BTreeMap<String, Option<(Bytes, crab_storage::ETag)>>,
+    cancel: &CancellationToken,
 ) -> Result<CapsulePublishAttempt> {
+    check_cancelled(cancel)?;
     let Some(replication) = config.active_active_replication.as_ref() else {
-        return match crab_write::capsule_protocol::publish_with_ref_head_bases(
-            layout,
-            base,
-            transaction,
-            capsule,
-            push_ref_head_bases,
-        )
-        .await
-        {
+        let publish = async {
+            let prepared = crab_write::capsule_protocol::prepare_publication_with_ref_head_bases(
+                layout,
+                base,
+                transaction,
+                capsule,
+                push_ref_head_bases,
+            )
+            .await?;
+            // Ref/GC renewal may fail while immutable preparation runs. Check
+            // its scoped token before visibility, then resolve the commit fully.
+            if cancel.is_cancelled() {
+                return Err(crab_write::WriteError::Cancelled);
+            }
+            crab_write::capsule_protocol::publish_prepared(layout, prepared).await
+        }
+        .await;
+        return match publish {
             Ok(_) => Ok(CapsulePublishAttempt::Committed(None)),
             Err(crab_write::WriteError::RefChanged { .. }) => Ok(CapsulePublishAttempt::RefChanged),
             Err(error) => Err(error.into()),
@@ -724,19 +761,7 @@ async fn publish_capsule(
         .collect::<Vec<_>>();
     let mut uploaded_objects = BTreeSet::new();
     uploaded_objects.insert(layout.capsule_path(&descriptor.run_hash).to_string());
-    uploaded_objects.extend(
-        pointer_delta
-            .xorbs()
-            .keys()
-            .map(|hash| layout.xorb_path(hash).to_string()),
-    );
-    uploaded_objects.extend(lfs_objects.iter().cloned());
-    uploaded_objects.extend(
-        pointer_delta
-            .shards()
-            .keys()
-            .map(|hash| layout.shard_path(hash).to_string()),
-    );
+    uploaded_objects.extend(payload_objects.iter().cloned());
     if let Some(plan_id) = transaction.plan_id() {
         uploaded_objects.insert(layout.capsule_plan_intent_path(plan_id).to_string());
     }
@@ -747,6 +772,7 @@ async fn publish_capsule(
         refs,
         uploaded_objects.into_iter().collect(),
     )?;
+    check_cancelled(cancel)?;
     let mut outcome = match crab_coordination::write_coordinator::commit_uploaded_push_refs(
         coordinator.as_ref(),
         plan.request.clone(),
@@ -1232,6 +1258,8 @@ mod tests {
 
     use super::*;
 
+    mod cancellation;
+
     #[derive(Default)]
     struct RecordingObserver {
         observations: Mutex<Vec<StorageObservation>>,
@@ -1391,9 +1419,9 @@ mod tests {
             base,
             &transaction,
             &capsule,
-            &crab_metadata::capsule_protocol::PointerCatalog::new(),
             &[],
             &BTreeMap::new(),
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1457,9 +1485,9 @@ mod tests {
             base,
             &transaction,
             &capsule,
-            &crab_metadata::capsule_protocol::PointerCatalog::new(),
             &[],
             &BTreeMap::new(),
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2286,12 +2314,13 @@ mod tests {
         use bstr::ByteSlice;
         use crab_staging::stream::{StreamStageProgress, stage_reader_streaming};
         let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
-        for (stale, native_intent, restored_index) in [
-            (false, false, false),
-            (true, false, false),
-            (false, true, false),
-            (true, true, false),
-            (false, true, true),
+        for (stale, native_intent, restored_index, cancel_after_commit) in [
+            (false, false, false, false),
+            (true, false, false, false),
+            (false, true, false, false),
+            (true, true, false, false),
+            (false, true, true, false),
+            (false, false, false, true),
         ] {
             let source = tempfile::tempdir().unwrap();
             git(source.path(), &["init", "-b", "main"]);
@@ -2355,7 +2384,10 @@ mod tests {
             }
             staging.close().await.unwrap();
             let staging = Arc::new(StagingAreaReadOnly::open(staging_root).await.unwrap());
-            let storage = crab_storage::Store::new(Arc::new(InMemory::new()));
+            let hooked = Arc::new(crab_storage::test_support::CountingObjectStore::new(
+                Arc::new(InMemory::new()),
+            ));
+            let storage = crab_storage::Store::new(hooked.clone());
             let store = crate::storage::store::Store::from_storage(storage);
             let router = crate::storage::StoreLayout::new(store.clone(), "repos/test".to_owned());
             let layout =
@@ -2391,6 +2423,10 @@ mod tests {
                 git_dir: Some(source.path().join(".git")),
                 ..Default::default()
             };
+            let cancel = CancellationToken::new();
+            if cancel_after_commit {
+                hooked.cancel_after_put(layout.capsule_ref_heads_prefix(), cancel.clone());
+            }
             let (result, _) = run(
                 &config,
                 &[PushSpec {
@@ -2405,10 +2441,23 @@ mod tests {
                 Some(&staging),
                 None,
                 None,
-                &CancellationToken::new(),
+                &cancel,
             )
             .await
             .unwrap();
+            assert_eq!(cancel.is_cancelled(), cancel_after_commit);
+            if cancel_after_commit {
+                for domain in [layout.global_prefix(), layout.repo_prefix()] {
+                    let sweep = crab_coordination::GcFenceLease::acquire_sweep(
+                        layout.store().inner(),
+                        domain,
+                        std::time::Duration::from_secs(60),
+                    )
+                    .await
+                    .unwrap();
+                    sweep.release().await.unwrap();
+                }
+            }
             let health = staging.lifecycle_health().unwrap();
             let view = crab_read::capsule_protocol::open_view(&layout, limits)
                 .await
@@ -2423,7 +2472,7 @@ mod tests {
                     && health.committed_push_snapshots == 0
                     && health.unresolved_publications == 0
                     && staging.list_inflight().unwrap().is_empty(),
-                "stale={stale}, native_intent={native_intent}, restored_index={restored_index}, health={health:?}"
+                "stale={stale}, native_intent={native_intent}, restored_index={restored_index}, cancel_after_commit={cancel_after_commit}, health={health:?}"
             );
         }
     }

@@ -70,6 +70,10 @@ verified create/read identities with their source catalog, publishes rebuildable
 chunk hints only after proven ref visibility, and preserves a committed outcome
 if hint-index maintenance fails. Uncertain publication does not publish hints.
 Caller-owned ref leases and GC fences cover this complete operation.
+Preparation rechecks caller cancellation and namespace renewal immediately before
+visibility. Cancellation during immutable preparation leaves only unadvertised
+objects; cancellation after visibility retains the known committed result while
+all publication and lease cleanup drains.
 New refs and explicit cross-ref visibility bases publish complete replacement
 closures from the captured proof. Only same-ref updates retain additive evidence;
 a different ref's later deletion must not invalidate an acknowledged branch.

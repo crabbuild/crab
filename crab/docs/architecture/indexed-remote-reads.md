@@ -2586,3 +2586,24 @@ The fixed edit must stay below 512 KiB for both bytes read and written; its look
 has a 256 KiB budget. These are encoded-request bounds, not latency claims.
 Full-source RustFS, cache-service, protected receive and final 10 GiB acceptance
 remain separate gates until their receipts pass.
+
+## Publication cancellation retains the authoritative outcome
+
+CLI capsule push, shared preparation and protected receive check their scoped
+lease token after immutable preparation and before visibility. Namespace renewal
+must cancel that same token; checking only the caller token before preparation
+misses a lease lost during upload or frontier compaction. Once the ref CAS or
+coordinator operation starts, the operation resolves its outcome before cleanup.
+
+CLI GC-admission cleanup may report late cancellation or a release failure after
+a successful ref transition. That is repair work, not a rejected push: preserve
+the committed outcome and finish local staging retirement. Uncertain publication
+and ordinary rejection remain distinct. Import consumes the same terminal
+publisher outcome; a second cancellation check after the return cannot revoke an
+acknowledged ref or leave a completed import looking retryable.
+
+Deterministic tests cancel on successful immutable or ref-head PUTs. They cover
+new and existing shared refs, direct/coordinated CLI preparation, exact staging
+retirement after late cancellation, and imported payload reconstruction. The
+shared cold-index fixture uses the capsule hint owner while preserving current
+source-catalog, exact provider-identity and complete reconstruction assertions.

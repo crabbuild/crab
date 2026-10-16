@@ -230,19 +230,37 @@ impl CapsuleArtifacts {
                         transaction.edits(),
                     )
                     .await?;
-                    crab_write::capsule_protocol::publish(
+                    let prepared = crab_write::capsule_protocol::prepare_publication(
                         &commit_layout,
                         base,
                         &transaction,
                         &capsule,
                     )
-                    .await
+                    .await?;
+                    // Namespace renewal joins caller cancellation. Recheck that
+                    // scoped token after preparation, then drain visibility.
+                    if scoped.is_cancelled() {
+                        return Err(crab_write::WriteError::Cancelled);
+                    }
+                    crab_write::capsule_protocol::publish_prepared(&commit_layout, prepared).await
                 },
             )
             .await
         } else {
-            crab_write::capsule_protocol::publish(&self.layout, self.base, &transaction, &capsule)
-                .await
+            let prepared = crab_write::capsule_protocol::prepare_publication(
+                &self.layout,
+                self.base,
+                &transaction,
+                &capsule,
+            )
+            .await;
+            match prepared {
+                Ok(_) if cancel.is_cancelled() => Err(crab_write::WriteError::Cancelled),
+                Ok(prepared) => {
+                    crab_write::capsule_protocol::publish_prepared(&self.layout, prepared).await
+                }
+                Err(error) => Err(error),
+            }
         };
         match publish {
             Ok(_) => {
