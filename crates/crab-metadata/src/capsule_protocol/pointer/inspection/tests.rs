@@ -251,7 +251,11 @@ async fn checkpoint_rows_stream_without_per_file_dependency_joins() {
     );
     let io = observations.0.lock().unwrap();
     let streamed = io.iter().map(|op| op.bytes_read).sum::<u64>();
-    eprintln!("logical maintenance: {streamed} origin bytes; full materializer: {full}");
+    tracing::debug!(
+        origin_bytes = streamed,
+        full_materializer_bytes = full,
+        "logical catalog maintenance"
+    );
     assert!(streamed <= 4 * full, "{streamed} versus {full}");
     assert!(io.iter().all(|op| op.bytes_written == 0));
 }

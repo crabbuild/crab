@@ -602,8 +602,10 @@ async fn streamed_inspection_bounds_io_for_distinct_recipes_beyond_the_page_cach
     assert!(logical.finish(checked).await.unwrap().is_empty());
     let io = observations.0.lock().unwrap();
     let logical = io.iter().map(|op| op.bytes_read).sum::<u64>();
-    eprintln!(
-        "distinct recipe logical maintenance: {logical} origin bytes; full materializer: {full}"
+    tracing::debug!(
+        origin_bytes = logical,
+        full_materializer_bytes = full,
+        "distinct recipe catalog maintenance"
     );
     assert!(logical <= 4 * full, "{logical} versus {full}");
     assert!(io.iter().all(|op| op.bytes_written == 0));
