@@ -58,6 +58,12 @@ impl RetainedBrowseIndexes {
         &self.payload.indexes
     }
 
+    /// Return the immutable checkpoint whose dependency pages belong to this capture.
+    #[must_use]
+    pub fn checkpoint(&self) -> Option<&CheckpointPointer> {
+        self.payload.checkpoint.as_ref()
+    }
+
     /// Return original source bodies, including a captured checkpoint when present.
     #[must_use]
     pub fn source_paths(&self, layout: &StoreLayout<Store>) -> Vec<object_store::path::Path> {
@@ -338,6 +344,21 @@ pub async fn verify_retained_browse_indexes(
     }
     let mut sources = BTreeSet::new();
     for record in records {
+        if let Some(pointer) = record.checkpoint() {
+            let checkpoint = super::load_layered_checkpoint_control(layout, pointer).await?;
+            if let Some(catalog) = checkpoint.catalog()
+                && !sources.contains(&layout.capsule_catalog_path(catalog.hash()))
+            {
+                sources.extend(
+                    checkpoint
+                        .catalog_objects(layout, maximum_bytes)
+                        .await?
+                        .into_iter()
+                        .map(|(path, _)| path),
+                );
+            }
+        }
+
         let graph = crate::split_commit_graph::load_split_commit_graph(
             layout.store(),
             layout,

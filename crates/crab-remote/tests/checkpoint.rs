@@ -34,11 +34,23 @@ const LIMITS: CapsuleReadLimits = CapsuleReadLimits {
     max_frontier_bytes: LIMIT,
 };
 
-#[derive(Default)]
 struct Observations(
     Mutex<Vec<StorageObservation>>,
     Mutex<Option<CancellationToken>>,
+    Arc<crab_storage::test_support::CountingObjectStore>,
 );
+
+impl Default for Observations {
+    fn default() -> Self {
+        Self(
+            Mutex::default(),
+            Mutex::default(),
+            Arc::new(crab_storage::test_support::CountingObjectStore::new(
+                Arc::new(object_store::memory::InMemory::new()),
+            )),
+        )
+    }
+}
 
 impl StorageObserver for Observations {
     fn started(&self, _: StorageOperation) {}
@@ -541,7 +553,7 @@ async fn compacted_frontier_uses_resident_indexes_and_verifies_payloads() {
 
 async fn empty_fixture() -> (StoreLayout<Store>, Arc<Observations>) {
     let observations = Arc::new(Observations::default());
-    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+    let store = Store::new(observations.2.clone())
         .with_immutable_write_verification(ImmutableWriteVerification::Sha256Checksum)
         .with_storage_observer(observations.clone());
     let layout = StoreLayout::new(store, "repositories/checkpoint".to_owned());

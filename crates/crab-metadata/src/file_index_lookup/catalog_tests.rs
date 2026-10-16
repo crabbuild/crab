@@ -73,7 +73,6 @@ pub(super) async fn capture(
             .unwrap(),
     )
     .unwrap();
-    let catalog_bytes = catalog.encode().unwrap();
     let checkpoint = LayeredCheckpoint::build(
         base.root().generation(),
         base.digest(),
@@ -82,15 +81,7 @@ pub(super) async fn capture(
         None,
     )
     .unwrap();
-    if let Some(source) = checkpoint.catalog() {
-        // Seed immutable fixture data without charging a publication readback
-        // to the reader-construction and selected-query measurements below.
-        layout
-            .store()
-            .put_overwrite(&layout.capsule_catalog_path(source.hash()), catalog_bytes)
-            .await
-            .unwrap();
-    }
+    checkpoint.publish_catalog(layout).await.unwrap();
     let pointer = CheckpointPointer::new_layered(
         checkpoint.hash(),
         checkpoint.bytes().len() as u64,
@@ -200,6 +191,9 @@ async fn pinned_batches_preserve_order_misses_and_page_bounds_as_history_grows()
             }));
         let layout = crab_storage::StoreLayout::new(storage, "pinned-lookup".to_owned());
         let (captured, _, _) = capture(&layout, catalog(count), 512 * 1024).await;
+        // Fixture publication verifies its writes; only capture construction and
+        // selected reads belong to this measurement window.
+        reads.store(0, Ordering::SeqCst);
         let lookup = SharedFileIndexLookup::for_pointer_catalog(layout.clone(), captured);
         assert_eq!(
             reads.load(Ordering::SeqCst),
@@ -208,6 +202,7 @@ async fn pinned_batches_preserve_order_misses_and_page_bounds_as_history_grows()
         );
         // A later authenticated catalog must not change an existing capture.
         capture(&layout, catalog(count + 1), 512 * 1024).await;
+        reads.store(0, Ordering::SeqCst);
         let file = super::tests::hash_from_seed(42);
         let later = super::tests::hash_from_seed(count as u64);
         let shard = super::tests::hash_from_seed(1_000_042);
@@ -283,6 +278,8 @@ async fn current_state_opener_keeps_catalog_pages_selected_and_pins_its_first_ro
         let layout = crab_storage::StoreLayout::new(storage.clone(), "current-catalog".to_owned());
         let (_, _, root) = capture(&layout, catalog(count), 512 * 1024).await;
         assert_eq!(root.root().generation(), 1);
+        reads.store(0, Ordering::SeqCst);
+        bytes.store(0, Ordering::SeqCst);
         let lookup = SharedFileIndexLookup::new_for_storage(&storage, layout.repo_prefix());
         assert_eq!(reads.load(Ordering::SeqCst), 0);
         let file = super::tests::hash_from_seed(42);

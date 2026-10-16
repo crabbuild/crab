@@ -60,15 +60,29 @@ capsules can therefore appear in differently compacted ref frontiers without
 inflating pack counts or appearing to conflict; differing payload commitments
 remain rejected.
 
-Checkpoint format 8 (`CRBCKP08`) commits to a separate immutable catalog at
-`v2/catalogs/<partition>/<hash>`, including its exact size and authenticated
-page roots. Catalog durability precedes checkpoint/history writes and root CAS.
-Ref-only checkpoint publication and physical repacking reuse that commitment
-without decoding, re-encoding, reading or rewriting the catalog body. A visible
-catalog delta still uses the canonical ordered full assembly; incremental delta
-updates remain required. Full checkpoint loading verifies visibility and catalog
-commitments; explicit maintenance materializes and verifies the catalog body.
-GC follows catalog objects from current, historical and retained browse roots.
+Checkpoint format 9 (`CRBCKP09`) commits to a small catalog descriptor and
+immutable content-addressed pages under `v2/catalogs/<partition>/<hash>`.
+Descriptor version 2 (`CRBCAT02`) authenticates the roots of file bindings,
+shards, xorbs and reverse chunk placements. Internal directories and nested
+recipes use independent pages (`CRABOP01`); unchanged subtrees retain their
+identities across checkpoint publication. New pages and the descriptor are
+verified before checkpoint/history writes and root CAS. Ref-only publication
+and physical repacking reuse the existing commitment without catalog object I/O.
+A catalog delta resolves its selected dependency closure and rewrites affected
+paths, preserving ordered file bindings and immutable descriptor conflicts.
+
+Readers share an aggregate page-byte budget across checkpoint and packed-run
+sources. Logical expansion has a separate allowance of four times the encoded ceiling: shared
+physical pages cannot authorize unbounded recipe/result copies. Cold and warm
+reads consume admission; decoded caches have independent resident limits.
+Full inspection authenticates every dependency and reverse placement; it still
+materializes the logical catalog and is not yet a streaming-memory guarantee.
+GC traverses catalog pages from current, historical and retained browse roots.
+Protected keys and authenticated closure traversal are tracked separately.
+Retired unshipped checkpoint formats through 8 are rejected without fallback.
+The six published release tags do not contain this capsule codec.
+This format is under qualification; earlier format-7/8 runtime receipts do not
+qualify format 9 or establish hosted-S3 performance.
 Retained browse record format 2 carries the complete checkpoint pointer and
 catalog identity; loading authenticates the footer and rejects omitted or
 mismatched catalog/source dependencies. `LayeredCheckpoint::pointer_catalog_lookup` captures these roots;

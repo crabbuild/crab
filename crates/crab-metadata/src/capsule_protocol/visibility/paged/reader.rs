@@ -2,7 +2,6 @@
 use super::*;
 use crate::pages::{PageCache, PageWork};
 use crab_storage::{Store, StoreLayout};
-use std::collections::BTreeSet;
 
 /// Change to an object's membership in one ref closure; never standalone authorization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,11 +60,7 @@ impl CapsuleVisibilityReader {
         store: &Store,
         names: &[&str],
     ) -> Result<Vec<Option<VisibilityEditHeader>>> {
-        let mut work = PageWork {
-            maximum: self.maximum,
-            bytes: 0,
-            seen: BTreeSet::new(),
-        };
+        let mut work = PageWork::new(self.maximum, 0);
         self.read_headers(store, names, &mut work).await
     }
 
@@ -115,11 +110,7 @@ impl CapsuleVisibilityReader {
         name: &str,
         direction: VisibilityChange,
     ) -> Result<Vec<[u8; 20]>> {
-        let mut work = PageWork {
-            maximum: self.maximum,
-            bytes: 0,
-            seen: BTreeSet::new(),
-        };
+        let mut work = PageWork::new(self.maximum, 0);
         let row = self
             .read_headers(store, &[name], &mut work)
             .await?
@@ -199,11 +190,7 @@ impl CapsuleVisibilityReader {
         if !ref_name.starts_with("refs/") || !valid_ref_name(ref_name) {
             return Err(contract_error("visibility lookup ref name is invalid"));
         }
-        let mut work = PageWork {
-            maximum: self.maximum,
-            bytes: 0,
-            seen: BTreeSet::new(),
-        };
+        let mut work = PageWork::new(self.maximum, 0);
         let key = blake3::hash(ref_name.as_bytes()).as_bytes().to_vec();
         let mut rows = self
             .rows(

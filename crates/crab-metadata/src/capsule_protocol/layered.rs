@@ -12,15 +12,17 @@ use crate::git_visibility::{
 use crate::validation::{validate_content_hash, validate_sha1};
 
 mod catalog;
-use catalog::CatalogInput;
 pub use catalog::CheckpointCatalog;
+#[cfg(feature = "storage")]
+pub use catalog::fold_checkpoint_catalog;
+use catalog::{CatalogInput, PreparedCatalog};
 
 mod visibility_pages;
 #[cfg(feature = "storage")]
 pub use visibility_pages::LayeredVisibilityReader;
 
-const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP08";
-pub(super) const CHECKPOINT_VERSION: u32 = 8;
+const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP09";
+pub(super) const CHECKPOINT_VERSION: u32 = 9;
 const LAYER_MAGIC: &[u8; 8] = b"CRBPKL01";
 const LAYER_VERSION: u32 = 1;
 const TRAILER_BYTES: usize = 8 + 32 + 8;
@@ -961,12 +963,12 @@ pub struct LayeredCheckpoint {
     object_size: u64,
     control_offset: u64,
     control_only: bool,
-    catalog_bytes: Option<Bytes>,
+    catalog_objects: BTreeMap<[u8; 32], Bytes>,
 }
 
 impl PartialEq for LayeredCheckpoint {
     fn eq(&self, other: &Self) -> bool {
-        // Loaded/pending catalog bytes are runtime state. The footer already
+        // Pending catalog objects are runtime state. The footer already
         // commits to their exact identity, independently of cache residency.
         self.bytes == other.bytes
             && self.hash == other.hash
@@ -998,10 +1000,11 @@ impl LayeredCheckpoint {
         )
     }
 
-    /// Reuse a captured immutable catalog when no visible catalog delta changed it.
+    /// Build a checkpoint around an already durable immutable catalog root.
     ///
-    /// The caller retains the source checkpoint's catalog through publication.
-    pub fn build_reusing_catalog(
+    /// The caller verifies newly folded pages or retains a captured root, and
+    /// holds their GC fence until the replacement checkpoint becomes visible.
+    pub fn build_with_catalog_root(
         covered_generation: u64,
         covered_root_digest: &str,
         sources: Vec<PackSourceDescriptor>,
@@ -1012,7 +1015,7 @@ impl LayeredCheckpoint {
             covered_generation,
             covered_root_digest,
             sources,
-            CatalogInput::Retained(catalog.map(Box::new)),
+            CatalogInput::Durable(catalog.map(Box::new)),
             visibility,
         )
     }
@@ -1085,7 +1088,10 @@ impl LayeredCheckpoint {
         }
         let mut body = Vec::new();
         let mut sections = Vec::new();
-        let (catalog, catalog_bytes) = catalog.prepare()?;
+        let PreparedCatalog {
+            source: catalog,
+            objects: catalog_objects,
+        } = catalog.prepare()?;
         if let Some((kind, visibility)) = visibility {
             append_section(&mut body, &mut sections, kind, visibility)?;
         }
@@ -1131,7 +1137,7 @@ impl LayeredCheckpoint {
         body.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());
         body.extend_from_slice(CHECKPOINT_MAGIC);
         let mut checkpoint = Self::decode(Bytes::from(body))?;
-        checkpoint.catalog_bytes = catalog_bytes;
+        checkpoint.catalog_objects = catalog_objects;
         Ok(checkpoint)
     }
 
@@ -1155,7 +1161,7 @@ impl LayeredCheckpoint {
             object_size,
             control_offset,
             control_only: false,
-            catalog_bytes: None,
+            catalog_objects: BTreeMap::new(),
         })
     }
 
@@ -1219,7 +1225,7 @@ impl LayeredCheckpoint {
             object_size,
             control_offset: footer_start,
             control_only: true,
-            catalog_bytes: None,
+            catalog_objects: BTreeMap::new(),
         })
     }
 
@@ -1794,12 +1800,12 @@ mod tests {
             .unwrap();
         let checkpoint =
             LayeredCheckpoint::build(0, &"3".repeat(64), vec![source], catalog, None).unwrap();
-        for field in ["hash", "bytes", "body_bytes"] {
+        for field in ["hash", "bytes", "page_bytes"] {
             let mut footer = serde_json::to_value(&checkpoint.footer).unwrap();
             match field {
                 "hash" => footer["catalog"]["hash"] = serde_json::json!("invalid"),
                 "bytes" => footer["catalog"]["bytes"] = serde_json::json!(0),
-                _ => footer["catalog"]["pages"]["body_bytes"] = serde_json::json!(u64::MAX),
+                _ => footer["catalog"]["pages"]["files"]["bytes"] = serde_json::json!(0),
             }
             let footer = serde_json::from_value(footer).unwrap();
             assert!(

@@ -41,6 +41,7 @@ futures-util = { workspace = true, optional = true }
 object_store = { workspace = true, optional = true }
 
 [dev-dependencies]
+crab-storage = { workspace = true, features = ["test-support"] }
 slatedb = "=0.15.0"
 sha1 = "0.10"
 tracing-subscriber = "0.3"

@@ -5,10 +5,13 @@ use crab_storage::{Store, StoreLayout};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
-pub(in crate::capsule_protocol) struct CatalogOrigin {
-    pub path: object_store::path::Path,
-    pub range: std::ops::Range<u64>,
-    pub layer: usize,
+pub(in crate::capsule_protocol) enum CatalogOrigin {
+    Pack {
+        path: object_store::path::Path,
+        range: std::ops::Range<u64>,
+        layer: usize,
+    },
+    Object(Arc<crate::capsule_protocol::pointer::object::CatalogPages>),
 }
 
 pub(in crate::capsule_protocol) struct CatalogValue {
@@ -133,7 +136,7 @@ impl RunCatalogSource {
                 // Membership admits logical values, not all capsules in the
                 // physical run. Equal variants may reuse an unselected source.
                 result.push(CatalogValue {
-                    origin: Arc::new(CatalogOrigin {
+                    origin: Arc::new(CatalogOrigin::Pack {
                         path: self.path.clone(),
                         range,
                         layer,

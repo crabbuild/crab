@@ -2441,7 +2441,7 @@ and affected-consumer validation must accompany this format change before push.
 
 ### Independent checkpoint catalog lifetime
 
-Checkpoint format 8 (`CRBCKP08`) replaces the inline catalog section with an
+The preceding checkpoint format 8 (`CRBCKP08`) replaces the inline catalog section with an
 immutable `v2/catalogs/<partition>/<hash>` commitment containing the full body
 hash, encoded size and authenticated page roots. Selected queries keep the same
 bounded page reader and complete-or-error dependency closure. Checkpoint loading
@@ -2477,3 +2477,46 @@ admission before catalog reads; missing/corrupt pages; ordinary/restore
 publication failures; and current/history/retained-only catalog survival through
 GC with the existing grace period and fences. No format-8 10 GiB or hosted-S3
 performance acceptance is established by the earlier combined-format run.
+
+
+### Copy-on-write checkpoint catalog: format 9 under qualification
+
+Checkpoint format 9 (`CRBCKP09`) replaces the monolithic format-8 catalog with
+an authenticated descriptor (`CRBCAT02`, at most 4 KiB) and content-addressed
+`CRABOP01` page objects. The existing `v2/catalogs/` namespace holds both;
+the descriptor binds four independently paged trees: file bindings, shard
+recipes, xorb recipes and reverse chunk placements. Nested recipes also use
+paged trees. Directories carry bounded child references, including ordering,
+cardinality, height, encoded size and hash commitments.
+
+The checkpoint writer folds selected capsule deltas in captured publication
+order. It validates changed file sizes and immutable shard/xorb descriptors,
+resolves selected dependencies, and rewrites only affected tree paths. An
+unchanged catalog carries its existing descriptor with zero catalog object
+I/O. New pages are persisted and verified before the new descriptor, then the
+checkpoint/history records, then the visible root transition. The caller keeps
+its GC fence across this sequence. Abandoned immutable pages remain ordinary
+grace-period orphans; they never advertise a partially published catalog.
+
+One aggregate byte budget admits packed-delta reads, object-page reads and new
+page writes. A separate logical-expansion counter allows four times the encoded ceiling
+for vector/string overhead and simultaneous row/typed values. It charges every
+visit/result copy, even when physical pages are deduplicated or cached.
+Incoming catalog row payload is admitted before recipe/assembly duplication;
+writers also enforce final encoded size. The object reader caps its decoded
+cache at 8 MiB/256 entries and shares four I/O lanes across recursive edits.
+
+GC authenticates page closures for current checkpoints, historical checkpoints
+and retained browse captures. A coordinator-protected descriptor key does not
+count as a verified closure. Missing/corrupt descendants abort maintenance.
+Full catalog maintenance still materializes logical metadata within its caller
+budget; streaming full inspection remains outstanding.
+
+Release audit: all six upstream published tag objects were checked again before
+this change; none contains the capsule codec. Unshipped checkpoint formats
+through 8 are rejected rather than interpreted through an alternate reader.
+Earlier format-7/8 benchmark receipts remain historical evidence. Format-9
+acceptance requires changed-catalog byte bounds, old/new cold reconstruction,
+corruption/admission tests, GC/retention coverage and a new real RustFS run.
+The earlier 10 GiB matrix does not qualify this new format. RustFS results do
+not establish representative hosted-S3 latency.

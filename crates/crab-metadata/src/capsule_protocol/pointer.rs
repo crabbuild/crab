@@ -9,6 +9,7 @@ use crate::validation::validate_content_hash;
 
 const POINTER_CATALOG_VERSION: u32 = 1;
 
+pub(in crate::capsule_protocol) mod object;
 pub(super) mod paged;
 pub use paged::MAX_CATALOG_BYTES;
 #[cfg(feature = "storage")]
@@ -182,11 +183,80 @@ impl PointerCatalogAssembly {
         self.catalog.merge_delta(delta)
     }
 
+    /// Return an ordered delta whose missing dependencies must be resolved from its base.
+    pub fn finish_delta(self) -> Result<PointerCatalog> {
+        self.catalog.validate(false, false)?;
+        Ok(self.catalog)
+    }
+
     /// Return the captured catalog only if its complete dependency closure is valid.
     pub fn finish(self) -> Result<PointerCatalog> {
         self.catalog.validate(true, false)?;
         Ok(self.catalog)
     }
+}
+
+pub(in crate::capsule_protocol) fn hash(value: &str) -> Result<[u8; 32]> {
+    let bytes = value.as_bytes();
+    // Binary keys cannot distinguish hex aliases. Reject them instead of silently
+    // merging two descriptors that were distinct in the caller's map.
+    if bytes.len() != 64
+        || bytes
+            .iter()
+            .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(byte))
+    {
+        return Err(contract_error(
+            "catalog hashes must be lowercase canonical hex",
+        ));
+    }
+    // Encode text order directly: Xet's raw hash bytes reverse each u64 word.
+    // Using those bytes as keys would change the original BTreeMap precedence.
+    let digit = |byte: u8| match byte {
+        b'0'..=b'9' => byte - b'0',
+        _ => byte - b'a' + 10,
+    };
+    Ok(std::array::from_fn(|index| {
+        (digit(bytes[index * 2]) << 4) | digit(bytes[index * 2 + 1])
+    }))
+}
+
+fn hex(bytes: &[u8]) -> Result<String> {
+    if bytes.len() != 32 {
+        return Err(corrupt("catalog hash has an invalid byte length"));
+    }
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(64);
+    for byte in bytes {
+        value.push(DIGITS[(byte >> 4) as usize] as char);
+        value.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    Ok(value)
+}
+
+// Bound unavoidable row payload before cloning caller-owned catalogs or recipes.
+// Both packed deltas and object-paged checkpoints share this admission rule;
+// page framing and actual encoded bytes are checked again by their writers.
+pub(in crate::capsule_protocol) fn admit_catalog_rows(
+    catalogs: &[PointerCatalog],
+    maximum: u64,
+) -> Result<()> {
+    let bytes = catalogs.iter().try_fold(0u64, |sum, catalog| {
+        let sum = sum.checked_add((catalog.files.len() as u64).checked_mul(76)?)?;
+        let sum = catalog.xorbs.values().try_fold(sum, |sum, xorb| {
+            sum.checked_add(76)?
+                .checked_add((xorb.chunks.len() as u64).checked_mul(44)?)
+        })?;
+        catalog.shards.values().try_fold(sum, |sum, shard| {
+            sum.checked_add(44)?
+                .checked_add((shard.xorb_hashes.len() as u64).checked_mul(36)?)
+        })
+    });
+    if bytes.is_none_or(|bytes| bytes > maximum.min(MAX_CATALOG_BYTES)) {
+        return Err(contract_error(
+            "catalog rows exceed their encoded byte bound",
+        ));
+    }
+    Ok(())
 }
 
 impl PointerCatalog {

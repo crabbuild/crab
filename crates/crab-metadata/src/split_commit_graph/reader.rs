@@ -329,11 +329,7 @@ impl CommitGraphReader {
     }
 
     fn work(&self) -> PageWork {
-        PageWork {
-            maximum: self.max_bytes,
-            bytes: self.descriptor_bytes,
-            seen: BTreeSet::new(),
-        }
+        PageWork::new(self.max_bytes, self.descriptor_bytes)
     }
 
     fn roots<'a>(&self, layer: &'a CommitGraphLayerRef) -> Result<&'a CommitGraphLayerPages> {

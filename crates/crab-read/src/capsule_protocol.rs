@@ -797,6 +797,30 @@ impl CapsuleRepositoryView {
             .any(CapsuleControl::has_catalog_delta))
     }
 
+    /// Merge selected publication deltas in capture order without loading the checkpoint catalog.
+    ///
+    /// Dependencies may belong to the checkpoint. Fetch-only captures remain incomplete.
+    pub async fn visible_pointer_catalog_delta(&self) -> Result<PointerCatalog> {
+        self.catalog_sources
+            .as_ref()
+            .ok_or(ReadError::IncompleteCatalogView)?;
+        let mut catalog = PointerCatalogAssembly::new(PointerCatalog::new());
+        for capsule in &self.capsules {
+            if let Some(delta) = capsule.pointer_catalog_delta()? {
+                catalog.apply(&delta)?;
+            }
+        }
+        for capsule in &self.capsule_controls {
+            let layout = self.metadata_layout.as_ref().ok_or_else(|| {
+                ReadError::internal("catalog materialization has no captured origin")
+            })?;
+            if let Some(delta) = capsule.materialize_catalog(layout.store()).await? {
+                catalog.apply(&delta)?;
+            }
+        }
+        Ok(catalog.finish_delta()?)
+    }
+
     /// Materialize the complete generation-pinned external pointer catalog.
     ///
     /// Fetch-only captures return `ReadError::IncompleteCatalogView`.
@@ -819,19 +843,7 @@ impl CapsuleRepositoryView {
             None => PointerCatalog::new(),
         };
         let mut catalog = PointerCatalogAssembly::new(base_catalog);
-        for capsule in &self.capsules {
-            if let Some(delta) = capsule.pointer_catalog_delta()? {
-                catalog.apply(&delta)?;
-            }
-        }
-        for capsule in &self.capsule_controls {
-            let layout = self.metadata_layout.as_ref().ok_or_else(|| {
-                ReadError::internal("catalog materialization has no captured origin")
-            })?;
-            if let Some(delta) = capsule.materialize_catalog(layout.store()).await? {
-                catalog.apply(&delta)?;
-            }
-        }
+        catalog.apply(&self.visible_pointer_catalog_delta().await?)?;
         Ok(catalog.finish()?)
     }
 

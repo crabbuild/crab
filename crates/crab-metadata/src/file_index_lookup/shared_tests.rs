@@ -184,7 +184,7 @@ impl ObjectStore for PausedLookupStore {
         location: &ObjectPath,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        if location == &self.shard && !self.paused.swap(true, Ordering::AcqRel) {
+        if location.prefix_matches(&self.shard) && !self.paused.swap(true, Ordering::AcqRel) {
             self.entered.notify_one();
             self.release.acquire().await.unwrap().forget();
         }
@@ -352,7 +352,7 @@ async fn captured_catalog_close_waits_for_active_reads_and_abandonment_releases_
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let storage = crab_storage::Store::new(inner.clone());
         let router = crab_storage::StoreLayout::new(storage, "pinned/close".to_owned());
-        let (catalog, path, _) = super::catalog_tests::capture(
+        let (catalog, _, _) = super::catalog_tests::capture(
             &router,
             super::catalog_tests::catalog(10_000),
             512 * 1024,
@@ -360,7 +360,8 @@ async fn captured_catalog_close_waits_for_active_reads_and_abandonment_releases_
         .await;
         let store = Arc::new(PausedLookupStore {
             inner,
-            shard: path,
+            // Pause a cold catalog object after the descriptor is warm.
+            shard: router.capsule_catalog_prefix(),
             paused: AtomicBool::new(true),
             pause_write: AtomicBool::new(false),
             entered: Notify::new(),

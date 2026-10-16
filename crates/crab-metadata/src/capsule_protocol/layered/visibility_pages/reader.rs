@@ -50,11 +50,7 @@ impl LayeredVisibilityReader {
     }
 
     fn work(&self) -> PageWork {
-        PageWork {
-            maximum: self.maximum,
-            bytes: 0,
-            seen: BTreeSet::new(),
-        }
+        PageWork::new(self.maximum, 0)
     }
 
     async fn rows(

@@ -615,7 +615,18 @@ async fn checkpoint_catalog_gc_preserves_roots_and_grace_period() {
     .unwrap();
     let source = first.layered_checkpoint().unwrap().catalog().unwrap();
     let retained = layout.capsule_catalog_path(source.hash());
-    backend.paths.lock().unwrap().insert(retained.clone());
+    let original_catalog = catalog.clone();
+    let retained_pages = first
+        .layered_checkpoint()
+        .unwrap()
+        .catalog_objects(&layout, LIMIT)
+        .await
+        .unwrap();
+    backend
+        .paths
+        .lock()
+        .unwrap()
+        .extend(retained_pages.into_iter().map(|(path, _)| path));
     // Publish a different current catalog; the old one is now history-owned.
     catalog
         .insert_file("c".repeat(64), FileCatalogEntry::new(1, "a".repeat(64)))
@@ -638,7 +649,17 @@ async fn checkpoint_catalog_gc_preserves_roots_and_grace_period() {
             .unwrap()
             .hash(),
     );
-    backend.paths.lock().unwrap().insert(current_path.clone());
+    let current_pages = current
+        .layered_checkpoint()
+        .unwrap()
+        .catalog_objects(&layout, LIMIT)
+        .await
+        .unwrap();
+    backend
+        .paths
+        .lock()
+        .unwrap()
+        .extend(current_pages.into_iter().map(|(path, _)| path));
     let mut orphans = Vec::new();
     for (index, aged) in [(1, true), (2, false)] {
         let bytes = Bytes::from(format!("unreferenced-{index}"));
@@ -678,4 +699,12 @@ async fn checkpoint_catalog_gc_preserves_roots_and_grace_period() {
         });
     }
     assert_eq!(existing, [true, true, false, true]);
+    // All dependent pages are aged: cold reads prove traversal, not grace-period luck.
+    assert_eq!(
+        (
+            first.pointer_catalog().await.unwrap(),
+            current.pointer_catalog().await.unwrap()
+        ),
+        (original_catalog, catalog),
+    );
 }

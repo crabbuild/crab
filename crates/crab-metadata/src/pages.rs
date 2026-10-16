@@ -1,6 +1,8 @@
 //! Authenticated bounded pages shared by immutable metadata indexes.
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod object;
+
 #[cfg(feature = "storage")]
 mod cache;
 #[cfg(feature = "storage")]

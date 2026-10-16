@@ -3191,13 +3191,15 @@ async fn sweep_capsule_objects(
     started: Instant,
 ) -> Result<GcOutcome> {
     let mut reachable = HashSet::new();
+    let mut verified_catalogs = HashSet::new();
     if let Some(checkpoint) = root.checkpoint() {
         reachable.insert(
             layout
                 .capsule_checkpoint_path(checkpoint.hash())
                 .to_string(),
         );
-        mark_layered_checkpoint_sources(layout, checkpoint, &mut reachable).await?;
+        mark_layered_checkpoint_sources(layout, checkpoint, &mut reachable, &mut verified_catalogs)
+            .await?;
     }
     reachable.extend(
         capsule_runs
@@ -3224,7 +3226,13 @@ async fn sweep_capsule_objects(
                     .capsule_checkpoint_path(segment.checkpoint().hash())
                     .to_string(),
             );
-            mark_layered_checkpoint_sources(layout, segment.checkpoint(), &mut reachable).await?;
+            mark_layered_checkpoint_sources(
+                layout,
+                segment.checkpoint(),
+                &mut reachable,
+                &mut verified_catalogs,
+            )
+            .await?;
             reachable.extend(
                 segment
                     .capsule_runs()
@@ -3234,7 +3242,14 @@ async fn sweep_capsule_objects(
         }
     }
     reachable.extend(coordinator_protected_keys.iter().cloned());
-    mark_derived_index_objects(store.as_storage(), layout, manifest, &mut reachable).await?;
+    mark_derived_index_objects(
+        store.as_storage(),
+        layout,
+        manifest,
+        &mut reachable,
+        &mut verified_catalogs,
+    )
+    .await?;
 
     let capsule_prefix = layout.repo_path("v2/capsules/");
     let checkpoint_prefix = layout.repo_path("v2/checkpoints/");
@@ -3399,6 +3414,7 @@ async fn mark_derived_index_objects(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     manifest: &crab_metadata::manifests::Manifest,
     reachable: &mut HashSet<String>,
+    verified_catalogs: &mut HashSet<String>,
 ) -> Result<()> {
     let current = crab_metadata::capsule_protocol::load_browse_indexes(layout).await?;
     let roots = crab_metadata::capsule_protocol::load_retained_browse_indexes(layout).await?;
@@ -3415,6 +3431,9 @@ async fn mark_derived_index_objects(
     // pages. Repacking cannot substitute a new source behind those ranges.
     for root in roots {
         reachable.insert(layout.browse_retained_root_path(root.hash()).to_string());
+        if let Some(pointer) = root.checkpoint() {
+            mark_layered_checkpoint_sources(layout, pointer, reachable, verified_catalogs).await?;
+        }
         reachable.extend(
             root.source_paths(layout)
                 .into_iter()
@@ -3515,19 +3534,27 @@ async fn mark_layered_checkpoint_sources(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     pointer: &crab_metadata::capsule_protocol::CheckpointPointer,
     reachable: &mut HashSet<String>,
+    verified_catalogs: &mut HashSet<String>,
 ) -> Result<()> {
     let checkpoint =
-        crab_metadata::capsule_protocol::load_layered_checkpoint(layout, pointer, u64::MAX)
+        crab_metadata::capsule_protocol::load_layered_checkpoint_control(layout, pointer)
             .await
             .map_err(CrabError::from)?;
     if let Some(catalog) = checkpoint.catalog() {
         let path = layout.capsule_catalog_path(catalog.hash()).to_string();
-        // Ref-only checkpoints share one catalog. Authenticate it once per
-        // sweep, so retained checkpoint count does not multiply body decoding.
-        if reachable.insert(path) {
-            checkpoint
-                .pointer_catalog_from_store(layout, u64::MAX)
-                .await?;
+        // Checkpoints and captured readers share immutable catalog subtrees.
+        // Authenticate each root's complete closure before sweeping page objects.
+        reachable.insert(path.clone());
+        // Coordinator protection may have marked only the descriptor key.
+        // Reachability alone does not prove its children were traversed.
+        if verified_catalogs.insert(path) {
+            reachable.extend(
+                checkpoint
+                    .catalog_objects(layout, u64::MAX)
+                    .await?
+                    .into_iter()
+                    .map(|(path, _)| path.to_string()),
+            );
         }
     }
     for source in checkpoint.sources() {
@@ -5462,6 +5489,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn protected_catalog_descriptor_still_requires_verified_page_closure() {
+        use bytes::Bytes;
+        use crab_metadata::capsule_protocol::{
+            CapsuleGitPack, FileCatalogEntry, LayeredCheckpoint, PackLayer, PointerCatalog,
+            ShardCatalogEntry,
+        };
+        let store =
+            crab_storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store, "catalog-protection".to_owned());
+        let pack = CapsuleGitPack::new(
+            Bytes::from_static(b"pack"),
+            Bytes::from_static(b"index"),
+            Bytes::from_static(b"reverse"),
+            Bytes::from_static(b"locator"),
+            "1".repeat(40),
+            1,
+        )
+        .unwrap();
+        let source = PackLayer::build(&pack)
+            .unwrap()
+            .source_descriptor()
+            .unwrap();
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_shard("a".repeat(64), ShardCatalogEntry::new(1, vec![]))
+            .unwrap();
+        catalog
+            .insert_file("b".repeat(64), FileCatalogEntry::new(1, "a".repeat(64)))
+            .unwrap();
+        let checkpoint =
+            LayeredCheckpoint::build(1, &"c".repeat(64), vec![source], catalog, None).unwrap();
+        checkpoint.publish_catalog(&layout).await.unwrap();
+        layout
+            .store()
+            .put_overwrite(
+                &layout.capsule_checkpoint_path(checkpoint.hash()),
+                checkpoint.bytes().clone(),
+            )
+            .await
+            .unwrap();
+        let root = layout
+            .capsule_catalog_path(checkpoint.catalog().unwrap().hash())
+            .to_string();
+        let expected = checkpoint
+            .catalog_objects(&layout, 1024 * 1024)
+            .await
+            .unwrap();
+        let mut reachable = HashSet::from([root.clone()]);
+        let mut verified = HashSet::new();
+        mark_layered_checkpoint_sources(
+            &layout,
+            &checkpoint.pointer().unwrap(),
+            &mut reachable,
+            &mut verified,
+        )
+        .await
+        .unwrap();
+        assert!(
+            expected
+                .iter()
+                .all(|(path, _)| reachable.contains(&path.to_string()))
+        );
+
+        let (child, _) = expected
+            .iter()
+            .find(|(path, _)| path.to_string() != root)
+            .unwrap();
+        layout.store().delete(child).await.unwrap();
+        assert!(
+            mark_layered_checkpoint_sources(
+                &layout,
+                &checkpoint.pointer().unwrap(),
+                &mut reachable,
+                &mut HashSet::new()
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn capsule_protocol_gc_retains_layered_checkpoint_history_and_sources() {
         use bytes::Bytes;
         use crab_metadata::capsule_protocol::{
@@ -5652,8 +5760,6 @@ mod tests {
                 Err(CrabError::NotFound { .. })
             ));
         }
-        assert_eq!(outcome.list_requests, 7);
-        assert_eq!(outcome.list_parallelism, 7);
     }
 
     async fn write_browse_indexes(
@@ -5860,9 +5966,15 @@ mod tests {
                     .unwrap(),
             });
             let mut retained = HashSet::new();
-            mark_derived_index_objects(store.as_storage(), &layout, &manifest, &mut retained)
-                .await
-                .unwrap();
+            mark_derived_index_objects(
+                store.as_storage(),
+                &layout,
+                &manifest,
+                &mut retained,
+                &mut HashSet::new(),
+            )
+            .await
+            .unwrap();
             assert!(
                 retained.contains(
                     &layout

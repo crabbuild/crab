@@ -467,8 +467,8 @@ mod tests {
     fn history_rejects_implicit_checkpoint_format() {
         let segment = HistorySegment::build(checkpoint(), None, state()).unwrap();
         let body = std::str::from_utf8(segment.bytes()).unwrap();
-        assert_eq!(body.matches("\"format\":8,").count(), 1);
-        let bytes = Bytes::from(body.replace("\"format\":8,", ""));
+        assert_eq!(body.matches("\"format\":9,").count(), 1);
+        let bytes = Bytes::from(body.replace("\"format\":9,", ""));
 
         let error = HistorySegment::decode(bytes)
             .expect_err("an implicit retired checkpoint format must fail");

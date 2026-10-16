@@ -1,9 +1,6 @@
 //! Lazy lookups bound to an authenticated descriptor; full scans remain maintenance operations.
 use crab_storage::{Store, StoreLayout};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use super::{
     PathStateDescriptor, PathStateNodeRef, PathStateRecord, PathStateSummary, Result, codec,
@@ -120,11 +117,7 @@ impl PathStateReader {
             .await?
             .remove(0)
             .ok_or_else(|| corruption("start commit is absent from graph"))?;
-        let mut work = PageWork {
-            maximum: self.max_bytes,
-            bytes: self.descriptor_bytes,
-            seen: BTreeSet::new(),
-        };
+        let mut work = PageWork::new(self.max_bytes, self.descriptor_bytes);
         let start = self
             .records(store, graph, &[start_ordinal], &mut work)
             .await?

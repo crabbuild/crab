@@ -56,10 +56,57 @@ impl State {
 pub(crate) struct PageWork {
     pub(crate) maximum: u64,
     pub(crate) bytes: u64,
-    pub(crate) seen: BTreeSet<(usize, u64)>,
+    seen: BTreeSet<(usize, u64)>,
+    objects: BTreeMap<[u8; 32], u64>,
+    materialized: u64,
 }
 
 impl PageWork {
+    pub(crate) fn new(maximum: u64, bytes: u64) -> Self {
+        Self {
+            maximum,
+            bytes,
+            seen: BTreeSet::new(),
+            objects: BTreeMap::new(),
+            materialized: 0,
+        }
+    }
+
+    pub(crate) fn admit_materialized(&mut self, bytes: u64) -> Result<()> {
+        let total = self
+            .materialized
+            .checked_add(bytes)
+            // Encoded admission also pays for vector/string headers, hex keys
+            // and simultaneous row/typed values. Bound that expansion separately
+            // so aliases cannot grant unlimited copies of one physical page.
+            .filter(|total| *total <= self.maximum.saturating_mul(4))
+            .ok_or_else(|| corruption("metadata materialization exceeds its byte limit"))?;
+        self.materialized = total;
+        Ok(())
+    }
+
+    pub(crate) fn admit_object(&mut self, hash: [u8; 32], bytes: u64) -> Result<()> {
+        if let Some(prior) = self.objects.get(&hash) {
+            return if *prior == bytes {
+                Ok(())
+            } else {
+                Err(corruption("object identity has conflicting byte lengths"))
+            };
+        }
+        let total = self
+            .bytes
+            .checked_add(bytes)
+            .filter(|total| *total <= self.maximum)
+            .ok_or_else(|| corruption("metadata query exceeds its byte limit"))?;
+        self.bytes = total;
+        self.objects.insert(hash, bytes);
+        Ok(())
+    }
+
+    pub(crate) fn object_dependencies(&self) -> impl Iterator<Item = (&[u8; 32], u64)> {
+        self.objects.iter().map(|(hash, bytes)| (hash, *bytes))
+    }
+
     fn admit(&mut self, layer: usize, offset: u64, bytes: u64) -> Result<()> {
         if self.seen.insert((layer, offset)) {
             self.bytes = self
@@ -392,11 +439,7 @@ mod tests {
         body.extend_from_slice(&[0; 128]);
         store.create_strict(&path, body.into()).await.unwrap();
         let cache = PageCache::for_region(region.clone());
-        let mut work = PageWork {
-            maximum: u64::MAX,
-            bytes: 0,
-            seen: BTreeSet::new(),
-        };
+        let mut work = PageWork::new(u64::MAX, 0);
         cache
             .lookup(
                 &store,
@@ -411,11 +454,7 @@ mod tests {
             .await
             .unwrap();
         let cold = bytes.swap(0, Ordering::SeqCst);
-        let mut limited = PageWork {
-            maximum: cold - 1,
-            bytes: 0,
-            seen: BTreeSet::new(),
-        };
+        let mut limited = PageWork::new(cold - 1, 0);
         let rejected = cache
             .lookup(
                 &store,

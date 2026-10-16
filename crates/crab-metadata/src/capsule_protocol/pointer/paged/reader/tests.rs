@@ -57,7 +57,6 @@ async fn fixture(
         .unwrap()
         .source_descriptor()
         .unwrap();
-    let catalog_bytes = catalog.encode().unwrap();
     let checkpoint =
         LayeredCheckpoint::build(1, &"3".repeat(64), vec![source], catalog, None).unwrap();
     let reads = Arc::new(AtomicUsize::new(0));
@@ -67,13 +66,7 @@ async fn fixture(
             observed.fetch_add(1, Ordering::SeqCst);
         }));
     let layout = StoreLayout::new(store, "catalog-lookup".to_owned());
-    if let Some(source) = checkpoint.catalog() {
-        layout
-            .store()
-            .put_overwrite(&layout.capsule_catalog_path(source.hash()), catalog_bytes)
-            .await
-            .unwrap();
-    }
+    checkpoint.publish_catalog(&layout).await.unwrap();
     layout
         .store()
         .put_overwrite(
@@ -93,6 +86,7 @@ async fn fixture(
     )
     .unwrap();
     let lookup = control.pointer_catalog_lookup(&layout, maximum).unwrap();
+    reads.store(0, Ordering::SeqCst);
     (layout, checkpoint, lookup, reads)
 }
 
@@ -301,7 +295,14 @@ async fn chunk_selection_uses_lowest_xorb_then_first_occurrence_across_sources()
 async fn missing_and_corrupted_pages_are_errors_instead_of_catalog_misses() {
     for missing in [false, true] {
         let (layout, checkpoint, lookup, _) = fixture(catalog(2), 1024 * 1024).await;
-        let path = layout.capsule_catalog_path(checkpoint.catalog().unwrap().hash());
+        let source = lookup.checkpoint.as_ref().unwrap();
+        let path = if missing {
+            layout.capsule_catalog_path(checkpoint.catalog().unwrap().hash())
+        } else {
+            source
+                .pages
+                .path(&source.descriptor.files.as_ref().unwrap().hash)
+        };
         if missing {
             layout.store().delete(&path).await.unwrap();
         } else {
@@ -312,9 +313,7 @@ async fn missing_and_corrupted_pages_are_errors_instead_of_catalog_misses() {
                 .unwrap()
                 .0
                 .to_vec();
-            let source = lookup.checkpoint.as_ref().unwrap();
-            let offset = source.range.offset() + source.descriptor.files.as_ref().unwrap().offset;
-            bytes[offset as usize] ^= 1;
+            bytes[0] ^= 1;
             layout
                 .store()
                 .put_overwrite(&path, bytes.into())
@@ -345,29 +344,46 @@ async fn loaded_dependencies_and_chunk_placements_fail_closed() {
             .is_err()
     );
     // A re-signed reverse index must still agree with its authenticated xorb.
-    let bytes = catalog(1).encode().unwrap();
-    let mut descriptor = Descriptor::decode(&bytes).unwrap();
-    let root = descriptor.chunks.as_mut().unwrap();
-    let mut body = bytes[..descriptor.body_bytes as usize].to_vec();
-    let size = root.offset as usize + 14 + 32 + 4 + 36;
-    body[size] ^= 1;
-    root.hash =
-        *blake3::hash(&body[root.offset as usize..root.offset as usize + root.bytes as usize])
-            .as_bytes();
-    descriptor.body_hash = *blake3::hash(&body).as_bytes();
-    let header = json(&descriptor).unwrap();
-    body.extend_from_slice(&header);
-    crate::pages::put_u32(&mut body, header.len()).unwrap();
-    body.extend_from_slice(MAGIC);
-    let descriptor = Descriptor::decode(&body).unwrap();
-    let range = PackRange::new(0, &body).unwrap();
-    let path = object_store::path::Path::from("resigned-catalog");
-    layout
-        .store()
-        .put_overwrite(&path, body.into())
+    let source = lookup.checkpoint.as_ref().unwrap();
+    let mut descriptor = source.descriptor.clone();
+    let mut value = blake3::Hash::from_hex(format!("{:064x}", 1_000_000))
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    value.extend_from_slice(&1u32.to_be_bytes());
+    value.extend_from_slice(&7u32.to_be_bytes());
+    descriptor.chunks = source
+        .pages
+        .edit(
+            layout.store(),
+            descriptor.chunks.as_ref(),
+            Kind::CatalogChunks,
+            vec![(
+                blake3::Hash::from_hex(format!("{:064x}", 2_000_000))
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec(),
+                value,
+            )],
+            &mut PageWork::new(1024 * 1024, 0),
+        )
         .await
         .unwrap();
-    let lookup = PointerCatalogLookup::checkpoint(path, range, descriptor, 1024 * 1024).unwrap();
+    let body = descriptor.encode().unwrap();
+    let identity = *blake3::hash(&body).as_bytes();
+    layout
+        .store()
+        .put_overwrite(&source.pages.path(&identity), body.clone())
+        .await
+        .unwrap();
+    let pages = CatalogPages::new(
+        layout.capsule_catalog_prefix(),
+        descriptor,
+        identity,
+        body.len() as u64,
+    )
+    .unwrap();
+    let lookup = PointerCatalogLookup::checkpoint(Arc::new(pages), 1024 * 1024);
     assert!(
         lookup
             .chunks(layout.store(), &[format!("{:064x}", 2_000_000)])

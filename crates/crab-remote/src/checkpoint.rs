@@ -201,7 +201,7 @@ pub async fn maintain_capsule_repository_from_view(
         publish_checkpoint(
             layout,
             view,
-            catalog_for_checkpoint(view).await?,
+            catalog_for_checkpoint(layout, view, maximum_bytes).await?,
             maximum_bytes,
             cancel,
         )
@@ -299,7 +299,7 @@ pub async fn repack_capsule_repository_from_view(
                 view,
                 consolidation.sources,
                 member_oids,
-                catalog_for_checkpoint(view).await?,
+                catalog_for_checkpoint(layout, view, maximum_bytes).await?,
                 maximum_bytes,
                 cancel,
             )
@@ -315,7 +315,7 @@ pub async fn repack_capsule_repository_from_view(
             publication = publish_checkpoint(
                 layout,
                 view,
-                catalog_for_checkpoint(view).await?,
+                catalog_for_checkpoint(layout, view, maximum_bytes).await?,
                 maximum_bytes,
                 cancel,
             )
@@ -361,7 +361,7 @@ pub async fn publish_capsule_checkpoint_from_view(
     if view.capsule_count()? < u64::from(threshold) {
         return Ok(CheckpointOutcome::default());
     }
-    let catalog = catalog_for_checkpoint(view).await?;
+    let catalog = catalog_for_checkpoint(layout, view, maximum_bytes).await?;
     Ok(
         publish_checkpoint(layout, view, catalog, maximum_bytes, cancel)
             .await?
@@ -395,18 +395,35 @@ pub async fn publish_capsule_checkpoint_with_catalog_from_view(
 
 enum CatalogWrite {
     New(PointerCatalog),
-    Retained(Option<Box<crab_metadata::capsule_protocol::CheckpointCatalog>>),
+    Durable(Option<Box<crab_metadata::capsule_protocol::CheckpointCatalog>>),
 }
 
 async fn catalog_for_checkpoint(
+    layout: &StoreLayout<Store>,
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    maximum_bytes: u64,
 ) -> Result<CatalogWrite, CheckpointError> {
     if view.has_catalog_deltas()? {
-        return Ok(CatalogWrite::New(view.pointer_catalog().await?));
+        let delta = view.visible_pointer_catalog_delta().await?;
+        let existing = view
+            .layered_checkpoint()
+            .and_then(LayeredCheckpoint::catalog);
+        let catalog = crab_metadata::capsule_protocol::fold_checkpoint_catalog(
+            layout,
+            existing,
+            std::slice::from_ref(&delta),
+            if maximum_bytes == 0 {
+                u64::MAX
+            } else {
+                maximum_bytes
+            },
+        )
+        .await?;
+        return Ok(CatalogWrite::Durable(catalog.map(Box::new)));
     }
     // The checkpoint freezes prior replay precedence. Reuse only when every
     // newly selected control lacks a catalog delta, even if other refs moved.
-    Ok(CatalogWrite::Retained(
+    Ok(CatalogWrite::Durable(
         view.layered_checkpoint()
             .and_then(LayeredCheckpoint::catalog)
             .cloned()
@@ -523,7 +540,7 @@ async fn repack_checkpoint_from_view(
     let Some(selected_start) = layered_suffix_start(checkpoint.sources())? else {
         return Ok(CheckpointPublication::default());
     };
-    let catalog = CatalogWrite::Retained(checkpoint.catalog().cloned().map(Box::new));
+    let catalog = CatalogWrite::Durable(checkpoint.catalog().cloned().map(Box::new));
     let consolidation = consolidate_layered_suffix(
         layout,
         view,
@@ -586,7 +603,7 @@ async fn publish_layered_sources(
         CatalogWrite::New(catalog) => {
             LayeredCheckpoint::build(generation, root_digest, sources, catalog, Some(visibility))?
         }
-        CatalogWrite::Retained(catalog) => LayeredCheckpoint::build_reusing_catalog(
+        CatalogWrite::Durable(catalog) => LayeredCheckpoint::build_with_catalog_root(
             generation,
             root_digest,
             sources,
@@ -594,7 +611,7 @@ async fn publish_layered_sources(
             Some(visibility),
         )?,
     };
-    if checkpoint.encoded_metadata_bytes()? > maximum_bytes && maximum_bytes > 0 {
+    if checkpoint.publication_metadata_bytes()? > maximum_bytes && maximum_bytes > 0 {
         return Err(CheckpointError::OutputLimit {
             maximum: maximum_bytes,
         });

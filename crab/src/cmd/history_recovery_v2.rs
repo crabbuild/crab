@@ -225,8 +225,9 @@ async fn verify_history(
         .map_err(|_| CrabError::Internal("history shard count overflowed".to_owned()))?;
     let xorb_count = u64::try_from(catalog.xorbs().len())
         .map_err(|_| CrabError::Internal("history xorb count overflowed".to_owned()))?;
+    let catalog_objects = checkpoint.catalog_objects(layout, u64::MAX).await?;
     let dependency_objects = 2_u64
-        .checked_add(u64::from(checkpoint.catalog().is_some()))
+        .checked_add(catalog_objects.len() as u64)
         .and_then(|total| total.checked_add(source_count))
         .and_then(|total| total.checked_add(shard_count))
         .and_then(|total| total.checked_add(xorb_count))
@@ -234,7 +235,12 @@ async fn verify_history(
         .ok_or_else(|| CrabError::Internal("history dependency count overflowed".to_owned()))?;
     let segment_bytes = u64::try_from(segment.bytes().len())
         .map_err(|_| CrabError::Internal("history segment size overflowed".to_owned()))?;
-    let checkpoint_bytes = checkpoint.encoded_metadata_bytes()?;
+    let checkpoint_bytes = catalog_objects
+        .iter()
+        .try_fold(checkpoint.pointer()?.size(), |total, (_, bytes)| {
+            total.checked_add(*bytes)
+        })
+        .ok_or_else(|| CrabError::Internal("history catalog byte count overflowed".to_owned()))?;
     let dependency_bytes = segment_bytes
         .checked_add(checkpoint_bytes)
         .and_then(|total| total.checked_add(source_bytes))

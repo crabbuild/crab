@@ -78,12 +78,11 @@ async fn native_content(
     (content, pointer, MerkleHash::from(hash).hex())
 }
 
-async fn publish_history(layout: &StoreLayout<Store>, catalog: PointerCatalog) {
+async fn publish_history(layout: &StoreLayout<Store>, catalog: PointerCatalog, name: &str) {
     let root = crab_write::capsule_protocol::open_root(layout)
         .await
         .unwrap();
     let (oid, pack) = blob_pack(b"history marker");
-    let name = "refs/tags/history";
     let transaction = CapsuleTransaction::new(
         root.record().digest(),
         vec![CapsuleRefEdit::new(name, None, Some(oid.clone()), None)],
@@ -185,7 +184,7 @@ async fn fixed_pointer_publication_and_hydration_keep_unrelated_history_cold() {
                         catalog.insert_file(hash.clone(), entry.clone()).unwrap();
                     }
                 }
-                publish_history(&layout, catalog.clone()).await;
+                publish_history(&layout, catalog.clone(), "refs/tags/history").await;
                 if checkpointed {
                     assert!(
                         crab_remote::checkpoint::publish_capsule_checkpoint(
@@ -251,6 +250,7 @@ async fn fixed_pointer_publication_and_hydration_keep_unrelated_history_cold() {
                         captured_lookup.close().await?;
                         assert_eq!(captured_result?, if supplied { None } else { Some(expected_shard) }, "captured hydration must not follow a later publication");
                         observations.0.lock().unwrap().clear();
+                        observations.2.reset();
                         let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
                             layout.clone(), after.pointer_catalog_lookup(&layout, 256 * 1024)?,
                         );
@@ -263,7 +263,12 @@ async fn fixed_pointer_publication_and_hydration_keep_unrelated_history_cold() {
                         let requests = observations.0.lock().unwrap().clone();
                         assert!(requests.len() <= 24 && requests.iter().map(|r| r.bytes_read).sum::<u64>() <= 256 * 1024,
                             "fixed hydration lookup exceeds bounds: count={count}, checkpoint={checkpointed}, supplied={supplied}");
-                        assert!(requests.iter().all(|r| r.operation == StorageOperation::Range), "captured hydration must not read mutable state or write checkpoints");
+                        use crab_storage::test_support::ObjectReadKind;
+                        let catalog_prefix = format!("{}/", layout.capsule_catalog_prefix());
+                        assert!(observations.2.put_requests() == 0 && observations.2.requests().iter().all(|r| {
+                            r.kind == ObjectReadKind::Range ||
+                            (r.kind == ObjectReadKind::Full && r.location.starts_with(&catalog_prefix))
+                        }), "captured hydration must read only pinned ranges or immutable catalog pages, without writes");
                         drop(prepared);
                         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
                     },
@@ -306,7 +311,7 @@ async fn ref_only_checkpoints_reuse_catalog_without_body_io() {
             .unwrap();
     }
     assert!(catalog.encode().unwrap().len() > 64 * 1024);
-    publish_history(&layout, catalog.clone()).await;
+    publish_history(&layout, catalog.clone(), "refs/tags/history").await;
     // Publication needs exact pack-member admission. The maintenance view
     // supplies it while checkpoint catalog bodies remain cold.
     let first = view(&layout).await;
@@ -356,4 +361,54 @@ async fn ref_only_checkpoints_reuse_catalog_without_body_io() {
         .await
         .unwrap();
     assert_eq!(after.pointer_catalog().await.unwrap(), catalog);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn changed_catalog_checkpoints_do_not_rewrite_unrelated_history() {
+    for count in [100, 10_000] {
+        let (layout, observations) = empty_fixture().await;
+        let shard = "a".repeat(64);
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_shard(shard.clone(), ShardCatalogEntry::new(1, Vec::new()))
+            .unwrap();
+        for index in 0..count {
+            catalog
+                .insert_file(format!("{index:064x}"), FileCatalogEntry::new(1, &shard))
+                .unwrap();
+        }
+        publish_history(&layout, catalog.clone(), "refs/tags/history").await;
+        let captured = checkpoint(&layout).await;
+        let mut delta = PointerCatalog::new();
+        delta
+            .insert_file(format!("{count:064x}"), FileCatalogEntry::new(1, &shard))
+            .unwrap();
+        publish_history(&layout, delta.clone(), "refs/tags/edit").await;
+        let before = view(&layout).await;
+        assert!(before.has_catalog_deltas().unwrap());
+        observations.0.lock().unwrap().clear();
+        let result = crab_remote::checkpoint::publish_capsule_checkpoint_from_view(
+            &layout,
+            &before,
+            0,
+            64 * LIMIT,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let io = observations.0.lock().unwrap().clone();
+        assert!(result.published);
+        let bytes_read = io.iter().map(|op| op.bytes_read).sum::<u64>();
+        let bytes_written = io.iter().map(|op| op.bytes_written).sum::<u64>();
+        assert!(
+            bytes_read <= 256 * 1024 && bytes_written <= 256 * 1024,
+            "fixed catalog edit rewrote history: files={count}, read={bytes_read}, written={bytes_written}"
+        );
+        assert_eq!(captured.pointer_catalog().await.unwrap(), catalog);
+        catalog.apply(&delta).unwrap();
+        assert_eq!(
+            view(&layout).await.pointer_catalog().await.unwrap(),
+            catalog
+        );
+    }
 }

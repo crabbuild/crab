@@ -1,7 +1,8 @@
 //! Selected dependency closure from captured checkpoint and run roots.
 use super::*;
+use crate::capsule_protocol::RunCatalogSource;
+use crate::capsule_protocol::pointer::object::{CatalogPages, shard_from_rows, xorb_from_rows};
 use crate::capsule_protocol::run::catalog::{CatalogOrigin, CatalogValue};
-use crate::capsule_protocol::{PackRange, RunCatalogSource};
 use crate::pages::{PageCache, PageWork};
 use crab_storage::Store;
 use std::collections::BTreeSet;
@@ -18,42 +19,22 @@ const QUERY_KEY_BYTES: u64 = 96;
 /// empty selection; missing pages and conflicting dependencies return errors.
 #[derive(Debug)]
 pub struct PointerCatalogLookup {
-    checkpoint: Option<CheckpointSource>,
+    checkpoint: Option<Arc<CatalogPages>>,
     runs: Vec<RunCatalogSource>,
     ranks: BTreeMap<String, usize>,
     cache: PageCache,
     maximum: u64,
 }
 
-#[derive(Debug)]
-struct CheckpointSource {
-    path: object_store::path::Path,
-    range: PackRange,
-    descriptor: Descriptor,
-}
-
 impl PointerCatalogLookup {
-    pub(in crate::capsule_protocol) fn checkpoint(
-        path: object_store::path::Path,
-        range: PackRange,
-        descriptor: Descriptor,
-        maximum: u64,
-    ) -> Result<Self> {
-        descriptor.validate(range.length())?;
-        if range.offset().checked_add(range.length()).is_none() {
-            return Err(corrupt("catalog source range overflows"));
-        }
-        Ok(Self {
-            checkpoint: Some(CheckpointSource {
-                path,
-                range,
-                descriptor,
-            }),
+    pub(in crate::capsule_protocol) fn checkpoint(pages: Arc<CatalogPages>, maximum: u64) -> Self {
+        Self {
+            checkpoint: Some(pages),
             runs: Vec::new(),
             ranks: BTreeMap::new(),
             cache: PageCache::default(),
             maximum,
-        })
+        }
     }
 
     /// Start a lookup for a captured view that has no checkpoint catalog.
@@ -94,41 +75,20 @@ impl PointerCatalogLookup {
     }
 
     fn work(&self) -> PageWork {
-        PageWork {
-            maximum: self.maximum,
-            bytes: 0,
-            seen: BTreeSet::new(),
-        }
+        PageWork::new(self.maximum, 0)
     }
 
     async fn rows(
         &self,
         store: &Store,
-        root: Option<&PageRef>,
         kind: Kind,
         keys: &[Vec<u8>],
         work: &mut PageWork,
     ) -> Result<Vec<Vec<CatalogValue>>> {
         let mut output = (0..keys.len()).map(|_| Vec::new()).collect::<Vec<_>>();
-        if let (Some(source), Some(root)) = (&self.checkpoint, root) {
-            let origin = Arc::new(CatalogOrigin {
-                path: source.path.clone(),
-                range: source.range.offset()..source.range.offset() + source.descriptor.body_bytes,
-                layer: 0,
-            });
-            let rows = self
-                .cache
-                .lookup(
-                    store,
-                    &origin.path,
-                    origin.layer,
-                    origin.range.clone(),
-                    root,
-                    kind,
-                    keys,
-                    work,
-                )
-                .await?;
+        if let Some(source) = &self.checkpoint {
+            let rows = source.rows(store, kind, keys, work).await?;
+            let origin = Arc::new(CatalogOrigin::Object(source.clone()));
             for (result, row) in output.iter_mut().zip(rows) {
                 if let Some(bytes) = row {
                     result.push(CatalogValue {
@@ -162,16 +122,13 @@ impl PointerCatalogLookup {
         let Some(root) = root else {
             return Ok(Vec::new());
         };
+        let CatalogOrigin::Pack { path, range, layer } = origin else {
+            return Err(corrupt(
+                "offset scan requested for an object-backed catalog",
+            ));
+        };
         self.cache
-            .scan(
-                store,
-                &origin.path,
-                origin.layer,
-                origin.range.clone(),
-                root,
-                kind,
-                work,
-            )
+            .scan(store, path, *layer, range.clone(), root, kind, work)
             .await
     }
 
@@ -182,42 +139,26 @@ impl PointerCatalogLookup {
         work: &mut PageWork,
     ) -> Result<PointerCatalog> {
         let keys = keys(hashes)?;
-        let root = self
-            .checkpoint
-            .as_ref()
-            .and_then(|s| s.descriptor.xorbs.as_ref());
-        let rows = self
-            .rows(store, root, Kind::CatalogXorbs, &keys, work)
-            .await?;
+        let rows = self.rows(store, Kind::CatalogXorbs, &keys, work).await?;
         let mut catalog = PointerCatalog::new();
         for (hash, row) in hashes.iter().zip(rows) {
             for value in row {
-                let row: XorbRow = from_json(&value.bytes)?;
-                let chunks = self
-                    .scan(
-                        store,
-                        &value.origin,
-                        Some(&row.chunks),
-                        Kind::CatalogXorbChunks,
-                        work,
-                    )
-                    .await?;
-                let chunks = chunks
-                    .into_iter()
-                    .enumerate()
-                    .map(|(position, (key, value))| {
-                        if key != (position as u32).to_be_bytes() || value.len() != 36 {
-                            return Err(corrupt("xorb chunk row has invalid position or size"));
-                        }
-                        let size = u32::from_be_bytes(
-                            value[32..]
-                                .try_into()
-                                .map_err(|_| corrupt("chunk size is truncated"))?,
-                        );
-                        Ok(XorbChunkEntry::new(hex(&value[..32])?, size))
-                    })
-                    .collect::<Result<_>>()?;
-                let entry = XorbCatalogEntry::new(row.encoded_size, hex(&row.body_digest)?, chunks);
+                let entry = match value.origin.as_ref() {
+                    CatalogOrigin::Object(source) => source.xorb(store, &value.bytes, work).await?,
+                    CatalogOrigin::Pack { .. } => {
+                        let row: XorbRow = from_json(&value.bytes)?;
+                        let chunks = self
+                            .scan(
+                                store,
+                                &value.origin,
+                                Some(&row.chunks),
+                                Kind::CatalogXorbChunks,
+                                work,
+                            )
+                            .await?;
+                        xorb_from_rows(row.encoded_size, row.body_digest, chunks)?
+                    }
+                };
                 verify_identity(&value, Kind::CatalogXorbs, &json(&entry)?)?;
                 catalog.insert_xorb(hash.clone(), entry)?;
             }
@@ -284,12 +225,8 @@ impl PointerCatalogLookup {
         if hashes.is_empty() && shards.is_empty() && xorbs.is_empty() {
             return Ok(PointerCatalog::new());
         }
-        let root = self
-            .checkpoint
-            .as_ref()
-            .and_then(|s| s.descriptor.files.as_ref());
         let rows = self
-            .rows(store, root, Kind::CatalogFiles, &keys(&hashes)?, &mut work)
+            .rows(store, Kind::CatalogFiles, &keys(&hashes)?, &mut work)
             .await?;
         let mut catalog = PointerCatalog::new();
         for (hash, row) in hashes.iter().zip(rows) {
@@ -349,36 +286,30 @@ impl PointerCatalogLookup {
         work: &mut PageWork,
     ) -> Result<PointerCatalog> {
         let mut catalog = PointerCatalog::new();
-        let root = self
-            .checkpoint
-            .as_ref()
-            .and_then(|s| s.descriptor.shards.as_ref());
         let rows = self
-            .rows(store, root, Kind::CatalogShards, &keys(shards)?, work)
+            .rows(store, Kind::CatalogShards, &keys(shards)?, work)
             .await?;
         let mut xorbs = BTreeSet::new();
         for (hash, row) in shards.iter().zip(rows) {
             for value in row {
-                let row: ShardRow = from_json(&value.bytes)?;
-                let closure = self
-                    .scan(
-                        store,
-                        &value.origin,
-                        row.xorbs.as_ref(),
-                        Kind::CatalogShardXorbs,
-                        work,
-                    )
-                    .await?;
-                let closure = closure
-                    .into_iter()
-                    .map(|(key, value)| {
-                        if !value.is_empty() {
-                            return Err(corrupt("shard xorb row has unexpected data"));
-                        }
-                        hex(&key)
-                    })
-                    .collect::<Result<_>>()?;
-                let entry = ShardCatalogEntry::new(row.encoded_size, closure);
+                let entry = match value.origin.as_ref() {
+                    CatalogOrigin::Object(source) => {
+                        source.shard(store, &value.bytes, work).await?
+                    }
+                    CatalogOrigin::Pack { .. } => {
+                        let row: ShardRow = from_json(&value.bytes)?;
+                        let closure = self
+                            .scan(
+                                store,
+                                &value.origin,
+                                row.xorbs.as_ref(),
+                                Kind::CatalogShardXorbs,
+                                work,
+                            )
+                            .await?;
+                        shard_from_rows(row.encoded_size, closure)?
+                    }
+                };
                 verify_identity(&value, Kind::CatalogShards, &json(&entry)?)?;
                 catalog.insert_shard(hash.clone(), entry)?;
             }
@@ -401,12 +332,8 @@ impl PointerCatalogLookup {
     pub async fn chunks(&self, store: &Store, hashes: &[String]) -> Result<PointerCatalog> {
         let mut work = self.work();
         let hashes = requested(hashes, &mut work)?;
-        let root = self
-            .checkpoint
-            .as_ref()
-            .and_then(|s| s.descriptor.chunks.as_ref());
         let rows = self
-            .rows(store, root, Kind::CatalogChunks, &keys(&hashes)?, &mut work)
+            .rows(store, Kind::CatalogChunks, &keys(&hashes)?, &mut work)
             .await?;
         let mut selected = BTreeMap::new();
         for (hash, row) in hashes.iter().zip(rows) {

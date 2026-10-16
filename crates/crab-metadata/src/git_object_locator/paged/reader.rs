@@ -374,11 +374,7 @@ impl PagedGitObjectIndex {
     }
 
     fn work(&self) -> PageWork {
-        PageWork {
-            maximum: self.maximum,
-            bytes: self.descriptor_bytes,
-            seen: BTreeSet::new(),
-        }
+        PageWork::new(self.maximum, self.descriptor_bytes)
     }
 
     async fn lookup_rows(
