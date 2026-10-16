@@ -73,7 +73,8 @@ pub use pointer::{
 };
 #[cfg(feature = "storage")]
 pub use pointer::{
-    PointerCatalogInspection, PointerCatalogLookup, PointerCatalogObject, inspect_pointer_catalog,
+    PointerCatalogCounts, PointerCatalogInspection, PointerCatalogLookup, PointerCatalogObject,
+    inspect_pointer_catalog,
 };
 pub use ref_head::{
     CAPSULE_REF_COMPACTION_FAN_IN, CAPSULE_REF_ROLLUP_WINDOW, CapsuleRefHead, CapsuleRefState,

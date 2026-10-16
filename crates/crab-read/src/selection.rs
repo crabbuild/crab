@@ -2,6 +2,9 @@ use std::borrow::Cow;
 use std::future::Future;
 use std::io::Write;
 
+use crab_metadata::capsule_protocol::{
+    PointerCatalogCounts, PointerCatalogInspection, PointerCatalogObject,
+};
 use crab_metadata::manifest_store;
 use crab_metadata::manifests::Manifest;
 use crab_metadata::ref_journal::list_active_transactions;
@@ -483,27 +486,8 @@ pub async fn check_capsule_read_replica_readiness(
     let mut catalog = replica.pointer_catalog_inspection().await?;
     // Metadata proof is complete before probing bodies. Keep the spill owner
     // through every exit, including an early sample limit or provider error.
-    let result: Result<Option<String>> = async {
-        while !readiness_probe_budget_exhausted(&stats, options) {
-            let Some(object) = catalog.next_object().await? else {
-                break;
-            };
-            let gap = match object {
-                crab_metadata::capsule_protocol::PointerCatalogObject::Shard { hash, entry } => {
-                    verify_shard_object(replica_router, &hash, Cow::Owned(entry), &mut stats)
-                        .await?
-                }
-                crab_metadata::capsule_protocol::PointerCatalogObject::Xorb { hash, entry } => {
-                    verify_xorb_object(replica_router, &hash, Cow::Owned(entry), &mut stats).await?
-                }
-            };
-            if gap.is_some() {
-                return Ok(gap);
-            }
-        }
-        Ok(None)
-    }
-    .await;
+    let result =
+        inspection_pointer_object_gap(replica_router, &mut catalog, &mut stats, options).await;
     if let Some(reason) = catalog.finish(result).await? {
         let mut readiness = ReadReplicaReadiness::not_ready(
             primary_generation,
@@ -538,6 +522,56 @@ pub async fn verify_capsule_pointer_catalog_objects(
         });
     }
     Ok(stats)
+}
+
+pub(crate) async fn verify_capsule_pointer_inspection(
+    router: &StoreLayout<Store>,
+    mut catalog: PointerCatalogInspection,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(PointerCatalogCounts, ReadinessProbeStats)> {
+    let counts = catalog.counts();
+    let mut stats = ReadinessProbeStats::default();
+    let result = tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(ReadError::Cancelled),
+        result = async {
+            if let Some(reason) = inspection_pointer_object_gap(
+                router, &mut catalog, &mut stats, ReadinessCheckOptions::deep(),
+            ).await? {
+                return Err(ReadError::CorruptObject {
+                    path: "capsule-protocol pointer catalog".to_owned(),
+                    reason,
+                });
+            }
+            Ok((counts, stats))
+        } => result,
+    };
+    catalog.finish(result).await
+}
+
+async fn inspection_pointer_object_gap(
+    router: &StoreLayout<Store>,
+    catalog: &mut PointerCatalogInspection,
+    stats: &mut ReadinessProbeStats,
+    options: ReadinessCheckOptions,
+) -> Result<Option<String>> {
+    while !readiness_probe_budget_exhausted(stats, options) {
+        let Some(object) = catalog.next_object().await? else {
+            break;
+        };
+        let gap = match object {
+            PointerCatalogObject::Shard { hash, entry } => {
+                verify_shard_object(router, &hash, Cow::Owned(entry), stats).await?
+            }
+            PointerCatalogObject::Xorb { hash, entry } => {
+                verify_xorb_object(router, &hash, Cow::Owned(entry), stats).await?
+            }
+        };
+        if gap.is_some() {
+            return Ok(gap);
+        }
+    }
+    Ok(None)
 }
 
 async fn capsule_pointer_object_gap(
@@ -1450,6 +1484,54 @@ mod tests {
         assert!(!complete.ready);
         assert_eq!(complete.stats.object_read_count, 2);
         assert!(complete.reason.unwrap().contains("xorb missing"));
+    }
+
+    #[tokio::test]
+    async fn catalog_body_verification_cancellation_interrupts_pending_origin_read() {
+        use object_store::throttle::{ThrottleConfig, ThrottledStore};
+        use std::sync::Arc;
+        use std::time::Duration;
+        let (_store, router) = memory_store_with_layout("org/repo");
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_file(
+                "a".repeat(64),
+                crab_metadata::capsule_protocol::FileCatalogEntry::new(3, "b".repeat(64)),
+            )
+            .unwrap();
+        catalog
+            .insert_shard(
+                "b".repeat(64),
+                crab_metadata::capsule_protocol::ShardCatalogEntry::new(7, Vec::new()),
+            )
+            .unwrap();
+        let view = capsule_catalog_view(&router, &catalog).await;
+        let inspection = view.pointer_catalog_inspection().await.unwrap();
+        let slow = StoreLayout::new(
+            Store::new(Arc::new(ThrottledStore::new(
+                Arc::clone(router.store().inner()),
+                ThrottleConfig {
+                    wait_get_per_call: Duration::from_secs(10),
+                    ..Default::default()
+                },
+            ))),
+            router.repo_prefix().to_owned(),
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let verification = verify_capsule_pointer_inspection(&slow, inspection, &cancel);
+        tokio::pin!(verification);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut verification)
+                .await
+                .is_err()
+        );
+        cancel.cancel();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), &mut verification)
+                .await
+                .unwrap(),
+            Err(ReadError::Cancelled)
+        ));
     }
 
     #[tokio::test]

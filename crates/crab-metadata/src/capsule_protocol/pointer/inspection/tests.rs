@@ -316,6 +316,7 @@ async fn cursor_fixture(
 #[tokio::test]
 async fn verified_cursor_preserves_complete_descriptors_across_spilled_file_rows() {
     let (_parent, mut cursor, expected) = cursor_fixture(5000).await;
+    let before = cursor.counts();
     let result: Result<_> = async {
         let mut values = Vec::new();
         while let Some(object) = cursor.next_object().await? {
@@ -324,7 +325,16 @@ async fn verified_cursor_preserves_complete_descriptors_across_spilled_file_rows
         Ok(values)
     }
     .await;
-    assert_eq!(cursor.finish(result).await.unwrap(), expected);
+    let after = cursor.counts();
+    let counts = PointerCatalogCounts {
+        files: 5000,
+        shards: 1,
+        xorbs: 1,
+    };
+    assert_eq!(
+        (before, after, cursor.finish(result).await.unwrap()),
+        (counts, counts, expected)
+    );
 }
 
 #[tokio::test]

@@ -2546,8 +2546,12 @@ shard/xorb descriptors through the shared physical body verifiers. No body probe
 starts before the final metadata proof; all returned paths close the cursor,
 including provider errors and sample limits. Pending reads advance only after
 verified I/O and decoding, so cancellation followed by resume cannot skip a block.
-Current fsck payload verification, restore accounting and catalog-rewriting tools
-also retain full logical catalogs. Materialization admission continues to
+Deep reachable-dependency verification now streams that same proof and physical
+body checks before batching reachable file bindings from the captured roots.
+Metadata diagnosis and rebuild summaries consume verified cardinalities without
+a separate materialization. Recovery's assembled replacement catalogs share the
+same Git scan and whole-file/LFS verification owner. Current fsck payload
+verification, restore accounting and catalog-rewriting tools retain full logical catalogs. Materialization admission continues to
 protect those callers retaining recipe copies.
 
 Release audit: all six upstream published tag objects were checked again before

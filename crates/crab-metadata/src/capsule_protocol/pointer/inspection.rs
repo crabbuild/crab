@@ -238,15 +238,26 @@ impl Inspector {
             return Ok(PointerCatalogInspection {
                 space: None,
                 rows: Cursor::new(Run::default()),
+                counts: PointerCatalogCounts::default(),
             });
         };
-        let result: Result<Run> = async {
+        let result: Result<(Run, PointerCatalogCounts)> = async {
             prior?;
             let run = self.rows.finish(&space).await?;
             let mut cursor = Cursor::<Entry>::new(run.clone());
             let mut dependencies = Reducer::<Relation>::new();
+            let mut counts = PointerCatalogCounts::default();
             while let Some(row) = cursor.next(&space).await? {
                 let identity = &row.key[1..];
+                let count = match row.key[0] {
+                    0 => &mut counts.files,
+                    1 => &mut counts.shards,
+                    2 => &mut counts.xorbs,
+                    _ => return Err(corrupt("logical catalog row kind differs")),
+                };
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| corrupt("catalog count overflows"))?;
                 match row.key[0] {
                     0 => {
                         dependencies
@@ -277,13 +288,14 @@ impl Inspector {
                 row.validate()?;
             }
             dependencies.remove(&space).await?;
-            Ok(run)
+            Ok((run, counts))
         }
         .await;
         match result {
-            Ok(run) => Ok(PointerCatalogInspection {
+            Ok((run, counts)) => Ok(PointerCatalogInspection {
                 space: Some(space),
                 rows: Cursor::new(run),
+                counts,
             }),
             Err(error) => finish(Some(space), Err(error)).await,
         }
@@ -303,6 +315,14 @@ pub enum PointerCatalogObject {
     },
 }
 
+/// Cardinalities of one complete, precedence-resolved captured catalog.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PointerCatalogCounts {
+    pub files: u64,
+    pub shards: u64,
+    pub xorbs: u64,
+}
+
 /// A complete catalog proof with bounded iteration over its external object descriptors.
 ///
 /// The private spill is owned until `finish` drains and removes it. Dropping the
@@ -311,9 +331,16 @@ pub enum PointerCatalogObject {
 pub struct PointerCatalogInspection {
     space: Option<ScratchSpace>,
     rows: Cursor<Entry>,
+    counts: PointerCatalogCounts,
 }
 
 impl PointerCatalogInspection {
+    /// Return complete catalog cardinalities, independent of cursor consumption.
+    #[must_use]
+    pub fn counts(&self) -> PointerCatalogCounts {
+        self.counts
+    }
+
     async fn next_entry(&mut self) -> Result<Option<Entry>> {
         match &self.space {
             Some(space) => self.rows.next(space).await,

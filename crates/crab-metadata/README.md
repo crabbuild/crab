@@ -101,7 +101,8 @@ shard identities from this owner; replica readiness streams full shard/xorb
 descriptors without a joined catalog in memory. The cursor retains the normalized
 run until `finish` drains workers and removes it, preserving the operation's primary
 error if cleanup also fails. A cancelled pending read can resume at the same
-object. Physical page identities, spill handles and the largest recipe still
+object. Complete cardinalities remain bound to the proof even after cursor
+consumption; sampled physical checks cannot stand in for these counts. Physical page identities, spill handles and the largest recipe still
 consume memory; each packed delta retains its format-bounded decoder. Logical
 reduction has a live disk ceiling of sixteen times the admitted catalog limit;
 normal lookup and materialization budgets remain unchanged.

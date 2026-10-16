@@ -498,3 +498,11 @@ reconciled logical delta state; both catalog APIs return
 `ReadError::IncompleteCatalogView` before I/O rather than treating that state
 as an authenticated miss. A complete capture with an empty suffix can still
 return a legitimate miss.
+
+Deep `capsule_protocol::verify_reachable_dependencies` streams the complete
+captured catalog proof and physical descriptor verification, then resolves
+reachable pointer bindings in batches of 64 from those same roots. Catalog
+cardinalities come from the completed metadata reduction. Recovery's assembled
+replacement catalogs share the Git scan and whole-file/LFS proof in
+`capsule_protocol/dependency.rs`; binding source selection does not change the
+integrity checks. Current fsck's additional cross-recipe checks remain separate.

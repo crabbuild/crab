@@ -1737,7 +1737,6 @@ async fn diagnose_capsule(
             },
         )
         .await?;
-        let catalog = view.pointer_catalog().await?;
         view.git_visibility_index().await?;
         // Verification must read layered sources and prove reachable content,
         // not rebuild a complete pack or accept catalog membership as file proof.
@@ -1774,13 +1773,11 @@ async fn diagnose_capsule(
                 git_closure_verified: true,
                 file_entries: db
                     .includes_file_index()
-                    .then(|| diagnosis_count(catalog.files().len(), "capsule file entry"))
-                    .transpose()?,
-                shard_entries: diagnosis_count(catalog.shards().len(), "capsule shard entry")?,
+                    .then_some(dependencies.catalog_files),
+                shard_entries: dependencies.catalog_shards,
                 xorb_entries: db
                     .includes_chunk_index()
-                    .then(|| diagnosis_count(catalog.xorbs().len(), "capsule xorb entry"))
-                    .transpose()?,
+                    .then_some(dependencies.catalog_xorbs),
                 pointer_objects_read: dependencies.catalog_objects_read,
                 verdict: "OK — root, ref heads, capsules, checkpoint, catalogs, visibility, and Git packs authenticated",
             }),
@@ -2662,11 +2659,10 @@ async fn run_capsule_rebuild_in(
         },
     )
     .await?;
-    let catalog = view.pointer_catalog().await?;
     view.git_visibility_index().await?;
     // Authenticate the complete closure before either a no-op success or a new
     // checkpoint; immutable publication alone does not verify reachable files.
-    crab_read::capsule_protocol::verify_reachable_dependencies(
+    let dependencies = crab_read::capsule_protocol::verify_reachable_dependencies(
         layout,
         &view,
         crab_read::capsule_protocol::CapsuleDependencyLimits {
@@ -2720,21 +2716,12 @@ async fn run_capsule_rebuild_in(
         protocol: "capsule-v2",
         repo_prefix: repo_prefix.to_owned(),
         checkpoint_published: Some(checkpoint_published),
-        catalog_files_verified: Some(diagnosis_count(
-            catalog.files().len(),
-            "capsule file entry",
-        )?),
-        catalog_shards_verified: Some(diagnosis_count(
-            catalog.shards().len(),
-            "capsule shard entry",
-        )?),
-        catalog_xorbs_verified: Some(diagnosis_count(
-            catalog.xorbs().len(),
-            "capsule xorb entry",
-        )?),
+        catalog_files_verified: Some(dependencies.catalog_files),
+        catalog_shards_verified: Some(dependencies.catalog_shards),
+        catalog_xorbs_verified: Some(dependencies.catalog_xorbs),
         file_index_entries_written: 0,
         chunk_index_entries_written: 0,
-        shards_processed: diagnosis_count(catalog.shards().len(), "capsule shard entry")?,
+        shards_processed: dependencies.catalog_shards,
         shards_failed: 0,
         git_packs_processed: git_packs,
         git_packs_failed: 0,
