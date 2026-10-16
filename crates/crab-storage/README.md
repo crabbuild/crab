@@ -197,9 +197,9 @@ caller policies; all share the provider construction implementation.
 
 ## Private maintenance spills
 
-`scratch::ScratchSpace` owns bounded immutable local spill files below an existing
-private temporary parent. It admits live bytes before creation and verifies exact
-length, EOF and Blake3 on reads. References cannot cross workspace identities.
+`scratch::ScratchSpace` owns bounded immutable local spill files. `temporary`
+selects platform temporary storage; `create` accepts an existing private parent.
+It admits live bytes before creation and verifies exact length, EOF and Blake3 on reads. References cannot cross workspace identities.
 Catalog maintenance uses it to replace repeated remote joins with sorted local
 reductions. This does not change foreground metadata reads or provider routing.
 

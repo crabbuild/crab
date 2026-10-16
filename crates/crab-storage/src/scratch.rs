@@ -43,6 +43,13 @@ fn worker(source: impl std::error::Error + Send + Sync + 'static) -> StorageErro
 }
 
 impl ScratchSpace {
+    /// Create private spill storage in the platform temporary directory.
+    ///
+    /// The live-byte ceiling and worker/cleanup ownership match `create`.
+    pub async fn temporary(maximum: u64) -> Result<Self> {
+        Self::create(&std::env::temp_dir(), maximum).await
+    }
+
     /// Create a private child of an existing caller-owned directory with a live-byte ceiling.
     ///
     /// The parent must remain private to the caller. Await `close` on normal and

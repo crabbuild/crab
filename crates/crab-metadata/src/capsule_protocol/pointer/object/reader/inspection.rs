@@ -16,7 +16,9 @@ impl CatalogPages {
     ) -> Result<Vec<(Path, u64)>> {
         let mut work = PageWork::new(maximum, 0);
         self.open(store, &mut work).await?;
-        let mut join = Join::create(&std::env::temp_dir(), maximum).await?;
+        let space =
+            crab_storage::scratch::ScratchSpace::temporary(maximum.saturating_mul(4)).await?;
+        let mut join = Join::new(space);
         let checked = self.inspect(store, &mut work, &mut join).await;
         join.finish(checked).await?;
         Ok(work

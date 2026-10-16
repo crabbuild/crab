@@ -148,7 +148,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<Record>> {
         return Err(corrupt("inspection spill block count differs"));
     }
     bytes[12..]
-        .chunks_exact(ROW_BYTES)
+        .as_chunks::<ROW_BYTES>()
+        .0
+        .iter()
         .map(|row| {
             let key: [u8; 33] = row[..33]
                 .try_into()
@@ -198,12 +200,12 @@ pub(super) struct Join {
 }
 
 impl Join {
-    pub(super) async fn create(parent: &std::path::Path, maximum: u64) -> Result<Self> {
-        Ok(Self {
-            space: ScratchSpace::create(parent, maximum.saturating_mul(4)).await?,
+    pub(super) fn new(space: ScratchSpace) -> Self {
+        Self {
+            space,
             buffer: Vec::with_capacity(BLOCK_ROWS),
             levels: Vec::new(),
-        })
+        }
     }
 
     pub(super) async fn add(&mut self, row: Record) -> Result<()> {
@@ -337,7 +339,10 @@ mod tests {
     async fn spilled_join_uses_the_lowest_owner_across_separate_runs() {
         for correct in [false, true] {
             let parent = tempfile::tempdir().unwrap();
-            let mut join = Join::create(parent.path(), 8 * 1024 * 1024).await.unwrap();
+            let space = ScratchSpace::create(parent.path(), 32 * 1024 * 1024)
+                .await
+                .unwrap();
+            let mut join = Join::new(space);
             let mut high = [9; 40];
             let mut low = high;
             low[..32].fill(1);
@@ -367,7 +372,10 @@ mod tests {
     #[tokio::test]
     async fn prior_scan_failure_drains_and_removes_written_runs() {
         let parent = tempfile::tempdir().unwrap();
-        let mut join = Join::create(parent.path(), 8 * 1024 * 1024).await.unwrap();
+        let space = ScratchSpace::create(parent.path(), 32 * 1024 * 1024)
+            .await
+            .unwrap();
+        let mut join = Join::new(space);
         for index in 0..5000u32 {
             let mut key = [0; 32];
             key[28..].copy_from_slice(&index.to_be_bytes());

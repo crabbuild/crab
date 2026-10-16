@@ -569,7 +569,6 @@ async fn streamed_inspection_bounds_io_for_distinct_recipes_beyond_the_page_cach
             .iter()
             .all(|op| op.bytes_written == 0)
     );
-    eprintln!("catalog_maintenance_io full_bytes={full} streamed_bytes={streamed}");
     assert!(
         streamed <= 4 * full,
         "streaming must not trade catalog-sized memory for repeated cold joins: {streamed} versus {full}"
