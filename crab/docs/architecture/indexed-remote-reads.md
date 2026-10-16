@@ -2619,3 +2619,14 @@ The ingestion smoke checks populated shard/xorb entries in the current SQLite
 payload catalog and absence of the released receipt warm index. The capsule
 classifier uses the authenticated hint tree, so requiring that old index file
 would incorrectly demand reinitialization of the retired metadata path.
+
+## Capsule GC drains admitted provider deletes
+
+Repository capsule GC uses the shared bounded deletion executor. Cancellation
+stops admission of subsequent batches; every admitted provider response drains
+before the root fence and repository sweep lease release. Delete-time HEAD checks
+still protect identity, size and grace, and retained candidates do not count as
+reclaimed bytes. The regression holds an accepted delete independently of its
+client future, cancels on a sibling deletion and requires admission to remain
+fenced until the held response completes. Successor writer admission must then
+be available after the cancelled sweep returns.

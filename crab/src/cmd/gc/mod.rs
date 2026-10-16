@@ -3365,40 +3365,45 @@ async fn sweep_capsule_objects(
             force: false,
         };
         let concurrency = args.delete_concurrency.max(1);
-        let mut deletes = futures_util::stream::iter(candidates.iter().map(|object| {
-            let derived_index = derived_index_keys.contains(object.location.as_ref());
-            let meta = ObjectMeta {
+        let objects = candidates
+            .into_iter()
+            .map(|object| ObjectMeta {
                 key: object.location.to_string(),
                 size: object.size,
                 last_modified: SystemTime::from(object.last_modified),
-                e_tag: object.e_tag.clone(),
-                version: object.version.clone(),
+                e_tag: object.e_tag,
+                version: object.version,
                 storage_class: None,
                 transitioned_at: None,
-            };
-            let deleter = &deleter;
-            async move {
-                (
-                    meta.size,
-                    derived_index,
-                    deleter.delete_candidate(&meta, policy).await,
-                )
-            }
-        }))
-        .buffer_unordered(concurrency);
-        while let Some((size, derived_index, result)) = deletes.next().await {
-            check_cancelled(cancel)?;
-            // HEAD may retain a candidate whose identity or freshness changed
-            // after LIST. Planned bytes are not reclaimed in that case.
-            if result? == CandidateDelete::Deleted {
-                if derived_index {
-                    accounting.derived_index_objects_deleted += 1;
-                } else {
-                    accounting.packs_deleted += 1;
-                }
-                accounting.bytes_reclaimed = accounting.bytes_reclaimed.saturating_add(size);
-            }
+            })
+            .collect::<Vec<_>>();
+        let mut deleted = GcOutcome::default();
+        // A sent provider delete can finish after its request future is dropped.
+        // Keep admission until the shared executor drains every admitted result,
+        // including cancellation and returned errors.
+        let result = execute_deletes(
+            &objects,
+            cancel,
+            concurrency,
+            &deleter,
+            &mut deleted,
+            None,
+            Some(policy),
+        )
+        .await;
+        check_cancelled(cancel)?;
+        if let Some(error) = result.first_error {
+            return Err(error);
         }
+        accounting.derived_index_objects_deleted = result
+            .deleted_keys
+            .iter()
+            .filter(|key| derived_index_keys.contains(key.as_str()))
+            .count() as u64;
+        accounting.packs_deleted = result.deleted_count - accounting.derived_index_objects_deleted;
+        // HEAD can retain objects whose identity or freshness changed after LIST.
+        // Their planned bytes never enter the executor's reclaimed-byte count.
+        accounting.bytes_reclaimed = deleted.bytes_reclaimed;
     }
     Ok(GcOutcome {
         list_requests: 8,

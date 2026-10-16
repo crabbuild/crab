@@ -13,7 +13,7 @@ use crab_read::capsule_protocol::{CapsuleReadLimits, CapsuleRepositoryView};
 use crab_remote_git::{RemoteGitRuntime, RepositoryIdentity, RepositoryOptions};
 use crab_storage::StoreLayout;
 use crab_xet::hash::MerkleHash;
-use futures_util::{TryStreamExt, stream::BoxStream};
+use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory, path::Path,
@@ -23,13 +23,16 @@ use tokio_util::sync::CancellationToken;
 use super::{GcArgs, sweep_capsule_objects};
 use crate::storage::store::Store;
 
+mod cancellation;
+
 const LIMIT: u64 = 8 * 1024 * 1024;
 
 // Immutable bodies can predate their first reader by years. Alter only their
 // provider timestamps; native pack validation and conditional publication stay real.
 #[derive(Debug)]
 struct AgedObjects {
-    inner: InMemory,
+    inner: Arc<dyn ObjectStore>,
+    deletes: Option<Arc<cancellation::DeleteGate>>,
     paths: Mutex<HashSet<Path>>,
     modified: SystemTime,
     list_calls: Mutex<Vec<Path>>,
@@ -72,6 +75,15 @@ impl ObjectStore for AgedObjects {
         &self,
         paths: BoxStream<'static, object_store::Result<Path>>,
     ) -> BoxStream<'static, object_store::Result<Path>> {
+        if let Some(gate) = &self.deletes {
+            let gate = gate.clone();
+            let inner = self.inner.clone();
+            return Box::pin(paths.then(move |path| {
+                let gate = gate.clone();
+                let inner = inner.clone();
+                async move { gate.delete(inner, path?).await }
+            }));
+        }
         self.inner.delete_stream(paths)
     }
 
@@ -194,7 +206,8 @@ async fn view(layout: &StoreLayout<crab_storage::Store>) -> CapsuleRepositoryVie
 
 async fn cold_capture_after_gc(replace_readiness: bool) -> crab_metadata::error::Result<bool> {
     let backend = Arc::new(AgedObjects {
-        inner: InMemory::new(),
+        inner: Arc::new(InMemory::new()),
+        deletes: None,
         paths: Mutex::new(HashSet::new()),
         modified: SystemTime::now() - Duration::from_secs(7200),
         list_calls: Mutex::new(Vec::new()),
@@ -318,7 +331,8 @@ async fn gc_preserves_cold_catalog_sessions_without_browse_indexes() {
         XorbCatalogEntry, XorbChunkEntry,
     };
     let backend = Arc::new(AgedObjects {
-        inner: InMemory::new(),
+        inner: Arc::new(InMemory::new()),
+        deletes: None,
         paths: Mutex::new(HashSet::new()),
         modified: SystemTime::now() - Duration::from_secs(7200),
         list_calls: Mutex::new(Vec::new()),
@@ -449,7 +463,8 @@ async fn gc_preserves_cold_catalog_sessions_without_browse_indexes() {
 #[tokio::test]
 async fn capsule_gc_lists_each_candidate_namespace_once() {
     let backend = Arc::new(AgedObjects {
-        inner: InMemory::new(),
+        inner: Arc::new(InMemory::new()),
+        deletes: None,
         paths: Mutex::new(HashSet::new()),
         modified: SystemTime::now(),
         list_calls: Mutex::new(Vec::new()),
@@ -502,7 +517,8 @@ async fn capsule_gc_lists_each_candidate_namespace_once() {
 #[tokio::test]
 async fn capsule_gc_preserves_metadata_outside_owned_index_directories() {
     let backend = Arc::new(AgedObjects {
-        inner: InMemory::new(),
+        inner: Arc::new(InMemory::new()),
+        deletes: None,
         paths: Mutex::new(HashSet::new()),
         modified: SystemTime::now() - Duration::from_secs(7200),
         list_calls: Mutex::new(Vec::new()),
@@ -556,7 +572,8 @@ async fn capsule_gc_preserves_metadata_outside_owned_index_directories() {
 async fn checkpoint_catalog_gc_preserves_roots_and_grace_period() {
     use crab_metadata::capsule_protocol::{FileCatalogEntry, PointerCatalog, ShardCatalogEntry};
     let backend = Arc::new(AgedObjects {
-        inner: InMemory::new(),
+        inner: Arc::new(InMemory::new()),
+        deletes: None,
         paths: Mutex::new(HashSet::new()),
         modified: SystemTime::now() - Duration::from_secs(7200),
         list_calls: Mutex::new(Vec::new()),
