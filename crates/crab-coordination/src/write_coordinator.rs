@@ -373,6 +373,10 @@ pub struct CoordinatorControlPlaneStatus {
 }
 
 /// Management backend for a linearizable active-active coordinator.
+#[allow(
+    clippy::double_must_use,
+    reason = "async-trait 0.1.89 injects must_use on boxed futures; MSRV Clippy does not report it"
+)]
 #[async_trait]
 pub trait CoordinatorControlPlaneBackend: Send + Sync {
     fn provider(&self) -> ManagedCoordinatorProvider;
@@ -601,6 +605,10 @@ fn coordinator_base_action(action: &str) -> &str {
 }
 
 /// Versioned CAS storage contract for managed coordinator data planes.
+#[allow(
+    clippy::double_must_use,
+    reason = "async-trait 0.1.89 injects must_use on boxed futures; MSRV Clippy does not report it"
+)]
 #[async_trait]
 pub trait VersionedCoordinatorStateStore: Send + Sync {
     async fn read_repo_state(
@@ -645,6 +653,10 @@ where
 }
 
 /// Linearizable authority for active-active repository writes.
+#[allow(
+    clippy::double_must_use,
+    reason = "async-trait 0.1.89 injects must_use on boxed futures; MSRV Clippy does not report it"
+)]
 #[async_trait]
 pub trait WriteCoordinator: Send + Sync {
     async fn health(&self) -> Result<CoordinatorHealth>;

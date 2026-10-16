@@ -85,6 +85,10 @@ pub type DynamoDbRepoState = CoordinatorRepoState;
 pub type DynamoDbTransactionRecord = CoordinatorTransactionRecord;
 
 /// DynamoDB data-plane client for one serialized repo authority item.
+#[allow(
+    clippy::double_must_use,
+    reason = "async-trait 0.1.89 injects must_use on boxed futures; MSRV Clippy does not report it"
+)]
 #[async_trait]
 pub trait DynamoDbWriteCoordinatorClient {
     async fn read_repo_state(
