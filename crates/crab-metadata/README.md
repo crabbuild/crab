@@ -75,8 +75,17 @@ Readers share an aggregate page-byte budget across checkpoint and packed-run
 sources. Logical expansion has a separate allowance of four times the encoded ceiling: shared
 physical pages cannot authorize unbounded recipe/result copies. Cold and warm
 reads consume admission; decoded caches have independent resident limits.
-Full inspection authenticates every dependency and reverse placement; it still
-materializes the logical catalog and is not yet a streaming-memory guarantee.
+Physical catalog-object inspection visits authenticated pages once and spills
+bounded relation batches into a private local workspace. Sorted reductions check
+file/shard/xorb dependencies and the lowest-xorb/first-occurrence reverse mapping
+without random origin joins or a complete logical catalog in memory. Shared
+positional pages retain their earliest canonical owner; inconsistent references
+still fail. The existing temporary-directory setting selects the workspace parent;
+its live disk ceiling is four times the caller's encoded-byte ceiling. Workers
+retain file ownership through cancellation and are drained before normal/error
+cleanup. No authoritative or cache object is written by inspection. Explicit
+full-catalog callers still materialize it; converting remaining maintenance
+consumers is separate work.
 GC traverses catalog pages from current, historical and retained browse roots.
 Protected keys and authenticated closure traversal are tracked separately.
 Retired unshipped checkpoint formats through 8 are rejected without fallback.

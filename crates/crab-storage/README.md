@@ -194,3 +194,17 @@ chain selection and retains the built store's signing, multipart and target
 identity capabilities. Azure logical identity retains account and container.
 The existing environment-selection and grant-endpoint constructors retain their
 caller policies; all share the provider construction implementation.
+
+## Private maintenance spills
+
+`scratch::ScratchSpace` owns bounded immutable local spill files below an existing
+private temporary parent. It admits live bytes before creation and verifies exact
+length, EOF and Blake3 on reads. References cannot cross workspace identities.
+Catalog maintenance uses it to replace repeated remote joins with sorted local
+reductions. This does not change foreground metadata reads or provider routing.
+
+Every blocking operation pins its directory until the worker exits, even when its
+awaiting future is dropped. `close` drains those workers before removing the root;
+callers retain primary validation errors while reporting cleanup failures. Drop
+performs best-effort off-thread cleanup after the last owner exits. No SlateDB,
+SQLite, new dependency or additional configuration is introduced by this transport.

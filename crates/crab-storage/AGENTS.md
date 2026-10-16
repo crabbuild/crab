@@ -27,6 +27,7 @@ dependency source before asserting provider behavior.
 | CAS behavior | `crates/crab-storage/src/cas.rs` | `crates/crab-metadata/src/manifest_store.rs` |
 | Provider or target identity | `crates/crab-storage/src/provider_store.rs` | `crates/crab-auth-store/src/lib.rs` |
 | Object key layout | `crates/crab-storage/src/layout.rs` | `crates/crab-cache/src/path_class.rs` |
+| Private local spills | `crates/crab-storage/src/scratch.rs` | `crates/crab-metadata/src/capsule_protocol/pointer/object/reader/inspection.rs` |
 
 ## Invariants
 
@@ -49,6 +50,11 @@ dependency source before asserting provider behavior.
   Source: `crates/crab-storage/src/cas.rs`.
 - Logical bucket identity and credential-free transport target identity serve different consumers; do not derive the latter from display text.
   Source: `crates/crab-storage/src/identity.rs`.
+
+- Private spill writes admit live bytes first; reads verify committed length/hash.
+  Blocking workers pin directory ownership through cancelled futures. Await close
+  on normal and returned-error paths; drop defers cleanup until the last worker owner
+  exits. Source: `crates/crab-storage/src/scratch.rs`.
 
 ## Features and platform
 

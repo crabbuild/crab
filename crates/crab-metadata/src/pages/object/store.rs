@@ -2,7 +2,7 @@ use super::*;
 use crate::pages::PageWork;
 use crab_storage::Store;
 use futures_util::future::BoxFuture;
-use futures_util::stream::{BoxStream, StreamExt as _, TryStreamExt as _};
+use futures_util::stream::{StreamExt as _, TryStreamExt as _};
 use object_store::path::Path;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -163,14 +163,15 @@ impl ObjectPages {
             for (reference, _) in &pending {
                 work.admit_object(reference.hash, u64::from(reference.bytes))?;
             }
-            let nodes = futures_util::stream::iter(std::mem::take(&mut pending))
+            let mut nodes = futures_util::stream::iter(std::mem::take(&mut pending))
                 .map(|(reference, positions)| async move {
                     Ok::<_, MetadataError>((self.fetch(store, &reference, kind).await?, positions))
                 })
-                .buffer_unordered(4)
-                .try_collect::<Vec<_>>()
-                .await?;
-            for (node, positions) in nodes {
+                .buffer_unordered(4);
+            // Drain each decoded page before retaining the next wave; a wide
+            // batch must not hold every cold leaf outside the bounded cache.
+            while let Some(result) = nodes.next().await {
+                let (node, positions) = result?;
                 match node.as_ref() {
                     Node::Leaf(rows) => {
                         for index in positions {
@@ -205,30 +206,21 @@ impl ObjectPages {
         Ok(output)
     }
 
-    pub(crate) fn walk<'a>(
-        &'a self,
-        store: &'a Store,
-        root: Option<&Reference>,
+    pub(crate) async fn next_page(
+        &self,
+        store: &Store,
+        pending: &mut Vec<Reference>,
         kind: Kind,
-        work: &'a mut PageWork,
-    ) -> BoxStream<'a, Result<(Reference, Arc<Node>)>> {
-        let pending = root.cloned().into_iter().collect::<Vec<_>>();
-        futures_util::stream::try_unfold((pending, work), move |(mut pending, work)| async move {
-            let Some(reference) = pending.pop() else {
-                return Ok(None);
-            };
-            let node = self.node(store, &reference, kind, work).await?;
-            match node.as_ref() {
-                // Count each logical visit, including repeated nested roots. The
-                // second copy admits row clones and their typed catalog values.
-                Node::Leaf(_) => work.admit_materialized(
-                    (resident_bytes(&reference, &node) as u64).saturating_mul(2),
-                )?,
-                Node::Branch(children) => pending.extend(children.iter().rev().cloned()),
-            }
-            Ok(Some(((reference, node), (pending, work))))
-        })
-        .boxed()
+        work: &mut PageWork,
+    ) -> Result<Option<(Reference, Arc<Node>)>> {
+        let Some(reference) = pending.pop() else {
+            return Ok(None);
+        };
+        let node = self.node(store, &reference, kind, work).await?;
+        if let Node::Branch(children) = node.as_ref() {
+            pending.extend(children.iter().rev().cloned());
+        }
+        Ok(Some((reference, node)))
     }
 
     pub(crate) async fn scan(
@@ -238,14 +230,19 @@ impl ObjectPages {
         kind: Kind,
         work: &mut PageWork,
     ) -> Result<Rows> {
-        self.walk(store, root, kind, work)
-            .try_fold(Vec::new(), |mut rows, (_, node)| async move {
-                if let Node::Leaf(leaf) = node.as_ref() {
-                    rows.extend(leaf.iter().cloned());
-                }
-                Ok(rows)
-            })
-            .await
+        let mut pending = root.cloned().into_iter().collect();
+        let mut rows = Vec::new();
+        while let Some((reference, node)) = self.next_page(store, &mut pending, kind, work).await? {
+            if let Node::Leaf(leaf) = node.as_ref() {
+                // Materializing callers retain row clones and typed values.
+                // Streaming visitors retain only a bounded page, not the catalog.
+                work.admit_materialized(
+                    (resident_bytes(&reference, &node) as u64).saturating_mul(2),
+                )?;
+                rows.extend(leaf.iter().cloned());
+            }
+        }
+        Ok(rows)
     }
 
     pub(crate) async fn edit(

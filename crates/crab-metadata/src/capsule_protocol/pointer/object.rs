@@ -138,8 +138,13 @@ fn json<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 }
 
 #[cfg(feature = "storage")]
-fn from_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    serde_json::from_slice(bytes).map_err(|source| MetadataError::PointerCatalogRecord { source })
+fn from_json<T: serde::de::DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<T> {
+    let value = serde_json::from_slice(bytes)
+        .map_err(|source| MetadataError::PointerCatalogRecord { source })?;
+    if json(&value)? != bytes {
+        return Err(corrupt("catalog record is not canonical"));
+    }
+    Ok(value)
 }
 
 fn file_rows(catalog: &PointerCatalog) -> Result<Rows> {

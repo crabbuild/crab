@@ -92,7 +92,6 @@ fn object_directory_rejects_overlapping_children_and_false_cardinality() {
 mod storage {
     use super::*;
     use crab_storage::{ImmutableWriteVerification, StorageObservation, StorageObserver, Store};
-    use futures_util::TryStreamExt as _;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -307,20 +306,17 @@ mod storage {
             expected.into_iter().collect::<Rows>()
         );
         let mut work = PageWork::new(8 * 1024 * 1024, 0);
-        let nodes = pages
-            .walk(&store, root.as_ref(), Kind::Children, &mut work)
-            .try_collect::<Vec<_>>()
+        let mut pending = root.into_iter().collect();
+        let mut count = 0;
+        while let Some((_, node)) = pages
+            .next_page(&store, &mut pending, Kind::Children, &mut work)
             .await
-            .unwrap();
-        assert_eq!(
-            nodes
-                .iter()
-                .filter_map(|(_, n)| match n.as_ref() {
-                    Node::Leaf(rows) => Some(rows.len()),
-                    _ => None,
-                })
-                .sum::<usize>(),
-            8000
-        );
+            .unwrap()
+        {
+            if let Node::Leaf(rows) = node.as_ref() {
+                count += rows.len();
+            }
+        }
+        assert_eq!(count, 8000);
     }
 }

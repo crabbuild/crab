@@ -281,3 +281,297 @@ async fn superseded_reverse_placement_still_validates_prior_dependency() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn maintenance_streams_shared_recipes_without_materializing_the_catalog() {
+    let mut catalog = PointerCatalog::new();
+    for identity in 1..=64 {
+        catalog
+            .insert_xorb(
+                format!("{identity:064x}"),
+                XorbCatalogEntry::new(
+                    80,
+                    "d".repeat(64),
+                    (0..2048)
+                        .map(|_| XorbChunkEntry::new("c".repeat(64), 7))
+                        .collect(),
+                ),
+            )
+            .unwrap();
+    }
+    let (_, expected) = Descriptor::build(&catalog).unwrap();
+    let (pages, store, _) = fixture(&catalog).await;
+    drop(catalog);
+    let maximum = 2 * 1024 * 1024;
+    assert!(
+        pages
+            .full(&store, &mut PageWork::new(maximum, 0))
+            .await
+            .is_err()
+    );
+    let body = pages.descriptor.encode().unwrap();
+    let pages = CatalogPages::new(
+        object_store::path::Path::from("catalog"),
+        pages.descriptor.clone(),
+        *blake3::hash(&body).as_bytes(),
+        body.len() as u64,
+    )
+    .unwrap();
+    let actual = pages.inspected_objects(&store, maximum).await.unwrap();
+    let expected = expected
+        .into_iter()
+        .map(|(hash, body)| (pages.pages.path(&hash), body.len() as u64))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(actual.into_iter().collect::<BTreeMap<_, _>>(), expected);
+}
+
+#[tokio::test]
+async fn streamed_inspection_rejects_resigned_broken_dependency_edges() {
+    for scenario in [
+        "file-shard",
+        "shard-xorb",
+        "shard-data",
+        "empty-shard",
+        "extra-placement",
+        "absent-placement-xorb",
+        "later-occurrence",
+        "placement-size",
+        "late-recipe",
+        "empty-xorb",
+        "empty-chunk",
+        "missing-recipe-page",
+        "shared-routing",
+    ] {
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_xorb(
+                "9".repeat(64),
+                XorbCatalogEntry::new(
+                    80,
+                    "d".repeat(64),
+                    vec![
+                        XorbChunkEntry::new("c".repeat(64), 7),
+                        XorbChunkEntry::new("c".repeat(64), 7),
+                    ],
+                ),
+            )
+            .unwrap();
+        catalog
+            .insert_shard(
+                "a".repeat(64),
+                ShardCatalogEntry::new(1, vec!["9".repeat(64)]),
+            )
+            .unwrap();
+        catalog
+            .insert_file("f".repeat(64), FileCatalogEntry::new(14, "a".repeat(64)))
+            .unwrap();
+        if scenario == "shared-routing" {
+            catalog
+                .insert_xorb("1".repeat(64), catalog.xorbs()[&"9".repeat(64)].clone())
+                .unwrap();
+        }
+        let (pages, store, _) = fixture(&catalog).await;
+        let mut descriptor = pages.descriptor.clone();
+        let mut work = PageWork::new(1024 * 1024, 0);
+        let xorb_values = pages
+            .rows(
+                &store,
+                Kind::CatalogXorbs,
+                &[hash(&"9".repeat(64)).unwrap().to_vec()],
+                &mut work,
+            )
+            .await
+            .unwrap();
+        let mut xorb: XorbRow = from_json(xorb_values[0].as_ref().unwrap()).unwrap();
+        let recipe_path = pages.pages.path(&xorb.chunks.hash);
+        let mut kind = Kind::CatalogChunks;
+        let mut key = hash(&"c".repeat(64)).unwrap().to_vec();
+        let mut value = hash(&"9".repeat(64)).unwrap().to_vec();
+        value.extend_from_slice(&0u32.to_be_bytes());
+        value.extend_from_slice(&7u32.to_be_bytes());
+        match scenario {
+            "file-shard" => {
+                kind = Kind::CatalogFiles;
+                key = hash(&"f".repeat(64)).unwrap().to_vec();
+                value = 14u64.to_be_bytes().to_vec();
+                value.extend_from_slice(&hash(&"b".repeat(64)).unwrap());
+            }
+            "shard-xorb" | "shard-data" | "empty-shard" => {
+                let nested_key = (if scenario == "shard-xorb" { "b" } else { "9" }).repeat(64);
+                let nested_value = if scenario == "shard-data" {
+                    vec![1]
+                } else {
+                    Vec::new()
+                };
+                let nested = pages
+                    .pages
+                    .edit(
+                        &store,
+                        None,
+                        Kind::CatalogShardXorbs,
+                        vec![(hash(&nested_key).unwrap().to_vec(), nested_value)],
+                        &mut work,
+                    )
+                    .await
+                    .unwrap();
+                kind = Kind::CatalogShards;
+                key = hash(&"a".repeat(64)).unwrap().to_vec();
+                value = json(&ShardRow {
+                    encoded_size: u64::from(scenario != "empty-shard"),
+                    xorbs: nested,
+                })
+                .unwrap();
+            }
+            "extra-placement" => key = hash(&"b".repeat(64)).unwrap().to_vec(),
+            "absent-placement-xorb" => value[..32].copy_from_slice(&hash(&"1".repeat(64)).unwrap()),
+            "later-occurrence" => value[32..36].copy_from_slice(&1u32.to_be_bytes()),
+            "placement-size" => value[36..].copy_from_slice(&9u32.to_be_bytes()),
+            "late-recipe" | "empty-xorb" | "empty-chunk" | "shared-routing" => {
+                if scenario == "empty-xorb" {
+                    xorb.encoded_size = 0;
+                } else if scenario == "shared-routing" {
+                    xorb.chunks.count = 3;
+                    xorb.chunks.last = 2u32.to_be_bytes().to_vec();
+                } else {
+                    let mut chunk = hash(&"c".repeat(64)).unwrap().to_vec();
+                    chunk.extend_from_slice(&u32::from(scenario != "empty-chunk").to_be_bytes());
+                    xorb.chunks = pages
+                        .pages
+                        .edit(
+                            &store,
+                            None,
+                            Kind::CatalogXorbChunks,
+                            vec![(
+                                u32::from(scenario == "late-recipe").to_be_bytes().to_vec(),
+                                chunk,
+                            )],
+                            &mut work,
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                }
+                kind = Kind::CatalogXorbs;
+                key = hash(&"9".repeat(64)).unwrap().to_vec();
+                value = json(&xorb).unwrap();
+            }
+            "missing-recipe-page" => (),
+            _ => unreachable!(),
+        }
+        if scenario != "missing-recipe-page" {
+            let previous = match kind {
+                Kind::CatalogFiles => descriptor.files.as_ref(),
+                Kind::CatalogShards => descriptor.shards.as_ref(),
+                Kind::CatalogXorbs => descriptor.xorbs.as_ref(),
+                Kind::CatalogChunks => descriptor.chunks.as_ref(),
+                _ => unreachable!(),
+            };
+            let next = pages
+                .pages
+                .edit(&store, previous, kind, vec![(key, value)], &mut work)
+                .await
+                .unwrap();
+            match kind {
+                Kind::CatalogFiles => descriptor.files = next,
+                Kind::CatalogShards => descriptor.shards = next,
+                Kind::CatalogXorbs => descriptor.xorbs = next,
+                Kind::CatalogChunks => descriptor.chunks = next,
+                _ => unreachable!(),
+            }
+        }
+        let root = descriptor.encode().unwrap();
+        let identity = *blake3::hash(&root).as_bytes();
+        store
+            .put_if_absent_verified(&pages.pages.path(&identity), root.clone())
+            .await
+            .unwrap();
+        if scenario == "missing-recipe-page" {
+            store.delete(&recipe_path).await.unwrap();
+        }
+        // A fresh reader must authenticate the forged closure, not reuse fixture nodes.
+        let forged = CatalogPages::new(
+            object_store::path::Path::from("catalog"),
+            descriptor,
+            identity,
+            root.len() as u64,
+        )
+        .unwrap();
+        assert!(
+            forged
+                .full(&store, &mut PageWork::new(1024 * 1024, 0))
+                .await
+                .is_err(),
+            "full: {scenario}"
+        );
+        assert!(
+            forged.inspected_objects(&store, 1024 * 1024).await.is_err(),
+            "stream: {scenario}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn streamed_inspection_bounds_io_for_distinct_recipes_beyond_the_page_cache() {
+    let mut catalog = PointerCatalog::new();
+    for identity in 0..1000u32 {
+        let chunks = (0..128u32)
+            .map(|index| {
+                let mut input = identity.to_be_bytes().to_vec();
+                input.extend_from_slice(&index.to_be_bytes());
+                XorbChunkEntry::new(blake3::hash(&input).to_hex().to_string(), 7)
+            })
+            .collect();
+        catalog
+            .insert_xorb(
+                format!("{identity:064x}"),
+                XorbCatalogEntry::new(80, "d".repeat(64), chunks),
+            )
+            .unwrap();
+    }
+    let (pages, store, observations) = fixture(&catalog).await;
+    drop(catalog);
+    let maximum = 64 * 1024 * 1024;
+    drop(
+        pages
+            .full(&store, &mut PageWork::new(maximum, 0))
+            .await
+            .unwrap(),
+    );
+    let full = observations
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|op| op.bytes_read)
+        .sum::<u64>();
+    observations.0.lock().unwrap().clear();
+    let body = pages.descriptor.encode().unwrap();
+    let cold = CatalogPages::new(
+        object_store::path::Path::from("catalog"),
+        pages.descriptor.clone(),
+        *blake3::hash(&body).as_bytes(),
+        body.len() as u64,
+    )
+    .unwrap();
+    cold.inspected_objects(&store, maximum).await.unwrap();
+    let streamed = observations
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|op| op.bytes_read)
+        .sum::<u64>();
+    assert!(
+        observations
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|op| op.bytes_written == 0)
+    );
+    eprintln!("catalog_maintenance_io full_bytes={full} streamed_bytes={streamed}");
+    assert!(
+        streamed <= 4 * full,
+        "streaming must not trade catalog-sized memory for repeated cold joins: {streamed} versus {full}"
+    );
+}

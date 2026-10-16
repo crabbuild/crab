@@ -1,3 +1,5 @@
+mod inspection;
+
 use super::*;
 use crate::pages::PageWork;
 use crate::pages::object::ObjectPages;
@@ -92,9 +94,6 @@ impl CatalogPages {
         work: &mut PageWork,
     ) -> Result<XorbCatalogEntry> {
         let row: XorbRow = from_json(bytes)?;
-        if json(&row)? != bytes {
-            return Err(corrupt("catalog xorb row is not canonical"));
-        }
         let rows = self
             .pages
             .scan(store, Some(&row.chunks), Kind::CatalogXorbChunks, work)
@@ -109,9 +108,6 @@ impl CatalogPages {
         work: &mut PageWork,
     ) -> Result<ShardCatalogEntry> {
         let row: ShardRow = from_json(bytes)?;
-        if json(&row)? != bytes {
-            return Err(corrupt("catalog shard row is not canonical"));
-        }
         let rows = self
             .pages
             .scan(store, row.xorbs.as_ref(), Kind::CatalogShardXorbs, work)
@@ -185,21 +181,6 @@ impl CatalogPages {
         }
         catalog.validate(true, true)?;
         Ok(catalog)
-    }
-
-    pub(in crate::capsule_protocol) async fn inspected_objects(
-        &self,
-        store: &Store,
-        maximum: u64,
-    ) -> Result<Vec<(Path, u64)>> {
-        let mut work = PageWork::new(maximum, 0);
-        // A missing or inconsistent dependency must abort a sweep; mere root
-        // presence cannot authorize deletion of shared persistent pages.
-        self.full(store, &mut work).await?;
-        Ok(work
-            .object_dependencies()
-            .map(|(hash, bytes)| (self.pages.path(hash), bytes))
-            .collect())
     }
 
     pub(in crate::capsule_protocol) async fn apply(

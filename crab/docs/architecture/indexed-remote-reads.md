@@ -2509,8 +2509,19 @@ cache at 8 MiB/256 entries and shares four I/O lanes across recursive edits.
 GC authenticates page closures for current checkpoints, historical checkpoints
 and retained browse captures. A coordinator-protected descriptor key does not
 count as a verified closure. Missing/corrupt descendants abort maintenance.
-Full catalog maintenance still materializes logical metadata within its caller
-budget; streaming full inspection remains outstanding.
+Catalog-object marking scans each authenticated page once and reduces bounded
+relation batches through private local spill files. A point-join implementation
+was rejected: a 1,000-xorb/128,000-distinct-chunk fixture read 2,698,130,639 bytes
+versus 15,818,115 for a cold full scan. Spill reduction reads 15,818,115 bytes on
+that same fixture while retaining bounded row windows and physical page identities.
+These are in-memory backend byte counts; complete test durations (80.81 seconds
+before, 13.34 after) include fixture construction and the full-scan comparison.
+They do not establish hosted latency or query-only RSS. Disk admission precedes
+spill growth; cleanup drains blocking workers. The existing temporary-directory
+setting controls placement, with no new config/env surface or dependency.
+Materialization admission still protects callers retaining recipe copies. Full
+logical-catalog APIs and maintenance consumers still using them remain separate
+conversion and runtime-qualification work.
 
 Release audit: all six upstream published tag objects were checked again before
 this change; none contains the capsule codec. Unshipped checkpoint formats
