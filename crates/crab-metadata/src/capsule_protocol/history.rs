@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn history_rejects_unsupported_checkpoint_formats() {
-        for format in [0, 1, 2, 3, 4, 6, u32::MAX] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, u32::MAX] {
             let segment = history_with_unvalidated_pointers(format, 1);
             let built = HistorySegment::build(
                 segment.checkpoint().clone(),
@@ -467,8 +467,8 @@ mod tests {
     fn history_rejects_implicit_checkpoint_format() {
         let segment = HistorySegment::build(checkpoint(), None, state()).unwrap();
         let body = std::str::from_utf8(segment.bytes()).unwrap();
-        assert_eq!(body.matches("\"format\":5,").count(), 1);
-        let bytes = Bytes::from(body.replace("\"format\":5,", ""));
+        assert_eq!(body.matches("\"format\":9,").count(), 1);
+        let bytes = Bytes::from(body.replace("\"format\":9,", ""));
 
         let error = HistorySegment::decode(bytes)
             .expect_err("an implicit retired checkpoint format must fail");
@@ -480,7 +480,8 @@ mod tests {
     #[test]
     fn history_rejects_inconsistent_capsule_counts() {
         for count in [0, 2, u32::MAX] {
-            let segment = history_with_unvalidated_pointers(5, count);
+            let segment =
+                history_with_unvalidated_pointers(super::super::layered::CHECKPOINT_VERSION, count);
             let mut state = state();
             state.capsule_runs = segment.capsule_runs().to_vec();
             let built = HistorySegment::build(
@@ -518,7 +519,11 @@ mod tests {
         let layout = crab_storage::StoreLayout::new(store, "history-format".to_owned());
         for (format, count, reason) in [
             (u32::MAX, 1, "checkpoint format is unsupported"),
-            (5, 2, "root capsule run descriptor is invalid"),
+            (
+                super::super::layered::CHECKPOINT_VERSION,
+                2,
+                "root capsule run descriptor is invalid",
+            ),
         ] {
             let segment = history_with_unvalidated_pointers(format, count);
             let pointer = segment.pointer().unwrap();

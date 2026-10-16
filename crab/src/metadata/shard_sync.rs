@@ -1172,14 +1172,14 @@ async fn load_published_shards(router: &StoreLayout) -> Result<PublishedShards> 
     match crab_metadata::capsule_protocol::load_root(&capsule_layout).await {
         Ok(root) => {
             let generation = root.record().root().generation();
-            let catalog = crab_metadata::capsule_protocol::load_pointer_catalog_from_root(
+            let inspection = crab_metadata::capsule_protocol::inspect_pointer_catalog_from_root(
                 &capsule_layout,
                 &root,
             )
             .await?;
             Ok(PublishedShards {
                 generation,
-                entries: catalog.shards().keys().cloned().collect(),
+                entries: inspection.into_shard_hashes().await?,
                 // Per-ref heads can advance without changing the compacted root
                 // generation, so this value cannot key the local generation cache.
                 cacheable_generation: false,

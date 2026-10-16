@@ -34,6 +34,10 @@ operations in `crates/crab-auth-server/src/receive/git_workspace.rs`.
   Source: `crates/crab-auth-server/src/receive.rs`.
 - Read-path authorization and denied paths must remain part of view construction; do not reuse an unscoped view merely because its source generation matches.
   Source: `crates/crab-auth-server/src/view.rs`.
+- Protected commit drains its operation before releasing GC fences. Propagate
+  the fence token into capsule namespace/preparation work, and check again before
+  visibility. Once committed, a fence-release error is repair work, not rejection.
+  Source: `crates/crab-auth-server/src/receive/workflow.rs` and `receive/capsule.rs`.
 - Operation-owned Git workspace cleanup and worker draining are part of error/cancellation handling, not just the success path. Inspect workspace creation and callers together.
   Source: `crates/crab-auth-server/src/receive/git_workspace.rs`.
 

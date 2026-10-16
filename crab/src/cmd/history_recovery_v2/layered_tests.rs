@@ -4,7 +4,7 @@ use super::*;
 use bytes::Bytes;
 use crab_metadata::capsule_protocol::{
     Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind,
-    CapsuleTransaction, CapsuleVisibilityDelta,
+    CapsuleTransaction, CapsuleVisibilityDelta, PointerCatalog,
 };
 use crab_metadata::git_visibility::GitVisibilityEdit;
 use object_store::ObjectStoreExt;
@@ -16,6 +16,7 @@ async fn publish_blob(
     layout: &CapsuleStoreLayout<crab_storage::Store>,
     name: &str,
     body: &[u8],
+    catalog: PointerCatalog,
 ) -> String {
     let kind = gix_object::Kind::Blob;
     let oid = crab_remote::objects::object_id(kind, body)
@@ -51,7 +52,7 @@ async fn publish_blob(
         1,
     )
     .unwrap();
-    publish_pack(layout, name, pack, &oid).await;
+    publish_pack(layout, name, pack, &oid, catalog).await;
     oid
 }
 
@@ -60,6 +61,7 @@ async fn publish_pack(
     name: &str,
     pack: CapsuleGitPack,
     oid: &str,
+    catalog: PointerCatalog,
 ) {
     let root = crab_write::capsule_protocol::open_root(layout)
         .await
@@ -74,15 +76,17 @@ async fn publish_pack(
         GitVisibilityEdit::from_replacement_objects(None, oid.to_owned(), vec![oid.to_owned()]),
     )]))
     .unwrap();
-    let capsule = Capsule::build(
-        &transaction,
-        vec![pack],
-        vec![CapsuleSection::new(
-            CapsuleSectionKind::VisibilityDelta,
-            visibility.encode().unwrap(),
-        )],
-    )
-    .unwrap();
+    let mut sections = vec![CapsuleSection::new(
+        CapsuleSectionKind::VisibilityDelta,
+        visibility.encode().unwrap(),
+    )];
+    if !catalog.is_empty() {
+        sections.push(CapsuleSection::new(
+            CapsuleSectionKind::CatalogDelta,
+            catalog.encode_delta().unwrap(),
+        ));
+    }
+    let capsule = Capsule::build(&transaction, vec![pack], sections).unwrap();
     crab_write::capsule_protocol::publish(layout, root, &transaction, &capsule)
         .await
         .unwrap();
@@ -105,7 +109,7 @@ async fn fixture() -> (CapsuleStoreLayout<crab_storage::Store>, RootSnapshot) {
         ("refs/tags/first", b"first version".as_slice()),
         ("refs/tags/second", b"second version".as_slice()),
     ] {
-        publish_blob(&layout, name, body).await;
+        publish_blob(&layout, name, body, PointerCatalog::new()).await;
         assert!(
             crab_remote::checkpoint::publish_capsule_checkpoint(
                 &layout,
@@ -129,7 +133,7 @@ async fn layered_history_verification_preserves_historical_refs_and_bytes() {
     let (layout, root) = fixture().await;
     let chain = history_chain(&layout, &root).await.unwrap();
     let oldest = chain.last().unwrap();
-    assert_eq!(oldest.checkpoint().format(), 5);
+    assert_eq!(oldest.checkpoint().format(), 9);
 
     let verified = verify_history(
         &layout,
@@ -142,7 +146,7 @@ async fn layered_history_verification_preserves_historical_refs_and_bytes() {
     .unwrap();
 
     assert_eq!(verified.verification.refs, 1);
-    let git_dir = verified._workspace.path().join("repository.git");
+    let git_dir = verified.workspace.path().join("repository.git");
     let refs = Command::new("git")
         .arg("--git-dir")
         .arg(&git_dir)
@@ -168,7 +172,7 @@ async fn historical_thin_member_is_repaired_against_its_retained_base() {
 
     let layout = empty_fixture().await;
     let base = vec![b'a'; 32 * 1024];
-    let base_oid = publish_blob(&layout, "refs/tags/base", &base).await;
+    let base_oid = publish_blob(&layout, "refs/tags/base", &base, PointerCatalog::new()).await;
     let base_oid = gix_hash::ObjectId::from_hex(base_oid.as_bytes()).unwrap();
     let mut target = base.clone();
     target[1024] = b'b';
@@ -211,7 +215,14 @@ async fn historical_thin_member_is_repaired_against_its_retained_base() {
         vec![base_oid.to_string()],
     )
     .unwrap();
-    publish_pack(&layout, "refs/tags/target", pack, &oid.to_string()).await;
+    publish_pack(
+        &layout,
+        "refs/tags/target",
+        pack,
+        &oid.to_string(),
+        PointerCatalog::new(),
+    )
+    .await;
     assert!(
         crab_remote::checkpoint::publish_capsule_checkpoint(
             &layout,
@@ -239,7 +250,7 @@ async fn historical_thin_member_is_repaired_against_its_retained_base() {
     .unwrap();
     let output = Command::new("git")
         .arg("--git-dir")
-        .arg(verified._workspace.path().join("repository.git"))
+        .arg(verified.workspace.path().join("repository.git"))
         .args(["cat-file", "blob", "refs/tags/target"])
         .output()
         .unwrap();
@@ -252,10 +263,13 @@ async fn layered_restore_preserves_sources_and_allows_new_epoch_publication() {
     let (layout, root) = fixture().await;
     let chain = history_chain(&layout, &root).await.unwrap();
     let oldest = chain.last().unwrap();
-    let historical =
-        crab_metadata::capsule_protocol::load_layered_checkpoint(&layout, oldest.checkpoint())
-            .await
-            .unwrap();
+    let historical = crab_metadata::capsule_protocol::load_layered_checkpoint(
+        &layout,
+        oldest.checkpoint(),
+        u64::MAX,
+    )
+    .await
+    .unwrap();
     let store = Store::from_storage(layout.store().clone());
     let router = StoreLayout::new(store.clone(), layout.repo_prefix().to_owned());
     let cancel = CancellationToken::new();
@@ -286,6 +300,7 @@ async fn layered_restore_preserves_sources_and_allows_new_epoch_publication() {
     let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(
         &layout,
         restored.record().root().checkpoint().unwrap(),
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -305,7 +320,13 @@ async fn layered_restore_preserves_sources_and_allows_new_epoch_publication() {
     .unwrap();
     assert_eq!(retained_proof.verification.refs, 2);
 
-    let new_oid = publish_blob(&layout, "refs/tags/after-restore", b"after restore").await;
+    let new_oid = publish_blob(
+        &layout,
+        "refs/tags/after-restore",
+        b"after restore",
+        PointerCatalog::new(),
+    )
+    .await;
     let view = crab_read::capsule_protocol::open_view(
         &layout,
         crab_read::capsule_protocol::CapsuleReadLimits {
@@ -350,10 +371,13 @@ async fn corrupt_layered_history_cannot_restore_or_leak_the_sweep_lease() {
     let (layout, root) = fixture().await;
     let chain = history_chain(&layout, &root).await.unwrap();
     let oldest = chain.last().unwrap();
-    let checkpoint =
-        crab_metadata::capsule_protocol::load_layered_checkpoint(&layout, oldest.checkpoint())
-            .await
-            .unwrap();
+    let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(
+        &layout,
+        oldest.checkpoint(),
+        u64::MAX,
+    )
+    .await
+    .unwrap();
     let source = &checkpoint.sources()[0];
     let path = layout.capsule_path(source.object_hash());
     let (body, _) = layout.store().get_with_etag(&path).await.unwrap();
@@ -408,7 +432,7 @@ async fn history_verification_rejects_unavailable_external_pointer_content() {
     .serialize();
     for (is_crab, bytes) in [(true, crab), (false, lfs)] {
         let layout = empty_fixture().await;
-        publish_blob(&layout, "refs/tags/pointer", &bytes).await;
+        publish_blob(&layout, "refs/tags/pointer", &bytes, PointerCatalog::new()).await;
         assert!(
             crab_remote::checkpoint::publish_capsule_checkpoint(
                 &layout,
@@ -461,7 +485,13 @@ async fn history_verification_counts_and_hashes_reachable_lfs_content() {
         size: content.len() as u64,
         extensions: Vec::new(),
     };
-    publish_blob(&layout, "refs/tags/lfs", &pointer.serialize()).await;
+    publish_blob(
+        &layout,
+        "refs/tags/lfs",
+        &pointer.serialize(),
+        PointerCatalog::new(),
+    )
+    .await;
     assert!(
         crab_remote::checkpoint::publish_capsule_checkpoint(
             &layout,
@@ -515,3 +545,6 @@ async fn history_verification_counts_and_hashes_reachable_lfs_content() {
         .is_err()
     );
 }
+
+#[path = "layered_catalog_tests.rs"]
+mod catalog_tests;

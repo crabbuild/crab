@@ -138,3 +138,8 @@ or mapping: a newly created side file can behave differently from a reopened
 main file. The check protects live WAL mappings from another opener's reset.
 The probe uses a byte beyond SQLite's lock region and releases its locks on both
 success and failure; it does not modify database contents.
+
+Catalog connections retain WAL between operations to avoid a close-time device
+flush for every small reservation or owner release. Existing sync and payload
+publication guarantees remain in force; see [checkpoint cadence](REFERENCE.md#catalog-checkpoint-cadence)
+for recovery, snapshot and qualification boundaries.

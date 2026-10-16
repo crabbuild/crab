@@ -531,12 +531,12 @@ impl Inner {
             &self.cancel,
         )
         .await?;
-        let catalog = view.pointer_catalog()?;
+        let catalog = view.pointer_catalog_lookup(&read_layout, maximum)?;
         let file_index_lookup =
             crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
                 read_layout,
-                &catalog,
-            )?;
+                catalog,
+            );
         Ok((resolved, git_dir, Some(file_index_lookup)))
     }
 
@@ -568,17 +568,15 @@ impl Inner {
             remote.router.global_prefix().to_owned(),
         );
         let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
-        Ok(
-            crab_read::capsule_protocol::open_view_from_root_with_control(
-                &layout,
-                root,
-                crab_read::capsule_protocol::CapsuleReadLimits {
-                    max_capsule_bytes: maximum,
-                    max_frontier_bytes: maximum,
-                },
-            )
-            .await?,
+        Ok(crab_read::capsule_protocol::open_git_view_from_root(
+            &layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: maximum,
+                max_frontier_bytes: maximum,
+            },
         )
+        .await?)
     }
 }
 

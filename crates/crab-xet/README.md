@@ -68,6 +68,10 @@ For a lower-level read path, parse a complete serialized Xorb with
 `xorb::builder::XorbBuilder` and upload each `XorbResult` through the owning
 storage or staging layer.
 
+`shard::FileBundleValidator` indexes a borrowed xorb metadata bundle once for
+multiple file-term checks. It preserves the same range and byte-coverage checks
+as `validate_file_bundle`; neither API proves payload hashes or whole-file bytes.
+
 ## Xorb verification
 
 | API | What it verifies |
@@ -88,7 +92,12 @@ the upstream BG4 reader would buffer before reaching a caller's sink. Decoder
 block buffers, vector capacity, and the BG4 regrouping allocation are additional
 memory costs, so this is not a whole-process memory limit.
 
-The builder and parser share the `u32` decoded-offset limit. Range assembly
+The builder and parser share the `u32` decoded-offset and Xet chunk-count
+limits. The builder seals before a new unique chunk would exceed either limit,
+including when the payload is still below its target size. Serial,
+precompressed, batch and admitted streaming writes share this boundary;
+deduplication happens first, and denied rollover admission leaves staged data
+unsealed for retry. Range assembly
 grows after validating decoded chunks instead of reserving an untrusted
 advertised total. These format checks are separate from request admission and
 whole-process memory limits.

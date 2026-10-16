@@ -2,9 +2,11 @@
 
 use std::{sync::Arc, time::Duration};
 
-use crab_metadata::capsule_protocol::{BrowseIndexes, MAX_BROWSE_INDEXES_BYTES, load_root};
+use crab_metadata::capsule_protocol::{
+    BrowseIndexes, MAX_BROWSE_INDEXES_BYTES, load_root, retain_browse_indexes,
+};
 use crab_read::capsule_protocol::{
-    CapsuleReadLimits, open_view_from_root_with_control, read_activity_from_root,
+    CapsuleReadLimits, open_view_from_root_with_metadata, read_activity_from_root,
 };
 use crab_remote_git::{RemoteGitRuntime, RepositoryIdentity, RepositoryOptions};
 use crab_storage::{ETag, StorageError, Store, StoreLayout};
@@ -25,7 +27,7 @@ pub enum Error {
     Coordination(#[from] crab_coordination::CoordinationError),
 }
 
-/// Publish graph readiness, then complete attribution, for one captured state.
+/// Publish graph and physical readiness, then complete attribution, for one captured state.
 ///
 /// This is opt-in background work, never a prerequisite for ref publication. A
 /// superseded snapshot is not published; readers independently reject stale records.
@@ -51,7 +53,7 @@ pub async fn ensure(
                 max_capsule_bytes: max_bytes,
                 max_frontier_bytes: max_bytes,
             };
-            let view = open_view_from_root_with_control(layout, root, limits).await?;
+            let mut view = open_view_from_root_with_metadata(layout, root, limits).await?;
             let snapshot = view.git_snapshot()?;
             if snapshot.manifest.refs.is_empty() {
                 return Ok(());
@@ -60,13 +62,13 @@ pub async fn ensure(
                 .git_repository_from_store(
                     layout.clone(),
                     identity.clone(),
-                    runtime,
+                    runtime.clone(),
                     options,
                     max_bytes,
                     cancel,
                 )
                 .await?;
-            let indexes = crab_write::generation::browse::build_graph(
+            let mut indexes = crab_write::generation::browse::build_graph(
                 layout,
                 &repository,
                 &snapshot,
@@ -75,6 +77,34 @@ pub async fn ensure(
                 cancel,
             )
             .await?;
+            let physical_ready = match indexes.object_index_hash() {
+                Some(hash) => verify_object_index(layout, &snapshot, hash, max_bytes, options, cancel).await?,
+                None => false,
+            };
+            if !physical_ready {
+                let write = view.build_object_index(layout, max_bytes, cancel).await?;
+                let hash = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Err(crab_read::ReadError::Cancelled.into()),
+                    result = write.upload(layout.store(), layout) => result?,
+                };
+                let reader = crab_metadata::git_object_locator::PagedGitObjectIndex::load(
+                    layout.store(), layout, &hash, &snapshot.manifest_etag, &snapshot.manifest,
+                    options.object_limits().max_pack_index_bytes,
+                ).await?;
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Err(crab_read::ReadError::Cancelled.into()),
+                    result = reader.verify_complete(layout.store(), &snapshot.manifest, max_bytes) => result?,
+                }
+                indexes = indexes.with_object_index(hash)?;
+            }
+            // Lifetime publication precedes query readiness. If the later CAS
+            // loses, extra retained data is safe; the opposite order can strand readers.
+            retain_browse_indexes(
+                layout, &indexes, snapshot.manifest.generation, view.layered_checkpoint(),
+                view.capsule_run_pointers(),
+            ).await?;
             if previous.as_ref() == Some(&indexes) && indexes.path_state_hash().is_some() {
                 ready = Some(indexes);
                 return Ok(());
@@ -87,6 +117,11 @@ pub async fn ensure(
                     None => return Ok(()),
                 }
             };
+            // Bind the just-verified physical pages to this same view before path
+            // construction. Reopening a fresh root could mix index and ref identities.
+            view = view.with_browse_indexes(Some(indexes.clone()));
+            let repository = view.git_repository_from_store(layout.clone(), identity.clone(), runtime, options, max_bytes, cancel)
+                .await?;
             let complete = crab_write::generation::browse::build_path_state(
                 layout,
                 &repository,
@@ -96,6 +131,10 @@ pub async fn ensure(
                 cancel,
             )
             .await?;
+            retain_browse_indexes(
+                layout, &complete, snapshot.manifest.generation, view.layered_checkpoint(),
+                view.capsule_run_pointers(),
+            ).await?;
             if publish_current(layout, &complete, etag, cancel)
                 .await?
                 .is_some()
@@ -133,6 +172,40 @@ async fn publish_current(
             .map(Some),
     }
     .map_err(Into::into)
+}
+
+async fn verify_object_index(
+    layout: &StoreLayout<Store>,
+    snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+    hash: &str,
+    max_bytes: u64,
+    options: RepositoryOptions,
+    cancel: &CancellationToken,
+) -> Result<bool, Error> {
+    let result = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(crab_read::ReadError::Cancelled.into()),
+        result = async {
+            let index = crab_metadata::git_object_locator::PagedGitObjectIndex::load(
+                layout.store(), layout, hash, &snapshot.manifest_etag, &snapshot.manifest,
+                options.object_limits().max_pack_index_bytes,
+            ).await?;
+            index.verify_complete(layout.store(), &snapshot.manifest, max_bytes).await
+        } => result,
+    };
+    // Only the elected maintenance owner repairs derived corruption. Foreground
+    // lookup propagates these errors; provider/auth failures never trigger rebuilds.
+    match result {
+        Ok(()) => Ok(true),
+        Err(
+            crab_metadata::error::MetadataError::CorruptObject { .. }
+            | crab_metadata::error::MetadataError::GitObjectIndexRecord { .. }
+            | crab_metadata::error::MetadataError::Storage {
+                source: StorageError::NotFound { .. } | StorageError::CorruptObject { .. },
+            },
+        ) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 async fn previous_record(

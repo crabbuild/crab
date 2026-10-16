@@ -634,7 +634,7 @@ async fn capsule_generation_owner_sample(
             started,
         ));
     }
-    let view = crab_read::capsule_protocol::open_view_from_root_for_checkpoint(
+    let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(
         layout,
         root,
         crab_read::capsule_protocol::CapsuleReadLimits {
@@ -1737,8 +1737,7 @@ async fn diagnose_capsule(
             },
         )
         .await?;
-        let catalog = view.pointer_catalog()?;
-        view.git_visibility_index()?;
+        view.git_visibility_index().await?;
         // Verification must read layered sources and prove reachable content,
         // not rebuild a complete pack or accept catalog membership as file proof.
         let dependencies = crab_read::capsule_protocol::verify_reachable_dependencies(
@@ -1774,13 +1773,11 @@ async fn diagnose_capsule(
                 git_closure_verified: true,
                 file_entries: db
                     .includes_file_index()
-                    .then(|| diagnosis_count(catalog.files().len(), "capsule file entry"))
-                    .transpose()?,
-                shard_entries: diagnosis_count(catalog.shards().len(), "capsule shard entry")?,
+                    .then_some(dependencies.catalog_files),
+                shard_entries: dependencies.catalog_shards,
                 xorb_entries: db
                     .includes_chunk_index()
-                    .then(|| diagnosis_count(catalog.xorbs().len(), "capsule xorb entry"))
-                    .transpose()?,
+                    .then_some(dependencies.catalog_xorbs),
                 pointer_objects_read: dependencies.catalog_objects_read,
                 verdict: "OK — root, ref heads, capsules, checkpoint, catalogs, visibility, and Git packs authenticated",
             }),
@@ -2662,11 +2659,10 @@ async fn run_capsule_rebuild_in(
         },
     )
     .await?;
-    let catalog = view.pointer_catalog()?;
-    view.git_visibility_index()?;
+    view.git_visibility_index().await?;
     // Authenticate the complete closure before either a no-op success or a new
     // checkpoint; immutable publication alone does not verify reachable files.
-    crab_read::capsule_protocol::verify_reachable_dependencies(
+    let dependencies = crab_read::capsule_protocol::verify_reachable_dependencies(
         layout,
         &view,
         crab_read::capsule_protocol::CapsuleDependencyLimits {
@@ -2720,21 +2716,12 @@ async fn run_capsule_rebuild_in(
         protocol: "capsule-v2",
         repo_prefix: repo_prefix.to_owned(),
         checkpoint_published: Some(checkpoint_published),
-        catalog_files_verified: Some(diagnosis_count(
-            catalog.files().len(),
-            "capsule file entry",
-        )?),
-        catalog_shards_verified: Some(diagnosis_count(
-            catalog.shards().len(),
-            "capsule shard entry",
-        )?),
-        catalog_xorbs_verified: Some(diagnosis_count(
-            catalog.xorbs().len(),
-            "capsule xorb entry",
-        )?),
+        catalog_files_verified: Some(dependencies.catalog_files),
+        catalog_shards_verified: Some(dependencies.catalog_shards),
+        catalog_xorbs_verified: Some(dependencies.catalog_xorbs),
         file_index_entries_written: 0,
         chunk_index_entries_written: 0,
-        shards_processed: diagnosis_count(catalog.shards().len(), "capsule shard entry")?,
+        shards_processed: dependencies.catalog_shards,
         shards_failed: 0,
         git_packs_processed: git_packs,
         git_packs_failed: 0,
@@ -2852,34 +2839,23 @@ async fn verify_capsule_file_index(
     root: crab_metadata::capsule_protocol::RootSnapshot,
     entries: &[(MerkleHash, MerkleHash)],
 ) -> Result<Vec<bool>> {
-    let view = crab_read::capsule_protocol::open_view_from_root(
-        layout,
-        root,
-        crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
-            max_frontier_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
-        },
-    )
-    .await?;
-    Ok(capsule_file_index_matches(
-        &view.pointer_catalog()?,
-        entries,
-    ))
-}
-
-fn capsule_file_index_matches(
-    catalog: &crab_metadata::capsule_protocol::PointerCatalog,
-    entries: &[(MerkleHash, MerkleHash)],
-) -> Vec<bool> {
-    entries
-        .iter()
-        .map(|(file_hash, expected_shard)| {
+    // Recovery verifies selected mappings, not global payload health. Capture
+    // once so every batch sees the same file-binding precedence during pushes.
+    let lookup =
+        crab_metadata::capsule_protocol::load_pointer_catalog_lookup_from_root(layout, &root)
+            .await?;
+    let mut verified = Vec::with_capacity(entries.len());
+    for batch in entries.chunks(64) {
+        let hashes = batch.iter().map(|(file, _)| file.hex()).collect::<Vec<_>>();
+        let catalog = lookup.files(layout.store(), &hashes).await?;
+        verified.extend(batch.iter().map(|(file, expected)| {
             catalog
                 .files()
-                .get(&file_hash.hex())
-                .is_some_and(|entry| entry.shard_hash() == expected_shard.hex())
-        })
-        .collect()
+                .get(&file.hex())
+                .is_some_and(|entry| entry.shard_hash() == expected.hex())
+        }));
+    }
+    Ok(verified)
 }
 
 async fn close_rebuild_guard<T>(guard: MetaDbGuard, result: Result<T>) -> Result<T> {
@@ -5084,59 +5060,6 @@ mod tests {
         assert!(legacy_objects.is_empty());
     }
 
-    #[test]
-    fn capsule_file_index_verification_uses_authenticated_mapping() {
-        let file_hash = MerkleHash::from([1; 32]);
-        let expected_shard = MerkleHash::from([2; 32]);
-        let other_shard = MerkleHash::from([3; 32]);
-        let mut catalog = crab_metadata::capsule_protocol::PointerCatalog::new();
-        catalog
-            .insert_file(
-                file_hash.hex(),
-                crab_metadata::capsule_protocol::FileCatalogEntry::new(42, expected_shard.hex()),
-            )
-            .expect("insert file catalog entry");
-
-        assert_eq!(
-            capsule_file_index_matches(
-                &catalog,
-                &[
-                    (file_hash, expected_shard),
-                    (file_hash, other_shard),
-                    (MerkleHash::from([4; 32]), expected_shard),
-                ],
-            ),
-            vec![true, false, false]
-        );
-    }
-
-    #[tokio::test]
-    async fn capsule_file_index_verification_does_not_create_legacy_metadata() {
-        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let storage = crab_storage::Store::new(Arc::clone(&inner));
-        let layout = crab_storage::StoreLayout::new(storage, "org/v2-recover".to_owned());
-        let root =
-            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
-                .await
-                .expect("initialize capsule root");
-
-        let verified = verify_capsule_file_index(
-            &layout,
-            root,
-            &[(MerkleHash::from([1; 32]), MerkleHash::from([2; 32]))],
-        )
-        .await
-        .expect("verify capsule catalog");
-
-        assert_eq!(verified, vec![false]);
-        let legacy_objects = inner
-            .list(Some(&ObjectPath::from("org/v2-recover/file_index_db")))
-            .try_collect::<Vec<_>>()
-            .await
-            .expect("list legacy metadata prefix");
-        assert!(legacy_objects.is_empty());
-    }
-
     #[tokio::test]
     async fn continuous_owner_skips_completed_repository_identity() {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -5867,3 +5790,7 @@ mod tests {
         guard.close().await.expect("close");
     }
 }
+
+#[cfg(test)]
+#[path = "metadb/capsule_lookup_tests.rs"]
+mod capsule_lookup_tests;

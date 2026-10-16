@@ -4477,17 +4477,17 @@ class CacheServiceRustfsSmoke:
             )
 
         (repo / "model.bin").write_bytes(data)
-        # Deduplication now happens while `crab add` prepares the staged xorb.
-        # Measure the complete add-to-push pipeline so this qualification proves
-        # both the cache-service classification and push-time proof reuse.
+        # Native add can prove origin placements before push and skip advisory
+        # queries. Git-clean retains local bytes, so this case reaches push-time
+        # cache candidates without weakening their canonical-origin proof.
         before_stats = self.cache_admin_stats()
         before_gets = state.total_get_count()
         before_get_counts = state.counts_snapshot()
         before_puts = state.total_put_count()
         before_put_counts = state.put_counts_snapshot()
         self.run_cmd(
-            "cli dedup crab add model",
-            [self.crab_bin, "add", "--jobs", "0", "model.bin"],
+            "cli dedup git add model",
+            ["git", "add", "model.bin"],
             repo,
             env=env,
             timeout=self.args.push_timeout,
@@ -4648,6 +4648,14 @@ class CacheServiceRustfsSmoke:
                 "actual": record.origin_get_key_delta,
                 "mutable_actual": record.mutable_origin_get_key_delta,
             },
+        )
+        expected_sha = hashlib.sha256(data).hexdigest()
+        self.clone_configure_and_hydrate(
+            "cli-dedup-cold-hydrate",
+            remote_url,
+            expected_sha,
+            cache_name="cli-dedup-cold-cache",
+            expect_origin_gets=False,
         )
         return record
 

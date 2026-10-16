@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::capsule_protocol::{
-    CapsuleRefEdit, CapsuleRefState, CapsuleTransaction, RepositoryRoot,
+    Capsule, CapsuleRefEdit, CapsuleRefState, CapsuleTransaction, RepositoryRoot,
 };
 use std::sync::Arc;
 
@@ -54,6 +54,9 @@ async fn run_pointer_binding_is_identical_for_full_and_control_reads() {
     let (layout, pointer, _) = run_fixture().await;
     load_capsule_run(&layout, &pointer).await.unwrap();
     load_capsule_run_control(&layout, &pointer).await.unwrap();
+    load_capsule_run_git_control(&layout, &pointer)
+        .await
+        .unwrap();
     for field in ["footer_hash", "control_boundary"] {
         let mut changed = serde_json::to_value(&pointer).unwrap();
         if field == "footer_hash" {
@@ -70,6 +73,12 @@ async fn run_pointer_binding_is_identical_for_full_and_control_reads() {
         assert!(
             load_capsule_run_control(&layout, &changed).await.is_err(),
             "control read: {field}"
+        );
+        assert!(
+            load_capsule_run_git_control(&layout, &changed)
+                .await
+                .is_err(),
+            "paged Git control: {field}"
         );
     }
 }
@@ -275,4 +284,414 @@ async fn pointer_catalog_resolves_dependencies_only_for_current_epoch_heads() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn git_control_keeps_oid_admission_cold_and_paged_queries_obey_budgets() {
+    use crate::capsule_protocol::{CapsuleGitPack, CapsulePointer};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let bytes = Arc::new(AtomicU64::new(0));
+    let observed = bytes.clone();
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_read_byte_observer(Arc::new(move |read| {
+            observed.fetch_add(read, Ordering::Relaxed);
+        }));
+    let layout = StoreLayout::new(store, "repositories/lazy-admission".into());
+    let transaction = CapsuleTransaction::new(
+        &"1".repeat(64),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/main",
+            None,
+            Some("2".repeat(40)),
+            None,
+        )],
+    )
+    .unwrap();
+    let pack = CapsuleGitPack::new(
+        bytes::Bytes::from_static(b"PACK"),
+        bytes::Bytes::from_static(b"index"),
+        bytes::Bytes::from_static(b"reverse"),
+        bytes::Bytes::from_static(b"locator"),
+        "4".repeat(40),
+        10000,
+    )
+    .unwrap();
+    let capsule = Capsule::build(&transaction, vec![pack], vec![]).unwrap();
+    let oids = (0u32..10000)
+        .map(|index| {
+            let mut oid = [0; 20];
+            oid[..4].copy_from_slice(&index.to_be_bytes());
+            oid
+        })
+        .collect::<Vec<_>>();
+    let run = CapsuleRun::leaf_with_member_oids(capsule, vec![oids.clone()]).unwrap();
+    layout
+        .store()
+        .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+        .await
+        .unwrap();
+    let pointer = CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )
+    .unwrap();
+    bytes.store(0, Ordering::Relaxed);
+    let (control, controls) = load_capsule_run_git_control(&layout, &pointer)
+        .await
+        .unwrap();
+    let opening_bytes = bytes.swap(0, Ordering::Relaxed);
+    assert!(opening_bytes < 16 * 1024 && control.admission().is_none());
+    assert_eq!(controls.len(), 1);
+    let reader = control
+        .admission_reader(&layout, 128 * 1024)
+        .unwrap()
+        .unwrap();
+    let requested = [oids[9999], oids[0], oids[9999], [0xff; 20]];
+    let expected = vec![Some(vec![0]), Some(vec![0]), Some(vec![0]), None];
+    assert_eq!(
+        reader.lookup(layout.store(), &requested).await.unwrap(),
+        expected
+    );
+    assert!(bytes.swap(0, Ordering::Relaxed) < 128 * 1024);
+    assert_eq!(
+        reader.lookup(layout.store(), &requested).await.unwrap(),
+        expected
+    );
+    assert_eq!(bytes.swap(0, Ordering::Relaxed), 0);
+    let limited = control.admission_reader(&layout, 1).unwrap().unwrap();
+    assert!(limited.lookup(layout.store(), &requested).await.is_err());
+    assert_eq!(bytes.load(Ordering::Relaxed), 0);
+    // Unrequested OID corruption must remain cold during Git control opening;
+    // exact lookup and complete inspection still reject the damaged dependency.
+    let mut damaged = run.bytes().to_vec();
+    damaged[run.control_offset() as usize] ^= 1;
+    layout
+        .store()
+        .put_overwrite(&layout.capsule_path(run.hash()), damaged.into())
+        .await
+        .unwrap();
+    let fresh = control
+        .admission_reader(&layout, 128 * 1024)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            load_capsule_run_git_control(&layout, &pointer)
+                .await
+                .is_ok(),
+            load_capsule_run_control(&layout, &pointer).await.is_err(),
+            fresh.lookup(layout.store(), &[oids[0]]).await.is_err(),
+        ),
+        (true, true, true),
+    );
+}
+
+#[tokio::test]
+async fn visibility_lookup_keeps_oid_pages_cold_until_requested() {
+    use crate::capsule_protocol::{
+        CapsulePointer, CapsuleSection, CapsuleVisibilityDelta, VisibilityChange,
+    };
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let read_bytes = Arc::new(AtomicU64::new(0));
+    let observed = read_bytes.clone();
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_read_byte_observer(Arc::new(move |bytes| {
+            observed.fetch_add(bytes, Ordering::Relaxed);
+        }));
+    let layout = StoreLayout::new(store, "repositories/paged-visibility".into());
+    let oids = (0u32..10000)
+        .map(|index| {
+            let mut oid = [0; 20];
+            oid[..4].copy_from_slice(&index.to_be_bytes());
+            oid
+        })
+        .collect::<Vec<_>>();
+    let objects = oids
+        .iter()
+        .map(crate::git_visibility::encode_oid)
+        .collect::<Vec<_>>();
+    let tip = objects[7000].clone();
+    let transaction = CapsuleTransaction::new(
+        &"1".repeat(64),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/main",
+            None,
+            Some(tip.clone()),
+            None,
+        )],
+    )
+    .unwrap();
+    let delta = CapsuleVisibilityDelta::new(BTreeMap::from([(
+        "refs/heads/main".into(),
+        crate::git_visibility::GitVisibilityEdit::from_replacement_objects(None, tip, objects),
+    )]))
+    .unwrap();
+    let capsule = Capsule::build(
+        &transaction,
+        vec![],
+        vec![CapsuleSection::new(
+            CapsuleSectionKind::VisibilityDelta,
+            delta.encode().unwrap(),
+        )],
+    )
+    .unwrap();
+    let run = CapsuleRun::leaf(capsule.clone()).unwrap();
+    layout
+        .store()
+        .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+        .await
+        .unwrap();
+    let pointer = CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )
+    .unwrap();
+    let footer = layout
+        .store()
+        .range_get(
+            &layout.capsule_path(run.hash()),
+            pointer.control_offset()..pointer.size(),
+        )
+        .await
+        .unwrap();
+    let control = CapsuleRunControl::decode_footer(footer, &pointer).unwrap();
+    assert!(read_bytes.swap(0, Ordering::Relaxed) < 4096);
+    let reader = control
+        .visibility_reader(&layout, capsule.hash(), 128 * 1024)
+        .unwrap()
+        .unwrap();
+    let requested = [oids[9999], oids[0], oids[9999], [0xff; 20]];
+    let expected = Some(vec![
+        Some(VisibilityChange::Added),
+        Some(VisibilityChange::Added),
+        Some(VisibilityChange::Added),
+        None,
+    ]);
+    assert_eq!(
+        reader
+            .lookup(layout.store(), "refs/heads/main", &requested)
+            .await
+            .unwrap(),
+        expected
+    );
+    assert!(read_bytes.swap(0, Ordering::Relaxed) < 128 * 1024);
+    assert_eq!(
+        reader
+            .lookup(layout.store(), "refs/heads/main", &requested)
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        reader
+            .lookup(layout.store(), "refs/heads/missing", &requested)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(read_bytes.swap(0, Ordering::Relaxed), 0);
+    let limited = control
+        .visibility_reader(&layout, capsule.hash(), 1)
+        .unwrap()
+        .unwrap();
+    assert!(
+        limited
+            .lookup(layout.store(), "refs/heads/main", &requested)
+            .await
+            .is_err()
+    );
+    assert_eq!(read_bytes.load(Ordering::Relaxed), 0);
+    let mut damaged = run.bytes().to_vec();
+    damaged[control.capsule_locations()[0]
+        .visibility()
+        .unwrap()
+        .offset() as usize] ^= 1;
+    layout
+        .store()
+        .put_overwrite(&layout.capsule_path(run.hash()), damaged.into())
+        .await
+        .unwrap();
+    let fresh = control
+        .visibility_reader(&layout, capsule.hash(), 128 * 1024)
+        .unwrap()
+        .unwrap();
+    assert!(
+        fresh
+            .lookup(layout.store(), "refs/heads/main", &[oids[0]])
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn ref_capture_rejects_uncommitted_base_changes_only_in_the_active_epoch() {
+    for retired in [false, true] {
+        let layout = StoreLayout::new(
+            Store::new(Arc::new(object_store::memory::InMemory::new())),
+            "repositories/ref-capture".to_owned(),
+        );
+        let root = RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap();
+        let name = "refs/tags/uncommitted";
+        let head = CapsuleRefHead::from_root(
+            name,
+            if retired {
+                "2".repeat(64)
+            } else {
+                root.ref_epoch().to_owned()
+            },
+            Some("3".repeat(40)),
+            None,
+        )
+        .unwrap();
+        layout
+            .store()
+            .create_strict(
+                &layout.capsule_ref_head_path(&capsule_ref_name_key(name)),
+                head.encode().unwrap(),
+            )
+            .await
+            .unwrap();
+        let result = capture_ref_heads(&layout, &root).await;
+        if retired {
+            assert!(result.unwrap().0.is_empty());
+        } else {
+            assert!(matches!(result, Err(MetadataError::CorruptObject { .. })));
+        }
+    }
+}
+
+#[tokio::test]
+async fn full_catalog_matches_selected_closure_across_independent_ref_dependencies() {
+    use crate::capsule_protocol::{
+        CapsulePointer, CapsuleSection, FileCatalogEntry, ShardCatalogEntry, XorbCatalogEntry,
+        XorbChunkEntry, load_pointer_catalog_lookup_from_root,
+    };
+    let layout = StoreLayout::new(
+        Store::new(Arc::new(object_store::memory::InMemory::new())),
+        "repositories/catalog-order".to_owned(),
+    );
+    let root = create_root(
+        &layout,
+        RootRecord::encode(RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let transaction = |name, tip| {
+        CapsuleTransaction::new(
+            root.record().digest(),
+            vec![CapsuleRefEdit::new(name, None, Some(tip), None)],
+        )
+        .unwrap()
+    };
+    let left = transaction("refs/tags/left", "1".repeat(40));
+    let right = transaction("refs/tags/right", "2".repeat(40));
+    // Assign roles after nonce generation; a bounded search against one random
+    // descriptor could fail before testing dependency assembly at all.
+    let (binding, descriptors) = if left.id().unwrap() < right.id().unwrap() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    assert!(binding.id().unwrap() < descriptors.id().unwrap());
+    let file = "3".repeat(64);
+    let shard = "4".repeat(64);
+    let xorb = "5".repeat(64);
+    let mut complete = PointerCatalog::new();
+    complete
+        .insert_xorb(
+            xorb.clone(),
+            XorbCatalogEntry::new(
+                99,
+                "6".repeat(64),
+                vec![XorbChunkEntry::new("7".repeat(64), 16)],
+            ),
+        )
+        .unwrap();
+    complete
+        .insert_shard(shard.clone(), ShardCatalogEntry::new(80, vec![xorb]))
+        .unwrap();
+    let mut file_delta = PointerCatalog::new();
+    file_delta
+        .insert_file(file.clone(), FileCatalogEntry::new(16, shard))
+        .unwrap();
+    for (transaction, delta) in [(&descriptors, &complete), (&binding, &file_delta)] {
+        let capsule = Capsule::build(
+            transaction,
+            vec![],
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::CatalogDelta,
+                delta.encode_delta().unwrap(),
+            )],
+        )
+        .unwrap();
+        let run = CapsuleRun::leaf(capsule).unwrap();
+        layout
+            .store()
+            .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let pointer = CapsulePointer::new(
+            run.hash(),
+            run.bytes().len() as u64,
+            run.control_offset(),
+            run.control_size(),
+            run.footer_hash(),
+            run.level(),
+            run.transaction_ids(),
+            run.newest_base_root_digest(),
+        )
+        .unwrap();
+        let edit = &transaction.edits()[0];
+        let head = CapsuleRefHead::from_root(
+            edit.ref_name(),
+            root.record().root().ref_epoch().to_owned(),
+            None,
+            None,
+        )
+        .unwrap();
+        let state = head
+            .successor_state(
+                &BTreeSet::new(),
+                edit.new_oid().map(str::to_owned),
+                None,
+                transaction.id().unwrap(),
+                vec![pointer],
+            )
+            .unwrap();
+        layout
+            .store()
+            .create_strict(
+                &layout.capsule_ref_head_path(&capsule_ref_name_key(edit.ref_name())),
+                head.commit(state).unwrap().encode().unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    complete.apply(&file_delta).unwrap();
+    let selected = load_pointer_catalog_lookup_from_root(&layout, &root)
+        .await
+        .unwrap()
+        .files(layout.store(), &[file])
+        .await
+        .unwrap();
+    assert_eq!(selected, complete);
+    assert_eq!(
+        load_pointer_catalog_from_root(&layout, &root)
+            .await
+            .unwrap(),
+        selected
+    );
 }

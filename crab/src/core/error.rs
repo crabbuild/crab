@@ -1134,7 +1134,8 @@ impl From<crab_read::ReadError> for CrabError {
             | crab_read::ReadError::Runtime(_)
             | crab_read::ReadError::ResolutionTask(_)
             | crab_read::ReadError::ReadinessTask(_)
-            | crab_read::ReadError::Reconstruction { .. }) => Self::Read(ReadFailure(error)),
+            | crab_read::ReadError::Reconstruction { .. }
+            | crab_read::ReadError::IncompleteCatalogView) => Self::Read(ReadFailure(error)),
             crab_read::ReadError::UnauthorizedObject => {
                 Self::Protocol("requested object is outside the visible generation".to_owned())
             }
@@ -2037,7 +2038,8 @@ impl From<crab_lfs::LfsError> for CrabError {
 impl From<crab_metadata::error::MetadataError> for CrabError {
     fn from(error: crab_metadata::error::MetadataError) -> Self {
         match error {
-            crab_metadata::error::MetadataError::RefJournalCancelled => Self::Cancelled,
+            crab_metadata::error::MetadataError::RefJournalCancelled
+            | crab_metadata::error::MetadataError::CapsuleHintCancelled => Self::Cancelled,
             crab_metadata::error::MetadataError::FileLookupLimit { resource, maximum } => {
                 Self::Protocol(format!("file lookup exceeds {resource} limit ({maximum})"))
             }
@@ -2045,7 +2047,12 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             | crab_metadata::error::MetadataError::FileLookupWorker { .. }
             | crab_metadata::error::MetadataError::CapsuleContract { .. }
             | crab_metadata::error::MetadataError::PathStateSize { .. }
+            | crab_metadata::error::MetadataError::CheckpointSize { .. }
             | crab_metadata::error::MetadataError::BrowseIndexRecord { .. }
+            | crab_metadata::error::MetadataError::SourceRetentionRecord { .. }
+            | crab_metadata::error::MetadataError::GitObjectIndexRecord { .. }
+            | crab_metadata::error::MetadataError::CapsuleVisibilityRecord { .. }
+            | crab_metadata::error::MetadataError::PointerCatalogRecord { .. }
             | crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. }
             | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }
             | crab_metadata::error::MetadataError::ManifestCommitUncertain { .. }) => {
@@ -3984,6 +3991,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn incomplete_catalog_capture_survives_cli_conversion() {
+        use std::error::Error;
+        let error = CrabError::from(crab_read::ReadError::IncompleteCatalogView);
+        assert!(
+            std::iter::successors(error.source(), |source| (*source).source()).any(
+                |source| matches!(
+                    source.downcast_ref::<crab_read::ReadError>(),
+                    Some(crab_read::ReadError::IncompleteCatalogView)
+                )
+            )
+        );
+    }
+
     #[tokio::test]
     async fn term_resolution_task_source_survives_cli_conversion() {
         use std::error::Error;
@@ -4016,6 +4037,19 @@ mod tests {
             .expect("CLI conversion must preserve the task failure");
 
         assert!(source.is_panic());
+    }
+
+    #[test]
+    fn physical_index_json_source_survives_cli_conversion() {
+        use std::error::Error;
+
+        let source = serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err();
+        let error =
+            CrabError::from(crab_metadata::error::MetadataError::GitObjectIndexRecord { source });
+        assert!(
+            std::iter::successors(error.source(), |source| (*source).source())
+                .any(|source| source.downcast_ref::<serde_json::Error>().is_some())
+        );
     }
 
     #[test]
@@ -4126,6 +4160,34 @@ mod tests {
         assert!(
             matches!(error, CrabError::CasConflict { path, .. } if path == "repositories/test/root")
         );
+    }
+
+    #[test]
+    fn checkpoint_admission_error_survives_direct_and_read_boundaries() {
+        for through_read in [false, true] {
+            let source = crab_metadata::error::MetadataError::CheckpointSize {
+                bytes: 1024,
+                maximum: 512,
+            };
+            let error = if through_read {
+                CrabError::from(crab_read::ReadError::Metadata(source))
+            } else {
+                CrabError::from(source)
+            };
+            let CrabError::Io(error) = error else {
+                panic!("expected typed checkpoint admission error");
+            };
+            let source = error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<crab_metadata::error::MetadataError>());
+            assert!(matches!(
+                source,
+                Some(crab_metadata::error::MetadataError::CheckpointSize {
+                    bytes: 1024,
+                    maximum: 512,
+                })
+            ));
+        }
     }
 
     #[test]

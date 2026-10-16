@@ -81,8 +81,8 @@ pub struct PublishInputs {
     /// before/after snapshot so [`PublishStats::bytes_uploaded`]
     /// reflects this publish only.
     pub metrics: Option<Arc<Metrics>>,
-    /// Cancellation token. Honored before the push kicks off and
-    /// again after it returns.
+    /// Cancellation token, honored until publication begins; a known commit
+    /// remains successful if cancellation arrives during outcome resolution.
     pub cancel: CancellationToken,
 }
 
@@ -123,8 +123,7 @@ pub struct PublishStats {
 ///
 /// # Errors
 ///
-/// - [`CrabError::Cancelled`] if the cancellation token trips
-///   before or after the push.
+/// - [`CrabError::Cancelled`] if cancellation stops the push before commitment.
 /// - [`CrabError::Internal`] carrying the combined per-ref error
 ///   messages when any ref outcome is not `Ok`. The stage treats
 ///   this as a hard failure — the import command should not proceed
@@ -206,8 +205,8 @@ pub async fn run_publish(inputs: PublishInputs) -> Result<PublishStats> {
     )
     .await?;
 
-    check_cancelled(&cancel)?;
-
+    // The publisher resolved the ref outcome and drained its leases. Preserve
+    // that result even if cancellation arrived after visibility.
     let (refs_pushed, refs_failed, failure_messages) = summarize_outcomes(&result);
 
     // Translate metrics deltas and the push transfer summary into
@@ -704,6 +703,44 @@ mod tests {
 
     // ── Unit: outcome summarization ──────────────────────────────
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn late_cancellation_preserves_published_import_and_reconstruction() {
+        let _git_dir_guard = GitDirOverride::locked_without_env();
+        let tmp = TempDir::new().unwrap();
+        let source_inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let objects = vec![("model.bin", vec![0x11; 8192])];
+        seed_object(&source_inner, "", objects[0].0, &objects[0].1).await;
+        let e2e = run_ingest_and_assemble(resolved(source_inner, ""), &objects, &tmp).await;
+        let hooked = Arc::new(crab_storage::test_support::CountingObjectStore::new(
+            Arc::new(InMemory::new()),
+        ));
+        let target_inner: Arc<dyn ObjectStore> = hooked.clone();
+        let target = resolved(target_inner.clone(), "repos/late-cancel");
+        let layout = crab_storage::StoreLayout::new(
+            target.store.as_storage().clone(),
+            "repos/late-cancel".to_owned(),
+        );
+        let cancel = CancellationToken::new();
+        hooked.cancel_after_put(layout.capsule_ref_heads_prefix(), cancel.clone());
+        let stats = run_publish(PublishInputs {
+            target,
+            repo_prefix: "repos/late-cancel".to_owned(),
+            staging: Arc::new(StagingAreaReadOnly::open(e2e.staging_root).await.unwrap()),
+            branch: "main".to_owned(),
+            head_commit_oid: e2e.head_oid.clone(),
+            git_dir: e2e.repo_root.join(".git"),
+            metrics: None,
+            cancel: cancel.clone(),
+        })
+        .await
+        .unwrap();
+        assert!(cancel.is_cancelled() && stats.refs_pushed == 1 && stats.refs_failed == 0);
+        let (_, view) = target_view(&target_inner, "repos/late-cancel").await;
+        assert_eq!(view.refs().get("refs/heads/main"), Some(&e2e.head_oid));
+        verify_reconstructed_files(&target_inner, "repos/late-cancel", &e2e.repo_root, &objects)
+            .await;
+    }
+
     #[test]
     fn summarize_outcomes_counts_ok_and_errors() {
         use std::collections::HashMap;
@@ -804,6 +841,7 @@ mod tests {
         );
         let catalog = view
             .pointer_catalog()
+            .await
             .expect("decode imported pointer catalog");
         for entry in &e2e.staged_entries {
             let EntryState::Staged { file_hash } = entry.state else {

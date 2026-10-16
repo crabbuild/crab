@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bytes::Bytes;
 use crab_metadata::capsule_protocol::PointerCatalog;
@@ -20,6 +20,56 @@ pub(super) struct DependencyCopy {
     target_key: String,
     size: u64,
     digest: String,
+}
+
+pub(super) async fn select_pointer_catalog(
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    pointers: &ReachablePointerScan,
+    candidate: &PointerCatalog,
+    maximum: u64,
+) -> Result<PointerCatalog> {
+    let files = pointers
+        .crab_pointers
+        .iter()
+        .map(|pointer| MerkleHash::from(pointer.file_hash).hex())
+        .chain(candidate.files().keys().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let shards = candidate
+        .shards()
+        .keys()
+        .cloned()
+        .chain(
+            candidate
+                .files()
+                .values()
+                .map(|file| file.shard_hash().to_owned()),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let xorbs = candidate
+        .xorbs()
+        .keys()
+        .cloned()
+        .chain(
+            candidate
+                .shards()
+                .values()
+                .flat_map(|shard| shard.xorb_hashes().iter().cloned()),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    // Delta references may be owned by history rather than carried by the delta.
+    // Query every candidate identity too, so selected reads retain collision checks.
+    view.pointer_catalog_lookup(layout, maximum)?
+        .dependencies(layout.store(), &files, &shards, &xorbs)
+        .await
+        .map_err(crab_read::ReadError::from)
+        .map_err(Into::into)
 }
 
 pub(super) fn source_pointer_delta(
@@ -80,7 +130,11 @@ pub(super) async fn verify_pointer_dependencies(
     catalog: &PointerCatalog,
     pointers: &ReachablePointerScan,
     fallback: Option<&crab_storage::StoreLayout<crab_storage::Store>>,
-) -> Result<(BTreeSet<String>, Vec<DependencyCopy>)> {
+) -> Result<(
+    BTreeSet<String>,
+    Vec<DependencyCopy>,
+    HashMap<MerkleHash, crab_metadata::receipts::OriginReceipt>,
+)> {
     let mut referenced = BTreeSet::from([ctx
         .router()
         .capsule_path(&plan.run_hash)
@@ -89,6 +143,7 @@ pub(super) async fn verify_pointer_dependencies(
     let mut verified_shards = BTreeMap::<String, Bytes>::new();
     let mut verified_xorbs = BTreeSet::new();
     let mut copies = Vec::new();
+    let mut origins = HashMap::new();
     for pointer in &pointers.crab_pointers {
         let file_hash = MerkleHash::from(pointer.file_hash).hex();
         let file = catalog
@@ -113,7 +168,7 @@ pub(super) async fn verify_pointer_dependencies(
             Some(bytes) => bytes.clone(),
             None => {
                 let fallback_key = fallback.map(|layout| layout.shard_path(&shard_hash));
-                let bytes = read_candidate_object(
+                let (bytes, _) = read_candidate_object(
                     ctx,
                     plan,
                     &shard_key,
@@ -167,7 +222,7 @@ pub(super) async fn verify_pointer_dependencies(
                 referenced.insert(key.clone());
                 if verified_xorbs.insert(hash.to_owned()) {
                     let fallback_key = fallback.map(|layout| layout.xorb_path(&xorb_hash));
-                    let bytes = read_candidate_object(
+                    let (bytes, identity) = read_candidate_object(
                         ctx,
                         plan,
                         &key,
@@ -182,6 +237,12 @@ pub(super) async fn verify_pointer_dependencies(
                         ));
                     }
                     validate_staged_xorb(&key, &bytes, &chunks)?;
+                    if let Some(identity) = identity {
+                        origins.insert(
+                            xorb_hash,
+                            verified_xorb_origin(&key, bytes.clone(), identity)?,
+                        );
+                    }
                 }
             }
         }
@@ -202,7 +263,8 @@ pub(super) async fn verify_pointer_dependencies(
         )
         .to_string();
         referenced.insert(key.clone());
-        let bytes = read_candidate_object(ctx, plan, &key, None, pointer.size, &mut copies).await?;
+        let (bytes, _) =
+            read_candidate_object(ctx, plan, &key, None, pointer.size, &mut copies).await?;
         if <[u8; 32]>::from(Sha256::digest(&bytes)) != pointer.oid {
             return Err(invalid(
                 "candidate LFS object digest differs from its pointer",
@@ -228,7 +290,7 @@ pub(super) async fn verify_pointer_dependencies(
         }
     }
     copies.dedup_by(|left, right| left.target_key == right.target_key);
-    Ok((referenced, copies))
+    Ok((referenced, copies, origins))
 }
 
 async fn read_candidate_object(
@@ -238,8 +300,8 @@ async fn read_candidate_object(
     fallback_key: Option<&object_store::path::Path>,
     expected_size: u64,
     copies: &mut Vec<DependencyCopy>,
-) -> Result<Bytes> {
-    let bytes = match plan
+) -> Result<(Bytes, Option<crab_storage::ETag>)> {
+    let (bytes, identity) = match plan
         .staged_objects
         .iter()
         .find(|object| object.canonical_key == canonical_key)
@@ -250,7 +312,10 @@ async fn read_candidate_object(
                     "staged dependency size differs from the candidate catalog",
                 ));
             }
-            read_verified_staged_object(ctx.store(), object).await?
+            (
+                read_verified_staged_object(ctx.store(), object).await?,
+                None,
+            )
         }
         None => match ctx
             .store()
@@ -260,7 +325,7 @@ async fn read_candidate_object(
             )
             .await
         {
-            Ok((bytes, _)) => bytes,
+            Ok((bytes, identity)) => (bytes, Some(identity)),
             Err(crab_storage::StorageError::NotFound { .. }) => {
                 let fallback_key = fallback_key.ok_or_else(|| AuthServerError::NotFound {
                     path: canonical_key.to_owned(),
@@ -275,7 +340,7 @@ async fn read_candidate_object(
                     size: expected_size,
                     digest: blake3::hash(&bytes).to_hex().to_string(),
                 });
-                bytes
+                (bytes, None)
             }
             Err(error) => return Err(error.into()),
         },
@@ -285,13 +350,14 @@ async fn read_candidate_object(
             "candidate dependency size differs from the candidate catalog",
         ));
     }
-    Ok(bytes)
+    Ok((bytes, identity))
 }
 
 pub(super) async fn promote_dependency_copies(
     ctx: &ReceiveContext,
     copies: &[DependencyCopy],
-) -> Result<()> {
+) -> Result<HashMap<MerkleHash, crab_metadata::receipts::OriginReceipt>> {
+    let mut origins = HashMap::new();
     for copy in copies {
         let (bytes, _) = ctx
             .store()
@@ -306,12 +372,64 @@ pub(super) async fn promote_dependency_copies(
                 "filtered view dependency changed after protected verification",
             ));
         }
-        ctx.store()
-            .put_if_absent_verified(
-                &object_store::path::Path::from(copy.target_key.clone()),
-                bytes,
-            )
-            .await?;
+        if content_hash_from_path(&copy.target_key, "xorbs").is_some() {
+            let origin = promote_xorb_origin(ctx.store(), &copy.target_key, bytes).await?;
+            origins.insert(MerkleHash::from(origin.content_hash), origin);
+        } else {
+            ctx.store()
+                .put_if_absent_verified(
+                    &object_store::path::Path::from(copy.target_key.clone()),
+                    bytes,
+                )
+                .await?;
+        }
     }
-    Ok(())
+    Ok(origins)
+}
+
+// Verification checked the complete body before promotion. Keep the immutable
+// operation identity with that body so a later HEAD cannot certify a replacement.
+pub(super) async fn promote_xorb_origin(
+    store: &crab_storage::Store,
+    key: &str,
+    bytes: Bytes,
+) -> Result<crab_metadata::receipts::OriginReceipt> {
+    let expected = *blake3::hash(&bytes).as_bytes();
+    let maximum = bytes.len() as u64;
+    let outcome = store
+        .create_or_read_immutable(&object_store::path::Path::from(key), bytes.clone(), maximum)
+        .await?;
+    let identity = match outcome {
+        crab_storage::ImmutableCreateOutcome::Created(identity) => identity,
+        crab_storage::ImmutableCreateOutcome::Existing {
+            bytes: stored,
+            identity,
+        } => {
+            if *blake3::hash(&stored).as_bytes() != expected {
+                return Err(conflict(
+                    "canonical xorb differs from the verified protected body",
+                ));
+            }
+            identity
+        }
+    };
+    verified_xorb_origin(key, bytes, identity)
+}
+
+fn verified_xorb_origin(
+    key: &str,
+    bytes: Bytes,
+    identity: crab_storage::ETag,
+) -> Result<crab_metadata::receipts::OriginReceipt> {
+    let size = bytes.len() as u64;
+    let parser = crab_xet::xorb::parser::XorbParser::parse(bytes)?;
+    Ok(crab_metadata::receipts::OriginReceipt::new(
+        "canonical-origin".to_owned(),
+        key.to_owned(),
+        parser.hash().into(),
+        parser.payload_digest(),
+        size,
+        identity.e_tag,
+        identity.version,
+    ))
 }

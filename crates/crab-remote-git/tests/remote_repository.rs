@@ -4709,6 +4709,84 @@ async fn immutable_blame_cache_is_bounded_and_replays_semantic_budgets() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn retained_blob_comparison_does_not_bypass_a_stricter_blame_budget() {
+    let runtime_options = RuntimeOptions {
+        max_blame_cache_bytes: 256,
+        ..RuntimeOptions::default()
+    };
+    let fixture = publish_with_runtime(
+        DeltaKind::Ref,
+        false,
+        RepositoryOptions::default(),
+        runtime_options,
+    )
+    .await;
+    let cancel = CancellationToken::new();
+    let path = GitPath::new(Bytes::from_static(b"text.txt")).unwrap();
+    let mut first = None;
+    for _ in 0..2 {
+        let operation = fixture
+            .repository
+            .operation(OperationKind::Blame, &cancel)
+            .await
+            .unwrap();
+        let result = async {
+            let snapshot = fixture
+                .repository
+                .snapshot(&Revision::Commit(fixture.semantic_head_commit), &operation)
+                .await?;
+            snapshot.blame(&path, &operation).await
+        }
+        .await;
+        let blame = operation.finish(result).await.unwrap();
+        if let Some(first) = &first {
+            assert_eq!(&blame, first);
+        }
+        first = Some(blame);
+    }
+    // The result exceeds this cache's byte limit; only its reusable line map fits.
+    assert_eq!(fixture.runtime.snapshot().await.blame_entries, 1);
+    let strict = RepositoryOptions::new(
+        ObjectLimits::default(),
+        OperationLimits {
+            max_blame_comparison_cells: 1,
+            ..OperationLimits::default()
+        },
+    )
+    .unwrap();
+    let repository = RemoteGitRepository::open(
+        fixture.store.clone(),
+        fixture.layout.clone(),
+        fixture.repository.identity().clone(),
+        fixture.runtime.clone(),
+        strict,
+        &cancel,
+    )
+    .await
+    .unwrap();
+    let operation = repository
+        .operation(OperationKind::Blame, &cancel)
+        .await
+        .unwrap();
+    let result = async {
+        let snapshot = repository
+            .snapshot(&Revision::Commit(fixture.semantic_head_commit), &operation)
+            .await?;
+        snapshot.blame(&path, &operation).await
+    }
+    .await;
+    let error = operation.finish(result).await.unwrap_err();
+    assert!(matches!(
+        error,
+        Error::LimitExceeded {
+            limit: "blame comparison cells",
+            ..
+        }
+    ));
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn archive_traversal_preserves_modes_links_submodules_and_raw_order() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();
@@ -4926,77 +5004,79 @@ async fn rejects_wrong_kind_and_unreachable_retained_commit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn attached_graph_preserves_tag_visibility_and_rejects_retained_commits() {
-    let options = RepositoryOptions::new(
-        ObjectLimits::default(),
-        OperationLimits {
-            max_history_commits: 1,
-            ..OperationLimits::default()
-        },
-    )
-    .unwrap();
-    let fixture = publish(DeltaKind::Ref, false, options).await;
-    let hash = publish_complete_graph(&fixture).await;
-    let cancel = CancellationToken::new();
-    let attached = fixture
-        .repository
-        .with_commit_graph(&hash, &cancel)
-        .await
+    for paged in [false, true] {
+        let options = RepositoryOptions::new(
+            ObjectLimits::default(),
+            OperationLimits {
+                max_history_commits: 1,
+                ..OperationLimits::default()
+            },
+        )
         .unwrap();
-    assert_eq!(
-        (
-            fixture.repository.commit_graph_available(),
-            attached.commit_graph_available()
-        ),
-        (false, true)
-    );
-    let operation = attached
-        .operation(OperationKind::Resolve, &cancel)
-        .await
-        .unwrap();
-    let result = async {
-        for oid in [fixture.root_commit, fixture.side_commit] {
-            assert_eq!(
-                attached
-                    .resolve(&Revision::Commit(oid), &operation)
-                    .await?
-                    .commit,
-                oid
-            );
-        }
-        assert!(matches!(
-            attached
-                .resolve(&Revision::Commit(fixture.unreachable), &operation)
-                .await,
-            Err(Error::Revision {
-                reason: crab_remote_git::RevisionError::NotReachable
-            })
-        ));
-        assert!(
-            attached
-                .resolve(&Revision::Reference("v2".to_owned()), &operation)
-                .await
-                .is_ok()
+        let fixture = publish(DeltaKind::Ref, false, options).await;
+        let hash = publish_complete_graph(&fixture, paged).await;
+        let cancel = CancellationToken::new();
+        let attached = fixture
+            .repository
+            .with_commit_graph(&hash, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                fixture.repository.commit_graph_available(),
+                attached.commit_graph_available()
+            ),
+            (false, true)
         );
-        assert!(matches!(
-            attached
-                .resolve(&Revision::Reference("blob".to_owned()), &operation)
-                .await,
-            Err(Error::Revision {
-                reason: crab_remote_git::RevisionError::NotCommit
-            })
-        ));
-        Ok(())
+        let operation = attached
+            .operation(OperationKind::Resolve, &cancel)
+            .await
+            .unwrap();
+        let result = async {
+            for oid in [fixture.root_commit, fixture.side_commit] {
+                assert_eq!(
+                    attached
+                        .resolve(&Revision::Commit(oid), &operation)
+                        .await?
+                        .commit,
+                    oid
+                );
+            }
+            assert!(matches!(
+                attached
+                    .resolve(&Revision::Commit(fixture.unreachable), &operation)
+                    .await,
+                Err(Error::Revision {
+                    reason: crab_remote_git::RevisionError::NotReachable
+                })
+            ));
+            assert!(
+                attached
+                    .resolve(&Revision::Reference("v2".to_owned()), &operation)
+                    .await
+                    .is_ok()
+            );
+            assert!(matches!(
+                attached
+                    .resolve(&Revision::Reference("blob".to_owned()), &operation)
+                    .await,
+                Err(Error::Revision {
+                    reason: crab_remote_git::RevisionError::NotCommit
+                })
+            ));
+            Ok(())
+        }
+        .await;
+        let result = operation.finish(result).await;
+        fixture.runtime.shutdown().await;
+        result.unwrap();
     }
-    .await;
-    let result = operation.finish(result).await;
-    fixture.runtime.shutdown().await;
-    result.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn declared_graph_uses_verified_commit_roots_including_nested_tags() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
-    let hash = publish_complete_graph(&fixture).await;
+    let hash = publish_complete_graph(&fixture, false).await;
     let (mut manifest, etag) = read_manifest(&fixture.store, &fixture.layout)
         .await
         .unwrap();
@@ -5024,7 +5104,7 @@ async fn declared_graph_uses_verified_commit_roots_including_nested_tags() {
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_attachment_rejects_other_ref_state_and_cancelled_work() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
-    let hash = publish_complete_graph(&fixture).await;
+    let hash = publish_complete_graph(&fixture, false).await;
     let cancel = CancellationToken::new();
     cancel.cancel();
     assert!(matches!(
@@ -5062,9 +5142,10 @@ async fn graph_attachment_rejects_other_ref_state_and_cancelled_work() {
     ));
 }
 
-async fn publish_complete_graph(fixture: &PublishedFixture) -> String {
+async fn publish_complete_graph(fixture: &PublishedFixture, paged: bool) -> String {
     use crab_metadata::split_commit_graph::{
-        CommitGraphInput, append_split_commit_graph, upload_split_commit_graph,
+        CommitGraphInput, append_paged_commit_graph, append_split_commit_graph,
+        upload_split_commit_graph,
     };
     let (manifest, _) = read_manifest(&fixture.store, &fixture.layout)
         .await
@@ -5115,7 +5196,12 @@ async fn publish_complete_graph(fixture: &PublishedFixture) -> String {
         })
         .collect::<Vec<_>>();
     let roots = inputs.iter().map(|input| input.oid).collect::<Vec<_>>();
-    let graph = append_split_commit_graph(
+    let append = if paged {
+        append_paged_commit_graph
+    } else {
+        append_split_commit_graph
+    };
+    let graph = append(
         None,
         manifest.generation,
         manifest.pack_index_hash,
@@ -5669,5 +5755,248 @@ async fn storage_telemetry_counts_shared_reads_once_and_excludes_warm_hits() {
     let result = snapshot.read_blob(&fixture.base_path, &operation).await;
     operation.finish(result).await.unwrap();
     assert_eq!(reads.0.load(Ordering::SeqCst), observed);
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn indexed_path_history_matches_raw_git_changes_and_continuations() {
+    use crab_metadata::path_state::{
+        PathStateInput, PathStateMutation, append_path_state, upload_path_state,
+    };
+    use crab_metadata::split_commit_graph::load_split_commit_graph;
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    crab_metadata::layout_descriptor::ensure_canonical_layout(&fixture.store, &fixture.layout)
+        .await
+        .unwrap();
+    let hash = publish_complete_graph(&fixture, true).await;
+    let graph = load_split_commit_graph(
+        &fixture.store,
+        &fixture.layout,
+        &hash,
+        ObjectLimits::default().max_commit_graph_bytes,
+    )
+    .await
+    .unwrap();
+    let tree = |oid: &str| {
+        let bytes = git(
+            &[
+                "--git-dir",
+                path(&fixture.source_git_dir),
+                "ls-tree",
+                "-r",
+                "-t",
+                "-z",
+                oid,
+            ],
+            None,
+        );
+        bytes
+            .split(|byte| *byte == 0)
+            .filter(|row| !row.is_empty())
+            .map(|row| {
+                let tab = row.iter().position(|byte| *byte == b'\t').unwrap();
+                let fields = std::str::from_utf8(&row[..tab])
+                    .unwrap()
+                    .split(' ')
+                    .collect::<Vec<_>>();
+                (
+                    row[tab + 1..].to_vec(),
+                    (
+                        u32::from_str_radix(fields[0], 8).unwrap(),
+                        fields[2].to_owned(),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let inputs = (0..graph.descriptor.commit_count)
+        .map(|ordinal| {
+            let record = graph.record(ordinal).unwrap();
+            let oid = gix_hash::ObjectId::Sha1(record.oid);
+            let parent = record
+                .parents
+                .first()
+                .map(|parent| graph.record(*parent).unwrap().oid);
+            let before = parent
+                .map(|parent| tree(&gix_hash::ObjectId::Sha1(parent).to_string()))
+                .unwrap_or_default();
+            let after = tree(&oid.to_string());
+            let paths = before
+                .keys()
+                .chain(after.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let mut mutations = paths
+                .into_iter()
+                .filter(|name| before.get(name) != after.get(name))
+                .map(|name| {
+                    let reset = before
+                        .get(&name)
+                        .zip(after.get(&name))
+                        .is_some_and(|(old, new)| old.0 & 0o170000 != new.0 & 0o170000);
+                    PathStateMutation {
+                        present: after.contains_key(&name),
+                        path: name,
+                        reset,
+                    }
+                })
+                .collect::<Vec<_>>();
+            if parent.is_none() {
+                mutations.push(PathStateMutation {
+                    path: Vec::new(),
+                    present: false,
+                    reset: true,
+                });
+            }
+            PathStateInput {
+                oid: record.oid,
+                first_parent: parent,
+                author: Vec::new(),
+                author_seconds: 0,
+                message: Vec::new(),
+                mutations,
+            }
+        })
+        .collect();
+    let write = append_path_state(None, &graph, inputs).unwrap();
+    upload_path_state(
+        &fixture.store,
+        &fixture.layout,
+        &write,
+        crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+    )
+    .await
+    .unwrap();
+    let mut captured =
+        crab_metadata::manifest_store::read_repository_snapshot(&fixture.store, &fixture.layout)
+            .await
+            .unwrap();
+    captured.manifest.commit_graph_hash = Some(hash);
+    captured.manifest.path_state_hash = Some(write.descriptor_hash);
+    let cancel = CancellationToken::new();
+    let indexed_runtime = Arc::new(RemoteGitRuntime::default());
+    let indexed = RemoteGitRepository::from_snapshot(
+        fixture.layout.clone(),
+        &captured,
+        fixture.repository.identity().clone(),
+        indexed_runtime.clone(),
+        RepositoryOptions::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    for (reference, name) in [
+        ("semantic-head", "mode.txt"),
+        ("semantic-head", "old-name.txt"),
+        ("semantic-head", "new-name.txt"),
+        ("semantic-head", "type/never"),
+        ("semantic-head", "never-existed"),
+    ] {
+        let path_value = GitPath::new(name.as_bytes().to_vec()).unwrap();
+        let mut results = Vec::new();
+        for repo in [&fixture.repository, &indexed] {
+            let operation = repo
+                .operation(OperationKind::PathHistory, &cancel)
+                .await
+                .unwrap();
+            let result = async {
+                let snapshot = repo
+                    .snapshot(&Revision::Reference(reference.to_owned()), &operation)
+                    .await?;
+                let mut cursor = None;
+                let mut rows = Vec::new();
+                loop {
+                    let page = snapshot
+                        .path_history(
+                            &path_value,
+                            HistoryTraversal::FirstParent,
+                            &PageRequest::new(1, cursor)?,
+                            &operation,
+                        )
+                        .await?;
+                    rows.extend(
+                        page.items
+                            .into_iter()
+                            .map(|entry| (entry.commit.oid, entry.kind)),
+                    );
+                    cursor = page.next;
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                Ok(rows)
+            }
+            .await;
+            results.push(operation.finish(result).await.unwrap());
+        }
+        assert_eq!(results[0], results[1], "{reference}:{name}");
+        let native = native_oid_lines(
+            &fixture.source_git_dir,
+            &[
+                "log",
+                "--first-parent",
+                "--format=%H",
+                "--no-renames",
+                &fixture.semantic_head_commit.to_string(),
+                "--",
+                name,
+            ],
+        );
+        assert_eq!(
+            results[1].iter().map(|(oid, _)| *oid).collect::<Vec<_>>(),
+            native,
+            "{reference}:{name}"
+        );
+    }
+    for name in ["mode.txt", "text.txt", "type.extra"] {
+        let path_value = GitPath::new(name.as_bytes().to_vec()).unwrap();
+        let mut results = Vec::new();
+        for repo in [&fixture.repository, &indexed] {
+            let operation = repo.operation(OperationKind::Blame, &cancel).await.unwrap();
+            let result = async {
+                let snapshot = repo
+                    .snapshot(&Revision::Reference("semantic-head".to_owned()), &operation)
+                    .await?;
+                snapshot.blame(&path_value, &operation).await
+            }
+            .await;
+            results.push(operation.finish(result).await.unwrap());
+        }
+        assert_eq!(results[0], results[1], "blame:{name}");
+        let native = git(
+            &[
+                "--git-dir",
+                path(&fixture.source_git_dir),
+                "blame",
+                "--first-parent",
+                "--root",
+                "--line-porcelain",
+                &fixture.semantic_head_commit.to_string(),
+                "--",
+                name,
+            ],
+            None,
+        );
+        let expected = native
+            .split(|byte| *byte == b'\n')
+            .filter(|row| !row.starts_with(b"\t"))
+            .filter_map(|row| {
+                let fields = row
+                    .split(|byte| byte.is_ascii_whitespace())
+                    .collect::<Vec<_>>();
+                (fields.len() >= 3
+                    && fields[0].len() == 40
+                    && fields[0].iter().all(u8::is_ascii_hexdigit))
+                .then(|| parse_oid(fields[0]))
+            })
+            .collect::<Vec<_>>();
+        let actual = results[1]
+            .ranges
+            .iter()
+            .flat_map(|range| std::iter::repeat_n(range.commit.oid, range.lines as usize))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "native blame:{name}");
+    }
+    indexed_runtime.shutdown().await;
     fixture.runtime.shutdown().await;
 }

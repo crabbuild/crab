@@ -10,6 +10,17 @@ use crate::validation::validate_content_hash;
 #[cfg(feature = "storage")]
 use crab_storage::{Store, StoreLayout};
 
+mod ancestry;
+mod paged;
+pub use paged::CommitGraphLayerPages;
+#[cfg(feature = "storage")]
+mod reader;
+#[cfg(feature = "storage")]
+pub use reader::{CommitGraphReader, CommitGraphView};
+
+const PAGED_VERSION: u32 = 3;
+const MAX_PAGED_LAYERS: usize = 32;
+
 const LAYER_MAGIC: &[u8; 8] = b"CRABCG01";
 const LAYER_VERSION: u32 = 1;
 const LAYER_HEADER_BYTES: usize = 24;
@@ -54,12 +65,16 @@ pub struct CommitGraphLayerRef {
     pub base_ordinal: u32,
     pub commit_count: u32,
     pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<CommitGraphLayerPages>,
 }
 
 /// Small immutable object named by `Manifest::commit_graph_hash`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommitGraphDescriptor {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_ordinal_digest: Option<String>,
     pub generation: u64,
     pub pack_index_hash: String,
     pub git_validation_digest: String,
@@ -121,6 +136,14 @@ impl SplitCommitGraph {
             oid_to_ordinal,
         };
         validate_graph_records(&graph)?;
+        if graph
+            .descriptor
+            .commit_ordinal_digest
+            .as_ref()
+            .is_some_and(|digest| *digest != graph.ordinal_digest())
+        {
+            return corrupt("commit graph positional identity mismatch");
+        }
         Ok(graph)
     }
 
@@ -150,20 +173,7 @@ impl SplitCommitGraph {
     /// Return a layer-independent digest of the positional commit records.
     #[must_use]
     pub fn ordinal_digest(&self) -> String {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"crab commit ordinal identity\0");
-        hasher.update(&self.descriptor.commit_count.to_le_bytes());
-        for layer in &self.layers {
-            for record in &layer.records {
-                hasher.update(&record.oid);
-                hasher.update(&record.tree_oid);
-                hasher.update(&(record.parents.len() as u32).to_le_bytes());
-                for parent in &record.parents {
-                    hasher.update(&parent.to_le_bytes());
-                }
-            }
-        }
-        hasher.finalize().to_hex().to_string()
+        ordinal_digest(&self.layers, self.descriptor.commit_count)
     }
 
     /// Return an exact ancestry answer when both commits are in this complete graph.
@@ -360,6 +370,28 @@ pub fn append_split_commit_graph(
         roots,
         additions,
         false,
+        LAYER_VERSION,
+    )
+}
+
+/// Append authenticated graph pages for the unreleased capsule browse protocol.
+pub fn append_paged_commit_graph(
+    base: Option<SplitCommitGraph>,
+    generation: u64,
+    pack_index_hash: String,
+    git_validation_digest: String,
+    roots: &[[u8; 20]],
+    additions: Vec<CommitGraphInput>,
+) -> Result<Option<CommitGraphWrite>> {
+    update_split_commit_graph(
+        base,
+        generation,
+        pack_index_hash,
+        git_validation_digest,
+        roots,
+        additions,
+        false,
+        PAGED_VERSION,
     )
 }
 
@@ -374,6 +406,7 @@ pub fn compact_split_commit_graph(graph: SplitCommitGraph) -> Result<Option<Comm
         &[],
         Vec::new(),
         true,
+        descriptor.version,
     )
 }
 
@@ -403,7 +436,8 @@ pub fn rebind_split_commit_graph(
     git_validation_digest: String,
 ) -> Result<CommitGraphWrite> {
     let descriptor = CommitGraphDescriptor {
-        version: LAYER_VERSION,
+        version: graph.descriptor.version,
+        commit_ordinal_digest: graph.descriptor.commit_ordinal_digest.clone(),
         generation,
         pack_index_hash,
         git_validation_digest,
@@ -428,6 +462,7 @@ fn update_split_commit_graph(
     roots: &[[u8; 20]],
     additions: Vec<CommitGraphInput>,
     compact_layers: bool,
+    encoding: u32,
 ) -> Result<Option<CommitGraphWrite>> {
     validate_content_hash(
         &pack_index_hash,
@@ -565,6 +600,9 @@ fn update_split_commit_graph(
     }
     let new_commit_count = u32::try_from(new_records.len())
         .map_err(|_| MetadataError::Internal("commit graph exceeds u32 ordinals".to_owned()))?;
+    let commit_count = first_new_ordinal
+        .checked_add(new_commit_count)
+        .ok_or_else(|| MetadataError::Internal("commit graph exceeds u32 ordinals".to_owned()))?;
 
     let existing_layer_refs = base
         .as_ref()
@@ -581,10 +619,12 @@ fn update_split_commit_graph(
     if new_commit_count > 0 {
         changed_layers.push(layers.len() - 1);
     }
-    while compact_layers && layers.len() >= 2 {
+    while (compact_layers || encoding == PAGED_VERSION) && layers.len() >= 2 {
         let newer = layers.last().map_or(0, |layer| layer.records.len());
         let older = layers[layers.len() - 2].records.len();
-        if newer < older {
+        // Variable append sizes can leave a long decreasing layer sequence.
+        // Carry the smallest layers when needed to keep lazy OID lookup bounded.
+        if newer < older && !(encoding == PAGED_VERSION && layers.len() > MAX_PAGED_LAYERS) {
             break;
         }
         let newer = layers
@@ -603,16 +643,32 @@ fn update_split_commit_graph(
         return Ok(None);
     }
 
+    let ancestry = if encoding == PAGED_VERSION {
+        Some(ancestry::Index::build(&layers)?)
+    } else {
+        None
+    };
     let mut layer_refs = Vec::with_capacity(layers.len());
     let mut layer_objects = Vec::new();
     for (index, layer) in layers.iter().enumerate() {
         if !changed_layers.contains(&index)
             && let Some(existing) = base_layer_ref_at(layer, index, &existing_layer_refs)
+            && existing.pages.is_some() == (encoding == PAGED_VERSION)
         {
             layer_refs.push(existing.clone());
             continue;
         }
-        let bytes = encode_commit_graph_layer(layer)?;
+        let (bytes, pages) = if encoding == PAGED_VERSION {
+            let (bytes, pages) = paged::encode_layer(
+                layer,
+                ancestry.as_ref().ok_or_else(|| {
+                    crate::validation::corrupt_object("graph", "ancestry construction is absent")
+                })?,
+            )?;
+            (bytes, Some(pages))
+        } else {
+            (encode_commit_graph_layer(layer)?, None)
+        };
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let reference = CommitGraphLayerRef {
             path: format!("metadata/commit-graph/layers/{hash}.bin"),
@@ -620,20 +676,19 @@ fn update_split_commit_graph(
             base_ordinal: layer.base_ordinal,
             commit_count: layer.records.len() as u32,
             bytes: bytes.len() as u64,
+            pages,
         };
         layer_refs.push(reference.clone());
         layer_objects.push(CommitGraphLayerObject { reference, bytes });
     }
     let descriptor = CommitGraphDescriptor {
-        version: LAYER_VERSION,
+        version: encoding,
+        commit_ordinal_digest: (encoding == PAGED_VERSION)
+            .then(|| ordinal_digest(&layers, commit_count)),
         generation,
         pack_index_hash,
         git_validation_digest,
-        commit_count: first_new_ordinal
-            .checked_add(new_commit_count)
-            .ok_or_else(|| {
-                MetadataError::Internal("commit graph exceeds u32 ordinals".to_owned())
-            })?,
+        commit_count,
         layers: layer_refs,
     };
     validate_descriptor(&descriptor, &layers)?;
@@ -759,6 +814,8 @@ pub fn decode_commit_graph_layer(bytes: &[u8], path: &str) -> Result<CommitGraph
     if cursor != bytes.len() || observed_parents != declared_parents {
         return corrupt_at(path, "commit graph parent count does not match header");
     }
+    tracing::debug!(target: "crab_metadata::index_decode", index_format = "commit_graph",
+        decoded_bytes = bytes.len() as u64, "index block decoded");
     Ok(CommitGraphLayer {
         base_ordinal,
         records,
@@ -777,6 +834,8 @@ pub async fn load_split_commit_graph(
         read_split_commit_graph_descriptor(store, router, descriptor_hash, max_bytes).await?;
     let descriptor_path = router.bulk_manifest_path("commit-graph", descriptor_hash);
     let mut layers = Vec::with_capacity(descriptor.layers.len());
+    let mut ancestry_roots = Vec::new();
+    let mut ancestry_nodes = BTreeMap::new();
     for reference in &descriptor.layers {
         fetched_bytes = fetched_bytes.checked_add(reference.bytes).ok_or_else(|| {
             MetadataError::CorruptObject {
@@ -801,9 +860,28 @@ pub async fn load_split_commit_graph(
                 reason: "commit graph layer byte length mismatch".to_owned(),
             });
         }
-        layers.push(decode_commit_graph_layer(&bytes, path.as_ref())?);
+        layers.push(match &reference.pages {
+            Some(pages) => {
+                let decoded = paged::decode_layer(&bytes, reference, pages, path.as_ref())?;
+                ancestry_roots.extend(decoded.roots);
+                for (hash, node) in decoded.nodes {
+                    if ancestry_nodes
+                        .insert(hash, (node, reference.base_ordinal, reference.commit_count))
+                        .is_some()
+                    {
+                        return corrupt("ancestry node occurs in multiple layers");
+                    }
+                }
+                decoded.graph
+            }
+            None => decode_commit_graph_layer(&bytes, path.as_ref())?,
+        });
     }
-    SplitCommitGraph::new(descriptor, layers)
+    let graph = SplitCommitGraph::new(descriptor, layers)?;
+    if graph.descriptor.version == PAGED_VERSION {
+        ancestry::Index::build(&graph.layers)?.validate_layers(&ancestry_roots, &ancestry_nodes)?;
+    }
+    Ok(graph)
 }
 
 /// Load and content-verify only the small split-graph descriptor.
@@ -930,7 +1008,7 @@ fn validate_graph_records(graph: &SplitCommitGraph) -> Result<()> {
 }
 
 fn validate_descriptor_shape(descriptor: &CommitGraphDescriptor, path: &str) -> Result<()> {
-    if descriptor.version != LAYER_VERSION {
+    if !matches!(descriptor.version, LAYER_VERSION | PAGED_VERSION) {
         return corrupt_at(path, "unsupported commit graph descriptor version");
     }
     validate_content_hash(
@@ -943,6 +1021,17 @@ fn validate_descriptor_shape(descriptor: &CommitGraphDescriptor, path: &str) -> 
         "commit graph validation digest",
         path,
     )?;
+    if descriptor.version == PAGED_VERSION {
+        let digest = descriptor.commit_ordinal_digest.as_deref().ok_or_else(|| {
+            crate::validation::corrupt_object(path, "paged graph positional identity is absent")
+        })?;
+        validate_content_hash(digest, "graph positional identity", path)?;
+        if descriptor.layers.len() > MAX_PAGED_LAYERS {
+            return corrupt_at(path, "paged graph layer directory exceeds its bound");
+        }
+    } else if descriptor.commit_ordinal_digest.is_some() {
+        return corrupt_at(path, "released graph has paged identity fields");
+    }
     let mut next = 0u32;
     for layer in &descriptor.layers {
         validate_content_hash(&layer.hash, "commit graph layer hash", path)?;
@@ -952,6 +1041,11 @@ fn validate_descriptor_shape(descriptor: &CommitGraphDescriptor, path: &str) -> 
             || layer.bytes < LAYER_HEADER_BYTES as u64
         {
             return corrupt_at(path, "invalid commit graph layer reference");
+        }
+        match (&layer.pages, descriptor.version) {
+            (Some(pages), PAGED_VERSION) => paged::validate_roots(layer, pages, path)?,
+            (None, LAYER_VERSION) => {}
+            _ => return corrupt_at(path, "graph layer format does not match descriptor"),
         }
         next =
             next.checked_add(layer.commit_count)
@@ -1030,6 +1124,23 @@ fn parse_sha1_hex(value: &str) -> Option<[u8; 20]> {
         *byte = u8::from_str_radix(&value[offset..offset + 2], 16).ok()?;
     }
     Some(oid)
+}
+
+fn ordinal_digest(layers: &[CommitGraphLayer], commit_count: u32) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab commit ordinal identity\0");
+    hasher.update(&commit_count.to_le_bytes());
+    for layer in layers {
+        for record in &layer.records {
+            hasher.update(&record.oid);
+            hasher.update(&record.tree_oid);
+            hasher.update(&(record.parents.len() as u32).to_le_bytes());
+            for parent in &record.parents {
+                hasher.update(&parent.to_le_bytes());
+            }
+        }
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 fn corrupt<T>(reason: &str) -> Result<T> {
@@ -1351,6 +1462,7 @@ mod tests {
     fn descriptor_compaction_due_only_when_newest_layer_reaches_older_layer() {
         let descriptor = |counts: &[u32]| CommitGraphDescriptor {
             version: 1,
+            commit_ordinal_digest: None,
             generation: 1,
             pack_index_hash: hash(1),
             git_validation_digest: hash(2),
@@ -1364,6 +1476,7 @@ mod tests {
                     base_ordinal: 0,
                     commit_count: *count,
                     bytes: 1,
+                    pages: None,
                 })
                 .collect(),
         };
@@ -1379,6 +1492,7 @@ mod tests {
     fn rejects_parent_that_is_not_earlier_than_child() {
         let descriptor = CommitGraphDescriptor {
             version: 1,
+            commit_ordinal_digest: None,
             generation: 1,
             pack_index_hash: hash(1),
             git_validation_digest: hash(2),
@@ -1389,6 +1503,7 @@ mod tests {
                 base_ordinal: 0,
                 commit_count: 1,
                 bytes: 88,
+                pages: None,
             }],
         };
         let layer = CommitGraphLayer {

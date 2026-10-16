@@ -322,13 +322,32 @@ fn validate_file_terms<'a>(
     Ok(())
 }
 
+/// Reusable file-term validation against one borrowed xorb metadata bundle.
+pub struct FileBundleValidator<'a> {
+    by_hash: HashMap<MerkleHash, &'a MDBXorbInfo>,
+}
+
+impl<'a> FileBundleValidator<'a> {
+    /// Index the supplied dependencies once for multiple file checks.
+    #[must_use]
+    pub fn new(dependencies: &'a [MDBXorbInfo]) -> Self {
+        Self {
+            by_hash: dependencies
+                .iter()
+                .map(|dependency| (dependency.metadata.xorb_hash, dependency))
+                .collect(),
+        }
+    }
+
+    /// Validate one file's ranges and byte coverage against this exact bundle.
+    pub fn validate(&self, file_info: &MDBFileInfo) -> Result<()> {
+        validate_file_terms(file_info, |hash| self.by_hash.get(hash).copied())
+    }
+}
+
 /// Validate one file entry against the exact xorb metadata bundled with it.
 pub fn validate_file_bundle(file_info: &MDBFileInfo, dependencies: &[MDBXorbInfo]) -> Result<()> {
-    let by_hash = dependencies
-        .iter()
-        .map(|dependency| (dependency.metadata.xorb_hash, dependency))
-        .collect::<HashMap<_, _>>();
-    validate_file_terms(file_info, |hash| by_hash.get(hash).copied())
+    FileBundleValidator::new(dependencies).validate(file_info)
 }
 
 /// Lazy-loading shard reader backed by raw bytes.
@@ -821,6 +840,19 @@ mod tests {
             verification: vec![],
             metadata_ext: None,
         }
+    }
+
+    #[test]
+    fn bundle_validator_keeps_dependencies_after_a_failed_file() {
+        let dependency = make_xorb(7, 2);
+        let dependencies = vec![dependency.as_ref().clone()];
+        let validator = FileBundleValidator::new(&dependencies);
+        let mut invalid = make_file(1, 7);
+        invalid.segments[0].unpacked_segment_bytes += 1;
+        assert!(validator.validate(&invalid).is_err());
+        assert!(validator.validate(&make_file(2, 7)).is_ok());
+        assert!(validator.validate(&make_file(3, 8)).is_err());
+        assert!(validator.validate(&make_file(4, 7)).is_ok());
     }
 
     #[test]

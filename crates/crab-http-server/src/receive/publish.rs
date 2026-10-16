@@ -424,7 +424,7 @@ async fn publish_attempt(
         .into());
     }
     let refs = view.refs().clone();
-    let visibility = view.git_visibility_index()?;
+    let visibility = view.git_visibility_index().await?;
     let has_branch = refs.keys().any(|name| name.starts_with("refs/heads/"));
     let actor = principal.identity().ok_or(ReceiveError::Forbidden)?;
     let initial_head = (!has_branch)

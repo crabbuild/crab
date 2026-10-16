@@ -9,6 +9,23 @@ use crate::validation::validate_content_hash;
 
 const POINTER_CATALOG_VERSION: u32 = 1;
 
+#[cfg(feature = "storage")]
+pub(super) mod inspection;
+pub(in crate::capsule_protocol) mod object;
+pub(super) mod paged;
+#[cfg(feature = "storage")]
+mod relations;
+#[cfg(feature = "storage")]
+pub(super) mod spill;
+#[cfg(feature = "storage")]
+pub use inspection::{
+    PointerCatalogCounts, PointerCatalogEntry, PointerCatalogInspection, PointerCatalogObject,
+    PointerCatalogShardInspection, inspect_pointer_catalog,
+};
+pub use paged::MAX_CATALOG_BYTES;
+#[cfg(feature = "storage")]
+pub use paged::PointerCatalogLookup;
+
 /// One file identity and the canonical shard that reconstructs it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -154,6 +171,105 @@ impl Default for PointerCatalog {
     }
 }
 
+/// Assemble a captured visible catalog without assuming dependency order across refs.
+///
+/// File bindings retain capture order; immutable conflicts fail immediately.
+/// Dependency completeness is required before the catalog can leave the assembly.
+#[must_use]
+pub struct PointerCatalogAssembly {
+    catalog: PointerCatalog,
+}
+
+impl PointerCatalogAssembly {
+    /// Start with the captured checkpoint catalog, or an empty catalog before checkpointing.
+    pub fn new(catalog: PointerCatalog) -> Self {
+        Self { catalog }
+    }
+
+    /// Add one ordered visible delta, validating its rows and immutable conflicts.
+    ///
+    /// Discard the assembly if a delta fails. Dependencies may come from another
+    /// visible ref; callers must finish before using the resulting catalog.
+    pub fn apply(&mut self, delta: &PointerCatalog) -> Result<()> {
+        self.catalog.merge_delta(delta)
+    }
+
+    /// Return an ordered delta whose missing dependencies must be resolved from its base.
+    pub fn finish_delta(self) -> Result<PointerCatalog> {
+        self.catalog.validate(false, false)?;
+        Ok(self.catalog)
+    }
+
+    /// Return the captured catalog only if its complete dependency closure is valid.
+    pub fn finish(self) -> Result<PointerCatalog> {
+        self.catalog.validate(true, false)?;
+        Ok(self.catalog)
+    }
+}
+
+pub(in crate::capsule_protocol) fn hash(value: &str) -> Result<[u8; 32]> {
+    let bytes = value.as_bytes();
+    // Binary keys cannot distinguish hex aliases. Reject them instead of silently
+    // merging two descriptors that were distinct in the caller's map.
+    if bytes.len() != 64
+        || bytes
+            .iter()
+            .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(byte))
+    {
+        return Err(contract_error(
+            "catalog hashes must be lowercase canonical hex",
+        ));
+    }
+    // Encode text order directly: Xet's raw hash bytes reverse each u64 word.
+    // Using those bytes as keys would change the original BTreeMap precedence.
+    let digit = |byte: u8| match byte {
+        b'0'..=b'9' => byte - b'0',
+        _ => byte - b'a' + 10,
+    };
+    Ok(std::array::from_fn(|index| {
+        (digit(bytes[index * 2]) << 4) | digit(bytes[index * 2 + 1])
+    }))
+}
+
+fn hex(bytes: &[u8]) -> Result<String> {
+    if bytes.len() != 32 {
+        return Err(corrupt("catalog hash has an invalid byte length"));
+    }
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(64);
+    for byte in bytes {
+        value.push(DIGITS[(byte >> 4) as usize] as char);
+        value.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    Ok(value)
+}
+
+// Bound unavoidable row payload before cloning caller-owned catalogs or recipes.
+// Both packed deltas and object-paged checkpoints share this admission rule;
+// page framing and actual encoded bytes are checked again by their writers.
+pub(in crate::capsule_protocol) fn admit_catalog_rows(
+    catalogs: &[PointerCatalog],
+    maximum: u64,
+) -> Result<()> {
+    let bytes = catalogs.iter().try_fold(0u64, |sum, catalog| {
+        let sum = sum.checked_add((catalog.files.len() as u64).checked_mul(76)?)?;
+        let sum = catalog.xorbs.values().try_fold(sum, |sum, xorb| {
+            sum.checked_add(76)?
+                .checked_add((xorb.chunks.len() as u64).checked_mul(44)?)
+        })?;
+        catalog.shards.values().try_fold(sum, |sum, shard| {
+            sum.checked_add(44)?
+                .checked_add((shard.xorb_hashes.len() as u64).checked_mul(36)?)
+        })
+    });
+    if bytes.is_none_or(|bytes| bytes > maximum.min(MAX_CATALOG_BYTES)) {
+        return Err(contract_error(
+            "catalog rows exceed their encoded byte bound",
+        ));
+    }
+    Ok(())
+}
+
 impl PointerCatalog {
     #[must_use]
     pub fn new() -> Self {
@@ -186,6 +302,11 @@ impl PointerCatalog {
 
     /// Apply one publication delta, rejecting immutable identity conflicts.
     pub fn apply(&mut self, delta: &Self) -> Result<()> {
+        self.merge_delta(delta)?;
+        self.validate(true, false)
+    }
+
+    fn merge_delta(&mut self, delta: &Self) -> Result<()> {
         delta.validate(false, false)?;
         for (hash, entry) in &delta.xorbs {
             self.insert_xorb(hash.clone(), entry.clone())?;
@@ -194,67 +315,41 @@ impl PointerCatalog {
             self.insert_shard(hash.clone(), entry.clone())?;
         }
         for (hash, entry) in &delta.files {
-            match self.files.get(hash) {
-                Some(existing) if existing.size != entry.size => {
-                    return Err(contract_error(format!(
-                        "file {hash} has conflicting declared sizes"
-                    )));
-                }
-                _ => {
-                    self.files.insert(hash.clone(), entry.clone());
-                }
+            if let Some(existing) = self.files.get(hash) {
+                validate_binding_size(hash, existing.size, entry.size)?;
             }
+            self.files.insert(hash.clone(), entry.clone());
         }
-        self.validate(true, false)
+        Ok(())
     }
 
-    /// Canonically encode and validate this catalog.
+    /// Encode this complete catalog as bounded authenticated page trees.
+    ///
+    /// Rejects incomplete dependencies, noncanonical hash keys and oversized catalogs.
     pub fn encode(&self) -> Result<Bytes> {
         self.encode_with_validation(true)
     }
 
-    /// Canonically encode a delta whose dependencies may come from its base catalog.
+    /// Encode paged delta metadata whose dependencies may come from its base catalog.
     pub fn encode_delta(&self) -> Result<Bytes> {
         self.encode_with_validation(false)
     }
 
     fn encode_with_validation(&self, require_complete_closure: bool) -> Result<Bytes> {
         self.validate(require_complete_closure, false)?;
-        serde_json::to_vec(self)
-            .map(Bytes::from)
-            .map_err(|source| MetadataError::Internal(format!("pointer catalog encode: {source}")))
+        paged::encode(self)
     }
 
-    /// Decode canonical bytes and validate their complete dependency closure.
+    /// Authenticate canonical pages and validate their complete dependency closure.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        let catalog: Self =
-            serde_json::from_slice(bytes).map_err(|source| MetadataError::CorruptObject {
-                path: "capsule-protocol pointer catalog".to_owned(),
-                reason: format!("invalid JSON: {source}"),
-            })?;
-        let canonical = serde_json::to_vec(&catalog).map_err(|source| {
-            MetadataError::Internal(format!("pointer catalog re-encode: {source}"))
-        })?;
-        if canonical != bytes {
-            return Err(corrupt("catalog is not canonically encoded"));
-        }
+        let catalog = paged::decode(bytes)?;
         catalog.validate(true, true)?;
         Ok(catalog)
     }
 
-    /// Decode a canonical delta and defer base-dependent closure checks to apply.
+    /// Authenticate canonical delta pages, deferring base-owned closure checks to apply.
     pub fn decode_delta(bytes: &[u8]) -> Result<Self> {
-        let catalog: Self =
-            serde_json::from_slice(bytes).map_err(|source| MetadataError::CorruptObject {
-                path: "capsule-protocol pointer catalog".to_owned(),
-                reason: format!("invalid JSON: {source}"),
-            })?;
-        let canonical = serde_json::to_vec(&catalog).map_err(|source| {
-            MetadataError::Internal(format!("pointer catalog re-encode: {source}"))
-        })?;
-        if canonical != bytes {
-            return Err(corrupt("catalog is not canonically encoded"));
-        }
+        let catalog = paged::decode(bytes)?;
         catalog.validate(false, true)?;
         Ok(catalog)
     }
@@ -344,12 +439,31 @@ fn insert_consistent<T: PartialEq>(
     entry: T,
     kind: &str,
 ) -> Result<()> {
-    if map.get(&hash).is_some_and(|existing| existing != &entry) {
+    validate_consistent(map.get(&hash), &entry, &hash, kind)?;
+    map.insert(hash, entry);
+    Ok(())
+}
+
+fn validate_binding_size(hash: &str, previous: u64, incoming: u64) -> Result<()> {
+    if previous != incoming {
+        return Err(contract_error(format!(
+            "file {hash} has conflicting declared sizes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_consistent<T: PartialEq + ?Sized>(
+    previous: Option<&T>,
+    incoming: &T,
+    hash: &str,
+    kind: &str,
+) -> Result<()> {
+    if previous.is_some_and(|previous| previous != incoming) {
         return Err(contract_error(format!(
             "{kind} {hash} has conflicting descriptors"
         )));
     }
-    map.insert(hash, entry);
     Ok(())
 }
 
@@ -460,6 +574,13 @@ mod tests {
     fn apply_rejects_dependency_absent_from_delta_and_base() {
         let mut current = PointerCatalog::new();
         assert!(current.apply(&delta_with_base_xorb()).is_err());
+    }
+
+    #[test]
+    fn visible_assembly_rejects_unresolved_dependencies_at_finish() {
+        let mut assembly = PointerCatalogAssembly::new(PointerCatalog::new());
+        assembly.apply(&delta_with_base_xorb()).unwrap();
+        assert!(assembly.finish().is_err());
     }
 
     #[test]

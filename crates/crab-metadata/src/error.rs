@@ -6,6 +6,9 @@ pub type Result<T> = std::result::Result<T, MetadataError>;
 /// Errors raised by metadata schema and local index helpers.
 #[derive(thiserror::Error, Debug)]
 pub enum MetadataError {
+    /// Checkpoint metadata and its catalog exceed the caller's aggregate read budget.
+    #[error("checkpoint metadata uses {bytes} encoded bytes, exceeding its {maximum}-byte limit")]
+    CheckpointSize { bytes: u64, maximum: u64 },
     /// A constructed path-state index cannot be admitted by its intended reader.
     #[error("path-state index uses {bytes} encoded bytes, exceeding its {maximum}-byte limit")]
     PathStateSize { bytes: u64, maximum: u64 },
@@ -18,6 +21,28 @@ pub enum MetadataError {
     /// The derived capsule browse-index record could not be encoded or decoded.
     #[error("invalid capsule browse-index JSON")]
     BrowseIndexRecord {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("invalid capsule source-retention JSON")]
+    SourceRetentionRecord {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("Git object index record encoding is invalid")]
+    GitObjectIndexRecord {
+        #[source]
+        source: serde_json::Error,
+    },
+    /// A capsule visibility page descriptor or edit record could not be encoded or decoded.
+    #[error("capsule visibility record encoding is invalid")]
+    CapsuleVisibilityRecord {
+        #[source]
+        source: serde_json::Error,
+    },
+    /// A pointer catalog page descriptor could not be encoded or decoded.
+    #[error("pointer catalog record encoding is invalid")]
+    PointerCatalogRecord {
         #[source]
         source: serde_json::Error,
     },
@@ -76,6 +101,11 @@ pub enum MetadataError {
     #[cfg(feature = "storage")]
     #[error("ref journal publication cancelled before commit")]
     RefJournalCancelled,
+
+    /// Hint publication stopped before advertising its replacement global root.
+    #[cfg(feature = "storage")]
+    #[error("capsule hint publication cancelled before root visibility")]
+    CapsuleHintCancelled,
 
     /// Durable attempt evidence prevents a new execution of this plan.
     #[cfg(feature = "storage")]

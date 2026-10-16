@@ -1,4 +1,4 @@
-//! Read-only file-index lookup over a repository's SlateDB metadata.
+//! Snapshot-bound file/shard lookup over authenticated repository metadata.
 //!
 //! This Module owns the read Interface for `file_hash -> shard_hash` point
 //! lookups. It does not own metadata writes, CLI error presentation, metrics,
@@ -22,6 +22,7 @@ use crab_xet::xorb::format::MerkleHash;
 const DB_LABEL: &str = "file_index_db";
 const GET_BATCH_CONCURRENCY: usize = 256;
 const SHARD_SEARCH_CONCURRENCY: usize = 4;
+const MAX_VERIFIED_CATALOG_FILES: usize = 4096;
 static SHARD_SCANS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(SHARD_SEARCH_CONCURRENCY)));
 
@@ -145,7 +146,7 @@ impl CommittedShardAnchor {
 }
 
 #[derive(Debug, Default)]
-struct ManifestFallbackCache {
+struct FileLookupCache {
     found: HashMap<MerkleHash, MerkleHash>,
     missing: HashSet<MerkleHash>,
     shard_visits: usize,
@@ -224,13 +225,13 @@ async fn lookup_committed_record(
 /// Opens the repo's `file_index_db` once, serves one or many point lookups, and
 /// closes the underlying SlateDB reader when consumed.
 pub struct FileIndexLookupSession {
-    static_entries: Option<Arc<HashMap<MerkleHash, MerkleHash>>>,
+    catalog: Option<Arc<crate::capsule_protocol::PointerCatalogLookup>>,
     reader: Option<Arc<slatedb::DbReader>>,
     anchor: Option<CommittedShardAnchor>,
     storage: crab_storage::Store,
     router: crab_storage::StoreLayout<crab_storage::Store>,
     parsers: tokio_util::task::TaskTracker,
-    manifest_fallback: tokio::sync::Mutex<ManifestFallbackCache>,
+    resolved_files: tokio::sync::Mutex<FileLookupCache>,
     limits: FileIndexLookupLimits,
 }
 
@@ -244,13 +245,13 @@ impl FileIndexLookupSession {
         snapshot: &RepositorySnapshot,
     ) -> Result<Self> {
         Ok(Self {
-            static_entries: None,
+            catalog: None,
             reader: None,
             anchor: CommittedShardAnchor::from_snapshot(snapshot)?,
             storage: router.store().clone(),
             router,
             parsers: tokio_util::task::TaskTracker::new(),
-            manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+            resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
             limits: FileIndexLookupLimits::CURRENT_STATE,
         })
     }
@@ -307,13 +308,13 @@ impl FileIndexLookupSession {
         )?;
         let anchor = CommittedShardAnchor::from_snapshot(snapshot)?;
         Ok(Self {
-            static_entries: None,
+            catalog: None,
             reader: None,
             anchor,
             storage: router.store().clone(),
             router: router.clone(),
             parsers: tokio_util::task::TaskTracker::new(),
-            manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+            resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
             limits,
         })
     }
@@ -367,13 +368,13 @@ impl FileIndexLookupSession {
             })
         };
         Ok(Self {
-            static_entries: None,
+            catalog: None,
             reader: None,
             anchor,
             storage: router.store().clone(),
             router: router.clone(),
             parsers: tokio_util::task::TaskTracker::new(),
-            manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+            resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
             limits,
         })
     }
@@ -389,38 +390,16 @@ impl FileIndexLookupSession {
                 // Only an absent root permits v1 lookup. Missing dependencies
                 // under a verified v2 root must not revive older v1 authority.
                 let catalog =
-                    crate::capsule_protocol::load_pointer_catalog_from_root(&router, &root).await?;
-                let entries = catalog
-                    .files()
-                    .iter()
-                    .map(|(file_hash, entry)| {
-                        Ok((
-                            MerkleHash::from_hex(file_hash).map_err(|error| {
-                                MetadataError::CorruptObject {
-                                    path: "capsule-protocol pointer catalog".to_owned(),
-                                    reason: format!("invalid file hash {file_hash}: {error}"),
-                                }
-                            })?,
-                            MerkleHash::from_hex(entry.shard_hash()).map_err(|error| {
-                                MetadataError::CorruptObject {
-                                    path: "capsule-protocol pointer catalog".to_owned(),
-                                    reason: format!(
-                                        "invalid shard hash {}: {error}",
-                                        entry.shard_hash()
-                                    ),
-                                }
-                            })?,
-                        ))
-                    })
-                    .collect::<Result<HashMap<_, _>>>()?;
+                    crate::capsule_protocol::load_pointer_catalog_lookup_from_root(&router, &root)
+                        .await?;
                 return Ok(Self {
-                    static_entries: Some(Arc::new(entries)),
+                    catalog: Some(Arc::new(catalog)),
                     reader: None,
                     anchor: None,
                     storage,
                     router,
                     parsers: tokio_util::task::TaskTracker::new(),
-                    manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+                    resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
                     limits: FileIndexLookupLimits::CURRENT_STATE,
                 });
             }
@@ -438,13 +417,13 @@ impl FileIndexLookupSession {
             Err(error) => return Err(error),
         };
         let mut session = Self {
-            static_entries: None,
+            catalog: None,
             reader: None,
             anchor,
             storage,
             router,
             parsers: tokio_util::task::TaskTracker::new(),
-            manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+            resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
             limits: FileIndexLookupLimits::CURRENT_STATE,
         };
         if use_acceleration {
@@ -477,8 +456,13 @@ impl FileIndexLookupSession {
 
     /// Look up one file hash in the open session.
     pub async fn lookup(&self, file_hash: &MerkleHash) -> Result<Option<MerkleHash>> {
-        if let Some(entries) = &self.static_entries {
-            return Ok(entries.get(file_hash).copied());
+        if self.catalog.is_some() {
+            return Ok(self
+                .lookup_batch(&[*file_hash])
+                .await?
+                .into_iter()
+                .next()
+                .flatten());
         }
         if let Some(reader) = self.reader.as_ref()
             && let Some(record) =
@@ -505,13 +489,9 @@ impl FileIndexLookupSession {
         if file_hashes.is_empty() {
             return Ok(Vec::new());
         }
-        if let Some(entries) = &self.static_entries {
-            return Ok(file_hashes
-                .iter()
-                .map(|file_hash| entries.get(file_hash).copied())
-                .collect());
+        if let Some(lookup) = &self.catalog {
+            return self.catalog_lookup_batch(lookup, file_hashes).await;
         }
-
         let records = self.lookup_committed_records_batch(file_hashes).await?;
         let mut out = records
             .into_iter()
@@ -531,6 +511,74 @@ impl FileIndexLookupSession {
             out[index] = shard_hash;
         }
         Ok(out)
+    }
+
+    async fn catalog_lookup_batch(
+        &self,
+        lookup: &crate::capsule_protocol::PointerCatalogLookup,
+        hashes: &[MerkleHash],
+    ) -> Result<Vec<Option<MerkleHash>>> {
+        let mut output = vec![None; hashes.len()];
+        let missing = {
+            let cache = self.resolved_files.lock().await;
+            hashes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, hash)| {
+                    if let Some(shard) = cache.found.get(hash) {
+                        output[index] = Some(*shard);
+                        return None;
+                    }
+                    (!cache.missing.contains(hash)).then_some((index, *hash))
+                })
+                .collect::<Vec<_>>()
+        };
+        let keys = missing
+            .iter()
+            .map(|(_, hash)| hash.hex())
+            .collect::<Vec<_>>();
+        let cached_files = hashes.len() - missing.len();
+        // Verified bindings belong to this immutable capture. Keep only the
+        // small result, but admit every input and validate cold dependency closure.
+        let selected = lookup
+            .files_for_lookup(&self.storage, &keys, cached_files)
+            .await?;
+        for (index, hash) in &missing {
+            output[*index] = selected
+                .files()
+                .get(&hash.hex())
+                .map(|entry| {
+                    MerkleHash::from_hex(entry.shard_hash()).map_err(|source| {
+                        MetadataError::CorruptObject {
+                            path: "capsule-protocol pointer catalog".to_owned(),
+                            reason: format!("invalid shard hash {}: {source}", entry.shard_hash()),
+                        }
+                    })
+                })
+                .transpose()?;
+        }
+        if !missing.is_empty() {
+            let mut cache = self.resolved_files.lock().await;
+            for (index, hash) in missing {
+                if cache.found.contains_key(&hash) || cache.missing.contains(&hash) {
+                    continue;
+                }
+                // Duplicate occurrences consume input budget, but retain one fact.
+                if cache.found.len() + cache.missing.len() == MAX_VERIFIED_CATALOG_FILES {
+                    cache.found.clear();
+                    cache.missing.clear();
+                }
+                match output[index] {
+                    Some(shard) => {
+                        cache.found.insert(hash, shard);
+                    }
+                    None => {
+                        cache.missing.insert(hash);
+                    }
+                }
+            }
+        }
+        Ok(output)
     }
 
     /// Return only generation-pinned acceleration hits, without invoking the
@@ -581,7 +629,7 @@ impl FileIndexLookupSession {
         let Some(anchor) = self.anchor.as_ref() else {
             return Ok(vec![None; file_hashes.len()]);
         };
-        let mut cache = self.manifest_fallback.lock().await;
+        let mut cache = self.resolved_files.lock().await;
         let unresolved = file_hashes
             .iter()
             .filter(|file_hash| {
@@ -739,9 +787,9 @@ fn spawn_shard_parse(
 }
 
 enum LookupSource {
-    Static {
+    Catalog {
         router: crab_storage::StoreLayout<crab_storage::Store>,
-        entries: Arc<HashMap<MerkleHash, MerkleHash>>,
+        lookup: Arc<crate::capsule_protocol::PointerCatalogLookup>,
     },
     Current {
         store: crab_storage::Store,
@@ -759,14 +807,14 @@ enum LookupSource {
 impl LookupSource {
     async fn open(&self) -> Result<FileIndexLookupSession> {
         match self {
-            Self::Static { router, entries } => Ok(FileIndexLookupSession {
-                static_entries: Some(Arc::clone(entries)),
+            Self::Catalog { router, lookup } => Ok(FileIndexLookupSession {
+                catalog: Some(Arc::clone(lookup)),
                 reader: None,
                 anchor: None,
                 storage: router.store().clone(),
                 router: router.clone(),
                 parsers: tokio_util::task::TaskTracker::new(),
-                manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+                resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
                 limits: FileIndexLookupLimits::CURRENT_STATE,
             }),
             Self::Current {
@@ -807,45 +855,25 @@ pub struct SharedFileIndexLookup {
 }
 
 impl SharedFileIndexLookup {
-    /// Lazily resolve files from an already authenticated pointer catalog.
+    /// Resolve files lazily from the caller's captured authenticated catalog roots.
     ///
-    /// This binds the lookup to the catalog captured by a caller's immutable
-    /// v2 view. Lookups never open the mutable file-index database or widen to
-    /// a later repository state.
+    /// The caller retains these roots against GC. Lookups never open mutable
+    /// metadata or widen to a later repository state; dependency errors stay errors.
+    #[must_use]
     pub fn for_pointer_catalog(
         router: crab_storage::StoreLayout<crab_storage::Store>,
-        catalog: &crate::capsule_protocol::PointerCatalog,
-    ) -> Result<Self> {
-        let entries = catalog
-            .files()
-            .iter()
-            .map(|(file_hash, entry)| {
-                Ok((
-                    MerkleHash::from_hex(file_hash).map_err(|source| {
-                        MetadataError::CorruptObject {
-                            path: "capsule-protocol pointer catalog".to_owned(),
-                            reason: format!("invalid file hash {file_hash}: {source}"),
-                        }
-                    })?,
-                    MerkleHash::from_hex(entry.shard_hash()).map_err(|source| {
-                        MetadataError::CorruptObject {
-                            path: "capsule-protocol pointer catalog".to_owned(),
-                            reason: format!("invalid shard hash {}: {source}", entry.shard_hash()),
-                        }
-                    })?,
-                ))
-            })
-            .collect::<Result<HashMap<_, _>>>()?;
-        Ok(Self {
+        lookup: crate::capsule_protocol::PointerCatalogLookup,
+    ) -> Self {
+        Self {
             inner: Arc::new(SharedFileIndexLookupInner {
-                source: LookupSource::Static {
+                source: LookupSource::Catalog {
                     router,
-                    entries: Arc::new(entries),
+                    lookup: Arc::new(lookup),
                 },
                 session: tokio::sync::RwLock::new(tokio::sync::OnceCell::new()),
                 closed: AtomicBool::new(false),
             }),
-        })
+        }
     }
 
     /// Lazily resolve files from one captured immutable shard-index root without writes.
@@ -976,6 +1004,8 @@ pub async fn resolve_file_hash_to_shard(
     result
 }
 
+#[cfg(test)]
+mod catalog_tests;
 #[cfg(test)]
 mod shared_tests;
 #[cfg(test)]
@@ -1831,30 +1861,5 @@ mod tests {
             .await
             .expect_err("closed clone must reject future lookups");
         assert!(matches!(err, MetadataError::Internal(_)));
-    }
-
-    #[tokio::test]
-    async fn shared_lookup_from_pointer_catalog_never_reads_latest_index() {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let storage = crab_storage::Store::new(Arc::clone(&store));
-        let router = crab_storage::StoreLayout::new(storage, "org/pinned".to_owned());
-        let file_hash = hash_from_seed(91);
-        let shard_hash = hash_from_seed(92);
-        let mut catalog = crate::capsule_protocol::PointerCatalog::new();
-        catalog
-            .insert_file(
-                file_hash.hex(),
-                crate::capsule_protocol::FileCatalogEntry::new(16, shard_hash.hex()),
-            )
-            .unwrap();
-
-        let lookup = SharedFileIndexLookup::for_pointer_catalog(router, &catalog).unwrap();
-        assert_eq!(lookup.lookup(&file_hash).await.unwrap(), Some(shard_hash));
-        assert_eq!(
-            lookup.lookup(&hash_from_seed(93)).await.unwrap(),
-            None,
-            "the captured catalog is authoritative for this mount"
-        );
-        lookup.close().await.unwrap();
     }
 }

@@ -45,9 +45,20 @@ writes, bounded reads, byte/request observers, and provider-neutral
 `StorageError` values. `put_if_absent` distinguishes a new immutable object
 from an identical retry without a preceding HEAD, and streamed size/hash
 verification uses the GET response metadata instead of a separate HEAD.
+`create_or_read_immutable` retains both ETag and version from the successful
+PUT, verified readback, or occupied-key GET alongside its outcome. Origin proof
+consumers must carry that identity with the verified bytes; a later HEAD may
+observe another object version. Occupied-key bytes still require caller validation.
 `Store::verify_bounded` combines that content-hash contract with pre-body size
 admission and streamed length checks. It uses one GET for a successful read;
 the limit applies to buffered encoded bytes, not the caller's decoded objects.
+Readback-required immutable writes use that same bounded verifier and corruption
+retry: one corrupt hash response permits one more GET, while persistent corruption
+still fails. An acknowledged PUT is not replayed during verification. A successful
+logical create carries the ETag and version from the hash-verified GET, including
+when that response follows a corrupt read. Checksum-qualified writes still skip
+readback, and occupied logical content addresses still return their body for
+caller validation rather than requiring the candidate's physical encoding.
 
 The admission token cancels pending admission, response headers, streamed
 body reads and pending listings without retrying the cancellation.
@@ -183,3 +194,22 @@ chain selection and retains the built store's signing, multipart and target
 identity capabilities. Azure logical identity retains account and container.
 The existing environment-selection and grant-endpoint constructors retain their
 caller policies; all share the provider construction implementation.
+
+## Private maintenance spills
+
+`scratch::ScratchSpace` owns bounded immutable local spill files. `temporary`
+selects platform temporary storage; `create` accepts an existing private parent.
+It admits live bytes before creation and verifies exact length, EOF and Blake3 on reads. References cannot cross workspace identities.
+Catalog maintenance uses it to replace repeated remote joins with sorted local
+reductions. This does not change foreground metadata reads or provider routing.
+
+Every blocking operation pins its directory until the worker exits, even when its
+awaiting future is dropped. `close` drains those workers before removing the root;
+callers retain primary validation errors while reporting cleanup failures. Drop
+performs best-effort off-thread cleanup after the last owner exits. No SlateDB,
+SQLite, new dependency or additional configuration is introduced by this transport.
+
+The `test-support` `CountingObjectStore::cancel_after_put` hook arms one
+cancellation after a successful PUT beneath a selected component prefix. It
+leaves failed writes and unrelated keys untouched, so publication tests can
+separate immutable-preparation cancellation from cancellation after visibility.

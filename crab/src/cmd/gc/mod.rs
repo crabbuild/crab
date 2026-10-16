@@ -22,6 +22,8 @@ pub mod parallel_enum;
 
 #[cfg(test)]
 mod capsule_cleanup_tests;
+#[cfg(test)]
+mod captured_index_tests;
 
 use std::collections::HashSet;
 #[cfg(test)]
@@ -3054,7 +3056,29 @@ pub async fn run_repo_remote_gc(
     grace_period: Duration,
     _jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
 ) -> Result<GcOutcome> {
-    run_capsule_gc(
+    if args.resume_run_id.is_some() {
+        return Err(CrabError::Configuration {
+            key: "gc.resume".to_owned(),
+            origin: "protocol-v2 GC completes under one root fence and has no journal resume mode"
+                .to_owned(),
+        });
+    }
+    if args.force && !confirm_force(args)? {
+        return Ok(GcOutcome::default());
+    }
+    check_cancelled(cancel)?;
+    // Auth-issued view-local content has one repository owner. Its hint pages
+    // need global admission before the repository sweep, matching publisher order.
+    // An arbitrary explicit layout does not establish that ownership.
+    let global = if !args.dry_run && owns_scoped_hint_pages(store, router) {
+        Some(
+            crate::maintenance::GcSweepLease::acquire(store, router.global_prefix(), cancel)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let operation = run_capsule_gc(
         args,
         store,
         router,
@@ -3062,7 +3086,24 @@ pub async fn run_repo_remote_gc(
         cancel,
         grace_period,
     )
-    .await
+    .await;
+    let release = match global {
+        Some(lease) => lease.release().await,
+        None => Ok(()),
+    };
+    match (operation, release) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn owns_scoped_hint_pages<S>(store: &Store, layout: &crab_storage::StoreLayout<S>) -> bool {
+    store.storage_scope().is_some_and(|scope| {
+        !scope.repo_prefix.is_empty()
+            && scope.repo_prefix == layout.repo_prefix()
+            && scope.global_prefix == layout.global_prefix()
+            && scope.global_prefix == format!("{}/.crab", scope.repo_prefix)
+    })
 }
 
 async fn run_capsule_gc(
@@ -3075,17 +3116,6 @@ async fn run_capsule_gc(
 ) -> Result<GcOutcome> {
     const FENCE_TTL: Duration = Duration::from_secs(60 * 60);
 
-    if args.resume_run_id.is_some() {
-        return Err(CrabError::Configuration {
-            key: "gc.resume".to_owned(),
-            origin: "protocol-v2 GC completes under one root fence and has no journal resume mode"
-                .to_owned(),
-        });
-    }
-    if args.force && !confirm_force(args)? {
-        return Ok(GcOutcome::default());
-    }
-    check_cancelled(cancel)?;
     let started = Instant::now();
     let snapshot_at = SystemTime::now();
     let layout = crab_storage::StoreLayout::with_global_prefix(
@@ -3134,14 +3164,12 @@ async fn run_capsule_gc(
             )
             .await?;
             let snapshot = view.git_snapshot()?;
-            let state_digest = view.state_digest().to_owned();
             sweep_capsule_objects(
                 args,
                 store,
                 &layout,
                 fenced.record().root(),
                 view.capsule_run_pointers(),
-                &state_digest,
                 &snapshot.manifest,
                 coordinator_protected_keys,
                 cancel,
@@ -3183,7 +3211,6 @@ async fn sweep_capsule_objects(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     root: &crab_metadata::capsule_protocol::RepositoryRoot,
     capsule_runs: &[crab_metadata::capsule_protocol::CapsulePointer],
-    state_digest: &str,
     manifest: &crab_metadata::manifests::Manifest,
     coordinator_protected_keys: &HashSet<String>,
     cancel: &CancellationToken,
@@ -3192,13 +3219,15 @@ async fn sweep_capsule_objects(
     started: Instant,
 ) -> Result<GcOutcome> {
     let mut reachable = HashSet::new();
+    let mut verified_catalogs = HashSet::new();
     if let Some(checkpoint) = root.checkpoint() {
         reachable.insert(
             layout
                 .capsule_checkpoint_path(checkpoint.hash())
                 .to_string(),
         );
-        mark_layered_checkpoint_sources(layout, checkpoint, &mut reachable).await?;
+        mark_layered_checkpoint_sources(layout, checkpoint, &mut reachable, &mut verified_catalogs)
+            .await?;
     }
     reachable.extend(
         capsule_runs
@@ -3225,7 +3254,13 @@ async fn sweep_capsule_objects(
                     .capsule_checkpoint_path(segment.checkpoint().hash())
                     .to_string(),
             );
-            mark_layered_checkpoint_sources(layout, segment.checkpoint(), &mut reachable).await?;
+            mark_layered_checkpoint_sources(
+                layout,
+                segment.checkpoint(),
+                &mut reachable,
+                &mut verified_catalogs,
+            )
+            .await?;
             reachable.extend(
                 segment
                     .capsule_runs()
@@ -3238,45 +3273,88 @@ async fn sweep_capsule_objects(
     mark_derived_index_objects(
         store.as_storage(),
         layout,
-        state_digest,
         manifest,
         &mut reachable,
+        &mut verified_catalogs,
     )
     .await?;
 
+    let scoped_hints = owns_scoped_hint_pages(store, layout);
+    let hint_pages = if scoped_hints {
+        // Authenticate the entire current page closure before selecting garbage.
+        // Destructive sweeps hold global admission against hint-root publication.
+        let (_, live) = crab_metadata::capsule_protocol::CapsuleChunkIndex::new(layout)
+            .objects(layout.store(), u64::MAX)
+            .await?;
+        reachable.extend(live.into_iter().map(|(path, _)| path.to_string()));
+        store
+            .list_prefix(&layout.capsule_chunk_pages_prefix())
+            .await?
+    } else {
+        Vec::new()
+    };
+    check_cancelled(cancel)?;
+
     let capsule_prefix = layout.repo_path("v2/capsules/");
     let checkpoint_prefix = layout.repo_path("v2/checkpoints/");
+    let catalog_prefix = layout.capsule_catalog_prefix();
     let pack_layer_prefix = layout.repo_path("v2/pack-layers/");
     let history_prefix = layout.repo_path("v2/history/");
-    let path_state_prefix = layout.repo_path("metadata/path-state/");
-    let commit_graph_prefix = layout.repo_path("metadata/commit-graph/");
+    let metadata_prefix = layout.repo_path("metadata/");
+    let index_prefixes = ["path-state", "commit-graph", "git-object-index"]
+        .map(|kind| format!("{metadata_prefix}/{kind}/"));
+    let browse_root_prefix = layout.repo_path("v2/browse-roots/");
     let manifests_prefix = layout.repo_path("manifests/");
     let path_state_descriptor_prefix = layout.repo_path("manifests/path-state-");
     let commit_graph_descriptor_prefix = layout.repo_path("manifests/commit-graph-");
+    let object_index_descriptor_prefix = layout.repo_path("manifests/git-object-index-");
     let (
         capsules,
         checkpoints,
+        catalogs,
         pack_layers,
         history,
-        path_state_objects,
-        commit_graph_objects,
+        metadata_objects,
+        browse_root_objects,
         manifests,
     ) = tokio::try_join!(
         store.list_prefix(&capsule_prefix),
         store.list_prefix(&checkpoint_prefix),
+        store.list_prefix(&catalog_prefix),
         store.list_prefix(&pack_layer_prefix),
         store.list_prefix(&history_prefix),
-        store.list_prefix(&path_state_prefix),
-        store.list_prefix(&commit_graph_prefix),
+        store.list_prefix(&metadata_prefix),
+        store.list_prefix(&browse_root_prefix),
         store.list_prefix(&manifests_prefix),
     )?;
-    let derived_index_objects = path_state_objects
+    let source_head_prefix = format!("{}/", layout.capsule_source_heads_prefix());
+    let source_heads = history
+        .iter()
+        .filter(|object| object.location.as_ref().starts_with(&source_head_prefix))
+        .map(|object| object.location.clone())
+        .collect::<Vec<_>>();
+    // Source lifetime is established by publishers, independent of optional
+    // browse readiness. Reuse the history enumeration rather than add another LIST.
+    let retained =
+        crab_metadata::capsule_protocol::load_retained_capsule_sources(layout, &source_heads)
+            .await?;
+    reachable.extend(retained.paths().iter().map(ToString::to_string));
+    // One metadata scan covers derived index bodies. Lifetime roots belong to
+    // protocol control; unrelated metadata never becomes a deletion candidate.
+    let derived_index_objects = metadata_objects
         .into_iter()
-        .chain(commit_graph_objects)
+        .filter(|object| {
+            index_prefixes
+                .iter()
+                .any(|prefix| object.location.as_ref().starts_with(prefix))
+        })
+        .chain(browse_root_objects)
+        .chain(hint_pages)
         .chain(manifests.into_iter().filter(|object| {
             let key = object.location.as_ref();
             key.starts_with(path_state_descriptor_prefix.as_ref())
                 || key.starts_with(commit_graph_descriptor_prefix.as_ref())
+                || key.starts_with(object_index_descriptor_prefix.as_ref())
         }))
         .collect::<Vec<_>>();
     let derived_index_keys = derived_index_objects
@@ -3302,6 +3380,7 @@ async fn sweep_capsule_objects(
     let candidates = capsules
         .into_iter()
         .chain(checkpoints)
+        .chain(catalogs)
         .chain(pack_layers)
         .chain(history)
         .chain(derived_index_objects)
@@ -3331,44 +3410,49 @@ async fn sweep_capsule_objects(
             force: false,
         };
         let concurrency = args.delete_concurrency.max(1);
-        let mut deletes = futures_util::stream::iter(candidates.iter().map(|object| {
-            let derived_index = derived_index_keys.contains(object.location.as_ref());
-            let meta = ObjectMeta {
+        let objects = candidates
+            .into_iter()
+            .map(|object| ObjectMeta {
                 key: object.location.to_string(),
                 size: object.size,
                 last_modified: SystemTime::from(object.last_modified),
-                e_tag: object.e_tag.clone(),
-                version: object.version.clone(),
+                e_tag: object.e_tag,
+                version: object.version,
                 storage_class: None,
                 transitioned_at: None,
-            };
-            let deleter = &deleter;
-            async move {
-                (
-                    meta.size,
-                    derived_index,
-                    deleter.delete_candidate(&meta, policy).await,
-                )
-            }
-        }))
-        .buffer_unordered(concurrency);
-        while let Some((size, derived_index, result)) = deletes.next().await {
-            check_cancelled(cancel)?;
-            // HEAD may retain a candidate whose identity or freshness changed
-            // after LIST. Planned bytes are not reclaimed in that case.
-            if result? == CandidateDelete::Deleted {
-                if derived_index {
-                    accounting.derived_index_objects_deleted += 1;
-                } else {
-                    accounting.packs_deleted += 1;
-                }
-                accounting.bytes_reclaimed = accounting.bytes_reclaimed.saturating_add(size);
-            }
+            })
+            .collect::<Vec<_>>();
+        let mut deleted = GcOutcome::default();
+        // A sent provider delete can finish after its request future is dropped.
+        // Keep admission until the shared executor drains every admitted result,
+        // including cancellation and returned errors.
+        let result = execute_deletes(
+            &objects,
+            cancel,
+            concurrency,
+            &deleter,
+            &mut deleted,
+            None,
+            Some(policy),
+        )
+        .await;
+        check_cancelled(cancel)?;
+        if let Some(error) = result.first_error {
+            return Err(error);
         }
+        accounting.derived_index_objects_deleted = result
+            .deleted_keys
+            .iter()
+            .filter(|key| derived_index_keys.contains(key.as_str()))
+            .count() as u64;
+        accounting.packs_deleted = result.deleted_count - accounting.derived_index_objects_deleted;
+        // HEAD can retain objects whose identity or freshness changed after LIST.
+        // Their planned bytes never enter the executor's reclaimed-byte count.
+        accounting.bytes_reclaimed = deleted.bytes_reclaimed;
     }
     Ok(GcOutcome {
-        list_requests: 7,
-        list_parallelism: 7,
+        list_requests: 8 + u64::from(scoped_hints),
+        list_parallelism: 8,
         list_wall_seconds: started.elapsed().as_secs_f64(),
         dry_run: args.dry_run,
         ..accounting
@@ -3378,13 +3462,34 @@ async fn sweep_capsule_objects(
 async fn mark_derived_index_objects(
     store: &crab_storage::Store,
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
-    state_digest: &str,
     manifest: &crab_metadata::manifests::Manifest,
     reachable: &mut HashSet<String>,
+    verified_catalogs: &mut HashSet<String>,
 ) -> Result<()> {
-    if let Some(indexes) = crab_metadata::capsule_protocol::load_browse_indexes(layout).await?
-        && indexes.state_digest() == state_digest
+    let current = crab_metadata::capsule_protocol::load_browse_indexes(layout).await?;
+    let roots = crab_metadata::capsule_protocol::load_retained_browse_indexes(layout).await?;
+    if current
+        .as_ref()
+        .is_some_and(|current| !roots.iter().any(|root| root.indexes() == current))
     {
+        return Err(CrabError::CorruptObject {
+            path: layout.capsule_browse_indexes_path().to_string(),
+            reason: "published browse indexes have no retained capture; rebuild browse indexes before GC".to_owned(),
+        });
+    }
+    // Captured readers own original source ranges as well as cold index
+    // pages. Repacking cannot substitute a new source behind those ranges.
+    for root in roots {
+        reachable.insert(layout.browse_retained_root_path(root.hash()).to_string());
+        if let Some(pointer) = root.checkpoint() {
+            mark_layered_checkpoint_sources(layout, pointer, reachable, verified_catalogs).await?;
+        }
+        reachable.extend(
+            root.source_paths(layout)
+                .into_iter()
+                .map(|path| path.to_string()),
+        );
+        let indexes = root.indexes();
         let graph_hash = indexes.commit_graph_hash();
         let graph_path = layout.bulk_manifest_path("commit-graph", graph_hash);
         let graph = crab_metadata::split_commit_graph::load_split_commit_graph_descriptor(
@@ -3401,6 +3506,18 @@ async fn mark_derived_index_objects(
                 .iter()
                 .map(|layer| layout.repo_path(&layer.path).to_string()),
         );
+
+        if let Some(hash) = indexes.object_index_hash() {
+            let paths = crab_metadata::git_object_locator::PagedGitObjectIndex::retained_paths(
+                store,
+                layout,
+                hash,
+                indexes.state_digest(),
+                crab_metadata::split_commit_graph::DEFAULT_MAX_SPLIT_COMMIT_GRAPH_BYTES,
+            )
+            .await?;
+            reachable.extend(paths.into_iter().map(|path| path.to_string()));
+        }
 
         if let Some(path_state_hash) = indexes.path_state_hash() {
             let path_state_path = layout.bulk_manifest_path("path-state", path_state_hash);
@@ -3467,10 +3584,29 @@ async fn mark_layered_checkpoint_sources(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     pointer: &crab_metadata::capsule_protocol::CheckpointPointer,
     reachable: &mut HashSet<String>,
+    verified_catalogs: &mut HashSet<String>,
 ) -> Result<()> {
-    let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(layout, pointer)
-        .await
-        .map_err(CrabError::from)?;
+    let checkpoint =
+        crab_metadata::capsule_protocol::load_layered_checkpoint_control(layout, pointer)
+            .await
+            .map_err(CrabError::from)?;
+    if let Some(catalog) = checkpoint.catalog() {
+        let path = layout.capsule_catalog_path(catalog.hash()).to_string();
+        // Checkpoints and captured readers share immutable catalog subtrees.
+        // Authenticate each root's complete closure before sweeping page objects.
+        reachable.insert(path.clone());
+        // Coordinator protection may have marked only the descriptor key.
+        // Reachability alone does not prove its children were traversed.
+        if verified_catalogs.insert(path) {
+            reachable.extend(
+                checkpoint
+                    .catalog_objects(layout, u64::MAX)
+                    .await?
+                    .into_iter()
+                    .map(|(path, _)| path.to_string()),
+            );
+        }
+    }
     for source in checkpoint.sources() {
         let path = match source.kind() {
             crab_metadata::capsule_protocol::PackSourceKind::CapsuleRun => {
@@ -5403,6 +5539,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn protected_catalog_descriptor_still_requires_verified_page_closure() {
+        use bytes::Bytes;
+        use crab_metadata::capsule_protocol::{
+            CapsuleGitPack, FileCatalogEntry, LayeredCheckpoint, PackLayer, PointerCatalog,
+            ShardCatalogEntry,
+        };
+        let store =
+            crab_storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store, "catalog-protection".to_owned());
+        let pack = CapsuleGitPack::new(
+            Bytes::from_static(b"pack"),
+            Bytes::from_static(b"index"),
+            Bytes::from_static(b"reverse"),
+            Bytes::from_static(b"locator"),
+            "1".repeat(40),
+            1,
+        )
+        .unwrap();
+        let source = PackLayer::build(&pack)
+            .unwrap()
+            .source_descriptor()
+            .unwrap();
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_shard("a".repeat(64), ShardCatalogEntry::new(1, vec![]))
+            .unwrap();
+        catalog
+            .insert_file("b".repeat(64), FileCatalogEntry::new(1, "a".repeat(64)))
+            .unwrap();
+        let checkpoint =
+            LayeredCheckpoint::build(1, &"c".repeat(64), vec![source], catalog, None).unwrap();
+        checkpoint.publish_catalog(&layout).await.unwrap();
+        layout
+            .store()
+            .put_overwrite(
+                &layout.capsule_checkpoint_path(checkpoint.hash()),
+                checkpoint.bytes().clone(),
+            )
+            .await
+            .unwrap();
+        let root = layout
+            .capsule_catalog_path(checkpoint.catalog().unwrap().hash())
+            .to_string();
+        let expected = checkpoint
+            .catalog_objects(&layout, 1024 * 1024)
+            .await
+            .unwrap();
+        let mut reachable = HashSet::from([root.clone()]);
+        let mut verified = HashSet::new();
+        mark_layered_checkpoint_sources(
+            &layout,
+            &checkpoint.pointer().unwrap(),
+            &mut reachable,
+            &mut verified,
+        )
+        .await
+        .unwrap();
+        assert!(
+            expected
+                .iter()
+                .all(|(path, _)| reachable.contains(&path.to_string()))
+        );
+
+        let (child, _) = expected
+            .iter()
+            .find(|(path, _)| path.to_string() != root)
+            .unwrap();
+        layout.store().delete(child).await.unwrap();
+        assert!(
+            mark_layered_checkpoint_sources(
+                &layout,
+                &checkpoint.pointer().unwrap(),
+                &mut reachable,
+                &mut HashSet::new()
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn capsule_protocol_gc_retains_layered_checkpoint_history_and_sources() {
         use bytes::Bytes;
         use crab_metadata::capsule_protocol::{
@@ -5491,7 +5708,6 @@ mod tests {
         .await
         .unwrap();
         let snapshot = current_view.git_snapshot().unwrap();
-        let state_digest = current_view.state_digest().to_owned();
         assert_eq!(
             root.record().root().compacted_ref_transactions(),
             captured.visible_ref_transactions()
@@ -5532,7 +5748,6 @@ mod tests {
                 &layout,
                 root.record().root(),
                 &[],
-                &state_digest,
                 &snapshot.manifest,
                 &protected,
                 &CancellationToken::new(),
@@ -5560,7 +5775,6 @@ mod tests {
             &layout,
             root.record().root(),
             &[],
-            &state_digest,
             &snapshot.manifest,
             &protected,
             &CancellationToken::new(),
@@ -5596,8 +5810,6 @@ mod tests {
                 Err(CrabError::NotFound { .. })
             ));
         }
-        assert_eq!(outcome.list_requests, 7);
-        assert_eq!(outcome.list_parallelism, 7);
     }
 
     async fn write_browse_indexes(
@@ -5681,6 +5893,10 @@ mod tests {
     #[tokio::test]
     async fn capsule_protocol_gc_retains_current_indexes_and_collects_stale_index_generations() {
         use crab_metadata::capsule_protocol::BrowseIndexes;
+        use crab_metadata::git_object_locator::{
+            GitObjectLocation, GitObjectLocator, GitPackInventoryEntry, PagedGitObjectIndex,
+            PagedGitObjectIndexWrite,
+        };
         use crab_metadata::path_state::publish_path_state_checkpoint;
         use object_store::memory::InMemory;
         use std::sync::Arc;
@@ -5698,9 +5914,61 @@ mod tests {
                 .unwrap();
         let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
         manifest.generation = root.record().root().generation();
-        manifest.pack_index_hash = "1".repeat(64);
+        let pack_id = crab_xet::hash::MerkleHash::from([8; 32]);
+        let inventory = GitPackInventoryEntry {
+            pack_id,
+            object_count: 1,
+            pack_size: 42,
+        };
+        let pack_index_hash = |generation| {
+            crab_metadata::manifests::compact_pack_index(
+                generation,
+                &[crab_metadata::manifests::PackManifestEntry {
+                    pack_id: pack_id.to_string(),
+                    content_hash: pack_id.to_string(),
+                    size: 42,
+                    object_count: 1,
+                    ref_tips: Vec::new(),
+                }],
+            )
+            .unwrap()
+            .0
+        };
+        manifest.pack_index_hash = pack_index_hash(manifest.generation);
         manifest.seal_git_validation();
         let state_digest = "a".repeat(64);
+        let physical_entries = [(
+            [7; 20],
+            GitObjectLocator {
+                ordinal: 0,
+                pack_id,
+                location: GitObjectLocation {
+                    pack_offset: 12,
+                    entry_len: 10,
+                    crc32: 0,
+                },
+                metadata: Default::default(),
+            },
+        )];
+        let physical = PagedGitObjectIndexWrite::build(
+            &state_digest,
+            &manifest,
+            &[inventory],
+            &physical_entries,
+        )
+        .unwrap();
+        let physical_hash = physical.upload(store.as_storage(), &layout).await.unwrap();
+        let physical_reader = PagedGitObjectIndex::load(
+            store.as_storage(),
+            &layout,
+            &physical_hash,
+            &state_digest,
+            &manifest,
+            128 * 1024,
+        )
+        .await
+        .unwrap();
+        let physical_body = physical_reader.body_path().clone();
         let (current_graph_hash, current_path_state_hash, current_graph, current_count) =
             write_browse_indexes(
                 store.as_storage(),
@@ -5726,7 +5994,18 @@ mod tests {
         for path_state in [None, Some(current_path_state_hash.clone())] {
             let indexes =
                 BrowseIndexes::new(state_digest.clone(), current_graph_hash.clone(), path_state)
+                    .unwrap()
+                    .with_object_index(physical_hash.clone())
                     .unwrap();
+            crab_metadata::capsule_protocol::retain_browse_indexes(
+                &layout,
+                &indexes,
+                manifest.generation,
+                None,
+                &[],
+            )
+            .await
+            .unwrap();
             let index_path = layout.capsule_browse_indexes_path();
             let bytes = indexes.encode().unwrap();
             index_etag = Some(match index_etag {
@@ -5740,9 +6019,9 @@ mod tests {
             mark_derived_index_objects(
                 store.as_storage(),
                 &layout,
-                &state_digest,
                 &manifest,
                 &mut retained,
+                &mut HashSet::new(),
             )
             .await
             .unwrap();
@@ -5760,6 +6039,34 @@ mod tests {
         }
 
         let stale_git_validation_digest = "f".repeat(64);
+        let mut stale_manifest = manifest.clone();
+        stale_manifest.generation += 1;
+        stale_manifest.pack_index_hash = pack_index_hash(stale_manifest.generation);
+        stale_manifest.git_validation_digest = stale_git_validation_digest.clone();
+        let stale_physical = PagedGitObjectIndexWrite::build(
+            &"f".repeat(64),
+            &stale_manifest,
+            &[inventory],
+            &physical_entries,
+        )
+        .unwrap();
+        let stale_physical_hash = stale_physical
+            .upload(store.as_storage(), &layout)
+            .await
+            .unwrap();
+        let stale_physical_reader = PagedGitObjectIndex::load(
+            store.as_storage(),
+            &layout,
+            &stale_physical_hash,
+            &"f".repeat(64),
+            &stale_manifest,
+            128 * 1024,
+        )
+        .await
+        .unwrap();
+        // Rebinding unchanged physical entries shares the immutable body; an
+        // obsolete descriptor must not make that current body's pages collectible.
+        assert_eq!(stale_physical_reader.body_path(), &physical_body);
         let (stale_graph_hash, stale_path_state_hash, stale_graph, stale_count) =
             write_browse_indexes(
                 store.as_storage(),
@@ -5787,6 +6094,15 @@ mod tests {
         let current_graph_layer = layout.repo_path(&current_graph.descriptor.layers[0].path);
         let current_path_state_descriptor =
             layout.bulk_manifest_path("path-state", &current_path_state_hash);
+        let current_path_state = crab_metadata::path_state::load_path_state_descriptor(
+            store.as_storage(),
+            &layout,
+            &current_path_state_hash,
+            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+        )
+        .await
+        .unwrap();
+        let current_path_state_layer = layout.repo_path(&current_path_state.layers[0].path);
         let current_checkpoint = layout.repo_path(
             &crab_metadata::path_state::path_state_checkpoint_path(&manifest.git_validation_digest),
         );
@@ -5807,12 +6123,16 @@ mod tests {
             &crab_metadata::path_state::path_state_checkpoint_path(&stale_git_validation_digest),
         );
         let current_indexes = [
+            layout.bulk_manifest_path("git-object-index", &physical_hash),
+            physical_body,
             current_graph_descriptor.clone(),
             current_graph_layer.clone(),
             current_path_state_descriptor.clone(),
+            current_path_state_layer.clone(),
             current_checkpoint.clone(),
         ];
         let stale_indexes = [
+            layout.bulk_manifest_path("git-object-index", &stale_physical_hash),
             stale_graph_descriptor.clone(),
             stale_graph_layer.clone(),
             stale_path_state_descriptor.clone(),
@@ -5832,7 +6152,6 @@ mod tests {
             &layout,
             root.record().root(),
             &[],
-            &state_digest,
             &manifest,
             &HashSet::new(),
             &CancellationToken::new(),
@@ -5850,7 +6169,6 @@ mod tests {
             &layout,
             root.record().root(),
             &[],
-            &state_digest,
             &manifest,
             &HashSet::new(),
             &CancellationToken::new(),
@@ -5864,6 +6182,47 @@ mod tests {
         for path in current_indexes {
             assert!(store.head(&path).await.is_ok());
         }
+        // Authenticated pages live inside the layer marked by both readiness
+        // and construction roots; sweeping other generations must retain them.
+        let reader = crab_metadata::path_state::PathStateReader::load(
+            store.as_storage(),
+            &layout,
+            &current_path_state_hash,
+            crab_metadata::split_commit_graph::CommitGraphView::Materialized(&current_graph),
+            crab_metadata::path_state::DEFAULT_MAX_PATH_STATE_BYTES,
+        )
+        .await
+        .unwrap();
+        let attribution = reader
+            .latest(
+                store.as_storage(),
+                crab_metadata::split_commit_graph::CommitGraphView::Materialized(&current_graph),
+                &[3; 20],
+                &[b"file"],
+            )
+            .await
+            .unwrap();
+        assert_eq!(attribution[0].oid, [3; 20]);
+        // Open afresh after sweeping: a cached page would conceal accidental deletion.
+        let physical_reader = PagedGitObjectIndex::load(
+            store.as_storage(),
+            &layout,
+            &physical_hash,
+            &state_digest,
+            &manifest,
+            128 * 1024,
+        )
+        .await
+        .unwrap();
+        let locations = physical_reader
+            .lookup(
+                store.as_storage(),
+                &[[7; 20]],
+                &std::collections::HashMap::from([(pack_id, inventory)]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(locations, vec![Some(physical_entries[0].1)]);
         for path in stale_indexes {
             let head = store.head(&path).await;
             assert!(
@@ -5872,7 +6231,7 @@ mod tests {
             );
         }
         assert_eq!(outcome.packs_deleted, 0);
-        assert_eq!(outcome.derived_index_objects_deleted, 5);
+        assert_eq!(outcome.derived_index_objects_deleted, 6);
     }
 
     #[tokio::test]

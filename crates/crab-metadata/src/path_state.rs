@@ -11,6 +11,22 @@ use crate::{
 };
 
 mod codec;
+use crate::pages as paged;
+#[cfg(feature = "storage")]
+mod reader;
+pub use crate::PageRef;
+
+/// Bounded page roots committed by an immutable layer descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathStateLayerPages {
+    pub records: PageRef,
+    pub nodes: PageRef,
+    pub names: Option<PageRef>,
+}
+
+#[cfg(feature = "storage")]
+pub use reader::{PathStateItem, PathStateReader, PathStateScan};
 #[cfg(feature = "storage")]
 mod storage;
 
@@ -23,12 +39,10 @@ pub use storage::{
     load_path_state_descriptor, publish_path_state_checkpoint, upload_path_state,
 };
 
-const LAYER_MAGIC: &[u8; 8] = b"CRABPS03";
-const LAYER_VERSION: u32 = 3;
-// Earlier descriptors can authenticate false mutations from Git-order merges.
-// Retire those semantics; maintenance rebuilds them without changing the codec.
-const DESCRIPTOR_VERSION: u32 = 4;
-const LAYER_HEADER_BYTES: usize = 28;
+// Whole-layer predecessors are unreleased derived data. Rebuild them before
+// publishing paged readiness, retaining the exact tree-comparison semantics.
+const DESCRIPTOR_VERSION: u32 = 6;
+const MAX_DESCRIPTOR_BYTES: u64 = 128 * 1024;
 const MAX_AUTHOR_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_PATH_BYTES: usize = 1024 * 1024;
@@ -46,7 +60,7 @@ pub struct PathStateMutation {
     pub path: Vec<u8>,
     /// The path exists after this commit and receives this commit's ordinal.
     pub present: bool,
-    /// Existing descendants are discarded before applying this mutation.
+    /// Existing descendants become absent unless recreated by this commit.
     pub reset: bool,
 }
 
@@ -92,6 +106,8 @@ pub struct PathStateRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathStateNode {
     pub value: Option<u32>,
+    /// Last deletion or type reset covering this path and its descendants.
+    pub reset: Option<u32>,
     pub children: BTreeMap<Arc<[u8]>, PathStateNodeRef>,
 }
 
@@ -113,6 +129,7 @@ pub struct PathStateLayerRef {
     pub commit_count: u32,
     pub node_count: u32,
     pub bytes: u64,
+    pub pages: PathStateLayerPages,
 }
 
 /// Immutable generation-bound path-state descriptor.
@@ -286,14 +303,19 @@ impl PathStateIndex {
 
     fn lookup(&self, root: PathStateNodeRef, path: &[u8]) -> Result<Option<u32>> {
         let mut current = root;
+        let mut reset = None;
         for component in path.split(|byte| *byte == b'/') {
             let node = self.node(current)?;
+            reset = reset.max(node.reset);
             let Some(next) = node.children.get(component) else {
                 return Ok(None);
             };
             current = *next;
         }
-        Ok(self.node(current)?.value)
+        Ok(self
+            .node(current)?
+            .value
+            .filter(|value| reset.is_none_or(|reset| *value >= reset)))
     }
 
     fn node(&self, reference: PathStateNodeRef) -> Result<&PathStateNode> {
@@ -415,7 +437,8 @@ pub fn append_path_state(
             records,
             nodes,
         };
-        let bytes = encode_layer(&layer)?;
+        let encoded = encode_layer(&layer)?;
+        let bytes = encoded.bytes;
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let reference = PathStateLayerRef {
             path: path_state_layer_path(&hash),
@@ -424,6 +447,7 @@ pub fn append_path_state(
             commit_count: layer.records.len() as u32,
             node_count: layer.nodes.len() as u32,
             bytes: bytes.len() as u64,
+            pages: encoded.pages,
         };
         references.push(reference.clone());
         objects.push(PathStateLayerObject { reference, bytes });
@@ -431,7 +455,8 @@ pub fn append_path_state(
     }
     if layers.len() > MAX_LAYERS_BEFORE_COMPACTION {
         let layer = compact_layers(&layers)?;
-        let bytes = encode_layer(&layer)?;
+        let encoded = encode_layer(&layer)?;
+        let bytes = encoded.bytes;
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let reference = PathStateLayerRef {
             path: path_state_layer_path(&hash),
@@ -440,6 +465,7 @@ pub fn append_path_state(
             commit_count: layer.records.len() as u32,
             node_count: layer.nodes.len() as u32,
             bytes: bytes.len() as u64,
+            pages: encoded.pages,
         };
         references = vec![reference.clone()];
         objects = vec![PathStateLayerObject { reference, bytes }];
@@ -465,6 +491,9 @@ pub fn append_path_state(
     let descriptor_bytes = serde_json::to_vec(&descriptor).map_err(|source| {
         MetadataError::Internal(format!("path-state descriptor encode: {source}"))
     })?;
+    if descriptor_bytes.len() as u64 > MAX_DESCRIPTOR_BYTES {
+        return corrupt("path-state descriptor exceeds its byte bound");
+    }
     Ok(PathStateWrite {
         descriptor_hash: blake3::hash(&descriptor_bytes).to_hex().to_string(),
         descriptor_bytes,
@@ -518,6 +547,7 @@ fn copy_compacted_node(
     };
     nodes.push(PathStateNode {
         value: node.value,
+        reset: node.reset,
         children,
     });
     remapped.insert(source, reference);
@@ -556,6 +586,7 @@ fn node_from_parts<'a>(
 #[derive(Debug, Default)]
 struct WorkingNode {
     value: Option<u32>,
+    reset: Option<u32>,
     children: BTreeMap<Arc<[u8]>, WorkingChild>,
 }
 
@@ -569,6 +600,7 @@ impl WorkingNode {
     fn from_node(node: &PathStateNode) -> Self {
         Self {
             value: node.value,
+            reset: node.reset,
             children: node
                 .children
                 .iter()
@@ -588,7 +620,7 @@ fn apply_mutation(
 ) -> Result<()> {
     if mutation.path.is_empty() {
         if mutation.reset {
-            root.children.clear();
+            root.reset = Some(ordinal);
         }
         root.value = mutation.present.then_some(ordinal);
         return Ok(());
@@ -621,16 +653,14 @@ fn apply_components(
         .first()
         .ok_or_else(|| corruption("path-state mutation has no component"))?;
     if components.len() == 1 {
-        if !mutation.present {
-            node.children.remove(*name);
-            return Ok(());
+        let mut child =
+            take_working_child(node.children.remove(*name), base, nodes, layer_ordinal)?;
+        // Retain deletion/reset history without walking every old descendant.
+        // The reset ordinal masks old visible values, while old roots stay immutable.
+        if mutation.reset || !mutation.present {
+            child.reset = Some(ordinal);
         }
-        let mut child = if mutation.reset {
-            WorkingNode::default()
-        } else {
-            take_working_child(node.children.remove(*name), base, nodes, layer_ordinal)?
-        };
-        child.value = Some(ordinal);
+        child.value = mutation.present.then_some(ordinal);
         node.children
             .insert(Arc::from(*name), WorkingChild::Owned(Box::new(child)));
         return Ok(());
@@ -689,6 +719,7 @@ fn freeze_node(
         .map_err(|_| corruption("path-state layer has too many nodes"))?;
     nodes.push(PathStateNode {
         value: node.value,
+        reset: node.reset,
         children,
     });
     Ok(PathStateNodeRef {
@@ -755,7 +786,9 @@ fn validate_descriptor(descriptor: &PathStateDescriptor, layers: &[PathStateLaye
         for (node_index, node) in layer.nodes.iter().enumerate() {
             if node
                 .value
-                .is_some_and(|value| value >= descriptor.commit_count)
+                .into_iter()
+                .chain(node.reset)
+                .any(|value| value >= descriptor.commit_count)
                 || node.children.len() > MAX_CHILDREN_PER_NODE
             {
                 return corrupt("path-state node exceeds its limits");
@@ -791,7 +824,9 @@ fn validate_node_ref(
 }
 
 fn validate_descriptor_shape(descriptor: &PathStateDescriptor) -> Result<()> {
-    if descriptor.version != DESCRIPTOR_VERSION {
+    if descriptor.version != DESCRIPTOR_VERSION
+        || descriptor.layers.len() > MAX_LAYERS_BEFORE_COMPACTION
+    {
         return corrupt("unsupported path-state descriptor version");
     }
     validate_content_hash(
@@ -820,9 +855,26 @@ fn validate_descriptor_shape(descriptor: &PathStateDescriptor) -> Result<()> {
             || reference.base_ordinal != next
             || reference.commit_count == 0
             || reference.node_count == 0
-            || reference.bytes < LAYER_HEADER_BYTES as u64
+            || reference.pages.records.count != reference.commit_count
+            || reference.pages.nodes.count != reference.node_count
         {
             return corrupt("invalid path-state layer reference");
+        }
+        reference
+            .pages
+            .records
+            .validate(paged::Kind::Records, reference.bytes)?;
+        reference
+            .pages
+            .nodes
+            .validate(paged::Kind::Nodes, reference.bytes)?;
+        if reference.pages.records.first != 0u32.to_be_bytes()
+            || reference.pages.nodes.first != 0u32.to_be_bytes()
+        {
+            return corrupt("positional layer roots do not start at zero");
+        }
+        if let Some(names) = &reference.pages.names {
+            names.validate(paged::Kind::Names, reference.bytes)?;
         }
         next = next
             .checked_add(reference.commit_count)
@@ -1067,7 +1119,7 @@ mod tests {
         graph_with_commits(2)
     }
 
-    fn graph_with_commits(count: u8) -> SplitCommitGraph {
+    pub(super) fn graph_with_commits(count: u8) -> SplitCommitGraph {
         let layer = CommitGraphLayer {
             base_ordinal: 0,
             records: (1..=count)
@@ -1087,6 +1139,7 @@ mod tests {
         SplitCommitGraph::new(
             CommitGraphDescriptor {
                 version: 1,
+                commit_ordinal_digest: None,
                 generation: 7,
                 pack_index_hash: "a".repeat(64),
                 git_validation_digest: "b".repeat(64),
@@ -1097,6 +1150,7 @@ mod tests {
                     base_ordinal: 0,
                     commit_count: u32::from(count),
                     bytes: 24,
+                    pages: None,
                 }],
             },
             vec![layer],

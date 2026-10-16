@@ -8,7 +8,7 @@ use bytes::Bytes;
 use crab_git::{delta, pack::VerifiedPackIdentity};
 use crab_metadata::git_object_locator::{
     GitObjectLocation, GitObjectLocator, GitObjectLocatorSession, GitObjectLookup,
-    GitPackInventoryEntry,
+    GitPackInventoryEntry, PagedGitObjectIndex,
 };
 use crab_storage::{
     Store, repo_pack_index_path, repo_pack_kind_metadata_path, repo_pack_path,
@@ -162,10 +162,12 @@ pub(crate) struct RemoteGitPackedEntry {
 /// Authenticated lookup data and immutable pack sources for a pinned snapshot.
 ///
 /// Callers must validate these against the snapshot before opening a repository.
-/// Inline locators precede preferred indexes; remaining lookups use the complete
-/// pinned inventory. An empty preferred set is distinct from an unspecified set.
+/// A complete physical index is definitive; unindexed snapshots use inline locators
+/// before preferred indexes and the complete pinned inventory. An empty preferred
+/// set is distinct from an unspecified set.
 #[derive(Default)]
 pub struct SnapshotLookupSources {
+    object_index: Option<Arc<PagedGitObjectIndex>>,
     preferred_pack_indexes: Option<Vec<GitPackInventoryEntry>>,
     preferred_object_admission: Option<Arc<HashMap<[u8; 20], Vec<MerkleHash>>>>,
     inline_locators: Option<Arc<HashMap<[u8; 20], GitObjectLocator>>>,
@@ -173,6 +175,31 @@ pub struct SnapshotLookupSources {
 }
 
 impl SnapshotLookupSources {
+    /// Use a completely verified captured physical index; misses do not probe pack indexes.
+    pub fn with_object_index(mut self, index: PagedGitObjectIndex) -> Self {
+        self.object_index = Some(Arc::new(index));
+        self
+    }
+
+    pub(crate) fn validate_object_index(
+        &self,
+        layout: &crab_storage::StoreLayout<Store>,
+        snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+    ) -> Result<()> {
+        if self.object_index.as_ref().is_some_and(|index| {
+            !index.matches_binding(
+                layout,
+                &snapshot.manifest_etag,
+                &snapshot.materialized_manifest(),
+            )
+        }) {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            });
+        }
+        Ok(())
+    }
+
     /// Use verified in-memory locators before reading pack indexes.
     pub fn with_inline_locators(mut self, locators: HashMap<[u8; 20], GitObjectLocator>) -> Self {
         self.inline_locators = Some(Arc::new(locators));
@@ -432,6 +459,7 @@ pub(crate) struct RemoteGitReader {
     store: Store,
     repo_prefix: String,
     inventory: HashMap<MerkleHash, GitPackInventoryEntry>,
+    object_index: Option<Arc<PagedGitObjectIndex>>,
     preferred_pack_indexes: Option<HashMap<MerkleHash, GitPackInventoryEntry>>,
     preferred_object_admission: Option<Arc<HashMap<[u8; 20], Vec<MerkleHash>>>>,
     inline_locators: Option<Arc<HashMap<[u8; 20], GitObjectLocator>>>,
@@ -515,6 +543,7 @@ impl RemoteGitReader {
             store,
             repo_prefix: repo_prefix.into(),
             inventory: canonical,
+            object_index: lookup_sources.object_index,
             preferred_pack_indexes,
             preferred_object_admission: lookup_sources.preferred_object_admission,
             inline_locators: lookup_sources.inline_locators,
@@ -797,6 +826,23 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Vec<GitObjectLookup>> {
+        if let Some(index) = &self.object_index {
+            let store = self
+                .store
+                .clone()
+                .with_read_admission(budget.read_admission(cancellation.clone()));
+            let locations = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(Error::Cancelled),
+                result = index.lookup(&store, requested, &self.inventory) => result?,
+            };
+            // Complete coverage was verified before readiness. A miss is definitive;
+            // probing whole indexes here would hide corrupt or incomplete publication.
+            return Ok(locations
+                .into_iter()
+                .map(|location| location.map_or(GitObjectLookup::Miss, GitObjectLookup::Hit))
+                .collect());
+        }
         if let Some(locators) = &self.inline_locators {
             tracing::debug!(object_count = requested.len(), "remote Git locator lookup");
             let mut lookups = requested
@@ -2072,6 +2118,27 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<gix_hash::ObjectId> {
+        if let Some(index) = &self.object_index {
+            let store = self
+                .store
+                .clone()
+                .with_read_admission(budget.read_admission(cancellation.clone()));
+            let offsets = [(pack_id, pack_offset)];
+            let oids = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(Error::Cancelled),
+                result = index.oids_at_offsets(&store, &offsets, &self.inventory) => result?,
+            };
+            return oids
+                .into_iter()
+                .next()
+                .flatten()
+                .map(gix_hash::ObjectId::from)
+                .ok_or(Error::DeltaBaseNotFound {
+                    pack_id,
+                    pack_offset,
+                });
+        }
         let index = self.load_pack_index(pack_id, budget, cancellation).await?;
         index
             .oid_at_offset(pack_offset)
@@ -3949,6 +4016,10 @@ fn usize_limit(value: u64, limit: &'static str) -> Result<usize> {
         maximum: usize::MAX as u64,
     })
 }
+
+#[cfg(test)]
+#[path = "reader/object_index_tests.rs"]
+mod object_index_tests;
 
 #[cfg(test)]
 mod tests {

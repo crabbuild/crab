@@ -214,6 +214,17 @@ pub async fn run_staging_clean(
 
     check_cancelled(cancel)?;
 
+    let handoffs_published = if staging.delegated_publications()?.is_empty() {
+        0
+    } else {
+        let worktree = crate::git::worktree::WorktreeContext::resolve()?;
+        crate::git::index::reconcile_delegated_publications(
+            &staging,
+            &worktree.current_worktree_root,
+            cancel,
+        )?
+    };
+    check_cancelled(cancel)?;
     let clean_stats = staging.clean()?;
 
     let abandoned_stats = if prune_abandoned {
@@ -231,10 +242,12 @@ pub async fn run_staging_clean(
         stale_markers_removed = clean_stats.stale_markers_removed,
         abandoned_segments_removed = abandoned_stats.map_or(0, |(s, _, _)| s),
         abandoned_bytes_reclaimed = abandoned_stats.map_or(0, |(_, b, _)| b),
+        handoffs_published,
         "staging clean complete"
     );
 
     println!("Staging clean complete:");
+    println!("  Handoffs published:    {handoffs_published}");
     println!("  Segments removed:      {}", clean_stats.segments_removed);
     println!(
         "  Segments compacted:    {}",

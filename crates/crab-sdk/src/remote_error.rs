@@ -106,7 +106,7 @@ pub(crate) fn metadata_kind(error: &crab_metadata::error::MetadataError) -> Erro
         E::Io { source } if source.kind() == std::io::ErrorKind::InvalidData => {
             ErrorKind::Corruption
         }
-        E::RefJournalCancelled => ErrorKind::Cancelled,
+        E::RefJournalCancelled | E::CapsuleHintCancelled => ErrorKind::Cancelled,
         E::ManifestCasConflict { .. } => ErrorKind::Conflict,
         E::ObjectStore { source } => object_store_kind(source),
         _ => ErrorKind::Io,

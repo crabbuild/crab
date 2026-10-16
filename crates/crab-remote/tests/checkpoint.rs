@@ -9,6 +9,9 @@ mod frontier_admission;
 #[path = "checkpoint/native_cache.rs"]
 mod native_cache;
 
+#[path = "checkpoint/publication_catalog.rs"]
+mod publication_catalog;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -31,11 +34,23 @@ const LIMITS: CapsuleReadLimits = CapsuleReadLimits {
     max_frontier_bytes: LIMIT,
 };
 
-#[derive(Default)]
 struct Observations(
     Mutex<Vec<StorageObservation>>,
     Mutex<Option<CancellationToken>>,
+    Arc<crab_storage::test_support::CountingObjectStore>,
 );
+
+impl Default for Observations {
+    fn default() -> Self {
+        Self(
+            Mutex::default(),
+            Mutex::default(),
+            Arc::new(crab_storage::test_support::CountingObjectStore::new(
+                Arc::new(object_store::memory::InMemory::new()),
+            )),
+        )
+    }
+}
 
 impl StorageObserver for Observations {
     fn started(&self, _: StorageOperation) {}
@@ -76,8 +91,8 @@ async fn maintenance_reuses_committed_checkpoint_without_reloading_authority() {
     let after = view(&layout).await;
     assert_eq!(after.refs(), before.refs());
     assert_eq!(
-        after.git_visibility_index().unwrap().ref_closures(),
-        before.git_visibility_index().unwrap().ref_closures()
+        after.git_visibility_index().await.unwrap().ref_closures(),
+        before.git_visibility_index().await.unwrap().ref_closures()
     );
     assert_eq!(after.git_pack_count(), 1);
     assert_eq!(
@@ -91,12 +106,38 @@ async fn maintenance_reuses_committed_checkpoint_without_reloading_authority() {
 }
 
 #[tokio::test]
+async fn query_view_cannot_publish_checkpoint_without_member_admission() {
+    let (layout, _) = fixture().await;
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let query = crab_read::capsule_protocol::open_git_view_from_root(&layout, root, LIMITS)
+        .await
+        .unwrap();
+    let result = crab_remote::checkpoint::publish_capsule_checkpoint_with_catalog_from_view(
+        &layout,
+        &query,
+        crab_metadata::capsule_protocol::PointerCatalog::new(),
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(crab_remote::checkpoint::CheckpointError::Repack(
+            crab_git::repack::RepackError::SourceIntegrity { .. }
+        ))
+    ));
+}
+
+#[tokio::test]
 async fn retained_checkpoint_view_requires_complete_metadata_and_exact_root_binding() {
     let (layout, _) = fixture().await;
     let checkpointed = checkpoint(&layout).await;
     let layered = checkpointed.layered_checkpoint().unwrap();
     publish_blob(&layout, "later").await;
     let retained = crab_read::capsule_protocol::compacted_view_from_checkpoint(
+        &layout,
         checkpointed.root_snapshot().clone(),
         layered.clone(),
         LIMITS,
@@ -130,6 +171,7 @@ async fn retained_checkpoint_view_requires_complete_metadata_and_exact_root_bind
     .unwrap();
     assert!(
         crab_read::capsule_protocol::compacted_view_from_checkpoint(
+            &layout,
             checkpointed.root_snapshot().clone(),
             footer,
             LIMITS,
@@ -138,6 +180,7 @@ async fn retained_checkpoint_view_requires_complete_metadata_and_exact_root_bind
     );
     assert!(matches!(
         crab_read::capsule_protocol::compacted_view_from_checkpoint(
+            &layout,
             checkpointed.root_snapshot().clone(),
             layered.clone(),
             CapsuleReadLimits {
@@ -150,6 +193,7 @@ async fn retained_checkpoint_view_requires_complete_metadata_and_exact_root_bind
     let newer = checkpoint(&layout).await;
     assert!(
         crab_read::capsule_protocol::compacted_view_from_checkpoint(
+            &layout,
             newer.root_snapshot().clone(),
             layered.clone(),
             LIMITS,
@@ -509,7 +553,7 @@ async fn compacted_frontier_uses_resident_indexes_and_verifies_payloads() {
 
 async fn empty_fixture() -> (StoreLayout<Store>, Arc<Observations>) {
     let observations = Arc::new(Observations::default());
-    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+    let store = Store::new(observations.2.clone())
         .with_immutable_write_verification(ImmutableWriteVerification::Sha256Checksum)
         .with_storage_observer(observations.clone());
     let layout = StoreLayout::new(store, "repositories/checkpoint".to_owned());
@@ -898,8 +942,8 @@ async fn logical_checkpoint_does_not_read_or_replace_pack_sources() {
     );
     assert_eq!(after.refs(), before.refs());
     assert_eq!(
-        after.git_visibility_index().unwrap().ref_closures(),
-        before.git_visibility_index().unwrap().ref_closures()
+        after.git_visibility_index().await.unwrap().ref_closures(),
+        before.git_visibility_index().await.unwrap().ref_closures()
     );
 }
 
@@ -920,7 +964,12 @@ async fn first_checkpoint_opens_its_frontier_from_authenticated_controls() {
     let after = view(&layout).await;
     assert_eq!(after.layered_checkpoint().unwrap().sources().len(), 2);
     assert_eq!(
-        after.git_visibility_index().unwrap().ref_closures().len(),
+        after
+            .git_visibility_index()
+            .await
+            .unwrap()
+            .ref_closures()
+            .len(),
         2
     );
 }
@@ -1131,8 +1180,8 @@ async fn first_checkpoint_rolls_up_only_the_suffix_required_by_the_source_limit(
     );
     assert_eq!(after.refs(), before.refs());
     assert_eq!(
-        after.git_visibility_index().unwrap().ref_closures(),
-        before.git_visibility_index().unwrap().ref_closures()
+        after.git_visibility_index().await.unwrap().ref_closures(),
+        before.git_visibility_index().await.unwrap().ref_closures()
     );
 }
 
@@ -1257,8 +1306,8 @@ async fn duplicate_suffix_pack_does_not_change_stable_member_positions() {
     let after = view(&layout).await;
     assert_eq!(after.layered_checkpoint().unwrap().sources()[0], prefix);
     assert_eq!(
-        after.git_visibility_index().unwrap().ref_closures(),
-        before.git_visibility_index().unwrap().ref_closures()
+        after.git_visibility_index().await.unwrap().ref_closures(),
+        before.git_visibility_index().await.unwrap().ref_closures()
     );
     verify_git_blobs(
         &layout,
@@ -1296,8 +1345,8 @@ async fn duplicate_only_suffix_can_be_consolidated() {
     assert_eq!(after.layered_checkpoint().unwrap().sources().len(), 1);
     assert_eq!(after.refs(), before.refs());
     assert_eq!(
-        after.git_visibility_index().unwrap().ref_closures(),
-        before.git_visibility_index().unwrap().ref_closures()
+        after.git_visibility_index().await.unwrap().ref_closures(),
+        before.git_visibility_index().await.unwrap().ref_closures()
     );
     verify_git_blobs(
         &layout,
@@ -1356,7 +1405,7 @@ async fn layered_inventory_includes_new_frontier_in_complete_and_control_views()
     let old_packs = checkpointed.git_pack_count();
     let old_bytes = checkpointed.git_pack_bytes().unwrap();
     let old_objects = checkpointed.git_object_count().unwrap();
-    let old_visibility = checkpointed.git_visibility_index().unwrap();
+    let old_visibility = checkpointed.git_visibility_index().await.unwrap();
     let (_, new_pack) = blob_pack(b"late");
     publish_blob(&layout, "late").await;
     let root = crab_write::capsule_protocol::open_root(&layout)
@@ -1375,7 +1424,11 @@ async fn layered_inventory_includes_new_frontier_in_complete_and_control_views()
         );
         assert_eq!(current.git_object_count().unwrap(), old_objects + 1);
         assert_ne!(
-            current.git_visibility_index().unwrap().pack_index_hash,
+            current
+                .git_visibility_index()
+                .await
+                .unwrap()
+                .pack_index_hash,
             old_visibility.pack_index_hash
         );
     }
@@ -1815,4 +1868,89 @@ async fn incremental_install_enforces_byte_budget_before_pack_payload_reads() {
         };
         assert_eq!(actual.stdout, expected);
     }
+}
+
+#[tokio::test]
+async fn maintenance_rebuilds_retired_advertised_indexes_before_opening_derived_reads() {
+    use crab_metadata::capsule_protocol::load_browse_indexes;
+    let (layout, _) = fixture().await;
+    let runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
+    let identity = crab_remote_git::RepositoryIdentity::new("memory", "retirement", 1).unwrap();
+    let cancel = CancellationToken::new();
+    let build = || {
+        crab_remote::browse_indexes::ensure(
+            &layout,
+            &identity,
+            runtime.clone(),
+            crab_remote_git::RepositoryOptions::default(),
+            LIMIT,
+            &cancel,
+        )
+    };
+    let original = build().await.unwrap().unwrap();
+    for (field, family, hash, version) in [
+        (
+            "commit_graph_hash",
+            "commit-graph",
+            original.commit_graph_hash(),
+            2,
+        ),
+        (
+            "object_index_hash",
+            "git-object-index",
+            original.object_index_hash().unwrap(),
+            1,
+        ),
+    ] {
+        let (bytes, _) = layout
+            .store()
+            .get_with_etag_bounded(&layout.bulk_manifest_path(family, hash), LIMIT)
+            .await
+            .unwrap();
+        let mut descriptor: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        descriptor["version"] = serde_json::json!(version);
+        let bytes = serde_json::to_vec(&descriptor).unwrap();
+        let retired_hash = blake3::hash(&bytes).to_hex().to_string();
+        layout
+            .store()
+            .put_overwrite(
+                &layout.bulk_manifest_path(family, &retired_hash),
+                bytes.into(),
+            )
+            .await
+            .unwrap();
+        let mut advertised: serde_json::Value =
+            serde_json::from_slice(&original.encode().unwrap()).unwrap();
+        advertised[field] = serde_json::json!(retired_hash);
+        layout
+            .store()
+            .put_overwrite(
+                &layout.capsule_browse_indexes_path(),
+                serde_json::to_vec(&advertised).unwrap().into(),
+            )
+            .await
+            .unwrap();
+        let captured = view(&layout)
+            .await
+            .with_browse_indexes(load_browse_indexes(&layout).await.unwrap());
+        assert!(
+            captured
+                .git_repository_from_store(
+                    layout.clone(),
+                    identity.clone(),
+                    runtime.clone(),
+                    crab_remote_git::RepositoryOptions::default(),
+                    LIMIT,
+                    &cancel
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(build().await.unwrap().unwrap(), original);
+        assert_eq!(
+            load_browse_indexes(&layout).await.unwrap(),
+            Some(original.clone())
+        );
+    }
+    runtime.shutdown().await;
 }

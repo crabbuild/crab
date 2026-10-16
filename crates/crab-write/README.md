@@ -21,7 +21,11 @@ Some(manifest): ready        None: capture fresh state and try another pass
 A commit error may be uncertain; resolve that outcome before proceeding or
 reporting rejection. Read readiness is a separate result from ref durability.
 
-Protocol v2 uses `capsule_protocol::publish` instead of the v1 journal. A
+Protocol v2 uses `capsule_protocol::publish` instead of the v1 journal.
+Callers with cancellation-sensitive immutable preparation can use
+`prepare_publication` then `publish_prepared`, checking their lease token between
+them. Publication must be awaited through outcome resolution, even if renewal
+fails after that boundary. A
 single-ref push commits by conditionally replacing only that ref head. A
 multi-ref push creates a unique preparing transaction record, conditionally
 prepares each edited head, wins a commit-vs-abort CAS on that record, and
@@ -59,7 +63,14 @@ orchestrator publishes graph readiness. `build_path_state` then attaches that
 verified graph, resumes attribution from its checkpoint and persists progress
 every 32 commits. Completion replaces the partial record through the returned
 CAS token; cached readers observe both phases without a ref change. Graph
-discovery drains a separate bounded operation per batch. `generation::with_generation_owner` shares renewed owner election and
+construction writes paged descriptor version 3, reuses unchanged paged layers
+and performs bounded-directory carries. Released manifest maintenance retains
+the eager version-1 encoding. The capsule owner rebuilds an eager browse graph
+even when its state digest is otherwise current, preserving reusable attribution
+through the existing checkpoint boundary. Full readback validates graph/page
+closure, including recomputed ancestor-set recurrence, before the returned
+descriptor can become readiness. Graph discovery
+drains a separate bounded operation per batch. `generation::with_generation_owner` shares renewed owner election and
 global/repository GC fences between v1 maintenance and the v2 orchestrator;
 all acquired leases are released on returned failure or cancellation. The
 orchestrator rechecks capsule activity and conditionally publishes the small

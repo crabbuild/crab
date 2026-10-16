@@ -474,6 +474,34 @@ async fn open_writer(
     path: &str,
     db: &'static str,
 ) -> Result<slatedb::Db> {
+    let fresh = match open_reader(Arc::clone(&store), path, db).await? {
+        None => true,
+        Some(reader) => {
+            let key = crate::key_codec::encode_system_key(crate::key_codec::SYS_FORMAT_VERSION);
+            let validation = async {
+                let value =
+                    reader
+                        .get(&key)
+                        .await
+                        .map_err(|source| MetadataError::SlateDbRead {
+                            db: db.to_owned(),
+                            source,
+                        })?;
+                validate_writer_format(value.as_deref(), db)
+            }
+            .await;
+            let close = reader
+                .close()
+                .await
+                .map_err(|source| MetadataError::SlateDbClose {
+                    db: db.to_owned(),
+                    source,
+                });
+            validation?;
+            close?;
+            false
+        }
+    };
     let l0_sst_size_bytes = usize::try_from(DEFAULT_CHUNK_INDEX_L0_SST_SIZE_BYTES)
         .map_err(|error| MetadataError::Internal(format!("L0 SST size unsupported: {error}")))?;
     let settings = slatedb::config::Settings {
@@ -484,7 +512,7 @@ async fn open_writer(
         l0_sst_size_bytes,
         ..slatedb::config::Settings::default()
     };
-    slatedb::Db::builder(ObjectPath::from(path), store)
+    let writer = slatedb::Db::builder(ObjectPath::from(path), store)
         .with_settings(settings)
         .build()
         .await
@@ -492,7 +520,61 @@ async fn open_writer(
             db: db.to_owned(),
             path: path.to_owned(),
             source,
-        })
+        })?;
+    if fresh {
+        let initialized = async {
+            let key = crate::key_codec::encode_system_key(crate::key_codec::SYS_FORMAT_VERSION);
+            let value = writer
+                .get(&key)
+                .await
+                .map_err(|source| MetadataError::SlateDbRead {
+                    db: db.to_owned(),
+                    source,
+                })?;
+            if let Some(value) = value {
+                return validate_writer_format(Some(&value), db);
+            }
+            let mut batch = slatedb::WriteBatch::new();
+            batch.put(key, crate::key_codec::METADB_FORMAT_VERSION.to_le_bytes());
+            writer
+                .write_with_options(
+                    batch,
+                    &slatedb::config::WriteOptions {
+                        await_durable: false,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map(|_| ())
+                .map_err(|source| MetadataError::SlateDbWrite {
+                    db: db.to_owned(),
+                    source,
+                })
+        }
+        .await;
+        if let Err(error) = initialized {
+            let _ = close_writer(Some(writer), db).await;
+            return Err(error);
+        }
+    }
+    Ok(writer)
+}
+
+fn validate_writer_format(value: Option<&[u8]>, db: &str) -> Result<()> {
+    if value
+        != Some(
+            crate::key_codec::METADB_FORMAT_VERSION
+                .to_le_bytes()
+                .as_slice(),
+        )
+    {
+        return Err(MetadataError::CorruptObject {
+            path: db.to_owned(),
+            reason: "metadata database is missing or has an unsupported canonical format marker"
+                .to_owned(),
+        });
+    }
+    Ok(())
 }
 
 async fn open_reader(
@@ -790,3 +872,6 @@ mod tests {
         assert_eq!(config.chunk_index_path, ".crab/chunk_index_db/");
     }
 }
+
+#[cfg(test)]
+mod format_tests;

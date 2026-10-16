@@ -422,6 +422,18 @@ async fn corrupt_and_orphaned_catalogs_are_unavailable_not_empty_or_repaired() {
                 .maintain()
                 .await
                 .unwrap();
+            // Corrupt the authoritative image, not a main file whose header
+            // can still be supplied by committed WAL pages during inspection.
+            PinnedRoot::open(&root)
+                .unwrap()
+                .open_database(
+                    Path::new(".catalog.sqlite"),
+                    crate::private_fs::DatabaseMode::ReadWrite,
+                    std::time::Duration::ZERO,
+                )
+                .unwrap()
+                .execute_batch("PRAGMA journal_mode = DELETE;")
+                .unwrap();
         }
         // Overwrite the existing main inode so its real generation owner is
         // valid and the probe reaches SQLite's corrupt-header check.

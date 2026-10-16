@@ -833,6 +833,7 @@ fn validate_candidate_key(state: &GcRunState, key: &str) -> Result<()> {
             ".crab/xorbs/",
             ".crab/gc/closures/",
             ".crab/gc/closure-segments/",
+            ".crab/capsule-chunk-pages/",
         ]
         .iter()
         .any(|prefix| key.starts_with(prefix)),

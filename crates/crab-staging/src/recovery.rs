@@ -31,7 +31,7 @@ pub struct RecoveredSegment {
 ///   committed boundary and actual file length, fsync when truncated, and
 ///   delete pending rows that no longer fit.
 ///
-/// Finally, removes any orphan `current.seg.tmp` files.
+/// Finally, removes orphan temporary and unindexed sealed segment bodies.
 ///
 /// Returns `Some(RecoveredSegment)` if an existing current segment was
 /// found and recovered, or `None` if no current segment existed (fresh
@@ -60,6 +60,7 @@ pub fn recover(root: &Path, index: &Index) -> Result<Option<RecoveredSegment>> {
     }
 
     cleanup_orphan_temps(&segments_dir)?;
+    cleanup_orphan_segments(&segments_dir, index)?;
 
     debug!("crash recovery complete");
     Ok(recovered)
@@ -170,6 +171,46 @@ fn cleanup_orphan_temps(segments_dir: &Path) -> Result<()> {
     }
 }
 
+fn cleanup_orphan_segments(segments_dir: &Path, index: &Index) -> Result<()> {
+    let owned = index
+        .all_segments()?
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .collect::<std::collections::HashSet<_>>();
+    let mut removed = false;
+    // Compaction can crash after installing a body but before its SQL commit,
+    // or after transferring ownership but before unlink. Under the exclusive
+    // open lock, unnamed-by-index sealed bodies cannot belong to a writer.
+    for entry in fs::read_dir(segments_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(identity) = name.strip_suffix(".seg").filter(|identity| {
+            identity.len() == 16 && identity.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) else {
+            continue;
+        };
+        let Ok(id) = u64::from_str_radix(identity, 16) else {
+            continue;
+        };
+        if !owned.contains(&id) {
+            if index.segment_has_payloads(id)? {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "payload inventory references unregistered segment {id:016x}"
+                )));
+            }
+            fs::remove_file(entry.path())?;
+            removed = true;
+        }
+    }
+    if removed {
+        fs::File::open(segments_dir)?.sync_all()?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +223,29 @@ mod tests {
         let index = Index::open(&db_path).expect("open index");
         fs::create_dir_all(root.join("segments")).expect("mkdir segments");
         (root, index)
+    }
+
+    #[test]
+    fn orphan_cleanup_never_deletes_a_referenced_unregistered_body() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (root, index) = setup_staging(&temp);
+        let file = [1; 32];
+        index.insert_file(&file, 8).expect("file");
+        index
+            .insert_pending(&[PendingRow {
+                chunk_hash: [2; 32],
+                file_hash: file,
+                chunk_index: 0,
+                size: 8,
+                segment_id: 123,
+                segment_offset: 0,
+            }])
+            .expect("referenced inventory");
+        let body = root.join("segments/000000000000007b.seg");
+        fs::write(&body, [0; 16]).expect("body");
+        let error = cleanup_orphan_segments(&root.join("segments"), &index)
+            .expect_err("missing registry is corruption");
+        assert!(matches!(error, StagingError::StagingCorrupt(_)) && body.exists());
     }
 
     #[cfg(unix)]

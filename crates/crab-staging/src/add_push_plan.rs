@@ -42,9 +42,9 @@ pub struct AddPushPlanSummary {
 }
 
 /// Looks up already-uploaded chunk placements for staged chunks.
-#[expect(
+#[allow(
     clippy::double_must_use,
-    reason = "async_trait marks boxed futures must-use; Result is also must-use"
+    reason = "async-trait 0.1.89 injects must_use on boxed futures; MSRV Clippy does not report it"
 )]
 #[async_trait]
 pub trait ExistingChunkLookup: Send + Sync {
@@ -55,9 +55,9 @@ pub trait ExistingChunkLookup: Send + Sync {
 }
 
 /// Adds local prepared-xorb candidates to the staging cache.
-#[expect(
+#[allow(
     clippy::double_must_use,
-    reason = "async_trait marks boxed futures must-use; Result is also must-use"
+    reason = "async-trait 0.1.89 injects must_use on boxed futures; MSRV Clippy does not report it"
 )]
 #[async_trait]
 pub trait LocalXorbCandidateLookup: Send + Sync {

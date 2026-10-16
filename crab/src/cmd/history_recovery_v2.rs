@@ -29,7 +29,7 @@ struct VerifiedCapsuleHistory {
     segment: HistorySegment,
     checkpoint: LayeredCheckpoint,
     verification: HistoryVerificationPayload,
-    _workspace: tempfile::TempDir,
+    workspace: tempfile::TempDir,
 }
 
 pub(super) async fn run(
@@ -196,56 +196,49 @@ async fn verify_history(
 ) -> Result<VerifiedCapsuleHistory> {
     check_cancelled(cancel)?;
     let segment = select_history(layout, root, generation, digest).await?;
-    let checkpoint =
-        crab_metadata::capsule_protocol::load_layered_checkpoint(layout, segment.checkpoint())
-            .await?;
+    let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(
+        layout,
+        segment.checkpoint(),
+        u64::MAX,
+    )
+    .await?;
     let (source_count, source_bytes) =
         verify_history_sources(layout, &segment, &checkpoint, cancel).await?;
     check_cancelled(cancel)?;
 
-    let catalog = checkpoint.pointer_catalog()?;
     validate_visibility(&segment, &checkpoint)?;
     let workspace = verify_git_checkpoint(layout, &segment, &checkpoint).await?;
-    let dependencies = crab_read::capsule_protocol::verify_installed_dependencies(
+    let dependencies = crab_read::capsule_protocol::verify_installed_catalog_dependencies(
         layout,
         &workspace.path().join("repository.git"),
         segment.refs(),
-        &catalog,
+        checkpoint.catalog(),
         crate::cmd::fsck_store::CAPSULE_GIT_SCAN_LIMITS,
         cancel,
     )
     .await?;
     check_cancelled(cancel)?;
-    let shard_count = u64::try_from(catalog.shards().len())
-        .map_err(|_| CrabError::Internal("history shard count overflowed".to_owned()))?;
-    let xorb_count = u64::try_from(catalog.xorbs().len())
-        .map_err(|_| CrabError::Internal("history xorb count overflowed".to_owned()))?;
+    let shard_count = dependencies.catalog_shards;
+    let xorb_count = dependencies.catalog_xorbs;
     let dependency_objects = 2_u64
-        .checked_add(source_count)
+        .checked_add(dependencies.checkpoint_catalog_objects)
+        .and_then(|total| total.checked_add(source_count))
         .and_then(|total| total.checked_add(shard_count))
         .and_then(|total| total.checked_add(xorb_count))
         .and_then(|total| total.checked_add(dependencies.reachable_lfs_objects))
         .ok_or_else(|| CrabError::Internal("history dependency count overflowed".to_owned()))?;
     let segment_bytes = u64::try_from(segment.bytes().len())
         .map_err(|_| CrabError::Internal("history segment size overflowed".to_owned()))?;
-    let checkpoint_bytes = u64::try_from(checkpoint.bytes().len())
-        .map_err(|_| CrabError::Internal("history checkpoint size overflowed".to_owned()))?;
+    let checkpoint_bytes = checkpoint
+        .pointer()?
+        .size()
+        .checked_add(dependencies.checkpoint_catalog_bytes)
+        .ok_or_else(|| CrabError::Internal("history catalog byte count overflowed".to_owned()))?;
     let dependency_bytes = segment_bytes
         .checked_add(checkpoint_bytes)
         .and_then(|total| total.checked_add(source_bytes))
         .and_then(|total| total.checked_add(dependencies.reachable_lfs_bytes))
-        .and_then(|total| {
-            catalog
-                .shards()
-                .values()
-                .try_fold(total, |sum, shard| sum.checked_add(shard.encoded_size()))
-        })
-        .and_then(|total| {
-            catalog
-                .xorbs()
-                .values()
-                .try_fold(total, |sum, xorb| sum.checked_add(xorb.encoded_size()))
-        })
+        .and_then(|total| total.checked_add(dependencies.catalog_payload_bytes))
         .ok_or_else(|| CrabError::Internal("history dependency bytes overflowed".to_owned()))?;
     let verification = HistoryVerificationPayload {
         generation: segment.checkpoint().covered_generation(),
@@ -262,7 +255,7 @@ async fn verify_history(
         segment,
         checkpoint,
         verification,
-        _workspace: workspace,
+        workspace,
     })
 }
 
@@ -459,7 +452,17 @@ async fn prune_history(
         let base = crab_write::capsule_protocol::open_root(layout).await?;
         let chain = history_chain(layout, &base).await?;
         let mut payload = prune_payload(&chain, args.keep_last, true);
+        let minimum = chain
+            .iter()
+            .take(args.keep_last)
+            .next_back()
+            .map(|segment| segment.checkpoint().covered_generation());
         if payload.roots_pruned == 0 {
+            // Retry capture cleanup after an earlier history CAS committed but
+            // its derived-retention update failed. Empty history has no cutoff.
+            if let Some(minimum) = minimum {
+                prune_capture_sources(layout, minimum).await?;
+            }
             return Ok(payload);
         }
         // Finish fallible local preparation before acquiring the root fence;
@@ -484,7 +487,13 @@ async fn prune_history(
         let replacement =
             crab_write::capsule_protocol::replace_history(layout, fenced.clone(), &rebuilt).await;
         let (primary, release_base) = match replacement {
-            Ok(root) => (None, root),
+            Ok(root) => {
+                let cleanup = match minimum {
+                    Some(minimum) => prune_capture_sources(layout, minimum).await,
+                    None => Ok(()),
+                };
+                (cleanup.err().map(CrabError::from), root)
+            }
             Err(error) => (Some(CrabError::from(error)), fenced),
         };
         let release = crab_write::capsule_protocol::end_gc(layout, release_base, &fence_id).await;
@@ -503,6 +512,16 @@ async fn prune_history(
         (Ok(payload), Ok(())) => Ok(payload),
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
+}
+
+async fn prune_capture_sources(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    minimum_generation: u64,
+) -> crab_metadata::error::Result<()> {
+    crab_metadata::capsule_protocol::prune_retained_browse_indexes(layout, minimum_generation)
+        .await?;
+    crab_metadata::capsule_protocol::prune_retained_capsule_sources(layout, minimum_generation)
+        .await
 }
 
 fn prune_payload(chain: &[HistorySegment], keep_last: usize, applied: bool) -> HistoryPrunePayload {
@@ -591,7 +610,7 @@ async fn restore_history(
 ) -> Result<HistoryRestorePayload> {
     let lease =
         crate::maintenance::GcSweepLease::acquire(store, router.repo_prefix(), cancel).await?;
-    let operation = async {
+    let operation = Box::pin(async {
         check_cancelled(cancel)?;
         let base = crab_write::capsule_protocol::open_root(layout).await?;
         let verified = verify_history(
@@ -614,20 +633,42 @@ async fn restore_history(
         let previous_generation = view.root().root().generation();
         let (refs_added, refs_updated, refs_deleted) =
             ref_change_counts(view.refs(), verified.segment.refs());
-        let current_catalog = view.pointer_catalog()?;
-        // Keep both catalogs: history may use a recipe no longer in the current
-        // view, while newer content must remain available after a rollback.
-        let mut restored_catalog = verified.checkpoint.pointer_catalog()?;
-        restored_catalog.apply(&current_catalog)?;
-        let outcome = crab_remote::checkpoint::publish_capsule_checkpoint_from_view(
+        let current_catalog = crab_remote::checkpoint::prepare_capsule_catalog_from_view(
             layout,
             &view,
-            0,
             RESTORE_CHECKPOINT_BYTES,
-            cancel,
         )
         .await
         .map_err(map_checkpoint_error)?;
+        // Retain newer-only content while older refs regain visibility. Current
+        // bindings still win, so the old byte proof alone cannot certify them.
+        let restored_catalog = crab_metadata::capsule_protocol::merge_checkpoint_catalogs(
+            layout,
+            verified.checkpoint.catalog(),
+            current_catalog.as_ref(),
+            RESTORE_CHECKPOINT_BYTES,
+        )
+        .await?;
+        crab_read::capsule_protocol::verify_installed_catalog_dependencies(
+            layout,
+            &verified.workspace.path().join("repository.git"),
+            verified.segment.refs(),
+            restored_catalog.as_ref(),
+            crate::cmd::fsck_store::CAPSULE_GIT_SCAN_LIMITS,
+            cancel,
+        )
+        .await?;
+        check_cancelled(cancel)?;
+        let outcome =
+            crab_remote::checkpoint::publish_capsule_checkpoint_with_catalog_root_from_view(
+                layout,
+                &view,
+                current_catalog,
+                RESTORE_CHECKPOINT_BYTES,
+                cancel,
+            )
+            .await
+            .map_err(map_checkpoint_error)?;
         let checkpointed = crab_write::capsule_protocol::open_root(layout).await?;
         // The shared publisher reports CAS loss as a no-op. Restore cannot
         // fence an unrelated winner using the catalog and refs captured above.
@@ -674,22 +715,13 @@ async fn restore_history(
         .await?;
 
         let restore = async {
-            let checkpoint = match verified.checkpoint.visibility_ordinal_snapshot()? {
-                Some(visibility) => LayeredCheckpoint::build_with_ordinal_visibility(
-                    fenced.record().root().generation(),
-                    fenced.record().digest(),
-                    verified.checkpoint.sources().to_vec(),
-                    restored_catalog,
-                    Some(visibility),
-                )?,
-                None => LayeredCheckpoint::build(
-                    fenced.record().root().generation(),
-                    fenced.record().digest(),
-                    verified.checkpoint.sources().to_vec(),
-                    restored_catalog,
-                    verified.checkpoint.visibility_snapshot()?,
-                )?,
-            };
+            let checkpoint = LayeredCheckpoint::build_with_catalog_root(
+                fenced.record().root().generation(),
+                fenced.record().digest(),
+                verified.checkpoint.sources().to_vec(),
+                restored_catalog,
+                verified.checkpoint.visibility_ordinal_snapshot()?,
+            )?;
             check_cancelled(cancel)?;
             crab_write::capsule_protocol::restore_checkpoint(
                 layout,
@@ -724,7 +756,7 @@ async fn restore_history(
             (Some(error), _) => Err(error),
             (None, Err(error)) => Err(error.into()),
         }
-    }
+    })
     .await;
     let release = lease.release().await;
     match (operation, release) {

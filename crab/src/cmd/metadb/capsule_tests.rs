@@ -109,7 +109,7 @@ async fn layered_diagnosis_and_rebuild_verify_nonempty_repository_without_rewrit
         .await
         .unwrap();
     let before = root.record().digest().to_owned();
-    assert_eq!(root.record().root().checkpoint().unwrap().format(), 5);
+    assert_eq!(root.record().root().checkpoint().unwrap().format(), 9);
     let diagnosis = diagnose_capsule(&layout, root.clone(), DbSelector::Both, true, &cancel)
         .await
         .unwrap();
@@ -183,6 +183,7 @@ async fn layered_metadata_verification_preserves_missing_source_failure() {
     let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(
         &layout,
         root.record().root().checkpoint().unwrap(),
+        u64::MAX,
     )
     .await
     .unwrap();
@@ -226,6 +227,7 @@ async fn layered_metadata_verification_rejects_corruption_outside_git_pack_range
     let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(
         &layout,
         root.record().root().checkpoint().unwrap(),
+        u64::MAX,
     )
     .await
     .unwrap();

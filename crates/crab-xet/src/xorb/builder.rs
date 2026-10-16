@@ -563,7 +563,11 @@ impl XorbBuilder {
             .checked_add(uncompressed_len)
             .ok_or_else(|| xorb_layout_overflow("uncompressed xorb size", uncompressed_len))?;
         let mut rolled = false;
-        if next_uncompressed > u64::from(u32::MAX) && !self.staged.is_empty() {
+        // Format limits override run continuity: small or highly compressed
+        // chunks must not produce a xorb that the parser will reject.
+        if (next_uncompressed > u64::from(u32::MAX) || self.staged.len() >= *MAX_XORB_CHUNKS)
+            && !self.staged.is_empty()
+        {
             self.finalize_current_after_admission(before_rollover)?;
             rolled = true;
         }
@@ -2363,6 +2367,140 @@ mod tests {
             idx < 30,
             "rollover at chunk {idx}, expected sooner with 16 MiB target"
         );
+    }
+
+    #[test]
+    fn chunk_count_limit_produces_verified_xorbs_for_every_ingestion_path() {
+        let chunks = (0..*MAX_XORB_CHUNKS + 2)
+            .map(|index| Chunk::new(Bytes::from((index as u64).to_le_bytes().to_vec())))
+            .collect::<Vec<_>>();
+        let mut batch = chunks[..*MAX_XORB_CHUNKS]
+            .iter()
+            .cloned()
+            .map(|chunk| (chunk, RunId(0)))
+            .collect::<Vec<_>>();
+        batch.push((chunks[0].clone(), RunId(0)));
+        batch.extend(
+            chunks[*MAX_XORB_CHUNKS..]
+                .iter()
+                .cloned()
+                .map(|chunk| (chunk, RunId(0))),
+        );
+        let mut expected = None;
+        for mode in ["serial", "precompressed", "batch", "admitted"] {
+            let mut builder =
+                XorbBuilder::with_policy(Arc::new(FixedCompression::new(CompressionScheme::None))
+                    as Arc<dyn CompressionPolicy>);
+            let mut xorbs = Vec::new();
+            match mode {
+                "serial" => {
+                    for (chunk, run) in &batch {
+                        builder.push(chunk, *run).unwrap();
+                    }
+                }
+                "precompressed" => {
+                    for (chunk, run) in &batch {
+                        builder
+                            .push_precompressed(
+                                chunk,
+                                CompressionScheme::None,
+                                chunk.data.to_vec(),
+                                *run,
+                            )
+                            .unwrap();
+                    }
+                }
+                "batch" => builder.push_batch(&batch).unwrap(),
+                "admitted" => xorbs = push_batch_and_collect(&mut builder, &batch).unwrap(),
+                _ => unreachable!(),
+            }
+            xorbs.extend(builder.finalize().unwrap());
+            let mut decoded = Vec::new();
+            for xorb in &xorbs {
+                let parser = crate::xorb::parser::XorbParser::parse(xorb.bytes.clone()).unwrap();
+                parser.verify_payload_digest().unwrap();
+                parser.verify_all_chunks().unwrap();
+                assert_eq!(parser.hash(), xorb.hash);
+                for (index, placement) in xorb.placements.iter().enumerate() {
+                    assert_eq!(placement.chunk_index, index as u32);
+                    assert_eq!(placement.xorb_hash, xorb.hash);
+                    decoded.push(parser.get_chunk(index as u32).unwrap().data);
+                }
+            }
+            assert_eq!(
+                decoded,
+                chunks
+                    .iter()
+                    .map(|chunk| chunk.data.clone())
+                    .collect::<Vec<_>>(),
+                "{mode}"
+            );
+            assert_eq!(
+                xorbs
+                    .iter()
+                    .map(|xorb| xorb.placements.len())
+                    .collect::<Vec<_>>(),
+                vec![*MAX_XORB_CHUNKS, 2],
+                "{mode}"
+            );
+            let bytes = xorbs
+                .iter()
+                .map(|xorb| xorb.bytes.clone())
+                .collect::<Vec<_>>();
+            if let Some(expected) = &expected {
+                assert_eq!(&bytes, expected, "{mode}");
+            } else {
+                expected = Some(bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_count_limit_preserves_staged_chunks_when_admission_fails() {
+        let batch = (0..=*MAX_XORB_CHUNKS)
+            .map(|index| {
+                (
+                    Chunk::new(Bytes::from((index as u64).to_le_bytes().to_vec())),
+                    RunId(0),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut builder =
+            XorbBuilder::with_policy(Arc::new(FixedCompression::new(CompressionScheme::None))
+                as Arc<dyn CompressionPolicy>);
+        builder.push_batch(&batch[..*MAX_XORB_CHUNKS]).unwrap();
+        builder
+            .push_batch_with_rollover_admission(
+                &batch[..1],
+                || -> Result<()> { panic!("dedup must not request rollover admission") },
+                |_, ()| -> Result<()> { panic!("dedup must not seal the current xorb") },
+            )
+            .unwrap();
+        let error = builder
+            .push_batch_with_rollover_admission(
+                &batch[*MAX_XORB_CHUNKS..],
+                || Err::<(), _>(XetError::Internal("admission denied".to_owned())),
+                |_, ()| -> Result<()> { panic!("failed admission must not publish a result") },
+            )
+            .unwrap_err();
+        assert!(matches!(error, XetError::Internal(message) if message == "admission denied"));
+        assert_eq!(builder.staged_count(), *MAX_XORB_CHUNKS);
+        assert_eq!(builder.completed_count(), 0);
+        assert!(!builder.seen.contains(&batch[*MAX_XORB_CHUNKS].0.hash));
+        let mut xorbs = push_batch_and_collect(&mut builder, &batch[*MAX_XORB_CHUNKS..]).unwrap();
+        xorbs.extend(builder.finalize().unwrap());
+        assert_eq!(
+            xorbs
+                .iter()
+                .map(|xorb| xorb.placements.len())
+                .collect::<Vec<_>>(),
+            vec![*MAX_XORB_CHUNKS, 1]
+        );
+        for xorb in xorbs {
+            let parsed = crate::xorb::parser::XorbParser::parse(xorb.bytes).unwrap();
+            parsed.verify_payload_digest().unwrap();
+            parsed.verify_all_chunks().unwrap();
+        }
     }
 
     #[test]

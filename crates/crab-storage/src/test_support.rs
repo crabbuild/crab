@@ -68,6 +68,7 @@ pub struct CountingObjectStore {
     body_reads_enabled: AtomicBool,
     blocked_body_paths: std::sync::Mutex<HashSet<String>>,
     requests: std::sync::Mutex<Vec<ObjectReadRequest>>,
+    put_cancel: std::sync::Mutex<Option<(Path, tokio_util::sync::CancellationToken)>>,
 }
 
 impl CountingObjectStore {
@@ -84,7 +85,17 @@ impl CountingObjectStore {
             body_reads_enabled: AtomicBool::new(true),
             blocked_body_paths: std::sync::Mutex::new(HashSet::new()),
             requests: std::sync::Mutex::new(Vec::new()),
+            put_cancel: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Cancel once after a successful PUT at or beneath the selected prefix.
+    pub fn cancel_after_put(&self, prefix: Path, cancel: tokio_util::sync::CancellationToken) {
+        let mut hook = self
+            .put_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *hook = Some((prefix, cancel));
     }
 
     /// Enable or disable range and full-body reads while continuing to allow HEAD.
@@ -207,7 +218,19 @@ impl ObjectStore for CountingObjectStore {
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
         self.puts.fetch_add(1, Ordering::AcqRel);
-        self.inner.put_opts(location, payload, options).await
+        let result = self.inner.put_opts(location, payload, options).await?;
+        let mut hook = self
+            .put_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if hook
+            .as_ref()
+            .is_some_and(|(prefix, _)| location.prefix_matches(prefix))
+            && let Some((_, cancel)) = hook.take()
+        {
+            cancel.cancel();
+        }
+        Ok(result)
     }
 
     async fn put_multipart_opts(

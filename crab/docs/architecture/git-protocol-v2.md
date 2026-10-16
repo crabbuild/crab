@@ -55,9 +55,8 @@ the invocation rather than allowing every protocol globally:
 git -c protocol.crab.allow=always clone --recurse-submodules crab://bucket/team/repo
 ```
 
-"All commands" is not a support claim. Date/ref-exclusion shallow selectors
-remain unimplemented; signed push certificates, push options intended for
-server-side hooks, and remote archive service need separate protocol contracts.
+"All commands" is not a support claim. Signed push certificates, push options
+intended for server-side hooks, and remote archive service need separate protocol contracts.
 Signed commits/tags are Git objects and are distinct from signed push requests.
 PRs, CI execution, and mandatory server-side hooks cannot execute inside a
 passive bucket. Clients with unrestricted bucket write credentials can bypass
@@ -76,7 +75,7 @@ select a v2 authority. The session supports:
 - `ls-refs` with ref prefixes, symrefs, peeled tags, unborn HEAD, and hidden
   refs;
 - `fetch` with wants, haves, done, tags, sideband/progress, shallow/deepen,
-  and `deepen-relative`;
+  `deepen-relative`, `deepen-since`, and `deepen-not`;
 - the bounded filter matrix: `blob:none`; `blob:limit=<n>[kmg]`; `tree:<depth>`;
   `object:type={tag,commit,tree,blob}`; `sparse:oid=<full SHA-1>`; and
   repeated filters or percent-encoded `combine:` intersections;
@@ -84,6 +83,12 @@ select a v2 authority. The session supports:
   producer emits a self-contained, non-delta pack because no external base is
   required or assumed;
 - standard local Git pack installation on the v2 path.
+
+The line helper normalizes `--shallow-since` date expressions through Git's
+date parser before passing epoch seconds to the shared planner. Date and
+ref-exclusion selectors apply to requested tips as well as their parents.
+If no commits qualify, fetching fails before pack installation or shallow-file
+publication; it does not substitute a depth-one checkout.
 
 An empty manifest is a valid ref snapshot without a catalog. Empty clones and
 `ls-remote` complete through v2; clients requesting `unborn` receive the
@@ -229,7 +234,7 @@ takeover.
 ## Explicitly unsupported
 
 The first profile rejects stateful `connect`, `packfile-uris`, `object-info`,
-`ref-in-want`, date/ref-exclusion shallow selectors, and other capabilities not
+`ref-in-want`, and other capabilities not
 listed above. A v2 session cannot fall back to the line protocol after the
 terminal handoff; it reports the protocol failure instead.
 
@@ -248,6 +253,13 @@ Git may skip object transfer when the tip is already present locally. Subsequent
 filter reads must leave canonical object counts and bytes unchanged; generated
 response-pack cache and coordination objects are accounted for separately. This
 is not a claim that first-read repair works with read-only object-store credentials.
+
+The add/commit/push RustFS smoke exercises the current physical fault boundary:
+loss of a published capsule and corruption confined to its embedded Git pack
+or index range. Each rejection probe uses an empty cache and requires no local
+HEAD or checked-out payload. It compares the remote root and ref-head bytes
+before and after the fault; discovery can itself reject a damaged capsule,
+so successful `ls-remote` is not the mutation oracle.
 
 Direct pushes and protected/service publication paths publish visibility
 before the corresponding ref or manifest commit. Protected receive extracts

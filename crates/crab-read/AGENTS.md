@@ -27,12 +27,17 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
 | --- | --- | --- |
 | Hydration or range integrity | `crates/crab-read/src/hydrator.rs` | `crates/crab-vfs/src/hydration.rs` |
 | Fetch authorization | `crates/crab-read/src/fetch_admission.rs` | `crab/src/git/remote_helper.rs` |
+| Deep dependency proof | `crates/crab-read/src/capsule_protocol/dependency.rs` | CLI metadata diagnosis, historical checkpoint verification, recovery and HTTP integrity |
+| Replica readiness | `crates/crab-read/src/selection.rs` | `crab/src/replication/mod.rs` |
 | Term resolution | `crates/crab-read/src/term_resolver.rs` | `crates/crab-metadata/src/file_index_lookup.rs` |
 
 ## Invariants
 
 - Requests naming hidden refs remain rejected even when arbitrary wants are enabled. This does not imply that the same SHA is denied under every other name; inspect policy and advertisement together.
   Source: `crates/crab-read/src/fetch_admission.rs`.
+- `verify_captured_installed_pointer_bytes` proves reachable Git/Crab/LFS bytes
+  against captured selected closures. Complete integrity callers separately
+  prove all catalog descriptors; do not treat this phase as global catalog proof.
 - Preserve the difference between full-file hash verification and range/chunk verification; partial output is not proof of the complete file.
   Source: `crates/crab-read/src/hydrator.rs`.
 - TermResolver construction rejects zero/oversized permit counts. Its semaphore

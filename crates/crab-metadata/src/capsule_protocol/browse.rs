@@ -16,6 +16,8 @@ pub struct BrowseIndexes {
     commit_graph_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     path_state_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_index_hash: Option<String>,
 }
 
 impl BrowseIndexes {
@@ -26,10 +28,11 @@ impl BrowseIndexes {
         path_state_hash: Option<String>,
     ) -> Result<Self> {
         let value = Self {
-            version: 2,
+            version: 3,
             state_digest,
             commit_graph_hash,
             path_state_hash,
+            object_index_hash: None,
         };
         value.validate()?;
         Ok(value)
@@ -51,6 +54,19 @@ impl BrowseIndexes {
     #[must_use]
     pub fn path_state_hash(&self) -> Option<&str> {
         self.path_state_hash.as_deref()
+    }
+
+    /// Return the complete physical object-index descriptor for this captured state.
+    #[must_use]
+    pub fn object_index_hash(&self) -> Option<&str> {
+        self.object_index_hash.as_deref()
+    }
+
+    /// Attach a durable, completely verified physical index before publishing readiness.
+    pub fn with_object_index(mut self, hash: String) -> Result<Self> {
+        self.object_index_hash = Some(hash);
+        self.validate()?;
+        Ok(self)
     }
 
     /// Encode a bounded record after every named index is durable.
@@ -76,7 +92,7 @@ impl BrowseIndexes {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.version != 2 {
+        if self.version != 3 {
             return Err(corrupt_object(
                 "browse indexes",
                 "unsupported record version",
@@ -90,6 +106,9 @@ impl BrowseIndexes {
         }
         if let Some(hash) = &self.path_state_hash {
             validate_content_hash(hash, "path state", "browse indexes")?;
+        }
+        if let Some(hash) = &self.object_index_hash {
+            validate_content_hash(hash, "object index", "browse indexes")?;
         }
         Ok(())
     }
@@ -121,7 +140,7 @@ mod tests {
     #[test]
     fn graph_ready_record_round_trips_without_complete_path_attribution() {
         let encoded = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "state_digest": "1".repeat(64),
             "commit_graph_hash": "2".repeat(64),
         });
@@ -134,8 +153,10 @@ mod tests {
 
     #[test]
     fn browse_indexes_round_trip_exact_state_and_complete_descriptors() {
-        let record =
-            BrowseIndexes::new("1".repeat(64), "2".repeat(64), Some("3".repeat(64))).unwrap();
+        let record = BrowseIndexes::new("1".repeat(64), "2".repeat(64), Some("3".repeat(64)))
+            .unwrap()
+            .with_object_index("4".repeat(64))
+            .unwrap();
         assert_eq!(
             BrowseIndexes::decode(&record.encode().unwrap()).unwrap(),
             record
@@ -156,12 +177,16 @@ mod tests {
             malformed[field] = serde_json::json!("../invalid");
             assert!(BrowseIndexes::decode(&serde_json::to_vec(&malformed).unwrap()).is_err());
         }
-        let mut malformed_path = valid.clone();
-        malformed_path["path_state_hash"] = serde_json::json!("../invalid");
-        assert!(BrowseIndexes::decode(&serde_json::to_vec(&malformed_path).unwrap()).is_err());
-        let mut unsupported = valid;
-        unsupported["version"] = serde_json::json!(1);
-        assert!(BrowseIndexes::decode(&serde_json::to_vec(&unsupported).unwrap()).is_err());
+        for field in ["path_state_hash", "object_index_hash"] {
+            let mut malformed = valid.clone();
+            malformed[field] = serde_json::json!("../invalid");
+            assert!(BrowseIndexes::decode(&serde_json::to_vec(&malformed).unwrap()).is_err());
+        }
+        for version in [1, 2] {
+            let mut unsupported = valid.clone();
+            unsupported["version"] = serde_json::json!(version);
+            assert!(BrowseIndexes::decode(&serde_json::to_vec(&unsupported).unwrap()).is_err());
+        }
         assert!(BrowseIndexes::decode(&vec![b' '; MAX_BROWSE_INDEXES_BYTES as usize + 1]).is_err());
     }
 }

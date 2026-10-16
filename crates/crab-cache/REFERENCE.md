@@ -11,6 +11,7 @@ their outstanding qualification limits.
 - [Health inspection and accounting](#health-inspection-and-accounting)
 - [Object maintenance and recency](#object-maintenance-and-recency)
 - [Catalog eviction](#catalog-eviction)
+- [Catalog checkpoint cadence](#catalog-checkpoint-cadence)
 - [Private SQLite ownership](#private-sqlite-ownership)
 - [Database generation binding](#database-generation-binding)
 - [Read-only SQLite inspection](#read-only-sqlite-inspection)
@@ -303,3 +304,42 @@ closing their file handles. On Unix, a descriptor inherited by a concurrent
 fork must not prolong ownership until that unrelated child executes or exits.
 Callers still must join their own cache workers before dropping the guard;
 explicit unlock does not make a detached writer safe.
+
+## Catalog checkpoint cadence
+
+Catalog writers retain their generation-bound WAL when short connections
+close. Reservation creation, owner release and payload removal use the same
+close policy; closing one SQL operation no longer requests a full checkpoint
+of the catalog. SQLite's existing automatic checkpoint policy remains enabled
+(the pinned dependency defaults to 1,000 pages), and synchronization settings,
+payload flushes, private filesystem checks and accounting transactions remain
+unchanged. A long active reader can still defer an automatic checkpoint under
+SQLite's existing WAL rules.
+
+Committed catalog state may remain in WAL after all catalog handles close.
+Inspection reads that WAL through the existing read-only private VFS. Copying
+the main database alone is not a coherent snapshot; fixture builders and repair
+operations must use a complete SQLite snapshot or checkpoint under its locks.
+Generation replacement still rejects stale owners instead of adopting recovery
+files from a different main/owner identity. This changes checkpoint cadence,
+not the schema or public cache configuration.
+
+The pre-fix regression fails for repeated reservations and immediate release.
+Post-fix qualification passes all 309 library tests and three credential
+integration tests with local-cache, Xet chunk cache and remote-client enabled.
+The corrupt-main fixture checkpoints before damage so committed WAL cannot
+supply its supposedly corrupted header; its original assertions remain.
+Strict combined-feature all-target Clippy also passes. Native-platform coverage
+and the failed 1,024-file push rerun remain required.
+
+The workspace selects SQLite 3.51.3 through rusqlite 0.39 and the matched
+[Cellule backport](https://github.com/crabbuild/cellule/pull/78). The earlier
+SQLite 3.49.1 was affected by the upstream
+[WAL-reset race](https://www.sqlite.org/wal.html#walreset). This dependency
+upgrade preserves unsigned conversion checks and rejects progress-hook
+installation failures before shard-hint inspection. The checkpoint policy
+and dependency change are separate reviewable commits. Private-VFS, cache,
+affected-consumer and native workflow qualification must run against this
+linked SQLite version before release. The combined cache suite has been
+repeated on this dependency: 309 library tests and three credential tests
+pass; native workflow and affected-consumer gates remain open.

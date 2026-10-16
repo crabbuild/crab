@@ -224,7 +224,7 @@ diff, blame, archive, storage, inflation, and response work have independent
 aggregate limits.
 
 History remains authoritative over verified raw commit objects. When the
-manifest names an immutable split commit graph, open bounds the complete graph
+released manifest names a version-1 split commit graph, open bounds the complete graph
 to 128 MiB, verifies every descriptor and layer Blake3 identity, validates
 stable ordinals, parent closure, corrected generations, and the exact manifest
 generation/pack/digest tuple. A snapshot uses it only while each positional
@@ -234,9 +234,28 @@ commit. First-parent path cursors carry the next verified raw parent, so later
 pages do not replay newer commits. A matching complete graph groups bounded raw
 commit and tree reads for range coalescing without becoming the history authority.
 
+Capsule browse graph version 3 uses descriptor and dependency-page reads instead
+of loading the complete graph. Its captured ref roots authorize exact ancestor-set
+queries; physically retained records do not grant visibility. OID, parent and
+generation access is batched and asynchronous. Required page corruption fails
+explicitly. Path-state binds the immutable descriptor's verified positional digest
+and validates consumed records through the graph reader. Complete recurrence and
+physical coverage validation remain the publication/maintenance owner's obligation.
+This removes the graph bitmap and full positional hashing from capsule foreground
+reads; outer capsule control capture is a separate remaining opening cost.
+
 All snapshot constructors use this same graph validation when their supplied
-metadata names an index. They retain path-state metadata for exact attribution;
-a corrupt declared path index, or a missing graph needed to interpret it,
+metadata names an index. Attribution captures the path-state descriptor and
+graph identity, batches path prefixes, and fetches only required authenticated
+pages. Verified page caching is bounded and private to that captured index;
+every invocation wraps the same origin store with its current operation's
+read admission. The cache retains no operation admission or cancellation token.
+Descriptor/page reads obey aggregate request/byte admission, while entry, depth,
+logical-object and response limits also apply to warm queries. Required missing
+pages fail as corruption rather than becoming indexing readiness or path misses.
+A cancelled waiter can abandon shared descriptor initialization; a successful
+initializer retains only immutable metadata, so later operations remain usable.
+A corrupt declared path index, or a missing graph needed to interpret it,
 returns `Corrupt(PathState)` instead of fabricating attribution. A journal
 overlay that changes the Git validation digest discards the base index pointers.
 Absent or superseded indexes cause no index-origin reads. Graph opening obeys
@@ -290,44 +309,44 @@ the pinned proof cannot confer visibility from unrelated refs.
 
 ### Command-line qualification
 
-`qualify_remote` exercises repository open, snapshot/commit reads, cold and
-warm directory/blob reads, history, path history, compare, diff, blame, and a
-complete archive through one shared runtime:
+`qualify_remote` measures isolated capsule-v2 opening, ref resolution, commit,
+directory, blob, point/batch object, history, attribution and blame queries. Each
+workload gets a fresh runtime and runs cold/warm with opening reported separately:
 
 ```console
 CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-remote-qualification \
-  cargo run -p crab-remote-git --release --example qualify_remote -- \
-  <bucket> <repository-prefix> <path-changed-by-head>
+  cargo run -p crab-remote --features publication --release --example qualify_remote -- \
+  <bucket> <repository-prefix> <text-path> [operation|all|build-indexes]
 ```
 
 Use a unique target directory for your checkout on the mounted workspace volume.
-
-The example reports elapsed time plus canonical `crab-storage` read attempts
-and bytes for each operation. Those counters include manifest, inventory,
-pack-index, and pack-body reads but exclude SlateDB locator-internal reads, so
-they are useful for regression comparison rather than complete provider
-billing. The example uses an explicit larger archive qualification budget; it
-does not change library or service defaults.
+`build-indexes` explicitly runs state-fenced background maintenance; normal
+queries only consume published indexes and require attribution readiness.
+The JSONL measurements include backend operation outcomes/consumed bytes,
+locator-internal reads and graph/path-state decode counts. Backend invocations
+are distinct from provider HTTP retries; the scaling harness meters HTTP and
+process CPU/peak RSS separately. Oracle records verify Git content hashes and
+complete supported blame origins. Archive qualification remains in
+`qualify_browse`. See the [delivery and measurement contract](../../crab/docs/architecture/indexed-remote-reads.md).
 
 ## Browsing correctness against a real repository
 
 `qualify_browse` emits JSONL evidence using only the remote storage API. It
-paginates 1,000 first-parent commits and the complete HEAD tree, checks 128
+paginates 1,000 first-parent commits and the complete HEAD tree, checks every directory entry attribution and selected file history/blame, reads 128
 spread-out blob paths twice, and streams every HEAD blob through an independent
 Git SHA-1 calculation. Paths and commit messages are emitted as byte arrays.
 The run succeeds only when a final `complete` record is emitted.
 
 A fresh push can precede object-catalog publication.
-Run `crab metadb owner --once` from the uploader repository to advance the
-catalog; repeat owner passes until `action=none` to finish all derived maintenance. The direct reader
-returns `RepositoryIndexing` while locator coverage is absent or stale and does
-not perform this write-side work. See [metadata ownership](../../crab/docs/guides/metadb.md).
+Run the explicit `qualify_remote ... build-indexes` operation after publishing
+the capsule fixture to construct complete browse indexes. The direct reader
+does not perform this write-side work; incomplete attribution remains indexing. See [metadata ownership](../../crab/docs/guides/metadb.md).
 
 Run the built example from an empty directory with the local RustFS environment
 configured as described in the [local development guide](../../crab/docs/guides/local-dev-rustfs.md):
 
 ```console
-/path/to/qualify_browse <bucket> <repository-prefix> > browse.jsonl
+/path/to/qualify_browse <bucket> <repository-prefix> <text-path> > browse.jsonl
 python3 crab/scripts/e2e/verify_remote_browse.py \
   /path/to/read-only/source-repository browse.jsonl --output report.json
 ```

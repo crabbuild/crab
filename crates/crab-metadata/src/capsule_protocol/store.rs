@@ -5,7 +5,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use object_store::ObjectMeta;
 
 use crate::capsule_protocol::{
-    Capsule, CapsuleControl, CapsuleRefHead, CapsuleRun, CapsuleRunControl, CapsuleSectionKind,
+    CapsuleControl, CapsuleRefHead, CapsuleRun, CapsuleRunControl, CapsuleSectionKind,
     HistorySegment, HistorySegmentPointer, LayeredCheckpoint, MAX_CAPSULE_REF_HEADS,
     MAX_HISTORY_SEGMENT_BYTES, MAX_ROOT_BYTES, PointerCatalog, RootRecord, capsule_ref_name_key,
 };
@@ -14,6 +14,9 @@ use crate::error::Result;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod catalog_order_tests;
 
 /// A verified stored root and the provider token protecting its next update.
 #[derive(Debug, Clone)]
@@ -294,12 +297,22 @@ pub async fn load_history_chain(
     Ok(segments)
 }
 
-/// Load and verify one immutable metadata-only layered checkpoint.
+/// Load and verify a checkpoint's visibility body and external catalog commitment.
+///
+/// Catalog pages remain cold until lookup or explicit full materialization.
 pub async fn load_layered_checkpoint(
     router: &StoreLayout<Store>,
     pointer: &super::CheckpointPointer,
+    maximum_bytes: u64,
 ) -> Result<LayeredCheckpoint> {
-    if pointer.format() != 5 {
+    let checkpoint_limit = maximum_bytes.min(super::layered::MAX_CHECKPOINT_BYTES);
+    if pointer.size() > checkpoint_limit {
+        return Err(MetadataError::CheckpointSize {
+            bytes: pointer.size(),
+            maximum: checkpoint_limit,
+        });
+    }
+    if pointer.format() != super::layered::CHECKPOINT_VERSION {
         return Err(corrupt(
             &router.capsule_checkpoint_path(pointer.hash()),
             "checkpoint pointer does not name the layered checkpoint format",
@@ -317,6 +330,13 @@ pub async fn load_layered_checkpoint(
             "layered checkpoint does not match its authenticated pointer",
         ));
     }
+    let total = checkpoint.encoded_metadata_bytes()?;
+    if total > maximum_bytes {
+        return Err(MetadataError::CheckpointSize {
+            bytes: total,
+            maximum: maximum_bytes,
+        });
+    }
     Ok(checkpoint)
 }
 
@@ -325,10 +345,19 @@ pub async fn load_layered_checkpoint_control(
     router: &StoreLayout<Store>,
     pointer: &super::CheckpointPointer,
 ) -> Result<LayeredCheckpoint> {
-    if pointer.format() != 5 {
+    if pointer.format() != super::layered::CHECKPOINT_VERSION {
         return Err(corrupt(
             &router.capsule_checkpoint_path(pointer.hash()),
             "checkpoint pointer does not name the layered checkpoint format",
+        ));
+    }
+    super::root::validate_checkpoint_pointer(pointer)?;
+    if pointer.size() > super::layered::MAX_CHECKPOINT_BYTES
+        || pointer.control_size() > super::layered::MAX_CHECKPOINT_FOOTER_BYTES as u64 + 48
+    {
+        return Err(corrupt(
+            &router.capsule_checkpoint_path(pointer.hash()),
+            "checkpoint control exceeds format byte bounds",
         ));
     }
     // A checkpoint without catalog or visibility sections is entirely footer.
@@ -398,6 +427,46 @@ pub async fn load_capsule_run_control(
     Ok((control, capsules))
 }
 
+/// Load complete reference controls while validating admission counts through authenticated pages.
+///
+/// OID admission remains cold; reference reconciliation still validates complete visibility edits.
+pub async fn load_capsule_run_git_control(
+    router: &StoreLayout<Store>,
+    pointer: &super::CapsulePointer,
+) -> Result<(CapsuleRunControl, Vec<CapsuleControl>)> {
+    super::root::validate_capsule_pointer(pointer)?;
+    let path = router.capsule_path(pointer.hash());
+    let start = pointer
+        .size()
+        .checked_sub(CapsuleRunControl::trailer_bytes())
+        .ok_or_else(|| corrupt(&path, "capsule run is shorter than its trailer"))?;
+    let trailer = router
+        .store()
+        .range_get(&path, start..pointer.size())
+        .await?;
+    let range = CapsuleRunControl::footer_range(&trailer, pointer)?;
+    let footer = router.store().range_get(&path, range).await?;
+    let control = CapsuleRunControl::decode_footer(footer, pointer)?;
+    if let Some(reader) =
+        control.admission_reader(router, super::run::MAX_RUN_FOOTER_BYTES as u64)?
+    {
+        let counts = reader.counts(router.store()).await?;
+        if counts.len() != control.git_packs().len()
+            || counts
+                .iter()
+                .zip(control.git_packs())
+                .any(|(count, member)| *count != member.object_count())
+        {
+            return Err(corrupt(
+                &path,
+                "capsule member counts do not match its authenticated pack directory",
+            ));
+        }
+    }
+    let capsules = control.materialize_capsules_with_paged_visibility(router)?;
+    Ok((control, capsules))
+}
+
 async fn load_detached_control_sections(
     router: &StoreLayout<Store>,
     path: &object_store::path::Path,
@@ -440,201 +509,14 @@ pub async fn load_pointer_catalog_from_root(
     router: &StoreLayout<Store>,
     snapshot: &RootSnapshot,
 ) -> Result<PointerCatalog> {
-    let root = snapshot.record().root().clone();
-    let mut catalog = if let Some(pointer) = root.checkpoint() {
-        load_layered_checkpoint(router, pointer)
-            .await?
-            .pointer_catalog()?
-    } else {
-        PointerCatalog::new()
-    };
-    for pointer in root.capsule_frontier() {
-        let run = load_run(router, pointer).await?;
-        for capsule in run.capsules() {
-            if let Some(delta) = capsule.pointer_catalog_delta()? {
-                catalog.apply(&delta)?;
-            }
-        }
-    }
-    for capsule in load_visible_ref_capsules(router, &root, &catalog).await? {
-        if let Some(delta) = capsule.pointer_catalog_delta()? {
-            catalog.apply(&delta)?;
-        }
-    }
-    Ok(catalog)
+    super::catalog_capture::materialize_from_root(router, snapshot).await
 }
 
-async fn load_visible_ref_capsules(
-    router: &StoreLayout<Store>,
-    root: &super::RepositoryRoot,
-    base_catalog: &PointerCatalog,
-) -> Result<Vec<Capsule>> {
-    let (heads, active) = capture_ref_heads(router, root).await?;
-
-    let mut pointers = BTreeMap::new();
-    let mut sequences = BTreeMap::new();
-    let mut expected_refs = root.refs().clone();
-    for head in heads {
-        let state = head.visible(&active);
-        if state.transaction_id()
-            == root
-                .compacted_ref_transactions()
-                .get(head.ref_name())
-                .map(String::as_str)
-        {
-            continue;
-        }
-        match state.oid() {
-            Some(oid) => {
-                expected_refs.insert(head.ref_name().to_owned(), oid.to_owned());
-            }
-            None => {
-                expected_refs.remove(head.ref_name());
-            }
-        }
-        for pointer in state.frontier() {
-            match pointers.get(pointer.hash()) {
-                Some(existing) if existing != pointer => {
-                    return Err(contract_error(
-                        "capsule run identity has conflicting authenticated metadata",
-                    ));
-                }
-                Some(_) => {}
-                None => {
-                    pointers.insert(pointer.hash().to_owned(), pointer.clone());
-                }
-            }
-        }
-        sequences.insert(
-            head.ref_name().to_owned(),
-            (
-                state.checkpoint_transaction_id().map(str::to_owned),
-                state.frontier().to_vec(),
-            ),
-        );
-    }
-
-    let run_router = router.clone();
-    let runs = futures_util::stream::iter(pointers.into_values().map(move |pointer| {
-        let router = run_router.clone();
-        async move {
-            load_run(&router, &pointer)
-                .await
-                .map(|run| (run.hash().to_owned(), run))
-        }
-    }))
-    .buffer_unordered(32)
-    .try_collect::<BTreeMap<_, _>>()
-    .await?;
-    let mut required = BTreeSet::new();
-    for (ref_name, (checkpoint_transaction_id, frontier)) in sequences {
-        let transaction_ids = frontier
-            .iter()
-            .flat_map(|pointer| {
-                runs.get(pointer.hash())
-                    .into_iter()
-                    .flat_map(|run| run.capsules().iter().map(Capsule::transaction_id))
-            })
-            .collect::<Vec<_>>();
-        let start = match root.compacted_ref_transactions().get(&ref_name) {
-            Some(compacted) => match transaction_ids
-                .iter()
-                .position(|transaction_id| *transaction_id == compacted)
-            {
-                Some(index) => index + 1,
-                None if checkpoint_transaction_id.as_deref() == Some(compacted.as_str()) => 0,
-                None => {
-                    return Err(contract_error(format!(
-                        "ref {ref_name} does not extend its compacted transaction"
-                    )));
-                }
-            },
-            None if checkpoint_transaction_id.is_none() => 0,
-            None => {
-                return Err(contract_error(format!(
-                    "ref {ref_name} names a checkpoint absent from the repository root"
-                )));
-            }
-        };
-        required.extend(
-            transaction_ids[start..]
-                .iter()
-                .map(|transaction_id| (*transaction_id).to_owned()),
-        );
-    }
-    let mut pending = BTreeMap::new();
-    for capsule in runs
-        .values()
-        .flat_map(|run| run.capsules())
-        .filter(|capsule| required.contains(capsule.transaction_id()))
-    {
-        match pending.get(capsule.transaction_id()) {
-            Some(existing) if existing != capsule => {
-                return Err(contract_error(
-                    "transaction identity names conflicting capsules",
-                ));
-            }
-            Some(_) => {}
-            None => {
-                pending.insert(capsule.transaction_id().to_owned(), capsule.clone());
-            }
-        }
-    }
-    let mut refs = root.refs().clone();
-    let mut catalog = base_catalog.clone();
-    let mut ordered = Vec::with_capacity(pending.len());
-    while !pending.is_empty() {
-        let mut ready = None;
-        for (id, capsule) in &pending {
-            let transaction = capsule.transaction()?;
-            if transaction
-                .edits()
-                .iter()
-                .any(|edit| refs.get(edit.ref_name()).map(String::as_str) != edit.expected_old())
-            {
-                continue;
-            }
-            let mut candidate = catalog.clone();
-            if let Some(delta) = capsule.pointer_catalog_delta()?
-                && candidate.apply(&delta).is_err()
-            {
-                continue;
-            }
-            ready = Some(id.clone());
-            break;
-        }
-        let Some(ready) = ready else {
-            return Err(contract_error(
-                "capsule ref history is cyclic or has an unsatisfied catalog dependency",
-            ));
-        };
-        let capsule = pending
-            .remove(&ready)
-            .ok_or_else(|| contract_error("ready capsule disappeared"))?;
-        for edit in capsule.transaction()?.edits() {
-            match edit.new_oid() {
-                Some(oid) => {
-                    refs.insert(edit.ref_name().to_owned(), oid.to_owned());
-                }
-                None => {
-                    refs.remove(edit.ref_name());
-                }
-            }
-        }
-        if let Some(delta) = capsule.pointer_catalog_delta()? {
-            catalog.apply(&delta)?;
-        }
-        ordered.push(capsule);
-    }
-    if refs != expected_refs {
-        return Err(contract_error(
-            "materialized capsules do not match visible ref-head state",
-        ));
-    }
-    Ok(ordered)
-}
-
-async fn capture_ref_heads(
+/// Capture one stable, epoch-filtered ref-head view and its committed activations.
+///
+/// Rejects mismatched object identities, activation records and uncommitted base
+/// heads. Concurrent changes retry within the existing bounded capture policy.
+pub async fn capture_ref_heads(
     router: &StoreLayout<Store>,
     root: &super::RepositoryRoot,
 ) -> Result<(Vec<CapsuleRefHead>, BTreeSet<String>)> {
@@ -677,6 +559,16 @@ async fn capture_ref_heads(
         if before != after {
             continue;
         }
+        for head in &heads {
+            let visible = head.visible(&active);
+            let base_oid = root.refs().get(head.ref_name()).map(String::as_str);
+            if visible.transaction_id().is_none() && visible.oid() != base_oid {
+                return Err(corrupt(
+                    &router.capsule_ref_head_path(&capsule_ref_name_key(head.ref_name())),
+                    "capsule ref head without a transaction differs from the compacted root",
+                ));
+            }
+        }
         return Ok((heads, active));
     }
     Err(contract_error(
@@ -705,7 +597,11 @@ fn listed_version_matches(object: &ObjectMeta, etag: &ETag) -> bool {
             .is_none_or(|listed| etag.version.as_ref() == Some(listed))
 }
 
-async fn resolve_referenced_activations(
+/// Validate referenced activation records and select those committed for these heads.
+///
+/// Callers filter retired epochs before resolving activations so stale heads
+/// cannot introduce authority or demand retired dependencies.
+pub async fn resolve_referenced_activations(
     router: &StoreLayout<Store>,
     heads: &[CapsuleRefHead],
 ) -> Result<BTreeSet<String>> {

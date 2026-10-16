@@ -2,13 +2,14 @@ use super::*;
 
 async fn snapshot_with_read_indexes(
     fixture: &OpenFixture,
+    paged: bool,
 ) -> crab_metadata::manifest_store::RepositorySnapshot {
     use crab_metadata::path_state::{
         PathStateInput, PathStateMutation, append_path_state, upload_path_state,
     };
     use crab_metadata::split_commit_graph::{
-        CommitGraphInput, append_split_commit_graph, load_split_commit_graph,
-        upload_split_commit_graph,
+        CommitGraphInput, append_paged_commit_graph, append_split_commit_graph,
+        load_split_commit_graph, upload_split_commit_graph,
     };
 
     crab_metadata::layout_descriptor::ensure_canonical_layout(&fixture.store, &fixture.layout)
@@ -19,7 +20,12 @@ async fn snapshot_with_read_indexes(
             .await
             .unwrap();
     let manifest = &mut snapshot.manifest;
-    let graph = append_split_commit_graph(
+    let append = if paged {
+        append_paged_commit_graph
+    } else {
+        append_split_commit_graph
+    };
+    let graph = append(
         None,
         manifest.generation,
         manifest.pack_index_hash.clone(),
@@ -78,7 +84,13 @@ async fn snapshot_with_read_indexes(
 #[tokio::test]
 async fn snapshot_read_indexes_supply_exact_attribution_without_manifest_or_catalog() {
     let fixture = open_fixture(1, None).await;
-    let snapshot = snapshot_with_read_indexes(&fixture).await;
+    let snapshot = snapshot_with_read_indexes(&fixture, true).await;
+    // Full maintenance reads are valid during construction. Foreground opening
+    // and attribution must succeed when only graph-page ranges are admitted.
+    fixture
+        .backend
+        .reject_graph_layer_bodies
+        .store(true, Ordering::SeqCst);
     fixture
         .store
         .delete(&fixture.layout.manifest_path())
@@ -127,15 +139,28 @@ async fn snapshot_read_indexes_supply_exact_attribution_without_manifest_or_cata
         .unwrap();
         assert!(repository.commit_graph_available());
         assert!(repository.path_state_available());
-        let index = repository.state.path_state(&cancel).await.unwrap().unwrap();
+        let operation = repository
+            .operation(crate::OperationKind::History, &cancel)
+            .await
+            .unwrap();
+        let index = repository
+            .state
+            .path_state(&operation)
+            .await
+            .unwrap()
+            .unwrap();
         let latest = index
             .latest(
+                &repository.state.store,
                 ObjectId::Sha1([0x11; 20]),
                 &[crate::GitPath::new(b"README.md".to_vec()).unwrap()],
+                &operation,
             )
+            .await
             .unwrap();
         assert_eq!(latest[0].oid, ObjectId::Sha1([0x11; 20]));
         assert_eq!(latest[0].message.as_ref(), b"initial");
+        operation.finish(Ok(())).await.unwrap();
     }
     runtime.shutdown().await;
 }
@@ -143,7 +168,7 @@ async fn snapshot_read_indexes_supply_exact_attribution_without_manifest_or_cata
 #[tokio::test]
 async fn snapshot_read_indexes_skip_origin_when_absent_or_superseded() {
     let fixture = open_fixture(1, None).await;
-    let indexed = snapshot_with_read_indexes(&fixture).await;
+    let indexed = snapshot_with_read_indexes(&fixture, true).await;
     let runtime = Arc::new(RemoteGitRuntime::default());
     for absent in [false, true] {
         let mut snapshot = indexed.clone();
@@ -184,7 +209,7 @@ async fn snapshot_read_indexes_skip_origin_when_absent_or_superseded() {
 #[tokio::test]
 async fn snapshot_read_indexes_do_not_hide_exhausted_request_or_byte_budgets() {
     let fixture = open_fixture(1, None).await;
-    let snapshot = snapshot_with_read_indexes(&fixture).await;
+    let snapshot = snapshot_with_read_indexes(&fixture, true).await;
     for limits in [
         OperationLimits {
             max_storage_requests: 1,
@@ -211,51 +236,85 @@ async fn snapshot_read_indexes_do_not_hide_exhausted_request_or_byte_budgets() {
 }
 
 #[tokio::test]
-async fn snapshot_read_indexes_fail_attribution_when_declared_metadata_is_corrupt() {
-    for kind in ["commit-graph", "path-state"] {
-        let fixture = open_fixture(1, None).await;
-        let snapshot = snapshot_with_read_indexes(&fixture).await;
-        let hash = match kind {
-            "commit-graph" => snapshot.manifest.commit_graph_hash.as_deref().unwrap(),
-            _ => snapshot.manifest.path_state_hash.as_deref().unwrap(),
-        };
-        // Bypass immutable-write protection only to inject corrupt origin bytes.
-        fixture
-            .backend
-            .inner
-            .put(
-                &fixture.layout.bulk_manifest_path(kind, hash),
-                Bytes::from_static(b"corrupt").into(),
-            )
-            .await
-            .unwrap();
-        let runtime = Arc::new(RemoteGitRuntime::default());
-        let cancel = CancellationToken::new();
-        let repository = RemoteGitRepository::from_snapshot(
-            fixture.layout.clone(),
-            &snapshot,
-            RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
-            runtime.clone(),
-            RepositoryOptions::default(),
-            &cancel,
+async fn captured_corrupt_graph_fails_opening_instead_of_raw_traversal() {
+    let fixture = open_fixture(1, None).await;
+    let snapshot = snapshot_with_read_indexes(&fixture, true).await;
+    let hash = snapshot.manifest.commit_graph_hash.as_deref().unwrap();
+    fixture
+        .backend
+        .inner
+        .put(
+            &fixture.layout.bulk_manifest_path("commit-graph", hash),
+            Bytes::from_static(b"corrupt").into(),
         )
         .await
         .unwrap();
-        assert!(matches!(
-            repository.state.path_state(&cancel).await,
-            Err(Error::Corrupt {
-                stage: crate::CorruptionStage::PathState
-            })
-        ));
-        runtime.shutdown().await;
-    }
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let result = RemoteGitRepository::from_snapshot(
+        fixture.layout.clone(),
+        &snapshot,
+        RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+        runtime.clone(),
+        RepositoryOptions::default(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(Error::Metadata(
+            crab_metadata::error::MetadataError::Storage {
+                source: crab_storage::StorageError::CorruptObject { .. }
+            }
+        ))
+    ));
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn captured_corrupt_path_state_fails_attribution() {
+    let fixture = open_fixture(1, None).await;
+    let snapshot = snapshot_with_read_indexes(&fixture, true).await;
+    let hash = snapshot.manifest.path_state_hash.as_deref().unwrap();
+    fixture
+        .backend
+        .inner
+        .put(
+            &fixture.layout.bulk_manifest_path("path-state", hash),
+            Bytes::from_static(b"corrupt").into(),
+        )
+        .await
+        .unwrap();
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let cancel = CancellationToken::new();
+    let repository = RemoteGitRepository::from_snapshot(
+        fixture.layout.clone(),
+        &snapshot,
+        RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+        runtime.clone(),
+        RepositoryOptions::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    let operation = repository
+        .operation(crate::OperationKind::History, &cancel)
+        .await
+        .unwrap();
+    let result = repository.state.path_state(&operation).await.map(|_| ());
+    assert!(matches!(
+        operation.finish(result).await,
+        Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PathState
+        })
+    ));
+    runtime.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_read_indexes_drain_on_cancellation_shutdown_and_deadline() {
     for mode in ["caller", "shutdown", "deadline"] {
         let fixture = open_fixture(1, None).await;
-        let snapshot = snapshot_with_read_indexes(&fixture).await;
+        let snapshot = snapshot_with_read_indexes(&fixture, true).await;
         fixture
             .backend
             .block_path_containing("manifests/commit-graph-");
@@ -309,4 +368,402 @@ async fn snapshot_read_indexes_drain_on_cancellation_shutdown_and_deadline() {
         );
         runtime.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn snapshot_read_indexes_admit_descriptor_pages_and_warm_semantic_results() {
+    for mode in ["descriptor", "page", "warm"] {
+        let fixture = open_fixture(1, None).await;
+        let snapshot = snapshot_with_read_indexes(&fixture, true).await;
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let cancel = CancellationToken::new();
+        let repository = RemoteGitRepository::from_snapshot(
+            fixture.layout.clone(),
+            &snapshot,
+            RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+            runtime.clone(),
+            RepositoryOptions::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let paths = [crate::GitPath::new(b"README.md".to_vec()).unwrap()];
+        if mode != "descriptor" {
+            let warm = repository
+                .operation(crate::OperationKind::History, &cancel)
+                .await
+                .unwrap();
+            let index = repository.state.path_state(&warm).await.unwrap().unwrap();
+            if mode == "warm" {
+                index
+                    .latest(
+                        &repository.state.store,
+                        ObjectId::Sha1([0x11; 20]),
+                        &paths,
+                        &warm,
+                    )
+                    .await
+                    .unwrap();
+            }
+            warm.finish(Ok(())).await.unwrap();
+        }
+        let limits = match mode {
+            "descriptor" => OperationLimits {
+                max_fetched_bytes: 1,
+                ..Default::default()
+            },
+            "page" => OperationLimits {
+                max_storage_requests: 1,
+                ..Default::default()
+            },
+            _ => OperationLimits {
+                max_response_bytes: 1,
+                ..Default::default()
+            },
+        };
+        let operation = crate::OperationContext::open(
+            repository.state.clone(),
+            crate::OperationKind::History,
+            &cancel,
+            limits,
+        )
+        .await
+        .unwrap();
+        let result = async {
+            let index = repository.state.path_state(&operation).await?.unwrap();
+            index
+                .latest(
+                    &repository.state.store,
+                    ObjectId::Sha1([0x11; 20]),
+                    &paths,
+                    &operation,
+                )
+                .await
+        }
+        .await;
+        let error = operation.finish(result).await.unwrap_err();
+        assert!(
+            match mode {
+                "warm" => matches!(
+                    error,
+                    Error::LimitExceeded {
+                        limit: "response bytes",
+                        ..
+                    }
+                ),
+                _ => admission_rejected(&error),
+            },
+            "{mode}: {error:?}"
+        );
+        runtime.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_read_indexes_cancel_inflight_dependency_pages() {
+    for (mode, dependency) in ["caller", "shutdown", "deadline"]
+        .into_iter()
+        .flat_map(|mode| ["path-state", "commit-graph"].map(|dependency| (mode, dependency)))
+    {
+        let fixture = open_fixture(1, None).await;
+        let snapshot = snapshot_with_read_indexes(&fixture, true).await;
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let cancel = CancellationToken::new();
+        let repository = RemoteGitRepository::from_snapshot(
+            fixture.layout.clone(),
+            &snapshot,
+            RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+            runtime.clone(),
+            RepositoryOptions::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+        fixture
+            .backend
+            .block_path_containing(if dependency == "path-state" {
+                "metadata/path-state/layers/"
+            } else {
+                "metadata/commit-graph/layers/"
+            });
+        let worker_cancel = cancel.clone();
+        let worker = tokio::spawn(async move {
+            let limits = OperationLimits {
+                max_duration: if mode == "deadline" {
+                    Duration::from_millis(50)
+                } else {
+                    Duration::from_secs(60)
+                },
+                ..Default::default()
+            };
+            let operation = crate::OperationContext::open(
+                repository.state.clone(),
+                crate::OperationKind::History,
+                &worker_cancel,
+                limits,
+            )
+            .await
+            .unwrap();
+            let result = async {
+                if dependency == "commit-graph" {
+                    // Caller-supplied batch roots still require ancestry pages;
+                    // a verified captured tip no longer needs an in-flight read.
+                    return repository
+                        .state
+                        .commit_graph
+                        .as_ref()
+                        .unwrap()
+                        .reachable_from_roots(
+                            &[ObjectId::Sha1([0x11; 20])],
+                            &[ObjectId::Sha1([0x11; 20])],
+                            &operation,
+                        )
+                        .await
+                        .map(|_| ());
+                }
+                let index = repository.state.path_state(&operation).await?.unwrap();
+                index
+                    .latest(
+                        &repository.state.store,
+                        ObjectId::Sha1([0x11; 20]),
+                        &[crate::GitPath::new(b"README.md".to_vec()).unwrap()],
+                        &operation,
+                    )
+                    .await
+                    .map(|_| ())
+            }
+            .await;
+            operation.finish(result).await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            fixture.backend.request_started.notified(),
+        )
+        .await
+        .unwrap();
+        if mode == "caller" {
+            cancel.cancel();
+        }
+        if mode == "shutdown" {
+            tokio::time::timeout(Duration::from_secs(2), runtime.shutdown())
+                .await
+                .unwrap();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            match mode {
+                "deadline" => matches!(result, Err(Error::Timeout { .. })),
+                _ => matches!(result, Err(Error::Cancelled)),
+            },
+            "{mode}/{dependency}: {result:?}"
+        );
+        runtime.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn released_manifest_graph_remains_usable_for_metadata_membership() {
+    let fixture = open_fixture(1, None).await;
+    let snapshot = snapshot_with_read_indexes(&fixture, false).await;
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let cancel = CancellationToken::new();
+    let repository = RemoteGitRepository::from_snapshot(
+        fixture.layout.clone(),
+        &snapshot,
+        RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+        runtime.clone(),
+        RepositoryOptions::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repository
+            .commits_reachable_from(
+                &[
+                    ObjectId::Sha1([0x11; 20]),
+                    ObjectId::Sha1([0x99; 20]),
+                    ObjectId::Sha1([0x11; 20])
+                ],
+                &[ObjectId::Sha1([0x11; 20])],
+                &cancel,
+            )
+            .await
+            .unwrap(),
+        Some(vec![true, false, true])
+    );
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn captured_tip_membership_avoids_ancestry_reads_and_retains_admission() {
+    let fixture = open_fixture(1, None).await;
+    let snapshot = snapshot_with_read_indexes(&fixture, true).await;
+    let requests = Arc::new(AtomicUsize::new(0));
+    let observed = requests.clone();
+    let store = fixture
+        .store
+        .clone()
+        .with_read_request_observer(Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let cancel = CancellationToken::new();
+    let repository = RemoteGitRepository::from_snapshot(
+        StoreLayout::new(store, "org/repo".into()),
+        &snapshot,
+        RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+        runtime.clone(),
+        RepositoryOptions::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    requests.store(0, Ordering::SeqCst);
+    let graph = repository.state.commit_graph.as_ref().unwrap();
+    let operation = repository
+        .operation_with_limits(
+            crate::OperationKind::Resolve,
+            &cancel,
+            OperationLimits {
+                max_entries: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        graph
+            .is_reachable(ObjectId::Sha1([0x11; 20]), &operation)
+            .await
+            .unwrap()
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        graph
+            .is_reachable(ObjectId::Sha1([0x11; 20]), &operation)
+            .await,
+        Err(Error::LimitExceeded {
+            limit: "entries",
+            ..
+        })
+    ));
+    operation.finish(Ok(())).await.unwrap();
+    let operation = repository
+        .operation(crate::OperationKind::Resolve, &cancel)
+        .await
+        .unwrap();
+    cancel.cancel();
+    assert!(matches!(
+        graph
+            .is_reachable(ObjectId::Sha1([0x11; 20]), &operation)
+            .await,
+        Err(Error::Cancelled)
+    ));
+    let _ = operation.finish(Ok(())).await;
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn paged_graph_queries_preserve_merge_parents_and_exclude_retained_history() {
+    use crab_metadata::split_commit_graph::{
+        CommitGraphInput, append_paged_commit_graph, upload_split_commit_graph,
+    };
+    let fixture = open_fixture(1, None).await;
+    let mut snapshot = snapshot_with_read_indexes(&fixture, true).await;
+    let input = |value: u8, parents: &[u8]| CommitGraphInput {
+        oid: [value; 20],
+        tree_oid: [0x22; 20],
+        commit_time: i64::from(value),
+        parents: parents.iter().map(|parent| [*parent; 20]).collect(),
+    };
+    let graph = append_paged_commit_graph(
+        None,
+        snapshot.manifest.generation,
+        snapshot.manifest.pack_index_hash.clone(),
+        snapshot.manifest.git_validation_digest.clone(),
+        &[[0x11; 20], [4; 20]],
+        vec![
+            input(1, &[]),
+            input(2, &[1]),
+            input(3, &[1]),
+            input(0x11, &[2, 3]),
+            input(4, &[1]),
+        ],
+    )
+    .unwrap()
+    .unwrap();
+    upload_split_commit_graph(&fixture.store, &fixture.layout, &graph)
+        .await
+        .unwrap();
+    snapshot.manifest.commit_graph_hash = Some(graph.descriptor_hash);
+    snapshot.manifest.path_state_hash = None;
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let cancel = CancellationToken::new();
+    let repository = RemoteGitRepository::from_snapshot(
+        fixture.layout.clone(),
+        &snapshot,
+        RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+        runtime.clone(),
+        RepositoryOptions::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    let operation = repository
+        .operation(crate::OperationKind::Resolve, &cancel)
+        .await
+        .unwrap();
+    let result = async {
+        let graph = repository.state.commit_graph.as_ref().unwrap();
+        assert!(matches!(
+            graph.view(),
+            crab_metadata::split_commit_graph::CommitGraphView::Paged(_)
+        ));
+        let candidates = [1, 2, 3, 4, 0x11, 99, 2].map(|value| ObjectId::Sha1([value; 20]));
+        assert_eq!(
+            graph
+                .reachable_from_roots(&candidates, &[ObjectId::Sha1([0x11; 20])], &operation)
+                .await?,
+            vec![true, true, true, false, true, false, true]
+        );
+        assert!(
+            !graph
+                .is_reachable(ObjectId::Sha1([4; 20]), &operation)
+                .await?
+        );
+        assert!(matches!(
+            repository
+                .resolve(&Revision::Commit(ObjectId::Sha1([4; 20])), &operation)
+                .await,
+            Err(Error::Revision {
+                reason: RevisionError::NotReachable
+            })
+        ));
+        assert_eq!(
+            graph
+                .reachable_from_roots(&candidates, &[ObjectId::Sha1([1; 20])], &operation)
+                .await?,
+            vec![true, false, false, false, false, false, false]
+        );
+        assert_eq!(
+            graph
+                .first_parent_chain(ObjectId::Sha1([0x11; 20]), 2, &operation)
+                .await?,
+            Some(vec![ObjectId::Sha1([0x11; 20]), ObjectId::Sha1([2; 20])])
+        );
+        assert!(
+            graph
+                .first_parent_chain(ObjectId::Sha1([99; 20]), 2, &operation)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+    .await;
+    operation.finish(result).await.unwrap();
+    runtime.shutdown().await;
 }

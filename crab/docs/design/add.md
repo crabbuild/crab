@@ -203,6 +203,42 @@ SlateDB contains only committed, origin-bound receipts and is updated after a
 successful push CAS; it never stores add claims, local paths, or pending
 uploads.
 
+Capsule pushes publish chunk hints into the same shared database after ref
+visibility. Their head/source keys are separate from the released manifest
+receipt keys. A source assertion carries the whole-xorb catalog digest and an
+origin receipt captured from the verified PUT or GET; the receipt's payload
+digest remains distinct. Readers batch requested chunks, authenticate the
+source repository's current paged catalog, check each exact chunk position and
+size, then verify canonical origin identity. An absent source or changed
+physical descriptor cannot turn an index hint into authority.
+
+Each capsule placement is also stored under its immutable placement digest.
+Staged recipes retain that digest and the origin proof ID, so replacing a shared
+chunk head does not erase an add's chosen assertion. Capsule push re-reads those
+exact records, revalidates the source shard, and requires the recorded physical
+origin identity before adopting remote-only chunks. Warm payload/index caches
+cannot substitute for that identity check. The proof session is read-only and
+closed before publication opens the shared index writer.
+
+The revalidator returns caller-owned source descriptors and original receipts
+with the accepted candidates. Capsule preparation adopts those descriptors
+without a full xorb GET or decompression. Retained metadata shares one catalog
+byte allowance across source repositories; conflicting physical assertions fail
+explicitly. Released manifest receipts still use full-body verification when
+constructing a capsule descriptor that their older record does not contain.
+
+Canonical origin receipts belong to the trusted `global_prefix` of the same
+authorization scope as the repository. Managed and ACL-scoped views use their
+own supplied global root. Local staging and advisory caches only name candidates;
+they cannot issue canonical receipts or certify an origin identity.
+
+Direct publication and protected receive use the same bounded candidate
+encoder/writer. Protected promotion carries the canonical operation identity;
+client staging-prefix writes do not confer canonical origin proof. Every index
+writer is explicitly closed, including batch failures. A post-commit index
+failure leaves a successful ref publication visible and reports repair work;
+local packing remains available for future lookup misses.
+
 Concurrent add lookups own their receipt snapshot and validation result across
 remote awaits. They share keyed advisory caches, not the push pipeline's
 mutable per-push proof accumulator; otherwise one file can erase another's
@@ -223,6 +259,11 @@ An expired or stale miss otherwise only causes local
 repacking; push still revalidates every positive placement and origin proof.
 Cache failures, stale entries, and evictions are advisory misses; they cannot
 change the bytes selected for a push.
+
+An uninitialized global chunk index is remembered only for the current add
+session. It does not establish per-chunk absence, so it does not populate the
+persistent negative cache. Existing index snapshots keep their normal cache
+behavior; unavailable remote authority still leaves payload ownership local.
 
 Push reads remote candidates in bounded pages under a shared deadline. It
 retains completed pages and local cache hits if the deadline expires or a later
@@ -256,6 +297,14 @@ occurrence has independent verified segment authority. Otherwise it fails
 closed and asks the user to run `crab add` again. Recipe leases and push
 snapshots retain shared bodies until the final owner is released; restaging
 reclaims only globally unleased payloads.
+
+Capsule publication adopts a complete prepared xorb only when every chunk is
+selected for the push and still unresolved. Mixed sources are repacked using
+only missing chunks, retaining committed placements for reused bytes. The shared
+staging read plan groups residual requests across files by source, verifies each
+prepared body once, and yields bounded decoded batches. Compression runs off the
+async worker. Ordered recipe occurrences still produce complete file terms;
+local recipe ownership and flush-before-pointer publication are unchanged.
 
 There is no persisted per-file JSON plan or per-file payload copy. Runtime
 `FilePushPlan` values are derived from normalized recipe, remote, prepared, and

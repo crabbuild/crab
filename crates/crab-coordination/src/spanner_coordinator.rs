@@ -64,9 +64,9 @@ pub struct SpannerCreateCoordinator {
 }
 
 /// Minimal Spanner control-plane client needed by Crab-owned coordinator setup.
-#[expect(
+#[allow(
     clippy::double_must_use,
-    reason = "async_trait marks boxed futures must-use; Result is also must-use"
+    reason = "async-trait 0.1.89 injects must_use on boxed futures; MSRV Clippy does not report it"
 )]
 #[async_trait]
 pub trait SpannerCoordinatorControlPlaneClient {

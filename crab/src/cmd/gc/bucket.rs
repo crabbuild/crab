@@ -35,6 +35,7 @@ use crate::core::config::GcListProfile;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::storage::store::Store;
 use crab_metadata::ref_registry::RefRegistry;
+use crab_storage::layout::CAPSULE_CHUNK_PAGE_KIND;
 use crab_storage::{
     StorageProviderKind, StoreLayout, canonical_global_content_path, content_hash_from_path,
     global_content_partition_prefix, global_content_prefix,
@@ -70,6 +71,7 @@ pub struct BucketGcOutcome {
     pub shards_deleted: u64,
     pub xorbs_deleted: u64,
     pub file_index_deleted: u64,
+    pub derived_index_objects_deleted: u64,
     pub bytes_reclaimed: u64,
     pub list_requests: u64,
     pub list_parallelism: usize,
@@ -83,6 +85,7 @@ impl BucketGcOutcome {
                 shards = self.shards_deleted,
                 xorbs = self.xorbs_deleted,
                 file_index = self.file_index_deleted,
+                derived_index_objects = self.derived_index_objects_deleted,
                 bytes = self.bytes_reclaimed,
                 list_requests = self.list_requests,
                 list_parallelism = self.list_parallelism,
@@ -93,6 +96,7 @@ impl BucketGcOutcome {
                 shards = self.shards_deleted,
                 xorbs = self.xorbs_deleted,
                 file_index = self.file_index_deleted,
+                derived_index_objects = self.derived_index_objects_deleted,
                 bytes = self.bytes_reclaimed,
                 list_requests = self.list_requests,
                 list_parallelism = self.list_parallelism,
@@ -105,7 +109,7 @@ impl BucketGcOutcome {
     pub fn to_summary(&self) -> super::GcSummary {
         super::GcSummary {
             packs_deleted: 0,
-            derived_index_objects_deleted: 0,
+            derived_index_objects_deleted: self.derived_index_objects_deleted,
             xorbs_deleted: self.xorbs_deleted,
             shards_deleted: self.shards_deleted,
             file_index_entries_deleted: self.file_index_deleted,
@@ -557,6 +561,7 @@ async fn run_bucket_gc_streaming(
         repo_prefixes,
         root_identity,
         capsule_shards,
+        hint_pages,
     } = roots;
     let snapshot_at = match resume_phase {
         Some(super::journal::GcRunPhase::Planning | super::journal::GcRunPhase::Deleting) => {
@@ -743,7 +748,7 @@ async fn run_bucket_gc_streaming(
         .list_parallelism
         .max(closure_stats.parallelism.max(1));
 
-    let mut closure_segment_planner = ClosureSegmentStreamingPlanner::new(
+    let mut closure_segment_planner = ImmutableObjectStreamingPlanner::new(
         DurableMarkReader::new_keys(
             store.clone(),
             journal.marks_prefix(),
@@ -797,6 +802,40 @@ async fn run_bucket_gc_streaming(
     outcome.list_requests = outcome.list_requests.saturating_add(xorb_stats.requests);
     outcome.list_parallelism = outcome.list_parallelism.max(xorb_stats.parallelism.max(1));
 
+    let mut hint_marks = DurableMarkWriter::new_keys(
+        store.clone(),
+        journal.marks_prefix(),
+        "referenced-capsule-hint-pages",
+    );
+    for path in hint_pages {
+        hint_marks.add(&path).await?;
+    }
+    hint_marks.finish().await?;
+    let mut hint_planner = ImmutableObjectStreamingPlanner::new(
+        DurableMarkReader::new_keys(
+            store.clone(),
+            journal.marks_prefix(),
+            "referenced-capsule-hint-pages",
+        ),
+        coordinator_protected_keys,
+        cutoff,
+        args.force,
+        &mut journal,
+    );
+    let hint_stats = scan_global_objects(
+        store,
+        CAPSULE_CHUNK_PAGE_KIND,
+        args.list_profile,
+        args.list_concurrency,
+        Arc::clone(&permits),
+        cancel,
+        &mut hint_planner,
+    )
+    .await?;
+    hint_planner.finish().await?;
+    outcome.list_requests = outcome.list_requests.saturating_add(hint_stats.requests);
+    outcome.list_parallelism = outcome.list_parallelism.max(hint_stats.parallelism.max(1));
+
     if args.dry_run {
         let preview = async {
             let current_roots = bucket_root_snapshot_streaming(
@@ -827,6 +866,7 @@ async fn run_bucket_gc_streaming(
                     match object.key.split('/').nth(1) {
                         Some("shards") => outcome.shards_deleted += 1,
                         Some("xorbs") => outcome.xorbs_deleted += 1,
+                        Some(CAPSULE_CHUNK_PAGE_KIND) => outcome.derived_index_objects_deleted += 1,
                         _ => {}
                     }
                     outcome.bytes_reclaimed = outcome
@@ -934,6 +974,7 @@ async fn execute_bucket_journal(
         match key.split('/').nth(1) {
             Some("shards") => outcome.shards_deleted += 1,
             Some("xorbs") => outcome.xorbs_deleted += 1,
+            Some(CAPSULE_CHUNK_PAGE_KIND) => outcome.derived_index_objects_deleted += 1,
             _ => {}
         }
     }
@@ -992,6 +1033,7 @@ async fn execute_bucket_journal(
                     match object.key.split('/').nth(1) {
                         Some("shards") => outcome.shards_deleted += 1,
                         Some("xorbs") => outcome.xorbs_deleted += 1,
+                        Some(CAPSULE_CHUNK_PAGE_KIND) => outcome.derived_index_objects_deleted += 1,
                         _ => {}
                     }
                     batch_bytes = match batch_bytes.checked_add(object.size) {
@@ -1061,6 +1103,7 @@ struct BucketRootSnapshot {
     repo_prefixes: Vec<String>,
     root_identity: String,
     capsule_shards: HashMap<String, Vec<String>>,
+    hint_pages: Vec<String>,
 }
 
 struct CapsuleRepositoryRoots {
@@ -1094,10 +1137,10 @@ async fn capsule_repository_roots(
     )
     .await?;
     let root_digest = view.state_digest();
-    let catalog = view.pointer_catalog()?;
+    let shard_hashes = view.pointer_catalog_shard_hashes().await?;
     Ok(Some(CapsuleRepositoryRoots {
         root_digest,
-        shard_hashes: catalog.shards().keys().cloned().collect(),
+        shard_hashes,
     }))
 }
 
@@ -1240,10 +1283,20 @@ async fn bucket_root_snapshot_streaming(
     for key in coordinator_protected_keys {
         digest.add("coordinator-protected", key);
     }
+    let (hint_root, hint_pages) = crab_metadata::capsule_protocol::CapsuleChunkIndex::new(&router)
+        .objects(&storage, u64::MAX)
+        .await?;
+    if let Some(root) = hint_root {
+        digest.add("capsule-chunk-index", &root);
+    }
     Ok(BucketRootSnapshot {
         repo_prefixes,
         root_identity: digest.finish(),
         capsule_shards,
+        hint_pages: hint_pages
+            .into_iter()
+            .map(|(path, _)| path.to_string())
+            .collect(),
     })
 }
 
@@ -2237,24 +2290,24 @@ impl GlobalObjectConsumer for ClosureStreamingPlanner<'_> {
     }
 }
 
-struct ClosureSegmentStreamingPlanner<'a> {
-    live_segments: DurableMarkReader,
+struct ImmutableObjectStreamingPlanner<'a> {
+    referenced: DurableMarkReader,
     coordinator_protected_keys: &'a HashSet<String>,
     cutoff: SystemTime,
     force: bool,
     sink: CandidateBatchSink<'a>,
 }
 
-impl<'a> ClosureSegmentStreamingPlanner<'a> {
+impl<'a> ImmutableObjectStreamingPlanner<'a> {
     fn new(
-        live_segments: DurableMarkReader,
+        referenced: DurableMarkReader,
         coordinator_protected_keys: &'a HashSet<String>,
         cutoff: SystemTime,
         force: bool,
         journal: &'a mut super::journal::GcRunJournal,
     ) -> Self {
         Self {
-            live_segments,
+            referenced,
             coordinator_protected_keys,
             cutoff,
             force,
@@ -2268,10 +2321,10 @@ impl<'a> ClosureSegmentStreamingPlanner<'a> {
 }
 
 #[async_trait(?Send)]
-impl GlobalObjectConsumer for ClosureSegmentStreamingPlanner<'_> {
+impl GlobalObjectConsumer for ImmutableObjectStreamingPlanner<'_> {
     async fn consume(&mut self, object: ListedObject) -> Result<()> {
         if self.coordinator_protected_keys.contains(&object.location)
-            || self.live_segments.contains(&object.location).await?
+            || self.referenced.contains(&object.location).await?
             || (!self.force && object.last_modified >= self.cutoff)
         {
             return Ok(());
@@ -3020,7 +3073,7 @@ mod tests {
         .unwrap();
         journal.set_root_identity("root").await.unwrap();
         let protected = HashSet::new();
-        let mut planner = ClosureSegmentStreamingPlanner::new(
+        let mut planner = ImmutableObjectStreamingPlanner::new(
             DurableMarkReader::new_keys(
                 store.clone(),
                 journal.marks_prefix(),
@@ -3178,6 +3231,29 @@ mod tests {
         assert!(registry.is_complete_for_destructive_gc());
         assert!(registry.complete_repos.contains("org/a"));
         assert!(registry.complete_repos.contains("org/b"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires CRAB_E2E_FLAT_BUCKET and explicit scratch S3 credentials"]
+    async fn live_capsule_shard_inspection_reads_published_catalog_without_gc() {
+        let bucket = std::env::var("CRAB_E2E_FLAT_BUCKET").unwrap();
+        let storage =
+            crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
+                .unwrap();
+        let store = Store::from_storage(storage);
+        let repo = format!("catalog-shard-inspection/{}", uuid::Uuid::now_v7());
+        let (expected, _) = publish_capsule_pointer_catalog(&store, &repo).await;
+        let roots = capsule_repository_roots(&store, &repo)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(roots.shard_hashes, vec![expected]);
+        // Root capture only: this fixture must never invoke a bucket sweep.
+        let again = capsule_repository_roots(&store, &repo)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.root_digest, roots.root_digest);
     }
 
     #[tokio::test]
@@ -3906,4 +3982,5 @@ mod tests {
             "workflow experiment stage-refs blob was touched by bucket GC",
         );
     }
+    mod hint_tests;
 }

@@ -49,6 +49,75 @@ failure rolls back the batch; an unlink failure leaves an orphan for recovery,
 not a missing live payload. This shares one cleanup path across publication,
 rollback and push, avoiding repeated per-file commits and inventory scans.
 
+A direct-stream preparation retains each reused prepared Xorb in the same
+transaction that selects its locator. The original recipe can then retire
+without deleting bytes needed by the unsealed recording. Sealing transfers
+retention to recipe leases; abort releases preparation retention and reclaims
+only bodies with no other owner. Selection failures roll back these pins.
+
+Segment payload inventory is also independent of file occurrence rows. An
+in-flight recipe recording or sealed recipe retains reused segment bytes when
+the original file retires. Reads and deduplication use that inventory; recipes
+preserve every ordered occurrence separately. Batch rollback releases recording
+retention, and cleanup removes inventory only after the last owner retires.
+
+Compaction copies each retained payload once, then atomically moves inventory
+and all committed/pending occurrence locators. Output reservation remains in
+that transaction until the new body is durable. Readers capture file handles
+with their locators, so unlink and reader-pool eviction cannot invalidate an
+already captured segment read. Recovery reclaims unindexed compaction bodies
+only after checking both segment registry and canonical payload ownership.
+
+Staging layout v3 upgrades the released v1 layout transactionally on writable
+or shared open. It repairs inventory using the locators v1 readers used and
+creates explicit external-publication ownership in the same transaction. Old
+writers reject v3. Payload encoding stays unchanged. Missing dependencies or
+failed schema installation leave v1 admission intact; deleted bytes cannot be
+recovered by migration. The unreleased v2 prototype is rejected and needs a
+fresh staging root and restaging, rather than an implicit compatibility reader.
+
+Native add owns its batches until its Git-index transaction succeeds or rolls
+back. Git-clean cannot acknowledge Git's subsequent index replacement. It
+instead delegates a complete verified lease after payload flush, before returning
+a pointer. Native `--defer` delegates the same way. Delegation freezes the
+completed batch and requires all of its paths to be handed off, with no active
+preparation. It does not create a published path head.
+Explicit staging maintenance holds Git's index lock, checks bounded pointer
+blobs and publishes only batches whose every path matches the index. A missing
+or different index entry retains its lease, including native `--defer` work and
+older unpushed history. Publication consumes its delegation markers atomically.
+
+Push discovers pointers in selected Git history, loads only
+their published or delegated recipes, then captures exact eligible leases.
+Retirement releases only captured owners after remote publication; newer handoffs
+and active native transactions survive. Publishing a newer head never cancels
+another caller's open lease. Failed Git conversion can leave a retained handoff;
+reconciliation and abandoned-handoff reclamation still need qualification.
+
+`StagingPushSnapshot::begin` fences retirement before recipe selection;
+`capture` pins exact selected leases. Call `commit` only after confirmed remote
+publication. It records a committed journal before retiring captured owners.
+Drop clears the reader marker and discards an uncommitted snapshot when no
+sibling reader prevents cleanup. Deferred journals remain for exclusive
+maintenance; native and uncaptured leases remain owned throughout.
+
+The coalesced residual reader uses `CoalescedChunkReadPlan::read_next_bounded` after all
+selected requests are appended. One prepared source is opened and fully verified
+once, then retained as a format-bounded serialized body while decoded batches obey
+the caller's count and byte limits. A single oversized chunk may exceed the byte
+target to make progress; its format limit still applies. Returned chunks own their
+allocations. Source descriptors are pinned before worker admission, and cancelling
+a pending read preserves its result for the next call. The public `read_next`
+method retains the complete-source behavior shipped in v1.2.4; it shares the same
+source and chunk verification. Canonical callers should migrate to the bounded
+method; removing the released method requires a breaking library release.
+
+Native intent recovery may preserve caller-attested committed recipes under
+canonical history owners before rolling back an old Git index state.
+`preserve_publication_history` accepts only verified recipe roots belonging to
+that unresolved intent. It leaves the original intent intact on cancellation or
+error, so interrupted preservation can be retried before rollback.
+
 ## Recovery contract
 
 Opening writable staging runs recovery before creating or reusing its writer.
@@ -110,6 +179,22 @@ Production cleaners normally use `stream` or `recipe` helpers and submit
 multiple batches with consecutive chunk offsets. Flush all staged bytes before
 publishing a push bundle; otherwise a remote upload can reference data that is
 not yet durable locally.
+
+`stream::stage_reader_streaming` accepts an `AsyncRead + Unpin` byte source
+without seeking, reopening or reading source metadata. Native file staging uses
+the same ingestion engine behind descriptor/path validation. Both paths compute
+ordered recipes and use the existing segment/prepared-Xorb ownership machinery.
+Successful ingestion flushes pending segment authority before recording the
+version lease. The returned batch stays open until its caller publishes or
+rolls back; the supplied logical path is not proof of a Git index update.
+Cancel through the token while awaiting the operation so failed attempts clean
+up. Production Git-clean adapts packet bytes to this engine without reopening or
+seeking the source. Exact prepared inputs reuse their recipe after byte verification;
+changed inputs replay a pinned, bounded prefix and continue through the same engine.
+Short reads coalesce into one bounded block before CDC. The released custom
+`ChunkStager` injection API retains its byte-to-chunk adapter until a breaking
+library release. Real 10-GiB crossover, termination and failure qualification remain
+required before declaring the unification complete.
 
 ## Boundaries
 

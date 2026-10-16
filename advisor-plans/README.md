@@ -1,5 +1,17 @@
 # Crate quality implementation plans
 
+## Indexed remote reads and unified staging
+
+Planned on 2026-10-13 against `51435f76bd2`. [037](037-indexed-remote-reads-and-unified-staging.md)
+specifies the remaining graph/visibility/opening, change-point history, historical
+Xet catalog, staging ownership and qualification work. It consumes the existing
+path-state implementation instead of rebuilding it. Execute its named slices in
+dependency order; update the canonical indexed-read ledger with actual proof.
+
+| Plan | Priority | Effort | Depends on | Status |
+| --- | --- | --- | --- | --- |
+| [037](037-indexed-remote-reads-and-unified-staging.md) | P1 performance / P0 correctness gates | XL | Indexed-read stages 1–3; existing recipe/lease authority | IN PROGRESS — paged graph producer/component reader qualified; visibility/opening, stages 5–8 and staging remain open |
+
 ## crab-ltx foundation hardening
 
 Planned on 2026-09-25 against `3b8d3b3614c`. [035](035-crab-ltx-foundation-durability-and-performance.md)

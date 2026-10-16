@@ -18,7 +18,7 @@ pub const GIT_VISIBILITY_INDEX_VERSION: u32 = 1;
 /// Maximum serialized proof accepted from object storage.
 pub const MAX_GIT_VISIBILITY_INDEX_BYTES: u64 = 128 * 1024 * 1024;
 
-const MAX_GIT_VISIBILITY_REFS: usize = 100_000;
+pub(crate) const MAX_GIT_VISIBILITY_REFS: usize = 100_000;
 /// Maximum number of distinct Git objects in one visibility proof dictionary.
 pub const MAX_GIT_VISIBILITY_OBJECTS: u64 = 10_000_000;
 
@@ -1558,38 +1558,6 @@ impl GitVisibilityIndex {
         Ok(index)
     }
 
-    pub(crate) fn restore_checkpoint_history(
-        &mut self,
-        history: &BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>,
-    ) -> Result<()> {
-        let mut restored = BTreeMap::new();
-        for (name, transitions) in history {
-            let mut restored_transitions = Vec::with_capacity(transitions.len());
-            for transition in transitions {
-                validate_sorted_oids(&transition.objects, "checkpoint history")?;
-                let positions = transition
-                    .objects
-                    .iter()
-                    .map(|oid| {
-                        let oid = decode_oid(oid)?;
-                        self.positions
-                            .get(&oid)
-                            .copied()
-                            .ok_or_else(|| corrupt("checkpoint history object is absent"))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                restored_transitions.push(GitVisibilityTransition {
-                    from_oid: decode_oid(&transition.from_oid)?,
-                    to_oid: decode_oid(&transition.to_oid)?,
-                    objects: GitVisibilityClosure::from_positions(positions, self.objects.len())?,
-                });
-            }
-            restored.insert(name.clone(), restored_transitions);
-        }
-        self.incremental_history = restored;
-        self.validate()
-    }
-
     /// Remove one ref and every transition whose authority depends on it.
     pub fn remove_ref(&mut self, name: &str) {
         self.refs.remove(name);
@@ -2019,7 +1987,7 @@ fn validate_oid(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn decode_oid(value: &str) -> Result<GitVisibilityOid> {
+pub(crate) fn decode_oid(value: &str) -> Result<GitVisibilityOid> {
     validate_oid(value)?;
     let mut decoded = [0u8; 20];
     let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
@@ -2040,7 +2008,7 @@ fn hex_value(value: u8) -> u8 {
     }
 }
 
-fn encode_oid(oid: &GitVisibilityOid) -> String {
+pub(crate) fn encode_oid(oid: &GitVisibilityOid) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(40);
     for byte in oid {

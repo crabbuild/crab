@@ -1527,7 +1527,7 @@ dependencies = [
 [[package]]
 name = "cellule-app"
 version = "0.1.0"
-source = "git+https://github.com/crabbuild/cellule?rev=6ac8a03ff784e2cd6ac001d75c84e3890c0ba4c6#6ac8a03ff784e2cd6ac001d75c84e3890c0ba4c6"
+source = "git+https://github.com/crabbuild/cellule?rev=25809dc7a3acc37411776d79f526512088e466c3#25809dc7a3acc37411776d79f526512088e466c3"
 dependencies = [
  "blake3",
  "cellule-runtime",
@@ -1536,7 +1536,7 @@ dependencies = [
 [[package]]
 name = "cellule-host"
 version = "0.1.0"
-source = "git+https://github.com/crabbuild/cellule?rev=6ac8a03ff784e2cd6ac001d75c84e3890c0ba4c6#6ac8a03ff784e2cd6ac001d75c84e3890c0ba4c6"
+source = "git+https://github.com/crabbuild/cellule?rev=25809dc7a3acc37411776d79f526512088e466c3#25809dc7a3acc37411776d79f526512088e466c3"
 dependencies = [
  "cellule-app",
  "cellule-runtime",
@@ -1550,7 +1550,7 @@ dependencies = [
 [[package]]
 name = "cellule-ltx"
 version = "0.1.0"
-source = "git+https://github.com/crabbuild/cellule?rev=6ac8a03ff784e2cd6ac001d75c84e3890c0ba4c6#6ac8a03ff784e2cd6ac001d75c84e3890c0ba4c6"
+source = "git+https://github.com/crabbuild/cellule?rev=25809dc7a3acc37411776d79f526512088e466c3#25809dc7a3acc37411776d79f526512088e466c3"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1572,7 +1572,7 @@ dependencies = [
 [[package]]
 name = "cellule-runtime"
 version = "0.1.0"
-source = "git+https://github.com/crabbuild/cellule?rev=6ac8a03ff784e2cd6ac001d75c84e3890c0ba4c6#6ac8a03ff784e2cd6ac001d75c84e3890c0ba4c6"
+source = "git+https://github.com/crabbuild/cellule?rev=25809dc7a3acc37411776d79f526512088e466c3#25809dc7a3acc37411776d79f526512088e466c3"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1600,7 +1600,7 @@ dependencies = [
 [[package]]
 name = "cellule-store"
 version = "0.1.0"
-source = "git+https://github.com/crabbuild/cellule?rev=6ac8a03ff784e2cd6ac001d75c84e3890c0ba4c6#6ac8a03ff784e2cd6ac001d75c84e3890c0ba4c6"
+source = "git+https://github.com/crabbuild/cellule?rev=25809dc7a3acc37411776d79f526512088e466c3#25809dc7a3acc37411776d79f526512088e466c3"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1623,7 +1623,7 @@ dependencies = [
 [[package]]
 name = "cellule-types"
 version = "0.1.0"
-source = "git+https://github.com/crabbuild/cellule?rev=6ac8a03ff784e2cd6ac001d75c84e3890c0ba4c6#6ac8a03ff784e2cd6ac001d75c84e3890c0ba4c6"
+source = "git+https://github.com/crabbuild/cellule?rev=25809dc7a3acc37411776d79f526512088e466c3#25809dc7a3acc37411776d79f526512088e466c3"
 dependencies = [
  "schemars 0.8.22",
  "serde",
@@ -2538,12 +2538,15 @@ dependencies = [
  "rand 0.9.4",
  "serde",
  "serde_json",
+ "sha1 0.10.6",
+ "slatedb",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "toml",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5109,11 +5112,11 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.10.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
+checksum = "824e001ac4f3012dd16a264bec811403a67ca9deb6c102fc5049b32c4574b35f"
 dependencies = [
- "hashbrown 0.15.5",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -6077,9 +6080,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.32.0"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbb8270bb4060bd76c6e96f20c52d80620f1d82a3470885694e41e0f81ef6fe7"
+checksum = "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1"
 dependencies = [
  "cc",
  "pkg-config",
@@ -8156,10 +8159,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusqlite"
-version = "0.34.0"
+name = "rsqlite-vfs"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37e34486da88d8e051c7c0e23c3f15fd806ea8546260aa2fec247e97242ec143"
+checksum = "c51c9ae4df8a7fba42103df5c621fa3c37eccf3a3c650879e90fc48b11cc192c"
+dependencies = [
+ "hashbrown 0.16.1",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "rusqlite"
+version = "0.39.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0d2b0146dd9661bf67bb107c0bb2a55064d556eeb3fc314151b957f313bcd4e"
 dependencies = [
  "bitflags 2.11.1",
  "fallible-iterator",
@@ -8167,6 +8180,7 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
+ "sqlite-wasm-rs",
 ]
 
 [[package]]
@@ -9036,6 +9050,18 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "sqlite-wasm-rs"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc3efc0da82635d7e1ced0053bbbfa8c7ab9645d0bf36ceb4f7127bb85315d75"
+dependencies = [
+ "cc",
+ "js-sys",
+ "rsqlite-vfs",
+ "wasm-bindgen",
 ]
 
 [[package]]

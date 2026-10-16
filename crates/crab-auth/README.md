@@ -18,6 +18,11 @@ The crate also owns the wire contracts used by protected pushes and managed
 transfer grants. A caller can therefore validate an auth response before any
 credential is handed to an object-store builder.
 
+A successful protected finalize response requires `status: updated`. If it
+includes coordinator metadata, the complete metadata must attest `Committed`
+or `Materialized`; pending, uploaded-only and aborted states are rejected before
+a caller can retire its local staging payloads.
+
 ## Architecture
 
 The main flow is:

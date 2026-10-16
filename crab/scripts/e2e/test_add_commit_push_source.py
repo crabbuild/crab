@@ -214,5 +214,36 @@ class CanaryTerminationTests(unittest.TestCase):
                 self.assertNotIn(secret, report_text + stderr.getvalue())
 
 
+class CapsuleFaultRangeTests(unittest.TestCase):
+    @staticmethod
+    def fixture(*, offset: int = 8, length: int = 9, version: int = 5) -> bytes:
+        body = b"PACKbody\xfftOcindex"
+        footer = json.dumps({
+            "version": version,
+            "git_packs": [{
+                "pack": {"offset": 0, "length": 8},
+                "index": {"offset": offset, "length": length},
+            }],
+        }).encode()
+        return body + footer + len(footer).to_bytes(8, "big") + bytes(32) + b"CRBRUN01"
+
+    def test_targets_the_absolute_pack_and_index_ranges(self) -> None:
+        body = self.fixture()
+        for kind, expected in (("pack", (0, 8)), ("index", (8, 9))):
+            with self.subTest(kind=kind):
+                self.assertEqual(SMOKE.capsule_member_range(body, kind), expected)
+
+    def test_refuses_ranges_that_could_damage_unselected_controls(self) -> None:
+        for arguments in ({"offset": -1}, {"offset": 8, "length": 10}, {"offset": True}, {"length": 3}):
+            with self.subTest(arguments=arguments), self.assertRaises(SMOKE.SmokeError):
+                SMOKE.capsule_member_range(self.fixture(**arguments), "index")
+
+    def test_refuses_other_container_formats_and_malformed_trailers(self) -> None:
+        body = self.fixture()
+        for malformed in (body[:-1], body[:20], self.fixture(version=3), self.fixture(version=4), body[:-48] + bytes(48)):
+            with self.subTest(size=len(malformed)), self.assertRaises(SMOKE.SmokeError):
+                SMOKE.capsule_member_range(malformed, "pack")
+
+
 if __name__ == "__main__":
     unittest.main()

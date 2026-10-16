@@ -792,7 +792,7 @@ impl Repository {
             .map_err(|source| crate::Error::Settings {
                 source: Box::new(source),
             })?;
-        let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+        let view = crab_read::capsule_protocol::open_git_view_from_root(
             &self.layout,
             root,
             crab_read::capsule_protocol::CapsuleReadLimits {

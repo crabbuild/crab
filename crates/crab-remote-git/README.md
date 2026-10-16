@@ -31,6 +31,20 @@ identity, integrity and admission checks; a journal ref change discards stale
 base indexes even when its generation is unchanged. Snapshots without indexes
 make no additional index requests. Publication of capsule-bound browse indexes
 is a separate maintenance responsibility, not part of opening or pushing.
+Captured physical indexes resolve both OIDs and offset-delta bases through
+authenticated pages. Snapshot opening checks their state, origin and prefixes;
+queries retain storage admission, encoded-work limits and cancellation. Complete
+index misses are definitive. Physical placement never assigns catalog ordinals
+or authorizes ref visibility; ordinary unindexed snapshots retain their existing
+pack-index inspection path until background readiness is published.
+Capsule graphs retain an immutable paged reader and captured commit roots;
+membership reads exact ancestor sets rather than allocating a full reachability
+bitmap. A full commit ID matching a verified captured root reuses that visibility
+proof without rereading ancestry pages; other IDs still require exact membership.
+Graph/OID/parent reads share operation admission and cancellation, including
+warm queries. Released manifest graph version 1 retains complete graph validation.
+`commits_reachable_from` is asynchronous and uses a metadata-admitted operation
+without opening the object-locator database.
 Without a commit graph, full commit-ID resolution checks matching ref tips
 before traversing other roots. Matching annotated tags still require verified
 peeling; non-tip commits retain bounded breadth-first reachability traversal.
@@ -224,3 +238,29 @@ duplicates. Each verified index probes the smaller side, avoiding a complete
 request-set scan per small frontier member or an index scan per point read.
 Self-contained matches remain preferred over external deltas. This bounds CPU
 lookup work; it does not change source-range admission or reduce origin requests.
+
+First-parent path history and blame use captured path-state change points when
+an index is available. History verifies each candidate against raw first-parent
+commit/tree entries, including deletion, mode changes and covering type resets.
+Continuations resume from the candidate's parent without rewalking unrelated
+commits. Blame preserves line comparison and deletion boundaries while jumping
+between relevant versions. Root-path and all-parent history retain their existing
+raw traversal; index absence retains the ordinary Git read path. Missing or
+corrupt advertised pages are errors, not a reason to switch traversal.
+
+Snapshot constructors treat supplied graph readiness as required metadata: a
+missing, corrupt or retired advertised graph fails opening. Index absence still
+permits ordinary raw reads. The manifest-based `open` retains its release-tagged
+optional-graph policy; cancellation and admission failures are never suppressed.
+Operation finalization normalizes wrapped cancellation only when its own scope
+was interrupted, preserving real failures and typed locator-close errors.
+
+## Blame comparison reuse
+
+First-parent blame retains verified line mappings by repository identity, ordered
+parent/current blob IDs and a fixed algorithm/semantics version. Complete blame
+results retain their commit, raw-path and generation identity. Both entry kinds
+share the existing blame cache's entry and byte limits; no additional cache
+configuration is introduced. Blob verification, comparison-budget charging and
+cancellation checks happen before consuming a retained line map. A cached map
+never authorizes a commit or substitutes for fetching an unverified blob.

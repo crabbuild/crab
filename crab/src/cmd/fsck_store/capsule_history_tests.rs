@@ -5,8 +5,91 @@ use crab_metadata::capsule_protocol::{
     LayeredCheckpoint, PackLayer, PackSourceDescriptor, PointerCatalog, RootSnapshot,
 };
 use crab_storage::{StorageObservation, StorageObserver, StorageOperation};
-use object_store::{ObjectStoreExt, memory::InMemory};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory,
+    path::Path as ObjectPath,
+};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+#[derive(Debug)]
+struct CorruptLifetimeDuringRead {
+    inner: Arc<dyn ObjectStore>,
+    source: ObjectPath,
+    head: ObjectPath,
+    fired: AtomicBool,
+}
+
+impl std::fmt::Display for CorruptLifetimeDuringRead {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str("source lifetime corruption fixture")
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for CorruptLifetimeDuringRead {
+    async fn put_opts(
+        &self,
+        path: &ObjectPath,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        self.inner.put_opts(path, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        path: &ObjectPath,
+        options: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(path, options).await
+    }
+
+    async fn get_opts(
+        &self,
+        path: &ObjectPath,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        let full_body = !options.head && options.range.is_none();
+        let response = self.inner.get_opts(path, options).await?;
+        if full_body && *path == self.source && !self.fired.swap(true, Ordering::SeqCst) {
+            self.inner
+                .put(&self.head, Bytes::from_static(b"corrupt").into())
+                .await?;
+        }
+        Ok(response)
+    }
+
+    fn delete_stream(
+        &self,
+        paths: futures_util::stream::BoxStream<'static, object_store::Result<ObjectPath>>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<ObjectPath>> {
+        self.inner.delete_stream(paths)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
 
 async fn history_fixture() -> (
     crab_storage::StoreLayout<crab_storage::Store>,
@@ -73,12 +156,13 @@ async fn checkpoint(
     root: RootSnapshot,
     source: PackSourceDescriptor,
     pointer: CapsulePointer,
+    catalog: PointerCatalog,
 ) -> RootSnapshot {
     let checkpoint = LayeredCheckpoint::build(
         root.record().root().generation(),
         root.record().digest(),
         vec![source],
-        PointerCatalog::new(),
+        catalog,
         None,
     )
     .unwrap();
@@ -104,6 +188,238 @@ struct SourceReads {
     count: AtomicUsize,
 }
 
+#[tokio::test]
+async fn fsck_rejects_lifetime_corruption_during_original_source_verification() {
+    let (layout, root, run) = history_fixture().await;
+    let pointer = run_pointer(&run, root.record().digest());
+    crab_metadata::capsule_protocol::retain_capsule_sources(
+        &layout,
+        "refs/heads/main",
+        0,
+        &[pointer],
+    )
+    .await
+    .unwrap();
+    let head = layout
+        .store()
+        .list_prefix(&layout.capsule_source_heads_prefix())
+        .await
+        .unwrap()
+        .remove(0)
+        .location;
+    let backend = Arc::new(CorruptLifetimeDuringRead {
+        inner: Arc::clone(layout.store().inner()),
+        source: layout.capsule_path(run.hash()),
+        head,
+        fired: AtomicBool::new(false),
+    });
+    let observed = crab_storage::StoreLayout::new(
+        crab_storage::Store::new(backend.clone()),
+        layout.repo_prefix().to_owned(),
+    );
+    let result = verify_capsule_history(&observed, root.record().root()).await;
+    assert!(backend.fired.load(Ordering::SeqCst));
+    assert!(
+        result.is_err(),
+        "fsck accepted corrupt lifetime metadata after its original source read: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn data_checks_reject_browse_corruption_during_xorb_verification() {
+    for readiness in [false, true] {
+        let (store, prefix, root, xorb_hash, _) = super::tests::capsule_checker_fixture().await;
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let backend = Arc::new(CorruptLifetimeDuringRead {
+            inner: Arc::clone(store.inner()),
+            source: router.xorb_path(&xorb_hash),
+            head: if readiness {
+                layout.capsule_browse_indexes_path()
+            } else {
+                layout.browse_retained_head_path()
+            },
+            fired: AtomicBool::new(false),
+        });
+        let store = crab_storage::Store::new(backend.clone());
+        let checker = StoreChecker::for_capsule_repository(
+            crate::storage::store::Store::from_storage(store),
+            prefix,
+            root,
+        )
+        .await
+        .unwrap();
+        let result = checker.check_data_chain().await;
+        assert!(backend.fired.load(Ordering::SeqCst));
+        assert!(
+            result.is_err(),
+            "fsck accepted corrupt browse metadata after its xorb read: readiness={readiness}, {result:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn final_snapshot_check_rejects_browse_movement_after_payload_verification() {
+    for readiness in [false, true] {
+        let (store, prefix, root, _, _) = super::tests::capsule_checker_fixture().await;
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let checker = StoreChecker::for_capsule_repository(store.clone(), prefix, root)
+            .await
+            .unwrap();
+        assert!(checker.check_data_chain().await.unwrap().is_empty());
+        let indexes = crab_metadata::capsule_protocol::BrowseIndexes::new(
+            "a".repeat(64),
+            "b".repeat(64),
+            None,
+        )
+        .unwrap();
+        if readiness {
+            store
+                .put(
+                    &layout.capsule_browse_indexes_path(),
+                    indexes.encode().unwrap(),
+                )
+                .await
+                .unwrap();
+        } else {
+            crab_metadata::capsule_protocol::retain_browse_indexes(&layout, &indexes, 0, None, &[])
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            checker.check_orphan_file_index().await,
+            Err(CrabError::Protocol(reason)) if reason.contains("browse retention changed")
+        ));
+    }
+}
+
+#[tokio::test]
+async fn capsule_recipe_probe_does_not_require_browse_maintenance() {
+    let (store, prefix, root, _, _) = super::tests::capsule_checker_fixture().await;
+    let router = StoreLayout::new(store.clone(), prefix.clone());
+    store
+        .put(
+            &router.repo_path("v2/browse-retention"),
+            Bytes::from_static(b"corrupt"),
+        )
+        .await
+        .unwrap();
+    let checker = StoreChecker::for_capsule_repository(store, prefix, root)
+        .await
+        .unwrap();
+    // The fixture's original user bytes define the expected pointer, independent
+    // of how the checker stores or queries its catalog.
+    let pointer = Pointer {
+        file_hash: blake3::hash(&[0x61; 1024]).into(),
+        size: 1024,
+        shard_hint: None,
+    };
+    let proof = checker
+        .verify_capsule_pointer_data(&[pointer], &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(proof.verified == 1 && proof.issues.is_empty(), "{proof:?}");
+}
+
+#[tokio::test]
+async fn data_checks_reject_lifetime_movement_after_checker_construction() {
+    let (layout, root, run) = history_fixture().await;
+    let pointer = run_pointer(&run, root.record().digest());
+    crab_metadata::capsule_protocol::retain_capsule_sources(
+        &layout,
+        "refs/heads/main",
+        0,
+        &[pointer],
+    )
+    .await
+    .unwrap();
+    let checker = StoreChecker::for_capsule_repository(
+        crate::storage::store::Store::from_storage(layout.store().clone()),
+        layout.repo_prefix().to_owned(),
+        root,
+    )
+    .await
+    .unwrap();
+    assert!(checker.check_data_chain().await.unwrap().is_empty());
+    crab_metadata::capsule_protocol::prune_retained_capsule_sources(&layout, 0)
+        .await
+        .unwrap();
+    assert!(matches!(
+        checker.check_data_chain().await,
+        Err(CrabError::Protocol(reason)) if reason.contains("source lifetime changed")
+    ));
+}
+
+#[tokio::test]
+async fn retired_sources_are_checked_without_checkpoint_history() {
+    let (layout, root, run) = history_fixture().await;
+    let pointer = run_pointer(&run, root.record().digest());
+    crab_metadata::capsule_protocol::retain_capsule_sources(
+        &layout,
+        "refs/heads/main",
+        0,
+        &[pointer],
+    )
+    .await
+    .unwrap();
+    verify_capsule_history(&layout, root.record().root())
+        .await
+        .unwrap();
+    layout
+        .store()
+        .delete(&layout.capsule_path(run.hash()))
+        .await
+        .unwrap();
+    assert!(
+        verify_capsule_history(&layout, root.record().root())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn retired_sources_share_full_body_verification_with_checkpoint_history() {
+    let (layout, root, run) = history_fixture().await;
+    let pointer = run_pointer(&run, root.record().digest());
+    crab_metadata::capsule_protocol::retain_capsule_sources(
+        &layout,
+        "refs/heads/main",
+        0,
+        std::slice::from_ref(&pointer),
+    )
+    .await
+    .unwrap();
+    let root = checkpoint(
+        &layout,
+        root,
+        PackSourceDescriptor::from_capsule_run(&run).unwrap(),
+        pointer,
+        PointerCatalog::new(),
+    )
+    .await;
+    let reads = Arc::new(SourceReads {
+        size: run.bytes().len() as u64,
+        count: AtomicUsize::new(0),
+    });
+    let observed = crab_storage::StoreLayout::new(
+        layout.store().clone().with_storage_observer(reads.clone()),
+        layout.repo_prefix().to_owned(),
+    );
+    verify_capsule_history(&observed, root.record().root())
+        .await
+        .unwrap();
+    assert_eq!(reads.count.load(Ordering::Relaxed), 1);
+}
+
 impl StorageObserver for SourceReads {
     fn started(&self, _operation: StorageOperation) {}
 
@@ -127,6 +443,7 @@ async fn retained_checkpoints_and_run_pointers_read_shared_source_once() {
             root,
             PackSourceDescriptor::from_capsule_run(&run).unwrap(),
             run_pointer(&run, run.newest_base_root_digest()),
+            PointerCatalog::new(),
         )
         .await;
     }
@@ -164,6 +481,7 @@ async fn retained_checkpoints_read_shared_pack_layer_once() {
             root,
             layer.source_descriptor().unwrap(),
             run_pointer(&run, run.newest_base_root_digest()),
+            PointerCatalog::new(),
         )
         .await;
     }
@@ -192,6 +510,7 @@ async fn shared_source_body_corruption_is_not_hidden_by_reuse() {
             root,
             PackSourceDescriptor::from_capsule_run(&run).unwrap(),
             run_pointer(&run, run.newest_base_root_digest()),
+            PointerCatalog::new(),
         )
         .await;
     }
@@ -219,6 +538,7 @@ async fn source_reuse_still_validates_the_retained_run_pointer() {
         root,
         PackSourceDescriptor::from_capsule_run(&run).unwrap(),
         run_pointer(&run, &"e".repeat(64)),
+        PointerCatalog::new(),
     )
     .await;
 
@@ -238,6 +558,7 @@ async fn shared_sources_reject_conflicting_checkpoint_descriptors() {
         root,
         source.clone(),
         run_pointer(&run, run.newest_base_root_digest()),
+        PointerCatalog::new(),
     )
     .await;
     let conflicting = PackSourceDescriptor::new(
@@ -255,6 +576,7 @@ async fn shared_sources_reject_conflicting_checkpoint_descriptors() {
         root,
         conflicting,
         run_pointer(&run, run.newest_base_root_digest()),
+        PointerCatalog::new(),
     )
     .await;
 
@@ -263,4 +585,102 @@ async fn shared_sources_reject_conflicting_checkpoint_descriptors() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn historical_catalog_pages_are_verified_after_catalog_is_replaced() {
+    use crab_metadata::capsule_protocol::{
+        FileCatalogEntry, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
+    };
+    let (layout, root, run) = history_fixture().await;
+    let mut catalog = PointerCatalog::new();
+    catalog
+        .insert_xorb(
+            "a".repeat(64),
+            XorbCatalogEntry::new(
+                80,
+                "b".repeat(64),
+                vec![XorbChunkEntry::new("c".repeat(64), 7); 4],
+            ),
+        )
+        .unwrap();
+    catalog
+        .insert_shard(
+            "d".repeat(64),
+            ShardCatalogEntry::new(40, vec!["a".repeat(64)]),
+        )
+        .unwrap();
+    catalog
+        .insert_file("e".repeat(64), FileCatalogEntry::new(7, "d".repeat(64)))
+        .unwrap();
+    let mut root = root;
+    for _ in 0..3 {
+        root = checkpoint(
+            &layout,
+            root,
+            PackSourceDescriptor::from_capsule_run(&run).unwrap(),
+            run_pointer(&run, run.newest_base_root_digest()),
+            catalog.clone(),
+        )
+        .await;
+    }
+    let objects = layout
+        .store()
+        .list_prefix(&layout.capsule_catalog_prefix())
+        .await
+        .unwrap();
+    assert!(
+        objects.len() > 4,
+        "fixture must include nested catalog pages"
+    );
+    // The latest catalog is empty: only authenticated history keeps these
+    // pages reachable, independently of current-catalog and source-body checks.
+    let root = checkpoint(
+        &layout,
+        root,
+        PackSourceDescriptor::from_capsule_run(&run).unwrap(),
+        run_pointer(&run, run.newest_base_root_digest()),
+        PointerCatalog::new(),
+    )
+    .await;
+    verify_capsule_history(&layout, root.record().root())
+        .await
+        .unwrap();
+    for object in objects {
+        let (body, _) = layout
+            .store()
+            .get_with_etag_bounded(&object.location, object.size)
+            .await
+            .unwrap();
+        layout.store().delete(&object.location).await.unwrap();
+        assert!(
+            verify_capsule_history(&layout, root.record().root())
+                .await
+                .is_err(),
+            "missing historical catalog object was accepted: {}",
+            object.location,
+        );
+        let mut corrupt = body.to_vec();
+        corrupt[0] ^= 1;
+        layout
+            .store()
+            .put(&object.location, Bytes::from(corrupt))
+            .await
+            .unwrap();
+        assert!(
+            verify_capsule_history(&layout, root.record().root())
+                .await
+                .is_err(),
+            "corrupt historical catalog object was accepted: {}",
+            object.location,
+        );
+        layout
+            .store()
+            .put_overwrite(&object.location, body)
+            .await
+            .unwrap();
+    }
+    verify_capsule_history(&layout, root.record().root())
+        .await
+        .unwrap();
 }

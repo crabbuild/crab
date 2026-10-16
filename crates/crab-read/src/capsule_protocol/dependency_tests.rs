@@ -1,6 +1,7 @@
 #![expect(clippy::unwrap_used, reason = "test assertions")]
 
-use super::*;
+use super::super::*;
+use super::{DependencyCatalog, verify_installed_dependencies_from};
 use crab_metadata::capsule_protocol::{
     FileCatalogEntry, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
 };
@@ -100,12 +101,14 @@ async fn fixture(
             ShardCatalogEntry::new(shard_body.len() as u64, vec![xorb.hash.hex()]),
         )
         .unwrap();
-    catalog
-        .insert_file(
-            MerkleHash::from(pointer.file_hash).hex(),
-            FileCatalogEntry::new(pointer.size, shard_hash.hex()),
-        )
-        .unwrap();
+    if recipe_case != "missing_binding" {
+        catalog
+            .insert_file(
+                MerkleHash::from(pointer.file_hash).hex(),
+                FileCatalogEntry::new(pointer.size, shard_hash.hex()),
+            )
+            .unwrap();
+    }
     layout
         .store()
         .put(&layout.xorb_path(&xorb.hash), xorb.bytes)
@@ -129,6 +132,117 @@ async fn fixture(
     )
 }
 
+async fn captured_catalog(
+    layout: &StoreLayout<Store>,
+    catalog: &PointerCatalog,
+    refs: &BTreeMap<String, String>,
+) -> CapsuleRepositoryView {
+    use crab_metadata::capsule_protocol::{
+        CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction, RepositoryRoot,
+    };
+    let initial =
+        RootRecord::encode(RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap())
+            .unwrap();
+    let transaction = CapsuleTransaction::new(
+        initial.digest(),
+        refs.iter()
+            .map(|(name, oid)| CapsuleRefEdit::new(name, None, Some(oid.clone()), None))
+            .collect(),
+    )
+    .unwrap();
+    let run = CapsuleRun::leaf(
+        Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::CatalogDelta,
+                catalog.encode_delta().unwrap(),
+            )],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    layout
+        .store()
+        .put(&layout.capsule_path(run.hash()), run.bytes().clone())
+        .await
+        .unwrap();
+    let pointer = CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )
+    .unwrap();
+    let root = initial
+        .root()
+        .advance(
+            initial.digest(),
+            refs.clone(),
+            BTreeMap::new(),
+            vec![pointer],
+            &transaction.id().unwrap(),
+        )
+        .unwrap();
+    let root = RootRecord::encode(root).unwrap();
+    layout
+        .store()
+        .put_overwrite(&layout.capsule_root_path(), root.bytes().clone())
+        .await
+        .unwrap();
+    open_view(
+        layout,
+        CapsuleReadLimits {
+            max_capsule_bytes: 16 * 1024 * 1024,
+            max_frontier_bytes: 16 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap()
+}
+
+async fn verify_fixture(
+    layout: &StoreLayout<Store>,
+    workspace: &Path,
+    refs: &BTreeMap<String, String>,
+    catalog: &PointerCatalog,
+    captured: bool,
+) -> Result<CapsuleDependencyProof> {
+    let cancel = CancellationToken::new();
+    let git_dir = workspace.join("repository.git");
+    if !captured {
+        return verify_installed_dependencies(
+            layout,
+            &git_dir,
+            refs,
+            catalog,
+            SCAN_LIMITS,
+            &cancel,
+        )
+        .await;
+    }
+    let view = captured_catalog(layout, catalog, refs).await;
+    let lookup = view
+        .pointer_catalog_lookup(layout, 16 * 1024 * 1024)
+        .unwrap();
+    verify_installed_dependencies_from(
+        layout,
+        &git_dir,
+        refs,
+        DependencyCatalog::Captured {
+            view: &view,
+            lookup: &lookup,
+        },
+        SCAN_LIMITS,
+        &cancel,
+    )
+    .await
+}
+
 fn write_pointer(workspace: &Path, pointer: &Pointer) -> String {
     let file = workspace.join("pointer");
     std::fs::write(&file, pointer.serialize()).unwrap();
@@ -146,17 +260,35 @@ fn write_pointer(workspace: &Path, pointer: &Pointer) -> String {
 #[tokio::test]
 async fn installed_dependency_proof_accepts_reordered_repeated_file_chunks() {
     let (layout, catalog, workspace, refs) = fixture("valid").await;
-    let proof = verify_installed_dependencies(
-        &layout,
-        &workspace.path().join("repository.git"),
-        &refs,
-        &catalog,
-        SCAN_LIMITS,
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(proof.reachable_crab_pointers, 1);
+    for captured in [false, true] {
+        let proof = verify_fixture(&layout, workspace.path(), &refs, &catalog, captured)
+            .await
+            .unwrap();
+        assert_eq!(
+            proof,
+            CapsuleDependencyProof {
+                catalog_files: 1,
+                catalog_shards: 1,
+                catalog_xorbs: 1,
+                catalog_objects_read: 2,
+                catalog_payload_bytes: catalog
+                    .shards()
+                    .values()
+                    .map(|entry| entry.encoded_size())
+                    .sum::<u64>()
+                    + catalog
+                        .xorbs()
+                        .values()
+                        .map(|entry| entry.encoded_size())
+                        .sum::<u64>(),
+                checkpoint_catalog_objects: 0,
+                checkpoint_catalog_bytes: 0,
+                reachable_crab_pointers: 1,
+                reachable_lfs_objects: 0,
+                reachable_lfs_bytes: 0
+            }
+        );
+    }
 }
 
 #[tokio::test]
@@ -165,19 +297,13 @@ async fn installed_dependency_proof_rejects_a_valid_catalog_with_wrong_file_hash
     crate::verify_capsule_pointer_catalog_objects(&layout, &catalog)
         .await
         .unwrap();
-    let result = verify_installed_dependencies(
-        &layout,
-        &workspace.path().join("repository.git"),
-        &refs,
-        &catalog,
-        SCAN_LIMITS,
-        &CancellationToken::new(),
-    )
-    .await;
-    assert!(
-        matches!(result, Err(ReadError::HashMismatch { .. })),
-        "{result:?}"
-    );
+    for captured in [false, true] {
+        let result = verify_fixture(&layout, workspace.path(), &refs, &catalog, captured).await;
+        assert!(
+            matches!(result, Err(ReadError::HashMismatch { .. })),
+            "{captured}: {result:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -187,22 +313,16 @@ async fn installed_dependency_proof_rejects_missing_short_or_reordered_recipes()
         crate::verify_capsule_pointer_catalog_objects(&layout, &catalog)
             .await
             .unwrap();
-        let result = verify_installed_dependencies(
-            &layout,
-            &workspace.path().join("repository.git"),
-            &refs,
-            &catalog,
-            SCAN_LIMITS,
-            &CancellationToken::new(),
-        )
-        .await;
-        assert!(
-            matches!(
-                result,
-                Err(ReadError::HashMismatch { .. } | ReadError::CorruptObject { .. })
-            ),
-            "{case}: {result:?}",
-        );
+        for captured in [false, true] {
+            let result = verify_fixture(&layout, workspace.path(), &refs, &catalog, captured).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(ReadError::HashMismatch { .. } | ReadError::CorruptObject { .. })
+                ),
+                "{case}/{captured}: {result:?}"
+            );
+        }
     }
 }
 
@@ -323,5 +443,292 @@ async fn catalog_file_proof_cancellation_interrupts_pending_shard_read() {
             .await
             .unwrap(),
         Err(ReadError::Cancelled),
+    ));
+}
+
+#[tokio::test]
+async fn git_view_catalog_materialization_uses_the_captured_checkpoint_after_root_changes() {
+    use crab_metadata::capsule_protocol::{
+        CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction, HistorySegment, HistorySegmentState,
+        LayeredVisibilitySnapshot, PackLayer, RepositoryRoot, source_catalog_digest,
+    };
+    use crab_metadata::git_visibility::GitVisibilityIndex;
+
+    let (layout, catalog, _workspace, refs) = fixture("valid").await;
+    let initial =
+        RootRecord::encode(RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap())
+            .unwrap();
+    let pack = CapsuleGitPack::new(
+        Bytes::from_static(b"pack"),
+        Bytes::from_static(b"index"),
+        Bytes::from_static(b"reverse"),
+        Bytes::from_static(b"locator"),
+        "2".repeat(40),
+        1,
+    )
+    .unwrap();
+    let transaction = CapsuleTransaction::new(
+        initial.digest(),
+        vec![CapsuleRefEdit::new(
+            "refs/tags/file",
+            None,
+            refs.get("refs/tags/file").cloned(),
+            None,
+        )],
+    )
+    .unwrap();
+    let run =
+        CapsuleRun::leaf(Capsule::build(&transaction, vec![pack.clone()], Vec::new()).unwrap())
+            .unwrap();
+    let run_pointer = CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )
+    .unwrap();
+    let initial = RootRecord::encode(
+        initial
+            .root()
+            .advance(
+                initial.digest(),
+                refs.clone(),
+                BTreeMap::new(),
+                vec![run_pointer],
+                &transaction.id().unwrap(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let layer = PackLayer::build(&pack).unwrap();
+    let source = layer.source_descriptor().unwrap();
+    let visibility = LayeredVisibilitySnapshot::from_index(
+        &GitVisibilityIndex::new(
+            1,
+            "0".repeat(64),
+            "0".repeat(64),
+            refs.into_iter()
+                .map(|(name, oid)| (name, vec![oid]))
+                .collect(),
+        )
+        .unwrap(),
+        &source_catalog_digest(std::slice::from_ref(&source)).unwrap(),
+    )
+    .unwrap();
+    let checkpoint = LayeredCheckpoint::build(
+        initial.root().generation(),
+        initial.digest(),
+        vec![source],
+        catalog.clone(),
+        Some(visibility),
+    )
+    .unwrap();
+    let pointer = CheckpointPointer::new_layered(
+        checkpoint.hash(),
+        checkpoint.bytes().len() as u64,
+        checkpoint.control_offset(),
+        checkpoint.control_size(),
+        checkpoint.footer_hash(),
+        checkpoint.covered_generation(),
+        checkpoint.covered_root_digest(),
+        checkpoint.pack_count().unwrap(),
+        checkpoint.object_count().unwrap(),
+    )
+    .unwrap();
+    let history = HistorySegment::build(
+        pointer.clone(),
+        None,
+        HistorySegmentState::new(
+            initial.root().refs().clone(),
+            initial.root().peeled_refs().clone(),
+            initial.root().head().to_owned(),
+            initial.root().compacted_ref_transactions().clone(),
+            initial.root().capsule_frontier().to_vec(),
+        ),
+    )
+    .unwrap();
+    let root = RootRecord::encode(
+        initial
+            .root()
+            .install_checkpoint(initial.digest(), pointer, Some(history.pointer().unwrap()))
+            .unwrap(),
+    )
+    .unwrap();
+    checkpoint.publish_catalog(&layout).await.unwrap();
+    layout
+        .store()
+        .put(
+            &layout.capsule_checkpoint_path(checkpoint.hash()),
+            checkpoint.bytes().clone(),
+        )
+        .await
+        .unwrap();
+    layout
+        .store()
+        .put(&layout.capsule_root_path(), root.bytes().clone())
+        .await
+        .unwrap();
+    let view = open_git_view_from_root(
+        &layout,
+        load_root(&layout).await.unwrap(),
+        CapsuleReadLimits {
+            max_capsule_bytes: 1024 * 1024,
+            max_frontier_bytes: 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(view.layered_checkpoint().unwrap().is_control_only());
+    // The bulk read must follow the captured pointer rather than recapturing a
+    // mutable root; otherwise hydration could silently select a different recipe.
+    layout
+        .store()
+        .put_overwrite(&layout.capsule_root_path(), initial.bytes().clone())
+        .await
+        .unwrap();
+    assert_eq!(view.pointer_catalog().await.unwrap(), catalog);
+}
+
+#[tokio::test]
+async fn dependency_proof_rejects_missing_bindings_on_both_sources() {
+    let (layout, catalog, workspace, refs) = fixture("missing_binding").await;
+    for captured in [false, true] {
+        let result = verify_fixture(&layout, workspace.path(), &refs, &catalog, captured).await;
+        assert!(
+            matches!(result, Err(ReadError::CorruptObject { reason, .. }) if reason.contains("absent from the catalog"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn captured_dependency_proof_keeps_pinned_bindings_after_root_replacement() {
+    use crab_metadata::capsule_protocol::RepositoryRoot;
+    let (layout, catalog, workspace, refs) = fixture("valid").await;
+    let view = captured_catalog(&layout, &catalog, &refs).await;
+    let lookup = view
+        .pointer_catalog_lookup(&layout, 16 * 1024 * 1024)
+        .unwrap();
+    let replacement =
+        RootRecord::encode(RepositoryRoot::initial(&"2".repeat(64), "refs/heads/main").unwrap())
+            .unwrap();
+    layout
+        .store()
+        .put_overwrite(&layout.capsule_root_path(), replacement.bytes().clone())
+        .await
+        .unwrap();
+    let proof = verify_installed_dependencies_from(
+        &layout,
+        &workspace.path().join("repository.git"),
+        &refs,
+        DependencyCatalog::Captured {
+            view: &view,
+            lookup: &lookup,
+        },
+        SCAN_LIMITS,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(proof.reachable_crab_pointers, 1);
+}
+
+#[tokio::test]
+async fn captured_dependency_proof_rejects_unrelated_incomplete_catalog_dependencies() {
+    let (layout, mut catalog, workspace, refs) = fixture("valid").await;
+    catalog
+        .insert_file("a".repeat(64), FileCatalogEntry::new(7, "b".repeat(64)))
+        .unwrap();
+    let result = verify_fixture(&layout, workspace.path(), &refs, &catalog, true).await;
+    assert!(matches!(
+        result,
+        Err(ReadError::Metadata(
+            crab_metadata::error::MetadataError::CorruptObject { .. }
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn captured_binding_batches_do_not_repeat_file_reconstruction() {
+    let (layout, catalog, workspace, mut refs) = fixture("valid").await;
+    let reads = Arc::new(ReadCount::default());
+    let layout = StoreLayout::new(
+        layout.store().clone().with_storage_observer(reads.clone()),
+        layout.repo_prefix().to_owned(),
+    );
+    let git_dir = workspace.path().join("repository.git");
+    verify_installed_dependencies(
+        &layout,
+        &git_dir,
+        &refs,
+        &catalog,
+        SCAN_LIMITS,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let baseline = reads.0.swap(0, Ordering::Relaxed);
+    let mut pointer =
+        Pointer::parse(&std::fs::read(workspace.path().join("pointer")).unwrap()).unwrap();
+    for hint in 1..=65u8 {
+        pointer.shard_hint = Some([hint; 32]);
+        refs.insert(
+            format!("refs/tags/hint-{hint}"),
+            write_pointer(workspace.path(), &pointer),
+        );
+    }
+    let view = captured_catalog(&layout, &catalog, &refs).await;
+    let lookup = view
+        .pointer_catalog_lookup(&layout, 16 * 1024 * 1024)
+        .unwrap();
+    reads.0.store(0, Ordering::Relaxed);
+    let proof = verify_installed_dependencies_from(
+        &layout,
+        &git_dir,
+        &refs,
+        DependencyCatalog::Captured {
+            view: &view,
+            lookup: &lookup,
+        },
+        crab_git::walk::PointerScanLimits {
+            objects: 256,
+            lookups: 512,
+            allocation_bytes: 1024 * 1024,
+        },
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (
+            proof.reachable_crab_pointers,
+            reads.0.load(Ordering::Relaxed)
+        ),
+        (66, baseline)
+    );
+}
+
+#[tokio::test]
+async fn pointer_byte_phase_checks_selected_closures_without_claiming_global_catalog_health() {
+    let (layout, mut catalog, workspace, refs) = fixture("valid").await;
+    catalog
+        .insert_file("a".repeat(64), FileCatalogEntry::new(7, "b".repeat(64)))
+        .unwrap();
+    let view = captured_catalog(&layout, &catalog, &refs).await;
+    verify_captured_installed_pointer_bytes(
+        &layout,
+        &workspace.path().join("repository.git"),
+        &view,
+        SCAN_LIMITS,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        verify_fixture(&layout, workspace.path(), &refs, &catalog, true).await,
+        Err(ReadError::Metadata(_))
     ));
 }

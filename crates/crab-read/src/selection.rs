@@ -1,6 +1,10 @@
+use std::borrow::Cow;
 use std::future::Future;
 use std::io::Write;
 
+use crab_metadata::capsule_protocol::{
+    PointerCatalogCounts, PointerCatalogInspection, PointerCatalogObject,
+};
 use crab_metadata::manifest_store;
 use crab_metadata::manifests::Manifest;
 use crab_metadata::ref_journal::list_active_transactions;
@@ -479,10 +483,12 @@ pub async fn check_capsule_read_replica_readiness(
     }
 
     let mut stats = ReadinessProbeStats::default();
-    let catalog = replica.pointer_catalog()?;
-    if let Some(reason) =
-        capsule_pointer_object_gap(replica_router, &catalog, &mut stats, options).await?
-    {
+    let mut catalog = replica.pointer_catalog_inspection().await?;
+    // Metadata proof is complete before probing bodies. Keep the spill owner
+    // through every exit, including an early sample limit or provider error.
+    let result =
+        inspection_pointer_object_gap(replica_router, &mut catalog, &mut stats, options).await;
+    if let Some(reason) = catalog.finish(result).await? {
         let mut readiness = ReadReplicaReadiness::not_ready(
             primary_generation,
             Some(replica_generation),
@@ -518,6 +524,66 @@ pub async fn verify_capsule_pointer_catalog_objects(
     Ok(stats)
 }
 
+pub(crate) struct CatalogVerification {
+    pub counts: PointerCatalogCounts,
+    pub stats: ReadinessProbeStats,
+    pub payload_bytes: u64,
+    pub checkpoint_objects: u64,
+    pub checkpoint_bytes: u64,
+}
+
+pub(crate) async fn verify_capsule_pointer_inspection(
+    router: &StoreLayout<Store>,
+    mut catalog: PointerCatalogInspection,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<CatalogVerification> {
+    let counts = catalog.counts();
+    let payload_bytes = catalog.encoded_payload_bytes();
+    let (checkpoint_objects, checkpoint_bytes) = catalog.checkpoint_catalog_footprint();
+    let mut stats = ReadinessProbeStats::default();
+    let result = tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(ReadError::Cancelled),
+        result = async {
+            if let Some(reason) = inspection_pointer_object_gap(
+                router, &mut catalog, &mut stats, ReadinessCheckOptions::deep(),
+            ).await? {
+                return Err(ReadError::CorruptObject {
+                    path: "capsule-protocol pointer catalog".to_owned(),
+                    reason,
+                });
+            }
+            Ok(CatalogVerification { counts, stats, payload_bytes, checkpoint_objects, checkpoint_bytes })
+        } => result,
+    };
+    catalog.finish(result).await
+}
+
+async fn inspection_pointer_object_gap(
+    router: &StoreLayout<Store>,
+    catalog: &mut PointerCatalogInspection,
+    stats: &mut ReadinessProbeStats,
+    options: ReadinessCheckOptions,
+) -> Result<Option<String>> {
+    while !readiness_probe_budget_exhausted(stats, options) {
+        let Some(object) = catalog.next_object().await? else {
+            break;
+        };
+        let gap = match object {
+            PointerCatalogObject::Shard { hash, entry } => {
+                verify_shard_object(router, &hash, Cow::Owned(entry), stats).await?
+            }
+            PointerCatalogObject::Xorb { hash, entry } => {
+                verify_xorb_object(router, &hash, Cow::Owned(entry), stats).await?
+            }
+        };
+        if gap.is_some() {
+            return Ok(gap);
+        }
+    }
+    Ok(None)
+}
+
 async fn capsule_pointer_object_gap(
     router: &StoreLayout<Store>,
     catalog: &crab_metadata::capsule_protocol::PointerCatalog,
@@ -528,17 +594,7 @@ async fn capsule_pointer_object_gap(
         if readiness_probe_budget_exhausted(stats, options) {
             return Ok(None);
         }
-        let hash = parse_merkle_hash(hash, "shard")?;
-        let path = router.shard_path(&hash);
-        if let Some(reason) = verify_shard_object(
-            router,
-            &path,
-            hash,
-            shard.encoded_size(),
-            shard.xorb_hashes(),
-            stats,
-        )
-        .await?
+        if let Some(reason) = verify_shard_object(router, hash, Cow::Borrowed(shard), stats).await?
         {
             return Ok(Some(reason));
         }
@@ -547,19 +603,7 @@ async fn capsule_pointer_object_gap(
         if readiness_probe_budget_exhausted(stats, options) {
             return Ok(None);
         }
-        let hash = parse_merkle_hash(hash, "xorb")?;
-        let path = router.xorb_path(&hash);
-        if let Some(reason) = verify_xorb_object(
-            router,
-            &path,
-            hash,
-            xorb.encoded_size(),
-            xorb.body_digest(),
-            xorb.chunks(),
-            stats,
-        )
-        .await?
-        {
+        if let Some(reason) = verify_xorb_object(router, hash, Cow::Borrowed(xorb), stats).await? {
             return Ok(Some(reason));
         }
     }
@@ -568,16 +612,17 @@ async fn capsule_pointer_object_gap(
 
 async fn verify_shard_object(
     router: &StoreLayout<Store>,
-    path: &ObjectPath,
-    expected_hash: MerkleHash,
-    expected_size: u64,
-    expected_xorbs: &[String],
+    hash: &str,
+    entry: Cow<'_, crab_metadata::capsule_protocol::ShardCatalogEntry>,
     stats: &mut ReadinessProbeStats,
 ) -> Result<Option<String>> {
+    let expected_hash = parse_merkle_hash(hash, "shard")?;
+    let path = router.shard_path(&expected_hash);
+    let expected_size = entry.encoded_size();
     stats.object_read_count = stats.object_read_count.saturating_add(1);
     let body = match router
         .store()
-        .get_with_etag_bounded(path, expected_size)
+        .get_with_etag_bounded(&path, expected_size)
         .await
     {
         Ok((body, _)) => body,
@@ -594,9 +639,11 @@ async fn verify_shard_object(
         )));
     }
     let path = path.to_string();
-    let expected_xorbs = expected_xorbs.to_vec();
+    // Streamed descriptors already own their recipe. Borrowed publication
+    // catalogs clone only at this blocking-worker lifetime boundary.
+    let entry = entry.into_owned();
     tokio::task::spawn_blocking(move || {
-        verify_shard_body(&path, body, expected_hash, &expected_xorbs)
+        verify_shard_body(&path, body, expected_hash, entry.xorb_hashes())
     })
     .await
     .map_err(ReadError::ReadinessTask)?
@@ -630,17 +677,17 @@ fn verify_shard_body(
 
 async fn verify_xorb_object(
     router: &StoreLayout<Store>,
-    path: &ObjectPath,
-    expected_hash: MerkleHash,
-    expected_size: u64,
-    expected_body_digest: &str,
-    expected_chunks: &[crab_metadata::capsule_protocol::XorbChunkEntry],
+    hash: &str,
+    entry: Cow<'_, crab_metadata::capsule_protocol::XorbCatalogEntry>,
     stats: &mut ReadinessProbeStats,
 ) -> Result<Option<String>> {
+    let expected_hash = parse_merkle_hash(hash, "xorb")?;
+    let path = router.xorb_path(&expected_hash);
+    let expected_size = entry.encoded_size();
     stats.object_read_count = stats.object_read_count.saturating_add(1);
     let body = match router
         .store()
-        .get_with_etag_bounded(path, expected_size)
+        .get_with_etag_bounded(&path, expected_size)
         .await
     {
         Ok((body, _)) => body,
@@ -657,15 +704,14 @@ async fn verify_xorb_object(
         )));
     }
     let path = path.to_string();
-    let expected_body_digest = expected_body_digest.to_owned();
-    let expected_chunks = expected_chunks.to_vec();
+    let entry = entry.into_owned();
     tokio::task::spawn_blocking(move || {
         verify_xorb_body(
             &path,
             body,
             expected_hash,
-            &expected_body_digest,
-            &expected_chunks,
+            entry.body_digest(),
+            entry.chunks(),
         )
     })
     .await
@@ -1177,6 +1223,83 @@ mod tests {
         .unwrap()
     }
 
+    async fn capsule_catalog_view(
+        router: &StoreLayout<Store>,
+        catalog: &PointerCatalog,
+    ) -> crate::capsule_protocol::CapsuleRepositoryView {
+        use crab_metadata::capsule_protocol::{
+            Capsule, CapsulePointer, CapsuleRefEdit, CapsuleRun, CapsuleSection,
+            CapsuleSectionKind, CapsuleTransaction,
+        };
+        let initial = RootRecord::encode(
+            RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+        )
+        .unwrap();
+        let oid = "2".repeat(40);
+        let transaction = CapsuleTransaction::new(
+            initial.digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some(oid.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::CatalogDelta,
+                catalog.encode_delta().unwrap(),
+            )],
+        )
+        .unwrap();
+        let run = CapsuleRun::leaf(capsule).unwrap();
+        router
+            .store()
+            .create_strict(&router.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let transaction_id = run.transaction_ids()[0].clone();
+        let pointer = CapsulePointer::new(
+            run.hash(),
+            run.bytes().len() as u64,
+            run.control_offset(),
+            run.control_size(),
+            run.footer_hash(),
+            run.level(),
+            run.transaction_ids(),
+            run.newest_base_root_digest(),
+        )
+        .unwrap();
+        let root = initial
+            .root()
+            .advance(
+                initial.digest(),
+                std::collections::BTreeMap::from([("refs/heads/main".to_owned(), oid)]),
+                std::collections::BTreeMap::new(),
+                vec![pointer],
+                &transaction_id,
+            )
+            .unwrap();
+        let root = RootRecord::encode(root).unwrap();
+        router
+            .store()
+            .create_strict(&router.capsule_root_path(), root.bytes().clone())
+            .await
+            .unwrap();
+        crate::capsule_protocol::open_view(
+            router,
+            crate::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 1024 * 1024,
+                max_frontier_bytes: 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn capsule_readiness_requires_the_exact_primary_view() {
         let (_primary_store, primary_router) = memory_store_with_layout("org/repo");
@@ -1346,6 +1469,107 @@ mod tests {
 
         assert!(gap.is_none());
         assert_eq!(stats.object_read_count, 2);
+
+        let primary = capsule_catalog_view(&router, &catalog).await;
+        let readiness =
+            check_capsule_read_replica_readiness(&primary, &router, ReadinessCheckOptions::deep())
+                .await
+                .unwrap();
+        assert!(readiness.ready);
+        assert_eq!(readiness.stats.object_read_count, 2);
+        store.delete(&router.xorb_path(&xorb.hash)).await.unwrap();
+        let sampled = check_capsule_read_replica_readiness(
+            &primary,
+            &router,
+            ReadinessCheckOptions::sampled(1),
+        )
+        .await
+        .unwrap();
+        assert!(sampled.ready);
+        assert_eq!(sampled.stats.object_read_count, 1);
+        let complete =
+            check_capsule_read_replica_readiness(&primary, &router, ReadinessCheckOptions::deep())
+                .await
+                .unwrap();
+        assert!(!complete.ready);
+        assert_eq!(complete.stats.object_read_count, 2);
+        assert!(complete.reason.unwrap().contains("xorb missing"));
+    }
+
+    #[tokio::test]
+    async fn catalog_body_verification_cancellation_interrupts_pending_origin_read() {
+        use object_store::throttle::{ThrottleConfig, ThrottledStore};
+        use std::sync::Arc;
+        use std::time::Duration;
+        let (_store, router) = memory_store_with_layout("org/repo");
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_file(
+                "a".repeat(64),
+                crab_metadata::capsule_protocol::FileCatalogEntry::new(3, "b".repeat(64)),
+            )
+            .unwrap();
+        catalog
+            .insert_shard(
+                "b".repeat(64),
+                crab_metadata::capsule_protocol::ShardCatalogEntry::new(7, Vec::new()),
+            )
+            .unwrap();
+        let view = capsule_catalog_view(&router, &catalog).await;
+        let inspection = view.pointer_catalog_inspection().await.unwrap();
+        let slow = StoreLayout::new(
+            Store::new(Arc::new(ThrottledStore::new(
+                Arc::clone(router.store().inner()),
+                ThrottleConfig {
+                    wait_get_per_call: Duration::from_secs(10),
+                    ..Default::default()
+                },
+            ))),
+            router.repo_prefix().to_owned(),
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let verification = verify_capsule_pointer_inspection(&slow, inspection, &cancel);
+        tokio::pin!(verification);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut verification)
+                .await
+                .is_err()
+        );
+        cancel.cancel();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), &mut verification)
+                .await
+                .unwrap(),
+            Err(ReadError::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn sampled_capsule_readiness_requires_complete_metadata_before_any_payload_probe() {
+        let (_store, router) = memory_store_with_layout("org/repo");
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_file(
+                "a".repeat(64),
+                crab_metadata::capsule_protocol::FileCatalogEntry::new(3, "b".repeat(64)),
+            )
+            .unwrap();
+        let primary = capsule_catalog_view(&router, &catalog).await;
+        let result = check_capsule_read_replica_readiness(
+            &primary,
+            &router,
+            ReadinessCheckOptions {
+                max_object_probes: Some(0),
+                ..ReadinessCheckOptions::deep()
+            },
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ReadError::Metadata(
+                crab_metadata::error::MetadataError::CorruptObject { .. }
+            ))
+        ));
     }
 
     #[tokio::test]

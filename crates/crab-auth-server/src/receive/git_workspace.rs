@@ -1,6 +1,6 @@
 //! Git workspace orchestration for protected-push receive.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -94,17 +94,30 @@ pub(super) async fn verify_capsule_git_candidate(
     let temp = tempfile::tempdir()?;
     let git_dir = temp.path().join("source.git");
     run_git(["init", "--bare", path_str(&git_dir)?], None)?;
-    crab_read::capsule_protocol::install_git_packs_with_candidates(
+    crab_read::capsule_protocol::install_git_packs_with_candidates_from_store(
         view,
         std::slice::from_ref(candidate),
+        router,
         &git_dir,
         max_input_bytes,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
     )
     .await?;
     let workspace = GitReceiveWorkspace::new(store, router, router.repo_prefix());
     let paths =
         workspace.compute_changed_paths_in(&git_dir, ref_updates, &BTreeMap::new(), false)?;
 
+    let refs = verify_capsule_candidate_refs(&git_dir, view, candidate).await?;
+    let pointers = scan_reachable_pointers_from_refs(&git_dir, &refs)?;
+    Ok((paths, pointers))
+}
+
+async fn verify_capsule_candidate_refs(
+    git_dir: &Path,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    candidate: &Capsule,
+) -> Result<Vec<(String, String)>> {
     let transaction = candidate.transaction()?;
     let mut refs = view.refs().clone();
     let mut peeled = view.peeled_refs().clone();
@@ -127,25 +140,57 @@ pub(super) async fn verify_capsule_git_candidate(
         }
     }
     let refs = refs.into_iter().collect::<Vec<_>>();
-    let closures = crab_git::walk_reachable_by_ref_bounded(
-        &git_dir,
+    let reachable = crab_git::walk_reachable_by_ref_bounded(
+        git_dir,
         &refs,
         &peeled,
         usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
             .map_err(|_| invalid("Git visibility object limit does not fit usize"))?,
     )
-    .map_err(|source| AuthServerError::GitVisibilityWalk { source })?
-    .into_iter()
-    .map(|(name, reachable)| (name, reachable_object_ids(&reachable)))
-    .collect::<BTreeMap<_, _>>();
-    let declared = view.candidate_git_visibility(candidate)?;
+    .map_err(|source| AuthServerError::GitVisibilityWalk { source })?;
+    // Pack presence is not read authority. Reintroducing an invisible object
+    // requires its body in the verified candidate, even if a retained base pack
+    // happens to contain it.
+    {
+        let visible = view.git_visibility_index().await?;
+        let mut allowed = visible
+            .objects_for_refs(view.refs().keys().map(String::as_str))
+            .into_iter()
+            .collect::<HashSet<_>>();
+        for pack in candidate.git_packs() {
+            let index = candidate.section_bytes(pack.index_section())?;
+            let (oids, _) = crab_git::pack_locator::sorted_object_ids_from_index_bytes(&index)
+                .map_err(std::io::Error::other)?;
+            for oid in oids {
+                let oid = <[u8; 20]>::try_from(oid.as_bytes()).map_err(std::io::Error::other)?;
+                allowed.insert(oid);
+            }
+        }
+        if reachable.values().any(|objects| {
+            objects
+                .commits
+                .iter()
+                .chain(&objects.trees)
+                .chain(&objects.blobs)
+                .chain(&objects.tags)
+                .any(|oid| !allowed.contains(oid))
+        }) {
+            return Err(invalid(
+                "candidate Git object is neither visible in the captured view nor supplied by its pack",
+            ));
+        }
+    }
+    let closures = reachable
+        .into_iter()
+        .map(|(name, objects)| (name, reachable_object_ids(&objects)))
+        .collect::<BTreeMap<_, _>>();
+    let declared = view.candidate_git_visibility(candidate).await?;
     if closures != declared {
         return Err(invalid(
             "candidate capsule Git visibility differs from its reachable object closure",
         ));
     }
-    let pointers = scan_reachable_pointers_from_refs(&git_dir, &refs)?;
-    Ok((paths, pointers))
+    Ok(refs)
 }
 
 pub(super) struct MaterializedCapsuleSourcePush {
@@ -160,10 +205,10 @@ pub(super) async fn materialize_capsule_source_push(
     source_router: &StoreLayout<Store>,
     source_view: &crab_read::capsule_protocol::CapsuleRepositoryView,
     filtered_view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    filtered_router: &StoreLayout<Store>,
     candidate: &Capsule,
     view_updates: &[PushRefUpdate],
     source_updates: &[PushRefUpdate],
-    candidate_transaction_id: &str,
     max_input_bytes: u64,
 ) -> Result<MaterializedCapsuleSourcePush> {
     if view_updates.len() != source_updates.len() {
@@ -172,18 +217,14 @@ pub(super) async fn materialize_capsule_source_push(
     let temp = tempfile::tempdir()?;
     let git_dir = temp.path().join("source.git");
     run_git(["init", "--bare", path_str(&git_dir)?], None)?;
-    crab_read::capsule_protocol::install_git_packs_with_candidates(
-        source_view,
-        &[],
-        &git_dir,
-        max_input_bytes,
-    )
-    .await?;
-    crab_read::capsule_protocol::install_git_packs_with_candidates(
+    crab_read::capsule_protocol::install_git_packs_with_candidates_from_store(
         filtered_view,
         std::slice::from_ref(candidate),
+        filtered_router,
         &git_dir,
         max_input_bytes,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
     )
     .await?;
 
@@ -194,6 +235,19 @@ pub(super) async fn materialize_capsule_source_push(
     );
     let changed_paths =
         workspace.compute_changed_paths_in(&git_dir, view_updates, filtered_view.refs(), true)?;
+    // Prove the candidate using only filtered and incoming objects before the
+    // private source ODB becomes available for source-commit synthesis.
+    let _ = verify_capsule_candidate_refs(&git_dir, filtered_view, candidate).await?;
+    crab_read::capsule_protocol::install_git_packs_with_candidates_from_store(
+        source_view,
+        &[],
+        source_router,
+        &git_dir,
+        max_input_bytes,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await?;
     let mut final_updates = Vec::with_capacity(source_updates.len());
     let mut synthesized_tips = Vec::with_capacity(source_updates.len());
     for (view_update, source_update) in view_updates.iter().zip(source_updates) {
@@ -251,7 +305,7 @@ pub(super) async fn materialize_capsule_source_push(
     )?;
     let transaction = CapsuleTransaction::for_protected_source(
         source_view.root().digest(),
-        candidate_transaction_id,
+        candidate.transaction_id(),
         final_updates
             .iter()
             .map(|update| {

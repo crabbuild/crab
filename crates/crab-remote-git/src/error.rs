@@ -237,6 +237,10 @@ pub enum Error {
     #[error("repository is empty")]
     EmptyRepository,
 
+    /// Date and ref exclusions selected no commits for a shallow fetch.
+    #[error("no commits selected for shallow requests")]
+    EmptyShallowSelection,
+
     /// Locator publication has not reached the required manifest generation.
     #[error(
         "repository object locator is not ready: observed generation {observed:?}, required {required}"
@@ -516,6 +520,7 @@ impl Error {
             | Self::InvalidPath { .. }
             | Self::InvalidCursor { .. }
             | Self::InvalidLimit { .. }
+            | Self::EmptyShallowSelection
             | Self::Revision {
                 reason:
                     RevisionError::InvalidReference

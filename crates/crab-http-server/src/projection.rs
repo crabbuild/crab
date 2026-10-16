@@ -8,9 +8,9 @@ use cellule_runtime::client::{CellClient, Committed, InvocationError};
 use cellule_runtime::identity::CellTarget;
 use cellule_runtime::identity::RequestId;
 use crab_metadata::manifest_store::RepositorySnapshot;
-use crab_metadata::path_state::{PathStateIndex, load_path_state};
+use crab_metadata::path_state::{PathStateItem, PathStateReader, PathStateRecord};
 use crab_metadata::split_commit_graph::{SplitCommitGraph, load_split_commit_graph};
-use crab_remote_git::{Commit, OperationKind, RemoteGitRepository, RepositoryOptions, Revision};
+use crab_remote_git::{RemoteGitRepository, RepositoryOptions};
 use crab_storage::{Store, StoreLayout};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -57,10 +57,9 @@ pub(crate) async fn reconcile(
             cancellation,
         )
         .await?;
-    let scheduled = router.route_projection(context.repository_id).await?;
-    let target = scheduled.cell.target.clone();
-    let client = scheduled.cell.client.clone();
-    let release_after = scheduled.should_release();
+    let cell = router.route_projection(context.repository_id).await?;
+    let target = cell.target.clone();
+    let client = cell.client.clone();
     let result = build_epoch(
         store,
         layout,
@@ -94,17 +93,7 @@ pub(crate) async fn reconcile(
         build_result,
         build_started.elapsed(),
     );
-    drop(scheduled.cell);
-    let drained = if release_after {
-        router.drain_local_target(&target).await
-    } else {
-        Ok(())
-    };
-    match (result, drained) {
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Ok(source), Ok(())) => Ok(source),
-    }
+    result
 }
 
 async fn collect_epochs(
@@ -222,27 +211,12 @@ pub(crate) async fn state(
     router: &RepositoryCellRouter,
     repository_id: Uuid,
 ) -> crate::Result<projection::ProjectionStateView> {
-    let scheduled = router.route_projection(repository_id).await?;
-    let target = scheduled.cell.target.clone();
-    let result = scheduled
-        .cell
-        .client
-        .query::<projection::GetProjectionState>(&target, None, projection::ProjectionState)
+    let cell = router.route_projection(repository_id).await?;
+    cell.client
+        .query::<projection::GetProjectionState>(&cell.target, None, projection::ProjectionState)
         .await
         .map(|observed| observed.output)
-        .map_err(invocation_error);
-    let release_after = scheduled.should_release();
-    drop(scheduled.cell);
-    let drained = if release_after {
-        router.drain_local_target(&target).await
-    } else {
-        Ok(())
-    };
-    match (result, drained) {
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Ok(output), Ok(())) => Ok(output),
-    }
+        .map_err(invocation_error)
 }
 
 pub(crate) async fn attribution(
@@ -253,47 +227,31 @@ pub(crate) async fn attribution(
     paths: Vec<Vec<u8>>,
 ) -> crate::Result<projection::AttributionResponse> {
     let batches = attribution_batches(source_token, commit_oid, paths)?;
-    let scheduled = router.route_projection(repository_id).await?;
-    let target = scheduled.cell.target.clone();
-    let result = async {
-        let mut items = Vec::new();
-        for paths in batches {
-            let input = serde_json::to_vec(&projection::AttributionQuery {
-                source_token: source_token.to_owned(),
-                commit_oid: commit_oid.to_vec(),
-                paths,
-            })?;
-            let observed = scheduled
-                .cell
-                .client
-                .query::<projection::GetProjectionAttribution>(&target, None, input)
-                .await
-                .map_err(invocation_error)?;
-            let response: projection::AttributionResponse =
-                serde_json::from_slice(&observed.output).map_err(crate::Error::Json)?;
-            if response.state != "ready" {
-                return Ok(response);
-            }
-            items.extend(response.items);
+    let cell = router.route_projection(repository_id).await?;
+    let target = cell.target.clone();
+    let mut items = Vec::new();
+    for paths in batches {
+        let input = serde_json::to_vec(&projection::AttributionQuery {
+            source_token: source_token.to_owned(),
+            commit_oid: commit_oid.to_vec(),
+            paths,
+        })?;
+        let observed = cell
+            .client
+            .query::<projection::GetProjectionAttribution>(&target, None, input)
+            .await
+            .map_err(invocation_error)?;
+        let response: projection::AttributionResponse =
+            serde_json::from_slice(&observed.output).map_err(crate::Error::Json)?;
+        if response.state != "ready" {
+            return Ok(response);
         }
-        Ok(projection::AttributionResponse {
-            state: "ready".to_owned(),
-            items,
-        })
+        items.extend(response.items);
     }
-    .await;
-    let release_after = scheduled.should_release();
-    drop(scheduled.cell);
-    let drained = if release_after {
-        router.drain_local_target(&target).await
-    } else {
-        Ok(())
-    };
-    match (result, drained) {
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Ok(output), Ok(())) => Ok(output),
-    }
+    Ok(projection::AttributionResponse {
+        state: "ready".to_owned(),
+        items,
+    })
 }
 
 fn attribution_batches(
@@ -483,29 +441,18 @@ async fn build_epoch_contents(
     )
     .await
     .map_err(metadata_error)?;
-    let path_state = load_path_state(
+    let path_state = PathStateReader::load(
         store,
         layout,
         path_hash,
-        &graph,
+        crab_metadata::split_commit_graph::CommitGraphView::Materialized(&graph),
         options.object_limits().max_path_state_bytes,
     )
     .await
     .map_err(metadata_error)?;
-    project_commits(
-        repository,
-        &graph,
-        client,
-        target,
-        source,
-        epoch,
-        metrics,
-        cancellation,
-    )
-    .await?;
-    // Tree APIs use the verified remote reader. Preloading unconsumed tree rows
-    // would add recursive origin reads and let a wide tree block attribution.
+
     project_attribution(
+        store,
         &graph,
         &path_state,
         client,
@@ -518,70 +465,14 @@ async fn build_epoch_contents(
     .await
 }
 
-async fn project_commits(
-    repository: &RemoteGitRepository,
-    graph: &SplitCommitGraph,
-    client: &CellClient,
-    target: &CellTarget,
-    source: &projection::SourceIdentity,
-    epoch: u64,
-    metrics: &crate::metrics::Metrics,
-    cancellation: &CancellationToken,
-) -> crate::Result<()> {
-    let mut start = 0_u32;
-    while start < graph.descriptor.commit_count {
-        check_cancelled(cancellation)?;
-        let end = start
-            .saturating_add(COMMIT_BATCH)
-            .min(graph.descriptor.commit_count);
-        let operation = repository
-            .operation(OperationKind::History, cancellation)
-            .await?;
-        let result = async {
-            let mut rows = Vec::with_capacity((end - start) as usize);
-            for ordinal in start..end {
-                if cancellation.is_cancelled() {
-                    return Err(crab_remote_git::Error::Cancelled);
-                }
-                let record =
-                    graph
-                        .record(ordinal)
-                        .ok_or(crab_remote_git::Error::InternalInvariant {
-                            invariant: "projection commit graph ordinal is missing",
-                        })?;
-                let oid = object_id(&record.oid).map_err(|_| {
-                    crab_remote_git::Error::InternalInvariant {
-                        invariant: "projection commit graph has a non-SHA-1 object ID",
-                    }
-                })?;
-                let snapshot = repository
-                    .snapshot(&Revision::Commit(oid), &operation)
-                    .await?;
-                let commit = snapshot.commit(&operation).await?;
-                rows.push(commit_row(ordinal, &commit));
-            }
-            Ok::<_, crab_remote_git::Error>(rows)
-        }
-        .await;
-        let rows = operation.finish(result).await?;
-        send_json_batch(
-            client,
-            target,
-            projection::OP_COMMITS,
-            epoch,
-            source,
-            &rows,
-            metrics,
-        )
-        .await?;
-        start = end;
-    }
-    Ok(())
-}
-
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the importer binds origin, graph, Cell, epoch, metrics and cancellation"
+)]
 async fn project_attribution(
+    store: &Store,
     graph: &SplitCommitGraph,
-    path_state: &PathStateIndex,
+    path_state: &PathStateReader,
     client: &CellClient,
     target: &CellTarget,
     source: &projection::SourceIdentity,
@@ -589,130 +480,151 @@ async fn project_attribution(
     metrics: &crate::metrics::Metrics,
     cancellation: &CancellationToken,
 ) -> crate::Result<()> {
-    if cancellation.is_cancelled() {
-        return Err(crate::Error::Remote(crab_remote_git::Error::Cancelled));
-    }
-    // Commit nodes before edges and roots to preserve their foreign keys. Build
-    // only the current batch; collecting all edges duplicates a large index.
-    for (layer_index, layer) in path_state.layers().iter().enumerate() {
-        for (batch_index, nodes) in layer.nodes.chunks(ATTRIBUTION_BATCH_NODES).enumerate() {
-            check_cancelled(cancellation)?;
-            let nodes = nodes
-                .iter()
-                .enumerate()
-                .map(|(offset, node)| projection::AttributionNodeRow {
-                    node_hash: node_hash(
-                        source,
-                        layer_index as u32,
-                        (batch_index * ATTRIBUTION_BATCH_NODES + offset) as u32,
-                    ),
-                    last_change_ordinal: node.value,
+    let mut scan = path_state.scan(store, graph).map_err(metadata_error)?;
+    let mut commits = Vec::new();
+    let mut commit_bytes = 2;
+    let mut attribution = projection::AttributionBatch {
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        roots: Vec::new(),
+    };
+    let empty_bytes = serde_json::to_vec(&attribution)?.len();
+    let mut attribution_bytes = empty_bytes;
+    loop {
+        let item = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
+            item = scan.next() => item.map_err(metadata_error)?,
+        };
+        let Some(item) = item else {
+            break;
+        };
+        check_cancelled(cancellation)?;
+        let (nodes, edges, roots) = match item {
+            // Projection attributes actual visible entries. Retained deletion
+            // history is used by canonical history reads, not visible listing rows.
+            PathStateItem::Node {
+                reference, value, ..
+            } => (
+                Some(projection::AttributionNodeRow {
+                    node_hash: node_hash(source, reference.layer, reference.index),
+                    last_change_ordinal: value,
                     encoded_bytes: 0,
-                })
-                .collect();
-            let batch = projection::AttributionBatch {
-                nodes,
-                edges: Vec::new(),
-                roots: Vec::new(),
-            };
+                }),
+                None,
+                None,
+            ),
+            PathStateItem::Edge {
+                parent,
+                name,
+                child,
+            } => (
+                None,
+                Some(projection::AttributionEdgeRow {
+                    parent_hash: node_hash(source, parent.layer, parent.index),
+                    component: name.to_vec(),
+                    child_hash: node_hash(source, child.layer, child.index),
+                }),
+                None,
+            ),
+            PathStateItem::Record { ordinal, record } => {
+                // Cache retained ordinals from verified metadata, without
+                // resolving them as visible revisions or rereading Git bodies.
+                let row = commit_row(ordinal, &record);
+                let bytes = serde_json::to_vec(&row)?.len() + 1;
+                if bytes + 2 > MAX_BATCH_PAYLOAD_BYTES {
+                    return Err(crate::Error::Config(
+                        "one commit summary exceeds the projection wire limit",
+                    ));
+                }
+                if !commits.is_empty()
+                    && (commits.len() == COMMIT_BATCH as usize
+                        || commit_bytes + bytes > MAX_BATCH_PAYLOAD_BYTES)
+                {
+                    send_json_batch(
+                        client,
+                        target,
+                        projection::OP_COMMITS,
+                        epoch,
+                        source,
+                        &commits,
+                        metrics,
+                    )
+                    .await?;
+                    commits.clear();
+                    commit_bytes = 2;
+                }
+                commit_bytes += bytes;
+                commits.push(row);
+                (
+                    None,
+                    None,
+                    Some(projection::AttributionRootRow {
+                        commit_ordinal: ordinal,
+                        root_hash: node_hash(source, record.root.layer, record.root.index),
+                    }),
+                )
+            }
+        };
+        let bytes = match (&nodes, &edges, &roots) {
+            (Some(row), _, _) => serde_json::to_vec(row)?.len(),
+            (_, Some(row), _) => serde_json::to_vec(row)?.len(),
+            (_, _, Some(row)) => serde_json::to_vec(row)?.len(),
+            _ => return Err(crate::Error::Config("empty attribution scan item")),
+        } + 1;
+        if bytes + empty_bytes > MAX_BATCH_PAYLOAD_BYTES {
+            return Err(crate::Error::Config(
+                "one attribution row exceeds the projection wire limit",
+            ));
+        }
+        if attribution.nodes.len() == ATTRIBUTION_BATCH_NODES
+            || attribution.edges.len() == ATTRIBUTION_BATCH_NODES * 8
+            || attribution.roots.len() == ATTRIBUTION_BATCH_NODES
+            || attribution_bytes + bytes > MAX_BATCH_PAYLOAD_BYTES
+        {
             send_json_batch(
                 client,
                 target,
                 projection::OP_ATTRIBUTION,
                 epoch,
                 source,
-                &batch,
+                &attribution,
                 metrics,
             )
             .await?;
+            attribution.nodes.clear();
+            attribution.edges.clear();
+            attribution.roots.clear();
+            attribution_bytes = empty_bytes;
         }
+        attribution.nodes.extend(nodes);
+        attribution.edges.extend(edges);
+        attribution.roots.extend(roots);
+        attribution_bytes += bytes;
     }
-    let mut batch = projection::AttributionBatch {
-        nodes: Vec::new(),
-        edges: Vec::new(),
-        roots: Vec::new(),
-    };
-    let empty_bytes = serde_json::to_vec(&batch)?.len();
-    let mut encoded_bytes = empty_bytes;
-    for (layer_index, layer) in path_state.layers().iter().enumerate() {
-        for (node_index, node) in layer.nodes.iter().enumerate() {
-            let parent_hash = node_hash(source, layer_index as u32, node_index as u32);
-            for (component, child) in &node.children {
-                check_cancelled(cancellation)?;
-                let edge = projection::AttributionEdgeRow {
-                    parent_hash: parent_hash.clone(),
-                    component: component.to_vec(),
-                    child_hash: node_hash(source, child.layer, child.index),
-                };
-                let edge_bytes = serde_json::to_vec(&edge)?.len() + 1;
-                if empty_bytes + edge_bytes > MAX_BATCH_PAYLOAD_BYTES {
-                    return Err(crate::Error::Config(
-                        "one attribution edge exceeds the projection wire limit",
-                    ));
-                }
-                if !batch.edges.is_empty()
-                    && (batch.edges.len() == ATTRIBUTION_BATCH_NODES * 8
-                        || encoded_bytes + edge_bytes > MAX_BATCH_PAYLOAD_BYTES)
-                {
-                    send_json_batch(
-                        client,
-                        target,
-                        projection::OP_ATTRIBUTION,
-                        epoch,
-                        source,
-                        &batch,
-                        metrics,
-                    )
-                    .await?;
-                    batch.edges.clear();
-                    encoded_bytes = empty_bytes;
-                }
-                encoded_bytes += edge_bytes;
-                batch.edges.push(edge);
-            }
-        }
-    }
-    if !batch.edges.is_empty() {
+    if !commits.is_empty() {
         send_json_batch(
             client,
             target,
-            projection::OP_ATTRIBUTION,
+            projection::OP_COMMITS,
             epoch,
             source,
-            &batch,
+            &commits,
             metrics,
         )
         .await?;
     }
-    for start in (0..graph.descriptor.commit_count).step_by(ATTRIBUTION_BATCH_NODES) {
-        check_cancelled(cancellation)?;
-        let end = start
-            .saturating_add(ATTRIBUTION_BATCH_NODES as u32)
-            .min(graph.descriptor.commit_count);
-        let roots = (start..end)
-            .map(|ordinal| {
-                let root = path_state
-                    .record(ordinal)
-                    .ok_or(crate::Error::Config("path-state record is missing"))?
-                    .root;
-                Ok(projection::AttributionRootRow {
-                    commit_ordinal: ordinal,
-                    root_hash: node_hash(source, root.layer, root.index),
-                })
-            })
-            .collect::<crate::Result<Vec<_>>>()?;
-        let batch = projection::AttributionBatch {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            roots,
-        };
+    if !attribution.nodes.is_empty()
+        || !attribution.edges.is_empty()
+        || !attribution.roots.is_empty()
+    {
         send_json_batch(
             client,
             target,
             projection::OP_ATTRIBUTION,
             epoch,
             source,
-            &batch,
+            &attribution,
             metrics,
         )
         .await?;
@@ -747,29 +659,14 @@ fn reference_rows(snapshot: &RepositorySnapshot) -> crate::Result<Vec<projection
         .collect()
 }
 
-fn commit_row(ordinal: u32, commit: &Commit) -> projection::CommitRow {
-    let message = commit.message.as_ref();
-    let preview = message[..message.len().min(MAX_MESSAGE_PREVIEW_BYTES)].to_vec();
+fn commit_row(ordinal: u32, record: &PathStateRecord) -> projection::CommitRow {
+    let message = &record.message;
     projection::CommitRow {
         ordinal,
-        oid: commit.oid.as_slice().to_vec(),
-        tree_oid: commit.tree.as_slice().to_vec(),
-        parents: commit
-            .parents
-            .iter()
-            .map(|parent| parent.as_slice().to_vec())
-            .collect(),
-        author_name: commit.author.name.to_vec(),
-        author_email: commit.author.email.to_vec(),
-        author_time: commit.author.seconds,
-        author_tz_offset_seconds: commit.author.offset_seconds,
-        committer_name: commit.committer.name.to_vec(),
-        committer_email: commit.committer.email.to_vec(),
-        committer_time: commit.committer.seconds,
-        committer_tz_offset_seconds: commit.committer.offset_seconds,
-        message_preview: preview,
-        message_truncated: message.len() > MAX_MESSAGE_PREVIEW_BYTES,
-        encoded_bytes: u64::try_from(message.len()).unwrap_or(u64::MAX),
+        oid: record.oid.to_vec(),
+        author_name: record.author.clone(),
+        author_time: record.author_seconds,
+        message_preview: message[..message.len().min(MAX_MESSAGE_PREVIEW_BYTES)].to_vec(),
     }
 }
 
@@ -860,11 +757,6 @@ fn invocation_error<T>(error: InvocationError<T>) -> crate::Error {
     }
 }
 
-fn object_id(bytes: &[u8]) -> crate::Result<gix_hash::ObjectId> {
-    gix_hash::ObjectId::try_from(bytes)
-        .map_err(|_| crate::Error::Config("Git object ID is not a SHA-1"))
-}
-
 fn decode_sha1(value: &str) -> crate::Result<Vec<u8>> {
     if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(crate::Error::Config("manifest ref is not a SHA-1"));
@@ -902,7 +794,7 @@ pub(crate) async fn open_view(
         .map_err(metadata_error)?;
     // Origin-backed readers need complete visibility controls, while Git pack
     // bodies remain in their authenticated sources for bounded range reads.
-    let view = crab_read::capsule_protocol::open_view_from_root_for_checkpoint(
+    let view = crab_read::capsule_protocol::open_git_view_from_root(
         layout,
         root,
         crab_read::capsule_protocol::CapsuleReadLimits {

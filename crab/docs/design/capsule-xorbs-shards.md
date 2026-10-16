@@ -1,5 +1,14 @@
 # Protocol v2 Xorb and Shard Integration
 
+Current development checkpoint format is `CRBCKP06`: visibility dictionaries,
+ref closures and transitions use authenticated pages rooted in the footer.
+Git views load those pages lazily; explicit catalog access remains a complete
+async bulk read. See [indexed remote reads](../architecture/indexed-remote-reads.md#checkpoint-visibility-pages-in-progress)
+for proof and remaining gates. `CRBCKP05` records below describe the preceding
+format and its historical qualification; they do not qualify v6. Readers reject
+retired v5 pointers, and fresh-prefix v6 live qualification remains pending.
+
+
 ## Document metadata
 
 | Field | Value |
@@ -44,6 +53,14 @@ metadata while leaving `FileData` and `FileRecipes` unused. Pointer payloads
 remain in canonical external xorbs and shards. The primary surfaces are
 `crates/crab-metadata/src/capsule_protocol/`,
 `crab/src/git/capsule_push.rs`, and the shared file-index lookup.
+
+Catalog sections now use the development `CRBPCP01` paged encoding rather than
+one JSON map. File/shard/xorb directories, reverse chunk placements and nested
+dependency lists are authenticated independently. Complete readers still
+materialize these sections; foreground batched lookup, checkpoint/run descriptor
+capture and bounded delta compaction remain the next implementation slices.
+No released tag in the 19-tag audit contains the retired catalog codec, so this
+development format rejects it without a compatibility reader.
 
 ## 2. Goals
 

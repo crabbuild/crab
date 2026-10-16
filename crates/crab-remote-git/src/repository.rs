@@ -20,9 +20,9 @@ use crate::operation::{TrackedLocatorSession, finish_with_close};
 use crate::reader::{ReaderLimits, RemoteGitReader, SnapshotLookupSources};
 use crate::state::RepositoryState;
 use crate::{
-    Error, HeadReference, OperationContext, OperationKind, RemoteGitRuntime, RemoteGitSnapshot,
-    RepositoryRef, RepositoryRefs, RepositoryStateError, ResolvedRevision, Result, Revision,
-    RevisionError,
+    BudgetDimension, CorruptionStage, Error, HeadReference, OperationContext, OperationKind,
+    RemoteGitRuntime, RemoteGitSnapshot, RepositoryRef, RepositoryRefs, RepositoryStateError,
+    ResolvedRevision, Result, Revision, RevisionError,
 };
 
 const MAX_IDENTITY_COMPONENT_BYTES: usize = 1_024;
@@ -421,6 +421,7 @@ impl RemoteGitRepository {
         RepositoryOptions::new(options.object_limits(), options.operation_limits())?;
         check_cancelled(cancellation)?;
         check_cancelled(&runtime.background_cancellation())?;
+        lookup_sources.validate_object_index(&layout, snapshot)?;
         let entries = snapshot
             .journal
             .packs
@@ -479,7 +480,14 @@ impl RemoteGitRepository {
             }),
             generated_pack_lease_provider: None,
         }
-        .with_optional_commit_graph(manifest.commit_graph_hash.as_deref(), cancellation, None)
+        // Snapshot callers supplied captured readiness. Ignoring its failure
+        // would silently replace indexed reads with an unrelated raw traversal.
+        .with_graph(
+            manifest.commit_graph_hash.as_deref(),
+            cancellation,
+            None,
+            false,
+        )
         .await
     }
 
@@ -731,10 +739,11 @@ impl RemoteGitRepository {
                     state: Arc::new(state),
                     generated_pack_lease_provider: None,
                 }
-                .with_optional_commit_graph(
+                .with_graph(
                     manifest.commit_graph_hash.as_deref(),
                     cancellation,
                     Some(budget),
+                    true,
                 )
                 .await;
             }
@@ -1192,22 +1201,29 @@ impl RemoteGitRepository {
     ///
     /// Returns `None` when the pinned repository has no complete commit graph.
     /// This metadata-only proof never opens the object-locator database.
-    pub fn commits_reachable_from(
+    pub async fn commits_reachable_from(
         &self,
         candidates: &[ObjectId],
         roots: &[ObjectId],
         cancellation: &CancellationToken,
     ) -> Result<Option<Vec<bool>>> {
-        let _task_token = self.state.runtime.operation_token();
-        let runtime_cancellation = self.state.runtime.background_cancellation();
         check_cancelled(cancellation)?;
-        check_cancelled(&runtime_cancellation)?;
+        check_cancelled(&self.state.runtime.background_cancellation())?;
         let Some(graph) = self.state.commit_graph.as_ref() else {
             return Ok(None);
         };
-        let reachable = graph.reachable_from_roots(candidates, roots, cancellation)?;
-        check_cancelled(&runtime_cancellation)?;
-        Ok(Some(reachable))
+        // Membership needs admitted metadata I/O, but no catalog database.
+        let operation = OperationContext::open_pack_transfer(
+            Arc::clone(&self.state),
+            cancellation,
+            self.state.options.operation,
+        )
+        .await?;
+        let result = graph
+            .reachable_from_roots(candidates, roots, &operation)
+            .await
+            .map(Some);
+        operation.finish(result).await
     }
 
     /// Attach a durable graph validated against this handle's exact pinned state.
@@ -1235,16 +1251,17 @@ impl RemoteGitRepository {
         })
     }
 
-    async fn with_optional_commit_graph(
+    async fn with_graph(
         mut self,
         content_hash: Option<&str>,
         cancellation: &CancellationToken,
         budget: Option<crate::budget::OperationBudget>,
+        optional: bool,
     ) -> Result<Self> {
         let Some(content_hash) = content_hash else {
             return Ok(self);
         };
-        let graph = load_commit_graph(&self, content_hash, cancellation, budget, true).await?;
+        let graph = load_commit_graph(&self, content_hash, cancellation, budget, optional).await?;
         Arc::get_mut(&mut self.state)
             .ok_or(Error::InternalInvariant {
                 invariant: "new repository state was shared before graph attachment",
@@ -1277,7 +1294,7 @@ impl RemoteGitRepository {
                 let reachable = match &self.state.commit_graph {
                     Some(graph) => {
                         check_cancelled(operation.cancellation())?;
-                        graph.is_reachable(*commit)
+                        graph.is_reachable(*commit, operation).await?
                     }
                     None => prove_reachable(*commit, &self.state.refs, operation).await?,
                 };
@@ -1329,18 +1346,23 @@ impl RemoteGitRepository {
                 .and_then(parse_merkle_hash)?,
             None => return Err(Error::EmptyRepository),
         };
+        let commit_graph = match &self.state.commit_graph {
+            Some(index)
+                if index
+                    .parents_match(std::slice::from_ref(&commit), operation)
+                    .await? =>
+            {
+                Some(Arc::clone(index))
+            }
+            _ => None,
+        };
         Ok(RemoteGitSnapshot {
             generation: self.state.generation,
             pack_index_hash,
             commit_oid: commit.oid,
             root_tree_oid: commit.tree,
             repository: Arc::clone(&self.state),
-            commit_graph: self
-                .state
-                .commit_graph
-                .as_ref()
-                .filter(|index| index.parents_match(commit.oid, &commit.parents))
-                .cloned(),
+            commit_graph,
         })
     }
 }
@@ -1387,7 +1409,6 @@ fn load_commit_graph<'a>(
                 state.options.object.max_commit_graph_bytes,
                 operation.cancellation(),
                 runtime,
-                operation.budget(),
                 &operation,
             )
             .await;
@@ -1753,38 +1774,54 @@ impl TagPeelState {
 
 pub(crate) async fn resolved_commit_roots(
     refs: &RepositoryRefs,
-    graph: Option<&crab_metadata::split_commit_graph::SplitCommitGraph>,
+    graph: Option<crab_metadata::split_commit_graph::CommitGraphView<'_>>,
     operation: &OperationContext,
 ) -> Result<Vec<ObjectId>> {
     let mut roots = Vec::new();
-    for reference in &refs.entries {
-        if let Some(commit) = resolved_commit_root(reference, graph, operation).await? {
+    let known = if let Some(graph) = graph {
+        let targets = refs
+            .entries
+            .iter()
+            .map(|reference| {
+                let ObjectId::Sha1(oid) = reference.peeled.unwrap_or(reference.target) else {
+                    return Err(Error::UnsupportedObjectFormat);
+                };
+                Ok(oid)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        operation
+            .charge(BudgetDimension::Entries, targets.len() as u64)
+            .await?;
+        operation
+            .read_metadata(graph.ordinals(&operation.metadata_store(), &targets))
+            .await?
+    } else {
+        vec![None; refs.entries.len()]
+    };
+    for (reference, ordinal) in refs.entries.iter().zip(known) {
+        if ordinal.is_some() {
+            roots.push(reference.peeled.unwrap_or(reference.target));
+            continue;
+        }
+        if graph.is_some() && !reference.name.starts_with("refs/tags/") {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::CommitGraph,
+            });
+        }
+        if let Some(commit) = resolved_commit_root(reference, operation).await? {
             roots.push(commit);
         }
     }
+    roots.sort_unstable();
+    roots.dedup();
     Ok(roots)
 }
 
 async fn resolved_commit_root(
     reference: &crate::RepositoryRef,
-    graph: Option<&crab_metadata::split_commit_graph::SplitCommitGraph>,
     operation: &OperationContext,
 ) -> Result<Option<ObjectId>> {
     check_cancelled(operation.cancellation())?;
-    let target = reference.peeled.unwrap_or(reference.target);
-    if let Some(graph) = graph {
-        // A validated snapshot's known commit roots need no pack reads at
-        // open. Only unresolved tags need raw peeling; object requests still
-        // verify OIDs/kinds and parent lists before using graph acceleration.
-        if <[u8; 20]>::try_from(target.as_bytes()).is_ok_and(|oid| graph.contains(&oid)) {
-            return Ok(Some(target));
-        }
-        if !reference.name.starts_with("refs/tags/") {
-            return Err(Error::Corrupt {
-                stage: crate::CorruptionStage::CommitGraph,
-            });
-        }
-    }
     match peel_to_commit(reference.target, operation).await {
         Ok((commit, _)) => {
             if reference.peeled.is_some_and(|expected| expected != commit) {
@@ -1825,7 +1862,7 @@ async fn prove_reachable(
                 .filter(|reference| !is_target(reference)),
         );
     for reference in references {
-        if let Some(commit) = resolved_commit_root(reference, None, operation).await? {
+        if let Some(commit) = resolved_commit_root(reference, operation).await? {
             if commit == target {
                 operation
                     .charge(crate::BudgetDimension::HistoryCommits, 1)
@@ -1918,6 +1955,7 @@ mod tests {
         manifest_release: tokio::sync::Notify,
         block_fragment: std::sync::Mutex<Option<String>>,
         reject_fragment: std::sync::Mutex<Option<String>>,
+        reject_graph_layer_bodies: AtomicBool,
         request_started: Arc<tokio::sync::Notify>,
         request_release: tokio::sync::Notify,
     }
@@ -1935,6 +1973,7 @@ mod tests {
                 manifest_release: tokio::sync::Notify::new(),
                 block_fragment: std::sync::Mutex::new(None),
                 reject_fragment: std::sync::Mutex::new(None),
+                reject_graph_layer_bodies: AtomicBool::new(false),
                 request_started: Arc::new(tokio::sync::Notify::new()),
                 request_release: tokio::sync::Notify::new(),
             }
@@ -1975,6 +2014,22 @@ mod tests {
             location: &ObjectPath,
             options: GetOptions,
         ) -> object_store::Result<GetResult> {
+            if self.reject_graph_layer_bodies.load(Ordering::SeqCst)
+                && location.as_ref().contains("metadata/commit-graph/layers/")
+                && !options.head
+                && options.range.is_none()
+            {
+                return Err(object_store::Error::Generic {
+                    store: "test admission",
+                    source: Box::new(crab_storage::StorageError::ReadRejected {
+                        source: Box::new(Error::LimitExceeded {
+                            limit: "whole graph layer reads",
+                            actual: 1,
+                            maximum: 0,
+                        }),
+                    }),
+                });
+            }
             if self
                 .reject_fragment
                 .lock()

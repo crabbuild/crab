@@ -9,6 +9,8 @@ use object_store::path::Path as ObjectPath;
 pub const GLOBAL_PREFIX: &str = ".crab";
 /// Number of leading hash characters used to partition global content.
 pub const GLOBAL_CONTENT_FANOUT_WIDTH: usize = 2;
+/// Global immutable pages owned by the rebuildable capsule chunk-hint root.
+pub const CAPSULE_CHUNK_PAGE_KIND: &str = "capsule-chunk-pages";
 
 /// Build the directory containing one global content kind.
 #[must_use]
@@ -188,6 +190,18 @@ impl<S> StoreLayout<S> {
         self.repo_path("v2/browse-indexes")
     }
 
+    /// Path to the mutable lifetime root for published browse captures.
+    #[must_use]
+    pub fn browse_retained_head_path(&self) -> ObjectPath {
+        self.repo_path("v2/browse-retention")
+    }
+
+    /// Path to one authenticated browse capture retained until explicit history pruning.
+    #[must_use]
+    pub fn browse_retained_root_path(&self, hash: &str) -> ObjectPath {
+        self.repo_path(&format!("v2/browse-roots/{hash}"))
+    }
+
     /// Path to one immutable capsule-protocol capsule.
     #[must_use]
     pub fn capsule_path(&self, hash: &str) -> ObjectPath {
@@ -202,6 +216,31 @@ impl<S> StoreLayout<S> {
         self.repo_path(&format!("v2/checkpoints/{partition}/{hash}"))
     }
 
+    /// Path to the conditional global root of rebuildable capsule chunk hints.
+    #[must_use]
+    pub fn capsule_chunk_index_path(&self) -> ObjectPath {
+        ObjectPath::from(format!("{}/capsule-chunk-index", self.global_prefix))
+    }
+
+    /// Prefix containing immutable pages owned by the global capsule hint root.
+    #[must_use]
+    pub fn capsule_chunk_pages_prefix(&self) -> ObjectPath {
+        global_content_prefix(&self.global_prefix, CAPSULE_CHUNK_PAGE_KIND)
+    }
+
+    /// Prefix containing immutable checkpoint catalog objects.
+    #[must_use]
+    pub fn capsule_catalog_prefix(&self) -> ObjectPath {
+        self.repo_path("v2/catalogs/")
+    }
+
+    /// Path to an immutable checkpoint catalog object.
+    #[must_use]
+    pub fn capsule_catalog_path(&self, hash: &str) -> ObjectPath {
+        let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
+        self.repo_path(&format!("v2/catalogs/{partition}/{hash}"))
+    }
+
     /// Path to one immutable protocol-v2 geometric Git pack layer.
     #[must_use]
     pub fn capsule_pack_layer_path(&self, hash: &str) -> ObjectPath {
@@ -214,6 +253,31 @@ impl<S> StoreLayout<S> {
     pub fn capsule_history_segment_path(&self, hash: &str) -> ObjectPath {
         let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
         self.repo_path(&format!("v2/history/{partition}/{hash}"))
+    }
+
+    /// Prefix of per-ref source-lifetime heads, separate from ref visibility.
+    #[must_use]
+    pub fn capsule_source_heads_prefix(&self) -> ObjectPath {
+        self.repo_path("v2/history/source-heads/")
+    }
+
+    /// Path to the source-lifetime generation floor committed by explicit pruning.
+    #[must_use]
+    pub fn capsule_source_floor_path(&self) -> ObjectPath {
+        self.repo_path("v2/history/source-floor")
+    }
+
+    /// Path to one per-ref source-lifetime head.
+    #[must_use]
+    pub fn capsule_source_head_path(&self, ref_key: &str) -> ObjectPath {
+        self.repo_path(&format!("v2/history/source-heads/{ref_key}.json"))
+    }
+
+    /// Path to one immutable source-lifetime history segment.
+    #[must_use]
+    pub fn capsule_source_segment_path(&self, hash: &str) -> ObjectPath {
+        let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
+        self.repo_path(&format!("v2/history/source-roots/{partition}/{hash}"))
     }
 
     /// Prefix containing independently mutable capsule-protocol ref heads.

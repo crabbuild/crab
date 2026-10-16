@@ -8,9 +8,9 @@ The harness exercises both user-facing staging paths:
 
 The large-file cases prove pointer staging, object-store publication, fresh
 clone, hydration, and byte identity. A separate ordinary-Git matrix proves
-missing/corrupt manifest handling, update/fetch, deletion, force and
+missing/corrupt metadata-root handling, update/fetch, deletion, force and
 non-fast-forward behavior, atomic rejection, tag following, shallow history,
-immutable-pack failures, and concurrent push serialization.
+capsule loss, embedded pack/index corruption, and concurrent push serialization.
 
 With ``--source``, run only the two managed-file workflows on disposable
 clones of a read-only real repository. Use a run root on the workspace volume
@@ -100,6 +100,44 @@ class SmokeReport:
     cases: list[dict[str, Any]] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
     updated_at: str = ""
+
+
+def capsule_staged_proof_complete(stderr: str, count: int) -> bool:
+    """Require complete direct reuse evidence for the capsule duplicate fixture."""
+    if type(count) is not int or count <= 0:
+        return False
+    proof_message = "revalidated staged remote placement proofs"
+    adoption_message = "capsule staged remote proof adoption complete"
+    events = []
+    for line in stderr.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        fields = record.get("fields") if isinstance(record, dict) else None
+        if isinstance(fields, dict) and fields.get("message") in (
+            proof_message, adoption_message
+        ):
+            events.append(fields)
+    # This fixture makes one push with one direct-proof batch. Counts from
+    # different batches cannot jointly prove that every planned chunk survived.
+    if len(events) != 2:
+        return False
+    proof, adoption = events
+    if proof.get("message") != proof_message or adoption.get("message") != adoption_message:
+        return False
+    expected = {
+        "planned": count, "indexed": count, "matched": count,
+        "capsule_source_verified": count, "generation_verified": 0,
+        "payload_verified": count, "placement_mismatches": 0,
+        "origin_proof_mismatches": 0,
+    }
+    adopted = {"planned_existing": count, "stale_existing": 0, "global_existing": 0}
+    return all(
+        type(event.get(key)) is int and event[key] == value
+        for event, counters in [(proof, expected), (adoption, adopted)]
+        for key, value in counters.items()
+    )
 
 
 def utc_now() -> str:
@@ -203,6 +241,31 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def capsule_member_range(body: bytes, kind: str) -> tuple[int, int]:
+    """Locate one pack/index fault inside the synthetic single-member run."""
+    if len(body) < 48 or body[-8:] != b"CRBRUN01" or kind not in ("pack", "index"):
+        raise SmokeError("fault fixture is not a capsule run with a pack/index target")
+    footer_length = int.from_bytes(body[-48:-40], "big")
+    footer_start = len(body) - 48 - footer_length
+    if not 0 < footer_length <= 8 * 1024 * 1024 or footer_start < 0:
+        raise SmokeError("fault fixture footer is outside its container")
+    try:
+        footer = json.loads(body[footer_start:-48])
+        members = footer["git_packs"]
+        if footer["version"] != 5 or len(members) != 1:
+            raise SmokeError("fault fixture requires one current-format pack member")
+        offset, length = members[0][kind]["offset"], members[0][kind]["length"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SmokeError("fault fixture has no usable pack member") from exc
+    if (type(offset) is not int or type(length) is not int
+            or offset < 0 or length < 4 or offset + length > footer_start):
+        raise SmokeError("fault fixture range overlaps control bytes or escapes its container")
+    magic = b"PACK" if kind == "pack" else b"\xfftOc"
+    if body[offset:offset + 4] != magic:
+        raise SmokeError("fault fixture member does not contain the selected Git format")
+    return offset, length
 
 
 def parse_pointer(blob: str) -> PointerRecord:
@@ -745,6 +808,20 @@ class AddCommitPushSmoke:
         finally:
             connection.close()
 
+    def assert_staging_retired(self, repo: Path, check_name: str) -> None:
+        record = self.run_crab(repo, ["staging", "stats", "--json"], name=check_name)
+        lifecycle = json.loads(self.read_stdout(record))["data"]["lifecycle"]
+        self.check(
+            check_name,
+            all(lifecycle[field] == 0 for field in (
+                "path_heads", "path_leases", "open_batches_without_publication",
+                "reclaimable_superseded_leases", "reclaimable_files",
+                "open_push_snapshots", "committed_push_snapshots", "payloads",
+                "current_head_prepared_bytes", "snapshot_pinned_prepared_bytes",
+            )),
+            lifecycle,
+        )
+
     def sqlite_cache_files(self) -> list[str]:
         return sorted(path.name for path in self.cache_dir.rglob("*.sqlite"))
 
@@ -850,19 +927,25 @@ class AddCommitPushSmoke:
             check=check,
         )
 
-    def run_missing_manifest_case(self) -> None:
-        case_name = "missing-manifest"
+    def run_missing_root_case(self) -> None:
+        case_name = "missing-root"
         _repo, remote_url, repo_prefix = self.prepare_git_repo(case_name)
+        root_key = f"{repo_prefix}/v2/root"
+        self.ls_remote(remote_url, name=f"{case_name} healthy list")
+        self.head_key(root_key)
         self.run_aws(
-            "delete canonical manifest fixture",
+            "delete canonical root fixture",
             [
                 "delete-object",
                 "--bucket",
                 self.args.bucket,
                 "--key",
-                f"{repo_prefix}/manifest",
+                root_key,
             ],
         )
+        status, _, _ = self.signed_s3_request("HEAD", root_key)
+        self.check(f"{case_name}-fixture-removed", status == 404,
+                   {"key": root_key, "status": status})
         listing = self.run_git(
             self.run_root,
             ["ls-remote", remote_url],
@@ -954,6 +1037,17 @@ class AddCommitPushSmoke:
             {"expected": third},
         )
 
+        missing_tip = self.run_git(
+            contender,
+            ["cat-file", "-e", third],
+            name=f"{case_name} remote tip absent locally",
+            check=False,
+        )
+        self.check(
+            f"{case_name}-force-push-does-not-require-fetch",
+            missing_tip.exit_code != 0,
+            {"remote_tip": third},
+        )
         self.run_git(contender, ["push", "--force", "origin", "main"])
         self.check(
             f"{case_name}-force-push-updates-tip",
@@ -964,6 +1058,20 @@ class AddCommitPushSmoke:
             {"expected": divergent},
         )
 
+        self.run_crab(
+            repo,
+            ["push", "--force", "origin", "main"],
+            name=f"{case_name} native force without fetching contender",
+        )
+        self.check(
+            f"{case_name}-native-force-push-updates-tip",
+            self.ls_remote(remote_url, name=f"{case_name} list after native force").get(
+                "refs/heads/main"
+            )
+            == third,
+            {"expected": third},
+        )
+        self.run_git(contender, ["push", "--force", "origin", "main"])
         self.run_git(contender, ["tag", "-a", "v1", "-m", "version one"])
         tag_oid = self.rev_parse(contender, "refs/tags/v1")
         self.run_git(contender, ["push", "--follow-tags", "origin", "main"])
@@ -1052,53 +1160,81 @@ class AddCommitPushSmoke:
     def run_shallow_case(self) -> None:
         case_name = "shallow-history"
         repo, remote_url, _repo_prefix = self.prepare_git_repo(case_name)
-        first = self.commit_text(repo, "history.txt", "one\n", "one")
-        self.commit_text(repo, "history.txt", "two\n", "two")
-        self.commit_text(repo, "history.txt", "three\n", "three")
-        self.run_git(repo, ["push", "-u", "origin", "main"])
+        commits = []
+        for index, text in enumerate(("one", "two", "three"), start=1):
+            (repo / "history.txt").write_text(text + "\n", encoding="utf-8")
+            self.run_git(repo, ["add", "history.txt"])
+            date = f"2023-11-{14 + index:02d}T22:13:20Z"
+            self.run_cmd(
+                f"{case_name} dated commit {text}",
+                ["git", "commit", "-m", text],
+                repo,
+                extra_env={"GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date},
+            )
+            commits.append(self.rev_parse(repo, "HEAD"))
+        first = commits[0]
+        # Exclude the first commit through a side tip, keeping that ancestor
+        # unadvertised for the raw-SHA policy check below.
+        archive = self.read_stdout(self.run_cmd(
+            f"{case_name} archive side tip",
+            ["git", "commit-tree", f"{first}^{{tree}}", "-p", first, "-m", "archive"],
+            repo,
+            extra_env={
+                "GIT_AUTHOR_DATE": "2023-11-15T23:13:20Z",
+                "GIT_COMMITTER_DATE": "2023-11-15T23:13:20Z",
+            },
+        ))
+        self.run_git(repo, ["tag", "archive", archive])
+        self.run_git(repo, ["push", "-u", "origin", "main", "--tags"])
 
-        selector_clone = self.run_root / case_name / "shallow-since-clone"
-        selector_result = self.clone_git(
-            remote_url,
-            selector_clone,
-            name=f"{case_name} unsupported shallow-since clone",
-            extra_args=["--shallow-since", "2100-01-01T00:00:00Z"],
-            check=False,
+        # Match native upload-pack before asserting Crab's selector behavior.
+        # Fixed dates separate date parsing from commit-boundary selection.
+        selectors = (
+            ("since", ["--shallow-since", "2023-11-16T22:13:20Z"]),
+            ("exclude", ["--shallow-exclude", "archive"]),
+            ("future", ["--shallow-since", "2030-01-01T00:00:00Z"]),
+            ("exclude-all", ["--shallow-exclude", "main"]),
         )
-        selector_stderr = Path(selector_result.stderr_log).read_text(
-            encoding="utf-8", errors="replace"
-        )
-        self.check(
-            f"{case_name}-shallow-since-fails-explicitly",
-            selector_result.exit_code != 0
-            and "deepen-since is not supported" in selector_stderr
-            and not (selector_clone / "history.txt").exists(),
-            {
-                "exit_code": selector_result.exit_code,
-                "stderr_log": selector_result.stderr_log,
-            },
-        )
-        exclude_clone = self.run_root / case_name / "shallow-exclude-clone"
-        exclude_result = self.clone_git(
-            remote_url,
-            exclude_clone,
-            name=f"{case_name} unsupported shallow-exclude clone",
-            extra_args=["--shallow-exclude", "main"],
-            check=False,
-        )
-        exclude_stderr = Path(exclude_result.stderr_log).read_text(
-            encoding="utf-8", errors="replace"
-        )
-        self.check(
-            f"{case_name}-shallow-exclude-fails-explicitly",
-            exclude_result.exit_code != 0
-            and "deepen-not is not supported" in exclude_stderr
-            and not (exclude_clone / "history.txt").exists(),
-            {
-                "exit_code": exclude_result.exit_code,
-                "stderr_log": exclude_result.stderr_log,
-            },
-        )
+        for selector, arguments in selectors:
+            expected_success = selector in ("since", "exclude")
+            transports = (
+                ("native", repo.resolve().as_uri(), []),
+                ("crab-v2", remote_url, ["--config", "protocol.version=2"]),
+                ("crab-classic", remote_url, ["--config", "protocol.version=0"]),
+            )
+            for transport, url, protocol in transports:
+                clone = self.run_root / case_name / f"{transport}-{selector}-clone"
+                result = self.clone_git(
+                    url, clone,
+                    name=f"{case_name} {transport} {selector} clone",
+                    extra_args=[*protocol, *arguments], check=False,
+                )
+                detail = {"exit_code": result.exit_code, "stderr_log": result.stderr_log}
+                if not expected_success:
+                    diagnostic = Path(result.stderr_log).read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                    self.check(
+                        f"{case_name}-{transport}-{selector}-rejects-empty-selection",
+                        result.exit_code != 0
+                        and "no commits selected for shallow requests" in diagnostic
+                        and not (clone / "history.txt").exists(),
+                        detail,
+                    )
+                    continue
+                self.check(
+                    f"{case_name}-{transport}-{selector}-clone-succeeds",
+                    result.exit_code == 0, detail,
+                )
+                selected = self.read_stdout(self.run_git(clone, ["rev-list", "HEAD"]))
+                boundary = (clone / ".git" / "shallow").read_text().splitlines()
+                self.check(
+                    f"{case_name}-{transport}-{selector}-exact-history-and-boundary",
+                    selected.splitlines() == list(reversed(commits[1:]))
+                    and boundary == [commits[1]]
+                    and (clone / "history.txt").read_text() == "three\n",
+                    {"commits": selected.splitlines(), "boundary": boundary},
+                )
 
         raw_fetch = self.run_root / case_name / "raw-fetch"
         raw_fetch.mkdir()
@@ -1174,13 +1310,15 @@ class AddCommitPushSmoke:
             {"commit_count": full_depth},
         )
 
-    def run_corrupt_manifest_case(self) -> None:
-        case_name = "corrupt-manifest"
-        remote_url, repo_prefix = self.remote_for_case(case_name)
-        manifest_key = f"{repo_prefix}/manifest"
+    def run_corrupt_root_case(self) -> None:
+        case_name = "corrupt-root"
+        _repo, remote_url, repo_prefix = self.prepare_git_repo(case_name)
+        root_key = f"{repo_prefix}/v2/root"
+        self.ls_remote(remote_url, name=f"{case_name} healthy list")
+        self.head_key(root_key)
         status, _, response_body = self.signed_s3_request(
             "PUT",
-            manifest_key,
+            root_key,
             body=b'{"version":',
         )
         self.check(
@@ -1192,6 +1330,11 @@ class AddCommitPushSmoke:
                 "body": response_body.decode("utf-8", errors="replace")[:200],
             },
         )
+
+        status, _, body = self.signed_s3_request("GET", root_key)
+        self.check(f"{case_name}-fixture-overwritten",
+                   status == 200 and body == b'{"version":',
+                   {"key": root_key, "status": status})
 
         ls_remote = self.run_git(
             self.run_root,
@@ -1234,122 +1377,74 @@ class AddCommitPushSmoke:
             {"stderr_log": clone.stderr_log},
         )
 
-    def run_immutable_object_failure_case(self, object_kind: str) -> None:
-        case_name = f"missing-{object_kind}"
+    def run_capsule_failure_case(self, fault: str) -> None:
+        case_name = "missing-capsule" if fault == "missing" else f"corrupt-{fault}"
         repo, remote_url, repo_prefix = self.prepare_git_repo(case_name)
         remote_tip = self.commit_text(repo, "payload.txt", "immutable\n", "immutable")
         self.run_git(repo, ["push", "-u", "origin", "main"])
+        self.check(
+            f"{case_name}-healthy-tip-before-fault",
+            self.ls_remote(remote_url, name=f"{case_name} healthy refs").get("refs/heads/main") == remote_tip,
+        )
         keys = self.list_keys(repo_prefix)
-        suffix = f".{object_kind}"
-        candidates = sorted(key for key in keys if key.endswith(suffix))
-        self.check(
-            f"{case_name}-fixture-object-found",
-            bool(candidates),
-            {"suffix": suffix, "keys": sorted(keys)},
-        )
+        candidates = sorted(key for key in keys if key.startswith(f"{repo_prefix}/v2/capsules/"))
+        self.check(f"{case_name}-fixture-object-found", len(candidates) == 1, {"keys": candidates})
         target_key = candidates[0]
-        status, _, body = self.signed_s3_request("DELETE", target_key)
-        self.check(
-            f"{case_name}-fixture-object-deleted",
-            status in (200, 204),
-            {
-                "status": status,
-                "key": target_key,
-                "body": body.decode("utf-8", errors="replace")[:200],
-            },
-        )
-
+        authority = {}
+        for key in sorted(key for key in keys if key == f"{repo_prefix}/v2/root" or key.startswith(f"{repo_prefix}/v2/refs/")):
+            status, _, value = self.signed_s3_request("GET", key)
+            self.check(f"{case_name}-authority-readable-before-fault", status == 200, {"key": key})
+            authority[key] = value
+        status, headers, original = self.signed_s3_request("GET", target_key)
+        self.check(f"{case_name}-fixture-body-readable", status == 200 and len(original) < 1024 * 1024)
+        if fault == "missing":
+            status, _, _ = self.signed_s3_request("DELETE", target_key)
+            absent, _, _ = self.signed_s3_request("GET", target_key)
+            self.check(f"{case_name}-fixture-object-deleted", status in (200, 204) and absent == 404)
+        else:
+            offset, length = capsule_member_range(original, fault)
+            damaged = bytearray(original)
+            damaged[offset] ^= 1
+            status, _, _ = self.signed_s3_request(
+                "PUT", target_key, body=bytes(damaged), extra_headers={"if-match": headers["etag"]},
+            )
+            read_status, _, stored = self.signed_s3_request("GET", target_key)
+            self.check(
+                f"{case_name}-fixture-member-corrupted",
+                status in (200, 201) and read_status == 200 and stored == bytes(damaged),
+                {"key": target_key, "member_offset": offset, "member_length": length},
+            )
         clone_dir = self.run_root / case_name / "clone"
-        clone = self.clone_git(
-            remote_url, clone_dir, name=f"{case_name} git clone", check=False
+        clone_cache = self.run_root / case_name / "cold-cache"
+        self.check(f"{case_name}-clone-cache-starts-empty", not clone_cache.exists())
+        clone = self.run_cmd(
+            f"{case_name} git clone", ["git", "clone", remote_url, str(clone_dir)], self.run_root,
+            check=False, extra_env={"CRAB_CACHE_DIR": str(clone_cache)},
         )
         head = self.run_git(
-            self.run_root,
-            ["-C", str(clone_dir), "rev-parse", "--verify", "HEAD"],
-            name=f"{case_name} verify no local ref update",
-            check=False,
+            self.run_root, ["-C", str(clone_dir), "rev-parse", "--verify", "HEAD"],
+            name=f"{case_name} verify no local ref update", check=False,
         )
         self.check(
             f"{case_name}-clone-fails-before-checkout",
-            clone.exit_code != 0
-            and head.exit_code != 0
-            and not (clone_dir / "payload.txt").exists(),
-            {
-                "clone_exit_code": clone.exit_code,
-                "head_exit_code": head.exit_code,
-                "target_key": target_key,
-            },
+            clone.exit_code != 0 and head.exit_code != 0 and not (clone_dir / "payload.txt").exists(),
+            {"clone_exit_code": clone.exit_code, "head_exit_code": head.exit_code, "target_key": target_key},
         )
-        refs = self.ls_remote(remote_url, name=f"{case_name} refs remain coherent")
-        self.check(
-            f"{case_name}-remote-ref-remains-original",
-            refs.get("refs/heads/main") == remote_tip,
-            {"expected": remote_tip, "actual": refs.get("refs/heads/main")},
-        )
-
-    def run_corrupt_index_failure_case(self) -> None:
-        case_name = "corrupt-idx"
-        repo, remote_url, repo_prefix = self.prepare_git_repo(case_name)
-        remote_tip = self.commit_text(repo, "payload.txt", "immutable\n", "immutable")
-        self.run_git(repo, ["push", "-u", "origin", "main"])
-        candidates = sorted(
-            key for key in self.list_keys(repo_prefix) if key.endswith(".idx")
-        )
-        self.check(
-            f"{case_name}-fixture-object-found",
-            bool(candidates),
-            {"suffix": ".idx", "keys": candidates},
-        )
-        target_key = candidates[0]
-        status, _, body = self.signed_s3_request(
-            "PUT", target_key, body=b"not a valid git pack index\n"
-        )
-        self.check(
-            f"{case_name}-fixture-object-corrupted",
-            status in (200, 201),
-            {
-                "status": status,
-                "key": target_key,
-                "body": body.decode("utf-8", errors="replace")[:200],
-            },
-        )
-
-        clone_dir = self.run_root / case_name / "clone"
-        clone = self.clone_git(
-            remote_url, clone_dir, name=f"{case_name} git clone", check=False
-        )
-        head = self.run_git(
-            self.run_root,
-            ["-C", str(clone_dir), "rev-parse", "--verify", "HEAD"],
-            name=f"{case_name} verify no local ref update",
-            check=False,
-        )
-        clone_stderr = Path(clone.stderr_log).read_text(
-            encoding="utf-8", errors="replace"
-        )
-        self.check(
-            f"{case_name}-clone-fails-before-checkout",
-            clone.exit_code != 0
-            and head.exit_code != 0
-            and not (clone_dir / "payload.txt").exists(),
-            {
-                "clone_exit_code": clone.exit_code,
-                "head_exit_code": head.exit_code,
-                "target_key": target_key,
-            },
-        )
-        self.check(
-            f"{case_name}-clone-surfaces-integrity-error",
-            "CRAB-E0020" in clone_stderr
-            or "corrupt object" in clone_stderr.lower(),
-            {"stderr_log": clone.stderr_log},
-        )
-        refs = self.ls_remote(remote_url, name=f"{case_name} refs remain coherent")
-        self.check(
-            f"{case_name}-remote-ref-remains-original",
-            refs.get("refs/heads/main") == remote_tip,
-            {"expected": remote_tip, "actual": refs.get("refs/heads/main")},
-        )
+        if fault != "missing":
+            diagnostic = Path(clone.stderr_log).read_text(encoding="utf-8", errors="replace")
+            self.check(
+                f"{case_name}-clone-surfaces-integrity-error",
+                "CRAB-E0020" in diagnostic or "corrupt object" in diagnostic.lower(),
+                {"stderr_log": clone.stderr_log},
+            )
+        # Payloads share their physical object with discovery controls. Compare
+        # authority bytes directly; failed discovery cannot prove unchanged refs.
+        after = {}
+        for key in authority:
+            status, _, value = self.signed_s3_request("GET", key)
+            self.check(f"{case_name}-authority-readable-after-fault", status == 200, {"key": key})
+            after[key] = value
+        self.check(f"{case_name}-remote-authority-unchanged", after == authority)
 
     def run_concurrent_push_case(self) -> None:
         case_name = "concurrent-cas"
@@ -1586,7 +1681,11 @@ class AddCommitPushSmoke:
         self.run_git(repo, ["commit", "-m", f"{case_name}: add staged binaries"])
 
         if use_crab_add:
-            self.run_crab(
+            # A committed capsule must not fail while rewriting an unused
+            # advisory pack-walk hint. Leave the fault through cold reconstruction.
+            advisory_state = repo / ".crab" / "push-state"
+            advisory_state.mkdir()
+            pushed = self.run_crab(
                 repo,
                 [
                     "push",
@@ -1599,6 +1698,12 @@ class AddCommitPushSmoke:
                 name=f"{case_name} crab push",
                 timeout=self.args.push_timeout,
             )
+            summary = json.loads(self.read_stdout(pushed))["data"]
+            self.check(
+                f"{case_name}-advisory-state-fault-preserves-success",
+                summary["refs_pushed"] == 1 and advisory_state.is_dir(),
+                summary,
+            )
         else:
             self.run_git(
                 repo,
@@ -1607,6 +1712,7 @@ class AddCommitPushSmoke:
             )
 
         self.head_repository_state(repo_prefix)
+        self.assert_staging_retired(repo, f"{case_name}-retires-published-staging-owners")
         after_xorbs = self.list_keys(".crab/xorbs/")
         after_shards = self.list_keys(".crab/shards/")
         new_xorbs = len(after_xorbs - before_xorbs)
@@ -1685,11 +1791,59 @@ class AddCommitPushSmoke:
             {"original_sha256": original_hash},
         )
 
+        # Reopen from a new cache after catalog compaction; the original clone
+        # can otherwise hide a checkpoint reader that only works with warm data.
+        self.run_crab(
+            repo, ["metadb", "owner", "--once", "--jsonl"],
+            name=f"{case_name} checkpoint catalog", timeout=self.args.push_timeout,
+        )
+        diagnosis = self.run_crab(
+            repo, ["metadb", "diagnose", "--json"],
+            name=f"{case_name} checkpoint diagnosis",
+        )
+        self.check(
+            f"{case_name}-checkpoint-present",
+            json.loads(self.read_stdout(diagnosis))["data"]["capsule"]["checkpoint_present"],
+        )
+        checkpoint_clone = self.run_root / case_name / "checkpoint-clone"
+        checkpoint_cache = self.run_root / case_name / "checkpoint-cache"
+        self.check(f"{case_name}-checkpoint-cache-starts-empty", not checkpoint_cache.exists())
+        checkpoint_env = {"CRAB_CACHE_DIR": str(checkpoint_cache)}
+        self.run_cmd(
+            f"{case_name} clone checkpoint",
+            [self.crab_bin, "clone", remote_url, str(checkpoint_clone), "--jsonl"],
+            self.run_root, extra_env=checkpoint_env,
+        )
+        self.check(
+            f"{case_name}-checkpoint-clone-tip-matches",
+            self.rev_parse(checkpoint_clone, "HEAD") == source_tip,
+        )
+        self.run_crab(
+            checkpoint_clone, ["hydrate", "--all"],
+            name=f"{case_name} cold checkpoint hydration", extra_env=checkpoint_env,
+        )
+        self.check(
+            f"{case_name}-checkpoint-model-byte-identical",
+            sha256_file(checkpoint_clone / "model.bin") == original_hash,
+        )
+        self.check(
+            f"{case_name}-checkpoint-duplicate-byte-identical",
+            sha256_file(checkpoint_clone / "duplicate.bin") == original_hash,
+        )
+
         sqlite_files = self.sqlite_cache_files()
+        # Capsule lookup does not initialize the released receipt warm index.
+        # Prove the canonical payload cache holds actual shards and xorbs.
+        catalog = self.cache_dir / ".catalog.sqlite"
+        with sqlite3.connect(f"file:{catalog}?mode=ro", uri=True) as connection:
+            cached = dict(connection.execute(
+                "SELECT family, SUM(size) FROM cache_entries GROUP BY family"
+            ))
         self.check(
             f"{case_name}-sqlite-cache-used",
-            "chunk-index.sqlite" in sqlite_files,
-            {"sqlite_files": sqlite_files},
+            cached.get("shard", 0) > 0 and cached.get("xorb", 0) > 0
+            and "chunk-index.sqlite" not in sqlite_files,
+            {"sqlite_files": sqlite_files, "cached_bytes": cached},
         )
         redb_files = self.redb_cache_files()
         self.check(
@@ -1933,13 +2087,7 @@ class AddCommitPushSmoke:
         remote_chunk_count = inventory["recipe_remote_chunks"]
         self.check(
             f"{case_name}-push-revalidates-staged-proof-directly",
-            "revalidated staged remote placement proofs" in push_stderr
-            and f'"planned":{remote_chunk_count}' in push_stderr
-            and f'"matched":{remote_chunk_count}' in push_stderr
-            and f'"generation_verified":{remote_chunk_count}' in push_stderr
-            and f'"payload_verified":{remote_chunk_count}' in push_stderr
-            and '"stale_existing":0' in push_stderr
-            and '"global_existing":0' in push_stderr,
+            capsule_staged_proof_complete(push_stderr, remote_chunk_count),
             {"remote_chunks": remote_chunk_count},
         )
         self.head_repository_state(consumer_prefix)
@@ -1954,12 +2102,19 @@ class AddCommitPushSmoke:
         )
 
         clone_dir = self.run_root / case_name / "consumer-clone"
+        clone_cache = self.run_root / case_name / "consumer-clone-cache"
+        self.check(f"{case_name}-clone-cache-starts-empty", not clone_cache.exists())
+        clone_env = {"CRAB_CACHE_DIR": str(clone_cache)}
         self.run_cmd(
             f"{case_name} consumer clone",
             [self.crab_bin, "clone", consumer_url, str(clone_dir), "--jsonl"],
             self.run_root,
+            extra_env=clone_env,
         )
-        self.run_crab(clone_dir, ["hydrate", "--all"], name=f"{case_name} hydrate")
+        self.run_crab(
+            clone_dir, ["hydrate", "--all"], name=f"{case_name} hydrate",
+            extra_env=clone_env,
+        )
         self.check(
             f"{case_name}-fresh-hydrate-is-byte-identical",
             sha256_file(clone_dir / "model.bin") == expected_sha256,
@@ -2007,11 +2162,18 @@ class AddCommitPushSmoke:
             ["staging", "stats", "--json"],
             name=f"{case_name} staging ownership before push",
         )
-        before_push = json.loads(self.read_stdout(before_push_record))["data"]["lifecycle"]
+        before_push_data = json.loads(self.read_stdout(before_push_record))["data"]
+        before_push = before_push_data["lifecycle"]
+        expected_versions = {first_pointer.file_hash, second_pointer.file_hash}
+        retained_versions = {entry["file_hash"] for entry in before_push_data["files"]}
+        # Native preparation and Git-clean retain independent handoff leases.
+        # Version coverage, followed by exact retirement, proves their lifetime;
+        # a fixed pre-push lease count cannot identify the preserved versions.
         self.check(
             f"{case_name}-retains-current-and-committed-history-owners",
-            before_push["path_heads"] == 2
-            and before_push["path_leases"] == 2
+            retained_versions == expected_versions
+            and before_push["recipes"] == len(expected_versions)
+            and before_push["path_leases"] >= len(expected_versions)
             and before_push["open_batches_without_publication"] == 0
             and before_push["reclaimable_superseded_leases"] == 0
             and before_push["reclaimable_files"] == 0,
@@ -2044,21 +2206,7 @@ class AddCommitPushSmoke:
             fsck_data,
         )
 
-        after_push_record = self.run_crab(
-            repo,
-            ["staging", "stats", "--json"],
-            name=f"{case_name} staging ownership after push",
-        )
-        after_push = json.loads(self.read_stdout(after_push_record))["data"]["lifecycle"]
-        self.check(
-            f"{case_name}-retires-both-pushed-version-owners",
-            after_push["path_heads"] == 0
-            and after_push["path_leases"] == 0
-            and after_push["open_batches_without_publication"] == 0
-            and after_push["reclaimable_superseded_leases"] == 0
-            and after_push["reclaimable_files"] == 0,
-            after_push,
-        )
+        self.assert_staging_retired(repo, f"{case_name}-retires-both-pushed-version-owners")
 
         clone_dir = self.run_root / case_name / "clone"
         self.run_cmd(
@@ -2193,14 +2341,13 @@ class AddCommitPushSmoke:
             self.write_report()
             return
         self.run_v1_hard_cutover_reset_case()
-        self.run_missing_manifest_case()
-        self.run_corrupt_manifest_case()
+        self.run_missing_root_case()
+        self.run_corrupt_root_case()
         self.run_ref_update_delete_force_and_tag_case()
         self.run_atomic_rejection_case()
         self.run_shallow_case()
-        self.run_immutable_object_failure_case("pack")
-        self.run_immutable_object_failure_case("idx")
-        self.run_corrupt_index_failure_case()
+        for fault in ("missing", "pack", "index"):
+            self.run_capsule_failure_case(fault)
         self.run_concurrent_push_case()
         self.run_committed_restage_before_first_push_case()
         self.run_partial_overlap_case()

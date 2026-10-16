@@ -16,6 +16,11 @@ import urllib.parse
 import urllib.request
 
 
+def require(condition, context):
+    if not condition:
+        raise AssertionError(context)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--url', required=True, help='Server origin, e.g. http://127.0.0.1:8788')
@@ -59,11 +64,11 @@ def main():
             response = error
         with response:
             body = response.read()
-            assert response.status == status, (path, response.status, body[:300])
+            require(response.status == status, (path, response.status, body[:300]))
             if status == 200 and path.startswith(api):
-                assert response.headers['Server-Timing'], path
-                assert response.headers['X-Crab-Generation'], path
-                assert response.headers['Cache-Control'] == 'no-store', path
+                require(response.headers['Server-Timing'], path)
+                require(response.headers['X-Crab-Generation'], path)
+                require(response.headers['Cache-Control'] == 'no-store', path)
                 action = sample_class or path.split('?', 1)[0].rsplit('/', 1)[-1]
                 elapsed = (time.perf_counter() - started) * 1000
                 with samples_lock:
@@ -77,14 +82,14 @@ def main():
     def verify_content(content, revision, path):
         body = git('show', f'{revision}:{path}')
         oid = hashlib.sha1(b'blob ' + str(len(body)).encode() + b'\0' + body).hexdigest()
-        assert content['oid'] == oid and content['size'] == len(body), path
+        require(content['oid'] == oid and content['size'] == len(body), path)
         if content['text'] is not None:
-            assert content['text'].encode() == body, path
+            require(content['text'].encode() == body, path)
         return body
 
-    assert git('rev-parse', args.revision).decode().strip() == args.revision
+    require(git('rev-parse', args.revision).decode().strip() == args.revision, 'HTTP qualification failed')
     refs = read('refs')
-    assert refs['head']['oid'] == args.revision
+    require(refs['head']['oid'] == args.revision, 'HTTP qualification failed')
     for directory in args.directory:
         expected = git('ls-tree', '-z', args.revision + (':' + directory if directory else ''))
         expected = [record.split(b'\t', 1) for record in expected.split(b'\0') if record]
@@ -95,14 +100,14 @@ def main():
             if cursor:
                 params['cursor'] = cursor
             page = read('tree', **params)
-            assert page['commit'] == args.revision
+            require(page['commit'] == args.revision, 'HTTP qualification failed')
             items.extend(page['items'])
             cursor = page['next']
             if not cursor:
                 break
         actual = [(item['mode'].lstrip('0'), item['oid'], bytes.fromhex(item['path_hex']).rsplit(b'/', 1)[-1]) for item in items]
         oracle = [(meta.split()[0].decode().lstrip('0'), meta.split()[2].decode(), name) for meta, name in expected]
-        assert actual == oracle, directory
+        require(actual == oracle, directory)
         checks['tree_entries'] += len(items)
         if args.attribution:
             attributed = []
@@ -112,37 +117,45 @@ def main():
                 if cursor:
                     params['cursor'] = cursor
                 page = read('tree-attribution', **params)
-                assert page['commit'] == args.revision
+                require(page['commit'] == args.revision, 'HTTP qualification failed')
                 attributed.extend(page['items'])
                 cursor = page['next']
                 if not cursor:
                     break
-            assert [(item['path_hex'], item['oid'], item['mode']) for item in attributed] == [
+            require([(item['path_hex'], item['oid'], item['mode']) for item in attributed] == [
                 (item['path_hex'], item['oid'], item['mode']) for item in items
-            ], directory
+            ], directory)
             for item in attributed:
                 path = bytes.fromhex(item['path_hex'])
                 expected_commit = git('--literal-pathspecs', 'log', '--first-parent',
                                       '--max-count=1', '--format=%H', args.revision,
                                       '--', os.fsdecode(path)).decode().strip()
-                assert item['last_commit']['oid'] == expected_commit, item['path_hex']
+                require(item['last_commit']['oid'] == expected_commit, item['path_hex'])
+                headers, message = git('cat-file', 'commit', expected_commit).split(b'\n\n', 1)
+                author = next(line[7:] for line in headers.splitlines() if line.startswith(b'author '))
+                identity, timestamp = author.rsplit(b'> ', 1)
+                name = identity.rsplit(b' <', 1)[0]
+                summary = item['last_commit']
+                require(summary['author'] == name.decode('utf-8', 'replace'), item['path_hex'])
+                require(summary['author_seconds'] == int(timestamp.split()[0]), item['path_hex'])
+                require(summary['message'] == message[:8192].decode('utf-8', 'replace'), item['path_hex'])
             checks['tree_attribution_entries'] = checks.get('tree_attribution_entries', 0) + len(attributed)
     page = read('commits', limit=10)
-    assert [item['oid'] for item in page['items']] == git('rev-list', '--first-parent', '--max-count=10', args.revision).decode().splitlines()
+    require([item['oid'] for item in page['items']] == git('rev-list', '--first-parent', '--max-count=10', args.revision).decode().splitlines(), 'HTTP qualification failed')
     for commit in page['items']:
         raw = git('cat-file', 'commit', commit['oid'])
-        assert bytes.fromhex(commit['message_hex']) == raw.split(b'\n\n', 1)[1]
-        assert read('commit', rev=commit['oid'])['tree'] == commit['tree']
+        require(bytes.fromhex(commit['message_hex']) == raw.split(b'\n\n', 1)[1], 'HTTP qualification failed')
+        require(read('commit', rev=commit['oid'])['tree'] == commit['tree'], 'HTTP qualification failed')
         checks['commits'] += 1
     for path in args.file or ['README.md']:
         expected = verify_content(read('file', path=path), args.revision, path)
         actual, headers = http(api + '/blob?' + urllib.parse.urlencode({'rev': args.revision, 'path': path}))
-        assert actual == expected and headers['Content-Disposition'] == 'attachment', path
+        require(actual == expected and headers['Content-Disposition'] == 'attachment', path)
         checks['blobs'] += 1
     changes = read('changes')
-    assert changes['base'] == git('rev-parse', args.revision + '^1').decode().strip()
+    require(changes['base'] == git('rev-parse', args.revision + '^1').decode().strip(), 'HTTP qualification failed')
     expected_paths = git('diff-tree', '--no-commit-id', '--no-renames', '--name-only', '-r', '-z', changes['base'], args.revision).split(b'\0')[:-1]
-    assert [bytes.fromhex(change['path_hex']) for change in changes['changes']] == expected_paths
+    require([bytes.fromhex(change['path_hex']) for change in changes['changes']] == expected_paths, 'HTTP qualification failed')
     for change in changes['changes']:
         diff = read('diff', path_hex=change['path_hex'])
         path = bytes.fromhex(change['path_hex']).decode()
@@ -156,19 +169,19 @@ def main():
         actual = [entry['commit']['oid'] for entry in attribution['ranges'] for _ in range(entry['lines'])]
         lines = git('blame', '--first-parent', '--line-porcelain', args.revision, '--', args.blame).splitlines()
         expected = [line.split()[0].decode() for line in lines if len(line.split()) in (3, 4) and len(line.split()[0]) == 40 and all(byte in b'0123456789abcdef' for byte in line.split()[0])]
-        assert actual == expected, args.blame
+        require(actual == expected, args.blame)
         checks['blame_lines'] = len(actual)
     for suffix, status in [('tree?limit=0', 400), ('tree?path=../secret', 404), ('file?path=missing-file', 404), ('file?path=.', 404), ('tree?path_hex=ff0', 400), ('tree?cursor=bad', 400)]:
         body, _ = http(api + '/' + suffix, status)
-        assert json.loads(body)['error']['message']
+        require(json.loads(body)['error']['message'], 'HTTP qualification failed')
         checks['errors'] += 1
     http('/api/repos/unknown/missing/refs', 404)
     http('/api/repos', 403, headers={'Host': 'untrusted.invalid'})
     http('/assets/absent.js', 404)
     shell, headers = http('/' + args.repository)
-    assert b'id="root"' in shell and "frame-ancestors 'none'" in headers['Content-Security-Policy']
+    require(b'id="root"' in shell and "frame-ancestors 'none'" in headers['Content-Security-Policy'], 'HTTP qualification failed')
     head, headers = http('/' + args.repository, method='HEAD')
-    assert not head and int(headers['Content-Length']) == len(shell)
+    require(not head and int(headers['Content-Length']) == len(shell), 'HTTP qualification failed')
     historical = None
     if args.historical_commits:
         ancestors = git('rev-list', '--first-parent', f'--max-count={args.history_window + 1}', args.revision).decode().splitlines()[1:]
@@ -180,9 +193,9 @@ def main():
             raw = git('cat-file', 'commit', oid)
             path = api + '/commit?' + urllib.parse.urlencode({'rev': oid})
             observed = json.loads(http(path, sample_class='historical_commit')[0])
-            assert observed['oid'] == oid, oid
-            assert observed['tree'].encode() == raw.splitlines()[0].split()[1], oid
-            assert bytes.fromhex(observed['message_hex']) == raw.split(b'\n\n', 1)[1], oid
+            require(observed['oid'] == oid, oid)
+            require(observed['tree'].encode() == raw.splitlines()[0].split()[1], oid)
+            require(bytes.fromhex(observed['message_hex']) == raw.split(b'\n\n', 1)[1], oid)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
             list(pool.map(verify_historical, selected))

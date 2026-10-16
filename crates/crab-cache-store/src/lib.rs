@@ -2073,8 +2073,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn replaced_catalog_bypasses_cache_until_old_generation_is_released() {
+    async fn replaced_catalog_readthrough(retain_recovery: bool) {
+        use std::os::unix::fs::OpenOptionsExt as _;
         let good_body = Bytes::from_static(b"origin survives replaced catalog");
         let hash = crab_xet::hash::compute_data_hash(&good_body);
         let path = content_path("shards", &hash.hex());
@@ -2097,7 +2097,32 @@ mod tests {
         let main = root.join(".catalog.sqlite");
         let retired = tmp.path().join("retired.sqlite");
         std::fs::rename(&main, &retired).unwrap();
-        std::fs::copy(retired, &main).unwrap();
+        let mut recovery = Vec::new();
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let path = root.join(format!(".catalog.sqlite{suffix}"));
+            if path.exists() {
+                if retain_recovery {
+                    recovery.push((path.clone(), std::fs::read(&path).unwrap()));
+                } else {
+                    std::fs::rename(&path, tmp.path().join(path.file_name().unwrap())).unwrap();
+                }
+            }
+        }
+        if retain_recovery {
+            assert!(recovery.iter().any(|(path, bytes)| {
+                path.file_name().unwrap() == ".catalog.sqlite-wal" && bytes.len() > 32
+            }));
+        }
+        // An empty replacement is coherent. Copying only the live main would
+        // omit committed WAL state and cannot establish recovery ownership.
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&main)
+                .unwrap(),
+        );
         let before = std::fs::read(&main).unwrap();
         let key = CacheKey::Shard(hash);
         let store =
@@ -2122,7 +2147,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, good_body);
-        assert!(cache.contains_verified(&key).await);
+        assert_eq!(counting_origin.counts().body_requests(), 2);
+        if retain_recovery {
+            assert!(!cache.contains_verified(&key).await);
+            assert!(matches!(
+                cache.put(&key, &good_body).await,
+                Err(CacheError::UnsafeRoot { .. })
+            ));
+            assert_eq!(std::fs::read(&main).unwrap(), before);
+            for (path, bytes) in recovery {
+                assert_eq!(std::fs::read(path).unwrap(), bytes);
+            }
+        } else {
+            assert!(cache.contains_verified(&key).await);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replaced_catalog_bypasses_cache_until_old_generation_is_released() {
+        replaced_catalog_readthrough(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replaced_catalog_with_recovery_files_keeps_bypassing_after_owner_release() {
+        replaced_catalog_readthrough(true).await;
     }
 
     #[cfg(unix)]

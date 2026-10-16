@@ -11,18 +11,28 @@ use crate::git_visibility::{
 };
 use crate::validation::{validate_content_hash, validate_sha1};
 
-const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP05";
-const CHECKPOINT_VERSION: u32 = 5;
+mod catalog;
+pub use catalog::CheckpointCatalog;
+use catalog::{CatalogInput, PreparedCatalog};
+#[cfg(feature = "storage")]
+pub use catalog::{fold_checkpoint_catalog, merge_checkpoint_catalogs};
+
+mod visibility_pages;
+#[cfg(feature = "storage")]
+pub use visibility_pages::LayeredVisibilityReader;
+
+const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP09";
+pub(super) const CHECKPOINT_VERSION: u32 = 9;
 const LAYER_MAGIC: &[u8; 8] = b"CRBPKL01";
 const LAYER_VERSION: u32 = 1;
 const TRAILER_BYTES: usize = 8 + 32 + 8;
-const MAX_CHECKPOINT_FOOTER_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const MAX_CHECKPOINT_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_LAYER_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PHYSICAL_SOURCES: usize = 64;
 const MAX_SOURCE_MEMBERS: usize = 512;
-const LAYERED_VISIBILITY_MAGIC: &[u8; 8] = b"CRBVORD1";
-const LAYERED_VISIBILITY_VERSION: u32 = 2;
 const MAX_LAYERED_VISIBILITY_BYTES: usize = 128 * 1024 * 1024;
+pub(super) const MAX_CHECKPOINT_BYTES: u64 =
+    (MAX_LAYERED_VISIBILITY_BYTES + MAX_CHECKPOINT_FOOTER_BYTES + TRAILER_BYTES) as u64;
 const MAX_LAYERED_VISIBILITY_REFS: usize = 100_000;
 const MAX_LAYERED_VISIBILITY_TRANSITIONS: usize = 1_000_000;
 const VISIBILITY_OBJECT_SET_DIGEST_DOMAIN: &[u8] = b"crab layered visibility object set\0";
@@ -72,6 +82,19 @@ impl LayeredObjectMember {
             source_index,
             member_index,
         }
+    }
+
+    fn validate_sources(self, sources: &[PackSourceDescriptor]) -> Result<()> {
+        if sources
+            .get(usize::from(self.source_index))
+            .and_then(|source| source.members().get(usize::from(self.member_index)))
+            .is_none()
+        {
+            return Err(corrupt(
+                "layered visibility admission is outside its checkpoint source inventory",
+            ));
+        }
+        Ok(())
     }
 
     /// Return the zero-based source ordinal.
@@ -178,108 +201,14 @@ impl LayeredVisibilitySnapshot {
             .map(|index| index.recent_checkpoint_history())
     }
 
-    /// Encode the proof in its canonical bounded binary representation.
+    /// Encode the proof as canonical authenticated pages.
     pub fn encode(&self) -> Result<Bytes> {
-        self.validate()?;
-        let mut writer = BinaryWriter::default();
-        writer.bytes(LAYERED_VISIBILITY_MAGIC);
-        writer.u32(LAYERED_VISIBILITY_VERSION);
-        let digest = blake3::Hash::from_hex(&self.catalog_digest)
-            .map_err(|_| contract_error("layered visibility catalog digest is invalid"))?;
-        writer.bytes(digest.as_bytes());
-        writer.u64(
-            u64::try_from(self.objects.len())
-                .map_err(|_| contract_error("layered visibility object count overflows"))?,
-        );
-        for object in &self.objects {
-            writer.bytes(object);
-        }
-        match self.member_admission.as_ref() {
-            Some(admission) => {
-                writer.bytes(&[1]);
-                for member in admission {
-                    writer.u16(member.source_index);
-                    writer.u16(member.member_index);
-                }
-            }
-            None => writer.bytes(&[0]),
-        }
-        let object_count = self.objects.len();
-        encode_closure_map(&mut writer, &self.refs, object_count)?;
-        encode_transition_map(&mut writer, &self.transitions, object_count)?;
-        encode_transition_map(&mut writer, &self.incremental_history, object_count)?;
-        if writer.bytes.len() > MAX_LAYERED_VISIBILITY_BYTES {
-            return Err(contract_error(
-                "layered visibility snapshot exceeds its size bound",
-            ));
-        }
-        Ok(Bytes::from(writer.bytes))
+        visibility_pages::encode(self)
     }
 
-    /// Decode and validate one canonical compact proof.
+    /// Decode and validate the complete canonical page representation.
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() > MAX_LAYERED_VISIBILITY_BYTES {
-            return Err(corrupt(
-                "layered visibility snapshot exceeds its size bound",
-            ));
-        }
-        let mut reader = BinaryReader::new(bytes);
-        if reader.bytes(LAYERED_VISIBILITY_MAGIC.len())? != LAYERED_VISIBILITY_MAGIC {
-            return Err(corrupt("layered visibility snapshot magic is invalid"));
-        }
-        if reader.u32()? != LAYERED_VISIBILITY_VERSION {
-            return Err(corrupt(
-                "layered visibility snapshot version is unsupported",
-            ));
-        }
-        let digest = reader.bytes(32)?;
-        let catalog_digest = encode_hex(digest);
-        let object_count = reader.u64()?;
-        let object_count = usize::try_from(object_count)
-            .map_err(|_| corrupt("layered visibility object count cannot be represented"))?;
-        if object_count > crate::git_visibility::MAX_GIT_VISIBILITY_OBJECTS as usize {
-            return Err(corrupt("layered visibility object dictionary is too large"));
-        }
-        let mut objects = Vec::with_capacity(object_count);
-        for _ in 0..object_count {
-            let bytes = reader.bytes(20)?;
-            let object = bytes
-                .try_into()
-                .map_err(|_| corrupt("layered visibility object ID is truncated"))?;
-            objects.push(object);
-        }
-        let member_admission = match reader.bytes(1)?[0] {
-            0 => None,
-            1 => {
-                let mut admission = Vec::with_capacity(object_count);
-                for _ in 0..object_count {
-                    admission.push(LayeredObjectMember::new(reader.u16()?, reader.u16()?));
-                }
-                Some(admission)
-            }
-            _ => {
-                return Err(corrupt(
-                    "layered visibility member admission flag is invalid",
-                ));
-            }
-        };
-        let refs = decode_closure_map(&mut reader, object_count)?;
-        let transitions = decode_transition_map(&mut reader, object_count)?;
-        let incremental_history = decode_transition_map(&mut reader, object_count)?;
-        reader.finish()?;
-        let snapshot = Self {
-            catalog_digest,
-            objects,
-            member_admission,
-            refs,
-            transitions,
-            incremental_history,
-        };
-        snapshot.validate()?;
-        if snapshot.encode()?.as_ref() != bytes {
-            return Err(corrupt("layered visibility snapshot is not canonical"));
-        }
-        Ok(snapshot)
+        visibility_pages::decode(bytes)
     }
 
     /// Restore the materialized visibility index after checking its catalog binding.
@@ -389,296 +318,8 @@ fn remap_member_admission(
         .collect()
 }
 
-#[derive(Default)]
-struct BinaryWriter {
-    bytes: Vec<u8>,
-}
-
-impl BinaryWriter {
-    fn bytes(&mut self, bytes: &[u8]) {
-        self.bytes.extend_from_slice(bytes);
-    }
-
-    fn u32(&mut self, value: u32) {
-        self.bytes.extend_from_slice(&value.to_be_bytes());
-    }
-
-    fn u16(&mut self, value: u16) {
-        self.bytes.extend_from_slice(&value.to_be_bytes());
-    }
-
-    fn u64(&mut self, value: u64) {
-        self.bytes.extend_from_slice(&value.to_be_bytes());
-    }
-}
-
-struct BinaryReader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> BinaryReader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn bytes(&mut self, length: usize) -> Result<&'a [u8]> {
-        let end = self
-            .offset
-            .checked_add(length)
-            .ok_or_else(|| corrupt("layered visibility reader overflowed"))?;
-        let bytes = self
-            .bytes
-            .get(self.offset..end)
-            .ok_or_else(|| corrupt("layered visibility snapshot is truncated"))?;
-        self.offset = end;
-        Ok(bytes)
-    }
-
-    fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_be_bytes(self.bytes(4)?.try_into().map_err(
-            |_| corrupt("layered visibility integer is truncated"),
-        )?))
-    }
-
-    fn u16(&mut self) -> Result<u16> {
-        Ok(u16::from_be_bytes(self.bytes(2)?.try_into().map_err(
-            |_| corrupt("layered visibility integer is truncated"),
-        )?))
-    }
-
-    fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_be_bytes(self.bytes(8)?.try_into().map_err(
-            |_| corrupt("layered visibility integer is truncated"),
-        )?))
-    }
-
-    fn finish(&self) -> Result<()> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(corrupt("layered visibility snapshot has trailing bytes"))
-        }
-    }
-}
-
-fn encode_closure_map(
-    writer: &mut BinaryWriter,
-    closures: &BTreeMap<String, Vec<u32>>,
-    object_count: usize,
-) -> Result<()> {
-    writer.u32(
-        u32::try_from(closures.len())
-            .map_err(|_| contract_error("layered visibility ref count overflows"))?,
-    );
-    for (name, positions) in closures {
-        encode_name(writer, name)?;
-        encode_positions(writer, positions, object_count)?;
-    }
-    Ok(())
-}
-
-fn decode_closure_map(
-    reader: &mut BinaryReader<'_>,
-    object_count: usize,
-) -> Result<BTreeMap<String, Vec<u32>>> {
-    let count = usize::try_from(reader.u32()?)
-        .map_err(|_| corrupt("layered visibility ref count cannot be represented"))?;
-    if count > MAX_LAYERED_VISIBILITY_REFS {
-        return Err(corrupt("layered visibility ref count exceeds its bound"));
-    }
-    let mut closures = BTreeMap::new();
-    for _ in 0..count {
-        let name = decode_name(reader)?;
-        let positions = decode_positions(reader, object_count)?;
-        if closures.insert(name, positions).is_some() {
-            return Err(corrupt("layered visibility proof repeats a ref"));
-        }
-    }
-    Ok(closures)
-}
-
-fn encode_transition_map(
-    writer: &mut BinaryWriter,
-    transitions: &BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
-    object_count: usize,
-) -> Result<()> {
-    writer.u32(
-        u32::try_from(transitions.len())
-            .map_err(|_| contract_error("layered visibility transition ref count overflows"))?,
-    );
-    for (name, entries) in transitions {
-        encode_name(writer, name)?;
-        writer.u32(
-            u32::try_from(entries.len())
-                .map_err(|_| contract_error("layered visibility transition count overflows"))?,
-        );
-        for entry in entries {
-            writer.u32(entry.from_ordinal);
-            writer.u32(entry.to_ordinal);
-            encode_positions(writer, &entry.objects, object_count)?;
-        }
-    }
-    Ok(())
-}
-
-fn decode_transition_map(
-    reader: &mut BinaryReader<'_>,
-    object_count: usize,
-) -> Result<BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>> {
-    let ref_count = usize::try_from(reader.u32()?)
-        .map_err(|_| corrupt("layered visibility transition ref count cannot be represented"))?;
-    if ref_count > MAX_LAYERED_VISIBILITY_REFS {
-        return Err(corrupt(
-            "layered visibility transition ref count exceeds its bound",
-        ));
-    }
-    let mut output = BTreeMap::new();
-    for _ in 0..ref_count {
-        let name = decode_name(reader)?;
-        let count = usize::try_from(reader.u32()?)
-            .map_err(|_| corrupt("layered visibility transition count cannot be represented"))?;
-        if count > MAX_LAYERED_VISIBILITY_TRANSITIONS {
-            return Err(corrupt(
-                "layered visibility transition count exceeds its bound",
-            ));
-        }
-        let mut entries = Vec::with_capacity(count);
-        for _ in 0..count {
-            entries.push(GitVisibilityOrdinalTransition {
-                from_ordinal: reader.u32()?,
-                to_ordinal: reader.u32()?,
-                objects: decode_positions(reader, object_count)?,
-            });
-        }
-        if output.insert(name, entries).is_some() {
-            return Err(corrupt("layered visibility proof repeats transition refs"));
-        }
-    }
-    Ok(output)
-}
-
-fn encode_name(writer: &mut BinaryWriter, name: &str) -> Result<()> {
-    let bytes = name.as_bytes();
-    writer.u32(
-        u32::try_from(bytes.len())
-            .map_err(|_| contract_error("layered visibility ref name is too long"))?,
-    );
-    writer.bytes(bytes);
-    Ok(())
-}
-
-fn decode_name(reader: &mut BinaryReader<'_>) -> Result<String> {
-    let length = usize::try_from(reader.u32()?)
-        .map_err(|_| corrupt("layered visibility ref name length cannot be represented"))?;
-    if length == 0 || length > 4 * 1024 {
-        return Err(corrupt("layered visibility ref name length is invalid"));
-    }
-    let name = std::str::from_utf8(reader.bytes(length)?)
-        .map_err(|_| corrupt("layered visibility ref name is not UTF-8"))?;
-    validate_visibility_ref(name)?;
-    Ok(name.to_owned())
-}
-
-fn encode_positions(
-    writer: &mut BinaryWriter,
-    positions: &[u32],
-    object_count: usize,
-) -> Result<()> {
-    validate_positions_for_encoding(positions)?;
-    if positions.iter().any(|position| {
-        usize::try_from(*position)
-            .ok()
-            .is_none_or(|position| position >= object_count)
-    }) {
-        return Err(contract_error(
-            "layered visibility position is outside its dictionary",
-        ));
-    }
-    let bitmap_len = object_count.div_ceil(8);
-    let sparse_bytes = positions
-        .len()
-        .checked_mul(4)
-        .ok_or_else(|| contract_error("layered visibility closure size overflows"))?;
-    if bitmap_len == 0 || sparse_bytes <= bitmap_len {
-        writer.bytes(&[0]);
-        writer.u32(
-            u32::try_from(positions.len())
-                .map_err(|_| contract_error("layered visibility closure count overflows"))?,
-        );
-        for position in positions {
-            writer.u32(*position);
-        }
-    } else {
-        let mut bitmap = vec![0_u8; bitmap_len];
-        for position in positions {
-            let position = usize::try_from(*position)
-                .map_err(|_| contract_error("layered visibility position overflows"))?;
-            bitmap[position / 8] |= 1 << (position % 8);
-        }
-        writer.bytes(&[1]);
-        writer.u32(
-            u32::try_from(bitmap.len())
-                .map_err(|_| contract_error("layered visibility bitmap length overflows"))?,
-        );
-        writer.bytes(&bitmap);
-    }
-    Ok(())
-}
-
-fn decode_positions(reader: &mut BinaryReader<'_>, object_count: usize) -> Result<Vec<u32>> {
-    let kind = reader.bytes(1)?[0];
-    let count = usize::try_from(reader.u32()?)
-        .map_err(|_| corrupt("layered visibility closure count cannot be represented"))?;
-    let positions = match kind {
-        0 => {
-            if count > object_count {
-                return Err(corrupt("layered visibility sparse closure is too large"));
-            }
-            let mut positions = Vec::with_capacity(count);
-            for _ in 0..count {
-                positions.push(reader.u32()?);
-            }
-            positions
-        }
-        1 => {
-            if count != object_count.div_ceil(8) {
-                return Err(corrupt(
-                    "layered visibility bitmap length does not match its dictionary",
-                ));
-            }
-            let bitmap = reader.bytes(count)?;
-            if let Some(last) = bitmap.last()
-                && !object_count.is_multiple_of(8)
-                && last >> (object_count % 8) != 0
-            {
-                return Err(corrupt(
-                    "layered visibility bitmap sets an out-of-range position",
-                ));
-            }
-            let mut positions = Vec::new();
-            for (byte_index, byte) in bitmap.iter().enumerate() {
-                for bit_index in 0..8 {
-                    if byte & (1 << bit_index) != 0
-                        && let Some(position) = byte_index
-                            .checked_mul(8)
-                            .and_then(|value| value.checked_add(bit_index))
-                            .and_then(|value| u32::try_from(value).ok())
-                    {
-                        positions.push(position);
-                    }
-                }
-            }
-            positions
-        }
-        _ => return Err(corrupt("layered visibility closure encoding is invalid")),
-    };
-    validate_positions(&positions, object_count)?;
-    Ok(positions)
-}
-
 fn validate_positions(positions: &[u32], object_count: usize) -> Result<()> {
-    validate_positions_for_encoding(positions)?;
+    validate_position_order(positions)?;
     if positions.iter().any(|position| {
         usize::try_from(*position)
             .ok()
@@ -691,7 +332,7 @@ fn validate_positions(positions: &[u32], object_count: usize) -> Result<()> {
     Ok(())
 }
 
-fn validate_positions_for_encoding(positions: &[u32]) -> Result<()> {
+fn validate_position_order(positions: &[u32]) -> Result<()> {
     if positions.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(corrupt(
             "layered visibility positions must be sorted and deduplicated",
@@ -749,16 +390,6 @@ fn validate_visibility_ref(name: &str) -> Result<()> {
         return Err(corrupt("layered visibility proof contains an invalid ref"));
     }
     Ok(())
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    output
 }
 
 /// The immutable object containing one bounded pack inventory.
@@ -1309,6 +940,8 @@ struct CheckpointFooter {
     cold_clone_object_count: Option<u64>,
     #[serde(default)]
     visibility_transitions: BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>,
+    visibility_pages: Option<visibility_pages::Descriptor>,
+    catalog: Option<CheckpointCatalog>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1321,7 +954,7 @@ struct LayerSectionLocation {
 }
 
 /// Metadata-only authenticated v2 checkpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct LayeredCheckpoint {
     bytes: Bytes,
     hash: String,
@@ -1330,46 +963,75 @@ pub struct LayeredCheckpoint {
     object_size: u64,
     control_offset: u64,
     control_only: bool,
+    catalog_objects: BTreeMap<[u8; 32], Bytes>,
 }
 
-impl LayeredCheckpoint {
-    /// Build a metadata-only checkpoint from immutable pack sources.
-    pub fn build(
-        covered_generation: u64,
-        covered_root_digest: &str,
-        sources: Vec<PackSourceDescriptor>,
-        pointer_catalog: PointerCatalog,
-        visibility: Option<crate::capsule_protocol::CapsuleVisibilitySnapshot>,
-    ) -> Result<Self> {
-        let visibility_transitions = visibility
-            .as_ref()
-            .map(crate::capsule_protocol::CapsuleVisibilitySnapshot::recent_transitions)
-            .transpose()?
-            .unwrap_or_default();
-        let visibility = match visibility {
-            Some(value) => Some((CapsuleSectionKind::VisibilitySnapshot, value.encode()?)),
-            None => None,
-        };
-        Self::build_inner(
-            covered_generation,
-            covered_root_digest,
-            sources,
-            pointer_catalog,
-            visibility,
-            None,
-            None,
-            visibility_transitions,
-        )
+impl PartialEq for LayeredCheckpoint {
+    fn eq(&self, other: &Self) -> bool {
+        // Pending catalog objects are runtime state. The footer already
+        // commits to their exact identity, independently of cache residency.
+        self.bytes == other.bytes
+            && self.hash == other.hash
+            && self.footer_hash == other.footer_hash
+            && self.footer == other.footer
+            && self.object_size == other.object_size
+            && self.control_offset == other.control_offset
+            && self.control_only == other.control_only
     }
+}
 
+impl Eq for LayeredCheckpoint {}
+
+impl LayeredCheckpoint {
     /// Build a metadata-only checkpoint with the compact ordinal proof.
-    pub fn build_with_ordinal_visibility(
+    pub fn build(
         covered_generation: u64,
         covered_root_digest: &str,
         sources: Vec<PackSourceDescriptor>,
         pointer_catalog: PointerCatalog,
         visibility: Option<LayeredVisibilitySnapshot>,
     ) -> Result<Self> {
+        Self::build_with_catalog(
+            covered_generation,
+            covered_root_digest,
+            sources,
+            CatalogInput::New(pointer_catalog),
+            visibility,
+        )
+    }
+
+    /// Build a checkpoint around an already durable immutable catalog root.
+    ///
+    /// The caller verifies newly folded pages or retains a captured root, and
+    /// holds their GC fence until the replacement checkpoint becomes visible.
+    pub fn build_with_catalog_root(
+        covered_generation: u64,
+        covered_root_digest: &str,
+        sources: Vec<PackSourceDescriptor>,
+        catalog: Option<CheckpointCatalog>,
+        visibility: Option<LayeredVisibilitySnapshot>,
+    ) -> Result<Self> {
+        Self::build_with_catalog(
+            covered_generation,
+            covered_root_digest,
+            sources,
+            CatalogInput::Durable(catalog.map(Box::new)),
+            visibility,
+        )
+    }
+
+    fn build_with_catalog(
+        covered_generation: u64,
+        covered_root_digest: &str,
+        sources: Vec<PackSourceDescriptor>,
+        catalog: CatalogInput,
+        visibility: Option<LayeredVisibilitySnapshot>,
+    ) -> Result<Self> {
+        if let Some(snapshot) = &visibility {
+            for member in snapshot.member_admission().unwrap_or_default() {
+                member.validate_sources(&sources)?;
+            }
+        }
         let visibility_transitions = visibility
             .as_ref()
             .map(LayeredVisibilitySnapshot::recent_transitions)
@@ -1396,7 +1058,7 @@ impl LayeredCheckpoint {
             covered_generation,
             covered_root_digest,
             sources,
-            pointer_catalog,
+            catalog,
             visibility,
             cold_clone_object_set_digest,
             cold_clone_object_count,
@@ -1408,7 +1070,7 @@ impl LayeredCheckpoint {
         covered_generation: u64,
         covered_root_digest: &str,
         sources: Vec<PackSourceDescriptor>,
-        pointer_catalog: PointerCatalog,
+        catalog: CatalogInput,
         visibility: Option<(CapsuleSectionKind, Bytes)>,
         cold_clone_object_set_digest: Option<String>,
         cold_clone_object_count: Option<u64>,
@@ -1426,17 +1088,22 @@ impl LayeredCheckpoint {
         }
         let mut body = Vec::new();
         let mut sections = Vec::new();
-        if !pointer_catalog.is_empty() {
-            append_section(
-                &mut body,
-                &mut sections,
-                CapsuleSectionKind::CatalogDelta,
-                pointer_catalog.encode()?,
-            )?;
-        }
+        let PreparedCatalog {
+            source: catalog,
+            objects: catalog_objects,
+        } = catalog.prepare()?;
         if let Some((kind, visibility)) = visibility {
             append_section(&mut body, &mut sections, kind, visibility)?;
         }
+        let visibility_pages = sections
+            .iter()
+            .find(|section| section.kind == CapsuleSectionKind::VisibilityOrdinalSnapshot)
+            .map(|section| {
+                visibility_pages::Descriptor::decode(
+                    &body[section.offset as usize..(section.offset + section.length) as usize],
+                )
+            })
+            .transpose()?;
         let control_offset = 0_u64;
         let footer = CheckpointFooter {
             version: CHECKPOINT_VERSION,
@@ -1448,6 +1115,8 @@ impl LayeredCheckpoint {
             cold_clone_object_set_digest,
             cold_clone_object_count,
             visibility_transitions,
+            visibility_pages,
+            catalog,
         };
         validate_source_inventory(&footer.sources)?;
         for source in &footer.sources {
@@ -1467,11 +1136,16 @@ impl LayeredCheckpoint {
         body.extend_from_slice(&(footer_bytes.len() as u64).to_be_bytes());
         body.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());
         body.extend_from_slice(CHECKPOINT_MAGIC);
-        Self::decode(Bytes::from(body))
+        let mut checkpoint = Self::decode(Bytes::from(body))?;
+        checkpoint.catalog_objects = catalog_objects;
+        Ok(checkpoint)
     }
 
     /// Decode and authenticate one layered checkpoint object.
     pub fn decode(bytes: Bytes) -> Result<Self> {
+        if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
+            return Err(corrupt("layered checkpoint exceeds its encoded size bound"));
+        }
         let (footer, footer_start, footer_hash) = decode_checkpoint_footer(&bytes)?;
         validate_checkpoint_footer(&footer, footer_start as u64, bytes.len() as u64)?;
         let hash = blake3::hash(&bytes).to_hex().to_string();
@@ -1487,6 +1161,7 @@ impl LayeredCheckpoint {
             object_size,
             control_offset,
             control_only: false,
+            catalog_objects: BTreeMap::new(),
         })
     }
 
@@ -1502,8 +1177,11 @@ impl LayeredCheckpoint {
         expected_hash: &str,
         expected_footer_hash: &str,
     ) -> Result<Self> {
-        if bytes.is_empty() {
-            return Err(corrupt("layered checkpoint control range is empty"));
+        if object_size > MAX_CHECKPOINT_BYTES
+            || bytes.is_empty()
+            || bytes.len() > MAX_CHECKPOINT_FOOTER_BYTES + TRAILER_BYTES
+        {
+            return Err(corrupt("layered checkpoint control range is out of bounds"));
         }
         validate_content_hash(
             expected_hash,
@@ -1547,7 +1225,49 @@ impl LayeredCheckpoint {
             object_size,
             control_offset: footer_start,
             control_only: true,
+            catalog_objects: BTreeMap::new(),
         })
+    }
+
+    /// Capture lazy visibility roots authenticated by this checkpoint footer.
+    #[cfg(feature = "storage")]
+    pub fn visibility_reader(
+        &self,
+        layout: &crab_storage::StoreLayout<crab_storage::Store>,
+        maximum: u64,
+    ) -> Result<Option<LayeredVisibilityReader>> {
+        let Some(descriptor) = &self.footer.visibility_pages else {
+            return Ok(None);
+        };
+        let section = self
+            .footer
+            .sections
+            .iter()
+            .find(|section| section.kind == CapsuleSectionKind::VisibilityOrdinalSnapshot)
+            .ok_or_else(|| corrupt("checkpoint visibility pages have no section"))?;
+        let range = PackRange::from_parts(section.offset, section.length, section.blake3.clone())?;
+        LayeredVisibilityReader::new(
+            layout,
+            &self.hash,
+            range,
+            descriptor.clone(),
+            self.footer.sources.clone(),
+            maximum,
+        )
+        .map(Some)
+    }
+
+    /// Capture catalog page roots without reading the checkpoint catalog body.
+    #[cfg(feature = "storage")]
+    pub fn pointer_catalog_lookup(
+        &self,
+        layout: &crab_storage::StoreLayout<crab_storage::Store>,
+        maximum: u64,
+    ) -> Result<super::PointerCatalogLookup> {
+        self.footer.catalog.as_ref().map_or_else(
+            || Ok(super::PointerCatalogLookup::empty(maximum)),
+            |catalog| catalog.lookup(layout, maximum),
+        )
     }
 
     /// Return the complete checkpoint bytes.
@@ -1576,7 +1296,7 @@ impl LayeredCheckpoint {
 
     /// Verify every identity field of the root's authenticated checkpoint pointer.
     pub fn matches_pointer(&self, pointer: &super::CheckpointPointer) -> Result<bool> {
-        Ok(pointer.format() == 5
+        Ok(pointer.format() == CHECKPOINT_VERSION
             && self.hash() == pointer.hash()
             && self.object_size == pointer.size()
             && self.control_offset() == pointer.control_offset()
@@ -1666,30 +1386,23 @@ impl LayeredCheckpoint {
         &self.footer.visibility_transitions
     }
 
-    /// Decode the complete pointer catalog compacted by this checkpoint.
-    pub fn pointer_catalog(&self) -> Result<PointerCatalog> {
-        let Some(section) = self.section(CapsuleSectionKind::CatalogDelta)? else {
-            return Ok(PointerCatalog::new());
-        };
-        PointerCatalog::decode(&section)
-    }
-
-    /// Decode the complete visibility snapshot compacted by this checkpoint.
-    pub fn visibility_snapshot(
-        &self,
-    ) -> Result<Option<crate::capsule_protocol::CapsuleVisibilitySnapshot>> {
-        let Some(section) = self.section(CapsuleSectionKind::VisibilitySnapshot)? else {
-            return Ok(None);
-        };
-        crate::capsule_protocol::CapsuleVisibilitySnapshot::decode(&section).map(Some)
-    }
-
-    /// Decode the compact ordinal visibility proof, when present.
+    /// Decode the compact ordinal proof and validate its checkpoint source bindings.
     pub fn visibility_ordinal_snapshot(&self) -> Result<Option<LayeredVisibilitySnapshot>> {
         let Some(section) = self.section(CapsuleSectionKind::VisibilityOrdinalSnapshot)? else {
             return Ok(None);
         };
-        LayeredVisibilitySnapshot::decode(&section).map(Some)
+        if Some(&visibility_pages::Descriptor::decode(&section)?)
+            != self.footer.visibility_pages.as_ref()
+        {
+            return Err(corrupt(
+                "checkpoint body roots differ from its authenticated footer",
+            ));
+        }
+        let snapshot = LayeredVisibilitySnapshot::decode(&section)?;
+        for member in snapshot.member_admission().unwrap_or_default() {
+            member.validate_sources(self.sources())?;
+        }
+        Ok(Some(snapshot))
     }
 
     /// Decode visibility bound to this source inventory and the caller's Git identity.
@@ -1709,9 +1422,7 @@ impl LayeredCheckpoint {
                 )
                 .map(Some);
         }
-        self.visibility_snapshot()?
-            .map(|snapshot| snapshot.to_index(generation, pack_index_hash, git_validation_digest))
-            .transpose()
+        Ok(None)
     }
 
     fn section(&self, kind: CapsuleSectionKind) -> Result<Option<Bytes>> {
@@ -1889,8 +1600,37 @@ fn validate_checkpoint_footer(
             "layered checkpoint cold-clone proof has an incomplete object-set commitment",
         ));
     }
+    let sections = footer
+        .sections
+        .iter()
+        .filter(|section| section.kind == CapsuleSectionKind::VisibilityOrdinalSnapshot)
+        .collect::<Vec<_>>();
+    match (&footer.visibility_pages, sections.as_slice()) {
+        (Some(descriptor), [section]) => {
+            descriptor.validate(section.length)?;
+            if descriptor.catalog_digest != source_catalog_digest(&footer.sources)?
+                || footer.cold_clone_object_count != Some(u64::from(descriptor.object_count))
+            {
+                return Err(corrupt(
+                    "checkpoint visibility roots differ from their captured inventory",
+                ));
+            }
+        }
+        (None, []) => {}
+        _ => {
+            return Err(corrupt(
+                "checkpoint visibility section and footer roots differ",
+            ));
+        }
+    }
+    if let Some(catalog) = &footer.catalog {
+        catalog.validate()?;
+    }
     let mut expected_offset = 0_u64;
     for section in &footer.sections {
+        if !matches!(section.kind, CapsuleSectionKind::VisibilityOrdinalSnapshot) {
+            return Err(corrupt("checkpoint section kind is retired or unsupported"));
+        }
         validate_content_hash(
             &section.blake3,
             "layered checkpoint section hash",
@@ -2040,42 +1780,80 @@ mod tests {
     }
 
     #[test]
-    fn layered_visibility_encodings_preserve_ref_membership() {
+    fn checkpoint_control_rejects_invalid_catalog_roots() {
         let source = PackLayer::build(&pack())
             .unwrap()
             .source_descriptor()
             .unwrap();
-        let refs = BTreeMap::from([("refs/tags/blob".to_owned(), vec!["a".repeat(40)])]);
-        let index = GitVisibilityIndex::new(0, "1".repeat(64), "2".repeat(64), refs).unwrap();
-        let catalog_digest = source_catalog_digest(std::slice::from_ref(&source)).unwrap();
-        let ordinal = LayeredVisibilitySnapshot::from_index(&index, &catalog_digest).unwrap();
-        let full = crate::capsule_protocol::CapsuleVisibilitySnapshot::from_index(&index).unwrap();
-        for checkpoint in [
-            LayeredCheckpoint::build_with_ordinal_visibility(
-                0,
-                &"3".repeat(64),
-                vec![source.clone()],
-                PointerCatalog::new(),
-                Some(ordinal),
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_shard(
+                "a".repeat(64),
+                crate::capsule_protocol::ShardCatalogEntry::new(10, Vec::new()),
             )
-            .unwrap(),
-            LayeredCheckpoint::build(
-                0,
-                &"3".repeat(64),
-                vec![source],
-                PointerCatalog::new(),
-                Some(full),
+            .unwrap();
+        catalog
+            .insert_file(
+                "b".repeat(64),
+                crate::capsule_protocol::FileCatalogEntry::new(0, "a".repeat(64)),
             )
-            .unwrap(),
-        ] {
-            let decoded = checkpoint
-                .visibility_index(1, &"4".repeat(64), &"5".repeat(64))
-                .unwrap()
-                .unwrap();
-            assert_eq!(decoded.ref_count(), 1);
-            assert!(decoded.contains_hex_in_ref("refs/tags/blob", &"a".repeat(40)));
-            assert!(!decoded.contains_hex_in_ref("refs/tags/blob", &"b".repeat(40)));
+            .unwrap();
+        let checkpoint =
+            LayeredCheckpoint::build(0, &"3".repeat(64), vec![source], catalog, None).unwrap();
+        for field in ["hash", "bytes", "page_bytes"] {
+            let mut footer = serde_json::to_value(&checkpoint.footer).unwrap();
+            match field {
+                "hash" => footer["catalog"]["hash"] = serde_json::json!("invalid"),
+                "bytes" => footer["catalog"]["bytes"] = serde_json::json!(0),
+                _ => footer["catalog"]["pages"]["files"]["bytes"] = serde_json::json!(0),
+            }
+            let footer = serde_json::from_value(footer).unwrap();
+            assert!(
+                validate_checkpoint_footer(
+                    &footer,
+                    checkpoint.control_offset(),
+                    checkpoint.bytes.len() as u64,
+                )
+                .is_err(),
+                "accepted invalid {field}"
+            );
         }
+    }
+
+    #[test]
+    fn checkpoint_pages_preserve_ref_membership() {
+        let source = PackLayer::build(&pack())
+            .unwrap()
+            .source_descriptor()
+            .unwrap();
+        let index = GitVisibilityIndex::new(
+            0,
+            "1".repeat(64),
+            "2".repeat(64),
+            BTreeMap::from([("refs/tags/blob".to_owned(), vec!["a".repeat(40)])]),
+        )
+        .unwrap();
+        let digest = source_catalog_digest(std::slice::from_ref(&source)).unwrap();
+        let visibility = LayeredVisibilitySnapshot::from_index(&index, &digest).unwrap();
+        let checkpoint = LayeredCheckpoint::build(
+            0,
+            &"3".repeat(64),
+            vec![source],
+            PointerCatalog::new(),
+            Some(visibility),
+        )
+        .unwrap();
+        let decoded = checkpoint
+            .visibility_index(1, &"4".repeat(64), &"5".repeat(64))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            [
+                decoded.contains_hex_in_ref("refs/tags/blob", &"a".repeat(40)),
+                decoded.contains_hex_in_ref("refs/tags/blob", &"b".repeat(40))
+            ],
+            [true, false]
+        );
     }
 
     #[test]
@@ -2092,18 +1870,15 @@ mod tests {
         )
         .unwrap();
         let visibility = LayeredVisibilitySnapshot::from_index(&index, &"f".repeat(64)).unwrap();
-        let checkpoint = LayeredCheckpoint::build_with_ordinal_visibility(
-            0,
-            &"3".repeat(64),
-            vec![source],
-            PointerCatalog::new(),
-            Some(visibility),
-        )
-        .unwrap();
         assert!(
-            checkpoint
-                .visibility_index(1, &"4".repeat(64), &"5".repeat(64))
-                .is_err()
+            LayeredCheckpoint::build(
+                0,
+                &"3".repeat(64),
+                vec![source],
+                PointerCatalog::new(),
+                Some(visibility)
+            )
+            .is_err()
         );
     }
 
@@ -2308,6 +2083,40 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_visibility_rejects_admission_outside_its_own_sources() {
+        let layer = PackLayer::build(&pack()).unwrap();
+        let source = layer.source_descriptor().unwrap();
+        let digest = source_catalog_digest(std::slice::from_ref(&source)).unwrap();
+        let index = GitVisibilityIndex::new(
+            1,
+            "1".repeat(64),
+            "2".repeat(64),
+            BTreeMap::from([("refs/heads/main".to_owned(), vec!["a".repeat(40)])]),
+        )
+        .unwrap();
+        for (member, valid) in [
+            (LayeredObjectMember::new(0, 0), true),
+            (LayeredObjectMember::new(1, 0), false),
+            (LayeredObjectMember::new(0, 1), false),
+        ] {
+            let snapshot = LayeredVisibilitySnapshot::from_index_with_member_admission(
+                &index,
+                &digest,
+                vec![member],
+            )
+            .unwrap();
+            let checkpoint = LayeredCheckpoint::build(
+                1,
+                &"3".repeat(64),
+                vec![source.clone()],
+                PointerCatalog::new(),
+                Some(snapshot),
+            );
+            assert_eq!(checkpoint.is_ok(), valid);
+        }
+    }
+
+    #[test]
     fn ordinal_visibility_member_admission_round_trips() {
         let refs = BTreeMap::from([(
             "refs/heads/main".to_owned(),
@@ -2344,7 +2153,7 @@ mod tests {
         )
         .unwrap();
         let expected_digest = snapshot.object_set_digest();
-        let checkpoint = LayeredCheckpoint::build_with_ordinal_visibility(
+        let checkpoint = LayeredCheckpoint::build(
             1,
             &"4".repeat(64),
             vec![source],
@@ -2400,7 +2209,7 @@ mod tests {
         let source = layer.source_descriptor().unwrap();
         let catalog_digest = source_catalog_digest(std::slice::from_ref(&source)).unwrap();
         let snapshot = LayeredVisibilitySnapshot::from_index(&index, &catalog_digest).unwrap();
-        let checkpoint = LayeredCheckpoint::build_with_ordinal_visibility(
+        let checkpoint = LayeredCheckpoint::build(
             1,
             &"3".repeat(64),
             vec![source],
@@ -2474,26 +2283,5 @@ mod tests {
             Some([second, first, third].as_slice())
         );
         LayeredVisibilitySnapshot::decode(&snapshot.encode().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn ordinal_visibility_is_smaller_than_hex_snapshot_for_shared_history() {
-        let mut refs = BTreeMap::new();
-        refs.insert(
-            "refs/heads/main".to_owned(),
-            (0..128)
-                .map(|value| format!("{value:040x}"))
-                .collect::<Vec<_>>(),
-        );
-        let index = GitVisibilityIndex::new(1, "1".repeat(64), "2".repeat(64), refs).unwrap();
-        let full = crate::capsule_protocol::CapsuleVisibilitySnapshot::from_index(&index)
-            .unwrap()
-            .encode()
-            .unwrap();
-        let compact = LayeredVisibilitySnapshot::from_index(&index, &"3".repeat(64))
-            .unwrap()
-            .encode()
-            .unwrap();
-        assert!(compact.len() < full.len());
     }
 }

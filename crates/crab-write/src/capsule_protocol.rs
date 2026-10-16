@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use crab_metadata::capsule_protocol::{
-    Capsule, CapsulePointer, CapsuleRun, CapsuleTransaction, CheckpointPointer, HistorySegment,
-    HistorySegmentState, LayeredCheckpoint, RepositoryRoot, RootRecord, create_root, load_root,
+    Capsule, CapsulePointer, CapsuleRun, CapsuleTransaction, HistorySegment, HistorySegmentState,
+    LayeredCheckpoint, RepositoryRoot, RootRecord, create_root, load_root,
 };
 use crab_storage::{ETag, StorageError, Store, StoreLayout};
 use futures_util::future::try_join_all;
@@ -283,7 +283,14 @@ pub async fn prepare_publication_with_ref_head_bases(
     let run = capsule_leaf_run(capsule)?;
     let prepared = try_join_all(transaction.edits().iter().zip(snapshots).map(
         |(edit, snapshot)| {
-            prepare_ref_successor(router, snapshot, edit, &transaction_id, run.clone())
+            prepare_ref_successor(
+                router,
+                snapshot,
+                edit,
+                &transaction_id,
+                run.clone(),
+                base.record().root().generation(),
+            )
         },
     ))
     .await?;
@@ -316,7 +323,11 @@ pub async fn prepare_publication_with_ref_head_bases(
     })
 }
 
-async fn publish_prepared(
+/// Make a prepared capsule visible and resolve any uncertain commit outcome.
+///
+/// Callers retain ref/GC leases and check cancellation before entering. Await
+/// completion without dropping this future, including after lease renewal loss.
+pub async fn publish_prepared(
     router: &StoreLayout<Store>,
     prepared: PreparedCapsulePublication,
 ) -> Result<RootSnapshot> {
@@ -560,6 +571,7 @@ pub async fn materialize_coordinated_repair(
                 edit,
                 &descriptor.transaction_id,
                 run.clone(),
+                base.record().root().generation(),
             )
         },
     ))
@@ -1093,6 +1105,7 @@ async fn prepare_ref_successor(
     edit: &crab_metadata::capsule_protocol::CapsuleRefEdit,
     transaction_id: &str,
     leaf: CapsuleRun,
+    generation: u64,
 ) -> Result<(PreparedRefHead, Option<CapsuleRun>)> {
     let mut frontier = snapshot.visible.frontier().to_vec();
     frontier.push(CapsulePointer::new(
@@ -1106,6 +1119,28 @@ async fn prepare_ref_successor(
         leaf.newest_base_root_digest(),
     )?);
     let compacted = compact_ref_frontier(router, &mut frontier, &leaf).await?;
+    if compacted.is_some() {
+        let remaining = frontier
+            .iter()
+            .map(CapsulePointer::hash)
+            .collect::<std::collections::BTreeSet<_>>();
+        let retired = snapshot
+            .visible
+            .frontier()
+            .iter()
+            .filter(|pointer| !remaining.contains(pointer.hash()))
+            .cloned()
+            .collect::<Vec<_>>();
+        // Captured catalog/visibility readers still address the old immutable
+        // bodies. Publish their lifetime before any replacement ref CAS can hide them.
+        crab_metadata::capsule_protocol::retain_capsule_sources(
+            router,
+            edit.ref_name(),
+            generation,
+            &retired,
+        )
+        .await?;
+    }
     let state = snapshot.visible.successor(
         edit.new_oid().map(str::to_owned),
         edit.peeled_oid().map(str::to_owned),
@@ -1558,20 +1593,6 @@ struct CheckpointRefState {
     capsule_runs: Vec<CapsulePointer>,
 }
 
-fn checkpoint_pointer(checkpoint: &LayeredCheckpoint) -> Result<CheckpointPointer> {
-    Ok(CheckpointPointer::new_layered(
-        checkpoint.hash(),
-        checkpoint.bytes().len() as u64,
-        checkpoint.control_offset(),
-        checkpoint.control_size(),
-        checkpoint.footer_hash(),
-        checkpoint.covered_generation(),
-        checkpoint.covered_root_digest(),
-        checkpoint.pack_count()?,
-        checkpoint.object_count()?,
-    )?)
-}
-
 async fn publish_checkpoint_inner(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
@@ -1592,7 +1613,7 @@ async fn publish_checkpoint_inner(
             reason: "checkpoint does not cover the exact CAS base".to_owned(),
         });
     }
-    let pointer = checkpoint_pointer(checkpoint)?;
+    let pointer = checkpoint.pointer()?;
     if let Some(state) = &ref_state {
         let retained_transactions = state
             .capsule_runs
@@ -1648,6 +1669,9 @@ async fn publish_checkpoint_inner(
         })
         .transpose()?;
     let path = router.capsule_checkpoint_path(checkpoint.hash());
+    // The checkpoint advertises immutable catalog roots. Their bytes must be
+    // verified and durable before either checkpoint or history can expose them.
+    checkpoint.publish_catalog(router).await?;
     if let Some(history) = &history {
         let history_path = router.capsule_history_segment_path(history.hash());
         tokio::try_join!(
@@ -1807,7 +1831,8 @@ pub async fn restore_checkpoint(
             reason: "restore checkpoint visibility does not authenticate its ref tips".to_owned(),
         });
     }
-    let pointer = checkpoint_pointer(checkpoint)?;
+    let pointer = checkpoint.pointer()?;
+    checkpoint.publish_catalog(router).await?;
     router
         .store()
         .put_if_absent_verified(
@@ -2748,6 +2773,7 @@ mod tests {
             &transaction.edits()[0],
             &transaction_id,
             leaf,
+            base.record().root().generation(),
         )
         .await
         .unwrap();
@@ -2872,8 +2898,26 @@ mod tests {
                 .iter()
                 .filter(|operation| **operation == StorageOperation::Put)
                 .count(),
-            3
+            // Source lifetime adds one immutable segment and its per-ref CAS
+            // before the ref can stop exposing the original bodies to GC.
+            5
         );
+
+        let source_heads = router
+            .store()
+            .list_prefix(&router.capsule_source_heads_prefix())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|object| object.location)
+            .collect::<Vec<_>>();
+        let retained =
+            crab_metadata::capsule_protocol::load_retained_capsule_sources(&router, &source_heads)
+                .await
+                .unwrap();
+        let mut expected_sources = prior_frontier.clone();
+        expected_sources.sort_by(|left, right| left.hash().cmp(right.hash()));
+        assert_eq!(retained.runs(), expected_sources);
 
         let head = read_ref_head(&router, published.record().root(), "refs/heads/main")
             .await
@@ -3092,6 +3136,7 @@ mod tests {
         let stored = crab_metadata::capsule_protocol::load_layered_checkpoint(
             &router,
             checkpointed.record().root().checkpoint().unwrap(),
+            u64::MAX,
         )
         .await
         .unwrap();
@@ -3190,10 +3235,6 @@ mod tests {
             )]),
         )
         .unwrap();
-        let visibility = crab_metadata::capsule_protocol::CapsuleVisibilitySnapshot::from_index(
-            &visibility_index,
-        )
-        .unwrap();
         let pack = CapsuleGitPack::new(
             Bytes::from_static(b"RESTORED PACK"),
             Bytes::from_static(b"restored index"),
@@ -3207,6 +3248,12 @@ mod tests {
             .unwrap()
             .source_descriptor()
             .unwrap();
+        let visibility = crab_metadata::capsule_protocol::LayeredVisibilitySnapshot::from_index(
+            &visibility_index,
+            &crab_metadata::capsule_protocol::source_catalog_digest(std::slice::from_ref(&source))
+                .unwrap(),
+        )
+        .unwrap();
         let mut restored_catalog = crab_metadata::capsule_protocol::PointerCatalog::new();
         restored_catalog
             .insert_xorb(
@@ -3251,7 +3298,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(restored.record().root().checkpoint().unwrap().format(), 5);
+        assert_eq!(restored.record().root().checkpoint().unwrap().format(), 9);
         assert_eq!(
             restored.record().root().generation(),
             fenced.record().root().generation() + 1
@@ -3352,6 +3399,7 @@ mod tests {
         let stored = crab_metadata::capsule_protocol::load_layered_checkpoint(
             &router,
             segments[0].checkpoint(),
+            u64::MAX,
         )
         .await
         .unwrap();
@@ -3416,6 +3464,7 @@ mod tests {
         let stored = crab_metadata::capsule_protocol::load_layered_checkpoint(
             &router,
             segments[0].checkpoint(),
+            u64::MAX,
         )
         .await
         .unwrap();
@@ -3546,6 +3595,147 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(visible.visible.oid(), Some("3".repeat(40).as_str()));
+    }
+
+    #[tokio::test]
+    async fn catalog_write_failure_cannot_publish_checkpoint_or_restore() {
+        use crab_metadata::capsule_protocol::{
+            FileCatalogEntry, GcFence, LayeredVisibilitySnapshot, PointerCatalog,
+            ShardCatalogEntry, source_catalog_digest,
+        };
+        for restore in [false, true] {
+            let inner = Arc::new(InMemory::new());
+            let seed = StoreLayout::new(
+                Store::new(inner.clone()),
+                "repositories/catalog-barrier".to_owned(),
+            );
+            let mut base = initialize(&seed, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+            let transaction = transaction(&base, None, &"2".repeat(40));
+            let run = CapsuleRun::leaf(capsule(&transaction)).unwrap();
+            let source =
+                crab_metadata::capsule_protocol::PackSourceDescriptor::from_capsule_run(&run)
+                    .unwrap();
+            seed.store()
+                .put_if_absent_verified(&seed.capsule_path(run.hash()), run.bytes().clone())
+                .await
+                .unwrap();
+            // Generation zero forbids checkpoint state. Establish a valid
+            // generation before testing replacement and restore barriers.
+            let initial = LayeredCheckpoint::build(
+                0,
+                base.record().digest(),
+                vec![source.clone()],
+                PointerCatalog::new(),
+                None,
+            )
+            .unwrap();
+            base = publish_ref_layered_checkpoint(
+                &seed,
+                base,
+                &initial,
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+            if restore {
+                base = begin_gc(&seed, base, GcFence::new("e".repeat(64), u64::MAX).unwrap())
+                    .await
+                    .unwrap();
+            }
+            let visibility = crab_metadata::git_visibility::GitVisibilityIndex::new(
+                0,
+                "a".repeat(64),
+                "b".repeat(64),
+                Default::default(),
+            )
+            .unwrap();
+            let visibility = LayeredVisibilitySnapshot::from_index(
+                &visibility,
+                &source_catalog_digest(std::slice::from_ref(&source)).unwrap(),
+            )
+            .unwrap();
+            let mut catalog = PointerCatalog::new();
+            catalog
+                .insert_shard("a".repeat(64), ShardCatalogEntry::new(1, Vec::new()))
+                .unwrap();
+            catalog
+                .insert_file("b".repeat(64), FileCatalogEntry::new(1, "a".repeat(64)))
+                .unwrap();
+            let checkpoint = LayeredCheckpoint::build(
+                base.record().root().generation(),
+                base.record().digest(),
+                vec![source],
+                catalog.clone(),
+                Some(visibility),
+            )
+            .unwrap();
+            let fault = Arc::new(LostHeadReplyStore {
+                inner,
+                head_path: seed
+                    .capsule_catalog_path(checkpoint.catalog().unwrap().hash())
+                    .to_string(),
+                lost: AtomicBool::new(true),
+                reject: AtomicBool::new(true),
+            });
+            let router = StoreLayout::new(
+                Store::with_retry(
+                    fault.clone(),
+                    crab_storage::RetryPolicy {
+                        max_attempts: 1,
+                        base: std::time::Duration::ZERO,
+                        cap: std::time::Duration::ZERO,
+                    },
+                ),
+                seed.repo_prefix().to_owned(),
+            );
+            let publish = |base| async {
+                if restore {
+                    restore_checkpoint(
+                        &router,
+                        base,
+                        &checkpoint,
+                        Default::default(),
+                        Default::default(),
+                        "refs/heads/main".to_owned(),
+                    )
+                    .await
+                } else {
+                    publish_layered_checkpoint(&router, base, &checkpoint).await
+                }
+            };
+            assert!(publish(base.clone()).await.is_err(), "restore={restore}");
+            assert_eq!(
+                open_root(&seed).await.unwrap().record().digest(),
+                base.record().digest()
+            );
+            assert!(matches!(
+                seed.store()
+                    .head(&seed.capsule_checkpoint_path(checkpoint.hash()))
+                    .await,
+                Err(StorageError::NotFound { .. })
+            ));
+            fault.reject.store(false, Ordering::Release);
+            let published = publish(base).await.unwrap();
+            let loaded = crab_metadata::capsule_protocol::load_layered_checkpoint(
+                &seed,
+                published.record().root().checkpoint().unwrap(),
+                u64::MAX,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                loaded
+                    .pointer_catalog_from_store(&seed, u64::MAX)
+                    .await
+                    .unwrap(),
+                catalog
+            );
+        }
     }
 
     #[tokio::test]
