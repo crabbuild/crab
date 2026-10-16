@@ -99,13 +99,13 @@ impl ScratchSpace {
             let size = bytes.len() as u64;
             let slot = directory
                 .next
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                     value.checked_add(1)
                 })
                 .map_err(|_| io(std::io::Error::other("spill file count overflowed")))?;
             directory
                 .live
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |live| {
                     live.checked_add(size)
                         .filter(|total| *total <= directory.maximum)
                 })
