@@ -156,12 +156,13 @@ async fn checkpoint(
     root: RootSnapshot,
     source: PackSourceDescriptor,
     pointer: CapsulePointer,
+    catalog: PointerCatalog,
 ) -> RootSnapshot {
     let checkpoint = LayeredCheckpoint::build(
         root.record().root().generation(),
         root.record().digest(),
         vec![source],
-        PointerCatalog::new(),
+        catalog,
         None,
     )
     .unwrap();
@@ -408,6 +409,7 @@ async fn retired_sources_share_full_body_verification_with_checkpoint_history() 
         root,
         PackSourceDescriptor::from_capsule_run(&run).unwrap(),
         pointer,
+        PointerCatalog::new(),
     )
     .await;
     let reads = Arc::new(SourceReads {
@@ -447,6 +449,7 @@ async fn retained_checkpoints_and_run_pointers_read_shared_source_once() {
             root,
             PackSourceDescriptor::from_capsule_run(&run).unwrap(),
             run_pointer(&run, run.newest_base_root_digest()),
+            PointerCatalog::new(),
         )
         .await;
     }
@@ -484,6 +487,7 @@ async fn retained_checkpoints_read_shared_pack_layer_once() {
             root,
             layer.source_descriptor().unwrap(),
             run_pointer(&run, run.newest_base_root_digest()),
+            PointerCatalog::new(),
         )
         .await;
     }
@@ -512,6 +516,7 @@ async fn shared_source_body_corruption_is_not_hidden_by_reuse() {
             root,
             PackSourceDescriptor::from_capsule_run(&run).unwrap(),
             run_pointer(&run, run.newest_base_root_digest()),
+            PointerCatalog::new(),
         )
         .await;
     }
@@ -539,6 +544,7 @@ async fn source_reuse_still_validates_the_retained_run_pointer() {
         root,
         PackSourceDescriptor::from_capsule_run(&run).unwrap(),
         run_pointer(&run, &"e".repeat(64)),
+        PointerCatalog::new(),
     )
     .await;
 
@@ -558,6 +564,7 @@ async fn shared_sources_reject_conflicting_checkpoint_descriptors() {
         root,
         source.clone(),
         run_pointer(&run, run.newest_base_root_digest()),
+        PointerCatalog::new(),
     )
     .await;
     let conflicting = PackSourceDescriptor::new(
@@ -575,6 +582,7 @@ async fn shared_sources_reject_conflicting_checkpoint_descriptors() {
         root,
         conflicting,
         run_pointer(&run, run.newest_base_root_digest()),
+        PointerCatalog::new(),
     )
     .await;
 
@@ -583,4 +591,102 @@ async fn shared_sources_reject_conflicting_checkpoint_descriptors() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn historical_catalog_pages_are_verified_after_catalog_is_replaced() {
+    use crab_metadata::capsule_protocol::{
+        FileCatalogEntry, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
+    };
+    let (layout, root, run) = history_fixture().await;
+    let mut catalog = PointerCatalog::new();
+    catalog
+        .insert_xorb(
+            "a".repeat(64),
+            XorbCatalogEntry::new(
+                80,
+                "b".repeat(64),
+                vec![XorbChunkEntry::new("c".repeat(64), 7); 4],
+            ),
+        )
+        .unwrap();
+    catalog
+        .insert_shard(
+            "d".repeat(64),
+            ShardCatalogEntry::new(40, vec!["a".repeat(64)]),
+        )
+        .unwrap();
+    catalog
+        .insert_file("e".repeat(64), FileCatalogEntry::new(7, "d".repeat(64)))
+        .unwrap();
+    let mut root = root;
+    for _ in 0..3 {
+        root = checkpoint(
+            &layout,
+            root,
+            PackSourceDescriptor::from_capsule_run(&run).unwrap(),
+            run_pointer(&run, run.newest_base_root_digest()),
+            catalog.clone(),
+        )
+        .await;
+    }
+    let objects = layout
+        .store()
+        .list_prefix(&layout.capsule_catalog_prefix())
+        .await
+        .unwrap();
+    assert!(
+        objects.len() > 4,
+        "fixture must include nested catalog pages"
+    );
+    // The latest catalog is empty: only authenticated history keeps these
+    // pages reachable, independently of current-catalog and source-body checks.
+    let root = checkpoint(
+        &layout,
+        root,
+        PackSourceDescriptor::from_capsule_run(&run).unwrap(),
+        run_pointer(&run, run.newest_base_root_digest()),
+        PointerCatalog::new(),
+    )
+    .await;
+    verify_capsule_history(&layout, root.record().root())
+        .await
+        .unwrap();
+    for object in objects {
+        let (body, _) = layout
+            .store()
+            .get_with_etag_bounded(&object.location, object.size)
+            .await
+            .unwrap();
+        layout.store().delete(&object.location).await.unwrap();
+        assert!(
+            verify_capsule_history(&layout, root.record().root())
+                .await
+                .is_err(),
+            "missing historical catalog object was accepted: {}",
+            object.location,
+        );
+        let mut corrupt = body.to_vec();
+        corrupt[0] ^= 1;
+        layout
+            .store()
+            .put(&object.location, Bytes::from(corrupt))
+            .await
+            .unwrap();
+        assert!(
+            verify_capsule_history(&layout, root.record().root())
+                .await
+                .is_err(),
+            "corrupt historical catalog object was accepted: {}",
+            object.location,
+        );
+        layout
+            .store()
+            .put_overwrite(&object.location, body)
+            .await
+            .unwrap();
+    }
+    verify_capsule_history(&layout, root.record().root())
+        .await
+        .unwrap();
 }

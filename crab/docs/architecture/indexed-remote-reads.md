@@ -2519,9 +2519,12 @@ before, 13.34 after) include fixture construction and the full-scan comparison.
 They do not establish hosted latency or query-only RSS. Disk admission precedes
 spill growth; cleanup drains blocking workers. The existing temporary-directory
 setting controls placement, with no new config/env surface or dependency.
-Materialization admission still protects callers retaining recipe copies. Full
-logical-catalog APIs and maintenance consumers still using them remain separate
-conversion and runtime-qualification work.
+Historical fsck uses the same streaming integrity inspection before checking
+pack sources, including catalogs replaced by an empty current catalog. It does
+not retain complete historical recipe maps. Current fsck payload verification,
+restore accounting, GC shard discovery and catalog-rewriting tools still use
+full logical catalogs and remain separate conversion work. Materialization
+admission continues to protect those callers retaining recipe copies.
 
 Release audit: all six upstream published tag objects were checked again before
 this change; none contains the capsule codec. Unshipped checkpoint formats

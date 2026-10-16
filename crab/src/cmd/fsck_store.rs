@@ -970,32 +970,52 @@ async fn verify_capsule_history(
         }
     }
     let mut sources = BTreeMap::new();
-    let mut checkpoints =
-        futures_util::stream::iter(checkpoints.into_values().map(|pointer| async move {
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let mut checkpoints = futures_util::stream::iter(checkpoints.into_values())
+        .take_while(|_| {
+            futures_util::future::ready(!stop.load(std::sync::atomic::Ordering::Relaxed))
+        })
+        .map(|pointer| async move {
             let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(
                 layout,
                 &pointer,
                 u64::MAX,
             )
             .await?;
-            checkpoint
-                .pointer_catalog_from_store(layout, u64::MAX)
-                .await?;
+            // Historical catalogs need complete integrity proof, not retained
+            // recipe maps. Streaming inspection also validates cross-page edges.
+            checkpoint.catalog_objects(layout, u64::MAX).await?;
             Ok::<_, CrabError>(checkpoint.sources().to_vec())
-        }))
+        })
         .buffer_unordered(16);
-    while let Some(checkpoint_sources) = checkpoints.try_next().await? {
-        for source in checkpoint_sources {
-            let path = match source.kind() {
-                crab_metadata::capsule_protocol::PackSourceKind::CapsuleRun => {
-                    layout.capsule_path(source.object_hash())
-                }
-                crab_metadata::capsule_protocol::PackSourceKind::PackLayer => {
-                    layout.capsule_pack_layer_path(source.object_hash())
-                }
-            };
-            insert_history_pointer(&mut sources, path.as_ref(), source, "pack source")?;
+    let mut first_error = None;
+    while let Some(checkpoint_sources) = checkpoints.next().await {
+        if first_error.is_some() {
+            continue;
         }
+        let result = checkpoint_sources.and_then(|checkpoint_sources| {
+            for source in checkpoint_sources {
+                let path = match source.kind() {
+                    crab_metadata::capsule_protocol::PackSourceKind::CapsuleRun => {
+                        layout.capsule_path(source.object_hash())
+                    }
+                    crab_metadata::capsule_protocol::PackSourceKind::PackLayer => {
+                        layout.capsule_pack_layer_path(source.object_hash())
+                    }
+                };
+                insert_history_pointer(&mut sources, path.as_ref(), source, "pack source")?;
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            // Stop admission, then drain active inspections before returning.
+            // Dropping their futures would detach spill-worker cleanup.
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            first_error = Some(error);
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
     // Stable sources can appear in many checkpoints and as retained run pointers.
     // Read each immutable body once, but prove both authenticated descriptions;
