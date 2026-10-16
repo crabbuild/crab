@@ -93,6 +93,18 @@ retain file ownership through cancellation and are drained before normal/error
 cleanup. No authoritative or cache object is written by inspection. Explicit
 full-catalog callers still materialize it; converting remaining maintenance
 consumers is separate work.
+
+`inspect_pointer_catalog` reduces a complete captured checkpoint and selected
+deltas through private spill, resolves file-binding precedence and validates the
+final dependency closure before returning `PointerCatalogInspection`. GC collects
+shard identities from this owner; replica readiness streams full shard/xorb
+descriptors without a joined catalog in memory. The cursor retains the normalized
+run until `finish` drains workers and removes it, preserving the operation's primary
+error if cleanup also fails. A cancelled pending read can resume at the same
+object. Physical page identities, spill handles and the largest recipe still
+consume memory; each packed delta retains its format-bounded decoder. Logical
+reduction has a live disk ceiling of sixteen times the admitted catalog limit;
+normal lookup and materialization budgets remain unchanged.
 GC traverses catalog pages from current, historical and retained browse roots.
 Protected keys and authenticated closure traversal are tracked separately.
 Retired unshipped checkpoint formats through 8 are rejected without fallback.

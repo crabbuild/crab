@@ -847,12 +847,22 @@ impl CapsuleRepositoryView {
         Ok(catalog.finish()?)
     }
 
-    /// Inspect complete captured catalog dependencies without retaining the merged catalog.
-    ///
-    /// File bindings and immutable conflicts retain capture order. Fetch-only
-    /// captures remain incomplete; origin state is never recaptured or written.
-    /// The caller retains these captured sources against GC through completion.
+    /// Collect complete captured shard roots without retaining the merged catalog.
     pub async fn pointer_catalog_shard_hashes(&self) -> Result<Vec<String>> {
+        Ok(self
+            .pointer_catalog_inspection()
+            .await?
+            .into_shard_hashes()
+            .await?)
+    }
+
+    /// Validate the complete captured catalog before streaming its external object descriptors.
+    ///
+    /// Fetch-only captures remain incomplete. Retain captured origin sources
+    /// through construction, then await the cursor's `finish` on every returned path.
+    pub async fn pointer_catalog_inspection(
+        &self,
+    ) -> Result<crab_metadata::capsule_protocol::PointerCatalogInspection> {
         self.catalog_sources
             .as_ref()
             .ok_or(ReadError::IncompleteCatalogView)?;
@@ -860,18 +870,16 @@ impl CapsuleRepositoryView {
             .metadata_layout
             .as_ref()
             .ok_or_else(|| ReadError::internal("catalog inspection has no captured origin"))?;
-        Ok(
-            crab_metadata::capsule_protocol::inspect_pointer_catalog_shard_hashes(
-                layout,
-                self.checkpoint
-                    .as_ref()
-                    .and_then(LayeredCheckpoint::catalog),
-                &self.capsules,
-                &self.capsule_controls,
-                crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
-            )
-            .await?,
+        Ok(crab_metadata::capsule_protocol::inspect_pointer_catalog(
+            layout,
+            self.checkpoint
+                .as_ref()
+                .and_then(LayeredCheckpoint::catalog),
+            &self.capsules,
+            &self.capsule_controls,
+            crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
         )
+        .await?)
     }
 
     /// Open the authenticated embedded Git packs as a filesystem-free repository.

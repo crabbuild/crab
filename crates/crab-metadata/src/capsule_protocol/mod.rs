@@ -72,7 +72,9 @@ pub use pointer::{
     XorbCatalogEntry, XorbChunkEntry,
 };
 #[cfg(feature = "storage")]
-pub use pointer::{PointerCatalogLookup, inspect_pointer_catalog_shard_hashes};
+pub use pointer::{
+    PointerCatalogInspection, PointerCatalogLookup, PointerCatalogObject, inspect_pointer_catalog,
+};
 pub use ref_head::{
     CAPSULE_REF_COMPACTION_FAN_IN, CAPSULE_REF_ROLLUP_WINDOW, CapsuleRefHead, CapsuleRefState,
     MAX_CAPSULE_REF_FRONTIER, MAX_CAPSULE_REF_HEADS, capsule_ref_name_from_key,

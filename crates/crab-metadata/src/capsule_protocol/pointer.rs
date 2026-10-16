@@ -18,7 +18,7 @@ mod relations;
 #[cfg(feature = "storage")]
 pub(super) mod spill;
 #[cfg(feature = "storage")]
-pub use inspection::inspect_pointer_catalog_shard_hashes;
+pub use inspection::{PointerCatalogInspection, PointerCatalogObject, inspect_pointer_catalog};
 pub use paged::MAX_CATALOG_BYTES;
 #[cfg(feature = "storage")]
 pub use paged::PointerCatalogLookup;

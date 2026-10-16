@@ -1,6 +1,6 @@
 //! Captured logical catalog reduction with file precedence and deferred closure checks.
 use super::relations::Record as Relation;
-use super::spill::{Cursor, Reducer, Row};
+use super::spill::{Cursor, Reducer, Row, Run};
 use super::*;
 use crate::capsule_protocol::{Capsule, CapsuleControl, CheckpointCatalog};
 use crab_storage::{Store, StoreLayout, scratch::ScratchSpace};
@@ -232,16 +232,19 @@ impl Inspector {
         }
         Ok(())
     }
-    pub(super) async fn finish(self, prior: Result<()>) -> Result<Vec<String>> {
+    pub(super) async fn finish(self, prior: Result<()>) -> Result<PointerCatalogInspection> {
         let Some(space) = self.space else {
             prior?;
-            return Ok(Vec::new());
+            return Ok(PointerCatalogInspection {
+                space: None,
+                rows: Cursor::new(Run::default()),
+            });
         };
-        let result: Result<Vec<String>> = async {
+        let result: Result<Run> = async {
             prior?;
-            let mut cursor = Cursor::<Entry>::new(self.rows.finish(&space).await?);
+            let run = self.rows.finish(&space).await?;
+            let mut cursor = Cursor::<Entry>::new(run.clone());
             let mut dependencies = Reducer::<Relation>::new();
-            let mut shards = Vec::new();
             while let Some(row) = cursor.next(&space).await? {
                 let identity = &row.key[1..];
                 match row.key[0] {
@@ -251,7 +254,6 @@ impl Inspector {
                             .await?
                     }
                     1 => {
-                        shards.push(hex(identity)?);
                         dependencies
                             .add(&space, Relation::reference(0, identity, true)?)
                             .await?;
@@ -269,36 +271,169 @@ impl Inspector {
                     _ => return Err(corrupt("logical catalog row kind differs")),
                 }
             }
-            let mut cursor = Cursor::<Relation>::new(dependencies.finish(&space).await?);
+            let dependencies = dependencies.finish(&space).await?;
+            let mut cursor = Cursor::<Relation>::new(dependencies.clone());
             while let Some(row) = cursor.next(&space).await? {
                 row.validate()?;
             }
-            Ok(shards)
+            dependencies.remove(&space).await?;
+            Ok(run)
         }
         .await;
-        let cleanup = space.close().await.map_err(MetadataError::from);
-        if let (Err(_), Err(source)) = (&result, &cleanup) {
-            tracing::warn!(%source, "logical catalog spill cleanup failed after validation error");
+        match result {
+            Ok(run) => Ok(PointerCatalogInspection {
+                space: Some(space),
+                rows: Cursor::new(run),
+            }),
+            Err(error) => finish(Some(space), Err(error)).await,
         }
-        let result = result?;
-        cleanup?;
-        Ok(result)
     }
 }
 
-/// Inspect one ordered captured catalog and return its complete shard identities.
+/// One immutable external object authenticated by a complete captured catalog.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PointerCatalogObject {
+    Shard {
+        hash: String,
+        entry: ShardCatalogEntry,
+    },
+    Xorb {
+        hash: String,
+        entry: XorbCatalogEntry,
+    },
+}
+
+/// A complete catalog proof with bounded iteration over its external object descriptors.
 ///
-/// The caller retains these sources against GC. Checkpoint rows stream through
-/// bounded spill; each packed delta retains its existing format-bounded decoder.
-/// Immutable conflicts, file-size conflicts and incomplete final dependencies fail
-/// before any result is returned. No origin object is written.
-pub async fn inspect_pointer_catalog_shard_hashes(
+/// The private spill is owned until `finish` drains and removes it. Dropping the
+/// cursor retains cleanup behind blocking workers. No origin writes or recapture occur.
+#[must_use]
+pub struct PointerCatalogInspection {
+    space: Option<ScratchSpace>,
+    rows: Cursor<Entry>,
+}
+
+impl PointerCatalogInspection {
+    async fn next_entry(&mut self) -> Result<Option<Entry>> {
+        match &self.space {
+            Some(space) => self.rows.next(space).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Return the next shard or xorb in canonical hash order within each kind.
+    ///
+    /// Complete metadata validation precedes construction. One typed descriptor
+    /// is returned at a time; its recipe may reach the admitted catalog bound.
+    /// Cancelling a pending call leaves the next object available on resume.
+    pub async fn next_object(&mut self) -> Result<Option<PointerCatalogObject>> {
+        while let Some(row) = self.next_entry().await? {
+            if row.key[0] == 0 {
+                continue;
+            }
+            let hash = hex(&row.key[1..])?;
+            let size = u64::from_be_bytes(
+                row.value[..8]
+                    .try_into()
+                    .map_err(|_| corrupt("object size is truncated"))?,
+            );
+            let object = match row.key[0] {
+                1 => PointerCatalogObject::Shard {
+                    hash,
+                    entry: ShardCatalogEntry::new(
+                        size,
+                        row.value[8..]
+                            .as_chunks::<32>()
+                            .0
+                            .iter()
+                            .map(|value| hex(value))
+                            .collect::<Result<_>>()?,
+                    ),
+                },
+                2 => PointerCatalogObject::Xorb {
+                    hash,
+                    entry: XorbCatalogEntry::new(
+                        size,
+                        hex(&row.value[8..40])?,
+                        row.value[40..]
+                            .as_chunks::<36>()
+                            .0
+                            .iter()
+                            .map(|chunk| {
+                                Ok(XorbChunkEntry::new(
+                                    hex(&chunk[..32])?,
+                                    u32::from_be_bytes(
+                                        chunk[32..]
+                                            .try_into()
+                                            .map_err(|_| corrupt("chunk size is truncated"))?,
+                                    ),
+                                ))
+                            })
+                            .collect::<Result<_>>()?,
+                    ),
+                },
+                _ => return Err(corrupt("logical catalog object kind differs")),
+            };
+            return Ok(Some(object));
+        }
+        Ok(None)
+    }
+
+    /// Collect the remaining shard identities without decoding object recipes, then close.
+    pub async fn into_shard_hashes(mut self) -> Result<Vec<String>> {
+        let result = async {
+            let mut hashes = Vec::new();
+            while let Some(row) = self.next_entry().await? {
+                if row.key[0] == 1 {
+                    hashes.push(hex(&row.key[1..])?);
+                }
+            }
+            Ok(hashes)
+        }
+        .await;
+        self.finish(result).await
+    }
+
+    /// Close the private spill after an operation, preserving its primary error.
+    ///
+    /// Await completion on success and returned-error paths. A cleanup failure
+    /// becomes the result only when the operation itself succeeded.
+    pub async fn finish<T, E: From<MetadataError>>(
+        self,
+        result: std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
+        finish(self.space, result).await
+    }
+}
+
+async fn finish<T, E: From<MetadataError>>(
+    space: Option<ScratchSpace>,
+    result: std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    let cleanup = match space {
+        Some(space) => space.close().await.map_err(MetadataError::from),
+        None => Ok(()),
+    };
+    if let (Err(_), Err(source)) = (&result, &cleanup) {
+        tracing::warn!(%source, "logical catalog spill cleanup failed after operation error");
+    }
+    let result = result?;
+    cleanup.map_err(E::from)?;
+    Ok(result)
+}
+
+/// Validate one ordered captured catalog before opening its external object cursor.
+///
+/// Checkpoint rows stream through bounded spill; each packed delta retains its
+/// existing format-bounded decoder. Conflicts and incomplete final dependencies
+/// fail before a cursor is returned. Await cursor `finish` on every returned path.
+pub async fn inspect_pointer_catalog(
     layout: &StoreLayout<Store>,
     checkpoint: Option<&CheckpointCatalog>,
     capsules: &[Capsule],
     controls: &[CapsuleControl],
     maximum: u64,
-) -> Result<Vec<String>> {
+) -> Result<PointerCatalogInspection> {
     let maximum = maximum.min(MAX_CATALOG_BYTES);
     let mut inspector = Inspector::new(maximum);
     let checked = async {

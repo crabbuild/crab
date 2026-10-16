@@ -2541,8 +2541,13 @@ list remains output-sized. This is bounded external reduction, not constant
 space: physical page identities, spill handles, the largest recipe and output
 roots still consume memory. Each selected packed delta still uses its existing
 format-bounded decoder individually; streaming those deltas remains follow-up
-work. Current fsck payload verification, restore accounting and catalog-rewriting
-tools also retain full logical catalogs. Materialization admission continues to
+work. Replica readiness now retains that verified local run and streams full
+shard/xorb descriptors through the shared physical body verifiers. No body probe
+starts before the final metadata proof; all returned paths close the cursor,
+including provider errors and sample limits. Pending reads advance only after
+verified I/O and decoding, so cancellation followed by resume cannot skip a block.
+Current fsck payload verification, restore accounting and catalog-rewriting tools
+also retain full logical catalogs. Materialization admission continues to
 protect those callers retaining recipe copies.
 
 Release audit: all six upstream published tag objects were checked again before

@@ -223,12 +223,22 @@ Its error source is Tokio's `JoinError`, so diagnostic consumers can distinguish
 worker panic from task cancellation without parsing log text. The CLI preserves
 that source while retaining its internal-error diagnostic classification.
 
-Replica readiness compares the exact authenticated capsule view before reading
-and validating every cataloged shard and xorb body. Large-body hashing and
-parsing run outside the async executor; worker failures remain typed as
-`ReadError::ReadinessTask`. Product caches may skip repeated immutable-body
-validation, but must recheck the replica's authenticated view digest before
-selection.
+Replica readiness compares the exact authenticated capsule view and completes
+catalog conflict/dependency validation before checking any payload. It owns a
+`PointerCatalogInspection` cursor and verifies one shard/xorb descriptor at a time.
+Full probes validate every cataloged body; sampled probes preserve canonical
+shard-before-xorb order and stop at their existing limit. The complete metadata
+proof is required even for a zero-object sample. Every returned path finishes the
+cursor, including missing bodies, errors and early sample limits; abandonment
+retains local cleanup behind blocking workers.
+
+Large-body hashing and parsing run outside the async executor; worker failures
+remain typed as `ReadError::ReadinessTask`. Streamed recipes move into that worker;
+already-built publication catalogs clone borrowed recipes only at the worker
+boundary. Both inputs share the physical body verifiers. Product caches may skip
+repeated immutable-body validation, but must recheck the replica's authenticated
+view digest before selection; a sampled probe does not publish full-readiness
+cache state.
 
 ## Boundaries
 

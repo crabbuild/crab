@@ -26,6 +26,7 @@ Trace one path: `crates/crab-write/src/journal.rs` → `commit_ref_transaction` 
 | Manifest/journal change | `crates/crab-metadata/src/manifest_store.rs` | `crates/crab-write/src/journal.rs` |
 | Catalog coverage | `crates/crab-metadata/src/git_object_locator` | `crates/crab-remote-git/src/repository.rs` |
 | Local dedup index | `crates/crab-metadata/src/persistent_chunk_index.rs` | `crates/crab-staging/src/index.rs` |
+| Captured catalog inspection | `crates/crab-metadata/src/capsule_protocol/pointer/inspection.rs` | GC shard discovery and replica readiness |
 | Capsule chunk hints | `crates/crab-metadata/src/capsule_protocol/chunk_candidates/store.rs` | CLI/shared/protected capsule publishers and bucket GC |
 
 ## Invariants
@@ -50,6 +51,11 @@ Trace one path: `crates/crab-write/src/journal.rs` → `commit_ref_transaction` 
   publication. Read-only discovery can recapture a changed advisory root after a
   missing page; unchanged-root absence/corruption remains an error.
   Source: `crates/crab-metadata/src/capsule_protocol/chunk_candidates/store.rs`.
+
+- `PointerCatalogInspection` exposes external descriptors only after complete
+  precedence/conflict/dependency proof. Await `finish` on all returned paths;
+  cancelled reads must resume without losing a block or object.
+  Source: `crates/crab-metadata/src/capsule_protocol/pointer/inspection.rs`.
 
 ## Features and platform
 

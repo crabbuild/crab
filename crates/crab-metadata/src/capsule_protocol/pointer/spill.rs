@@ -13,8 +13,18 @@ pub(super) trait Row: Sized {
     fn decode(bytes: Bytes) -> Result<Vec<Self>>;
 }
 
+#[derive(Clone, Default)]
 pub(super) struct Run {
     files: Vec<ScratchFile>,
+}
+
+impl Run {
+    pub(super) async fn remove(self, space: &ScratchSpace) -> Result<()> {
+        for file in self.files {
+            space.remove(file).await?;
+        }
+        Ok(())
+    }
 }
 
 pub(super) struct Cursor<R> {
@@ -34,17 +44,21 @@ impl<R: Row> Cursor<R> {
 
     pub(super) async fn next(&mut self, space: &ScratchSpace) -> Result<Option<R>> {
         loop {
-            if let Some(row) = self.rows.next() {
+            if let Some(row) = self.rows.as_slice().first() {
                 if self.previous.is_some_and(|previous| previous >= *row.key()) {
                     return Err(corrupt("inspection spill rows are not strictly ordered"));
                 }
                 self.previous = Some(*row.key());
-                return Ok(Some(row));
+                return Ok(self.rows.next());
             }
-            let Some(file) = self.files.pop_front() else {
+            let Some(file) = self.files.front() else {
                 return Ok(None);
             };
-            self.rows = R::decode(space.read(&file, R::MAX_BYTES).await?)?.into_iter();
+            // A caller can cancel and resume this read. Commit progression only
+            // after verified I/O and decoding, or the unread block is lost.
+            let rows = R::decode(space.read(file, R::MAX_BYTES).await?)?;
+            let _ = self.files.pop_front();
+            self.rows = rows.into_iter();
         }
     }
 }
@@ -165,9 +179,7 @@ impl<R: Row> Reducer<R> {
         if !rows.is_empty() {
             output.files.push(space.write(R::encode(&rows)?).await?);
         }
-        for file in retired {
-            space.remove(file).await?;
-        }
+        Run { files: retired }.remove(space).await?;
         Ok(output)
     }
 
@@ -180,6 +192,6 @@ impl<R: Row> Reducer<R> {
                 None => run,
             });
         }
-        Ok(combined.unwrap_or(Run { files: Vec::new() }))
+        Ok(combined.unwrap_or_default())
     }
 }

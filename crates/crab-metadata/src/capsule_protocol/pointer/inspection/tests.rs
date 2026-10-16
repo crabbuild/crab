@@ -31,7 +31,7 @@ async fn inspect(deltas: Vec<PointerCatalog>) -> Result<Vec<String>> {
         Ok(())
     }
     .await;
-    inspector.finish(checked).await
+    inspector.finish(checked).await?.into_shard_hashes().await
 }
 
 #[tokio::test]
@@ -246,7 +246,13 @@ async fn checkpoint_rows_stream_without_per_file_dependency_joins() {
     let mut inspector = Inspector::new(maximum);
     let checked = cold.inspect_into(&store, maximum, &mut inspector).await;
     assert_eq!(
-        inspector.finish(checked).await.unwrap(),
+        inspector
+            .finish(checked)
+            .await
+            .unwrap()
+            .into_shard_hashes()
+            .await
+            .unwrap(),
         catalog.shards.into_keys().collect::<Vec<_>>()
     );
     let io = observations.0.lock().unwrap();
@@ -258,4 +264,162 @@ async fn checkpoint_rows_stream_without_per_file_dependency_joins() {
     );
     assert!(streamed <= 4 * full, "{streamed} versus {full}");
     assert!(io.iter().all(|op| op.bytes_written == 0));
+}
+
+async fn cursor_fixture(
+    files: u32,
+) -> (
+    tempfile::TempDir,
+    PointerCatalogInspection,
+    Vec<PointerCatalogObject>,
+) {
+    let parent = tempfile::tempdir().unwrap();
+    let space = ScratchSpace::create(parent.path(), 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    let mut inspector = Inspector {
+        space: Some(space),
+        rows: Reducer::new(),
+        maximum: 1024 * 1024,
+    };
+    let xorb = XorbCatalogEntry::new(
+        80,
+        "d".repeat(64),
+        vec![
+            XorbChunkEntry::new("c".repeat(64), 3),
+            XorbChunkEntry::new("b".repeat(64), 9),
+            XorbChunkEntry::new("c".repeat(64), 7),
+        ],
+    );
+    let shard = ShardCatalogEntry::new(7, vec!["a".repeat(64)]);
+    let expected = vec![
+        PointerCatalogObject::Shard {
+            hash: format!("{:064x}", 1),
+            entry: shard.clone(),
+        },
+        PointerCatalogObject::Xorb {
+            hash: "a".repeat(64),
+            entry: xorb.clone(),
+        },
+    ];
+    let mut catalog = PointerCatalog::new();
+    for file in 0..files {
+        catalog.merge_delta(&binding(file, 1, 19)).unwrap();
+    }
+    catalog.insert_shard(format!("{:064x}", 1), shard).unwrap();
+    catalog.insert_xorb("a".repeat(64), xorb).unwrap();
+    inspector.delta(catalog, 0).await.unwrap();
+    let cursor = inspector.finish(Ok(())).await.unwrap();
+    (parent, cursor, expected)
+}
+
+#[tokio::test]
+async fn verified_cursor_preserves_complete_descriptors_across_spilled_file_rows() {
+    let (_parent, mut cursor, expected) = cursor_fixture(5000).await;
+    let result: Result<_> = async {
+        let mut values = Vec::new();
+        while let Some(object) = cursor.next_object().await? {
+            values.push(object);
+        }
+        Ok(values)
+    }
+    .await;
+    assert_eq!(cursor.finish(result).await.unwrap(), expected);
+}
+
+#[tokio::test]
+async fn verified_cursor_retires_spill_after_early_stop_error_abandonment_and_tampering() {
+    for outcome in ["early", "error", "drop", "tamper"] {
+        let (parent, mut cursor, _) = cursor_fixture(64).await;
+        match outcome {
+            "early" => {
+                cursor.next_object().await.unwrap();
+                cursor.finish(Ok::<_, MetadataError>(())).await.unwrap();
+            }
+            "error" => {
+                let result: Result<()> = Err(contract_error("body check failed"));
+                assert!(matches!(
+                    cursor.finish(result).await,
+                    Err(MetadataError::CapsuleContract { .. })
+                ));
+            }
+            "drop" => drop(cursor),
+            "tamper" => {
+                let directory = std::fs::read_dir(parent.path())
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                for file in std::fs::read_dir(directory).unwrap() {
+                    std::fs::write(file.unwrap().path(), b"changed").unwrap();
+                }
+                let result = cursor.next_object().await;
+                assert!(matches!(
+                    result,
+                    Err(MetadataError::Storage {
+                        source: crab_storage::StorageError::CorruptObject { .. }
+                    })
+                ));
+                assert!(cursor.next_object().await.is_err());
+                assert!(cursor.finish(result).await.is_err());
+            }
+            _ => unreachable!(),
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while std::fs::read_dir(parent.path()).unwrap().count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn verified_cursor_preserves_operation_errors_when_cleanup_also_fails() {
+    let (parent, cursor, _) = cursor_fixture(1).await;
+    let directory = std::fs::read_dir(parent.path())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::remove_dir_all(&directory).unwrap();
+    std::fs::write(&directory, b"obstruct cleanup").unwrap();
+    let result: Result<()> = Err(contract_error("body check failed"));
+    assert!(
+        matches!(cursor.finish(result).await, Err(MetadataError::CapsuleContract { reason, .. }) if reason == "body check failed")
+    );
+}
+
+#[test]
+fn cancelled_pending_cursor_read_resumes_at_the_same_object() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (_parent, mut cursor, mut expected) = cursor_fixture(64).await;
+        let (release, gate) = std::sync::mpsc::channel();
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            gate.recv().unwrap();
+        });
+        entered.await.unwrap();
+        let mut pending = Box::pin(cursor.next_object());
+        std::future::poll_fn(|context| {
+            assert!(std::future::Future::poll(pending.as_mut(), context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(pending);
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+        let actual = cursor.next_object().await.unwrap();
+        cursor.finish(Ok::<_, MetadataError>(())).await.unwrap();
+        assert_eq!(actual, Some(expected.remove(0)));
+    });
 }

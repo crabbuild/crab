@@ -332,7 +332,16 @@ async fn maintenance_streams_shared_recipes_without_materializing_the_catalog() 
     .unwrap();
     let mut logical = crate::capsule_protocol::pointer::inspection::Inspector::new(maximum);
     let checked = cold.inspect_into(&store, maximum, &mut logical).await;
-    assert!(logical.finish(checked).await.unwrap().is_empty());
+    assert!(
+        logical
+            .finish(checked)
+            .await
+            .unwrap()
+            .into_shard_hashes()
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -599,7 +608,16 @@ async fn streamed_inspection_bounds_io_for_distinct_recipes_beyond_the_page_cach
     .unwrap();
     let mut logical = crate::capsule_protocol::pointer::inspection::Inspector::new(maximum);
     let checked = cold.inspect_into(&store, maximum, &mut logical).await;
-    assert!(logical.finish(checked).await.unwrap().is_empty());
+    assert!(
+        logical
+            .finish(checked)
+            .await
+            .unwrap()
+            .into_shard_hashes()
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let io = observations.0.lock().unwrap();
     let logical = io.iter().map(|op| op.bytes_read).sum::<u64>();
     tracing::debug!(
