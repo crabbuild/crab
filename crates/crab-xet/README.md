@@ -68,6 +68,10 @@ For a lower-level read path, parse a complete serialized Xorb with
 `xorb::builder::XorbBuilder` and upload each `XorbResult` through the owning
 storage or staging layer.
 
+`shard::FileBundleValidator` indexes a borrowed xorb metadata bundle once for
+multiple file-term checks. It preserves the same range and byte-coverage checks
+as `validate_file_bundle`; neither API proves payload hashes or whole-file bytes.
+
 ## Xorb verification
 
 | API | What it verifies |

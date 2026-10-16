@@ -433,3 +433,186 @@ fn cancelled_pending_cursor_read_resumes_at_the_same_object() {
         assert_eq!(actual, Some(expected.remove(0)));
     });
 }
+
+#[tokio::test]
+async fn grouping_restarts_a_partially_consumed_capture_and_retires_input_spill() {
+    let (parent, mut cursor, mut objects) = cursor_fixture(5000).await;
+    cursor.next_object().await.unwrap();
+    let directory = std::fs::read_dir(parent.path())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let input = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut grouped = cursor.group_by_shard().await.unwrap();
+    let output = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(input.is_disjoint(&output));
+    let mut expected = vec![
+        PointerCatalogEntry::Object(objects.remove(1)),
+        PointerCatalogEntry::Object(objects.remove(0)),
+    ];
+    expected.extend((0..5000).map(|file| PointerCatalogEntry::File {
+        hash: format!("{file:064x}"),
+        entry: FileCatalogEntry::new(19, format!("{:064x}", 1)),
+    }));
+    let result: Result<_> = async {
+        let mut entries = Vec::new();
+        while let Some(entry) = grouped.next_entry().await? {
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+    .await;
+    assert_eq!(grouped.finish(result).await.unwrap(), expected);
+    assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn grouped_file_bindings_match_assembly_after_shard_rebinding() {
+    let parent = tempfile::tempdir().unwrap();
+    let mut inspector = Inspector {
+        space: Some(
+            ScratchSpace::create(parent.path(), 16 * 1024 * 1024)
+                .await
+                .unwrap(),
+        ),
+        rows: Reducer::new(),
+        maximum: 1024 * 1024,
+    };
+    let mut initial = binding(0, 99, 3);
+    for file in 1..13_000 {
+        initial
+            .merge_delta(&binding(file, file % 3 + 1, 3))
+            .unwrap();
+    }
+    let deltas = vec![
+        initial,
+        binding(0, 3, 3),
+        shard(1, Vec::new()),
+        shard(2, Vec::new()),
+        shard(3, Vec::new()),
+    ];
+    let mut oracle = PointerCatalogAssembly::new(PointerCatalog::new());
+    for (rank, delta) in deltas.into_iter().enumerate() {
+        oracle.apply(&delta).unwrap();
+        inspector.delta(delta, rank as u64).await.unwrap();
+    }
+    let oracle = oracle.finish().unwrap();
+    let mut expected = Vec::new();
+    for (hash, entry) in oracle.shards() {
+        expected.push(PointerCatalogEntry::Object(PointerCatalogObject::Shard {
+            hash: hash.clone(),
+            entry: entry.clone(),
+        }));
+        expected.extend(
+            oracle
+                .files()
+                .iter()
+                .filter(|(_, entry)| entry.shard_hash() == hash)
+                .map(|(hash, entry)| PointerCatalogEntry::File {
+                    hash: hash.clone(),
+                    entry: entry.clone(),
+                }),
+        );
+    }
+    let mut grouped = inspector
+        .finish(Ok(()))
+        .await
+        .unwrap()
+        .group_by_shard()
+        .await
+        .unwrap();
+    let result: Result<_> = async {
+        let mut entries = Vec::new();
+        while let Some(entry) = grouped.next_entry().await? {
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+    .await;
+    assert_eq!(grouped.finish(result).await.unwrap(), expected);
+}
+
+#[tokio::test]
+async fn grouped_inspection_retires_spill_on_early_error_drop_and_tampering() {
+    for outcome in ["early", "error", "drop", "tamper", "input-tamper"] {
+        let (parent, cursor, _) = cursor_fixture(64).await;
+        let directory = std::fs::read_dir(parent.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        if outcome == "input-tamper" {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                std::fs::write(entry.unwrap().path(), b"changed").unwrap();
+            }
+            assert!(cursor.group_by_shard().await.is_err());
+        } else {
+            let mut grouped = cursor.group_by_shard().await.unwrap();
+            match outcome {
+                "early" => {
+                    grouped.next_entry().await.unwrap();
+                    grouped.finish(Ok::<_, MetadataError>(())).await.unwrap();
+                }
+                "error" => {
+                    assert!(
+                        grouped
+                            .finish(Err::<(), _>(contract_error("body failed")))
+                            .await
+                            .is_err()
+                    );
+                }
+                "drop" => drop(grouped),
+                "tamper" => {
+                    for entry in std::fs::read_dir(directory).unwrap() {
+                        std::fs::write(entry.unwrap().path(), b"changed").unwrap();
+                    }
+                    let result = grouped.next_entry().await;
+                    assert!(result.is_err());
+                    assert!(grouped.next_entry().await.is_err());
+                    assert!(grouped.finish(result).await.is_err());
+                }
+                _ => unreachable!(),
+            }
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while std::fs::read_dir(parent.path()).unwrap().count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn grouping_disk_admission_failure_removes_the_workspace() {
+    let parent = tempfile::tempdir().unwrap();
+    let mut inspector = Inspector {
+        space: Some(
+            ScratchSpace::create(parent.path(), 1024 * 1024)
+                .await
+                .unwrap(),
+        ),
+        rows: Reducer::new(),
+        maximum: 1024 * 1024,
+    };
+    for file in 0..5000 {
+        inspector.delta(binding(file, 1, 3), 0).await.unwrap();
+    }
+    inspector.delta(shard(1, Vec::new()), 0).await.unwrap();
+    let cursor = inspector.finish(Ok(())).await.unwrap();
+    assert!(matches!(
+        cursor.group_by_shard().await,
+        Err(MetadataError::Storage { .. })
+    ));
+    assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+}

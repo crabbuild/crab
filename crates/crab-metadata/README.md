@@ -106,6 +106,13 @@ consumption; sampled physical checks cannot stand in for these counts. Physical 
 consume memory; each packed delta retains its format-bounded decoder. Logical
 reduction has a live disk ceiling of sixteen times the admitted catalog limit;
 normal lookup and materialization budgets remain unchanged.
+`PointerCatalogInspection::group_by_shard` consumes the complete verified capture,
+including rows already visited by its object cursor. It reorders only private
+spill blocks: xorbs first, then each shard and its final file bindings. The same
+disk ceiling and cleanup owner apply; the original run retires before the grouped
+cursor returns. Ordinary GC/readiness consumers do not pay this extra reduction.
+Fsck consumes bounded file-binding batches while retaining one shard body and its
+xorb metadata, rather than a complete file map or a scan of every file per shard.
 GC traverses catalog pages from current, historical and retained browse roots.
 Protected keys and authenticated closure traversal are tracked separately.
 Retired unshipped checkpoint formats through 8 are rejected without fallback.

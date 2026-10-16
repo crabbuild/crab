@@ -482,9 +482,9 @@ tracks physical memory separately from this admission limit.
 Git views capture footer-rooted checkpoint visibility readers and load requested
 membership pages separately from retained-object presence. Complete visibility
 inspection is an explicit async operation. `CapsuleRepositoryView::pointer_catalog`
-is also async: hydration, publication and maintenance materialize the complete
-catalog from the captured checkpoint when its body was omitted during opening.
-Shared preparation and hydration still need selected-lookup integration.
+is also async: explicit bulk maintenance materializes the complete catalog from
+the captured checkpoint. Publication preparation and hydration use selected
+lookups; complete fsck streams its catalog proof.
 
 `CapsuleRepositoryView::pointer_catalog_lookup` captures the checkpoint's paged
 catalog together with authenticated run roots and exactly the selected
@@ -505,4 +505,8 @@ reachable pointer bindings in batches of 64 from those same roots. Catalog
 cardinalities come from the completed metadata reduction. Recovery's assembled
 replacement catalogs share the Git scan and whole-file/LFS proof in
 `capsule_protocol/dependency.rs`; binding source selection does not change the
-integrity checks. Current fsck's additional cross-recipe checks remain separate.
+integrity checks. Fsck composes its stronger decoded-chunk and cross-recipe proof
+with `verify_captured_installed_pointer_bytes`, the same canonical Git scan and
+whole-file/LFS byte phase. That API validates selected dependency closures only;
+it does not certify unrelated catalog health. Complete fsck must first finish
+its full catalog/object proof against the same captured sources.

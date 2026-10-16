@@ -35,6 +35,9 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
 
 - Requests naming hidden refs remain rejected even when arbitrary wants are enabled. This does not imply that the same SHA is denied under every other name; inspect policy and advertisement together.
   Source: `crates/crab-read/src/fetch_admission.rs`.
+- `verify_captured_installed_pointer_bytes` proves reachable Git/Crab/LFS bytes
+  against captured selected closures. Complete integrity callers separately
+  prove all catalog descriptors; do not treat this phase as global catalog proof.
 - Preserve the difference between full-file hash verification and range/chunk verification; partial output is not proof of the complete file.
   Source: `crates/crab-read/src/hydrator.rs`.
 - TermResolver construction rejects zero/oversized permit counts. Its semaphore

@@ -221,6 +221,67 @@ async fn verify_installed_dependencies_from(
     cancellation: &CancellationToken,
 ) -> Result<CapsuleDependencyProof> {
     let (counts, catalog_stats) = catalog.verify(layout, cancellation).await?;
+    let proof =
+        verify_installed_pointer_bytes_from(layout, git_dir, refs, catalog, limits, cancellation)
+            .await?;
+    Ok(CapsuleDependencyProof {
+        catalog_files: counts.files,
+        catalog_shards: counts.shards,
+        catalog_xorbs: counts.xorbs,
+        catalog_objects_read: catalog_stats.object_read_count,
+        reachable_crab_pointers: proof.crab,
+        reachable_lfs_objects: proof.lfs_objects,
+        reachable_lfs_bytes: proof.lfs_bytes,
+    })
+}
+
+struct PointerProof {
+    crab: u64,
+    lfs_objects: u64,
+    lfs_bytes: u64,
+}
+
+/// Verify reachable Git, Crab and LFS bytes in an installed database against captured bindings.
+///
+/// Callers install authenticated packs matching this view and retain the database
+/// and captured sources through completion. This checks selected dependency closures;
+/// complete repository inspection must separately validate all catalog descriptors.
+/// Token cancellation drains the Git worker before returning.
+pub async fn verify_captured_installed_pointer_bytes(
+    layout: &StoreLayout<Store>,
+    git_dir: &Path,
+    view: &CapsuleRepositoryView,
+    limits: crab_git::walk::PointerScanLimits,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    if cancellation.is_cancelled() {
+        return Err(ReadError::Cancelled);
+    }
+    let lookup =
+        view.pointer_catalog_lookup(layout, crab_metadata::capsule_protocol::MAX_CATALOG_BYTES)?;
+    verify_installed_pointer_bytes_from(
+        layout,
+        git_dir,
+        view.refs(),
+        DependencyCatalog::Captured {
+            view,
+            lookup: &lookup,
+        },
+        limits,
+        cancellation,
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn verify_installed_pointer_bytes_from(
+    layout: &StoreLayout<Store>,
+    git_dir: &Path,
+    refs: &BTreeMap<String, String>,
+    catalog: DependencyCatalog<'_>,
+    limits: crab_git::walk::PointerScanLimits,
+    cancellation: &CancellationToken,
+) -> Result<PointerProof> {
     let refs = refs
         .iter()
         .map(|(name, oid)| (name.clone(), oid.clone()))
@@ -316,14 +377,10 @@ async fn verify_installed_dependencies_from(
         }
     }
 
-    Ok(CapsuleDependencyProof {
-        catalog_files: counts.files,
-        catalog_shards: counts.shards,
-        catalog_xorbs: counts.xorbs,
-        catalog_objects_read: catalog_stats.object_read_count,
-        reachable_crab_pointers: scan.pointers.len() as u64,
-        reachable_lfs_objects: lfs_objects.len() as u64,
-        reachable_lfs_bytes: lfs_objects.values().try_fold(0_u64, |total, size| {
+    Ok(PointerProof {
+        crab: scan.pointers.len() as u64,
+        lfs_objects: lfs_objects.len() as u64,
+        lfs_bytes: lfs_objects.values().try_fold(0_u64, |total, size| {
             total
                 .checked_add(*size)
                 .ok_or_else(|| ReadError::internal("LFS dependency byte count overflowed"))

@@ -316,17 +316,11 @@ async fn capsule_recipe_probe_does_not_require_browse_maintenance() {
     let checker = StoreChecker::for_capsule_repository(store, prefix, root)
         .await
         .unwrap();
-    let (hash, file) = checker
-        .capsule
-        .as_ref()
-        .unwrap()
-        .catalog
-        .files()
-        .first_key_value()
-        .unwrap();
+    // The fixture's original user bytes define the expected pointer, independent
+    // of how the checker stores or queries its catalog.
     let pointer = Pointer {
-        file_hash: MerkleHash::from_hex(hash).unwrap().into(),
-        size: file.size(),
+        file_hash: blake3::hash(&[0x61; 1024]).into(),
+        size: 1024,
         shard_hint: None,
     };
     let proof = checker

@@ -157,6 +157,7 @@ fn decode(bytes: &[u8]) -> Result<Vec<Record>> {
 }
 
 impl Row for Record {
+    type Key = [u8; 33];
     const TARGET_BYTES: usize = BLOCK_ROWS * ROW_BYTES;
     const MAX_BYTES: u64 = MAX_BLOCK_BYTES;
     fn key(&self) -> &[u8; 33] {

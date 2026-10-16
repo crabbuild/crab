@@ -15,6 +15,70 @@ pub(super) struct Entry {
 }
 
 impl Entry {
+    fn external_object(self) -> Result<PointerCatalogObject> {
+        let hash = hex(&self.key[1..])?;
+        let size = u64::from_be_bytes(
+            self.value[..8]
+                .try_into()
+                .map_err(|_| corrupt("object size is truncated"))?,
+        );
+        let object = match self.key[0] {
+            1 => PointerCatalogObject::Shard {
+                hash,
+                entry: ShardCatalogEntry::new(
+                    size,
+                    self.value[8..]
+                        .as_chunks::<32>()
+                        .0
+                        .iter()
+                        .map(|value| hex(value))
+                        .collect::<Result<_>>()?,
+                ),
+            },
+            2 => PointerCatalogObject::Xorb {
+                hash,
+                entry: XorbCatalogEntry::new(
+                    size,
+                    hex(&self.value[8..40])?,
+                    self.value[40..]
+                        .as_chunks::<36>()
+                        .0
+                        .iter()
+                        .map(|chunk| {
+                            Ok(XorbChunkEntry::new(
+                                hex(&chunk[..32])?,
+                                u32::from_be_bytes(
+                                    chunk[32..]
+                                        .try_into()
+                                        .map_err(|_| corrupt("chunk size is truncated"))?,
+                                ),
+                            ))
+                        })
+                        .collect::<Result<_>>()?,
+                ),
+            },
+            _ => return Err(corrupt("logical catalog object kind differs")),
+        };
+        Ok(object)
+    }
+    fn encode_rows<'a>(rows: impl ExactSizeIterator<Item = &'a Self>) -> Result<Bytes> {
+        let count = rows.len();
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&(count as u32).to_be_bytes());
+        for row in rows {
+            row.validate()?;
+            bytes.extend_from_slice(&row.key);
+            bytes.extend_from_slice(&row.rank.to_be_bytes());
+            let size = u32::try_from(row.value.len())
+                .map_err(|_| corrupt("logical spill value exceeds its length field"))?;
+            bytes.extend_from_slice(&size.to_be_bytes());
+            bytes.extend_from_slice(&row.value);
+        }
+        if count == 0 || count > 4096 || bytes.len() as u64 > Self::MAX_BYTES {
+            return Err(corrupt("logical catalog spill block exceeds its bound"));
+        }
+        Ok(bytes.into())
+    }
     fn new(kind: u8, identity: &str, rank: u64, value: Vec<u8>) -> Result<Self> {
         let mut key = [0; 33];
         key[0] = kind;
@@ -62,6 +126,7 @@ impl Entry {
 }
 
 impl Row for Entry {
+    type Key = [u8; 33];
     const TARGET_BYTES: usize = 512 * 1024;
     const MAX_BYTES: u64 = MAX_CATALOG_BYTES + 128;
     fn key(&self) -> &[u8; 33] {
@@ -91,21 +156,7 @@ impl Row for Entry {
         Ok(())
     }
     fn encode(rows: &[Self]) -> Result<Bytes> {
-        let mut bytes = MAGIC.to_vec();
-        bytes.extend_from_slice(&(rows.len() as u32).to_be_bytes());
-        for row in rows {
-            row.validate()?;
-            bytes.extend_from_slice(&row.key);
-            bytes.extend_from_slice(&row.rank.to_be_bytes());
-            let size = u32::try_from(row.value.len())
-                .map_err(|_| corrupt("logical spill value exceeds its length field"))?;
-            bytes.extend_from_slice(&size.to_be_bytes());
-            bytes.extend_from_slice(&row.value);
-        }
-        if rows.is_empty() || rows.len() > 4096 || bytes.len() as u64 > Self::MAX_BYTES {
-            return Err(corrupt("logical catalog spill block exceeds its bound"));
-        }
-        Ok(bytes.into())
+        Self::encode_rows(rows.iter())
     }
     fn decode(bytes: Bytes) -> Result<Vec<Self>> {
         if bytes.len() < 12 || bytes.get(..8) != Some(MAGIC.as_slice()) {
@@ -358,50 +409,7 @@ impl PointerCatalogInspection {
             if row.key[0] == 0 {
                 continue;
             }
-            let hash = hex(&row.key[1..])?;
-            let size = u64::from_be_bytes(
-                row.value[..8]
-                    .try_into()
-                    .map_err(|_| corrupt("object size is truncated"))?,
-            );
-            let object = match row.key[0] {
-                1 => PointerCatalogObject::Shard {
-                    hash,
-                    entry: ShardCatalogEntry::new(
-                        size,
-                        row.value[8..]
-                            .as_chunks::<32>()
-                            .0
-                            .iter()
-                            .map(|value| hex(value))
-                            .collect::<Result<_>>()?,
-                    ),
-                },
-                2 => PointerCatalogObject::Xorb {
-                    hash,
-                    entry: XorbCatalogEntry::new(
-                        size,
-                        hex(&row.value[8..40])?,
-                        row.value[40..]
-                            .as_chunks::<36>()
-                            .0
-                            .iter()
-                            .map(|chunk| {
-                                Ok(XorbChunkEntry::new(
-                                    hex(&chunk[..32])?,
-                                    u32::from_be_bytes(
-                                        chunk[32..]
-                                            .try_into()
-                                            .map_err(|_| corrupt("chunk size is truncated"))?,
-                                    ),
-                                ))
-                            })
-                            .collect::<Result<_>>()?,
-                    ),
-                },
-                _ => return Err(corrupt("logical catalog object kind differs")),
-            };
-            return Ok(Some(object));
+            return row.external_object().map(Some);
         }
         Ok(None)
     }
@@ -492,6 +500,9 @@ pub async fn inspect_pointer_catalog(
     .await;
     inspector.finish(checked).await
 }
+
+mod grouped;
+pub use grouped::{PointerCatalogEntry, PointerCatalogShardInspection};
 
 #[cfg(test)]
 mod tests;

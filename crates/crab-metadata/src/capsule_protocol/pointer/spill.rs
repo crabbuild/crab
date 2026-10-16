@@ -1,12 +1,12 @@
 //! Bounded sorted reductions over authenticated private spill blocks.
 use super::*;
 use crab_storage::scratch::{ScratchFile, ScratchSpace};
-use std::collections::VecDeque;
 
 pub(super) trait Row: Sized {
+    type Key: Ord + Clone;
     const TARGET_BYTES: usize;
     const MAX_BYTES: u64;
-    fn key(&self) -> &[u8; 33];
+    fn key(&self) -> &Self::Key;
     fn bytes(&self) -> usize;
     fn merge(&mut self, other: Self) -> Result<()>;
     fn encode(rows: &[Self]) -> Result<Bytes>;
@@ -27,37 +27,54 @@ impl Run {
     }
 }
 
-pub(super) struct Cursor<R> {
-    files: VecDeque<ScratchFile>,
+pub(super) struct Cursor<R: Row> {
+    files: Vec<ScratchFile>,
+    next_file: usize,
     rows: std::vec::IntoIter<R>,
-    previous: Option<[u8; 33]>,
+    previous: Option<R::Key>,
 }
 
 impl<R: Row> Cursor<R> {
     pub(super) fn new(run: Run) -> Self {
         Self {
-            files: run.files.into(),
+            files: run.files,
+            next_file: 0,
             rows: Vec::new().into_iter(),
             previous: None,
         }
     }
 
+    pub(super) fn restart(mut self) -> Self {
+        self.next_file = 0;
+        self.rows = Vec::new().into_iter();
+        self.previous = None;
+        self
+    }
+
+    pub(super) fn into_run(self) -> Run {
+        Run { files: self.files }
+    }
+
     pub(super) async fn next(&mut self, space: &ScratchSpace) -> Result<Option<R>> {
         loop {
             if let Some(row) = self.rows.as_slice().first() {
-                if self.previous.is_some_and(|previous| previous >= *row.key()) {
+                if self
+                    .previous
+                    .as_ref()
+                    .is_some_and(|previous| previous >= row.key())
+                {
                     return Err(corrupt("inspection spill rows are not strictly ordered"));
                 }
-                self.previous = Some(*row.key());
+                self.previous = Some(row.key().clone());
                 return Ok(self.rows.next());
             }
-            let Some(file) = self.files.front() else {
+            let Some(file) = self.files.get(self.next_file) else {
                 return Ok(None);
             };
             // A caller can cancel and resume this read. Commit progression only
             // after verified I/O and decoding, or the unread block is lost.
             let rows = R::decode(space.read(file, R::MAX_BYTES).await?)?;
-            let _ = self.files.pop_front();
+            self.next_file += 1;
             self.rows = rows.into_iter();
         }
     }

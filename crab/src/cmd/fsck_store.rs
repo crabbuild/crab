@@ -3,8 +3,7 @@
 //! Wraps the real `Store`, ref store, and manifest state to perform
 //! actual storage queries and repairs for `crab fsck`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::io::Cursor;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -30,7 +29,7 @@ use crab_storage::repo_pack_path;
 use crab_types::pointer::Pointer;
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::ShardReader;
-use crab_xet::xorb::format::MAX_XORB_SIZE;
+#[cfg(test)]
 use crab_xet::xorb::parser::XorbParser;
 
 const MAX_FSCK_SHARD_BYTES: u64 = 512 * 1024 * 1024;
@@ -93,7 +92,7 @@ pub struct StoreChecker {
 
 struct CapsuleFsckState {
     view: crab_read::capsule_protocol::CapsuleRepositoryView,
-    catalog: crab_metadata::capsule_protocol::PointerCatalog,
+    lookup: crab_metadata::capsule_protocol::PointerCatalogLookup,
     source_lifetime: Arc<crab_metadata::capsule_protocol::RetainedCapsuleSources>,
     browse_lifetime:
         Arc<tokio::sync::OnceCell<crab_metadata::capsule_protocol::BrowseRetentionCapture>>,
@@ -136,7 +135,14 @@ impl StoreChecker {
             },
         )
         .await?;
-        let catalog = view.pointer_catalog().await?;
+        let lookup = view
+            .pointer_catalog_lookup(&layout, crab_metadata::capsule_protocol::MAX_CATALOG_BYTES)?;
+        // Validate the complete capture before any phase can report success.
+        // Keep spill ownership within the operation; later phases retain roots.
+        view.pointer_catalog_inspection()
+            .await?
+            .finish(Ok::<_, crab_metadata::error::MetadataError>(()))
+            .await?;
         let source_lifetime = verify_capsule_history(&layout, view.root().root()).await?;
         Ok(Self {
             store,
@@ -145,7 +151,7 @@ impl StoreChecker {
             multipart_journal: None,
             capsule: Some(CapsuleFsckState {
                 view,
-                catalog,
+                lookup,
                 source_lifetime: Arc::new(source_lifetime),
                 browse_lifetime: Arc::new(tokio::sync::OnceCell::new()),
                 git_workspace: tokio::sync::OnceCell::new(),
@@ -176,75 +182,7 @@ impl StoreChecker {
                 )
             })
             .await?;
-        let mut issues = Vec::new();
-
-        for (hash, entry) in state.catalog.xorbs() {
-            if entry.encoded_size() > MAX_XORB_SIZE as u64 {
-                issues.push(FsckIssue::corrupt_xorb(
-                    hash,
-                    format!(
-                        "catalog size {} exceeds the xorb limit {MAX_XORB_SIZE}",
-                        entry.encoded_size()
-                    ),
-                ));
-                continue;
-            }
-            let xorb_hash = MerkleHash::from_hex(hash).map_err(|error| {
-                CrabError::Internal(format!(
-                    "validated xorb catalog hash became invalid: {error}"
-                ))
-            })?;
-            let path = self.router.xorb_path(&xorb_hash);
-            let body = match self
-                .store
-                .get_with_etag_bounded(&path, entry.encoded_size())
-                .await
-            {
-                Ok((body, _)) => body,
-                Err(CrabError::NotFound { .. }) => {
-                    issues.push(FsckIssue::missing_xorb(hash));
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            if let Err(detail) = validate_catalog_xorb(hash, entry, body) {
-                issues.push(FsckIssue::corrupt_xorb(hash, detail));
-            }
-        }
-
-        for (hash, entry) in state.catalog.shards() {
-            if entry.encoded_size() > MAX_FSCK_SHARD_BYTES {
-                issues.push(FsckIssue::corrupt_shard(
-                    hash,
-                    format!(
-                        "catalog size {} exceeds the shard limit {MAX_FSCK_SHARD_BYTES}",
-                        entry.encoded_size()
-                    ),
-                ));
-                continue;
-            }
-            let shard_hash = MerkleHash::from_hex(hash).map_err(|error| {
-                CrabError::Internal(format!(
-                    "validated shard catalog hash became invalid: {error}"
-                ))
-            })?;
-            let path = self.router.shard_path(&shard_hash);
-            let body = match self
-                .store
-                .get_with_etag_bounded(&path, entry.encoded_size())
-                .await
-            {
-                Ok((body, _)) => body,
-                Err(CrabError::NotFound { .. }) => {
-                    issues.push(FsckIssue::missing_shard(hash));
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            if let Err(detail) = validate_catalog_shard(hash, entry, &state.catalog, body) {
-                issues.push(FsckIssue::corrupt_shard(hash, detail));
-            }
-        }
+        let issues = catalog::check_objects(&layout, &state.view, &state.lookup).await?;
 
         if issues.is_empty() {
             // Keep the authenticated Git database across phases. Catalog bodies
@@ -255,11 +193,12 @@ impl StoreChecker {
                     check_capsule_git_connectivity(&self.store, &self.router, state)
                 })
                 .await?;
-            crab_read::capsule_protocol::verify_installed_dependencies(
+            // Object/catalog proof above is stronger than the shared descriptor
+            // pass. Reuse only the canonical Git and whole-file/LFS byte phase.
+            crab_read::capsule_protocol::verify_captured_installed_pointer_bytes(
                 &layout,
                 workspace.path(),
-                state.view.refs(),
-                &state.catalog,
+                &state.view,
                 CAPSULE_GIT_SCAN_LIMITS,
                 &CancellationToken::new(),
             )
@@ -336,60 +275,74 @@ impl StoreChecker {
         let mut issues = Vec::new();
         let mut verified = 0u64;
         let mut recipes = blake3::Hasher::new_derive_key("crab verified pointer recipes v1");
-        for (file_hash, expected_size) in expected {
-            crate::core::error::check_cancelled(cancel)?;
-            let Some(entry) = state.catalog.files().get(&file_hash.hex()) else {
-                issues.push(PointerDataIssue {
-                    file_hash: file_hash.hex(),
-                    expected_size,
-                    kind: PointerDataIssueKind::Missing,
-                    detail: format!(
-                        "pointer {} has no recipe in the captured capsule catalog",
-                        file_hash.hex()
-                    ),
-                });
-                continue;
+        let mut expected = expected.into_iter();
+        loop {
+            let batch = expected.by_ref().take(64).collect::<Vec<_>>();
+            if batch.is_empty() {
+                break;
+            }
+            let hashes = batch.iter().map(|(hash, _)| hash.hex()).collect::<Vec<_>>();
+            let selected = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                result = state.lookup.files(origin_layout.store(), &hashes) => result?,
             };
-            let shard_hash = MerkleHash::from_hex(entry.shard_hash()).map_err(|error| {
-                CrabError::CorruptObject {
-                    path: entry.shard_hash().to_owned(),
-                    reason: format!("capsule catalog shard identity is invalid: {error}"),
-                }
-            })?;
-            let pointer = Pointer {
-                file_hash: file_hash.into(),
-                size: expected_size,
-                shard_hint: None,
-            };
-            match crab_read::verify_catalog_file_recipe(&origin_layout, &pointer, entry, cancel)
-                .await
-            {
-                Ok(file_info) => {
-                    verified += 1;
-                    recipes.update(&pointer.file_hash);
-                    recipes.update(&pointer.size.to_le_bytes());
-                    recipes.update(shard_hash.as_bytes());
-                    let mut recipe = blake3::Hasher::new_derive_key("crab shard file recipe v1");
-                    file_info.serialize(&mut recipe)?;
-                    recipes.update(recipe.finalize().as_bytes());
-                }
-                Err(crab_read::ReadError::Cancelled) => return Err(CrabError::Cancelled),
-                Err(error) => {
-                    let kind = match &error {
-                        crab_read::ReadError::Xet(_) => PointerDataIssueKind::Corrupt,
-                        _ => PointerDataIssueKind::Unverifiable,
-                    };
-                    let error = CrabError::from(error);
+            for (file_hash, expected_size) in batch {
+                crate::core::error::check_cancelled(cancel)?;
+                let Some(entry) = selected.files().get(&file_hash.hex()) else {
                     issues.push(PointerDataIssue {
                         file_hash: file_hash.hex(),
                         expected_size,
-                        kind: if kind == PointerDataIssueKind::Corrupt {
-                            kind
-                        } else {
-                            PointerDataIssueKind::from_error(&error)
-                        },
-                        detail: error.to_string(),
+                        kind: PointerDataIssueKind::Missing,
+                        detail: format!(
+                            "pointer {} has no recipe in the captured capsule catalog",
+                            file_hash.hex()
+                        ),
                     });
+                    continue;
+                };
+                let shard_hash = MerkleHash::from_hex(entry.shard_hash()).map_err(|error| {
+                    CrabError::CorruptObject {
+                        path: entry.shard_hash().to_owned(),
+                        reason: format!("capsule catalog shard identity is invalid: {error}"),
+                    }
+                })?;
+                let pointer = Pointer {
+                    file_hash: file_hash.into(),
+                    size: expected_size,
+                    shard_hint: None,
+                };
+                match crab_read::verify_catalog_file_recipe(&origin_layout, &pointer, entry, cancel)
+                    .await
+                {
+                    Ok(file_info) => {
+                        verified += 1;
+                        recipes.update(&pointer.file_hash);
+                        recipes.update(&pointer.size.to_le_bytes());
+                        recipes.update(shard_hash.as_bytes());
+                        let mut recipe =
+                            blake3::Hasher::new_derive_key("crab shard file recipe v1");
+                        file_info.serialize(&mut recipe)?;
+                        recipes.update(recipe.finalize().as_bytes());
+                    }
+                    Err(crab_read::ReadError::Cancelled) => return Err(CrabError::Cancelled),
+                    Err(error) => {
+                        let kind = match &error {
+                            crab_read::ReadError::Xet(_) => PointerDataIssueKind::Corrupt,
+                            _ => PointerDataIssueKind::Unverifiable,
+                        };
+                        let error = CrabError::from(error);
+                        issues.push(PointerDataIssue {
+                            file_hash: file_hash.hex(),
+                            expected_size,
+                            kind: if kind == PointerDataIssueKind::Corrupt {
+                                kind
+                            } else {
+                                PointerDataIssueKind::from_error(&error)
+                            },
+                            detail: error.to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -1086,157 +1039,6 @@ fn insert_history_pointer<T: Clone + PartialEq>(
     Ok(())
 }
 
-fn validate_catalog_xorb(
-    hash: &str,
-    entry: &crab_metadata::capsule_protocol::XorbCatalogEntry,
-    body: bytes::Bytes,
-) -> std::result::Result<(), String> {
-    if body.len() as u64 != entry.encoded_size() {
-        return Err(format!(
-            "stored size is {}, catalog declares {}",
-            body.len(),
-            entry.encoded_size()
-        ));
-    }
-    let body_digest = blake3::hash(&body).to_hex().to_string();
-    if body_digest != entry.body_digest() {
-        return Err(format!(
-            "stored body digest is {body_digest}, catalog declares {}",
-            entry.body_digest()
-        ));
-    }
-    let parser = XorbParser::parse(body).map_err(|error| error.to_string())?;
-    if parser.hash().hex() != hash {
-        return Err(format!(
-            "stored logical identity is {}, catalog key is {hash}",
-            parser.hash().hex()
-        ));
-    }
-    parser
-        .verify_payload_digest()
-        .and_then(|()| parser.verify_all_chunks())
-        .map_err(|error| error.to_string())?;
-    if parser.num_chunks() as usize != entry.chunks().len() {
-        return Err(format!(
-            "stored chunk count is {}, catalog declares {}",
-            parser.num_chunks(),
-            entry.chunks().len()
-        ));
-    }
-    for (index, expected) in entry.chunks().iter().enumerate() {
-        let index = u32::try_from(index)
-            .map_err(|_| "catalog xorb chunk index cannot be represented".to_owned())?;
-        let actual = parser
-            .chunk_meta(index)
-            .map_err(|error| error.to_string())?;
-        if actual.hash.hex() != expected.hash()
-            || actual.uncompressed_len != expected.uncompressed_size()
-        {
-            return Err(format!(
-                "stored chunk {index} does not match its catalog hash and size"
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_catalog_shard(
-    hash: &str,
-    entry: &crab_metadata::capsule_protocol::ShardCatalogEntry,
-    catalog: &crab_metadata::capsule_protocol::PointerCatalog,
-    body: bytes::Bytes,
-) -> std::result::Result<(), String> {
-    if body.len() as u64 != entry.encoded_size() {
-        return Err(format!(
-            "stored size is {}, catalog declares {}",
-            body.len(),
-            entry.encoded_size()
-        ));
-    }
-    let shard_hash = MerkleHash::from_hex(hash).map_err(|error| error.to_string())?;
-    let actual_hash = crab_xet::hash::compute_data_hash(&body);
-    if actual_hash != shard_hash {
-        return Err(format!(
-            "stored content identity is {}, catalog key is {hash}",
-            actual_hash.hex()
-        ));
-    }
-
-    let mut actual_xorbs = BTreeSet::new();
-    let mut cursor = Cursor::new(crab_xet::shard_parse::strip_bloom_trailer(&body));
-    crab_xet::shard_parse::visit_xorb_chunks_from_reader(&mut cursor, |xorb_hash, _, _, _| {
-        actual_xorbs.insert(xorb_hash.hex());
-        Ok(())
-    })
-    .map_err(|error| error.to_string())?;
-    let expected_xorbs = entry.xorb_hashes().iter().cloned().collect::<BTreeSet<_>>();
-    if actual_xorbs != expected_xorbs {
-        return Err("stored xorb closure differs from the authenticated catalog".to_owned());
-    }
-
-    let reader = ShardReader::from_bytes(body, shard_hash);
-    let mut dependencies = Vec::with_capacity(entry.xorb_hashes().len());
-    for xorb_hash in entry.xorb_hashes() {
-        let parsed_hash = MerkleHash::from_hex(xorb_hash).map_err(|error| error.to_string())?;
-        let dependency = reader
-            .get_xorb_info(&parsed_hash)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("stored shard lacks catalogued xorb {xorb_hash}"))?;
-        let expected = catalog
-            .xorbs()
-            .get(xorb_hash)
-            .ok_or_else(|| format!("catalog lacks shard xorb {xorb_hash}"))?;
-        if dependency.chunks.len() != expected.chunks().len()
-            || dependency
-                .chunks
-                .iter()
-                .zip(expected.chunks())
-                .any(|(actual, expected)| {
-                    actual.chunk_hash.hex() != expected.hash()
-                        || actual.unpacked_segment_bytes != expected.uncompressed_size()
-                })
-        {
-            return Err(format!(
-                "stored shard metadata for xorb {xorb_hash} differs from the catalog"
-            ));
-        }
-        dependencies.push(dependency);
-    }
-
-    for (file_hash, expected) in catalog
-        .files()
-        .iter()
-        .filter(|(_, file)| file.shard_hash() == hash)
-    {
-        let parsed_hash = MerkleHash::from_hex(file_hash).map_err(|error| error.to_string())?;
-        let file = reader
-            .get_file_info(&parsed_hash)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("stored shard lacks catalogued file {file_hash}"))?;
-        if file.metadata.file_hash != parsed_hash
-            || file.metadata.num_entries as usize != file.segments.len()
-        {
-            return Err(format!(
-                "stored recipe header for file {file_hash} is inconsistent"
-            ));
-        }
-        let size = file.segments.iter().try_fold(0_u64, |total, segment| {
-            total
-                .checked_add(u64::from(segment.unpacked_segment_bytes))
-                .ok_or_else(|| format!("stored recipe size for file {file_hash} overflowed"))
-        })?;
-        if size != expected.size() {
-            return Err(format!(
-                "stored recipe for file {file_hash} covers {size} bytes, catalog declares {}",
-                expected.size()
-            ));
-        }
-        crab_xet::shard::validate_file_bundle(&file, &dependencies)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
 async fn install_capsule_git_packs(
     view: crab_read::capsule_protocol::CapsuleRepositoryView,
     layout: crab_storage::StoreLayout<crab_storage::Store>,
@@ -1799,6 +1601,8 @@ fn unix_now() -> i64 {
         .and_then(|duration| i64::try_from(duration.as_secs()).ok())
         .unwrap_or(0)
 }
+
+mod catalog;
 
 #[cfg(test)]
 mod verification_tests;

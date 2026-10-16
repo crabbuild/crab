@@ -698,3 +698,25 @@ async fn captured_binding_batches_do_not_repeat_file_reconstruction() {
         (66, baseline)
     );
 }
+
+#[tokio::test]
+async fn pointer_byte_phase_checks_selected_closures_without_claiming_global_catalog_health() {
+    let (layout, mut catalog, workspace, refs) = fixture("valid").await;
+    catalog
+        .insert_file("a".repeat(64), FileCatalogEntry::new(7, "b".repeat(64)))
+        .unwrap();
+    let view = captured_catalog(&layout, &catalog, &refs).await;
+    verify_captured_installed_pointer_bytes(
+        &layout,
+        &workspace.path().join("repository.git"),
+        &view,
+        SCAN_LIMITS,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        verify_fixture(&layout, workspace.path(), &refs, &catalog, true).await,
+        Err(ReadError::Metadata(_))
+    ));
+}

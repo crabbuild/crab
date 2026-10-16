@@ -24,7 +24,10 @@ use tokio_util::sync::CancellationToken;
 use crate::{ReadError, Result};
 
 mod dependency;
-pub use dependency::{verify_installed_dependencies, verify_reachable_dependencies};
+pub use dependency::{
+    verify_captured_installed_pointer_bytes, verify_installed_dependencies,
+    verify_reachable_dependencies,
+};
 
 #[cfg(test)]
 mod visibility_tests;
@@ -5927,6 +5930,30 @@ mod tests {
                 .await,
                 Err(ReadError::IncompleteCatalogView)
             ));
+            let workspace = tempfile::tempdir().unwrap();
+            for cancelled in [false, true] {
+                let cancel = CancellationToken::new();
+                if cancelled {
+                    cancel.cancel();
+                }
+                let result = verify_captured_installed_pointer_bytes(
+                    &router,
+                    &workspace.path().join("absent.git"),
+                    &fetch,
+                    crab_git::walk::PointerScanLimits {
+                        objects: 16,
+                        lookups: 64,
+                        allocation_bytes: 1024 * 1024,
+                    },
+                    &cancel,
+                )
+                .await;
+                if cancelled {
+                    assert!(matches!(result, Err(ReadError::Cancelled)));
+                } else {
+                    assert!(matches!(result, Err(ReadError::IncompleteCatalogView)));
+                }
+            }
             assert!(observer.observations.lock().unwrap().is_empty());
             let complete = open_git_view_from_root(&router, root, TEST_LIMITS)
                 .await

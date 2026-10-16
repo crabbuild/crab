@@ -19,7 +19,8 @@ mod relations;
 pub(super) mod spill;
 #[cfg(feature = "storage")]
 pub use inspection::{
-    PointerCatalogCounts, PointerCatalogInspection, PointerCatalogObject, inspect_pointer_catalog,
+    PointerCatalogCounts, PointerCatalogEntry, PointerCatalogInspection, PointerCatalogObject,
+    PointerCatalogShardInspection, inspect_pointer_catalog,
 };
 pub use paged::MAX_CATALOG_BYTES;
 #[cfg(feature = "storage")]

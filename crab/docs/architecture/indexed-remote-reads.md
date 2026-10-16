@@ -2550,8 +2550,18 @@ Deep reachable-dependency verification now streams that same proof and physical
 body checks before batching reachable file bindings from the captured roots.
 Metadata diagnosis and rebuild summaries consume verified cardinalities without
 a separate materialization. Recovery's assembled replacement catalogs share the
-same Git scan and whole-file/LFS verification owner. Current fsck payload
-verification, restore accounting and catalog-rewriting tools retain full logical catalogs. Materialization admission continues to
+same Git scan and whole-file/LFS verification owner. Current fsck also streams
+its complete metadata proof. A private external reduction groups final file
+bindings by shard, so one shard body and its dependency metadata serve batches
+of 64 bindings. Xorb decoded-chunk checks, exact shard/xorb metadata comparisons,
+file headers, sizes and reconstruction term validation remain required. The
+subsequent canonical Git/whole-file/LFS phase does not repeat the weaker physical
+descriptor pass. Constructor admission completes and closes its own inspection;
+a later full-data phase opens a fresh inspection of the same pinned sources.
+This can scan metadata twice, but avoids retaining operation spill across checker
+phases and prevents an unrelated phase from reporting success before full proof.
+Ordinary GC and replica readiness do not perform shard grouping. Restore
+accounting and catalog-rewriting tools retain full logical catalogs. Materialization admission continues to
 protect those callers retaining recipe copies.
 
 Release audit: all six upstream published tag objects were checked again before

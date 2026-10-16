@@ -55,6 +55,8 @@ Trace one path: `crates/crab-write/src/journal.rs` → `commit_ref_transaction` 
 - `PointerCatalogInspection` exposes external descriptors only after complete
   precedence/conflict/dependency proof. Await `finish` on all returned paths;
   cancelled reads must resume without losing a block or object.
+  Consuming `group_by_shard` replays the complete capture and retires its input
+  run before returning; grouped cursors retain the same finish/cleanup contract.
   Source: `crates/crab-metadata/src/capsule_protocol/pointer/inspection.rs`.
 
 ## Features and platform
