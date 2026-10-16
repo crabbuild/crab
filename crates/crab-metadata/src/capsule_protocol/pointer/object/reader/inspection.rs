@@ -31,10 +31,18 @@ impl CatalogPages {
         store: &Store,
         maximum: u64,
         output: &mut crate::capsule_protocol::pointer::inspection::Inspector,
-    ) -> Result<()> {
-        // The complete physical proof includes reverse placement and alias checks.
-        // Streaming logical rows must not hide corruption in an unselected column.
-        self.inspected_objects(store, maximum).await?;
+    ) -> Result<(u64, u64)> {
+        // Retain the authenticated inventory totals for accounting. Repeating the
+        // physical proof after consuming the logical rows doubles origin work.
+        let footprint = {
+            let objects = self.inspected_objects(store, maximum).await?;
+            let bytes = objects.iter().try_fold(0_u64, |total, (_, bytes)| {
+                total
+                    .checked_add(*bytes)
+                    .ok_or_else(|| corrupt("checkpoint catalog byte count overflows"))
+            })?;
+            (objects.len() as u64, bytes)
+        };
         let mut work = PageWork::new(maximum, 0);
         for kind in [Kind::CatalogFiles, Kind::CatalogShards, Kind::CatalogXorbs] {
             let mut pending = self.root(kind)?.cloned().into_iter().collect();
@@ -82,7 +90,7 @@ impl CatalogPages {
                 }
             }
         }
-        Ok(())
+        Ok(footprint)
     }
 
     async fn inspect(&self, store: &Store, work: &mut PageWork, join: &mut Join) -> Result<()> {

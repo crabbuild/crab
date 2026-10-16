@@ -524,13 +524,22 @@ pub async fn verify_capsule_pointer_catalog_objects(
     Ok(stats)
 }
 
+pub(crate) struct CatalogVerification {
+    pub counts: PointerCatalogCounts,
+    pub stats: ReadinessProbeStats,
+    pub payload_bytes: u64,
+    pub checkpoint_objects: u64,
+    pub checkpoint_bytes: u64,
+}
+
 pub(crate) async fn verify_capsule_pointer_inspection(
     router: &StoreLayout<Store>,
     mut catalog: PointerCatalogInspection,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<(PointerCatalogCounts, ReadinessProbeStats, u64)> {
+) -> Result<CatalogVerification> {
     let counts = catalog.counts();
     let payload_bytes = catalog.encoded_payload_bytes();
+    let (checkpoint_objects, checkpoint_bytes) = catalog.checkpoint_catalog_footprint();
     let mut stats = ReadinessProbeStats::default();
     let result = tokio::select! {
         biased;
@@ -544,7 +553,7 @@ pub(crate) async fn verify_capsule_pointer_inspection(
                     reason,
                 });
             }
-            Ok((counts, stats, payload_bytes))
+            Ok(CatalogVerification { counts, stats, payload_bytes, checkpoint_objects, checkpoint_bytes })
         } => result,
     };
     catalog.finish(result).await

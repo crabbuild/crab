@@ -332,6 +332,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inspection_retains_authenticated_inventory_for_empty_and_nonempty_catalogs() {
+        for catalog in [PointerCatalog::new(), fixture().2] {
+            let (layout, _, _) = fixture();
+            let (pages, objects) = Descriptor::build(&catalog).unwrap();
+            let source = CheckpointCatalog::new(pages).unwrap();
+            publish_objects(&layout, &objects).await.unwrap();
+            let expected = (
+                objects.len() as u64,
+                objects.values().map(|body| body.len() as u64).sum(),
+            );
+            let mut inspection = crate::capsule_protocol::inspect_pointer_catalog(
+                &layout,
+                Some(&source),
+                &[],
+                &[],
+                crate::capsule_protocol::MAX_CATALOG_BYTES,
+            )
+            .await
+            .unwrap();
+            while inspection.next_object().await.unwrap().is_some() {}
+            let actual = inspection.checkpoint_catalog_footprint();
+            inspection
+                .finish::<_, crate::error::MetadataError>(Ok(()))
+                .await
+                .unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[tokio::test]
     async fn cold_checkpoint_load_admits_catalog_before_reading_and_verifies_its_body() {
         let (layout, checkpoint, catalog) = fixture();
         let pointer = checkpoint.pointer().unwrap();

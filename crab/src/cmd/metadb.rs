@@ -2839,34 +2839,23 @@ async fn verify_capsule_file_index(
     root: crab_metadata::capsule_protocol::RootSnapshot,
     entries: &[(MerkleHash, MerkleHash)],
 ) -> Result<Vec<bool>> {
-    let view = crab_read::capsule_protocol::open_view_from_root(
-        layout,
-        root,
-        crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
-            max_frontier_bytes: CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
-        },
-    )
-    .await?;
-    Ok(capsule_file_index_matches(
-        &view.pointer_catalog().await?,
-        entries,
-    ))
-}
-
-fn capsule_file_index_matches(
-    catalog: &crab_metadata::capsule_protocol::PointerCatalog,
-    entries: &[(MerkleHash, MerkleHash)],
-) -> Vec<bool> {
-    entries
-        .iter()
-        .map(|(file_hash, expected_shard)| {
+    // Recovery verifies selected mappings, not global payload health. Capture
+    // once so every batch sees the same file-binding precedence during pushes.
+    let lookup =
+        crab_metadata::capsule_protocol::load_pointer_catalog_lookup_from_root(layout, &root)
+            .await?;
+    let mut verified = Vec::with_capacity(entries.len());
+    for batch in entries.chunks(64) {
+        let hashes = batch.iter().map(|(file, _)| file.hex()).collect::<Vec<_>>();
+        let catalog = lookup.files(layout.store(), &hashes).await?;
+        verified.extend(batch.iter().map(|(file, expected)| {
             catalog
                 .files()
-                .get(&file_hash.hex())
-                .is_some_and(|entry| entry.shard_hash() == expected_shard.hex())
-        })
-        .collect()
+                .get(&file.hex())
+                .is_some_and(|entry| entry.shard_hash() == expected.hex())
+        }));
+    }
+    Ok(verified)
 }
 
 async fn close_rebuild_guard<T>(guard: MetaDbGuard, result: Result<T>) -> Result<T> {
@@ -5071,59 +5060,6 @@ mod tests {
         assert!(legacy_objects.is_empty());
     }
 
-    #[test]
-    fn capsule_file_index_verification_uses_authenticated_mapping() {
-        let file_hash = MerkleHash::from([1; 32]);
-        let expected_shard = MerkleHash::from([2; 32]);
-        let other_shard = MerkleHash::from([3; 32]);
-        let mut catalog = crab_metadata::capsule_protocol::PointerCatalog::new();
-        catalog
-            .insert_file(
-                file_hash.hex(),
-                crab_metadata::capsule_protocol::FileCatalogEntry::new(42, expected_shard.hex()),
-            )
-            .expect("insert file catalog entry");
-
-        assert_eq!(
-            capsule_file_index_matches(
-                &catalog,
-                &[
-                    (file_hash, expected_shard),
-                    (file_hash, other_shard),
-                    (MerkleHash::from([4; 32]), expected_shard),
-                ],
-            ),
-            vec![true, false, false]
-        );
-    }
-
-    #[tokio::test]
-    async fn capsule_file_index_verification_does_not_create_legacy_metadata() {
-        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let storage = crab_storage::Store::new(Arc::clone(&inner));
-        let layout = crab_storage::StoreLayout::new(storage, "org/v2-recover".to_owned());
-        let root =
-            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
-                .await
-                .expect("initialize capsule root");
-
-        let verified = verify_capsule_file_index(
-            &layout,
-            root,
-            &[(MerkleHash::from([1; 32]), MerkleHash::from([2; 32]))],
-        )
-        .await
-        .expect("verify capsule catalog");
-
-        assert_eq!(verified, vec![false]);
-        let legacy_objects = inner
-            .list(Some(&ObjectPath::from("org/v2-recover/file_index_db")))
-            .try_collect::<Vec<_>>()
-            .await
-            .expect("list legacy metadata prefix");
-        assert!(legacy_objects.is_empty());
-    }
-
     #[tokio::test]
     async fn continuous_owner_skips_completed_repository_identity() {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -5854,3 +5790,7 @@ mod tests {
         guard.close().await.expect("close");
     }
 }
+
+#[cfg(test)]
+#[path = "metadb/capsule_lookup_tests.rs"]
+mod capsule_lookup_tests;

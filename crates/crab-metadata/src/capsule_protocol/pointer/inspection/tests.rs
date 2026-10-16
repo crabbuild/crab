@@ -247,7 +247,7 @@ async fn checkpoint_rows_stream_without_per_file_dependency_joins() {
     let checked = cold.inspect_into(&store, maximum, &mut inspector).await;
     assert_eq!(
         inspector
-            .finish(checked)
+            .finish(checked.map(|_| ()))
             .await
             .unwrap()
             .into_shard_hashes()

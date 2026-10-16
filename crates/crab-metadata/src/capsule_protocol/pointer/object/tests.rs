@@ -334,7 +334,7 @@ async fn maintenance_streams_shared_recipes_without_materializing_the_catalog() 
     let checked = cold.inspect_into(&store, maximum, &mut logical).await;
     assert!(
         logical
-            .finish(checked)
+            .finish(checked.map(|_| ()))
             .await
             .unwrap()
             .into_shard_hashes()
@@ -529,7 +529,7 @@ async fn streamed_inspection_rejects_resigned_broken_dependency_edges() {
         let mut logical = crate::capsule_protocol::pointer::inspection::Inspector::new(1024 * 1024);
         let checked = forged.inspect_into(&store, 1024 * 1024, &mut logical).await;
         assert!(
-            logical.finish(checked).await.is_err(),
+            logical.finish(checked.map(|_| ())).await.is_err(),
             "logical: {scenario}"
         );
     }
@@ -610,7 +610,7 @@ async fn streamed_inspection_bounds_io_for_distinct_recipes_beyond_the_page_cach
     let checked = cold.inspect_into(&store, maximum, &mut logical).await;
     assert!(
         logical
-            .finish(checked)
+            .finish(checked.map(|_| ()))
             .await
             .unwrap()
             .into_shard_hashes()

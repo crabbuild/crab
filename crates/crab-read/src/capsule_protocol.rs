@@ -76,6 +76,11 @@ pub struct CapsuleDependencyProof {
     pub catalog_objects_read: u64,
     /// Encoded bytes of all distinct, verified catalog shard and xorb bodies.
     pub catalog_payload_bytes: u64,
+    /// Distinct durable checkpoint catalog objects authenticated by this proof.
+    /// Assembled inputs and captures without such a source contribute zero.
+    pub checkpoint_catalog_objects: u64,
+    /// Encoded bytes of those objects, excluding embedded run catalogs and payload bodies.
+    pub checkpoint_catalog_bytes: u64,
     /// Reachable Crab pointer blobs whose complete file bytes were verified.
     pub reachable_crab_pointers: u64,
     /// Distinct reachable LFS bodies read and hash-verified from origin.

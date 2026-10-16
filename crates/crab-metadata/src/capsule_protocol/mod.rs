@@ -49,7 +49,9 @@ pub use captured_visibility::{
     visibility_is_ready,
 };
 #[cfg(feature = "storage")]
-pub use catalog_capture::load_pointer_catalog_lookup_from_root;
+pub use catalog_capture::{
+    inspect_pointer_catalog_from_root, load_pointer_catalog_lookup_from_root,
+};
 pub use history::{
     HistorySegment, HistorySegmentPointer, HistorySegmentState, MAX_HISTORY_CHAIN_BYTES,
     MAX_HISTORY_CHAIN_SEGMENTS, MAX_HISTORY_SEGMENT_BYTES,

@@ -220,9 +220,8 @@ async fn verify_history(
     check_cancelled(cancel)?;
     let shard_count = dependencies.catalog_shards;
     let xorb_count = dependencies.catalog_xorbs;
-    let catalog_objects = checkpoint.catalog_objects(layout, u64::MAX).await?;
     let dependency_objects = 2_u64
-        .checked_add(catalog_objects.len() as u64)
+        .checked_add(dependencies.checkpoint_catalog_objects)
         .and_then(|total| total.checked_add(source_count))
         .and_then(|total| total.checked_add(shard_count))
         .and_then(|total| total.checked_add(xorb_count))
@@ -230,11 +229,10 @@ async fn verify_history(
         .ok_or_else(|| CrabError::Internal("history dependency count overflowed".to_owned()))?;
     let segment_bytes = u64::try_from(segment.bytes().len())
         .map_err(|_| CrabError::Internal("history segment size overflowed".to_owned()))?;
-    let checkpoint_bytes = catalog_objects
-        .iter()
-        .try_fold(checkpoint.pointer()?.size(), |total, (_, bytes)| {
-            total.checked_add(*bytes)
-        })
+    let checkpoint_bytes = checkpoint
+        .pointer()?
+        .size()
+        .checked_add(dependencies.checkpoint_catalog_bytes)
         .ok_or_else(|| CrabError::Internal("history catalog byte count overflowed".to_owned()))?;
     let dependency_bytes = segment_bytes
         .checked_add(checkpoint_bytes)

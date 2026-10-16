@@ -291,6 +291,7 @@ impl Inspector {
                 rows: Cursor::new(Run::default()),
                 counts: PointerCatalogCounts::default(),
                 payload_bytes: 0,
+                checkpoint_catalog: (0, 0),
             });
         };
         let result: Result<(Run, PointerCatalogCounts, u64)> = async {
@@ -360,6 +361,7 @@ impl Inspector {
                 rows: Cursor::new(run),
                 counts,
                 payload_bytes,
+                checkpoint_catalog: (0, 0),
             }),
             Err(error) => finish(Some(space), Err(error)).await,
         }
@@ -397,6 +399,7 @@ pub struct PointerCatalogInspection {
     rows: Cursor<Entry>,
     counts: PointerCatalogCounts,
     payload_bytes: u64,
+    checkpoint_catalog: (u64, u64),
 }
 
 impl PointerCatalogInspection {
@@ -413,6 +416,15 @@ impl PointerCatalogInspection {
     #[must_use]
     pub fn encoded_payload_bytes(&self) -> u64 {
         self.payload_bytes
+    }
+
+    /// Return distinct checkpoint catalog objects and their encoded bytes authenticated by this capture.
+    ///
+    /// Captures without a checkpoint catalog return `(0, 0)`. Embedded run
+    /// catalogs and external shard/xorb bodies are excluded. No I/O occurs.
+    #[must_use]
+    pub fn checkpoint_catalog_footprint(&self) -> (u64, u64) {
+        self.checkpoint_catalog
     }
 
     async fn next_entry(&mut self) -> Result<Option<Entry>> {
@@ -494,9 +506,10 @@ pub async fn inspect_pointer_catalog(
 ) -> Result<PointerCatalogInspection> {
     let maximum = maximum.min(MAX_CATALOG_BYTES);
     let mut inspector = Inspector::new(maximum);
+    let mut checkpoint_catalog = (0, 0);
     let checked = async {
         if let Some(checkpoint) = checkpoint {
-            checkpoint
+            checkpoint_catalog = checkpoint
                 .reader(layout)?
                 .inspect_into(layout.store(), maximum, &mut inspector)
                 .await?;
@@ -521,7 +534,9 @@ pub async fn inspect_pointer_catalog(
         Ok(())
     }
     .await;
-    inspector.finish(checked).await
+    let mut inspection = inspector.finish(checked).await?;
+    inspection.checkpoint_catalog = checkpoint_catalog;
+    Ok(inspection)
 }
 
 mod grouped;

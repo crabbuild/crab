@@ -281,6 +281,8 @@ async fn installed_dependency_proof_accepts_reordered_repeated_file_chunks() {
                         .values()
                         .map(|entry| entry.encoded_size())
                         .sum::<u64>(),
+                checkpoint_catalog_objects: 0,
+                checkpoint_catalog_bytes: 0,
                 reachable_crab_pointers: 1,
                 reachable_lfs_objects: 0,
                 reachable_lfs_bytes: 0

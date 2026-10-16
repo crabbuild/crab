@@ -2563,6 +2563,16 @@ phases and prevents an unrelated phase from reporting success before full proof.
 Ordinary GC and replica readiness do not perform shard grouping. Historical
 verification uses the same streamed complete catalog/body proof plus checkpoint-
 bound file lookups, preserving checked dependency counts and byte accounting.
+The complete inspection also retains authenticated checkpoint catalog object/byte
+counts. Historical accounting consumes those totals instead of repeating the
+physical catalog walk. Empty durable catalog descriptors remain counted.
+Recovery verifies selected file-index mappings in batches of 64 against one
+captured lookup, including each selected dependency closure. Unrelated catalog
+corruption is outside that selected check; complete inspection remains the
+integrity boundary. Post-fetch shard discovery streams complete inspection from
+the same metadata control-capture owner, retaining shard identities instead of
+all file and xorb recipes. Per-ref head movement still disables generation-only
+shard-list caching.
 Restore's catalog merge and catalog-rewriting tools retain full logical catalogs. Materialization admission continues to
 protect those callers retaining recipe copies.
 

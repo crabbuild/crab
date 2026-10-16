@@ -2,10 +2,10 @@
 use super::pointer::paged::MAX_CATALOG_BYTES;
 use super::{
     CapsuleControl, CapturedVisibility, LayeredCheckpoint, PointerCatalog, PointerCatalogAssembly,
-    PointerCatalogLookup, RootSnapshot, RunCatalogSource, VisibilityReconciliation,
-    apply_control_refs, capture_ref_heads, load_capsule_run_git_control, load_layered_checkpoint,
-    load_layered_checkpoint_control, materialize_visible_ref_heads, order_ref_controls,
-    select_ref_control_frontiers, select_ref_journal_controls,
+    PointerCatalogInspection, PointerCatalogLookup, RootSnapshot, RunCatalogSource,
+    VisibilityReconciliation, apply_control_refs, capture_ref_heads, load_capsule_run_git_control,
+    load_layered_checkpoint, load_layered_checkpoint_control, materialize_visible_ref_heads,
+    order_ref_controls, select_ref_control_frontiers, select_ref_journal_controls,
 };
 use crate::error::{MetadataError, Result};
 use crate::git_visibility::GitVisibilityIndex;
@@ -23,6 +23,28 @@ pub async fn load_pointer_catalog_lookup_from_root(
     root: &RootSnapshot,
 ) -> Result<PointerCatalogLookup> {
     capture(layout, root).await?.lookup(layout)
+}
+
+/// Inspect the complete catalog from one authenticated current-state control capture.
+///
+/// The caller retains captured roots against GC and must finish the returned
+/// spill cursor. Logical rows are normalized without retaining the recipe map.
+pub async fn inspect_pointer_catalog_from_root(
+    layout: &StoreLayout<Store>,
+    root: &RootSnapshot,
+) -> Result<PointerCatalogInspection> {
+    let captured = capture(layout, root).await?;
+    super::inspect_pointer_catalog(
+        layout,
+        captured
+            .checkpoint
+            .as_ref()
+            .and_then(LayeredCheckpoint::catalog),
+        &[],
+        &captured.controls,
+        MAX_CATALOG_BYTES,
+    )
+    .await
 }
 
 pub(super) async fn materialize_from_root(

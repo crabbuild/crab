@@ -31,7 +31,7 @@ impl DependencyCatalog<'_> {
         &self,
         layout: &StoreLayout<Store>,
         cancel: &CancellationToken,
-    ) -> Result<(PointerCatalogCounts, crate::ReadinessProbeStats, u64)> {
+    ) -> Result<crate::selection::CatalogVerification> {
         match self {
             Self::Assembled(catalog) => {
                 let stats = tokio::select! {
@@ -39,14 +39,14 @@ impl DependencyCatalog<'_> {
                     () = cancel.cancelled() => return Err(ReadError::Cancelled),
                     result = crate::verify_capsule_pointer_catalog_objects(layout, catalog) => result?,
                 };
-                Ok((
-                    PointerCatalogCounts {
+                Ok(crate::selection::CatalogVerification {
+                    counts: PointerCatalogCounts {
                         files: catalog.files().len() as u64,
                         shards: catalog.shards().len() as u64,
                         xorbs: catalog.xorbs().len() as u64,
                     },
                     stats,
-                    catalog
+                    payload_bytes: catalog
                         .shards()
                         .values()
                         .map(|entry| entry.encoded_size())
@@ -55,7 +55,10 @@ impl DependencyCatalog<'_> {
                         .ok_or_else(|| {
                             ReadError::internal("catalog payload byte count overflowed")
                         })?,
-                ))
+                    // Assembled input authenticates no durable checkpoint catalog.
+                    checkpoint_objects: 0,
+                    checkpoint_bytes: 0,
+                })
             }
             Self::Captured { view, .. } => {
                 let inspection = view.pointer_catalog_inspection().await?;
@@ -278,16 +281,18 @@ async fn verify_installed_dependencies_from(
     limits: crab_git::walk::PointerScanLimits,
     cancellation: &CancellationToken,
 ) -> Result<CapsuleDependencyProof> {
-    let (counts, catalog_stats, payload_bytes) = catalog.verify(layout, cancellation).await?;
+    let verified = catalog.verify(layout, cancellation).await?;
     let proof =
         verify_installed_pointer_bytes_from(layout, git_dir, refs, catalog, limits, cancellation)
             .await?;
     Ok(CapsuleDependencyProof {
-        catalog_files: counts.files,
-        catalog_shards: counts.shards,
-        catalog_xorbs: counts.xorbs,
-        catalog_objects_read: catalog_stats.object_read_count,
-        catalog_payload_bytes: payload_bytes,
+        catalog_files: verified.counts.files,
+        catalog_shards: verified.counts.shards,
+        catalog_xorbs: verified.counts.xorbs,
+        catalog_objects_read: verified.stats.object_read_count,
+        catalog_payload_bytes: verified.payload_bytes,
+        checkpoint_catalog_objects: verified.checkpoint_objects,
+        checkpoint_catalog_bytes: verified.checkpoint_bytes,
         reachable_crab_pointers: proof.crab,
         reachable_lfs_objects: proof.lfs_objects,
         reachable_lfs_bytes: proof.lfs_bytes,
