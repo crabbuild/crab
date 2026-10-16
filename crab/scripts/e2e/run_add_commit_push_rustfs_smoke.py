@@ -1681,7 +1681,11 @@ class AddCommitPushSmoke:
         self.run_git(repo, ["commit", "-m", f"{case_name}: add staged binaries"])
 
         if use_crab_add:
-            self.run_crab(
+            # A committed capsule must not fail while rewriting an unused
+            # advisory pack-walk hint. Leave the fault through cold reconstruction.
+            advisory_state = repo / ".crab" / "push-state"
+            advisory_state.mkdir()
+            pushed = self.run_crab(
                 repo,
                 [
                     "push",
@@ -1693,6 +1697,12 @@ class AddCommitPushSmoke:
                 ],
                 name=f"{case_name} crab push",
                 timeout=self.args.push_timeout,
+            )
+            summary = json.loads(self.read_stdout(pushed))["data"]
+            self.check(
+                f"{case_name}-advisory-state-fault-preserves-success",
+                summary["refs_pushed"] == 1 and advisory_state.is_dir(),
+                summary,
             )
         else:
             self.run_git(
@@ -1822,10 +1832,18 @@ class AddCommitPushSmoke:
         )
 
         sqlite_files = self.sqlite_cache_files()
+        # Capsule lookup does not initialize the released receipt warm index.
+        # Prove the canonical payload cache holds actual shards and xorbs.
+        catalog = self.cache_dir / ".catalog.sqlite"
+        with sqlite3.connect(f"file:{catalog}?mode=ro", uri=True) as connection:
+            cached = dict(connection.execute(
+                "SELECT family, SUM(size) FROM cache_entries GROUP BY family"
+            ))
         self.check(
             f"{case_name}-sqlite-cache-used",
-            "chunk-index.sqlite" in sqlite_files,
-            {"sqlite_files": sqlite_files},
+            cached.get("shard", 0) > 0 and cached.get("xorb", 0) > 0
+            and "chunk-index.sqlite" not in sqlite_files,
+            {"sqlite_files": sqlite_files, "cached_bytes": cached},
         )
         redb_files = self.redb_cache_files()
         self.check(

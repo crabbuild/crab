@@ -2607,3 +2607,15 @@ new and existing shared refs, direct/coordinated CLI preparation, exact staging
 retirement after late cancellation, and imported payload reconstruction. The
 shared cold-index fixture uses the capsule hint owner while preserving current
 source-catalog, exact provider-identity and complete reconstruction assertions.
+
+The native capsule command does not read or update the released advisory
+`.crab/push-state` hint. Incremental pack selection uses the captured remote ref
+view. Removing its redundant load/save prevents a local hint write from rejecting
+an already visible push. The existing RustFS ingestion smoke holds an unwritable
+hint path across native publication and independent cold reconstruction. The
+released journal helper retains its own advisory-state contract.
+
+The ingestion smoke checks populated shard/xorb entries in the current SQLite
+payload catalog and absence of the released receipt warm index. The capsule
+classifier uses the authenticated hint tree, so requiring that old index file
+would incorrectly demand reinitialization of the retired metadata path.

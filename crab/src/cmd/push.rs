@@ -24,7 +24,6 @@ use crate::git::push::{
     PushConfig, PushFailureStage, PushRejectReason, PushResult, RefPushOutcome,
     configure_active_active_push_coordinator, record_push_audit_event,
 };
-use crate::git::push_state::PushState;
 use crate::git::remote_helper::{AGENT_REBASE_FETCH_REF_FILTERING_ENV, PushSpec};
 use crate::git::url::CrabUrl;
 use crate::replication::StoreResolver;
@@ -520,9 +519,6 @@ async fn run_push_once(
         "starting push"
     );
 
-    // Load push state for incremental walk.
-    let push_state = PushState::load(&repo_root);
-
     // Dry-run: print what would be pushed and return.
     if args.dry_run && !args.follow_tags {
         print_dry_run(&remote_name, &remote_url, &specs);
@@ -738,8 +734,6 @@ async fn run_push_once(
         ) {
             warn!(%err, "failed to append push audit event");
         }
-        push_state.save(&repo_root)?;
-
         let elapsed = start.elapsed();
         let integration =
             push_integration_summary(args, integration_retries, integration_retry_stages);
