@@ -411,6 +411,12 @@ mandatory. Recovery currently reads complete sources for this strict proof and
 reads member ranges again for native installation; this is not a request-minimal
 history-verification claim.
 
+`verify_installed_catalog_dependencies` binds an installed Git database and
+its authenticated refs directly to one durable catalog root. Historical checks
+and restore's final merged catalog use this owner without constructing another
+checkpoint footer or materializing recipes. Callers still authenticate and retain
+Git sources separately; an immutable catalog root does not authorize Git objects.
+
 Current-view and historical integrity checks share the installed-database
 dependency verifier. It validates external catalog bodies, looks up Crab file
 identities in canonical Xet MerkleHash encoding, and verifies whole-file bytes

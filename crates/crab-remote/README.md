@@ -20,6 +20,13 @@ outcome mapping, durable plan attribution, historical reconciliation, readiness,
 and protected-push request binding. CLI and HTTP callers use these mechanics
 without delegating their authorization decisions.
 
+`checkpoint::prepare_capsule_catalog_from_view` prepares durable catalog pages
+without making a checkpoint visible. Checkpoint publication and historical
+restore use this same captured-delta folding owner under caller-held GC admission.
+Ref-only preparation retains the existing root without catalog I/O.
+`publish_capsule_checkpoint_with_catalog_root_from_view` consumes that prepared
+root through the same publication owner, avoiding duplicate delta preparation.
+
 `checkpoint` separates metadata-first logical publication from physical pack
 maintenance using the layered format only. Foreground admission checkpoints the
 authenticated source directory;

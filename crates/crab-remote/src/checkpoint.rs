@@ -201,7 +201,11 @@ pub async fn maintain_capsule_repository_from_view(
         publish_checkpoint(
             layout,
             view,
-            catalog_for_checkpoint(layout, view, maximum_bytes).await?,
+            CatalogWrite::Durable(
+                prepare_capsule_catalog_from_view(layout, view, maximum_bytes)
+                    .await?
+                    .map(Box::new),
+            ),
             maximum_bytes,
             cancel,
         )
@@ -299,7 +303,11 @@ pub async fn repack_capsule_repository_from_view(
                 view,
                 consolidation.sources,
                 member_oids,
-                catalog_for_checkpoint(layout, view, maximum_bytes).await?,
+                CatalogWrite::Durable(
+                    prepare_capsule_catalog_from_view(layout, view, maximum_bytes)
+                        .await?
+                        .map(Box::new),
+                ),
                 maximum_bytes,
                 cancel,
             )
@@ -315,7 +323,11 @@ pub async fn repack_capsule_repository_from_view(
             publication = publish_checkpoint(
                 layout,
                 view,
-                catalog_for_checkpoint(layout, view, maximum_bytes).await?,
+                CatalogWrite::Durable(
+                    prepare_capsule_catalog_from_view(layout, view, maximum_bytes)
+                        .await?
+                        .map(Box::new),
+                ),
                 maximum_bytes,
                 cancel,
             )
@@ -361,7 +373,11 @@ pub async fn publish_capsule_checkpoint_from_view(
     if view.capsule_count()? < u64::from(threshold) {
         return Ok(CheckpointOutcome::default());
     }
-    let catalog = catalog_for_checkpoint(layout, view, maximum_bytes).await?;
+    let catalog = CatalogWrite::Durable(
+        prepare_capsule_catalog_from_view(layout, view, maximum_bytes)
+            .await?
+            .map(Box::new),
+    );
     Ok(
         publish_checkpoint(layout, view, catalog, maximum_bytes, cancel)
             .await?
@@ -393,16 +409,43 @@ pub async fn publish_capsule_checkpoint_with_catalog_from_view(
     .work)
 }
 
+/// Publish one checkpoint with a durable catalog prepared from the same captured view.
+///
+/// The caller verifies the catalog's complete dependency closure and retains GC
+/// admission through visibility. Reusing prepared pages avoids folding captured
+/// deltas a second time; publication still compares the exact root and ref heads.
+pub async fn publish_capsule_checkpoint_with_catalog_root_from_view(
+    layout: &StoreLayout<Store>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    catalog: Option<crab_metadata::capsule_protocol::CheckpointCatalog>,
+    maximum_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<CheckpointOutcome, CheckpointError> {
+    Ok(publish_checkpoint(
+        layout,
+        view,
+        CatalogWrite::Durable(catalog.map(Box::new)),
+        maximum_bytes,
+        cancel,
+    )
+    .await?
+    .work)
+}
+
 enum CatalogWrite {
     New(PointerCatalog),
     Durable(Option<Box<crab_metadata::capsule_protocol::CheckpointCatalog>>),
 }
 
-async fn catalog_for_checkpoint(
+/// Prepare durable catalog pages for one captured maintenance view without publishing a checkpoint.
+///
+/// The caller retains the view's sources under GC admission until publication.
+/// New pages are verified before returning; a ref-only capture reuses its root.
+pub async fn prepare_capsule_catalog_from_view(
     layout: &StoreLayout<Store>,
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
     maximum_bytes: u64,
-) -> Result<CatalogWrite, CheckpointError> {
+) -> Result<Option<crab_metadata::capsule_protocol::CheckpointCatalog>, CheckpointError> {
     if view.has_catalog_deltas()? {
         let delta = view.visible_pointer_catalog_delta().await?;
         let existing = view
@@ -419,16 +462,14 @@ async fn catalog_for_checkpoint(
             },
         )
         .await?;
-        return Ok(CatalogWrite::Durable(catalog.map(Box::new)));
+        return Ok(catalog);
     }
     // The checkpoint freezes prior replay precedence. Reuse only when every
     // newly selected control lacks a catalog delta, even if other refs moved.
-    Ok(CatalogWrite::Durable(
-        view.layered_checkpoint()
-            .and_then(LayeredCheckpoint::catalog)
-            .cloned()
-            .map(Box::new),
-    ))
+    Ok(view
+        .layered_checkpoint()
+        .and_then(LayeredCheckpoint::catalog)
+        .cloned())
 }
 
 async fn publish_checkpoint(

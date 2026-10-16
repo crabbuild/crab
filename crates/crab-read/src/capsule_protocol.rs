@@ -25,7 +25,7 @@ use crate::{ReadError, Result};
 
 mod dependency;
 pub use dependency::{
-    verify_captured_installed_pointer_bytes, verify_installed_checkpoint_dependencies,
+    verify_captured_installed_pointer_bytes, verify_installed_catalog_dependencies,
     verify_installed_dependencies, verify_reachable_dependencies,
 };
 

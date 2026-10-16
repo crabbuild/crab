@@ -62,7 +62,7 @@ pub use layered::{
     source_catalog_digest, visibility_object_set_digest,
 };
 #[cfg(feature = "storage")]
-pub use layered::{LayeredVisibilityReader, fold_checkpoint_catalog};
+pub use layered::{LayeredVisibilityReader, fold_checkpoint_catalog, merge_checkpoint_catalogs};
 #[cfg(feature = "storage")]
 pub use plan::{
     CapsulePlanReceipt, ensure_capsule_plan_unattempted, prepare_capsule_plan,

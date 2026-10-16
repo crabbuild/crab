@@ -29,7 +29,7 @@ struct VerifiedCapsuleHistory {
     segment: HistorySegment,
     checkpoint: LayeredCheckpoint,
     verification: HistoryVerificationPayload,
-    _workspace: tempfile::TempDir,
+    workspace: tempfile::TempDir,
 }
 
 pub(super) async fn run(
@@ -208,11 +208,11 @@ async fn verify_history(
 
     validate_visibility(&segment, &checkpoint)?;
     let workspace = verify_git_checkpoint(layout, &segment, &checkpoint).await?;
-    let dependencies = crab_read::capsule_protocol::verify_installed_checkpoint_dependencies(
+    let dependencies = crab_read::capsule_protocol::verify_installed_catalog_dependencies(
         layout,
         &workspace.path().join("repository.git"),
         segment.refs(),
-        &checkpoint,
+        checkpoint.catalog(),
         crate::cmd::fsck_store::CAPSULE_GIT_SCAN_LIMITS,
         cancel,
     )
@@ -255,7 +255,7 @@ async fn verify_history(
         segment,
         checkpoint,
         verification,
-        _workspace: workspace,
+        workspace,
     })
 }
 
@@ -610,7 +610,7 @@ async fn restore_history(
 ) -> Result<HistoryRestorePayload> {
     let lease =
         crate::maintenance::GcSweepLease::acquire(store, router.repo_prefix(), cancel).await?;
-    let operation = async {
+    let operation = Box::pin(async {
         check_cancelled(cancel)?;
         let base = crab_write::capsule_protocol::open_root(layout).await?;
         let verified = verify_history(
@@ -633,23 +633,42 @@ async fn restore_history(
         let previous_generation = view.root().root().generation();
         let (refs_added, refs_updated, refs_deleted) =
             ref_change_counts(view.refs(), verified.segment.refs());
-        let current_catalog = view.pointer_catalog().await?;
-        // Keep both catalogs: history may use a recipe no longer in the current
-        // view, while newer content must remain available after a rollback.
-        let mut restored_catalog = verified
-            .checkpoint
-            .pointer_catalog_from_store(layout, u64::MAX)
-            .await?;
-        restored_catalog.apply(&current_catalog)?;
-        let outcome = crab_remote::checkpoint::publish_capsule_checkpoint_from_view(
+        let current_catalog = crab_remote::checkpoint::prepare_capsule_catalog_from_view(
             layout,
             &view,
-            0,
             RESTORE_CHECKPOINT_BYTES,
-            cancel,
         )
         .await
         .map_err(map_checkpoint_error)?;
+        // Retain newer-only content while older refs regain visibility. Current
+        // bindings still win, so the old byte proof alone cannot certify them.
+        let restored_catalog = crab_metadata::capsule_protocol::merge_checkpoint_catalogs(
+            layout,
+            verified.checkpoint.catalog(),
+            current_catalog.as_ref(),
+            RESTORE_CHECKPOINT_BYTES,
+        )
+        .await?;
+        crab_read::capsule_protocol::verify_installed_catalog_dependencies(
+            layout,
+            &verified.workspace.path().join("repository.git"),
+            verified.segment.refs(),
+            restored_catalog.as_ref(),
+            crate::cmd::fsck_store::CAPSULE_GIT_SCAN_LIMITS,
+            cancel,
+        )
+        .await?;
+        check_cancelled(cancel)?;
+        let outcome =
+            crab_remote::checkpoint::publish_capsule_checkpoint_with_catalog_root_from_view(
+                layout,
+                &view,
+                current_catalog,
+                RESTORE_CHECKPOINT_BYTES,
+                cancel,
+            )
+            .await
+            .map_err(map_checkpoint_error)?;
         let checkpointed = crab_write::capsule_protocol::open_root(layout).await?;
         // The shared publisher reports CAS loss as a no-op. Restore cannot
         // fence an unrelated winner using the catalog and refs captured above.
@@ -696,7 +715,7 @@ async fn restore_history(
         .await?;
 
         let restore = async {
-            let checkpoint = LayeredCheckpoint::build(
+            let checkpoint = LayeredCheckpoint::build_with_catalog_root(
                 fenced.record().root().generation(),
                 fenced.record().digest(),
                 verified.checkpoint.sources().to_vec(),
@@ -737,7 +756,7 @@ async fn restore_history(
             (Some(error), _) => Err(error),
             (None, Err(error)) => Err(error.into()),
         }
-    }
+    })
     .await;
     let release = lease.release().await;
     match (operation, release) {

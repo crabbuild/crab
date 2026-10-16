@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{ReadError, Result};
 use crab_metadata::capsule_protocol::{
-    FileCatalogEntry, PointerCatalog, PointerCatalogCounts, PointerCatalogLookup,
+    CheckpointCatalog, FileCatalogEntry, PointerCatalog, PointerCatalogCounts, PointerCatalogLookup,
 };
 use crab_storage::{Store, StoreLayout};
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,8 +20,8 @@ enum DependencyCatalog<'a> {
         view: &'a CapsuleRepositoryView,
         lookup: &'a PointerCatalogLookup,
     },
-    Checkpoint {
-        checkpoint: &'a LayeredCheckpoint,
+    Durable {
+        catalog: Option<&'a CheckpointCatalog>,
         lookup: &'a PointerCatalogLookup,
     },
 }
@@ -65,10 +65,10 @@ impl DependencyCatalog<'_> {
                 crate::selection::verify_capsule_pointer_inspection(layout, inspection, cancel)
                     .await
             }
-            Self::Checkpoint { checkpoint, .. } => {
+            Self::Durable { catalog, .. } => {
                 let inspection = crab_metadata::capsule_protocol::inspect_pointer_catalog(
                     layout,
-                    checkpoint.catalog(),
+                    *catalog,
                     &[],
                     &[],
                     crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
@@ -95,7 +95,7 @@ impl DependencyCatalog<'_> {
                         .map(|entry| (hash.clone(), entry.clone()))
                 })
                 .collect()),
-            Self::Captured { lookup, .. } | Self::Checkpoint { lookup, .. } => {
+            Self::Captured { lookup, .. } | Self::Durable { lookup, .. } => {
                 let selected = lookup.files(layout.store(), hashes).await?;
                 Ok(selected.files().clone())
             }
@@ -240,31 +240,34 @@ pub async fn verify_installed_dependencies(
     .await
 }
 
-/// Verify installed Git and external dependencies against one pinned checkpoint.
+/// Verify installed Git and external dependencies against one pinned durable catalog.
 ///
-/// Callers authenticate the checkpoint, install its verified packs, validate
-/// the supplied ref visibility and retain its sources through completion.
-/// The complete catalog is streamed; file bindings use that same checkpoint.
+/// Callers authenticate the catalog root, install verified Git packs, validate
+/// the supplied ref visibility and retain their sources through completion.
+/// The complete catalog is streamed; file bindings use that same root.
 /// Token cancellation drains the Git worker before returning.
-pub async fn verify_installed_checkpoint_dependencies(
+pub async fn verify_installed_catalog_dependencies(
     layout: &StoreLayout<Store>,
     git_dir: &Path,
     refs: &BTreeMap<String, String>,
-    checkpoint: &LayeredCheckpoint,
+    catalog: Option<&CheckpointCatalog>,
     limits: crab_git::walk::PointerScanLimits,
     cancellation: &CancellationToken,
 ) -> Result<CapsuleDependencyProof> {
     if cancellation.is_cancelled() {
         return Err(ReadError::Cancelled);
     }
-    let lookup = checkpoint
-        .pointer_catalog_lookup(layout, crab_metadata::capsule_protocol::MAX_CATALOG_BYTES)?;
+    let maximum = crab_metadata::capsule_protocol::MAX_CATALOG_BYTES;
+    let lookup = catalog
+        .map(|catalog| catalog.lookup(layout, maximum))
+        .transpose()?
+        .unwrap_or_else(|| PointerCatalogLookup::empty(maximum));
     verify_installed_dependencies_from(
         layout,
         git_dir,
         refs,
-        DependencyCatalog::Checkpoint {
-            checkpoint,
+        DependencyCatalog::Durable {
+            catalog,
             lookup: &lookup,
         },
         limits,

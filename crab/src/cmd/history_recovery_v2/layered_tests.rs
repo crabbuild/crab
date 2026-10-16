@@ -146,7 +146,7 @@ async fn layered_history_verification_preserves_historical_refs_and_bytes() {
     .unwrap();
 
     assert_eq!(verified.verification.refs, 1);
-    let git_dir = verified._workspace.path().join("repository.git");
+    let git_dir = verified.workspace.path().join("repository.git");
     let refs = Command::new("git")
         .arg("--git-dir")
         .arg(&git_dir)
@@ -250,7 +250,7 @@ async fn historical_thin_member_is_repaired_against_its_retained_base() {
     .unwrap();
     let output = Command::new("git")
         .arg("--git-dir")
-        .arg(verified._workspace.path().join("repository.git"))
+        .arg(verified.workspace.path().join("repository.git"))
         .args(["cat-file", "blob", "refs/tags/target"])
         .output()
         .unwrap();

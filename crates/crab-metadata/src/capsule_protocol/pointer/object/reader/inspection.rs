@@ -14,16 +14,26 @@ impl CatalogPages {
         maximum: u64,
     ) -> Result<Vec<(Path, u64)>> {
         let mut work = PageWork::new(maximum, 0);
-        self.open(store, &mut work).await?;
-        let space =
-            crab_storage::scratch::ScratchSpace::temporary(maximum.saturating_mul(4)).await?;
-        let mut join = Join::new(space);
-        let checked = self.inspect(store, &mut work, &mut join).await;
-        join.finish(checked).await?;
+        self.verify(store, &mut work).await?;
         Ok(work
             .object_dependencies()
             .map(|(hash, bytes)| (self.pages.path(hash), bytes))
             .collect())
+    }
+
+    // Merge inputs share admission before any page I/O; separate inspection
+    // budgets would let each input consume the whole operation allowance.
+    pub(in crate::capsule_protocol) async fn verify(
+        &self,
+        store: &Store,
+        work: &mut PageWork,
+    ) -> Result<()> {
+        self.open(store, work).await?;
+        let space =
+            crab_storage::scratch::ScratchSpace::temporary(work.maximum.saturating_mul(4)).await?;
+        let mut join = Join::new(space);
+        let checked = self.inspect(store, work, &mut join).await;
+        join.finish(checked).await
     }
 
     pub(in crate::capsule_protocol) async fn inspect_into(

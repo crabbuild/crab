@@ -1,4 +1,5 @@
 mod inspection;
+mod merge;
 
 use super::*;
 use crate::pages::PageWork;

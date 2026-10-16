@@ -13,9 +13,9 @@ use crate::validation::{validate_content_hash, validate_sha1};
 
 mod catalog;
 pub use catalog::CheckpointCatalog;
-#[cfg(feature = "storage")]
-pub use catalog::fold_checkpoint_catalog;
 use catalog::{CatalogInput, PreparedCatalog};
+#[cfg(feature = "storage")]
+pub use catalog::{fold_checkpoint_catalog, merge_checkpoint_catalogs};
 
 mod visibility_pages;
 #[cfg(feature = "storage")]

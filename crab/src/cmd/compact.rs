@@ -596,8 +596,9 @@ async fn download_shards(
             });
         }
 
-        // Write shard bytes to the temp directory via MDBShardFile.
-        let mut cursor = std::io::Cursor::new(data.as_ref());
+        // Authenticate the complete stored object above. Xet seeks its footer
+        // from EOF, so private merge inputs must omit Crab's bloom trailer.
+        let mut cursor = std::io::Cursor::new(crab_xet::shard_parse::strip_bloom_trailer(&data));
         MDBShardFile::write_out_from_reader(target_dir, &mut cursor, &shard_file_cache).map_err(
             |e| CrabError::Internal(format!("failed to write shard {hash_hex} to temp dir: {e}")),
         )?;
@@ -964,7 +965,7 @@ mod tests {
         shard_body: Bytes,
     }
 
-    fn xet_file_shard(byte: u8) -> XetShardFixture {
+    fn xet_file_shard(byte: u8, bloom: bool) -> XetShardFixture {
         use crab_xet::shard::{
             FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo, ShardWriter,
             XorbChunkSequenceEntry, XorbChunkSequenceHeader,
@@ -1001,7 +1002,13 @@ mod tests {
                 metadata_ext: None,
             })
             .unwrap();
-        let (bytes, hash) = writer.finalize().unwrap();
+        let (bytes, hash) = if bloom {
+            writer
+                .finalize_with_bloom(&[chunk.hash], &[chunk.hash])
+                .unwrap()
+        } else {
+            writer.finalize().unwrap()
+        };
         XetShardFixture {
             content_size: content.len() as u64,
             file_hash: chunk.hash,
@@ -1012,6 +1019,78 @@ mod tests {
             shard_hash: hash,
             shard_body: Bytes::from(bytes),
         }
+    }
+
+    #[tokio::test]
+    async fn downloaded_shards_load_plain_and_bloom_objects_as_native_xet_bodies() {
+        for bloom in [false, true] {
+            let fixture = xet_file_shard(55, bloom);
+            let store = memory_store();
+            let layout = crab_storage::StoreLayout::new(
+                store.as_storage().clone(),
+                "compact-format".to_owned(),
+            );
+            layout
+                .store()
+                .put(
+                    &layout.shard_path(&fixture.shard_hash),
+                    fixture.shard_body.clone(),
+                )
+                .await
+                .unwrap();
+            let target = tempfile::tempdir().unwrap();
+            download_shards(
+                &store,
+                &layout,
+                &[fixture.shard_hash.hex()],
+                target.path(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            let shards =
+                MDBShardFile::load_all_valid(target.path(), &new_shard_file_cache()).unwrap();
+            let mut actual = Vec::new();
+            shards[0].read_into_buffer(&mut actual).unwrap();
+            assert_eq!(
+                actual,
+                crab_xet::shard_parse::strip_bloom_trailer(&fixture.shard_body)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn downloaded_bloom_shards_authenticate_trailer_before_creating_native_files() {
+        let fixture = xet_file_shard(55, true);
+        let store = memory_store();
+        let layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            "compact-corrupt-bloom".to_owned(),
+        );
+        let mut corrupt = fixture.shard_body.to_vec();
+        let index = corrupt.len() - 13;
+        corrupt[index] ^= 1;
+        layout
+            .store()
+            .put(
+                &layout.shard_path(&fixture.shard_hash),
+                Bytes::from(corrupt),
+            )
+            .await
+            .unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let result = download_shards(
+            &store,
+            &layout,
+            &[fixture.shard_hash.hex()],
+            target.path(),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CrabError::CorruptObject { .. }))
+                && std::fs::read_dir(target.path()).unwrap().next().is_none()
+        );
     }
 
     #[test]
@@ -1277,8 +1356,8 @@ mod tests {
             crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
                 .await
                 .unwrap();
-        let fixture_a = xet_file_shard(11);
-        let fixture_b = xet_file_shard(12);
+        let fixture_a = xet_file_shard(11, true);
+        let fixture_b = xet_file_shard(12, false);
         for fixture in [&fixture_a, &fixture_b] {
             layout
                 .store()
@@ -1598,8 +1677,8 @@ mod tests {
     fn capsule_filter_keeps_only_authenticated_files_and_dependencies() {
         use crab_xet::shard::ShardWriter;
 
-        let retained = xet_file_shard(31);
-        let foreign = xet_file_shard(32);
+        let retained = xet_file_shard(31, false);
+        let foreign = xet_file_shard(32, false);
         let mut writer = ShardWriter::new();
         for fixture in [&retained, &foreign] {
             let parsed = MDBMinimalShard::from_reader(

@@ -2573,8 +2573,28 @@ integrity boundary. Post-fetch shard discovery streams complete inspection from
 the same metadata control-capture owner, retaining shard identities instead of
 all file and xorb recipes. Per-ref head movement still disables generation-only
 shard-list caching.
-Restore's catalog merge and catalog-rewriting tools retain full logical catalogs. Materialization admission continues to
-protect those callers retaining recipe copies.
+Shard compaction authenticates the complete stored shard, including its optional
+bloom trailer, before passing only the native Xet body to the private merge
+loader. Xet locates its footer relative to EOF; feeding the bloom bytes to that
+loader rejects valid native-push shards. The merge input's local content hash
+may differ from the complete stored object's identity; source authentication
+and retained-root ownership continue to use the complete object.
+Restore unions durable catalogs by streaming their authenticated columns through
+copy-on-write edits. Both input closures and every edit share one encoded-page
+budget; unchanged subtrees keep their identities. Newer file bindings win only
+when declared sizes agree; shard/xorb descriptor conflicts remain errors. Reverse
+placements retain the lowest xorb and its first occurrence across both inputs.
+Immutable nested recipes are compared by framed ordered-row digests, independent
+of page partitioning. Digests are retained only for this merge and cached after
+complete scans; each distinct root pays logical-work admission before I/O.
+Before checkpoint or ref visibility changes, restore verifies historical Git
+pointers against the final winning union bindings and hashes their complete
+bytes at origin. Verifying only the old checkpoint would miss a broken newer
+replacement recipe. The merge does not retain either full recipe map; complete
+metadata proof and the largest selected recipe still consume resources. Current
+uncheckpointed deltas retain their bounded materializer, and other catalog-rewrite
+consumers remain follow-up work. Materialization admission continues to protect
+callers retaining recipe copies.
 
 Release audit: all six upstream published tag objects were checked again before
 this change; none contains the capsule codec. Unshipped checkpoint formats

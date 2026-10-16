@@ -64,8 +64,12 @@ impl CheckpointCatalog {
         )
     }
 
+    /// Capture selected lookups from this durable immutable catalog.
+    ///
+    /// The caller protects the root and its dependencies against GC. Each query
+    /// uses the supplied aggregate encoded-page budget and bounded parsed cache.
     #[cfg(feature = "storage")]
-    pub(super) fn lookup(
+    pub fn lookup(
         &self,
         layout: &crab_storage::StoreLayout<crab_storage::Store>,
         maximum: u64,
@@ -293,6 +297,56 @@ pub async fn fold_checkpoint_catalog(
     Ok(Some(source))
 }
 
+/// Union two durable catalogs, retaining newer file bindings and immutable descriptors.
+///
+/// Both complete physical closures and every merge batch share one byte budget.
+/// Recipe maps are never materialized; unchanged subtrees retain their identities.
+/// Missing/corrupt inputs, descriptor/size conflicts and exhausted encoded or
+/// logical-work budgets return errors. The caller holds GC admission until the replacement checkpoint becomes visible.
+/// External shard/xorb bodies and final file bytes require separate verification.
+#[cfg(feature = "storage")]
+pub async fn merge_checkpoint_catalogs(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    older: Option<&CheckpointCatalog>,
+    newer: Option<&CheckpointCatalog>,
+    maximum_bytes: u64,
+) -> Result<Option<CheckpointCatalog>> {
+    let mut work = crate::pages::PageWork::new(maximum_bytes, 0);
+    let older_reader = older.map(|source| source.reader(layout)).transpose()?;
+    let newer_reader = newer.map(|source| source.reader(layout)).transpose()?;
+    if let Some(reader) = &older_reader {
+        reader.verify(layout.store(), &mut work).await?;
+    }
+    if let Some(reader) = &newer_reader
+        && older != newer
+    {
+        reader.verify(layout.store(), &mut work).await?;
+    }
+    let (Some(older_reader), Some(newer_reader)) = (older_reader, newer_reader) else {
+        return Ok(newer.or(older).cloned());
+    };
+    if older == newer {
+        return Ok(newer.cloned());
+    }
+    let descriptor = older_reader
+        .merge(layout.store(), &newer_reader, &mut work)
+        .await?;
+    if newer.is_some_and(|source| descriptor == source.pages) {
+        return Ok(newer.cloned());
+    }
+    if older.is_some_and(|source| descriptor == source.pages) {
+        return Ok(older.cloned());
+    }
+    let source = CheckpointCatalog::new(descriptor)?;
+    let body = source.pages.encode()?;
+    work.admit_object(*blake3::hash(&body).as_bytes(), body.len() as u64)?;
+    layout
+        .store()
+        .put_if_absent_verified(&layout.capsule_catalog_path(&source.hash), body)
+        .await?;
+    Ok(Some(source))
+}
+
 #[cfg(all(test, feature = "storage"))]
 mod tests {
     use super::*;
@@ -475,3 +529,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "storage"))]
+#[path = "catalog/merge_tests.rs"]
+mod merge_tests;

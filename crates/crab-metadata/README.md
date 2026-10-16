@@ -77,6 +77,12 @@ verified before checkpoint/history writes and root CAS. Ref-only publication
 and physical repacking reuse the existing commitment without catalog object I/O.
 A catalog delta resolves its selected dependency closure and rewrites affected
 paths, preserving ordered file bindings and immutable descriptor conflicts.
+`merge_checkpoint_catalogs` unions durable roots without retaining logical
+recipe maps. Complete input proofs and merge batches share one encoded-page
+budget. It retains newer file bindings, checks immutable descriptors and file
+sizes, chooses canonical reverse placements, and verifies immutable writes.
+Callers hold GC admission through publication and separately prove external
+payloads and final file bytes. Unchanged subtrees retain their identities.
 
 Readers share an aggregate page-byte budget across checkpoint and packed-run
 sources. Logical expansion has a separate allowance of four times the encoded ceiling: shared
