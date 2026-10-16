@@ -1,5 +1,5 @@
 //! Rebuildable chunk hints whose source authority is a capsule catalog.
-#[cfg(any(test, feature = "remote-index"))]
+#[cfg(any(test, feature = "storage"))]
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
@@ -7,12 +7,17 @@ use serde::{Deserialize, Serialize};
 
 use super::XorbCatalogEntry;
 use crate::error::{MetadataError, Result};
-#[cfg(any(test, feature = "remote-index"))]
+#[cfg(any(test, feature = "storage"))]
 use crate::receipts::RECEIPT_SCHEMA_VERSION;
 use crate::receipts::{CommittedChunkPlacement, OriginReceipt};
 use crab_xet::hash::MerkleHash;
 
 pub use crate::key_codec::{capsule_chunk_anchor_key, capsule_chunk_head_key};
+
+#[cfg(feature = "storage")]
+mod store;
+#[cfg(feature = "storage")]
+pub use store::{CapsuleChunkIndex, write_capsule_chunk_candidates};
 
 /// Capsule source and verified physical origin for one xorb.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,7 +119,7 @@ pub struct CapsuleChunkCandidates {
     pub anchors: HashMap<[u8; 32], CapsuleChunkAnchor>,
 }
 
-#[cfg(any(test, feature = "remote-index"))]
+#[cfg(any(test, feature = "storage"))]
 /// Encode one bounded xorb's candidates after full verification and ref publication.
 pub(crate) fn capsule_chunk_candidate_rows(
     repo_prefix: &str,

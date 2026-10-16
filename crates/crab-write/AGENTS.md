@@ -32,6 +32,10 @@ Trace one path: `crab/src/git/push.rs` → `commit_edits` in
 
 - commit_edits requires a snapshot captured under every edited ref lease; callers retain authorization, dependency checks, uploads, and lease renewal.
   Source: `crates/crab-write/src/journal.rs`.
+- Cancellation-sensitive capsule callers use `prepare_publication`, check their
+  lease token, then await `publish_prepared` through commit resolution. Do not
+  drop publication on renewal loss or reinterpret committed success as cleanup
+  failure. Source: `crates/crab-write/src/capsule_protocol.rs`.
 - A marker storage error can leave an uncertain commit. Await the commit future and resolve outcome rather than treating every error as rejection.
   Source: `crates/crab-write/src/journal.rs`.
 - Maintenance combines operation and cleanup errors through `finish_after_cleanup`

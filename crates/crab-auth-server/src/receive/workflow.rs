@@ -355,17 +355,34 @@ pub async fn commit_receive(
     ctx.validate_layout().await?;
     let operation_cancel = CancellationToken::new();
     let fences = ReceiveWriterFences::acquire(ctx, &operation_cancel).await?;
-    let operation = tokio::select! {
-        result = commit_receive_inner(ctx, repo_url, plan_digest, active_active_json) => result,
-        _ = operation_cancel.cancelled() => {
-            Err(conflict("GC writer fence lease lost during protected receive"))
-        }
-    };
+    // The operation owns ref leases and possibly in-flight publication. Fence
+    // loss requests cancellation, but cleanup and commit resolution must drain
+    // before either GC fence is released.
+    let operation = commit_receive_inner(
+        ctx,
+        repo_url,
+        plan_digest,
+        active_active_json,
+        &operation_cancel,
+    )
+    .await;
     let release = fences.release().await;
     match (operation, release) {
-        (Ok(response), Ok(())) => Ok(response),
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Ok(response), release) => {
+            if let Err(error) = release {
+                tracing::warn!(%error, "protected receive committed; fence cleanup requires repair");
+            }
+            Ok(response)
+        }
+        (Err(error), _) => Err(error),
     }
+}
+
+pub(super) fn check_receive_cancelled(cancel: &CancellationToken) -> Result<()> {
+    if cancel.is_cancelled() {
+        return Err(crab_write::WriteError::Cancelled.into());
+    }
+    Ok(())
 }
 
 async fn commit_receive_inner(
@@ -373,14 +390,16 @@ async fn commit_receive_inner(
     repo_url: &str,
     plan_digest: &str,
     active_active_json: Option<&str>,
+    cancel: &CancellationToken,
 ) -> Result<PushFinalizeResponse> {
+    check_receive_cancelled(cancel)?;
     let active_active = parse_active_active_receive_config(active_active_json, repo_url)?;
     match ctx.read_plan_document().await? {
         ProtectedReceivePlan::Manifest(plan) => {
-            commit_manifest_receive(ctx, *plan, plan_digest, active_active.as_ref()).await
+            commit_manifest_receive(ctx, *plan, plan_digest, active_active.as_ref(), cancel).await
         }
         ProtectedReceivePlan::Capsule(plan) => {
-            commit_capsule_receive(ctx, plan, plan_digest, active_active.as_ref()).await
+            commit_capsule_receive(ctx, plan, plan_digest, active_active.as_ref(), cancel).await
         }
     }
 }
@@ -390,18 +409,18 @@ async fn commit_capsule_receive(
     plan: super::ProtectedCapsulePushPlan,
     plan_digest: &str,
     active_active: Option<&super::ActiveActiveReceiveConfig>,
+    cancel: &CancellationToken,
 ) -> Result<PushFinalizeResponse> {
     super::validate_protected_capsule_plan_shape(&plan, ctx.repo_prefix(), ctx.push_id())?;
     let prepare = ctx.read_prepare_record().await?;
     let evidence =
         read_verified_capsule_receive_evidence(ctx, plan_digest, &plan, &prepare).await?;
-    let cancel = CancellationToken::new();
     let outcome = commit_capsule_candidate(
         ctx,
         &plan,
         active_active,
         &evidence.replication_objects,
-        &cancel,
+        cancel,
     )
     .await?;
     Ok(PushFinalizeResponse::updated_with_commit_outcome(
@@ -415,6 +434,7 @@ async fn commit_manifest_receive(
     plan: super::ProtectedPushPlan,
     plan_digest: &str,
     active_active: Option<&super::ActiveActiveReceiveConfig>,
+    cancel: &CancellationToken,
 ) -> Result<PushFinalizeResponse> {
     validate_push_plan_shape(&plan, ctx.repo_prefix(), ctx.push_id())?;
     if plan.mirror_plan_id.is_some() && active_active.is_some() {
@@ -498,6 +518,7 @@ async fn commit_manifest_receive(
         gc_registry_generation,
     )
     .await?;
+    check_receive_cancelled(cancel)?;
     let active_active_commit = commit_receive_manifest(
         ctx.store(),
         ctx.router(),

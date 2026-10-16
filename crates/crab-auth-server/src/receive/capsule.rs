@@ -11,6 +11,7 @@ use super::capsule_dependencies::{
     verify_pointer_dependencies,
 };
 use super::git_workspace::{materialize_capsule_source_push, verify_capsule_git_candidate};
+use super::workflow::check_receive_cancelled;
 use super::{
     ActiveActiveReceiveConfig, ProtectedCapsulePushPlan, PushPrepareRecord, ReceiveContext,
     active_active_coordinator_registration, conflict, invalid, promote_staged_writes,
@@ -37,6 +38,7 @@ pub(super) async fn commit_capsule_candidate(
     replication_objects: &[String],
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Option<CommitOutcome>> {
+    check_receive_cancelled(cancel)?;
     let view = open_candidate_view(ctx).await?;
     if plan.ref_updates.iter().all(|update| {
         view.refs().get(&update.ref_name) == Some(&update.new_oid)
@@ -58,7 +60,6 @@ pub(super) async fn commit_capsule_candidate(
             plan.run_size,
         );
         return commit_active_active_candidate(
-            ctx.store(),
             ctx.router(),
             ctx.repo_prefix(),
             active_active,
@@ -66,6 +67,7 @@ pub(super) async fn commit_capsule_candidate(
             &transaction,
             replication_objects,
             None,
+            cancel,
         )
         .await
         .map(Some);
@@ -90,7 +92,6 @@ pub(super) async fn commit_capsule_candidate(
             run.bytes().len() as u64,
         );
         return commit_active_active_candidate(
-            ctx.store(),
             ctx.router(),
             ctx.repo_prefix(),
             active_active,
@@ -98,6 +99,7 @@ pub(super) async fn commit_capsule_candidate(
             &transaction,
             replication_objects,
             None,
+            cancel,
         )
         .await
         .map(Some);
@@ -167,7 +169,6 @@ pub(super) async fn commit_capsule_candidate(
                 )
                 .await?;
                 publish_verified_candidate(
-                    layout.store(),
                     &layout,
                     &repo_prefix,
                     base,
@@ -175,6 +176,7 @@ pub(super) async fn commit_capsule_candidate(
                     &capsule,
                     active_active.as_ref(),
                     &replication_objects,
+                    &scoped,
                 )
                 .await
             },
@@ -182,7 +184,6 @@ pub(super) async fn commit_capsule_candidate(
         .await
     } else {
         publish_verified_candidate(
-            ctx.store(),
             ctx.router(),
             ctx.repo_prefix(),
             base,
@@ -190,31 +191,25 @@ pub(super) async fn commit_capsule_candidate(
             &capsule,
             active_active,
             replication_objects,
+            cancel,
         )
         .await
     };
-    if result.is_ok() {
-        let config = crab_metadata::remote_index::RemoteIndexConfig::for_repo_with_global_prefix(
-            ctx.repo_prefix(),
-            ctx.router().global_prefix(),
-        );
-        if let Err(error) = crab_metadata::remote_index::write_capsule_chunk_candidates(
-            std::sync::Arc::clone(ctx.store().inner()),
-            &config,
-            ctx.repo_prefix(),
+    if result.is_ok()
+        && let Err(error) = crab_metadata::capsule_protocol::write_capsule_chunk_candidates(
+            ctx.router(),
             &delta,
             &origins,
+            &|| cancel.is_cancelled(),
         )
         .await
-        {
-            tracing::warn!(%error, "capsule committed; chunk candidate index needs repair");
-        }
+    {
+        tracing::warn!(%error, "capsule committed; chunk candidate index needs repair");
     }
     result
 }
 
 async fn publish_verified_candidate(
-    store: &crab_storage::Store,
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     repo_prefix: &str,
     base: crab_metadata::capsule_protocol::RootSnapshot,
@@ -222,9 +217,17 @@ async fn publish_verified_candidate(
     capsule: &Capsule,
     active_active: Option<&ActiveActiveReceiveConfig>,
     replication_objects: &[String],
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Option<CommitOutcome>> {
+    check_receive_cancelled(cancel)?;
     let Some(active_active) = active_active else {
-        crab_write::capsule_protocol::publish(layout, base, transaction, capsule).await?;
+        let prepared =
+            crab_write::capsule_protocol::prepare_publication(layout, base, transaction, capsule)
+                .await?;
+        // Immutable preparation may outlive fence/namespace renewal. Check
+        // again before visibility, then await its exact commit outcome.
+        check_receive_cancelled(cancel)?;
+        crab_write::capsule_protocol::publish_prepared(layout, prepared).await?;
         return Ok(None);
     };
     let prepared = crab_write::capsule_protocol::prepare_coordinated_publication(
@@ -236,7 +239,6 @@ async fn publish_verified_candidate(
     .await?;
     let descriptor = prepared.descriptor().clone();
     commit_active_active_candidate(
-        store,
         layout,
         repo_prefix,
         active_active,
@@ -244,13 +246,13 @@ async fn publish_verified_candidate(
         transaction,
         replication_objects,
         Some(prepared),
+        cancel,
     )
     .await
     .map(Some)
 }
 
 async fn commit_active_active_candidate(
-    store: &crab_storage::Store,
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     repo_prefix: &str,
     active_active: &ActiveActiveReceiveConfig,
@@ -258,6 +260,7 @@ async fn commit_active_active_candidate(
     transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
     replication_objects: &[String],
     prepared: Option<crab_write::capsule_protocol::CoordinatedPreparedCapsulePublication>,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<CommitOutcome> {
     let refs = transaction
         .edits()
@@ -280,7 +283,7 @@ async fn commit_active_active_candidate(
     )?;
     let registration = active_active_coordinator_registration(&active_active.replication)?;
     crab_metadata::ref_registry::register_active_active_coordinator_for_repo(
-        store,
+        layout.store(),
         layout,
         registration,
     )
@@ -290,6 +293,7 @@ async fn commit_active_active_candidate(
         repo_prefix,
     )
     .await?;
+    check_receive_cancelled(cancel)?;
     let mut outcome = crab_coordination::write_coordinator::commit_uploaded_push_refs(
         coordinator.as_ref(),
         plan.request.clone(),
@@ -648,6 +652,7 @@ mod tests {
     };
     use crab_types::pointer::Pointer;
     use crab_xet::hash::MerkleHash;
+    use std::sync::Arc;
 
     use super::*;
     use crate::git_pointer_scan::ReachablePointerScan;
@@ -658,6 +663,65 @@ mod tests {
 
     fn hash(ch: char) -> String {
         std::iter::repeat_n(ch, 64).collect()
+    }
+
+    struct CancelAfterWrite(tokio_util::sync::CancellationToken);
+
+    impl crab_storage::StorageObserver for CancelAfterWrite {
+        fn started(&self, _: crab_storage::StorageOperation) {}
+
+        fn finished(&self, observation: crab_storage::StorageObservation) {
+            if observation.operation == crab_storage::StorageOperation::Put
+                && observation.outcome == crab_storage::StorageOutcome::Success
+            {
+                self.0.cancel();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_immutable_preparation_cannot_publish_a_ref() -> Result<()> {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store, "repo".to_owned());
+        let base = crab_write::capsule_protocol::initialize(&layout, &hash('a'), "refs/heads/main")
+            .await?;
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some(oid('1')),
+                None,
+            )],
+        )?;
+        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new())?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let observed = layout
+            .store()
+            .clone()
+            .with_storage_observer(Arc::new(CancelAfterWrite(cancel.clone())));
+        let observed_layout = crab_storage::StoreLayout::new(observed.clone(), "repo".to_owned());
+        let result = publish_verified_candidate(
+            &observed_layout,
+            "repo",
+            base,
+            &transaction,
+            &capsule,
+            None,
+            &[],
+            &cancel,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(crate::error::AuthServerError::Write(error))
+            if matches!(*error, crab_write::WriteError::Cancelled))
+        );
+        assert!(
+            crab_read::capsule_protocol::read_visible_refs(&layout)
+                .await?
+                .is_empty()
+        );
+        Ok(())
     }
 
     #[test]

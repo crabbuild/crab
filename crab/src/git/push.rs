@@ -4265,10 +4265,15 @@ pub struct PushPipeline {
     cas_dependency_replans: std::sync::atomic::AtomicU64,
 }
 
+enum AddChunkIndex {
+    Capsule(crab_metadata::capsule_protocol::CapsuleChunkIndex),
+    Manifest(crate::metadata::ChunkIndexStore),
+}
+
 /// Shared add-time classifier backed by the push pipeline's full proof path.
 pub(crate) struct AddRemoteChunkClassifier {
     pipeline: PushPipeline,
-    remote_chunk_index: tokio::sync::OnceCell<Option<crate::metadata::ChunkIndexStore>>,
+    remote_chunk_index: tokio::sync::OnceCell<Option<AddChunkIndex>>,
     candidate_cache: Option<Arc<crate::cache::add_remote_candidates::AddRemoteCandidateCache>>,
     candidate_cache_hits: std::sync::atomic::AtomicU64,
     candidate_cache_misses: std::sync::atomic::AtomicU64,
@@ -4464,12 +4469,52 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
                 let chunk_index = self
                     .remote_chunk_index
                     .get_or_try_init(|| async {
+                        let Some(store) = self.pipeline.store.as_ref() else {
+                            return Ok(None);
+                        };
+                        let layout = crab_storage::StoreLayout::with_global_prefix(
+                            store.as_storage().clone(),
+                            self.pipeline.router.repo_prefix().to_owned(),
+                            self.pipeline.router.global_prefix().to_owned(),
+                        );
+                        // The published v1.2.4 add contract remains attached to
+                        // an explicit v1 layout. Capsule targets and fresh repos
+                        // must not discover or initialize its receipt database.
+                        let manifest = match store.head(&layout.capsule_root_path()).await {
+                            Ok(_) => false,
+                            Err(CrabError::NotFound { .. }) => {
+                                match crab_metadata::layout_descriptor::read_canonical_layout(
+                                    layout.store(),
+                                    &layout,
+                                )
+                                .await
+                                {
+                                    Ok(_) => true,
+                                    Err(crab_metadata::error::MetadataError::Storage {
+                                        source: crab_storage::StorageError::NotFound { .. },
+                                    }) => false,
+                                    Err(error) => return Err(error.into()),
+                                }
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        if !manifest {
+                            let index =
+                                crab_metadata::capsule_protocol::CapsuleChunkIndex::new(&layout);
+                            return Ok(index
+                                .available(
+                                    layout.store(),
+                                    crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
+                                )
+                                .await?
+                                .then_some(AddChunkIndex::Capsule(index)));
+                        }
                         let guard = self.pipeline.metadb.lock().await;
                         let Some(guard) = guard.as_ref() else {
                             return Ok(None);
                         };
                         match guard.chunk_index().await {
-                            Ok(store) => Ok(Some(store)),
+                            Ok(store) => Ok(Some(AddChunkIndex::Manifest(store))),
                             Err(error) if error.is_metadb_read_only_uninitialized() => Ok(None),
                             Err(error) => Err(error),
                         }
@@ -4481,7 +4526,7 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
                 // the index later; transient open failures are still retried.
                 if let Some(chunk_index) = chunk_index {
                     self.pipeline
-                        .lookup_proven_remote_chunks_for_add(&misses, chunk_index.clone())
+                        .lookup_proven_remote_chunks_for_add(&misses, chunk_index)
                         .await
                 } else {
                     Ok(HashMap::new())
@@ -4490,9 +4535,7 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
             .await
             .map_err(|error| match error {
                 CrabError::Cancelled => crab_staging::StagingError::Cancelled,
-                error => crab_staging::StagingError::Internal(format!(
-                    "remote add classifier failed: {error}"
-                )),
+                error => crab_staging::StagingError::Io(std::io::Error::other(error)),
             })?;
             // Keep index absence in the session's OnceCell: persisting one miss
             // per chunk makes cache writes scale with the entire new file.
@@ -10375,18 +10418,8 @@ impl PushPipeline {
         if planned.is_empty() {
             return Ok(VerifiedRemoteCandidates::default());
         }
-        let chunk_store = {
-            let guard = self.metadb.lock().await;
-            let Some(guard) = guard.as_ref() else {
-                return Ok(VerifiedRemoteCandidates::default());
-            };
-            match guard.chunk_index().await {
-                Ok(store) => store,
-                Err(error) if error.is_metadb_read_only_uninitialized() => {
-                    return Ok(VerifiedRemoteCandidates::default());
-                }
-                Err(error) => return Err(error),
-            }
+        let Some(store) = self.store.as_ref() else {
+            return Ok(VerifiedRemoteCandidates::default());
         };
         let exact_candidates = planned
             .iter()
@@ -10395,9 +10428,19 @@ impl PushPipeline {
         let deadline = tokio::time::Instant::now() + GLOBAL_CHUNK_LOOKUP_BUDGET;
         let (capsule, capsule_indexed, capsule_matched) =
             tokio::time::timeout_at(deadline, async {
-                let mut candidates = chunk_store
-                    .capsule_candidates_by_id(&exact_candidates)
-                    .await?;
+                let candidates_layout = crab_storage::StoreLayout::with_global_prefix(
+                    store.as_storage().clone(),
+                    self.router.repo_prefix().to_owned(),
+                    self.router.global_prefix().to_owned(),
+                );
+                let mut candidates =
+                    crab_metadata::capsule_protocol::CapsuleChunkIndex::new(&candidates_layout)
+                        .candidates_by_id(
+                            store.as_storage(),
+                            &exact_candidates,
+                            crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
+                        )
+                        .await?;
                 let indexed = candidates.placements.len();
                 candidates.placements.retain(|hash, placement| {
                     planned
@@ -10431,6 +10474,36 @@ impl PushPipeline {
             .into_iter()
             .filter(|(hash, _)| !capsule.candidates.contains_key(hash))
             .collect::<Vec<_>>();
+        if exact_candidates.is_empty() {
+            debug!(
+                planned = planned.len(),
+                indexed = capsule_indexed,
+                matched = capsule_matched,
+                generation_verified = 0,
+                capsule_source_verified = capsule.candidates.len(),
+                payload_verified = capsule.candidates.len(),
+                placement_mismatches = 0,
+                origin_proof_mismatches = 0,
+                "revalidated staged remote placement proofs"
+            );
+            return Ok(capsule);
+        }
+        // Released v1.2.4 plans store opaque placement IDs. Only unresolved
+        // staged IDs need that migration proof; ordinary capsule hits must
+        // never initialize the old manifest-receipt database.
+        let chunk_store = {
+            let guard = self.metadb.lock().await;
+            let Some(guard) = guard.as_ref() else {
+                return Ok(capsule);
+            };
+            match guard.chunk_index().await {
+                Ok(store) => store,
+                Err(error) if error.is_metadb_read_only_uninitialized() => {
+                    return Ok(capsule);
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let remote_candidates = tokio::time::timeout_at(
             deadline,
             chunk_store.get_committed_candidates_by_id_batch(&exact_candidates),
@@ -15071,9 +15144,18 @@ impl PushPipeline {
     async fn lookup_capsule_chunks_for_add(
         &self,
         hashes: &[MerkleHash],
-        chunk_store: &crate::metadata::ChunkIndexStore,
+        index: &crab_metadata::capsule_protocol::CapsuleChunkIndex,
     ) -> Result<HashMap<MerkleHash, crab_staging::push_plan::ExistingChunkCandidate>> {
-        let candidates = chunk_store.capsule_candidates(hashes).await?;
+        let Some(store) = self.store.as_ref() else {
+            return Ok(HashMap::new());
+        };
+        let candidates = index
+            .candidates(
+                store.as_storage(),
+                hashes,
+                crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
+            )
+            .await?;
         self.verify_capsule_chunk_candidates(candidates)
             .await
             .map(|verified| verified.candidates)
@@ -15238,7 +15320,7 @@ impl PushPipeline {
     async fn lookup_proven_remote_chunks_for_add(
         &self,
         chunk_hashes: &[MerkleHash],
-        chunk_store: crate::metadata::ChunkIndexStore,
+        index: &AddChunkIndex,
     ) -> Result<HashMap<MerkleHash, crab_staging::push_plan::ExistingChunkCandidate>> {
         if chunk_hashes.is_empty() {
             return Ok(HashMap::new());
@@ -15254,23 +15336,20 @@ impl PushPipeline {
                 )),
             })
         };
-        let mut capsule = tokio::time::timeout_at(
-            deadline,
-            self.lookup_capsule_chunks_for_add(chunk_hashes, &chunk_store),
-        )
-        .await
-        .map_err(|_| timeout_error())??;
-        let remaining = chunk_hashes
-            .iter()
-            .copied()
-            .filter(|hash| !capsule.contains_key(hash))
-            .collect::<Vec<_>>();
-        if remaining.is_empty() {
-            return Ok(capsule);
-        }
+        let chunk_store = match index {
+            AddChunkIndex::Capsule(index) => {
+                return tokio::time::timeout_at(
+                    deadline,
+                    self.lookup_capsule_chunks_for_add(chunk_hashes, index),
+                )
+                .await
+                .map_err(|_| timeout_error())?;
+            }
+            AddChunkIndex::Manifest(store) => store,
+        };
         let remote_candidates = tokio::time::timeout_at(
             deadline,
-            chunk_store.get_committed_candidates_batch(&remaining),
+            chunk_store.get_committed_candidates_batch(chunk_hashes),
         )
         .await
         .map_err(|_| timeout_error())??;
@@ -15302,18 +15381,20 @@ impl PushPipeline {
         let verified = self
             .verify_xorb_refs_with_committed_receipts(&refs, &validated.origins, false)
             .await?;
-        capsule.extend(verified.into_iter().filter_map(|(chunk_hash, xorb_ref)| {
-            let (placement_id, origin_proof_id) = proof_ids.get(&chunk_hash).copied()?;
-            (validated.placements.get(&chunk_hash) == Some(&placement_id)).then_some((
-                chunk_hash,
-                crab_staging::push_plan::ExistingChunkCandidate {
-                    xorb_ref,
-                    placement_id,
-                    origin_proof_id,
-                },
-            ))
-        }));
-        Ok(capsule)
+        Ok(verified
+            .into_iter()
+            .filter_map(|(chunk_hash, xorb_ref)| {
+                let (placement_id, origin_proof_id) = proof_ids.get(&chunk_hash).copied()?;
+                (validated.placements.get(&chunk_hash) == Some(&placement_id)).then_some((
+                    chunk_hash,
+                    crab_staging::push_plan::ExistingChunkCandidate {
+                        xorb_ref,
+                        placement_id,
+                        origin_proof_id,
+                    },
+                ))
+            })
+            .collect())
     }
 
     async fn lookup_cache_service_chunk_refs(
@@ -22364,7 +22445,7 @@ mod tests {
 
     mod capsule_chunk_tests;
 
-    fn add_classifier_with_private_cache(
+    async fn add_classifier_with_private_cache(
         store: &Store,
         router: &StoreLayout,
         cache_root: &std::path::Path,
@@ -22372,6 +22453,9 @@ mod tests {
         AddRemoteChunkClassifier,
         Arc<crate::cache::add_remote_candidates::AddRemoteCandidateCache>,
     ) {
+        crate::core::remote_layout::initialize(store, router)
+            .await
+            .expect("released v1 layout");
         let cache_root = cache_root.join("cache");
         crab_cache::ensure_private_cache_directory(&cache_root).expect("private cache root");
         let candidate_cache = Arc::new(
@@ -22417,7 +22501,7 @@ mod tests {
         let store = Store::new(recording_store);
         let router = StoreLayout::new(store.clone(), "repo-add-uninitialized-index".to_owned());
         let (classifier, candidate_cache) =
-            add_classifier_with_private_cache(&store, &router, cache_root.path());
+            add_classifier_with_private_cache(&store, &router, cache_root.path()).await;
         let first = crab_staging::push_plan::ExistingChunkLookup::lookup_existing_candidates(
             &classifier,
             &[(MerkleHash::from([1; 32]), 4)],
@@ -22478,7 +22562,7 @@ mod tests {
         seed.chunk_index_system_keys().await.expect("seed manifest");
         seed.close().await.expect("close seed writer");
         let (classifier, candidate_cache) =
-            add_classifier_with_private_cache(&store, &router, cache_root.path());
+            add_classifier_with_private_cache(&store, &router, cache_root.path()).await;
         let hash = MerkleHash::from([4; 32]);
         let lookup = crab_staging::push_plan::ExistingChunkLookup::lookup_existing_candidates(
             &classifier,

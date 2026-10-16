@@ -100,73 +100,6 @@ pub async fn write_index_entries(
     close_result
 }
 
-/// Publish rebuildable capsule chunk hints using origin receipts captured during byte verification.
-///
-/// Call after ref visibility. Every opened database is closed on success or error;
-/// callers must await this future through completion. Readers still revalidate source
-/// visibility and exact origin identity, so partial batches never confer authority.
-pub async fn write_capsule_chunk_candidates(
-    store: Arc<dyn ObjectStore>,
-    config: &RemoteIndexConfig,
-    repo_prefix: &str,
-    catalog: &crate::capsule_protocol::PointerCatalog,
-    origins: &HashMap<MerkleHash, OriginReceipt>,
-) -> Result<()> {
-    let mut source_shards = HashMap::new();
-    for (shard_hash, shard) in catalog.shards() {
-        for xorb in shard.xorb_hashes() {
-            source_shards
-                .entry(xorb.as_str())
-                .or_insert(shard_hash.as_str());
-        }
-    }
-    let mut selected = Vec::new();
-    for (hash, entry) in catalog.xorbs().iter().rev() {
-        let parsed = MerkleHash::from_hex(hash).map_err(|_| MetadataError::CorruptObject {
-            path: CHUNK_INDEX_DB_LABEL.to_owned(),
-            reason: "invalid capsule xorb hash".to_owned(),
-        })?;
-        if let Some(origin) = origins.get(&parsed) {
-            selected.push((hash, parsed, entry, origin));
-        }
-    }
-    if selected.is_empty() {
-        return Ok(());
-    }
-    for (hash, _, _, _) in &selected {
-        if !source_shards.contains_key(hash.as_str()) {
-            return Err(MetadataError::CorruptObject {
-                path: CHUNK_INDEX_DB_LABEL.to_owned(),
-                reason: "capsule xorb candidate has no source shard root".to_owned(),
-            });
-        }
-    }
-    let writer = RemoteIndexWriter::open(store, config, false, true).await?;
-    let result = async {
-        // Last-write heads choose the lowest canonical xorb and first occurrence.
-        for (hash, parsed, entry, origin) in selected {
-            let source_shard = source_shards.get(hash.as_str()).ok_or_else(|| {
-                MetadataError::Internal(
-                    "admitted capsule candidate lost its source shard".to_owned(),
-                )
-            })?;
-            let rows = crate::capsule_protocol::capsule_chunk_candidate_rows(
-                repo_prefix,
-                source_shard,
-                parsed,
-                entry,
-                origin,
-            )?;
-            writer.write_capsule_candidates(&rows).await?;
-        }
-        Ok::<_, MetadataError>(())
-    }
-    .await;
-    let close = writer.close().await;
-    result?;
-    close
-}
-
 /// Long-lived writer for caller-bounded remote index batches.
 ///
 /// Writes buffer data without waiting for durability. Always await [`Self::close`]
@@ -229,33 +162,6 @@ impl RemoteIndexWriter {
             committed_chunk_entries,
         )
         .await
-    }
-
-    /// Buffer a bounded set of capsule candidate rows; close remains the durability barrier.
-    async fn write_capsule_candidates(&self, rows: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
-        let db = self
-            .chunk_db
-            .as_ref()
-            .ok_or_else(|| MetadataError::Internal("chunk index was not opened".to_owned()))?;
-        for rows in rows.chunks(4096) {
-            let mut batch = slatedb::WriteBatch::new();
-            for (key, value) in rows {
-                batch.put(key.as_slice(), value.as_slice());
-            }
-            db.write_with_options(
-                batch,
-                &slatedb::config::WriteOptions {
-                    await_durable: false,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|source| MetadataError::SlateDbWrite {
-                db: CHUNK_INDEX_DB_LABEL.to_owned(),
-                source,
-            })?;
-        }
-        Ok(())
     }
 
     /// Flush and close every database opened by this writer.
@@ -968,4 +874,4 @@ mod tests {
 }
 
 #[cfg(test)]
-mod capsule_tests;
+mod format_tests;

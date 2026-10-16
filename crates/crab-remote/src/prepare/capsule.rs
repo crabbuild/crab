@@ -248,17 +248,11 @@ impl CapsuleArtifacts {
             Ok(_) => {
                 // Ref visibility owns the payload before hints become discoverable.
                 // Failed hint maintenance cannot reject an already committed Git push.
-                let config =
-                    crab_metadata::remote_index::RemoteIndexConfig::for_repo_with_global_prefix(
-                        self.layout.repo_prefix(),
-                        self.layout.global_prefix(),
-                    );
-                if let Err(error) = crab_metadata::remote_index::write_capsule_chunk_candidates(
-                    Arc::clone(self.layout.store().inner()),
-                    &config,
-                    self.layout.repo_prefix(),
+                if let Err(error) = crab_metadata::capsule_protocol::write_capsule_chunk_candidates(
+                    &self.layout,
                     &self.pointer_delta,
                     &self.origins,
+                    &|| cancel.is_cancelled(),
                 )
                 .await
                 {

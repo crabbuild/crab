@@ -534,6 +534,28 @@ async fn run_inner(
             }
         }
         .await;
+    // Root visibility precedes advisory discovery, while global admission
+    // still pins immutable hint pages until their own root becomes durable.
+    let hint_indexed = if publication.as_ref().is_ok_and(Option::is_some)
+        && layout.store().staging_write_prefix().is_none()
+    {
+        match crab_metadata::capsule_protocol::write_capsule_chunk_candidates(
+            &layout,
+            &pointer_delta,
+            &xet_stats.origins,
+            &|| cancel.is_cancelled(),
+        )
+        .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "capsule committed; chunk candidate index needs repair");
+                false
+            }
+        }
+    } else {
+        false
+    };
     let release = match gc_writer {
         Some(writer) => writer.release().await,
         None => Ok(()),
@@ -550,55 +572,26 @@ async fn run_inner(
         }
     };
     if let Some(active_active_commit) = committed {
-        if layout.store().staging_write_prefix().is_none() {
-            let mut index_config =
-                crab_metadata::remote_index::RemoteIndexConfig::for_repo_with_global_prefix(
-                    layout.repo_prefix(),
-                    layout.global_prefix(),
-                );
-            if let Some(path) = config.metadb.chunk_index.db.path.as_ref() {
-                index_config.chunk_index_path.clone_from(path);
-            }
-            // The ref is already committed. Index failures only remove acceleration;
-            // reporting an uncommitted push here would invite a duplicate publication.
-            match crab_metadata::remote_index::write_capsule_chunk_candidates(
-                Arc::clone(layout.store().inner()),
-                &index_config,
-                layout.repo_prefix(),
-                &pointer_delta,
-                &xet_stats.origins,
-            )
-            .await
-            {
-                Ok(()) => {
-                    let cache_path = crate::cache::add_remote_candidate_cache_path(
-                        &crate::cache::default_cache_root(),
-                        &store.bucket_identity(),
-                        layout.global_prefix(),
-                    );
-                    if cache_path.is_file() {
-                        let hashes = pointer_delta
-                            .xorbs()
-                            .values()
-                            .flat_map(|entry| entry.chunks())
-                            .filter_map(|chunk| MerkleHash::from_hex(chunk.hash()).ok())
-                            .collect::<Vec<_>>();
-                        let invalidation = tokio::task::spawn_blocking(move || {
-                            crate::cache::add_remote_candidates::AddRemoteCandidateCache::open(
-                                &cache_path,
-                            )
-                            .and_then(|cache| cache.forget_negatives(&hashes))
-                        })
-                        .await;
-                        if !matches!(invalidation, Ok(Ok(()))) {
-                            tracing::warn!(
-                                "capsule committed; candidate cache invalidation failed"
-                            );
-                        }
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "capsule committed; chunk candidate index needs repair")
+        if hint_indexed {
+            let cache_path = crate::cache::add_remote_candidate_cache_path(
+                &crate::cache::default_cache_root(),
+                &store.bucket_identity(),
+                layout.global_prefix(),
+            );
+            if cache_path.is_file() {
+                let hashes = pointer_delta
+                    .xorbs()
+                    .values()
+                    .flat_map(|entry| entry.chunks())
+                    .filter_map(|chunk| MerkleHash::from_hex(chunk.hash()).ok())
+                    .collect::<Vec<_>>();
+                let invalidation = tokio::task::spawn_blocking(move || {
+                    crate::cache::add_remote_candidates::AddRemoteCandidateCache::open(&cache_path)
+                        .and_then(|cache| cache.forget_negatives(&hashes))
+                })
+                .await;
+                if !matches!(invalidation, Ok(Ok(()))) {
+                    tracing::warn!("capsule committed; candidate cache invalidation failed");
                 }
             }
         }

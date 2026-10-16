@@ -2534,3 +2534,55 @@ acceptance requires changed-catalog byte bounds, old/new cold reconstruction,
 corruption/admission tests, GC/retention coverage and a new real RustFS run.
 The earlier 10 GiB matrix does not qualify this new format. RustFS results do
 not establish representative hosted-S3 latency.
+
+## Capsule chunk discovery without the retired receipt database
+
+Capsule add and push use `CapsuleChunkIndex`, owned by `crab-metadata`.
+The mutable `{global-prefix}/capsule-chunk-index` descriptor commits to an
+immutable authenticated B+ tree under `capsule-chunk-pages/`. Internal routing
+is paged. Current heads, immutable placement IDs and source anchors share this
+one tree, so replacing a head preserves the exact assertion recorded by an
+already-staged plan. Writers copy only affected paths and retry conditional root
+conflicts against the newer root; concurrent publishers cannot lose each other's
+records. Immutable pages are verified before the root can advertise them.
+
+These records remain advisory. A hit must still prove membership in a captured
+current source catalog and match fresh canonical-origin identity. Index presence,
+old exact IDs and cache-service observations grant no independent payload
+lifetime. An absent index permits local packing. Corrupt or missing pages under
+an unchanged root are errors, rather than negative hits. A read-only query whose
+page disappeared may restart its entire advisory lookup only after observing a
+different root, with three attempts and one aggregate byte budget. This does
+not rebase a pinned repository or require write grants from managed readers.
+
+All three producers—CLI capsule push, shared remote preparation and protected
+receive—use the same metadata writer after visibility and before releasing GC
+writer admission. Cancellation before hint-root publication leaves collectible
+immutable pages; it cannot advertise incomplete hints or reject a ref already
+committed. Protected receive propagates GC-fence cancellation to publication,
+drains its operation before releasing fences, and rechecks cancellation after
+immutable preparation and before visibility. Namespace renewal loss joins that
+same pre-publication check. Once publication starts, its exact outcome is awaited.
+
+Bucket GC authenticates the root's complete physical page closure, includes its
+identity in durable plan revalidation, and retains every referenced page. It
+collects only unreferenced pages under its existing grace and conditional-delete
+policy. Missing current pages abort planning before any sweep. Global bucket
+sweep covers the canonical `.crab` namespace; qualification of lifecycle cleanup
+for managed view-local global scopes remains a release gate.
+
+The released v1.2.4 tag contains version-1 staged plans with opaque placement and
+origin IDs. A target explicitly advertising the v1 layout therefore retains its
+manifest receipt-reader path. Capsule targets and fresh repositories do not open
+that database during discovery. Push resolves exact capsule IDs first; only
+unresolved released staged assertions enter the v1 migration reader. This
+boundary is a released local-data contract, not an error-driven fallback from a
+corrupt capsule index.
+
+Deterministic tests cover selected edits against 100, 10,000 and 100,000 unrelated
+chunks, read-only lookup concurrent with root replacement/page reclamation,
+competing root creates, cancellation before root publication, and GC retention.
+The fixed edit must stay below 512 KiB for both bytes read and written; its lookup
+has a 256 KiB budget. These are encoded-request bounds, not latency claims.
+Full-source RustFS, cache-service, protected receive and final 10 GiB acceptance
+remain separate gates until their receipts pass.

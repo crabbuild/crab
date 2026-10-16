@@ -323,7 +323,11 @@ pub async fn prepare_publication_with_ref_head_bases(
     })
 }
 
-async fn publish_prepared(
+/// Make a prepared capsule visible and resolve any uncertain commit outcome.
+///
+/// Callers retain ref/GC leases and check cancellation before entering. Await
+/// completion without dropping this future, including after lease renewal loss.
+pub async fn publish_prepared(
     router: &StoreLayout<Store>,
     prepared: PreparedCapsulePublication,
 ) -> Result<RootSnapshot> {

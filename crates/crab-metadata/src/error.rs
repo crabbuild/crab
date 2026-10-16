@@ -102,6 +102,11 @@ pub enum MetadataError {
     #[error("ref journal publication cancelled before commit")]
     RefJournalCancelled,
 
+    /// Hint publication stopped before advertising its replacement global root.
+    #[cfg(feature = "storage")]
+    #[error("capsule hint publication cancelled before root visibility")]
+    CapsuleHintCancelled,
+
     /// Durable attempt evidence prevents a new execution of this plan.
     #[cfg(feature = "storage")]
     #[error(

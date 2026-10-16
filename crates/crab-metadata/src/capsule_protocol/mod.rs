@@ -129,5 +129,5 @@ pub use chunk_candidates::{
     CapsuleChunkAnchor, CapsuleChunkCandidates, capsule_chunk_anchor_key, capsule_chunk_head_key,
 };
 
-#[cfg(feature = "remote-index")]
-pub(crate) use chunk_candidates::capsule_chunk_candidate_rows;
+#[cfg(feature = "storage")]
+pub use chunk_candidates::{CapsuleChunkIndex, write_capsule_chunk_candidates};

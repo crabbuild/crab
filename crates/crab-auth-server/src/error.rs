@@ -149,7 +149,8 @@ impl From<crab_git::pack::PackError> for AuthServerError {
 impl From<crab_metadata::error::MetadataError> for AuthServerError {
     fn from(error: crab_metadata::error::MetadataError) -> Self {
         match error {
-            error @ crab_metadata::error::MetadataError::RefJournalCancelled => {
+            error @ (crab_metadata::error::MetadataError::RefJournalCancelled
+            | crab_metadata::error::MetadataError::CapsuleHintCancelled) => {
                 Self::Io(io::Error::other(error))
             }
             error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }

@@ -2038,7 +2038,8 @@ impl From<crab_lfs::LfsError> for CrabError {
 impl From<crab_metadata::error::MetadataError> for CrabError {
     fn from(error: crab_metadata::error::MetadataError) -> Self {
         match error {
-            crab_metadata::error::MetadataError::RefJournalCancelled => Self::Cancelled,
+            crab_metadata::error::MetadataError::RefJournalCancelled
+            | crab_metadata::error::MetadataError::CapsuleHintCancelled => Self::Cancelled,
             crab_metadata::error::MetadataError::FileLookupLimit { resource, maximum } => {
                 Self::Protocol(format!("file lookup exceeds {resource} limit ({maximum})"))
             }

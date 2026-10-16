@@ -37,7 +37,14 @@ the semantically validated Git state to a BLAKE3 digest; readers call
 `validate_manifest_payload` before trusting refs or index pointers.
 
 Capsule protocol v2 uses one compacted root plus independently mutable ref
-heads and immutable capsule runs. Pointer catalogs keep shard/xorb payloads
+heads and immutable capsule runs.
+`capsule_protocol::CapsuleChunkIndex` reads paged global advisory chunk heads
+and exact placement IDs without opening the released manifest receipt database.
+`write_capsule_chunk_candidates` conditionally publishes verified immutable pages
+after ref visibility, under caller-held GC writer admission. Readers need no
+write grant; hints still require current source-catalog and canonical-origin
+proof. `CapsuleChunkIndex::objects` authenticates the physical closure for GC;
+it does not make hints authoritative payload roots. Pointer catalogs keep shard/xorb payloads
 external while authenticating their identities and reconstruction closure.
 Readers that already loaded and verified a root use
 `load_pointer_catalog_from_root`; this preserves the same catalog validation

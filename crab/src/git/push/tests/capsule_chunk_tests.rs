@@ -225,12 +225,11 @@ async fn capsule_push_exposes_committed_chunks_to_cold_cross_repository_add() {
         origin.proven_at_unix_secs += 10;
         origins.insert(candidate.xorb_ref.xorb_hash, origin);
     }
-    crab_metadata::remote_index::write_capsule_chunk_candidates(
-        Arc::clone(layout.store().inner()),
-        &crab_metadata::remote_index::RemoteIndexConfig::for_repo("repos/source"),
-        "repos/source",
+    crab_metadata::capsule_protocol::write_capsule_chunk_candidates(
+        &layout,
         &catalog,
         &origins,
+        &|| false,
     )
     .await
     .unwrap();
@@ -434,23 +433,20 @@ async fn capsule_push_exposes_committed_chunks_to_cold_cross_repository_add() {
             ),
         );
     }
-    crab_metadata::remote_index::write_capsule_chunk_candidates(
-        Arc::clone(layout.store().inner()),
-        &crab_metadata::remote_index::RemoteIndexConfig::for_repo("repos/source"),
-        "repos/source",
+    crab_metadata::capsule_protocol::write_capsule_chunk_candidates(
+        &layout,
         &catalog,
         &fresh_origins,
+        &|| false,
     )
     .await
     .unwrap();
-    let guard = build_push_metadb_guard(&store, &router, None, &metadata, true);
-    let chunk_store = guard.chunk_index().await.unwrap();
+    let index = crab_metadata::capsule_protocol::CapsuleChunkIndex::new(&layout);
     let hashes = planned.keys().copied().collect::<Vec<_>>();
     let fresh = classifier
         .pipeline
-        .lookup_capsule_chunks_for_add(&hashes, &chunk_store)
+        .lookup_capsule_chunks_for_add(&hashes, &index)
         .await;
-    guard.close().await.unwrap();
     let fresh = fresh.unwrap();
     assert_eq!(
         fresh.len(),

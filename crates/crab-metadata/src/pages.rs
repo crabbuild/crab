@@ -75,6 +75,7 @@ pub(crate) enum Kind {
     RunCatalogShards = 27,
     RunCatalogXorbs = 28,
     RunCatalogChunks = 29,
+    CapsuleChunkHints = 30,
 }
 
 impl Kind {
@@ -119,6 +120,7 @@ impl Kind {
             Self::ObjectLocators => 20,
             #[cfg(feature = "remote-index")]
             Self::PackOffsets => 12,
+            Self::CapsuleChunkHints => 33,
             _ => 4,
         }
     }

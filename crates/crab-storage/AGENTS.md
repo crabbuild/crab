@@ -27,6 +27,7 @@ dependency source before asserting provider behavior.
 | CAS behavior | `crates/crab-storage/src/cas.rs` | `crates/crab-metadata/src/manifest_store.rs` |
 | Provider or target identity | `crates/crab-storage/src/provider_store.rs` | `crates/crab-auth-store/src/lib.rs` |
 | Object key layout | `crates/crab-storage/src/layout.rs` | `crates/crab-cache/src/path_class.rs` |
+| Global capsule hint paths | `StoreLayout::capsule_chunk_index_path / capsule_chunk_pages_prefix` in `layout.rs` | `crab-metadata::capsule_protocol::CapsuleChunkIndex` and bucket GC |
 | Private local spills | `crates/crab-storage/src/scratch.rs` | `crates/crab-metadata/src/capsule_protocol/pointer/object/reader/inspection.rs` |
 
 ## Invariants

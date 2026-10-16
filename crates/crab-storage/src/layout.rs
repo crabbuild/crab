@@ -9,6 +9,8 @@ use object_store::path::Path as ObjectPath;
 pub const GLOBAL_PREFIX: &str = ".crab";
 /// Number of leading hash characters used to partition global content.
 pub const GLOBAL_CONTENT_FANOUT_WIDTH: usize = 2;
+/// Global immutable pages owned by the rebuildable capsule chunk-hint root.
+pub const CAPSULE_CHUNK_PAGE_KIND: &str = "capsule-chunk-pages";
 
 /// Build the directory containing one global content kind.
 #[must_use]
@@ -212,6 +214,18 @@ impl<S> StoreLayout<S> {
     pub fn capsule_checkpoint_path(&self, hash: &str) -> ObjectPath {
         let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
         self.repo_path(&format!("v2/checkpoints/{partition}/{hash}"))
+    }
+
+    /// Path to the conditional global root of rebuildable capsule chunk hints.
+    #[must_use]
+    pub fn capsule_chunk_index_path(&self) -> ObjectPath {
+        ObjectPath::from(format!("{}/capsule-chunk-index", self.global_prefix))
+    }
+
+    /// Prefix containing immutable pages owned by the global capsule hint root.
+    #[must_use]
+    pub fn capsule_chunk_pages_prefix(&self) -> ObjectPath {
+        global_content_prefix(&self.global_prefix, CAPSULE_CHUNK_PAGE_KIND)
     }
 
     /// Prefix containing immutable checkpoint catalog objects.

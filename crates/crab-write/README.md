@@ -21,7 +21,11 @@ Some(manifest): ready        None: capture fresh state and try another pass
 A commit error may be uncertain; resolve that outcome before proceeding or
 reporting rejection. Read readiness is a separate result from ref durability.
 
-Protocol v2 uses `capsule_protocol::publish` instead of the v1 journal. A
+Protocol v2 uses `capsule_protocol::publish` instead of the v1 journal.
+Callers with cancellation-sensitive immutable preparation can use
+`prepare_publication` then `publish_prepared`, checking their lease token between
+them. Publication must be awaited through outcome resolution, even if renewal
+fails after that boundary. A
 single-ref push commits by conditionally replacing only that ref head. A
 multi-ref push creates a unique preparing transaction record, conditionally
 prepares each edited head, wins a commit-vs-abort CAS on that record, and
