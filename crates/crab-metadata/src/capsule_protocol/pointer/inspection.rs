@@ -290,14 +290,16 @@ impl Inspector {
                 space: None,
                 rows: Cursor::new(Run::default()),
                 counts: PointerCatalogCounts::default(),
+                payload_bytes: 0,
             });
         };
-        let result: Result<(Run, PointerCatalogCounts)> = async {
+        let result: Result<(Run, PointerCatalogCounts, u64)> = async {
             prior?;
             let run = self.rows.finish(&space).await?;
             let mut cursor = Cursor::<Entry>::new(run.clone());
             let mut dependencies = Reducer::<Relation>::new();
             let mut counts = PointerCatalogCounts::default();
+            let mut payload_bytes = 0_u64;
             while let Some(row) = cursor.next(&space).await? {
                 let identity = &row.key[1..];
                 let count = match row.key[0] {
@@ -309,6 +311,16 @@ impl Inspector {
                 *count = count
                     .checked_add(1)
                     .ok_or_else(|| corrupt("catalog count overflows"))?;
+                if row.key[0] != 0 {
+                    let size = u64::from_be_bytes(
+                        row.value[..8]
+                            .try_into()
+                            .map_err(|_| corrupt("catalog payload size is truncated"))?,
+                    );
+                    payload_bytes = payload_bytes
+                        .checked_add(size)
+                        .ok_or_else(|| corrupt("catalog payload byte count overflows"))?;
+                }
                 match row.key[0] {
                     0 => {
                         dependencies
@@ -339,14 +351,15 @@ impl Inspector {
                 row.validate()?;
             }
             dependencies.remove(&space).await?;
-            Ok((run, counts))
+            Ok((run, counts, payload_bytes))
         }
         .await;
         match result {
-            Ok((run, counts)) => Ok(PointerCatalogInspection {
+            Ok((run, counts, payload_bytes)) => Ok(PointerCatalogInspection {
                 space: Some(space),
                 rows: Cursor::new(run),
                 counts,
+                payload_bytes,
             }),
             Err(error) => finish(Some(space), Err(error)).await,
         }
@@ -383,6 +396,7 @@ pub struct PointerCatalogInspection {
     space: Option<ScratchSpace>,
     rows: Cursor<Entry>,
     counts: PointerCatalogCounts,
+    payload_bytes: u64,
 }
 
 impl PointerCatalogInspection {
@@ -390,6 +404,15 @@ impl PointerCatalogInspection {
     #[must_use]
     pub fn counts(&self) -> PointerCatalogCounts {
         self.counts
+    }
+
+    /// Return the declared encoded bytes of all distinct shard and xorb bodies.
+    ///
+    /// The total comes from the complete normalized capture, independent of
+    /// iteration progress. It does not certify that those bodies are readable.
+    #[must_use]
+    pub fn encoded_payload_bytes(&self) -> u64 {
+        self.payload_bytes
     }
 
     async fn next_entry(&mut self) -> Result<Option<Entry>> {

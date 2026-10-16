@@ -12,12 +12,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 
-// Recovery owns an already assembled replacement catalog; captured views own
-// authenticated lookup roots. Both feed the same Git scan and file-byte proof.
+// Recovery owns assembled catalogs; current and historical captures own
+// authenticated lookup roots. All feed the same Git scan and file-byte proof.
 enum DependencyCatalog<'a> {
     Assembled(&'a PointerCatalog),
     Captured {
         view: &'a CapsuleRepositoryView,
+        lookup: &'a PointerCatalogLookup,
+    },
+    Checkpoint {
+        checkpoint: &'a LayeredCheckpoint,
         lookup: &'a PointerCatalogLookup,
     },
 }
@@ -27,7 +31,7 @@ impl DependencyCatalog<'_> {
         &self,
         layout: &StoreLayout<Store>,
         cancel: &CancellationToken,
-    ) -> Result<(PointerCatalogCounts, crate::ReadinessProbeStats)> {
+    ) -> Result<(PointerCatalogCounts, crate::ReadinessProbeStats, u64)> {
         match self {
             Self::Assembled(catalog) => {
                 let stats = tokio::select! {
@@ -42,10 +46,31 @@ impl DependencyCatalog<'_> {
                         xorbs: catalog.xorbs().len() as u64,
                     },
                     stats,
+                    catalog
+                        .shards()
+                        .values()
+                        .map(|entry| entry.encoded_size())
+                        .chain(catalog.xorbs().values().map(|entry| entry.encoded_size()))
+                        .try_fold(0_u64, |total, bytes| total.checked_add(bytes))
+                        .ok_or_else(|| {
+                            ReadError::internal("catalog payload byte count overflowed")
+                        })?,
                 ))
             }
             Self::Captured { view, .. } => {
                 let inspection = view.pointer_catalog_inspection().await?;
+                crate::selection::verify_capsule_pointer_inspection(layout, inspection, cancel)
+                    .await
+            }
+            Self::Checkpoint { checkpoint, .. } => {
+                let inspection = crab_metadata::capsule_protocol::inspect_pointer_catalog(
+                    layout,
+                    checkpoint.catalog(),
+                    &[],
+                    &[],
+                    crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
+                )
+                .await?;
                 crate::selection::verify_capsule_pointer_inspection(layout, inspection, cancel)
                     .await
             }
@@ -67,7 +92,7 @@ impl DependencyCatalog<'_> {
                         .map(|entry| (hash.clone(), entry.clone()))
                 })
                 .collect()),
-            Self::Captured { lookup, .. } => {
+            Self::Captured { lookup, .. } | Self::Checkpoint { lookup, .. } => {
                 let selected = lookup.files(layout.store(), hashes).await?;
                 Ok(selected.files().clone())
             }
@@ -212,6 +237,39 @@ pub async fn verify_installed_dependencies(
     .await
 }
 
+/// Verify installed Git and external dependencies against one pinned checkpoint.
+///
+/// Callers authenticate the checkpoint, install its verified packs, validate
+/// the supplied ref visibility and retain its sources through completion.
+/// The complete catalog is streamed; file bindings use that same checkpoint.
+/// Token cancellation drains the Git worker before returning.
+pub async fn verify_installed_checkpoint_dependencies(
+    layout: &StoreLayout<Store>,
+    git_dir: &Path,
+    refs: &BTreeMap<String, String>,
+    checkpoint: &LayeredCheckpoint,
+    limits: crab_git::walk::PointerScanLimits,
+    cancellation: &CancellationToken,
+) -> Result<CapsuleDependencyProof> {
+    if cancellation.is_cancelled() {
+        return Err(ReadError::Cancelled);
+    }
+    let lookup = checkpoint
+        .pointer_catalog_lookup(layout, crab_metadata::capsule_protocol::MAX_CATALOG_BYTES)?;
+    verify_installed_dependencies_from(
+        layout,
+        git_dir,
+        refs,
+        DependencyCatalog::Checkpoint {
+            checkpoint,
+            lookup: &lookup,
+        },
+        limits,
+        cancellation,
+    )
+    .await
+}
+
 async fn verify_installed_dependencies_from(
     layout: &StoreLayout<Store>,
     git_dir: &Path,
@@ -220,7 +278,7 @@ async fn verify_installed_dependencies_from(
     limits: crab_git::walk::PointerScanLimits,
     cancellation: &CancellationToken,
 ) -> Result<CapsuleDependencyProof> {
-    let (counts, catalog_stats) = catalog.verify(layout, cancellation).await?;
+    let (counts, catalog_stats, payload_bytes) = catalog.verify(layout, cancellation).await?;
     let proof =
         verify_installed_pointer_bytes_from(layout, git_dir, refs, catalog, limits, cancellation)
             .await?;
@@ -229,6 +287,7 @@ async fn verify_installed_dependencies_from(
         catalog_shards: counts.shards,
         catalog_xorbs: counts.xorbs,
         catalog_objects_read: catalog_stats.object_read_count,
+        catalog_payload_bytes: payload_bytes,
         reachable_crab_pointers: proof.crab,
         reachable_lfs_objects: proof.lfs_objects,
         reachable_lfs_bytes: proof.lfs_bytes,

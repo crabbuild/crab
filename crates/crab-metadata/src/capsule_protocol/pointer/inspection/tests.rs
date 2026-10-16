@@ -316,7 +316,7 @@ async fn cursor_fixture(
 #[tokio::test]
 async fn verified_cursor_preserves_complete_descriptors_across_spilled_file_rows() {
     let (_parent, mut cursor, expected) = cursor_fixture(5000).await;
-    let before = cursor.counts();
+    let before = (cursor.counts(), cursor.encoded_payload_bytes());
     let result: Result<_> = async {
         let mut values = Vec::new();
         while let Some(object) = cursor.next_object().await? {
@@ -325,7 +325,7 @@ async fn verified_cursor_preserves_complete_descriptors_across_spilled_file_rows
         Ok(values)
     }
     .await;
-    let after = cursor.counts();
+    let after = (cursor.counts(), cursor.encoded_payload_bytes());
     let counts = PointerCatalogCounts {
         files: 5000,
         shards: 1,
@@ -333,7 +333,7 @@ async fn verified_cursor_preserves_complete_descriptors_across_spilled_file_rows
     };
     assert_eq!(
         (before, after, cursor.finish(result).await.unwrap()),
-        (counts, counts, expected)
+        ((counts, 87), (counts, 87), expected)
     );
 }
 
@@ -615,4 +615,20 @@ async fn grouping_disk_admission_failure_removes_the_workspace() {
         Err(MetadataError::Storage { .. })
     ));
     assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn complete_catalog_payload_accounting_rejects_overflow() {
+    let mut catalog = PointerCatalog::new();
+    for (identity, bytes) in [(1, u64::MAX), (2, 1)] {
+        catalog
+            .insert_shard(
+                format!("{identity:064x}"),
+                ShardCatalogEntry::new(bytes, Vec::new()),
+            )
+            .unwrap();
+    }
+    assert!(matches!(inspect(vec![catalog]).await,
+        Err(MetadataError::CorruptObject { reason, .. })
+            if reason == "catalog payload byte count overflows"));
 }

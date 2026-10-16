@@ -206,25 +206,20 @@ async fn verify_history(
         verify_history_sources(layout, &segment, &checkpoint, cancel).await?;
     check_cancelled(cancel)?;
 
-    let catalog = checkpoint
-        .pointer_catalog_from_store(layout, u64::MAX)
-        .await?;
     validate_visibility(&segment, &checkpoint)?;
     let workspace = verify_git_checkpoint(layout, &segment, &checkpoint).await?;
-    let dependencies = crab_read::capsule_protocol::verify_installed_dependencies(
+    let dependencies = crab_read::capsule_protocol::verify_installed_checkpoint_dependencies(
         layout,
         &workspace.path().join("repository.git"),
         segment.refs(),
-        &catalog,
+        &checkpoint,
         crate::cmd::fsck_store::CAPSULE_GIT_SCAN_LIMITS,
         cancel,
     )
     .await?;
     check_cancelled(cancel)?;
-    let shard_count = u64::try_from(catalog.shards().len())
-        .map_err(|_| CrabError::Internal("history shard count overflowed".to_owned()))?;
-    let xorb_count = u64::try_from(catalog.xorbs().len())
-        .map_err(|_| CrabError::Internal("history xorb count overflowed".to_owned()))?;
+    let shard_count = dependencies.catalog_shards;
+    let xorb_count = dependencies.catalog_xorbs;
     let catalog_objects = checkpoint.catalog_objects(layout, u64::MAX).await?;
     let dependency_objects = 2_u64
         .checked_add(catalog_objects.len() as u64)
@@ -245,18 +240,7 @@ async fn verify_history(
         .checked_add(checkpoint_bytes)
         .and_then(|total| total.checked_add(source_bytes))
         .and_then(|total| total.checked_add(dependencies.reachable_lfs_bytes))
-        .and_then(|total| {
-            catalog
-                .shards()
-                .values()
-                .try_fold(total, |sum, shard| sum.checked_add(shard.encoded_size()))
-        })
-        .and_then(|total| {
-            catalog
-                .xorbs()
-                .values()
-                .try_fold(total, |sum, xorb| sum.checked_add(xorb.encoded_size()))
-        })
+        .and_then(|total| total.checked_add(dependencies.catalog_payload_bytes))
         .ok_or_else(|| CrabError::Internal("history dependency bytes overflowed".to_owned()))?;
     let verification = HistoryVerificationPayload {
         generation: segment.checkpoint().covered_generation(),

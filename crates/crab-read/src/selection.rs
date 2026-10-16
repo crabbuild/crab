@@ -528,8 +528,9 @@ pub(crate) async fn verify_capsule_pointer_inspection(
     router: &StoreLayout<Store>,
     mut catalog: PointerCatalogInspection,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<(PointerCatalogCounts, ReadinessProbeStats)> {
+) -> Result<(PointerCatalogCounts, ReadinessProbeStats, u64)> {
     let counts = catalog.counts();
+    let payload_bytes = catalog.encoded_payload_bytes();
     let mut stats = ReadinessProbeStats::default();
     let result = tokio::select! {
         biased;
@@ -543,7 +544,7 @@ pub(crate) async fn verify_capsule_pointer_inspection(
                     reason,
                 });
             }
-            Ok((counts, stats))
+            Ok((counts, stats, payload_bytes))
         } => result,
     };
     catalog.finish(result).await

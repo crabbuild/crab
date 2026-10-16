@@ -80,6 +80,7 @@ impl PointerCatalogInspection {
             space,
             rows,
             counts,
+            ..
         } = self;
         let Some(space) = space else {
             return Ok(PointerCatalogShardInspection {

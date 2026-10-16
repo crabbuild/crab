@@ -25,8 +25,8 @@ use crate::{ReadError, Result};
 
 mod dependency;
 pub use dependency::{
-    verify_captured_installed_pointer_bytes, verify_installed_dependencies,
-    verify_reachable_dependencies,
+    verify_captured_installed_pointer_bytes, verify_installed_checkpoint_dependencies,
+    verify_installed_dependencies, verify_reachable_dependencies,
 };
 
 #[cfg(test)]
@@ -74,6 +74,8 @@ pub struct CapsuleDependencyProof {
     pub catalog_xorbs: u64,
     /// Logical shard/xorb body reads for catalog verification, excluding recipe reads and retries.
     pub catalog_objects_read: u64,
+    /// Encoded bytes of all distinct, verified catalog shard and xorb bodies.
+    pub catalog_payload_bytes: u64,
     /// Reachable Crab pointer blobs whose complete file bytes were verified.
     pub reachable_crab_pointers: u64,
     /// Distinct reachable LFS bodies read and hash-verified from origin.

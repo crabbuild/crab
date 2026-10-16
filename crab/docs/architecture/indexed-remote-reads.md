@@ -2560,8 +2560,10 @@ descriptor pass. Constructor admission completes and closes its own inspection;
 a later full-data phase opens a fresh inspection of the same pinned sources.
 This can scan metadata twice, but avoids retaining operation spill across checker
 phases and prevents an unrelated phase from reporting success before full proof.
-Ordinary GC and replica readiness do not perform shard grouping. Restore
-accounting and catalog-rewriting tools retain full logical catalogs. Materialization admission continues to
+Ordinary GC and replica readiness do not perform shard grouping. Historical
+verification uses the same streamed complete catalog/body proof plus checkpoint-
+bound file lookups, preserving checked dependency counts and byte accounting.
+Restore's catalog merge and catalog-rewriting tools retain full logical catalogs. Materialization admission continues to
 protect those callers retaining recipe copies.
 
 Release audit: all six upstream published tag objects were checked again before

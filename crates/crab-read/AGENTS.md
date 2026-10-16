@@ -27,7 +27,7 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
 | --- | --- | --- |
 | Hydration or range integrity | `crates/crab-read/src/hydrator.rs` | `crates/crab-vfs/src/hydration.rs` |
 | Fetch authorization | `crates/crab-read/src/fetch_admission.rs` | `crab/src/git/remote_helper.rs` |
-| Deep dependency proof | `crates/crab-read/src/capsule_protocol/dependency.rs` | CLI metadata diagnosis, recovery and HTTP integrity |
+| Deep dependency proof | `crates/crab-read/src/capsule_protocol/dependency.rs` | CLI metadata diagnosis, historical checkpoint verification, recovery and HTTP integrity |
 | Replica readiness | `crates/crab-read/src/selection.rs` | `crab/src/replication/mod.rs` |
 | Term resolution | `crates/crab-read/src/term_resolver.rs` | `crates/crab-metadata/src/file_index_lookup.rs` |
 

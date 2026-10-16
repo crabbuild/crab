@@ -271,6 +271,16 @@ async fn installed_dependency_proof_accepts_reordered_repeated_file_chunks() {
                 catalog_shards: 1,
                 catalog_xorbs: 1,
                 catalog_objects_read: 2,
+                catalog_payload_bytes: catalog
+                    .shards()
+                    .values()
+                    .map(|entry| entry.encoded_size())
+                    .sum::<u64>()
+                    + catalog
+                        .xorbs()
+                        .values()
+                        .map(|entry| entry.encoded_size())
+                        .sum::<u64>(),
                 reachable_crab_pointers: 1,
                 reachable_lfs_objects: 0,
                 reachable_lfs_bytes: 0

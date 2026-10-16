@@ -510,3 +510,10 @@ with `verify_captured_installed_pointer_bytes`, the same canonical Git scan and
 whole-file/LFS byte phase. That API validates selected dependency closures only;
 it does not certify unrelated catalog health. Complete fsck must first finish
 its full catalog/object proof against the same captured sources.
+
+Historical verification uses `verify_installed_checkpoint_dependencies` after
+source authentication, pack installation and ref-visibility validation. It
+streams the full checkpoint catalog, resolves reachable file bindings from
+that same immutable checkpoint and shares the Git/whole-file/LFS byte proof.
+Proof counts include the encoded bytes of distinct verified shard/xorb bodies;
+logical recipe occurrences and repeated references do not increase that total.
