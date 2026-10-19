@@ -825,11 +825,14 @@ suffix consolidation rather than publishing a complete pack with every push.
 Measure source/member count, copied bytes, checkpoint metadata growth, clone
 throughput, and boundary-push tails on the final binary and provider.
 
-Fresh-clone throughput should prefer full parallel capsule downloads when
-consolidation is required. Partial clone, mount, and sparse hydration should
-prefer coalesced ranges based on authenticated locators. The range planner
-MUST merge adjacent sections only up to a bounded overfetch ratio so request
-savings do not create uncontrolled byte waste.
+Protocol-v2 multi-member clones first open complete authenticated metadata,
+then reuse a cached response pack or download the required source packs. Large
+source and response packs use bounded parallel ranges; cache lookup does not
+require retaining complete capsule payloads. Whole-capsule verification callers
+still materialize and authenticate the complete body. Partial clone, mount,
+and sparse hydration prefer coalesced ranges based on authenticated locators.
+The range planner MUST merge adjacent sections only up to a bounded overfetch
+ratio so request savings do not create uncontrolled byte waste.
 
 Local caches are keyed by immutable capsule hash and section range. They may
 remove repeated remote reads but never replace root, authorization, section,
