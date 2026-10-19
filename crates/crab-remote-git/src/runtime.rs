@@ -493,6 +493,10 @@ impl RemoteGitRuntime {
         self.tasks.spawn_blocking(task)
     }
 
+    pub(crate) fn origin_admission(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.origin)
+    }
+
     pub(crate) async fn origin_permit(
         &self,
         cancellation: &CancellationToken,

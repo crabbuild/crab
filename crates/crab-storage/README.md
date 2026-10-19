@@ -229,3 +229,14 @@ The `test-support` `CountingObjectStore::cancel_after_put` hook arms one
 cancellation after a successful PUT beneath a selected component prefix. It
 leaves failed writes and unrelated keys untouched, so publication tests can
 separate immutable-preparation cancellation from cancellation after visibility.
+
+Large immutable Git transfers use `Store::get_parallel_stream` and
+`Store::get_parallel_range_stream`: ranges larger than 512 MiB use ordered 32 MiB requests. Four active or queued
+range buffers are shared across store clones, bounding internal buffering to
+128 MiB. Capacity is reserved in source order and retained through ordered delivery.
+HEAD captures the source size and identity; later requests retain its ETag and
+version, validate exact response framing, and retry complete private ranges.
+All ranges use the normal routing, admission and observation path, including
+caller-owned origin concurrency for each request through body completion.
+Cancellation or dropping the stream stops pending reads; callers still verify the complete
+content hash. Small ranges retain one streaming GET without an extra HEAD.

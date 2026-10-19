@@ -44,6 +44,10 @@ and `crates/crab-metadata/src/git_object_locator`.
 - Range coalescing limits merging, not individual entry admission. Keep per-entry ReaderLimits and aggregate OperationBudget checks before fetching; do not split or truncate a valid larger pack entry to fit the merge threshold.
   Source: `crates/crab-remote-git/src/reader.rs`.
 
+- Canonical, embedded and cached large pack downloads share the storage range
+  stream. Preserve the complete Git/content hashes, byte budgets and file flush
+  on every returned exit. Sources: `reader.rs` and `pack.rs`.
+
 ## Features and platform
 
 No declared Cargo features. Inspect locked gix-pack/delta and SlateDB session contracts before altering decode or close behavior. Dedicated large-repository/HTTP qualification is separate from local fixture tests.

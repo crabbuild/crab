@@ -1798,7 +1798,12 @@ async fn write_layered_cold_clone_response<W: AsyncWrite + Unpin>(
     cancellation: &CancellationToken,
 ) -> Result<()> {
     let (metadata, returned_range, mut stream) = store
-        .get_stream(&source.source_path, Some(source.pack_range.clone()))
+        .get_parallel_range_stream(
+            &source.source_path,
+            source.pack_range.clone(),
+            None,
+            cancellation,
+        )
         .await
         .map_err(CrabError::from)?;
     if returned_range != source.pack_range || metadata.size < source.pack_range.end {

@@ -105,7 +105,13 @@ Pack-inventory downloads cancel only their operation's child token on a source
 failure, drain started body/sidecar writers, and skip queued work. Canonical,
 embedded and inline pack bodies share the same length/hash verifier and flush
 pending file writes before returning, including on cancellation or stream
-failure. Pack generation passes that semantic result to explicit session
+failure. Large canonical, capsule-backed and cached response packs use the storage
+owner's ordered concurrent range stream. Four range requests are shared across
+store clones, including concurrent source packs; complete pack SHA-1/BLAKE3
+verification and request/byte admission remain mandatory. Small artifacts keep
+a single GET. Pack/sidecar writes and response-pack file reads use 1 MiB buffers.
+Cached and source packs share the authenticated writer and drain pending writes on every returned
+exit. Pack generation passes that semantic result to explicit session
 closure. Callers must await cancellation cleanup before deleting destinations;
 abandoning the future is not a synchronous drain guarantee.
 

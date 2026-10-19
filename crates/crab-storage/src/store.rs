@@ -15,6 +15,8 @@
 //!   coordination pointers, and `update` uses `PutMode::Update(etag)`.
 //!   Callers never hand-build `PutOptions`.
 
+mod parallel_read;
+
 use std::collections::HashSet;
 use std::ops::Range;
 use std::pin::Pin;
@@ -132,6 +134,7 @@ fn next_cache_identity() -> u64 {
 pub struct Store {
     inner: Arc<dyn ObjectStore>,
     immutable_cache_identity: u64,
+    parallel_reads: Arc<tokio::sync::Semaphore>,
     retry: RetryPolicy,
     /// Stable bucket identity used for cross-scheme equality (same-
     /// bucket detection, safety rails). Defaults to
@@ -211,6 +214,7 @@ impl Store {
         Self {
             inner,
             immutable_cache_identity: next_cache_identity(),
+            parallel_reads: Arc::new(tokio::sync::Semaphore::new(parallel_read::CONCURRENCY)),
             retry: RetryPolicy::DEFAULT,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
@@ -257,6 +261,7 @@ impl Store {
         Self {
             inner,
             immutable_cache_identity: next_cache_identity(),
+            parallel_reads: Arc::new(tokio::sync::Semaphore::new(parallel_read::CONCURRENCY)),
             retry,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
@@ -1250,6 +1255,15 @@ impl Store {
             }
         })
         .await?;
+        self.stream_response(path, range, got)
+    }
+
+    fn stream_response(
+        &self,
+        path: &Path,
+        range: Option<Range<u64>>,
+        got: object_store::GetResult,
+    ) -> Result<(ObjectMeta, Range<u64>, StorageByteStream)> {
         let meta = got.meta.clone();
         let expected_range = range
             .map(|range| GetRange::Bounded(range).as_range(meta.size))
