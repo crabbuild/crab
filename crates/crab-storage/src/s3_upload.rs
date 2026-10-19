@@ -763,14 +763,11 @@ mod tests {
         for part in &payload {
             expected.update(part);
         }
-        let start = std::time::Instant::now();
         store
             .inner()
             .put_opts(&path, payload, PutMode::Create.into())
             .await
             .unwrap();
-        let upload_s = start.elapsed().as_secs_f64();
-        let start = std::time::Instant::now();
         let mut stream = store.inner().get(&path).await.unwrap().into_stream();
         let mut hash = blake3::Hasher::new();
         let mut received = 0;
@@ -780,7 +777,6 @@ mod tests {
             hash.update(&bytes);
         }
         assert_eq!((received, hash.finalize()), (size, expected.finalize()));
-        let download_s = start.elapsed().as_secs_f64();
         let replacement: PutPayload = (0..MULTIPART_THRESHOLD)
             .step_by(UPLOAD_FRAME_BYTES)
             .map(|_| Bytes::from(vec![0x7a; UPLOAD_FRAME_BYTES]))
@@ -800,12 +796,6 @@ mod tests {
             Err(crate::StorageError::StateConflict { .. })
         ));
         assert_eq!(store.head(&path).await.unwrap().size, size as u64);
-        println!(
-            "{}",
-            serde_json::json!({"key":path.as_ref(), "bytes":size,
-            "upload_s":upload_s, "download_s":download_s, "blake3_matched":true,
-            "conflicting_replacement_rejected":true})
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
