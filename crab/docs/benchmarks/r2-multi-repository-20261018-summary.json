@@ -1,0 +1,727 @@
+{
+  "schema": "crab.r2-multi-repository.summary",
+  "version": "1.0",
+  "bucket": "crab-v2-r2-20261018-d78b010",
+  "location": "WNAM",
+  "qualification": "not-qualified",
+  "source_sha": "d78b010cd207d154c403c63683fac3735f4811ce",
+  "repositories": [
+    {
+      "repository": "kubernetes/kubernetes",
+      "status": "failed",
+      "artifact_run": "03-kubernetes",
+      "whole_run_duration_seconds": 239.0,
+      "source_head": "12eb5840594c0b9b1454b6b809d2aa2c9447c9b9",
+      "source_base": "1f9e53d0ee0ed68b470bdb1b47397be80eec941b",
+      "source_pack_bytes_all_refs": 1346001374,
+      "source_first_parent_count": 59258,
+      "planned_replay_count": 100,
+      "completed_replay_count": 0,
+      "seed": null,
+      "incremental_push": null,
+      "commits_per_second": null,
+      "incremental_effective_capsule_mib_per_second": null,
+      "incremental_effective_visible_mib_per_second": null,
+      "stages": {},
+      "failures": [
+        {
+          "operation": "push-00000",
+          "duration_ms": 220992,
+          "exit_code": 3,
+          "stdout_sha256": "3372121996372c48edab1e9a27d8e8ad2f301131b18ffd41eb67ddad1c096260",
+          "stderr_sha256": "0d512301197ef99849f9c446d71564d508061f3c91821492efa97cf4f96859b0"
+        }
+      ],
+      "checks_passed": 9,
+      "checks_failed": [],
+      "source_unchanged": true,
+      "raw_report_sha256": "ed2577109ee2e437169b5936f72e6cb2203b09a78580ca1218f55eb3b52e877a",
+      "binary_sha256": "0227ad1c94d7bf7c6715feded359bcad2546c13d2ca944e076b9b4330fbd5bdf",
+      "started_at": "2026-10-18T19:04:16+00:00",
+      "finished_at": "2026-10-18T19:08:15+00:00"
+    },
+    {
+      "repository": "git/git",
+      "status": "failed",
+      "artifact_run": "medium/01-git",
+      "whole_run_duration_seconds": 104.0,
+      "source_head": "6de20f6092dcf9bdb1c8efe03db4b70c82b423dd",
+      "source_base": "9321f5936a11d43a666244b4a1737f231469ef7b",
+      "source_pack_bytes_all_refs": 605209306,
+      "source_first_parent_count": 24380,
+      "planned_replay_count": 100,
+      "completed_replay_count": 0,
+      "seed": null,
+      "incremental_push": null,
+      "commits_per_second": null,
+      "incremental_effective_capsule_mib_per_second": null,
+      "incremental_effective_visible_mib_per_second": null,
+      "stages": {},
+      "failures": [
+        {
+          "operation": "push-00000",
+          "duration_ms": 95164,
+          "exit_code": 3,
+          "stdout_sha256": "093558a3eca844b7def892bc40ccdf93d682ff282232463bb50794014f135b4b",
+          "stderr_sha256": "1db3b80877cfd25724520f90567a08646673d8f2c3f2d3755b8a90238dbe44a2"
+        }
+      ],
+      "checks_passed": 9,
+      "checks_failed": [],
+      "source_unchanged": true,
+      "raw_report_sha256": "ff3d7f5c3bdbb496ef241fa7b01f67cd3d8fde56681704617968f82ddfc52442",
+      "binary_sha256": "0227ad1c94d7bf7c6715feded359bcad2546c13d2ca944e076b9b4330fbd5bdf",
+      "started_at": "2026-10-18T19:13:11+00:00",
+      "finished_at": "2026-10-18T19:14:55+00:00"
+    },
+    {
+      "repository": "redis/redis",
+      "status": "failed",
+      "artifact_run": "medium/02-redis",
+      "whole_run_duration_seconds": 43.0,
+      "source_head": "38087a9f7f900eeb490297096c6a24b85f8e7d97",
+      "source_base": "0ef7e2b93c8b112c2d3ab80b0fce2de040e0d8fb",
+      "source_pack_bytes_all_refs": 509003817,
+      "source_first_parent_count": 9989,
+      "planned_replay_count": 100,
+      "completed_replay_count": 0,
+      "seed": null,
+      "incremental_push": null,
+      "commits_per_second": null,
+      "incremental_effective_capsule_mib_per_second": null,
+      "incremental_effective_visible_mib_per_second": null,
+      "stages": {},
+      "failures": [
+        {
+          "operation": "push-00000",
+          "duration_ms": 28301,
+          "exit_code": 4,
+          "stdout_sha256": "b83d2fd5435014cca55f91d45c157e1133baeabfd3647cab2eb2fb5b71d91132",
+          "stderr_sha256": "2a336b16698ec69be55efac16579ba58b67ae4ffffb60adeeef69bcb7008ae25"
+        }
+      ],
+      "checks_passed": 9,
+      "checks_failed": [],
+      "source_unchanged": true,
+      "raw_report_sha256": "f1184481af44f51b89dab404cd45cc6e3ef5f5da89b9ea35dc151afd3377f843",
+      "binary_sha256": "0227ad1c94d7bf7c6715feded359bcad2546c13d2ca944e076b9b4330fbd5bdf",
+      "started_at": "2026-10-18T19:14:55+00:00",
+      "finished_at": "2026-10-18T19:15:38+00:00"
+    },
+    {
+      "repository": "tokio-rs/axum (control)",
+      "status": "ok",
+      "artifact_run": "small-diagnostic/01-axum",
+      "whole_run_duration_seconds": 64.0,
+      "source_head": "af1345b53a259b0990be1ff853f9b56c05040ef7",
+      "source_base": "8aae5935791472be6e8aada157d3e7a49a610c23",
+      "source_pack_bytes_all_refs": 6375708,
+      "source_first_parent_count": 1862,
+      "planned_replay_count": 3,
+      "completed_replay_count": 3,
+      "seed": {
+        "duration_ms": 4373,
+        "new_or_changed_visible_bytes": 7688034,
+        "effective_visible_mib_per_second": 1.677,
+        "new_capsule_bytes": 7686786,
+        "effective_capsule_mib_per_second": 1.6764
+      },
+      "incremental_push": {
+        "count": 3,
+        "mean_ms": 1807.33,
+        "min_ms": 1562,
+        "max_ms": 2229,
+        "p50_ms": 1631,
+        "p95_ms": 2229,
+        "p99_ms": 2229
+      },
+      "commits_per_second": 0.5533,
+      "incremental_effective_capsule_mib_per_second": 0.018,
+      "incremental_effective_visible_mib_per_second": 0.0188,
+      "stages": {
+        "cold-clone": {
+          "duration_ms": 6161,
+          "effective_pack_mib_per_second": 0.922,
+          "git_fsck": "passed",
+          "received_pack_bytes": 5953228,
+          "sampled_blobs": 32,
+          "tip": "af1345b53a259b0990be1ff853f9b56c05040ef7"
+        },
+        "fetch-00001": {
+          "duration_ms": 2241,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 0,
+          "tip": "b14732f08cb54bde5b2ba3cfe324af3f6747b568"
+        },
+        "fetch-00002": {
+          "duration_ms": 2004,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 0,
+          "tip": "7d1594a003aac6a520b8153a632b2f6e234a9c8c"
+        },
+        "fetch-00003": {
+          "duration_ms": 1992,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 0,
+          "tip": "af1345b53a259b0990be1ff853f9b56c05040ef7"
+        },
+        "seed-clone": {
+          "duration_ms": 3332,
+          "effective_pack_mib_per_second": 1.682,
+          "git_fsck": "passed",
+          "received_pack_bytes": 5876940,
+          "sampled_blobs": 32,
+          "tip": "8aae5935791472be6e8aada157d3e7a49a610c23"
+        },
+        "warm-clone": {
+          "duration_ms": 5931,
+          "effective_pack_mib_per_second": 0.957,
+          "git_fsck": "passed",
+          "received_pack_bytes": 5953228,
+          "sampled_blobs": 32,
+          "tip": "af1345b53a259b0990be1ff853f9b56c05040ef7"
+        }
+      },
+      "failures": [],
+      "checks_passed": 29,
+      "checks_failed": [],
+      "source_unchanged": true,
+      "raw_report_sha256": "f2391d6f2b8982233d2252be46e5e66289e4b8f3fd2d7ab562bf9f78cdb2ce05",
+      "binary_sha256": "0227ad1c94d7bf7c6715feded359bcad2546c13d2ca944e076b9b4330fbd5bdf",
+      "started_at": "2026-10-18T19:10:28+00:00",
+      "finished_at": "2026-10-18T19:11:32+00:00"
+    },
+    {
+      "repository": "vuejs/vue",
+      "status": "ok",
+      "artifact_run": "replay/01-vue",
+      "whole_run_duration_seconds": 510.0,
+      "source_head": "9e88707940088cb1f4cd7dd210c9168a50dc347c",
+      "source_base": "f0057b101e6451d5095cdb7fd6308fd31ac0450c",
+      "source_pack_bytes_all_refs": 33006328,
+      "source_first_parent_count": 3401,
+      "planned_replay_count": 100,
+      "completed_replay_count": 100,
+      "seed": {
+        "duration_ms": 8895,
+        "new_or_changed_visible_bytes": 23526842,
+        "effective_visible_mib_per_second": 2.522,
+        "new_capsule_bytes": 23525591,
+        "effective_capsule_mib_per_second": 2.5223
+      },
+      "incremental_push": {
+        "count": 100,
+        "mean_ms": 2079.54,
+        "min_ms": 1282,
+        "max_ms": 13287,
+        "p50_ms": 1710,
+        "p95_ms": 3594,
+        "p99_ms": 11680
+      },
+      "commits_per_second": 0.4809,
+      "incremental_effective_capsule_mib_per_second": 0.2637,
+      "incremental_effective_visible_mib_per_second": 0.2682,
+      "stages": {
+        "cold-clone": {
+          "duration_ms": 10387,
+          "effective_pack_mib_per_second": 2.065,
+          "git_fsck": "passed",
+          "received_pack_bytes": 22486004,
+          "sampled_blobs": 32,
+          "tip": "9e88707940088cb1f4cd7dd210c9168a50dc347c"
+        },
+        "fetch-00025": {
+          "duration_ms": 2078,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 260503,
+          "tip": "0d6d972b32521fd18eb853b1073c0a19859a499a"
+        },
+        "fetch-00050": {
+          "duration_ms": 2952,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 510151,
+          "tip": "34c6192f4a5d0471da5655ebcf111653fd920172"
+        },
+        "fetch-00075": {
+          "duration_ms": 4437,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 705136,
+          "tip": "de0b97b3eadae120eda505b45df2de2115dcb6f0"
+        },
+        "fetch-00100": {
+          "duration_ms": 2482,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 637895,
+          "tip": "9e88707940088cb1f4cd7dd210c9168a50dc347c"
+        },
+        "seed-clone": {
+          "duration_ms": 4669,
+          "effective_pack_mib_per_second": 4.163,
+          "git_fsck": "passed",
+          "received_pack_bytes": 20380543,
+          "sampled_blobs": 32,
+          "tip": "f0057b101e6451d5095cdb7fd6308fd31ac0450c"
+        },
+        "warm-clone": {
+          "duration_ms": 6460,
+          "effective_pack_mib_per_second": 3.32,
+          "git_fsck": "passed",
+          "received_pack_bytes": 22486004,
+          "sampled_blobs": 32,
+          "tip": "9e88707940088cb1f4cd7dd210c9168a50dc347c"
+        }
+      },
+      "failures": [],
+      "checks_passed": 127,
+      "checks_failed": [],
+      "source_unchanged": true,
+      "raw_report_sha256": "6e9b387d42fd08f3f2b7c2332351d47223f14ef6098e34120cb54b995c920369",
+      "binary_sha256": "0227ad1c94d7bf7c6715feded359bcad2546c13d2ca944e076b9b4330fbd5bdf",
+      "started_at": "2026-10-18T19:17:20+00:00",
+      "finished_at": "2026-10-18T19:25:50+00:00"
+    },
+    {
+      "repository": "google/gson",
+      "status": "ok",
+      "artifact_run": "replay/02-gson",
+      "whole_run_duration_seconds": 352.0,
+      "source_head": "854c8255b625cf1e13c701a83ea9ccb4caaa576a",
+      "source_base": "09fcaffcd4752728e76b5baa97d357c9f993a31f",
+      "source_pack_bytes_all_refs": 52779212,
+      "source_first_parent_count": 2055,
+      "planned_replay_count": 100,
+      "completed_replay_count": 100,
+      "seed": {
+        "duration_ms": 5158,
+        "new_or_changed_visible_bytes": 11112928,
+        "effective_visible_mib_per_second": 2.055,
+        "new_capsule_bytes": 11111678,
+        "effective_capsule_mib_per_second": 2.0545
+      },
+      "incremental_push": {
+        "count": 100,
+        "mean_ms": 1614.53,
+        "min_ms": 1243,
+        "max_ms": 4568,
+        "p50_ms": 1469,
+        "p95_ms": 2063,
+        "p99_ms": 4409
+      },
+      "commits_per_second": 0.6194,
+      "incremental_effective_capsule_mib_per_second": 0.2961,
+      "incremental_effective_visible_mib_per_second": 0.3019,
+      "stages": {
+        "cold-clone": {
+          "duration_ms": 10487,
+          "effective_pack_mib_per_second": 1.772,
+          "git_fsck": "passed",
+          "received_pack_bytes": 19482652,
+          "sampled_blobs": 32,
+          "tip": "854c8255b625cf1e13c701a83ea9ccb4caaa576a"
+        },
+        "fetch-00025": {
+          "duration_ms": 2088,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 351722,
+          "tip": "6fd6a95c732371a7e5a1cb4007fd650eef0b0d10"
+        },
+        "fetch-00050": {
+          "duration_ms": 2550,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 416562,
+          "tip": "c2a1e189d26b9b5bbf0310da214d34a8b0847851"
+        },
+        "fetch-00075": {
+          "duration_ms": 2444,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 9779541,
+          "tip": "1ec0234b4006a0abcf456e7f9e3ba7f115f9b242"
+        },
+        "fetch-00100": {
+          "duration_ms": 4375,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 495495,
+          "tip": "854c8255b625cf1e13c701a83ea9ccb4caaa576a"
+        },
+        "seed-clone": {
+          "duration_ms": 2894,
+          "effective_pack_mib_per_second": 2.781,
+          "git_fsck": "passed",
+          "received_pack_bytes": 8439460,
+          "sampled_blobs": 32,
+          "tip": "09fcaffcd4752728e76b5baa97d357c9f993a31f"
+        },
+        "warm-clone": {
+          "duration_ms": 16096,
+          "effective_pack_mib_per_second": 1.154,
+          "git_fsck": "passed",
+          "received_pack_bytes": 19482652,
+          "sampled_blobs": 32,
+          "tip": "854c8255b625cf1e13c701a83ea9ccb4caaa576a"
+        }
+      },
+      "failures": [],
+      "checks_passed": 127,
+      "checks_failed": [],
+      "source_unchanged": true,
+      "raw_report_sha256": "df1e0f2934c92ac55ce59c83e43facb23c5da307c523894232ca75bce38c6afc",
+      "binary_sha256": "0227ad1c94d7bf7c6715feded359bcad2546c13d2ca944e076b9b4330fbd5bdf",
+      "started_at": "2026-10-18T19:25:50+00:00",
+      "finished_at": "2026-10-18T19:31:42+00:00"
+    },
+    {
+      "repository": "yt-dlp/yt-dlp",
+      "status": "ok",
+      "artifact_run": "replay/03-yt-dlp",
+      "whole_run_duration_seconds": 547.0,
+      "source_head": "c7fb478d21e9e59524befbe23f7801bb267fb880",
+      "source_base": "3cf981af60dd0b1b6c40807fb542d68ddb0a5f84",
+      "source_pack_bytes_all_refs": 66334424,
+      "source_first_parent_count": 20434,
+      "planned_replay_count": 100,
+      "completed_replay_count": 100,
+      "seed": {
+        "duration_ms": 45388,
+        "new_or_changed_visible_bytes": 77579978,
+        "effective_visible_mib_per_second": 1.63,
+        "new_capsule_bytes": 77578727,
+        "effective_capsule_mib_per_second": 1.6301
+      },
+      "incremental_push": {
+        "count": 100,
+        "mean_ms": 1862.42,
+        "min_ms": 1316,
+        "max_ms": 14658,
+        "p50_ms": 1552,
+        "p95_ms": 1960,
+        "p99_ms": 12831
+      },
+      "commits_per_second": 0.5369,
+      "incremental_effective_capsule_mib_per_second": 0.9523,
+      "incremental_effective_visible_mib_per_second": 0.9573,
+      "stages": {
+        "cold-clone": {
+          "duration_ms": 20359,
+          "effective_pack_mib_per_second": 3.387,
+          "git_fsck": "passed",
+          "received_pack_bytes": 72314404,
+          "sampled_blobs": 32,
+          "tip": "c7fb478d21e9e59524befbe23f7801bb267fb880"
+        },
+        "fetch-00025": {
+          "duration_ms": 5025,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 1381255,
+          "tip": "fa383a9efa02c2f89aba315b17e47fb6bf9e5bee"
+        },
+        "fetch-00050": {
+          "duration_ms": 4789,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 2105272,
+          "tip": "5d6b8c8cd19785c3086ae3a9ec618c45e25eb3bc"
+        },
+        "fetch-00075": {
+          "duration_ms": 4808,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 1566921,
+          "tip": "ec9425fcd06b04cb980eb73c03aae241ef6e87a3"
+        },
+        "fetch-00100": {
+          "duration_ms": 4359,
+          "git_fsck": "passed",
+          "pack_storage_delta_bytes": 1488814,
+          "tip": "c7fb478d21e9e59524befbe23f7801bb267fb880"
+        },
+        "seed-clone": {
+          "duration_ms": 8139,
+          "effective_pack_mib_per_second": 7.707,
+          "git_fsck": "passed",
+          "received_pack_bytes": 65772270,
+          "sampled_blobs": 32,
+          "tip": "3cf981af60dd0b1b6c40807fb542d68ddb0a5f84"
+        },
+        "warm-clone": {
+          "duration_ms": 13524,
+          "effective_pack_mib_per_second": 5.099,
+          "git_fsck": "passed",
+          "received_pack_bytes": 72314404,
+          "sampled_blobs": 32,
+          "tip": "c7fb478d21e9e59524befbe23f7801bb267fb880"
+        }
+      },
+      "failures": [],
+      "checks_passed": 127,
+      "checks_failed": [],
+      "source_unchanged": true,
+      "raw_report_sha256": "0ea97d6a1344e26096337e130db45fb961c3d46ea21546ca2668fc548a1547c1",
+      "binary_sha256": "0227ad1c94d7bf7c6715feded359bcad2546c13d2ca944e076b9b4330fbd5bdf",
+      "started_at": "2026-10-18T19:31:42+00:00",
+      "finished_at": "2026-10-18T19:40:49+00:00"
+    }
+  ],
+  "measurement_contract": {
+    "latency": "Complete child-command wall time, 50 ms sampling; excludes inventory and correctness checks.",
+    "capsule_upload_throughput": "New immutable capsule object bytes from post-push S3 inventories divided by complete push wall time; includes rollup payloads; excludes retry/readback traffic; not network bandwidth.",
+    "visible_write_bytes": "Change between successive post-push snapshots; seed includes initialization metadata and later snapshots can include intervening validation coordination metadata.",
+    "clone_throughput": "Received local Git pack bytes divided by complete clone wall time; no checkout; warm cache reused.",
+    "commits_per_second": "Replay count divided by summed push durations; excludes inventory, fetch, and verification pauses.",
+    "limitations": "Single run per repository on a shared macOS host. Diagnostic probes overlapped failed medium seed attempts. No release/provider/concurrency/Xet qualification."
+  },
+  "isolation": {
+    "all_passed": true,
+    "repositories": [
+      {
+        "run": "small-diagnostic/01-axum",
+        "exit_code": 0,
+        "expected_tip": "af1345b53a259b0990be1ff853f9b56c05040ef7",
+        "actual_tip": "af1345b53a259b0990be1ff853f9b56c05040ef7",
+        "ok": true
+      },
+      {
+        "run": "replay/01-vue",
+        "exit_code": 0,
+        "expected_tip": "9e88707940088cb1f4cd7dd210c9168a50dc347c",
+        "actual_tip": "9e88707940088cb1f4cd7dd210c9168a50dc347c",
+        "ok": true
+      },
+      {
+        "run": "replay/02-gson",
+        "exit_code": 0,
+        "expected_tip": "854c8255b625cf1e13c701a83ea9ccb4caaa576a",
+        "actual_tip": "854c8255b625cf1e13c701a83ea9ccb4caaa576a",
+        "ok": true
+      },
+      {
+        "run": "replay/03-yt-dlp",
+        "exit_code": 0,
+        "expected_tip": "c7fb478d21e9e59524befbe23f7801bb267fb880",
+        "actual_tip": "c7fb478d21e9e59524befbe23f7801bb267fb880",
+        "ok": true
+      }
+    ]
+  },
+  "source_mirrors_final": {
+    "all_unchanged": true,
+    "repositories": [
+      {
+        "repository": "git/git",
+        "head": "6de20f6092dcf9bdb1c8efe03db4b70c82b423dd",
+        "refs_sha256": "4f32e0506e61200a8d5e56686d80201bcee40e0b0db54c6ea7416b6e4a6abaa8",
+        "unchanged": true
+      },
+      {
+        "repository": "redis/redis",
+        "head": "38087a9f7f900eeb490297096c6a24b85f8e7d97",
+        "refs_sha256": "60c30a8ef50488a1d2f9441416f6a60c4fd21db19290e5c880fd78b9e8dd152d",
+        "unchanged": true
+      },
+      {
+        "repository": "vuejs/vue.git",
+        "head": "9e88707940088cb1f4cd7dd210c9168a50dc347c",
+        "refs_sha256": "e47a37ec2da16321e06d60f7ba65a4ff18966e5c9124023e74c30a5cb1b2fd1e",
+        "unchanged": true
+      },
+      {
+        "repository": "google/gson-mirror-20260919",
+        "head": "854c8255b625cf1e13c701a83ea9ccb4caaa576a",
+        "refs_sha256": "0332d818af4afdd1705f1285127866bc5d954e1cdf09fc288bda3fd4cb17e688",
+        "unchanged": true
+      },
+      {
+        "repository": "yt-dlp/yt-dlp.git",
+        "head": "c7fb478d21e9e59524befbe23f7801bb267fb880",
+        "refs_sha256": "4e7b9ed7a4d82c976b2e39124f6e59947abf9fd08b58c7af9ccb63162e53c66c",
+        "unchanged": true
+      }
+    ],
+    "source_views": [
+      {
+        "run": "03-kubernetes",
+        "unchanged": true
+      },
+      {
+        "run": "medium/01-git",
+        "unchanged": true
+      },
+      {
+        "run": "medium/02-redis",
+        "unchanged": true
+      },
+      {
+        "run": "small-diagnostic/01-axum",
+        "unchanged": true
+      },
+      {
+        "run": "replay/01-vue",
+        "unchanged": true
+      },
+      {
+        "run": "replay/02-gson",
+        "unchanged": true
+      },
+      {
+        "run": "replay/03-yt-dlp",
+        "unchanged": true
+      }
+    ]
+  },
+  "bucket_inventory_summary": {
+    "bucket": "crab-v2-r2-20261018-d78b010",
+    "objects": 394,
+    "stored_bytes": 609519862,
+    "inventory_sha256": "b1ba58bc8b98478cd1a464deb0ed5f52608bad084eb3210bcb41019b3be10125",
+    "repositories": [
+      {
+        "run": "03-kubernetes",
+        "prefix": "e2e-large-repository/03-kubernetes/",
+        "objects": 2,
+        "bytes": 522,
+        "ref_heads": 0,
+        "capsules": 0
+      },
+      {
+        "run": "medium/01-git",
+        "prefix": "e2e-large-repository/01-git/",
+        "objects": 2,
+        "bytes": 522,
+        "ref_heads": 0,
+        "capsules": 0
+      },
+      {
+        "run": "medium/02-redis",
+        "prefix": "e2e-large-repository/02-redis/",
+        "objects": 1,
+        "bytes": 448,
+        "ref_heads": 0,
+        "capsules": 0
+      },
+      {
+        "run": "small-diagnostic/01-axum",
+        "prefix": "e2e-large-repository/01-axum/",
+        "objects": 18,
+        "bytes": 13745630,
+        "ref_heads": 1,
+        "capsules": 4
+      },
+      {
+        "run": "replay/01-vue",
+        "prefix": "e2e-large-repository/01-vue/",
+        "objects": 122,
+        "bytes": 103574498,
+        "ref_heads": 1,
+        "capsules": 104
+      },
+      {
+        "run": "replay/02-gson",
+        "prefix": "e2e-large-repository/02-gson/",
+        "objects": 124,
+        "bytes": 80780384,
+        "ref_heads": 1,
+        "capsules": 104
+      },
+      {
+        "run": "replay/03-yt-dlp",
+        "prefix": "e2e-large-repository/03-yt-dlp/",
+        "objects": 123,
+        "bytes": 335920386,
+        "ref_heads": 1,
+        "capsules": 104
+      }
+    ]
+  },
+  "public_access_check": {
+    "success": true,
+    "enabled": false
+  },
+  "transport_control": [
+    {
+      "size_mib": 8,
+      "exit_code": 0,
+      "elapsed_s": 1.025,
+      "output": "PUT 8 MiB succeeded: 0.970 s\n"
+    },
+    {
+      "size_mib": 64,
+      "exit_code": 0,
+      "elapsed_s": 3.349,
+      "output": "PUT 64 MiB succeeded: 3.333 s\n"
+    },
+    {
+      "size_mib": 256,
+      "exit_code": 1,
+      "elapsed_s": 0.915,
+      "output": "PUT 256 MiB failed: 0.904 s\nGeneric S3 error: Error performing PUT https://<redacted>.r2.cloudflarestorage.com/crab-v2-r2-20261018-d78b010/transport-probe/256-mib in 796.77275ms - HTTP error: error sending request\nError performing PUT https://<redacted>.r2.cloudflarestorage.com/crab-v2-r2-20261018-d78b010/transport-probe/256-mib in 796.77275ms - HTTP error: error sending request\nHTTP error: error sending request\nHTTP error: error sending request\nerror sending request\nclient error (SendRequest)\nconnection error\nreceived fatal alert: BadRecordMac\n"
+    }
+  ],
+  "transport_variants": [
+    {
+      "size_mib": 256,
+      "frame_kib": 64,
+      "protocol": "h1",
+      "exit_code": 1,
+      "elapsed_s": 1.466,
+      "output": "PUT 256 MiB failed: 1.388 s\nGeneric S3 error: Error performing PUT https://<redacted>.r2.cloudflarestorage.com/crab-v2-r2-20261018-d78b010/transport-probe/256-mib-64-kib-http1-true in 1.267046791s - HTTP error: error sending request\nError performing PUT https://<redacted>.r2.cloudflarestorage.com/crab-v2-r2-20261018-d78b010/transport-probe/256-mib-64-kib-http1-true in 1.267046791s - HTTP error: error sending request\nHTTP error: error sending request\nHTTP error: error sending request\nerror sending request\nclient error (SendRequest)\nconnection error\nreceived fatal alert: BadRecordMac\n"
+    },
+    {
+      "size_mib": 256,
+      "frame_kib": 8192,
+      "protocol": "h2",
+      "exit_code": 1,
+      "elapsed_s": 1.752,
+      "output": "PUT 256 MiB failed: 1.736 s\nGeneric S3 error: Error performing PUT https://<redacted>.r2.cloudflarestorage.com/crab-v2-r2-20261018-d78b010/transport-probe/256-mib-8192-kib-http1-false in 1.618581083s - HTTP error: error sending request\nError performing PUT https://<redacted>.r2.cloudflarestorage.com/crab-v2-r2-20261018-d78b010/transport-probe/256-mib-8192-kib-http1-false in 1.618581083s - HTTP error: error sending request\nHTTP error: error sending request\nHTTP error: error sending request\nerror sending request\nclient error (SendRequest)\nconnection error\nreceived fatal alert: BadRecordMac\n"
+    }
+  ],
+  "aws_cli_control": {
+    "exit_code": 255,
+    "elapsed_s": 20.706,
+    "output": "\nSSL validation failed for https://<redacted>.r2.cloudflarestorage.com/crab-v2-r2-20261018-d78b010/transport-probe/aws-cli-256-mib EOF occurred in violation of protocol (_ssl.c:2427)\n"
+  },
+  "curl_control": [
+    {
+      "tls": "default",
+      "exit_code": 56,
+      "elapsed_s": 0.544,
+      "output": "100 14417920 27233065 0.529427 0 1.1\ncurl: (56) LibreSSL SSL_read: LibreSSL/3.3.6: error:1404C3FC:SSL routines:ST_OK:sslv3 alert bad record mac, errno 0\n"
+    },
+    {
+      "tls": "tls12",
+      "exit_code": 56,
+      "elapsed_s": 1.411,
+      "output": "100 33161216 23671500 1.400892 0 1.1\ncurl: (56) LibreSSL SSL_read: LibreSSL/3.3.6: error:1404C3FC:SSL routines:ST_OK:sslv3 alert bad record mac, errno 0\n"
+    }
+  ],
+  "redis_source_proof": {
+    "tree_oid": "1f9ef1b6556b375d56767fd78bf06c7d90e9abea",
+    "zero_padded_entries": [
+      {
+        "mode": "040000",
+        "name": "client-libraries"
+      },
+      {
+        "mode": "040000",
+        "name": "design-documents"
+      },
+      {
+        "mode": "040000",
+        "name": "doc"
+      },
+      {
+        "mode": "040000",
+        "name": "tests"
+      },
+      {
+        "mode": "040000",
+        "name": "utils"
+      }
+    ]
+  },
+  "raw_log_manifest_sha256": "550b98d14faccbd14d1cf0e061d411d7be3e29a62e470973f9043f4d884989e5",
+  "harness_provenance": {
+    "source_sha": "d78b010cd207d154c403c63683fac3735f4811ce",
+    "files": {
+      "crab/scripts/e2e/run_r2_multi_repo.py": "92d8fe9e75d0af691a7366d1286e82607110408d93ff036af9d9ec16a8da14a8",
+      "crab/scripts/e2e/run_large_repo_rustfs.py": "3b487d01e9e6d21705332bd59b1ff3a9d2449dc4c2454d9e6efb60f06be3813a",
+      "crab/scripts/e2e/run_capsule_k8s_rustfs.py": "c613499c3c0427753af2a8ad3cbe006badeb7a384c0132129e299f61ae026da7"
+    }
+  }
+}
