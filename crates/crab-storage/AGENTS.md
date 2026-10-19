@@ -55,6 +55,8 @@ dependency source before asserting provider behavior.
 - Large immutable range streams use shared bounded request admission, pin the
   captured source identity and preserve ordered output for caller hash checks.
   Range retries must not expose partial bytes or bypass read admission.
+  Complete-body consumers use `get_immutable_bounded` and retain full hash
+  checks; materialized body memory is separate from transfer buffering.
   Source and inline tests: `crates/crab-storage/src/store/parallel_read.rs`.
 - Check both loaded and newly serialized CAS object sizes; a successful write must remain within the same read ceiling.
   Source: `crates/crab-storage/src/cas.rs`.

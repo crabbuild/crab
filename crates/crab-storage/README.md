@@ -234,9 +234,17 @@ Large immutable Git transfers use `Store::get_parallel_stream` and
 `Store::get_parallel_range_stream`: ranges larger than 512 MiB use ordered 32 MiB requests. Four active or queued
 range buffers are shared across store clones, bounding internal buffering to
 128 MiB. Capacity is reserved in source order and retained through ordered delivery.
-HEAD captures the source size and identity; later requests retain its ETag and
-version, validate exact response framing, and retry complete private ranges.
+HEAD captures the source size and any available identity tokens; later requests
+retain those tokens, validate exact response framing, and retry complete private
+ranges. Cache-only metadata may lack origin identity, so complete caller hash
+verification remains mandatory when an origin response enriches that metadata.
 All ranges use the normal routing, admission and observation path, including
 caller-owned origin concurrency for each request through body completion.
 Cancellation or dropping the stream stops pending reads; callers still verify the complete
 content hash. Small ranges retain one streaming GET without an extra HEAD.
+
+`get_immutable_bounded` applies the same transfer policy when authenticated capsule
+decoders require a complete resident body. Its declared byte ceiling is checked
+before allocation; small bodies retain the existing bounded single-GET retry
+path. The complete returned body is caller-owned memory, separate from the
+128 MiB transfer-buffer budget; callers still verify its content commitment.

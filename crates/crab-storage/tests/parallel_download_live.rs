@@ -60,4 +60,16 @@ async fn parallel_download_preserves_the_complete_immutable_body() {
             serde_json::json!({"parallel":parallel,"bytes":bytes,"stream_requests":requests,"elapsed_s":start.elapsed().as_secs_f64(),"complete_hash_verified":true})
         );
     }
+    reads.store(0, Ordering::SeqCst);
+    let start = std::time::Instant::now();
+    let body = store.get_immutable_bounded(&path, size).await.unwrap();
+    assert_eq!((body.len() as u64, blake3::hash(&body)), (size, expected));
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        size.div_ceil(32 * 1024 * 1024) as usize
+    );
+    println!(
+        "{}",
+        serde_json::json!({"materialized":true, "bytes":size, "elapsed_s":start.elapsed().as_secs_f64(), "stream_requests":reads.load(Ordering::SeqCst), "complete_hash_verified":true})
+    );
 }

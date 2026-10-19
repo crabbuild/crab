@@ -262,6 +262,11 @@ identify the stored bytes. Verification writes no durable evidence and is not
 publication authority. A publisher must hold GC fences and recheck the exact
 base before exposing refs. Native HTTP receive/publication remains unfinished.
 
+Complete capsule and strict source verification reads use storage's bounded
+immutable materialization path. Large bodies download in concurrent ranges,
+while full-body hash and source/member commitments remain mandatory. The
+returned body remains resident; this does not bound total clone memory.
+
 `capsule_protocol::open_view` loads the v2 checkpoint root, double-collects
 complete per-ref-head object metadata around concurrent head reads, and retries
 a changing snapshot. It resolves each activation record still referenced by a

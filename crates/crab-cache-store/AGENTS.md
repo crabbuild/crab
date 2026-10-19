@@ -31,7 +31,7 @@ Trace one path: `StoreClient` in `crates/crab-read/src/store_client.rs` →
 - Construction errors make `try_build_healthy` return None; probe failure keeps a local-only wrapper. `new` does not probe health, and explicit local-cache instances retain their own limits.
   Source: `crates/crab-cache-store/src/lib.rs`.
 
-- Mutable, conditional, and versioned adapter reads bypass caches. `CachingStore::head` always uses origin; `object_store().head` may use cache-service metadata for immutable paths. That synthetic metadata has no origin ETag/version and must not be used for CAS. Inspect both APIs before extending cache admission.
+- Mutable, conditional, and versioned adapter reads bypass caches. `CachingStore::head` always uses origin; `object_store().head` may use cache-service metadata for immutable paths. Cache hits have synthetic metadata without origin ETag/version and must not be used for CAS. Streamed origin misses preserve their actual metadata and stream; do not buffer full pack bodies or add HEADs to bounded range misses. Resolve origin suffix reads once for provider portability. Inspect both APIs before extending cache admission.
   Source: `crates/crab-cache-store/src/lib.rs`.
 - Local adapter ranges use `GetRange::as_range` for EOF, offset, and suffix semantics. Resolve xorb ranges against the opened file, not a separate size probe. Lower-level hydration range reads remain exact.
   Source: `crates/crab-cache-store/src/lib.rs` and `crates/crab-cache/src/local_cache.rs`.

@@ -20,6 +20,44 @@ fn chunk_bytes(length: u64) -> u64 {
 }
 
 impl Store {
+    /// Read an immutable body within its declared size using bounded concurrent transfers.
+    ///
+    /// Callers still authenticate the complete hash and format. The returned
+    /// body occupies its full size in memory; dropping this future cancels reads.
+    pub async fn get_immutable_bounded(&self, path: &Path, max_bytes: u64) -> Result<Bytes> {
+        if max_bytes <= PARALLEL_THRESHOLD {
+            return self
+                .get_with_etag_bounded(path, max_bytes)
+                .await
+                .map(|(bytes, _)| bytes);
+        }
+        let cancellation = CancellationToken::new();
+        let (meta, _, mut stream) = self
+            .get_parallel_stream(path, max_bytes, None, &cancellation)
+            .await?;
+        if meta.size > max_bytes {
+            return Err(StorageError::CorruptObject {
+                path: path.to_string(),
+                reason: format!(
+                    "object is {} bytes; bounded read supports at most {max_bytes} bytes",
+                    meta.size
+                ),
+            });
+        }
+        let capacity = usize::try_from(meta.size).map_err(|source| StorageError::Io {
+            source: std::io::Error::other(source),
+        })?;
+        let mut body = Vec::new();
+        body.try_reserve_exact(capacity)
+            .map_err(|source| StorageError::Io {
+                source: std::io::Error::other(source),
+            })?;
+        while let Some(bytes) = stream.next().await {
+            body.extend_from_slice(&bytes?);
+        }
+        Ok(Bytes::from(body))
+    }
+
     /// Stream an immutable object with bounded concurrent requests for large bodies.
     ///
     /// The expected size selects transfer strategy; caller admission covers each
@@ -185,9 +223,12 @@ impl Store {
                 .get_opts(path, options)
                 .await
                 .map_err(|source| map_object_store_error(source, path.as_ref()))?;
+            // Cached metadata may have no origin identity. Check tokens that
+            // were actually captured; caller content hashes still authenticate
+            // the entire immutable body when a cache miss enriches metadata.
             if got.meta.size != pinned.size
-                || got.meta.e_tag != pinned.e_tag
-                || got.meta.version != pinned.version
+                || (pinned.e_tag.is_some() && got.meta.e_tag != pinned.e_tag)
+                || (pinned.version.is_some() && got.meta.version != pinned.version)
             {
                 return Err(StorageError::CorruptObject {
                     path: path.to_string(),
@@ -273,6 +314,7 @@ mod tests {
         Identity,
         Transient,
         HoldFirst,
+        HeadIdentityMissing,
     }
 
     #[derive(Debug)]
@@ -320,6 +362,10 @@ mod tests {
         async fn get_opts(&self, p: &Path, o: GetOptions) -> object_store::Result<GetResult> {
             self.0.requests.lock().unwrap().push(o.clone());
             let mut got = self.0.inner.get_opts(p, o.clone()).await?;
+            if o.head && *self.0.fault.lock().unwrap() == Some(Fault::HeadIdentityMissing) {
+                got.meta.e_tag = None;
+                got.meta.version = None;
+            }
             if !o.head {
                 let active = self.0.active.fetch_add(1, Ordering::SeqCst) + 1;
                 self.0.maximum.fetch_max(active, Ordering::SeqCst);
@@ -532,6 +578,45 @@ mod tests {
             );
             assert_eq!(e.active.load(Ordering::SeqCst), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn immutable_body_bounds_preserve_payload_and_admission() {
+        let (store, endpoint, path) = endpoint().await;
+        endpoint.release.add_permits(2);
+        let observed = Arc::new(AtomicUsize::new(0));
+        let counter = observed.clone();
+        let store = store.with_read_byte_observer(Arc::new(move |bytes| {
+            counter.fetch_add(bytes as usize, Ordering::SeqCst);
+        }));
+        for (bound, expected_bytes) in [(32, 32), (31, 32), (33, 64)] {
+            let result = store.get_immutable_bounded(&path, bound).await;
+            if bound < 32 {
+                assert!(matches!(result, Err(StorageError::CorruptObject { .. })));
+            } else {
+                assert_eq!(
+                    result.unwrap().as_ref(),
+                    b"0123456789abcdef0123456789abcdef"
+                );
+            }
+            assert_eq!(observed.load(Ordering::SeqCst), expected_bytes);
+            assert_eq!(endpoint.active.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_metadata_without_identity_allows_origin_range_metadata() {
+        let (store, endpoint, path) = endpoint().await;
+        endpoint.release.add_permits(64);
+        *endpoint.fault.lock().unwrap() = Some(Fault::HeadIdentityMissing);
+        let (_, _, body) = store
+            .parallel_stream(&path, Some(0..32), 32, 4, None, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            collect(body).await.unwrap(),
+            b"0123456789abcdef0123456789abcdef"
+        );
     }
 
     #[tokio::test]
