@@ -36,8 +36,16 @@ Trace one path: `crab/src/git/push.rs` → `commit_edits` in
   lease token, then await `publish_prepared` through commit resolution. Do not
   drop publication on renewal loss or reinterpret committed success as cleanup
   failure. Source: `crates/crab-write/src/capsule_protocol.rs`.
+- Foreground compaction preserves large historical runs, bounds ordinary input
+  bytes, and respects the persisted 64-segment/512-capsule ceilings. Selected
+  windows may precede the new leaf; load each selected source by identity.
+  Policy, I/O and tests: `crates/crab-write/src/capsule_protocol/compaction.rs`.
 - A marker storage error can leave an uncertain commit. Await the commit future and resolve outcome rather than treating every error as rejection.
   Source: `crates/crab-write/src/journal.rs`.
+- Ref-head retries require readback of the exact original state and retain its
+  conditional token. Matching candidate bytes prove commit; unreadable state
+  stays uncertain. Bound readback for both original and candidate head sizes.
+  Source: `crates/crab-write/src/capsule_protocol.rs`.
 - Maintenance combines operation and cleanup errors through `finish_after_cleanup`
   in `crates/crab-write/src/lib.rs`. Namespace publication preserves a known
   committed result even after lease failure; keep that distinct outcome policy.

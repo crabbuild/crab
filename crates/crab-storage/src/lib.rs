@@ -14,6 +14,7 @@ pub mod provider_store;
 mod read_admission;
 pub use read_admission::ReadAdmission;
 pub mod retry;
+mod s3_upload;
 pub mod scratch;
 #[cfg(test)]
 mod signed_read_tests;

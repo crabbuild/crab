@@ -106,12 +106,28 @@ endpoints, GCS, Azure, URL-parsed stores, and raw `Store::new` wrappers remain
 readback-required; endpoint names and ETags never qualify an immutable write.
 
 Uploads divide existing byte buffers into zero-copy 8 MiB HTTP frames so
-multi-GiB objects do not exceed macOS's vectored-write limit. Conditional PUTs
-still use one request; multipart part sizes and integrity checks are unchanged.
+multi-GiB objects do not exceed macOS's vectored-write limit. S3 create-only
+bodies of at least 32 MiB use multipart transfer with 16 MiB parts and at most
+four active parts per built store, shared by its clones. Part planning grows
+the part size when necessary to stay within 10,000 parts. Each part retries its
+explicit index, preserving ordering after an uncertain response. Completion
+carries `If-None-Match: *`; an occupied destination is never overwritten. The
+scoped transport condition does not affect ordinary multipart overwrites,
+small creates, or mutable CAS. Returned errors await abort; dropping an upload
+schedules abort. Process crashes still require provider multipart-expiration
+policy. Immutable readback and checksum contracts remain unchanged, and
+same-content conflicts stream their hash verification without buffering
+another complete body. Raw URL-parsed stores retain the dependency's own upload
+behavior; Crab-built S3 providers own automatic conditional multipart selection.
 
 Non-resumable multipart uploads use one bounded part queue with or without a
 progress callback. Part and completion failures attempt abort before returning;
 an abort failure does not replace the original error used for retry decisions.
+Crab-built S3 multipart handles retry each part at its original explicit index,
+including file-backed generated response-pack uploads during clone and fetch.
+They share the four-part admission limit with automatic immutable uploads;
+ordinary multipart completion retains overwrite semantics. Dropping an active
+handle schedules abort without publishing it.
 Durable resumable uploads keep their journal lease and recovery protocol.
 
 Stream responses must match the requested range, including EOF clamping. Drain

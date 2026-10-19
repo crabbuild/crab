@@ -588,6 +588,13 @@ plan receipt named by that attempt:
 Current refs alone are not sufficient proof because another writer could have
 produced the same ref values.
 
+Ref-head recovery compares complete encoded bodies, retaining the original
+conditional token for bounded transient retries. Readback admits the larger
+of the original and candidate heads because compaction can shrink the latter.
+Matching candidate bytes prove success; an unreadable head remains uncertain.
+Single- and multi-ref publication use the same head-recovery path; activation
+commit-vs-abort records retain their separate decision protocol.
+
 ## 8. Correctness argument
 
 ### 8.1 Durable-before-visible
@@ -1072,12 +1079,22 @@ production wiring and format freeze require these decisions to be closed:
   verified-PUT qualification;
 - **Partly decided:** roots are capped at 8 MiB. Repositories whose complete
   ref map cannot fit require a separately designed protocol and cannot use v2;
-- the maximum capsule size before multipart and the multipart part policy;
+- **Decided for Crab-built S3 providers:** create-only bodies at least 32 MiB
+  use 16 MiB multipart parts with four active parts per built store. Part sizes
+  grow when required by the 10,000-part ceiling. Retries preserve explicit part
+  indices; completion uses `If-None-Match: *` before immutable verification and
+  ref publication. Small creates and mutable CAS retain conditional single PUTs.
+  See `crates/crab-storage/src/s3_upload.rs` and the storage crate README;
+  provider and end-to-end performance qualification remain required.
 - **Decided for foreground publication:** per-ref heads append leaf capsules,
   fold 32 equal-level suffix runs in one bounded parallel wave, and roll each
   newest 500-capsule window into CRBRUN01. Maintenance starts at 32 visible
   capsules, receive forces a checkpoint at 56, runs cap at 512 capsules, and
-  the hard frontier limit is 64 run segments. Checkpoint positions may split a
+  the hard frontier limit is 64 run segments. Foreground compaction additionally
+  uses a 64 MiB input-byte budget and preserves large historical run identities.
+  Two inputs may exceed the soft budget; at the hard segment ceiling, merge
+  the eligible adjacent pair with the fewest bytes or require a checkpoint.
+  Checkpoint positions may split a
   run and readers replay only its authenticated suffix. Current-format tail
   latency and byte amplification remain qualification gates.
   This keeps pointer-free request means history-flat without depending on a

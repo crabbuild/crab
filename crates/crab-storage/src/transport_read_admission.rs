@@ -222,7 +222,8 @@ struct ReadAdmissionService(HttpClient);
 
 #[async_trait::async_trait]
 impl HttpService for ReadAdmissionService {
-    async fn call(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
+    async fn call(&self, mut request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        crate::s3_upload::condition_completion(&mut request);
         let contexts = contexts();
         if contexts.is_empty() {
             return self.0.execute(request).await;
