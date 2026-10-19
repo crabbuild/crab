@@ -51,7 +51,7 @@ dependency source before asserting provider behavior.
   Part retries reuse explicit indices; the scoped completion condition must
   never affect ordinary multipart overwrites or mutable CAS. Returned failures
   await abort; cancellation schedules abort. Source and regression tests:
-  `crates/crab-storage/src/s3_upload.rs` and `s3_upload/tests.rs`.
+  `crates/crab-storage/src/s3_upload.rs` (inline `tests` module).
 - Check both loaded and newly serialized CAS object sizes; a successful write must remain within the same read ceiling.
   Source: `crates/crab-storage/src/cas.rs`.
 - Logical bucket identity and credential-free transport target identity serve different consumers; do not derive the latter from display text.
