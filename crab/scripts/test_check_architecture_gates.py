@@ -84,6 +84,46 @@ class StorageScopeTests(unittest.TestCase):
                     self.assertEqual(result, expected)
 
 
+class WorkspaceDependencyTests(unittest.TestCase):
+    def test_remote_fixture_dependency_does_not_admit_other_dependency_kinds(self):
+        for name, kind, expected in (
+            ("crab-storage", "dev", True),
+            ("crab-storage", None, True),
+            ("crab-cache", None, False),
+            ("crab-auth", "dev", False),
+        ):
+            with self.subTest(dependency=name, kind=kind):
+                packages = [
+                    {"name": package, "dependencies": []}
+                    for package in GATES.WORKSPACE_DEPENDENCY_POLICY
+                ]
+                remote = next(package for package in packages if package["name"] == "crab-remote")
+                remote["dependencies"] = [{"name": name, "kind": kind}]
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    result = GATES.check_workspace_dependency_policy({"packages": packages})
+                self.assertEqual(result, expected)
+
+    def test_sqlite_policy_requires_the_cellule_version_and_checked_unsigned_bindings(self):
+        manifest = (GATES.repo_root() / "Cargo.toml").read_text(encoding="utf-8")
+        entry = next(line for line in manifest.splitlines() if line.startswith("rusqlite = "))
+        cases = (
+            ('{ version = "0.39", features = ["bundled", "fallible_uint"] }', True),
+            ('{ version = "0.34", features = ["bundled"] }', False),
+            ('{ version = "0.39", features = ["bundled"] }', False),
+            ('{ version = "0.39", features = ["bundled", "fallible_uint", "blob"] }', False),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for declaration, expected in cases:
+                with self.subTest(declaration=declaration):
+                    (root / "Cargo.toml").write_text(
+                        manifest.replace(entry, "rusqlite = " + declaration), encoding="utf-8"
+                    )
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        result = GATES.check_workspace_third_party_dependency_sources(root, {"packages": []})
+                    self.assertEqual(result, expected)
+
+
 class CelluleBoundaryTests(unittest.TestCase):
     def check_source(self, source: str, dependencies: tuple[str, ...] = ()) -> bool:
         with tempfile.TemporaryDirectory() as directory:

@@ -1818,7 +1818,8 @@ CELL_RUNTIME_SERVER_COMPONENT_FIELDS = frozenset(
 WORKSPACE_DEPENDENCY_POLICY = {
     "crab-remote": {
         "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-metadata", "crab-read", "crab-remote-git", "crab-storage", "crab-write", "crab-xet"},
-        "dev": {"crab-cache", "crab-cache-store"},
+        # Checkpoint cancellation fixtures need storage's test-only fault hooks.
+        "dev": {"crab-cache", "crab-cache-store", "crab-storage"},
     },
     "crab-sdk": {
         "normal": {"crab-auth", "crab-auth-store", "crab-cache", "crab-cache-store", "crab-coordination", "crab-git", "crab-lfs", "crab-metadata", "crab-read", "crab-remote", "crab-remote-git", "crab-staging", "crab-storage", "crab-types", "crab-write", "crab-xet"},
@@ -2047,7 +2048,8 @@ WORKSPACE_THIRD_PARTY_DEPENDENCIES = {
     "futures-util": "0.3",
     "object_store": {"version": "0.14.1", "default-features": False},
     "reqwest": {"version": "0.12", "default-features": False},
-    "rusqlite": {"version": "0.34", "features": ["bundled"]},
+    # Match pinned Cellule's SQLite linkage and preserve checked unsigned bindings.
+    "rusqlite": {"version": "0.39", "features": ["bundled", "fallible_uint"]},
     "schemars": "0.8",
     "serde": {"version": "1", "features": ["derive"]},
     "serde_json": "1",
