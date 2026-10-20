@@ -1396,9 +1396,9 @@ async fn open_repository_snapshot(
 ///
 /// Layered ordinary fetches use the checkpoint/run controls and a tip-bound
 /// proof only when the exact one-pack stream can be sent directly. A
-/// multi-member cold clone is promoted to the complete visibility view so
-/// protocol-v2 can consolidate the authenticated pack inventory into its
-/// singular `packfile` response without falling back to per-object reads.
+/// multi-member clone uses complete captured metadata so protocol-v2 can
+/// consolidate authenticated source packs without retaining their payloads
+/// before cache lookup or the bounded pack downloader.
 async fn open_capsule_repository_from_root(
     store: &crab_storage::Store,
     prefix: &str,
@@ -1431,7 +1431,8 @@ async fn open_capsule_repository_from_root(
         (footer_view, direct_pack, true)
     } else {
         (
-            crab_read::capsule_protocol::open_view_from_root(&layout, root, limits).await?,
+            crab_read::capsule_protocol::open_view_from_root_with_metadata(&layout, root, limits)
+                .await?,
             None,
             false,
         )
@@ -1798,7 +1799,12 @@ async fn write_layered_cold_clone_response<W: AsyncWrite + Unpin>(
     cancellation: &CancellationToken,
 ) -> Result<()> {
     let (metadata, returned_range, mut stream) = store
-        .get_stream(&source.source_path, Some(source.pack_range.clone()))
+        .get_parallel_range_stream(
+            &source.source_path,
+            source.pack_range.clone(),
+            None,
+            cancellation,
+        )
         .await
         .map_err(CrabError::from)?;
     if returned_range != source.pack_range || metadata.size < source.pack_range.end {

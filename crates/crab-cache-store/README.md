@@ -83,8 +83,15 @@ no duplicate full xorb; decoded-range caching belongs to `crab-read`'s runtime.
 | `CachingStore::head` | Always origin; retains its ETag, version, and modification time. |
 | `object_store()` with mutable paths | Always origin, including HEAD. |
 | `object_store()` with conditions or a version | Entire request goes to origin, including HEAD and ranges. |
-| Unconditional immutable adapter reads | May use caches; synthesized results have no ETag/version and use the response construction time. |
-| Unconditional immutable adapter HEAD | May use cache-service HEAD without fetching the body; otherwise asks origin for size and synthesizes the result. |
+| Unconditional immutable adapter reads | Cache hits and materialized local-cache reads have synthetic metadata; streamed origin misses retain the origin metadata. |
+| Unconditional immutable adapter HEAD | Cache-service hits have synthetic metadata; origin misses retain the actual ETag, version, and modification time. |
+
+Full reads without a local-cache key, and bounded range misses, forward the
+origin request and streaming response without collecting the body or adding a
+size probe. Suffix misses resolve once
+against origin metadata and issue a pinned bounded read because Azure does not
+support suffix headers. An origin HEAD retains
+its identity so large immutable range downloads can pin conditional reads.
 
 Use origin metadata for CAS and freshness decisions. Do not interpret a
 synthesized modification time as the object's creation or update time.

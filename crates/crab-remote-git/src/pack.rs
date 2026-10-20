@@ -106,14 +106,7 @@ impl PackStreamVerifier {
         self.trailer.extend_from_slice(&bytes[bytes_to_hash..]);
     }
 
-    pub(crate) fn finish(self) -> Result<VerifiedPackIdentity> {
-        self.finish_with_expected_object_count(None)
-    }
-
-    pub(crate) fn finish_with_expected_object_count(
-        self,
-        expected_object_count: Option<u32>,
-    ) -> Result<VerifiedPackIdentity> {
+    pub(crate) fn finish(self, expected_object_count: Option<u32>) -> Result<VerifiedPackIdentity> {
         let version = u32::from_be_bytes([
             self.header[4],
             self.header[5],
@@ -405,9 +398,13 @@ impl GeneratedPack {
         writer: &mut W,
         cancellation: &CancellationToken,
     ) -> Result<()> {
-        let mut file = tokio::fs::File::open(self.file.path())
+        let file = tokio::fs::File::open(self.file.path())
             .await
             .map_err(io_error)?;
+        // Refill from disk in batches; Git's packet bound still controls each
+        // outgoing frame, not the size of a filesystem read.
+        let mut file =
+            tokio::io::BufReader::with_capacity(crate::reader::PACK_FILE_BUFFER_BYTES, file);
         // Batch packet prefixes and payloads for unbuffered CLI output while
         // bounding queued HTTP bytes. Flush before callers append response framing.
         let mut writer = tokio::io::BufWriter::with_capacity(1024 * 1024, writer);
@@ -2579,11 +2576,11 @@ async fn download_cached_pack_to_path(
             stage: crate::CorruptionStage::PackEntry,
         });
     }
-    let origin_permit = repository.state.runtime.origin_permit(cancellation).await?;
-    let (metadata, range, mut stream) = tokio::select! {
+    let admission = Some(repository.state.runtime.origin_admission());
+    let (metadata, range, stream) = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(Error::Cancelled),
-        result = repository.state.store.get_stream(artifact_path, None) => result?,
+        result = repository.state.store.get_parallel_stream(artifact_path, expected_size, admission, cancellation) => result?,
     };
     if metadata.size > expected_size {
         return Err(crab_storage::StorageError::CorruptObject {
@@ -2600,40 +2597,24 @@ async fn download_cached_pack_to_path(
             stage: crate::CorruptionStage::PackEntry,
         });
     }
-    let mut file = tokio::fs::File::create(destination)
+    let file = tokio::fs::File::create(destination)
         .await
         .map_err(io_error)?;
-    let mut verifier = PackStreamVerifier::default();
-    let mut written = 0_u64;
-    while let Some(chunk) = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => return Err(Error::Cancelled),
-        chunk = stream.next() => chunk,
-    } {
-        let chunk = chunk?;
-        let next = written
-            .checked_add(chunk.len() as u64)
-            .ok_or(Error::Corrupt {
-                stage: crate::CorruptionStage::PackEntry,
-            })?;
-        if next > expected_size {
-            return Err(Error::Corrupt {
-                stage: crate::CorruptionStage::PackEntry,
-            });
-        }
-        verifier.update(&chunk);
-        file.write_all(&chunk).await.map_err(io_error)?;
-        written = next;
-    }
-    file.flush().await.map_err(io_error)?;
-    drop(origin_permit);
-    if written != expected_size {
-        return Err(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        });
-    }
-    let identity = verifier.finish_with_expected_object_count(Some(expected_objects))?;
-    if identity.git_sha1 != expected_checksum || identity.content_hash != expected_content_hash {
+    let mut file = tokio::io::BufWriter::with_capacity(crate::reader::PACK_FILE_BUFFER_BYTES, file);
+    let expected_hash = blake3::Hash::from_bytes(expected_content_hash)
+        .to_hex()
+        .to_string();
+    let identity = crate::reader::write_verified_pack_stream(
+        &mut file,
+        stream,
+        &expected_hash,
+        expected_size,
+        Some(expected_objects),
+        cancellation,
+        None,
+    )
+    .await?;
+    if identity.git_sha1 != expected_checksum {
         return Err(Error::Corrupt {
             stage: crate::CorruptionStage::PackEntry,
         });

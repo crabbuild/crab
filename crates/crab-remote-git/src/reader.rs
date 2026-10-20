@@ -26,6 +26,8 @@ use crate::pack::PackStreamVerifier;
 use crate::{BudgetDimension, RemoteGitRuntime, RepositoryIdentity};
 use crate::{CorruptionStage, Error, InflatedEntryError, RepositoryStateError, Result};
 
+pub(crate) const PACK_FILE_BUFFER_BYTES: usize = 1024 * 1024;
+
 /// Resource limits applied to one remote Git object read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReaderLimits {
@@ -2448,11 +2450,11 @@ impl RemoteGitReader {
             .clone()
             .with_read_admission(budget.read_admission(cancellation.clone()));
         let path = repo_pack_path(&self.repo_prefix, &pack_id);
-        let origin_permit = self.runtime.origin_permit(cancellation).await?;
+        let admission = Some(self.runtime.origin_admission());
         let (metadata, range, stream) = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(Error::Cancelled),
-            result = store.get_stream(&path, None) => result?,
+            result = store.get_parallel_stream(&path, expected_size, admission, cancellation) => result?,
         };
         if metadata.size != expected_size || range != (0..expected_size) {
             return Err(Error::Corrupt {
@@ -2464,7 +2466,7 @@ impl RemoteGitReader {
                 stage: CorruptionStage::PackEntry,
             });
         }
-        let mut file = tokio::fs::OpenOptions::new()
+        let file = tokio::fs::OpenOptions::new()
             .write(true)
             .truncate(true)
             .open(destination)
@@ -2472,16 +2474,18 @@ impl RemoteGitReader {
             .map_err(|source| {
                 Error::Metadata(crab_metadata::error::MetadataError::Io { source })
             })?;
+        let mut file = tokio::io::BufWriter::with_capacity(PACK_FILE_BUFFER_BYTES, file);
+        let expected_hash = pack_id.to_string();
         let result = write_verified_pack_stream(
             &mut file,
             stream,
-            pack_id,
+            &expected_hash,
             expected_size,
+            None,
             cancellation,
             progress,
         )
         .await;
-        drop(origin_permit);
         if result.is_ok() {
             observe_storage_read("pack_stream", expected_size);
         }
@@ -2503,7 +2507,7 @@ impl RemoteGitReader {
                 stage: CorruptionStage::Inventory,
             });
         }
-        let mut file = tokio::fs::OpenOptions::new()
+        let file = tokio::fs::OpenOptions::new()
             .write(true)
             .truncate(true)
             .open(destination)
@@ -2511,11 +2515,11 @@ impl RemoteGitReader {
             .map_err(|source| {
                 Error::Metadata(crab_metadata::error::MetadataError::Io { source })
             })?;
-        let (stream, origin_permit) = if let Some(pack) = source.pack {
+        let stream = if let Some(pack) = source.pack {
             budget
                 .charge(BudgetDimension::FetchedBytes, expected_size)
                 .await?;
-            (stream::once(async move { Ok(pack) }).boxed(), None)
+            stream::once(async move { Ok(pack) }).boxed()
         } else {
             let (path, range) =
                 self.pack_path_range(&pack_id, 0, expected_size)?
@@ -2526,29 +2530,31 @@ impl RemoteGitReader {
                 .store
                 .clone()
                 .with_read_admission(budget.read_admission(cancellation.clone()));
-            let origin_permit = self.runtime.origin_permit(cancellation).await?;
+            let admission = Some(self.runtime.origin_admission());
             let (metadata, returned_range, stream) = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return Err(Error::Cancelled),
-                result = store.get_stream(&path, Some(range.clone())) => result?,
+                result = store.get_parallel_range_stream(&path, range.clone(), admission, cancellation) => result?,
             };
             if returned_range != range || metadata.size < range.end || metadata.size == 0 {
                 return Err(Error::Corrupt {
                     stage: CorruptionStage::Inventory,
                 });
             }
-            (stream, Some(origin_permit))
+            stream
         };
+        let mut file = tokio::io::BufWriter::with_capacity(PACK_FILE_BUFFER_BYTES, file);
+        let expected_hash = pack_id.to_string();
         let result = write_verified_pack_stream(
             &mut file,
             stream,
-            pack_id,
+            &expected_hash,
             expected_size,
+            None,
             cancellation,
             progress,
         )
         .await;
-        drop(origin_permit);
         if result.is_ok() {
             observe_storage_read("pack_source_stream", expected_size);
         }
@@ -2848,7 +2854,7 @@ impl RemoteGitReader {
                 });
             }
             check_limit(limit, metadata.size, maximum_size)?;
-            let mut file = tokio::fs::OpenOptions::new()
+            let file = tokio::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
                 .truncate(true)
@@ -2857,6 +2863,7 @@ impl RemoteGitReader {
                 .map_err(|source| {
                     Error::Metadata(crab_metadata::error::MetadataError::Io { source })
                 })?;
+            let mut file = tokio::io::BufWriter::with_capacity(PACK_FILE_BUFFER_BYTES, file);
             let mut written = 0_u64;
             let copied = async {
                 while let Some(chunk) = tokio::select! {
@@ -2924,11 +2931,12 @@ fn observe_storage_read(storage_request: &'static str, storage_bytes: u64) {
     );
 }
 
-async fn write_verified_pack_stream<W: tokio::io::AsyncWrite + Unpin>(
+pub(crate) async fn write_verified_pack_stream<W: tokio::io::AsyncWrite + Unpin>(
     file: &mut W,
     mut stream: crab_storage::store::StorageByteStream,
-    pack_id: MerkleHash,
+    expected_hash: &str,
     expected_size: u64,
+    expected_objects: Option<u32>,
     cancellation: &CancellationToken,
     progress: Option<&(dyn Fn(u64) + Send + Sync)>,
 ) -> Result<VerifiedPackIdentity> {
@@ -2977,11 +2985,11 @@ async fn write_verified_pack_stream<W: tokio::io::AsyncWrite + Unpin>(
             stage: CorruptionStage::PackEntry,
         });
     }
-    let identity = verifier.finish()?;
+    let identity = verifier.finish(expected_objects)?;
     if blake3::Hash::from_bytes(identity.content_hash)
         .to_hex()
         .as_str()
-        != pack_id.to_string()
+        != expected_hash
     {
         return Err(Error::Corrupt {
             stage: CorruptionStage::PackEntry,
@@ -4175,7 +4183,7 @@ mod tests {
         }
 
         assert_eq!(
-            verifier.finish().expect("valid streamed pack"),
+            verifier.finish(None).expect("valid streamed pack"),
             VerifiedPackIdentity {
                 git_sha1: trailer,
                 content_hash: *blake3::hash(&pack).as_bytes(),
@@ -4340,8 +4348,9 @@ mod tests {
                 let result = write_verified_pack_stream(
                     &mut writer,
                     chunks,
-                    MerkleHash::from_hex(&"11".repeat(32)).unwrap(),
+                    &"11".repeat(32),
                     64,
+                    None,
                     &cancel,
                     None,
                 )
@@ -4358,6 +4367,34 @@ mod tests {
                 }
             }
         }
+        let mut writer =
+            tokio::io::BufWriter::with_capacity(PACK_FILE_BUFFER_BYTES, DeferredWriter::default());
+        let chunks = stream::iter([
+            Ok(Bytes::from_static(b"buffered pack bytes")),
+            Err(crab_storage::StorageError::Io {
+                source: std::io::Error::other("buffered origin failed"),
+            }),
+        ])
+        .boxed();
+        let expected_hash = "11".repeat(32);
+        let result = write_verified_pack_stream(
+            &mut writer,
+            chunks,
+            &expected_hash,
+            64,
+            None,
+            &CancellationToken::new(),
+            None,
+        )
+        .await;
+        let inner = writer.into_inner();
+        assert_eq!(
+            (inner.pending, inner.flushed),
+            (0, b"buffered pack bytes".len())
+        );
+        assert!(
+            matches!(result,Err(Error::Storage(crab_storage::StorageError::Io{source})) if source.to_string()=="buffered origin failed")
+        );
     }
 
     #[test]
@@ -4368,7 +4405,7 @@ mod tests {
         verifier.update(&pack);
 
         assert!(matches!(
-            verifier.finish(),
+            verifier.finish(None),
             Err(Error::Corrupt {
                 stage: CorruptionStage::PackEntry
             })

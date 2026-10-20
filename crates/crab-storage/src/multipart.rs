@@ -9,6 +9,19 @@ use std::time::Duration;
 
 use crate::StorageProviderKind;
 
+use bytes::Bytes;
+
+pub(crate) const UPLOAD_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+pub(crate) fn upload_payload(bytes: Bytes) -> object_store::PutPayload {
+    // The HTTP client emits one frame per buffer. A contiguous multi-GiB
+    // buffer exceeds macOS's vectored-write limit before any bytes are sent.
+    (0..bytes.len())
+        .step_by(UPLOAD_FRAME_BYTES)
+        .map(|offset| bytes.slice(offset..bytes.len().min(offset + UPLOAD_FRAME_BYTES)))
+        .collect()
+}
+
 /// Physical multipart-upload limits enforced by a storage provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MultipartUploadLimits {

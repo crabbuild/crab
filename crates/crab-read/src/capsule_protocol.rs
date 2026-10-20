@@ -2375,9 +2375,9 @@ pub async fn verify_layered_source(
         }
         return Ok(());
     }
-    let (bytes, _) = router
+    let bytes = router
         .store()
-        .get_with_etag_bounded(&path, source.object_size())
+        .get_immutable_bounded(&path, source.object_size())
         .await?;
     if bytes.len() as u64 != source.object_size() {
         return Err(corrupt_path(

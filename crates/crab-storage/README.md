@@ -106,12 +106,28 @@ endpoints, GCS, Azure, URL-parsed stores, and raw `Store::new` wrappers remain
 readback-required; endpoint names and ETags never qualify an immutable write.
 
 Uploads divide existing byte buffers into zero-copy 8 MiB HTTP frames so
-multi-GiB objects do not exceed macOS's vectored-write limit. Conditional PUTs
-still use one request; multipart part sizes and integrity checks are unchanged.
+multi-GiB objects do not exceed macOS's vectored-write limit. S3 create-only
+bodies of at least 32 MiB use multipart transfer with 16 MiB parts and at most
+four active parts per built store, shared by its clones. Part planning grows
+the part size when necessary to stay within 10,000 parts. Each part retries its
+explicit index, preserving ordering after an uncertain response. Completion
+carries `If-None-Match: *`; an occupied destination is never overwritten. The
+scoped transport condition does not affect ordinary multipart overwrites,
+small creates, or mutable CAS. Returned errors await abort; dropping an upload
+schedules abort. Process crashes still require provider multipart-expiration
+policy. Immutable readback and checksum contracts remain unchanged, and
+same-content conflicts stream their hash verification without buffering
+another complete body. Raw URL-parsed stores retain the dependency's own upload
+behavior; Crab-built S3 providers own automatic conditional multipart selection.
 
 Non-resumable multipart uploads use one bounded part queue with or without a
 progress callback. Part and completion failures attempt abort before returning;
 an abort failure does not replace the original error used for retry decisions.
+Crab-built S3 multipart handles retry each part at its original explicit index,
+including file-backed generated response-pack uploads during clone and fetch.
+They share the four-part admission limit with automatic immutable uploads;
+ordinary multipart completion retains overwrite semantics. Dropping an active
+handle schedules abort without publishing it.
 Durable resumable uploads keep their journal lease and recovery protocol.
 
 Stream responses must match the requested range, including EOF clamping. Drain
@@ -213,3 +229,22 @@ The `test-support` `CountingObjectStore::cancel_after_put` hook arms one
 cancellation after a successful PUT beneath a selected component prefix. It
 leaves failed writes and unrelated keys untouched, so publication tests can
 separate immutable-preparation cancellation from cancellation after visibility.
+
+Large immutable Git transfers use `Store::get_parallel_stream` and
+`Store::get_parallel_range_stream`: ranges larger than 512 MiB use ordered 32 MiB requests. Four active or queued
+range buffers are shared across store clones, bounding internal buffering to
+128 MiB. Capacity is reserved in source order and retained through ordered delivery.
+HEAD captures the source size and any available identity tokens; later requests
+retain those tokens, validate exact response framing, and retry complete private
+ranges. Cache-only metadata may lack origin identity, so complete caller hash
+verification remains mandatory when an origin response enriches that metadata.
+All ranges use the normal routing, admission and observation path, including
+caller-owned origin concurrency for each request through body completion.
+Cancellation or dropping the stream stops pending reads; callers still verify the complete
+content hash. Small ranges retain one streaming GET without an extra HEAD.
+
+`get_immutable_bounded` applies the same transfer policy when authenticated capsule
+decoders require a complete resident body. Its declared byte ceiling is checked
+before allocation; small bodies retain the existing bounded single-GET retry
+path. The complete returned body is caller-owned memory, separate from the
+128 MiB transfer-buffer budget; callers still verify its content commitment.

@@ -648,6 +648,9 @@ fn build_s3_object_store(
     } else {
         (builder, ImmutableWriteVerification::ReadbackRequired)
     };
+    let conditional_multipart = builder
+        .get_config_value(&AmazonS3ConfigKey::ConditionalPut)
+        .is_none_or(|value| value.trim() != "disabled");
     let s3 = builder
         .with_copy_if_not_exists(S3CopyIfNotExists::Multipart)
         .with_http_connector(crate::transport_read_admission::ReadAdmissionConnector::default())
@@ -655,7 +658,10 @@ fn build_s3_object_store(
         .map_err(|source| provider_config_error(StorageProviderKind::S3, bucket, source))?;
     let s3: Arc<AmazonS3> = Arc::new(s3);
     Ok(BuiltObjectStore {
-        inner: s3.clone() as Arc<dyn ObjectStore>,
+        inner: Arc::new(crate::s3_upload::S3Store::new(
+            s3.clone(),
+            conditional_multipart,
+        )),
         provider: StorageProviderKind::S3,
         multipart_identity: Some(multipart_identity),
         signer: Some(s3.clone() as Arc<dyn object_store::signer::Signer>),
@@ -769,6 +775,35 @@ fn normalize_env_option_key(key: &str) -> Option<String> {
 #[expect(clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn disabled_conditional_put_rejects_large_create_without_network() {
+        let built = build_s3_object_store(
+            "bucket",
+            AmazonS3Builder::new()
+                .with_bucket_name("bucket")
+                .with_access_key_id("test")
+                .with_secret_access_key("test")
+                .with_region("us-east-1")
+                .with_conditional_put(object_store::aws::S3ConditionalPut::Disabled),
+            None,
+            Some("https://127.0.0.1:9"),
+            false,
+        )
+        .unwrap();
+        let result = built
+            .inner
+            .put_opts(
+                &Path::from("large"),
+                bytes::Bytes::from(vec![0; 32 * 1024 * 1024]).into(),
+                object_store::PutMode::Create.into(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(object_store::Error::NotImplemented { .. })
+        ));
+    }
 
     #[test]
     fn credential_provider_kind_matches_variant() {

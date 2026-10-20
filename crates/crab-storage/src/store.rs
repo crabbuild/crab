@@ -15,6 +15,8 @@
 //!   coordination pointers, and `update` uses `PutMode::Update(etag)`.
 //!   Callers never hand-build `PutOptions`.
 
+mod parallel_read;
+
 use std::collections::HashSet;
 use std::ops::Range;
 use std::pin::Pin;
@@ -38,6 +40,7 @@ use crab_types::storage::StorageScope;
 use crate::error::{Result, StorageError};
 use crate::error_map::map_object_store_error;
 use crate::identity::BucketIdentity;
+use crate::multipart::upload_payload;
 use crate::retry::{RetryPolicy, retry};
 
 /// Opaque CAS token used by [`Store::update`] and returned by
@@ -76,16 +79,6 @@ const SIGNED_RANGE_CHUNK_BYTES: u64 = 512 * 1024 * 1024;
 const SIGNED_RANGE_READ_CONCURRENCY: usize = 4;
 const SIGNED_RANGE_WRITE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 const SIGNED_RANGE_GET_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
-const UPLOAD_FRAME_BYTES: usize = 8 * 1024 * 1024;
-
-fn upload_payload(bytes: Bytes) -> object_store::PutPayload {
-    // The HTTP client emits one frame per buffer. A contiguous multi-GiB
-    // buffer exceeds macOS's vectored-write limit before any bytes are sent.
-    (0..bytes.len())
-        .step_by(UPLOAD_FRAME_BYTES)
-        .map(|offset| bytes.slice(offset..bytes.len().min(offset + UPLOAD_FRAME_BYTES)))
-        .collect()
-}
 
 struct SignedFileTarget<'a> {
     path: &'a std::path::Path,
@@ -141,6 +134,7 @@ fn next_cache_identity() -> u64 {
 pub struct Store {
     inner: Arc<dyn ObjectStore>,
     immutable_cache_identity: u64,
+    parallel_reads: Arc<tokio::sync::Semaphore>,
     retry: RetryPolicy,
     /// Stable bucket identity used for cross-scheme equality (same-
     /// bucket detection, safety rails). Defaults to
@@ -220,6 +214,7 @@ impl Store {
         Self {
             inner,
             immutable_cache_identity: next_cache_identity(),
+            parallel_reads: Arc::new(tokio::sync::Semaphore::new(parallel_read::CONCURRENCY)),
             retry: RetryPolicy::DEFAULT,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
@@ -266,6 +261,7 @@ impl Store {
         Self {
             inner,
             immutable_cache_identity: next_cache_identity(),
+            parallel_reads: Arc::new(tokio::sync::Semaphore::new(parallel_read::CONCURRENCY)),
             retry,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
@@ -850,15 +846,9 @@ impl Store {
         path: &Path,
         expected: &[u8; 32],
     ) -> Result<bool> {
-        let get_result = inner
-            .get(path)
+        Self::streaming_meta_matches(inner, path, expected)
             .await
-            .map_err(|e| map_object_store_error(e, path.as_ref()))?;
-        let body = get_result
-            .bytes()
-            .await
-            .map_err(|e| map_object_store_error(e, path.as_ref()))?;
-        Ok(blake3::hash(&body).as_bytes() == expected)
+            .map(|(_, matches)| matches)
     }
 
     async fn streaming_meta_matches(
@@ -1265,6 +1255,15 @@ impl Store {
             }
         })
         .await?;
+        self.stream_response(path, range, got)
+    }
+
+    fn stream_response(
+        &self,
+        path: &Path,
+        range: Option<Range<u64>>,
+        got: object_store::GetResult,
+    ) -> Result<(ObjectMeta, Range<u64>, StorageByteStream)> {
         let meta = got.meta.clone();
         let expected_range = range
             .map(|range| GetRange::Bounded(range).as_range(meta.size))

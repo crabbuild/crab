@@ -37,7 +37,9 @@ the semantically validated Git state to a BLAKE3 digest; readers call
 `validate_manifest_payload` before trusting refs or index pointers.
 
 Capsule protocol v2 uses one compacted root plus independently mutable ref
-heads and immutable capsule runs.
+heads and immutable capsule runs. Complete capsule reads share storage's bounded
+immutable transfer policy, including concurrent ranges for large seed capsules.
+Full decoding still materializes the body and validates every pointer commitment.
 `capsule_protocol::CapsuleChunkIndex` reads paged global advisory chunk heads
 and exact placement IDs without opening the released manifest receipt database.
 `write_capsule_chunk_candidates` conditionally publishes verified immutable pages

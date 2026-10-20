@@ -342,7 +342,8 @@ impl CachingStore {
     /// dependencies such as SlateDB.
     ///
     /// Unconditional immutable reads may return synthetic metadata without an
-    /// origin ETag or version. This includes HEAD requests, unlike [`Self::head`].
+    /// origin ETag or version. Streamed origin misses preserve their actual metadata and
+    /// response streams, including HEAD; [`Self::head`] always asks origin.
     /// Conditional and versioned requests bypass caches to preserve origin
     /// preconditions and metadata; mutable paths always bypass caches.
     pub fn object_store(&self) -> Arc<dyn ObjectStore> {
@@ -1361,7 +1362,7 @@ impl ObjectStore for CacheAwareObjectStore {
     async fn get_opts(
         &self,
         location: &Path,
-        options: GetOptions,
+        mut options: GetOptions,
     ) -> object_store::Result<GetResult> {
         // Cache metadata cannot evaluate origin preconditions or select a
         // version. Forward the complete request before consulting any cache.
@@ -1376,14 +1377,64 @@ impl ObjectStore for CacheAwareObjectStore {
                 .await;
         }
 
-        let (body, returned_range, object_size) = if options.head {
-            let meta = head_immutable_object(&self.store, location).await?;
-            (Bytes::new(), 0..0, meta.size)
-        } else if let Some(range) = options.range {
-            cached_object_range(&self.store, location, range).await?
+        if options.head {
+            // Preserve real origin identity on a miss so later immutable ranges
+            // can pin it and bypass cache range resolution without repeated HEADs.
+            let meta = match cached_object_head(&self.store, location).await {
+                Some(meta) => meta,
+                None => self.store.origin().inner().head(location).await?,
+            };
+            return Ok(GetResult {
+                meta,
+                range: 0..0,
+                attributes: Attributes::default(),
+                extensions: Default::default(),
+                payload: GetResultPayload::Stream(Box::pin(futures_util::stream::empty())),
+            });
+        }
+        let (body, returned_range, object_size) = if let Some(range) = options.range.clone() {
+            let Some(cached) = cached_object_range(&self.store, location, range).await? else {
+                // Azure rejects suffix headers. Resolve once at origin and pin
+                // that source; bounded ranges need no additional size probe.
+                if let Some(range @ GetRange::Suffix(_)) = options.range.clone() {
+                    let mut head_options = options.clone();
+                    head_options.head = true;
+                    head_options.range = None;
+                    let mut head = self
+                        .store
+                        .origin()
+                        .inner()
+                        .get_opts(location, head_options)
+                        .await?;
+                    let range = range.as_range(head.meta.size).map_err(|source| {
+                        object_store::Error::Generic {
+                            store: "crab-cache",
+                            source: Box::new(source),
+                        }
+                    })?;
+                    if range.is_empty() {
+                        head.range = range;
+                        head.payload =
+                            GetResultPayload::Stream(Box::pin(futures_util::stream::empty()));
+                        return Ok(head);
+                    }
+                    options.range = Some(GetRange::Bounded(range));
+                    options.if_match = head.meta.e_tag;
+                    options.version = head.meta.version;
+                }
+                return self
+                    .store
+                    .origin()
+                    .inner()
+                    .get_opts(location, options)
+                    .await;
+            };
+            cached
         } else {
-            #[cfg(feature = "remote-client")]
+            // Packs have no local byte-cache key. Keep origin reads streaming
+            // in both feature sets instead of collecting repository-sized bodies.
             if cache_key_for_path(location.as_ref()).is_none() {
+                #[cfg(feature = "remote-client")]
                 match self.store.get_cache_service_stream(location).await {
                     Ok(Some(result)) => {
                         self.store.observe_cache_read(
@@ -1489,7 +1540,7 @@ async fn cached_object_range(
     store: &CachingStore,
     location: &Path,
     requested: GetRange,
-) -> object_store::Result<(Bytes, Range<u64>, u64)> {
+) -> object_store::Result<Option<(Bytes, Range<u64>, u64)>> {
     requested
         .is_valid()
         .map_err(|error| object_store::Error::Generic {
@@ -1501,65 +1552,58 @@ async fn cached_object_range(
         .await
     {
         store.observe_cache_read(CacheSource::Local, CacheReadOutcome::Hit, result.0.len());
-        return Ok(result);
+        return Ok(Some(result));
     }
     store.observe_cache_read(CacheSource::Local, CacheReadOutcome::Miss, 0);
-    if let GetRange::Bounded(range) = &requested {
-        match store
-            .range_get_cache_service_object(location, range.clone())
-            .await
-        {
-            Ok(Some(range)) => {
-                store.observe_cache_read(
-                    CacheSource::Service,
-                    CacheReadOutcome::Hit,
-                    range.data.len(),
-                );
-                return Ok((range.data, range.range, range.total_size));
+    let range = match requested {
+        GetRange::Bounded(range) => range,
+        other => {
+            let Some(head) = cached_object_head(store, location).await else {
+                return Ok(None);
+            };
+            let range =
+                other
+                    .as_range(head.size)
+                    .map_err(|source| object_store::Error::Generic {
+                        store: "crab-cache",
+                        source: Box::new(source),
+                    })?;
+            if range.is_empty() {
+                // Empty suffixes are valid, but the service's bounded-range
+                // endpoint requires a positive length.
+                return Ok(Some((Bytes::new(), range, head.size)));
             }
-            Ok(None) => {
-                if store.cache_reads_enabled() {
-                    store.observe_cache_read(CacheSource::Service, CacheReadOutcome::Miss, 0);
-                }
-            }
-            Err(error) => {
-                store.observe_cache_read(CacheSource::Service, CacheReadOutcome::Failure, 0);
-                tracing::warn!(path = %location, error = %error,
-                    "cache service bounded range read failed, falling back to resolved range");
+            range
+        }
+    };
+    match store.range_get_cache_service_object(location, range).await {
+        Ok(Some(range)) => {
+            store.observe_cache_read(
+                CacheSource::Service,
+                CacheReadOutcome::Hit,
+                range.data.len(),
+            );
+            return Ok(Some((range.data, range.range, range.total_size)));
+        }
+        Ok(None) => {
+            if store.cache_reads_enabled() {
+                store.observe_cache_read(CacheSource::Service, CacheReadOutcome::Miss, 0);
             }
         }
+        Err(error) => {
+            store.observe_cache_read(CacheSource::Service, CacheReadOutcome::Failure, 0);
+            tracing::warn!(path = %location, error = %error,
+                    "cache service bounded range read failed, falling back to origin");
+        }
     }
-    let (range, object_size) = resolve_cache_range(store, location, requested).await?;
-    let body = store
-        .range_get(location, range.clone())
-        .await
-        .map_err(|error| cache_error(location, error))?;
-    Ok((body, range, object_size))
+    Ok(None)
 }
 
-async fn resolve_cache_range(
-    store: &CachingStore,
-    location: &Path,
-    range: GetRange,
-) -> object_store::Result<(Range<u64>, u64)> {
-    let len = head_immutable_object(store, location).await?.size;
-    let range = range
-        .as_range(len)
-        .map_err(|e| object_store::Error::Generic {
-            store: "crab-cache",
-            source: Box::new(e),
-        })?;
-    Ok((range, len))
-}
-
-async fn head_immutable_object(
-    store: &CachingStore,
-    location: &Path,
-) -> object_store::Result<ObjectMeta> {
+async fn cached_object_head(store: &CachingStore, location: &Path) -> Option<ObjectMeta> {
     match store.head_cache_service_object(location).await {
         Ok(Some(head)) => {
             store.observe_cache_read(CacheSource::Service, CacheReadOutcome::Hit, 0);
-            return Ok(ObjectMeta {
+            return Some(ObjectMeta {
                 location: location.clone(),
                 last_modified: SystemTime::now().into(),
                 size: head.size,
@@ -1582,7 +1626,7 @@ async fn head_immutable_object(
         }
     }
 
-    store.origin().inner().head(location).await
+    None
 }
 
 #[cfg(feature = "remote-client")]
@@ -1767,6 +1811,7 @@ mod tests {
     struct CountingStore {
         inner: Arc<InMemory>,
         get_count: Arc<AtomicUsize>,
+        reject_suffix: bool,
     }
 
     impl std::fmt::Display for CountingStore {
@@ -1799,6 +1844,13 @@ mod tests {
             location: &ObjectPath,
             options: GetOptions,
         ) -> object_store::Result<GetResult> {
+            if self.reject_suffix
+                && matches!(options.range, Some(object_store::GetRange::Suffix(_)))
+            {
+                return Err(object_store::Error::NotSupported {
+                    source: "suffix ranges are unsupported by this fixture".into(),
+                });
+            }
             if !options.head {
                 self.get_count.fetch_add(1, Ordering::Relaxed);
             }
@@ -2356,6 +2408,7 @@ mod tests {
         let counting_store: Arc<dyn ObjectStore> = Arc::new(CountingStore {
             inner: Arc::clone(&origin_store),
             get_count: Arc::clone(&origin_get_count),
+            reject_suffix: false,
         });
         let origin = OriginClient::from_store(counting_store);
 
@@ -4431,6 +4484,7 @@ mod tests {
         let origin = Store::new(Arc::new(CountingStore {
             inner,
             get_count: Arc::clone(&get_count),
+            reject_suffix: false,
         }));
         let tempdir = tempfile::tempdir().unwrap();
         let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
@@ -4642,6 +4696,154 @@ mod tests {
         assert!(result.unknown.contains(&120_002));
         if let Some(shutdown) = server.shutdown.take() {
             let _ = shutdown.send(());
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_origin_head_pins_ranges_without_repeated_metadata_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let inner = Arc::new(InMemory::new());
+        let path = Path::from(format!(
+            "repo/generated-packs/v1/artifacts/11/{}.pack",
+            "11".repeat(32)
+        ));
+        let body = Bytes::from_static(b"0123456789abcdef");
+        inner.put(&path, body.clone().into()).await.unwrap();
+        let expected = inner.head(&path).await.unwrap();
+        let counting = Arc::new(CountingObjectStore::new(inner));
+        let cached = CachingStore::new_with_local_cache(
+            Store::new(counting.clone()),
+            no_cache_config(),
+            Arc::new(LocalCache::new(temp.path().join("cache"))),
+        )
+        .unwrap();
+        let adapter = cached.object_store();
+        let head = adapter.head(&path).await.unwrap();
+        assert_eq!(head, expected);
+        for if_match in [head.e_tag.clone(), None] {
+            for start in [0, 4, 8, 12] {
+                let result = adapter
+                    .get_opts(
+                        &path,
+                        GetOptions {
+                            range: Some(object_store::GetRange::Bounded(start..start + 4)),
+                            if_match: if_match.clone(),
+                            ..GetOptions::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    result.bytes().await.unwrap(),
+                    body.slice(start as usize..start as usize + 4)
+                );
+            }
+        }
+        assert_eq!(
+            counting.counts(),
+            ObjectReadCounts {
+                heads: 1,
+                ranges: 8,
+                full: 0
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn origin_suffix_ranges_resolve_once_for_portable_backends() {
+        for count in [4, 0] {
+            let temp = tempfile::tempdir().unwrap();
+            let backend = CountingStore {
+                inner: Arc::new(InMemory::new()),
+                get_count: Arc::new(AtomicUsize::new(0)),
+                reject_suffix: true,
+            };
+            let origin = Arc::new(CountingObjectStore::new(Arc::new(backend)));
+            let path = Path::from(format!(
+                "repo/generated-packs/v1/artifacts/11/{}.pack",
+                "11".repeat(32)
+            ));
+            let body = Bytes::from_static(b"0123456789abcdef");
+            origin.put(&path, body.clone().into()).await.unwrap();
+            let cached = CachingStore::new_with_local_cache(
+                Store::new(origin.clone()),
+                no_cache_config(),
+                Arc::new(LocalCache::new(temp.path().join("cache"))),
+            )
+            .unwrap();
+            let result = cached
+                .object_store()
+                .get_opts(
+                    &path,
+                    GetOptions {
+                        range: Some(object_store::GetRange::Suffix(count)),
+                        ..GetOptions::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                result.bytes().await.unwrap(),
+                body.slice(body.len() - count as usize..)
+            );
+            assert_eq!(
+                origin.counts(),
+                ObjectReadCounts {
+                    heads: 1,
+                    ranges: usize::from(count > 0),
+                    full: 0
+                }
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn adapter_origin_pack_reads_remain_streaming_for_full_and_range_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = object_store::throttle::ThrottledStore::new(
+            InMemory::new(),
+            object_store::throttle::ThrottleConfig {
+                wait_get_per_byte: std::time::Duration::from_secs(1),
+                ..Default::default()
+            },
+        );
+        let path = Path::from(format!(
+            "repo/generated-packs/v1/artifacts/11/{}.pack",
+            "11".repeat(32)
+        ));
+        let body = Bytes::from_static(b"0123456789abcdef");
+        origin.put(&path, body.clone().into()).await.unwrap();
+        let expected = origin.head(&path).await.unwrap();
+        let cached = CachingStore::new_with_local_cache(
+            Store::new(Arc::new(origin)),
+            no_cache_config(),
+            Arc::new(LocalCache::new(temp.path().join("cache"))),
+        )
+        .unwrap();
+        let adapter = cached.object_store();
+        for range in [None, Some(object_store::GetRange::Bounded(2..64))] {
+            let actual = range
+                .clone()
+                .map(|r| r.as_range(body.len() as u64).unwrap())
+                .unwrap_or(0..body.len() as u64);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                adapter.get_opts(
+                    &path,
+                    GetOptions {
+                        range,
+                        ..GetOptions::default()
+                    },
+                ),
+            )
+            .await
+            .expect("opening a stream must not consume its delayed body")
+            .unwrap();
+            assert_eq!(result.meta, expected);
+            assert_eq!(
+                result.bytes().await.unwrap(),
+                body.slice(actual.start as usize..actual.end as usize)
+            );
         }
     }
 

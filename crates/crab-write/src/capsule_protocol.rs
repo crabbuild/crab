@@ -15,6 +15,9 @@ use crate::{Result, WriteError};
 
 pub use crab_metadata::capsule_protocol::RootSnapshot;
 
+mod compaction;
+use compaction::compact_ref_frontier;
+
 /// Derive the exact object IDs for each capsule Git-pack member.
 pub fn capsule_member_oids(capsule: &Capsule) -> Result<Vec<Vec<[u8; 20]>>> {
     capsule
@@ -1157,113 +1160,6 @@ async fn prepare_ref_successor(
     ))
 }
 
-async fn compact_ref_frontier(
-    router: &StoreLayout<Store>,
-    frontier: &mut Vec<CapsulePointer>,
-    known_leaf: &CapsuleRun,
-) -> Result<Option<CapsuleRun>> {
-    let rollup_window = crab_metadata::capsule_protocol::CAPSULE_REF_ROLLUP_WINDOW;
-    let rollup_start = frontier
-        .iter()
-        .rposition(|pointer| pointer.capsule_count() as usize >= rollup_window)
-        .map_or(0, |index| index + 1);
-    // Roll up only the newest bounded fetch window; earlier immutable runs stay
-    // stable so this boundary never rewrites already-published history.
-    let rollup_suffix = &frontier[rollup_start..];
-    let rollup_count = rollup_suffix.iter().try_fold(0_usize, |count, pointer| {
-        count
-            .checked_add(pointer.capsule_count() as usize)
-            .ok_or_else(|| WriteError::Internal("capsule rollup count overflowed".to_owned()))
-    })?;
-    let compact_start = if rollup_count >= rollup_window {
-        if rollup_count > crab_metadata::capsule_protocol::MAX_CAPSULES_PER_RUN {
-            return Err(WriteError::Internal(
-                "capsule rollup exceeds the run bound".to_owned(),
-            ));
-        }
-        rollup_start
-    } else {
-        let fan_in = crab_metadata::capsule_protocol::CAPSULE_REF_COMPACTION_FAN_IN;
-        if !fan_in.is_power_of_two() {
-            return Err(WriteError::Internal(
-                "capsule compaction fan-in is not a power of two".to_owned(),
-            ));
-        }
-        let Some(level) = frontier.last().map(CapsulePointer::level) else {
-            return Ok(None);
-        };
-        let suffix_len = frontier
-            .iter()
-            .rev()
-            .take_while(|pointer| pointer.level() == level)
-            .count();
-        if suffix_len < fan_in {
-            return Ok(None);
-        }
-
-        let capsules_per_run = 1_usize.checked_shl(u32::from(level)).ok_or_else(|| {
-            WriteError::Internal("capsule compaction level overflowed".to_owned())
-        })?;
-        if capsules_per_run
-            .checked_mul(fan_in)
-            .is_none_or(|count| count > crab_metadata::capsule_protocol::MAX_CAPSULES_PER_RUN)
-        {
-            return Ok(None);
-        }
-
-        let suffix_start = frontier.len() - fan_in;
-        let level_delta = u8::try_from(fan_in.ilog2())
-            .map_err(|_| WriteError::Internal("capsule compaction level overflowed".to_owned()))?;
-        let mut next_level = level.checked_add(level_delta).ok_or_else(|| {
-            WriteError::Internal("capsule compaction level overflowed".to_owned())
-        })?;
-        let mut carry_start = suffix_start;
-        while carry_start > 0
-            && frontier[carry_start - 1].level() == next_level
-            && (1_usize << usize::from(next_level))
-                < crab_metadata::capsule_protocol::MAX_CAPSULES_PER_RUN
-        {
-            carry_start -= 1;
-            next_level = next_level.checked_add(1).ok_or_else(|| {
-                WriteError::Internal("capsule compaction level overflowed".to_owned())
-            })?;
-        }
-        carry_start
-    };
-
-    let pointers = frontier[compact_start..].to_vec();
-    let pointer_count = pointers.len();
-    let runs = try_join_all(
-        pointers
-            .iter()
-            .enumerate()
-            .map(|(index, pointer)| async move {
-                if index + 1 == pointer_count {
-                    return Ok::<_, WriteError>(known_leaf.clone());
-                }
-                Ok::<_, WriteError>(
-                    crab_metadata::capsule_protocol::load_capsule_run(router, pointer).await?,
-                )
-            }),
-    )
-    .await?;
-    // Only the final run is published. Encode and authenticate it once rather
-    // than copying every capsule through each discarded binary merge level.
-    let compacted = tokio::task::spawn_blocking(move || CapsuleRun::compact(runs)).await??;
-    frontier.truncate(compact_start);
-    frontier.push(CapsulePointer::new(
-        compacted.hash(),
-        compacted.bytes().len() as u64,
-        compacted.control_offset(),
-        compacted.control_size(),
-        compacted.footer_hash(),
-        compacted.level(),
-        compacted.transaction_ids(),
-        compacted.newest_base_root_digest(),
-    )?);
-    Ok(Some(compacted))
-}
-
 async fn upload_immutable_runs(router: &StoreLayout<Store>, runs: Vec<CapsuleRun>) -> Result<()> {
     let mut unique = std::collections::BTreeMap::new();
     for run in runs {
@@ -1490,41 +1386,53 @@ async fn write_ref_head(
         &crab_metadata::capsule_protocol::capsule_ref_name_key(original.head.ref_name()),
     );
     let body = candidate.encode()?;
-    let result = match &original.etag {
-        Some(etag) => {
-            router
-                .store()
-                .update(&path, body.clone(), etag.clone())
-                .await
-        }
-        None => {
-            router
-                .store()
-                .create_strict_with_etag(&path, body.clone())
-                .await
-        }
-    };
-    match result {
-        Ok(etag) => Ok(etag),
-        Err(source) => {
-            // A lost create reply can be retried into StateConflict after the
-            // candidate committed. Only a different readable head proves contention.
-            match router
-                .store()
-                .get_with_etag_bounded(&path, body.len() as u64)
-                .await
-            {
-                Ok((actual, etag)) if actual == body => Ok(etag),
-                Ok(_) if matches!(source, StorageError::StateConflict { .. }) => {
-                    Err(WriteError::RefChanged {
-                        ref_name: original.head.ref_name().to_owned(),
-                        path: path.to_string(),
-                    })
-                }
-                _ => Err(source.into()),
+    let original_body = original.head.encode()?;
+    let read_bound = body.len().max(original_body.len()) as u64;
+    crab_storage::retry(&crab_storage::RetryPolicy::DEFAULT, || async {
+        let result = match &original.etag {
+            Some(etag) => {
+                router
+                    .store()
+                    .update(&path, body.clone(), etag.clone())
+                    .await
             }
+            None => {
+                router
+                    .store()
+                    .create_strict_with_etag(&path, body.clone())
+                    .await
+            }
+        };
+        let source = match result {
+            Ok(etag) => return Ok(Ok(etag)),
+            Err(source) => source,
+        };
+        // Retry only after proving the original state is unchanged. Reusing its
+        // conditional token cannot overwrite another writer, even if an earlier
+        // request commits late. Unreadable or different state stays terminal.
+        match router
+            .store()
+            .get_with_etag_bounded(&path, read_bound)
+            .await
+        {
+            Ok((actual, etag)) if actual == body => Ok(Ok(etag)),
+            Ok(_) if matches!(source, StorageError::StateConflict { .. }) => {
+                Ok(Err(WriteError::RefChanged {
+                    ref_name: original.head.ref_name().to_owned(),
+                    path: path.to_string(),
+                }))
+            }
+            Ok((actual, _)) if actual == original_body => Err(source),
+            Err(StorageError::NotFound { .. })
+                if original.etag.is_none()
+                    && !matches!(source, StorageError::StateConflict { .. }) =>
+            {
+                Err(source)
+            }
+            _ => Ok(Err(source.into())),
         }
-    }
+    })
+    .await?
 }
 
 async fn rollback_ref_heads(
@@ -2100,10 +2008,11 @@ mod tests {
 
     #[derive(Debug)]
     struct LostHeadReplyStore {
-        inner: Arc<InMemory>,
+        inner: Arc<dyn ObjectStore>,
         head_path: String,
         lost: AtomicBool,
         reject: AtomicBool,
+        reject_once: AtomicBool,
     }
 
     impl fmt::Display for LostHeadReplyStore {
@@ -2121,7 +2030,8 @@ mod tests {
             options: PutOptions,
         ) -> object_store::Result<PutResult> {
             if location.as_ref() == self.head_path
-                && self.reject.load(Ordering::Acquire)
+                && (self.reject.load(Ordering::Acquire)
+                    || self.reject_once.swap(false, Ordering::AcqRel))
                 && !matches!(options.mode, PutMode::Overwrite)
             {
                 return Err(object_store::Error::Generic {
@@ -3681,6 +3591,7 @@ mod tests {
                     .to_string(),
                 lost: AtomicBool::new(true),
                 reject: AtomicBool::new(true),
+                reject_once: AtomicBool::new(false),
             });
             let router = StoreLayout::new(
                 Store::with_retry(
@@ -3739,6 +3650,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transient_head_failure_recovers_after_unchanged_readback() {
+        for seed_count in [0, 1, 31] {
+            for multiple in [false, true] {
+                let inner = Arc::new(InMemory::new());
+                let seed =
+                    StoreLayout::new(Store::new(inner.clone()), "repositories/test".to_owned());
+                let mut base = initialize(&seed, &"1".repeat(64), "refs/heads/main")
+                    .await
+                    .unwrap();
+                for sequence in 1..=seed_count {
+                    let old = (sequence > 1).then(|| format!("{:040x}", sequence - 1));
+                    let first = transaction(&base, old.as_deref(), &format!("{sequence:040x}"));
+                    base = publish(&seed, base, &first, &capsule(&first))
+                        .await
+                        .unwrap();
+                }
+                let fault = Arc::new(LostHeadReplyStore {
+                    inner,
+                    head_path: seed
+                        .capsule_ref_head_path(
+                            &crab_metadata::capsule_protocol::capsule_ref_name_key(
+                                "refs/heads/main",
+                            ),
+                        )
+                        .to_string(),
+                    lost: AtomicBool::new(true),
+                    reject: AtomicBool::new(false),
+                    reject_once: AtomicBool::new(true),
+                });
+                let router = StoreLayout::new(
+                    Store::with_retry(
+                        fault,
+                        crab_storage::RetryPolicy {
+                            max_attempts: 1,
+                            base: std::time::Duration::ZERO,
+                            cap: std::time::Duration::ZERO,
+                        },
+                    ),
+                    "repositories/test".to_owned(),
+                );
+                let mut edits = vec![CapsuleRefEdit::new(
+                    "refs/heads/main",
+                    (seed_count > 0).then(|| format!("{seed_count:040x}")),
+                    Some(format!("{:040x}", seed_count + 1)),
+                    None,
+                )];
+                if multiple {
+                    edits.push(CapsuleRefEdit::new(
+                        "refs/heads/feature",
+                        None,
+                        Some("4".repeat(40)),
+                        None,
+                    ));
+                }
+                let transaction = CapsuleTransaction::new(base.record().digest(), edits).unwrap();
+                let root = publish(&router, base, &transaction, &capsule(&transaction))
+                    .await
+                    .unwrap();
+                let head = read_ref_head(&router, root.record().root(), "refs/heads/main")
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    head.visible.transaction_id(),
+                    Some(transaction.id().unwrap().as_str())
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires an isolated real S3 bucket; retains metadata proof"]
+    async fn live_s3_ref_head_failure_recovers_after_unchanged_readback() {
+        let bucket = std::env::var("CRAB_TEST_BUCKET").unwrap();
+        let store =
+            crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
+                .unwrap();
+        for multiple in [false, true] {
+            let prefix = format!("transport-probe/ref-cas-recovery-{}", uuid::Uuid::now_v7());
+            let seed = StoreLayout::new(store.clone(), prefix.clone());
+            let base = initialize(&seed, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+            let first = transaction(&base, None, &"2".repeat(40));
+            let base = publish(&seed, base, &first, &capsule(&first))
+                .await
+                .unwrap();
+            let fault = Arc::new(LostHeadReplyStore {
+                inner: Arc::clone(store.inner()),
+                head_path: seed
+                    .capsule_ref_head_path(&crab_metadata::capsule_protocol::capsule_ref_name_key(
+                        "refs/heads/main",
+                    ))
+                    .to_string(),
+                lost: AtomicBool::new(true),
+                reject: AtomicBool::new(false),
+                reject_once: AtomicBool::new(true),
+            });
+            let router = StoreLayout::new(Store::new(fault), prefix.clone());
+            let mut edits = vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                Some("2".repeat(40)),
+                Some("3".repeat(40)),
+                None,
+            )];
+            if multiple {
+                edits.push(CapsuleRefEdit::new(
+                    "refs/heads/feature",
+                    None,
+                    Some("4".repeat(40)),
+                    None,
+                ));
+            }
+            let transaction = CapsuleTransaction::new(base.record().digest(), edits).unwrap();
+            let started = Instant::now();
+            let root = publish(&router, base, &transaction, &capsule(&transaction))
+                .await
+                .unwrap();
+            for edit in transaction.edits() {
+                let head = read_ref_head(&router, root.record().root(), edit.ref_name())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    head.visible.transaction_id(),
+                    Some(transaction.id().unwrap().as_str())
+                );
+            }
+            println!(
+                r#"{{"prefix":"{prefix}","multiple_refs":{multiple},"recovered":true,"elapsed_s":{}}}"#,
+                started.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn lost_ref_head_update_reply_reconciles_as_committed_success() {
         let inner = Arc::new(InMemory::new());
         let seed_store = Store::new(inner.clone());
@@ -3756,6 +3801,7 @@ mod tests {
                     .to_string(),
                 lost: AtomicBool::new(false),
                 reject: AtomicBool::new(false),
+                reject_once: AtomicBool::new(false),
             }),
             crab_storage::RetryPolicy {
                 max_attempts: 1,
@@ -3796,6 +3842,7 @@ mod tests {
                     .to_string(),
                 lost: AtomicBool::new(false),
                 reject: AtomicBool::new(false),
+                reject_once: AtomicBool::new(false),
             }),
             crab_storage::RetryPolicy {
                 max_attempts: 2,
@@ -3847,6 +3894,7 @@ mod tests {
                     .to_string(),
                 lost: AtomicBool::new(false),
                 reject: AtomicBool::new(true),
+                reject_once: AtomicBool::new(false),
             }),
             crab_storage::RetryPolicy {
                 max_attempts: 1,

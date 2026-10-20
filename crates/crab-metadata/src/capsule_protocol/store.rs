@@ -654,9 +654,11 @@ async fn load_run(
 ) -> Result<CapsuleRun> {
     super::root::validate_capsule_pointer(pointer)?;
     let path = router.capsule_path(pointer.hash());
-    let (bytes, _) = router
+    // Complete views still need resident capsule bytes. Keep their transport
+    // on the shared range engine so a large seed cannot serialize the clone.
+    let bytes = router
         .store()
-        .get_with_etag_bounded(&path, pointer.size())
+        .get_immutable_bounded(&path, pointer.size())
         .await?;
     let run = CapsuleRun::decode(bytes)?;
     if run.hash() != pointer.hash()

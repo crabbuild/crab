@@ -37,14 +37,26 @@ refs share no foreground mutable object.
 
 After a failed per-ref conditional write, v2 reads back the exact candidate.
 Matching bytes confirm commit even if a lost create reply retried into an
-already-exists error. A different readable head confirms a competing writer;
+already-exists error. An unchanged original head permits bounded retry of a
+transient failure with the original conditional token; this also protects a
+late first request from overwriting another writer. Readback allows the larger
+of the original and candidate bodies because compaction can shrink the head.
+A conflict plus a different readable head confirms a competing writer;
 an unreadable result remains uncertain rather than being reported as stale.
+Single- and multi-ref publication share this ref-head recovery. Transaction
+commit-vs-abort records, root maintenance and rollback keep their own protocols.
 
-Ref-frontier compaction gathers the selected leaf batch and older carries, then
+Ref-frontier compaction gathers one selected contiguous window, then
 performs one final `CapsuleRun::compact` on a blocking worker. Ordinary push and
 coordinated repair share this path. The 32-run batching policy bounds interim
-frontiers; every 500 capsules the writer rolls up only that newest window into
-one CRBRUN01 run, leaving prior rollup identities unchanged. Source
+frontiers; the normal count target rolls each newest 500-capsule window into
+one CRBRUN01 run. A 64 MiB input-byte budget also triggers prefix compaction;
+large historical runs remain stable so appending small commits does not rewrite
+repository-sized payloads. The smallest useful merge may contain two inputs
+above that soft budget. If a new leaf would exceed the persisted 64-segment
+ceiling, the writer merges the eligible adjacent pair with the fewest bytes.
+Every resulting run still contains at most 512 capsules; a frontier with no
+eligible pair requires a checkpoint. Source
 authentication, immutable upload verification and conditional publication are
 preserved. The worker owns immutable data and cannot publish if its caller is
 cancelled.

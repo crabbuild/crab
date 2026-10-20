@@ -59,6 +59,10 @@ Trace one path: `crates/crab-write/src/journal.rs` → `commit_ref_transaction` 
   run before returning; grouped cursors retain the same finish/cleanup contract.
   Source: `crates/crab-metadata/src/capsule_protocol/pointer/inspection.rs`.
 
+- Full capsule materialization uses `Store::get_immutable_bounded`; keep declared
+  byte admission and complete pointer/hash validation around concurrent transfer.
+  Source: `crates/crab-metadata/src/capsule_protocol/store.rs`.
+
 ## Features and platform
 
 Empty default. `storage` adds object-store helpers; `file-index-reader` and `remote-index` also enable storage and SlateDB paths; `local-index` adds SQLite. Inspect locked SlateDB session/writer close contracts before changing lifecycle. Payload-only checks must remain a separate slice.
