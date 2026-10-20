@@ -167,7 +167,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cellar-${{ github.run_id }}-${{ github.run_attempt }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
       AWS_DEFAULT_REGION: us-east-1
@@ -184,6 +183,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Configure external Rust build directory
+        run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP}/crab-cellar-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

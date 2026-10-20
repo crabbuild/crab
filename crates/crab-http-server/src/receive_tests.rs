@@ -1,8 +1,19 @@
-use super::*;
+use crate::repository::maintenance_tests;
+use crate::server::Server;
+use crate::server::http::router;
+use axum::extract::Request;
+use axum::http::StatusCode;
 use base64::Engine;
+use crab_remote_git::RepositoryIdentity;
+use crab_storage::StoreLayout;
+use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::Path;
 use std::process::Output;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 #[test]
 fn scratch_failures_keep_their_http_classification_through_io_wrappers() {
@@ -364,7 +375,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             source: crab_storage::StorageError::NotFound { .. }
         })
     ));
-    repo.schedule_maintenance(&server, crate::server::MaintenanceTrigger::Repair)
+    repo.schedule_maintenance(&server, crate::repository::MaintenanceTrigger::Repair)
         .await
         .unwrap();
     server.finish_maintenance().await.unwrap();

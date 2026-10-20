@@ -16,7 +16,8 @@ use tokio_util::sync::CancellationToken;
 use super::{ReceiveError, Result, check_cancelled, validate};
 use crate::{
     auth::Principal,
-    server::{MaintenanceTrigger, Repository, Server},
+    repository::{MaintenanceTrigger, Repository},
+    server::Server,
 };
 
 const TTL: Duration = Duration::from_secs(300);
@@ -443,8 +444,7 @@ async fn publish_attempt(
                 update.name.clone(),
             )
         });
-    let protections = entry
-        .branch_protections(server)
+    let protections = crate::repository_settings::load(server, entry)
         .await
         .map_err(|error| ReceiveError::Settings(Box::new(error)))?;
     let protected = input.publication == Publication::NativePush
@@ -694,8 +694,7 @@ async fn commit_prepared(
         return Err(ReceiveError::Forbidden);
     }
     principal.identity().ok_or(ReceiveError::Forbidden)?;
-    if entry
-        .lifecycle(server)
+    if crate::repository_settings::load_lifecycle(server, entry)
         .await
         .map_err(|error| ReceiveError::Settings(Box::new(error)))?
         .archived

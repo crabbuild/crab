@@ -1,6 +1,5 @@
 use std::{sync::Arc, time::Instant};
 
-use crate::cells::MutationIdentity;
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
@@ -118,14 +117,6 @@ fn state_name(state: u8) -> &'static str {
 
 fn same_author(left: &RepositoryAuthor, right: &Identity) -> bool {
     left.issuer == right.issuer && left.subject == right.subject
-}
-
-fn repository_author(identity: &Identity) -> RepositoryAuthor {
-    RepositoryAuthor {
-        issuer: identity.issuer.clone(),
-        subject: identity.subject.clone(),
-        name: identity.name.clone(),
-    }
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -246,10 +237,10 @@ async fn create(
             .client
             .command::<CreateIssue>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 CreateIssueInput {
                     submission_id: submission_id(&input.request_id)?,
-                    author: repository_author(&author),
+                    author: crate::cells::repository::RepositoryAuthor::from(&author),
                     title,
                     body: input.body,
                 },
@@ -393,10 +384,10 @@ async fn edit(
             .client
             .command::<UpdateIssue>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 UpdateIssueInput {
                     number: number(id)?,
-                    actor: repository_author(&author),
+                    actor: crate::cells::repository::RepositoryAuthor::from(&author),
                     can_manage_metadata,
                     version: input.version,
                     title,
@@ -500,11 +491,11 @@ async fn comment(
             .client
             .command::<CreateComment>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 CreateCommentInput {
                     submission_id: submission_id(&input.request_id)?,
                     issue: number(id)?,
-                    author: repository_author(&author),
+                    author: crate::cells::repository::RepositoryAuthor::from(&author),
                     body: input.body,
                 },
             )
@@ -567,13 +558,13 @@ async fn edit_comment(
             .client
             .command::<UpdateComment>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 UpdateCommentInput {
                     key: CommentKey {
                         issue: number(id)?,
                         number: number(comment)?,
                     },
-                    actor: repository_author(&author),
+                    actor: crate::cells::repository::RepositoryAuthor::from(&author),
                     version: input.version,
                     body: input.body,
                 },
@@ -588,18 +579,6 @@ async fn edit_comment(
         UpdateCommentOutcome::Conflict => return Err(Error::Conflict),
     };
     Ok(Json(comment_view(&comment, &author)))
-}
-
-fn mutation_identity() -> Result<MutationIdentity> {
-    let now_ms = crate::cells::unix_now_ms().map_err(Error::Cell)?;
-    let expires_at_ms = now_ms
-        .checked_add(60_000)
-        .ok_or(Error::CellContract("Cell request expiry overflowed"))?;
-    Ok(MutationIdentity {
-        request_id: Uuid::now_v7(),
-        issued_at_ms: now_ms,
-        expires_at_ms,
-    })
 }
 
 fn submission_id(value: &str) -> Result<[u8; 16]> {

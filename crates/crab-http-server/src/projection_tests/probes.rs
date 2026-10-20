@@ -1,8 +1,10 @@
 use super::*;
 use std::time::Duration;
 
-use crate::server::{
-    MaintenanceSchedule, MaintenanceTrigger, Repository, Server, maintenance_tests,
+use crate::{
+    repository::maintenance_tests,
+    repository::{MaintenanceSchedule, MaintenanceTrigger, Repository},
+    server::Server,
 };
 use crab_metadata::capsule_protocol::{
     BrowseIndexes, Capsule, CapsuleRefEdit, CapsuleTransaction, load_root,

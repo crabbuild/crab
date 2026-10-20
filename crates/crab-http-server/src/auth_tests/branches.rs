@@ -199,7 +199,12 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     let persisted = crate::repository_settings::load(&h.server, &repo)
         .await
         .unwrap();
-    assert_eq!(persisted, repo.branch_protections(&h.server).await.unwrap());
+    assert_eq!(
+        persisted,
+        crate::repository_settings::load(&h.server, &repo)
+            .await
+            .unwrap()
+    );
 
     crate::server::receive_tests::success(source.path(), &["checkout", "-b", "feature/policy"])
         .await;

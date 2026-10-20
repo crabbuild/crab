@@ -705,7 +705,9 @@ jobs:
       - name: Install process qualification dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y awscli openssl git python3
+          sudo apt-get install -y pipx openssl git python3
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Qualify the native image against RustFS and process restart
         run: |
           python3 crates/crab-http-server/tests/qualify_cellar_process.py \

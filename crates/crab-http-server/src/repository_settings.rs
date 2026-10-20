@@ -1,6 +1,4 @@
-use crate::cells::MutationIdentity;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::{
     BranchProtection,
@@ -13,7 +11,8 @@ use crate::{
         RepositoryLifecycleRecord,
     },
     config::valid_branch_protections,
-    server::{Repository, Server},
+    repository::Repository,
+    server::Server,
 };
 
 const MAX_NUMBER: u64 = 9_007_199_254_740_991;
@@ -81,7 +80,7 @@ pub(crate) async fn replace(
             .client
             .command::<ReplaceBranchProtections>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 ReplaceBranchProtectionsInput {
                     expected_version,
                     rules: rules.into_iter().map(protection_record).collect(),
@@ -122,7 +121,7 @@ pub(crate) async fn replace_lifecycle(
             .client
             .command::<ReplaceRepositoryLifecycle>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 ReplaceRepositoryLifecycleInput {
                     expected_version,
                     archived,
@@ -179,17 +178,5 @@ fn repository_lifecycle(record: RepositoryLifecycleRecord) -> Result<RepositoryL
     Ok(RepositoryLifecycle {
         version: record.version,
         archived: record.archived,
-    })
-}
-
-fn mutation_identity() -> Result<MutationIdentity> {
-    let now_ms = crate::cells::unix_now_ms().map_err(Error::Cell)?;
-    let expires_at_ms = now_ms
-        .checked_add(60_000)
-        .ok_or(Error::CellContract("Cell request expiry overflowed"))?;
-    Ok(MutationIdentity {
-        request_id: Uuid::now_v7(),
-        issued_at_ms: now_ms,
-        expires_at_ms,
     })
 }

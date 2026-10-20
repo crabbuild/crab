@@ -91,7 +91,7 @@ async fn logout_revokes_all_sessions_and_completed_replay_preserves_new_login() 
         .unwrap();
     assert_eq!(issued.status(), StatusCode::OK);
     let issued: Value = serde_json::from_slice(&issued.bytes().await.unwrap()).unwrap();
-    let replica = Authentication::new_durable(
+    let replica = Authentication::new(
         crate::OidcConfig {
             provider: crate::AuthProvider::Oidc,
             issuer: openidconnect::IssuerUrl::new(h.provider.issuer.clone()).unwrap(),

@@ -142,7 +142,7 @@ async fn scrub_reports_dependency_loss_without_erasing_the_last_complete_proof()
 
 #[tokio::test]
 async fn deployment_report_prevents_duplicate_scrubs_and_expires_fail_closed() {
-    let mut server = crate::server::maintenance_tests::fixture_without_cells().await;
+    let mut server = crate::repository::maintenance_tests::fixture_without_cells().await;
     let repository = server
         .repositories
         .get(&("team".into(), "repo".into()))
@@ -225,12 +225,12 @@ async fn deployment_report_prevents_duplicate_scrubs_and_expires_fail_closed() {
             .state,
         State::Failed
     );
-    crate::server::maintenance_tests::close(&server).await;
+    crate::repository::maintenance_tests::close(&server).await;
 }
 
 #[tokio::test]
 async fn lease_loss_during_scrub_cancels_before_report_publication() {
-    let mut server = crate::server::maintenance_tests::fixture_without_cells().await;
+    let mut server = crate::repository::maintenance_tests::fixture_without_cells().await;
     let repository = server
         .repositories
         .get(&("team".into(), "repo".into()))
@@ -332,5 +332,5 @@ async fn lease_loss_during_scrub_cancels_before_report_publication() {
     )
     .unwrap();
     assert_eq!(lock, replacement);
-    crate::server::maintenance_tests::close(&server).await;
+    crate::repository::maintenance_tests::close(&server).await;
 }

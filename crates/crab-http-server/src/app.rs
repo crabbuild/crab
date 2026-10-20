@@ -15,7 +15,8 @@ use serde_json::json;
 
 use crate::{
     auth::{Identity, Principal},
-    server::{Repository, Server},
+    repository::Repository,
+    server::Server,
 };
 
 pub(crate) const MAX_NUMBER: u64 = 9_007_199_254_740_991;
@@ -112,6 +113,28 @@ pub(crate) enum Error {
     Repository(#[from] crate::Error),
 }
 pub(crate) type Result<T> = std::result::Result<T, Error>;
+
+pub(crate) fn mutation_identity() -> Result<crate::cells::MutationIdentity> {
+    let now_ms = crate::cells::unix_now_ms().map_err(Error::Cell)?;
+    let expires_at_ms = now_ms
+        .checked_add(60_000)
+        .ok_or(Error::CellContract("Cell request expiry overflowed"))?;
+    Ok(crate::cells::MutationIdentity {
+        request_id: uuid::Uuid::now_v7(),
+        issued_at_ms: now_ms,
+        expires_at_ms,
+    })
+}
+
+impl From<&Identity> for crate::cells::repository::RepositoryAuthor {
+    fn from(identity: &Identity) -> Self {
+        Self {
+            issuer: identity.issuer.clone(),
+            subject: identity.subject.clone(),
+            name: identity.name.clone(),
+        }
+    }
+}
 
 pub(crate) fn repository_cell(
     server: &Server,

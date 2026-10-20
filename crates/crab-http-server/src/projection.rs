@@ -138,7 +138,7 @@ pub(crate) struct CachedSource {
 }
 
 pub(crate) async fn current_source(
-    repository: &crate::server::Repository,
+    repository: &crate::repository::Repository,
     server: &crate::server::Server,
     cancellation: &CancellationToken,
 ) -> crate::Result<projection::SourceIdentity> {
@@ -148,7 +148,7 @@ pub(crate) async fn current_source(
 }
 
 pub(crate) async fn validate_source(
-    repository: &crate::server::Repository,
+    repository: &crate::repository::Repository,
     source: &projection::SourceIdentity,
     cancellation: &CancellationToken,
 ) -> crate::Result<()> {

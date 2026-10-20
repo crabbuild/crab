@@ -15,9 +15,9 @@ use openidconnect::core::CoreProviderMetadata;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{
-    AuthError, AuthProvider, Authentication, Server, StorageError, bounded_http, now_epoch,
-};
+use super::{AuthError, Authentication, now_epoch, transport::bounded_http};
+use crate::{AuthProvider, server::Server};
+use crab_storage::StorageError;
 
 const BACKCHANNEL_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
 
@@ -101,7 +101,7 @@ pub(crate) async fn backchannel_logout(
 
 async fn process(auth: &Authentication, token: &str) -> Result<(), AuthError> {
     let claims = verify(auth, token).await?;
-    let state = auth.state.as_ref().ok_or(AuthError::Invalid)?;
+    let state = &auth.state;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"crab logout replay v1\0");
     hasher.update(claims.iss.as_bytes());

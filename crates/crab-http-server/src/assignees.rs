@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use crate::{
     app::{self, Error, Result},
     auth::{Identity, Principal},
-    server::{Repository, Server},
+    repository::Repository,
+    server::Server,
 };
 
 const MAX_ASSIGNEES: usize = 10;

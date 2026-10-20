@@ -1,4 +1,3 @@
-use crate::cells::MutationIdentity;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -16,7 +15,8 @@ use crate::{
         UpdatePullComment, UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput,
         UpdatePullOutcome, UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
     },
-    server::{Repository, Server},
+    repository::Repository,
+    server::Server,
 };
 
 pub(super) use crate::cells::repository::{MergeMethod, PullState, ReviewState};
@@ -237,10 +237,10 @@ pub(super) async fn create_pull(
             .client
             .command::<CreatePull>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 CreatePullInput {
                     submission_id: submission_id(&input.request_id)?,
-                    author: to_author(&input.author),
+                    author: crate::cells::repository::RepositoryAuthor::from(&input.author),
                     title: input.title,
                     body: input.body,
                     base_ref: input.base_ref,
@@ -268,10 +268,10 @@ pub(super) async fn update_pull(
             .client
             .command::<UpdatePull>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 UpdatePullInput {
                     number,
-                    actor: to_author(&input.actor),
+                    actor: crate::cells::repository::RepositoryAuthor::from(&input.actor),
                     can_manage: input.can_manage,
                     version: input.version,
                     title: input.title,
@@ -357,11 +357,11 @@ pub(super) async fn create_comment(
             .client
             .command::<CreatePullComment>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 CreatePullCommentInput {
                     pull,
                     submission_id: submission_id(&request_id)?,
-                    author: to_author(&author),
+                    author: crate::cells::repository::RepositoryAuthor::from(&author),
                     body,
                 },
             )
@@ -388,10 +388,10 @@ pub(super) async fn update_comment(
             .client
             .command::<UpdatePullComment>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 UpdatePullCommentInput {
                     key: PullChildKey { pull, number },
-                    actor: to_author(&actor),
+                    actor: crate::cells::repository::RepositoryAuthor::from(&actor),
                     version,
                     body,
                 },
@@ -481,11 +481,11 @@ pub(super) async fn create_review(
             .client
             .command::<CreatePullReview>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 CreatePullReviewInput {
                     pull,
                     submission_id: submission_id(&input.request_id)?,
-                    author: to_author(&input.author),
+                    author: crate::cells::repository::RepositoryAuthor::from(&input.author),
                     body: input.body,
                     state: input.state,
                     commit_oid: input.commit_oid,
@@ -522,10 +522,10 @@ pub(super) async fn update_review(
             .client
             .command::<UpdatePullReview>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 UpdatePullReviewInput {
                     key: PullChildKey { pull, number },
-                    actor: to_author(&actor),
+                    actor: crate::cells::repository::RepositoryAuthor::from(&actor),
                     version,
                     body,
                 },
@@ -581,7 +581,7 @@ pub(super) async fn reserve_merge(
             .client
             .command::<ReservePullMerge>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 ReservePullMergeInput { pull, merge },
             )
             .await,
@@ -632,7 +632,7 @@ async fn transition_merge(
             .client
             .command::<TransitionPullMerge>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 TransitionPullMergeInput {
                     pull,
                     merge: cell_merge(record)?,
@@ -655,13 +655,7 @@ fn merge_matches_cell(left: &crate::cells::repository::PullMerge, input: &NewPul
         && left.head_oid == input.head_oid
         && left.message == input.message
 }
-pub(super) fn to_author(value: &Identity) -> crate::cells::repository::RepositoryAuthor {
-    crate::cells::repository::RepositoryAuthor {
-        issuer: value.issuer.clone(),
-        subject: value.subject.clone(),
-        name: value.name.clone(),
-    }
-}
+
 pub(super) fn from_author(value: crate::cells::repository::RepositoryAuthor) -> Identity {
     Identity {
         issuer: value.issuer,
@@ -685,7 +679,7 @@ fn from_merge(value: crate::cells::repository::PullMerge) -> PullMerge {
 fn cell_merge(value: &PullMerge) -> Result<crate::cells::repository::PullMerge> {
     Ok(crate::cells::repository::PullMerge {
         request_id: submission_id(&value.request_id)?,
-        author: to_author(&value.author),
+        author: crate::cells::repository::RepositoryAuthor::from(&value.author),
         method: value.method,
         pull_version: value.pull_version,
         base_oid: value.base_oid.clone(),
@@ -702,7 +696,7 @@ fn to_merge(
 ) -> Result<crate::cells::repository::PullMerge> {
     Ok(crate::cells::repository::PullMerge {
         request_id: submission_id(&input.request_id)?,
-        author: to_author(&input.author),
+        author: crate::cells::repository::RepositoryAuthor::from(&input.author),
         method: input.method,
         pull_version: input.pull_version,
         base_oid: input.base_oid.clone(),
@@ -770,14 +764,4 @@ pub(super) fn submission_id(value: &str) -> Result<[u8; 16]> {
     Uuid::parse_str(value)
         .map(Uuid::into_bytes)
         .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
-}
-pub(super) fn mutation_identity() -> Result<MutationIdentity> {
-    let now_ms = crate::cells::unix_now_ms().map_err(Error::Cell)?;
-    Ok(MutationIdentity {
-        request_id: Uuid::now_v7(),
-        issued_at_ms: now_ms,
-        expires_at_ms: now_ms
-            .checked_add(60_000)
-            .ok_or(Error::CellContract("Cell request expiry overflowed"))?,
-    })
 }

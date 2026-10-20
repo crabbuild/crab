@@ -54,7 +54,7 @@ fn review_view(review: &PullReview, actor: &Identity, current_head: Option<&str>
 
 async fn pull_and_head(
     server: &Server,
-    repo: &crate::server::Repository,
+    repo: &crate::repository::Repository,
     id: u64,
 ) -> Result<(PullRequest, Option<String>)> {
     let pull = storage::pull(server, repo, id)

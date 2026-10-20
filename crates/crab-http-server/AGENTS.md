@@ -13,9 +13,9 @@ Read `crates/crab-http-server/CELLAR.md` for native Cellar storage, lifecycle,
 and migration limitations.
 
 1. `crates/crab-http-server/src/main.rs` — CLI configuration and lifecycle entry.
-2. `crates/crab-http-server/src/server.rs` — `serve / router / Repository::open_current`: repository catalog, routing, and runtime.
+2. `crates/crab-http-server/src/server.rs` — `serve`: process composition and ordered shutdown; `src/server/http.rs` composes routes and `src/repository.rs` owns pinned reads and maintenance.
 3. `crates/crab-http-server/src/app.rs` — `admit / repository`: request repository/principal boundary and error mapping.
-4. `crates/crab-http-server/src/auth.rs` — `Principal / Authentication`: session identity and Git-token boundary.
+4. `crates/crab-http-server/src/auth.rs` — `Principal / Authentication`: identity and configuration; `auth/state.rs` owns durable sessions, `auth/http.rs` owns login/session endpoints, and `auth/transport.rs` bounds provider requests.
 5. `crates/crab-http-server/src/receive.rs` — `receive / publish_objects`: bounded native receive and publication orchestration.
 
 Trace one path: `crates/crab-http-server/src/main.rs` → `serve` in
@@ -35,9 +35,11 @@ and session migration paths are supported.
 | --- | --- | --- |
 | HTTP receive | `crates/crab-http-server/src/receive.rs` | `crates/crab-write/src/journal.rs` |
 | Content reads | `crates/crab-http-server/src/contents.rs` | `crates/crab-remote-git/src/snapshot.rs` |
-| Auth or routing | `crates/crab-http-server/src/server.rs` | `crates/crab-http-server/src/auth.rs` |
-| Read readiness | `crates/crab-http-server/src/maintenance.rs` | `crates/crab-write/src/generation.rs` |
-| Metrics or management listener | `crates/crab-http-server/src/metrics.rs` | `crates/crab-http-server/src/server.rs` |
+| Auth or routing | `crates/crab-http-server/src/server/http.rs` | `crates/crab-http-server/src/server/http/boundary.rs`, `src/auth.rs` |
+| Read readiness | `crates/crab-http-server/src/repository.rs` | `src/server/background.rs`, `src/maintenance.rs`, `crates/crab-write/src/generation.rs` |
+| Management and capacity | `crates/crab-http-server/src/server/management.rs` | `src/server/capacity.rs`, `src/metrics.rs` |
+| Git imports | `crates/crab-http-server/src/git_import.rs` | `src/git_import/source.rs` (validation), `src/git_import/git.rs` (process isolation) |
+| Browse APIs | `crates/crab-http-server/src/api.rs` | `src/api/query.rs` (Git queries), `src/api/representation.rs` (encoding/ranges) |
 
 ## Invariants
 
@@ -54,7 +56,7 @@ No declared Cargo features. Both library and auto-discovered main binary exist. 
 
 ## Verification
 
-Tests are mounted from server.rs, including `crates/crab-http-server/src/receive_tests.rs`, `crates/crab-http-server/src/receive_fault_tests.rs`, and `crates/crab-http-server/src/auth_tests.rs`.
+Repository lifecycle tests are mounted under `repository::maintenance_tests`; HTTP integration tests remain mounted from `server.rs`, including `crates/crab-http-server/src/receive_tests.rs`, `crates/crab-http-server/src/receive_fault_tests.rs`, and `crates/crab-http-server/src/auth_tests.rs`.
 
 Run from repository root. The target below is the example for worktree `089c`;
 replace it with a unique directory for your checkout. Before compilation, verify

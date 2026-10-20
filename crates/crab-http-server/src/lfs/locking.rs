@@ -14,10 +14,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio_util::sync::CancellationToken;
 
 use super::{CONTENT_TYPE, Error, Result, ensure_active, repository};
-use crate::{
-    auth::Principal,
-    server::{Repository, Server},
-};
+use crate::{auth::Principal, repository::Repository, server::Server};
 
 const BUDGET: Duration = Duration::from_secs(30);
 const MAX_PATH_BYTES: usize = 4 * 1024;

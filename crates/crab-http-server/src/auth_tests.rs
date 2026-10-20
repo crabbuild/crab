@@ -1,7 +1,29 @@
-use super::*;
+use crate::RepositoryConfig;
+use crate::auth;
+use crate::auth::Authentication;
+use crate::catalog::CatalogStore;
+use crate::repository::Repository;
+use crate::repository::catalog::RepositoryIndex;
+use crate::server::Server;
+use crate::server::http::router;
+use axum::Json;
+use axum::Router;
+use axum::extract::Request;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::get;
+use axum::routing::post;
+use crab_remote_git::RepositoryIdentity;
+use crab_storage::Store;
+use crab_storage::StoreLayout;
+use serde_json::json;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 
 use axum::http::header;
 use axum::response::Redirect;
@@ -260,18 +282,16 @@ impl Harness {
                 github: None,
             }
         };
-        let auth = Authentication::new_durable(auth_config, &root)
-            .await
-            .unwrap();
+        let auth = Authentication::new(auth_config, &root).await.unwrap();
         let protected_branches = vec![crate::BranchProtection {
             branch: "main".into(),
             required_approvals: 1,
             required_checks: vec!["ci/test".into()],
         }];
         let admission_store = store.clone();
-        let mut repository = Repository {
-            id: uuid::Uuid::from_bytes([1; 16]),
-            config: RepositoryConfig {
+        let mut repository = Repository::new(
+            uuid::Uuid::from_bytes([1; 16]),
+            RepositoryConfig {
                 owner: "team".into(),
                 name: "private".into(),
                 bucket: "test".into(),
@@ -292,14 +312,9 @@ impl Harness {
                 ],
                 protected_branches: protected_branches.clone(),
             },
-            store: store.clone(),
-            layout: StoreLayout::new(store, "test".into()),
-            identity: RepositoryIdentity::new("test", "test", 1).unwrap(),
-            pinned: Mutex::new(None),
-            projection_source: Mutex::new(None),
-            maintenance: Mutex::new(MaintenanceState::default()),
-            integrity: crate::integrity::Status::default(),
-        };
+            StoreLayout::new(store, "test".into()),
+            RepositoryIdentity::new("test", "test", 1).unwrap(),
+        );
         crab_write::capsule_protocol::initialize(
             &repository.layout,
             &"1".repeat(64),
@@ -328,33 +343,21 @@ impl Harness {
             .initialize(repository.id)
             .await
             .unwrap();
-        let server = Arc::new(Server {
-            repositories: BTreeMap::from([(("team".into(), "private".into()), repository)]).into(),
-            runtime: Arc::new(RemoteGitRuntime::default()),
-            repository_cells: Some(cells.client.clone()),
-            cell_services: None,
-            cell_test_runtime: Some(cells),
-            shutdown_mode: tokio::sync::watch::channel(cellar::sdk::ShutdownMode::Preserve).0,
-            options: RepositoryOptions::default(),
-            cursor_key: [7; 32],
-            admission: Semaphore::new(16),
-            transfer_admission: crate::transfer_admission::TransferAdmission::new(
-                admission_store,
-                "test/.crab/http-server/v1/admission".into(),
-                4,
-            ),
-            local_staging: crate::local_disk::LocalStaging::for_test(),
-            app_admission: Semaphore::new(8),
-            maintenance_admission: Arc::new(Semaphore::new(2)),
-            cancellation: CancellationToken::new(),
-            receives: tokio_util::task::TaskTracker::new(),
-            auth: Some(auth),
-            catalog: Some(catalog),
-            git_import: None,
-            catalog_healthy: AtomicBool::new(false),
-            node_healthy: AtomicBool::new(false),
-            cell_capacity: super::test_cell_capacity_report(),
-            metrics: crate::metrics::Metrics::new().unwrap(),
+        let server = Arc::new({
+            let mut server = Server::for_test(
+                BTreeMap::from([(("team".into(), "private".into()), repository)]).into(),
+                crate::transfer_admission::TransferAdmission::new(
+                    admission_store,
+                    "test/.crab/http-server/v1/admission".into(),
+                    4,
+                ),
+            );
+            server.repository_cells = Some(cells.client.clone());
+            server.cell_test_runtime = Some(cells);
+            server.cursor_key = [7; 32];
+            server.auth = Some(auth);
+            server.catalog = Some(catalog);
+            server
         });
         let app = router(Arc::clone(&server));
         let task = tokio::spawn(async move {
