@@ -129,6 +129,10 @@ to test whether the repository has any refs.
 
 ## Performance and qualification
 
+Point and batch reads reuse verified decoded delta bases from the same bounded
+runtime cache. Batch dependency discovery stops at a cached base after checking
+its object identity and size, avoiding repeated origin reads across batches.
+
 Point reads, history, blame, and archives have different costs. A successful
 local fixture does not establish production cloud latency or full API coverage.
 

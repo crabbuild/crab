@@ -3301,6 +3301,47 @@ async fn distinct_delta_objects_share_one_cold_base_fetch() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn batched_delta_read_reuses_a_base_verified_by_an_earlier_operation() {
+    let fixture = publish(DeltaKind::RefShared, false, RepositoryOptions::default()).await;
+    let [(first_path, _), (second_path, expected)] = fixture.shared_paths.clone().unwrap();
+    let cancellation = CancellationToken::new();
+    let setup = fixture
+        .repository
+        .operation(OperationKind::Repository, &cancellation)
+        .await
+        .unwrap();
+    let snapshot = fixture
+        .repository
+        .snapshot(&Revision::Reference("main".to_owned()), &setup)
+        .await
+        .unwrap();
+    snapshot.read_blob(&first_path, &setup).await.unwrap();
+    let oid = snapshot
+        .entry(&second_path, &setup)
+        .await
+        .unwrap()
+        .unwrap()
+        .oid;
+    setup.finish(Ok(())).await.unwrap();
+
+    fixture.backend.reset_pack_gets();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Repository, &cancellation)
+        .await
+        .unwrap();
+    let objects = operation.read_objects(&[oid]).await.unwrap();
+    operation.finish(Ok(())).await.unwrap();
+    fixture.runtime.shutdown().await;
+    assert_eq!(objects[0].data.as_ref(), expected);
+    assert_eq!(
+        fixture.backend.pack_gets(),
+        1,
+        "the verified base must not be fetched again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn batched_objects_materialize_selected_delta_bases_from_one_range() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();
