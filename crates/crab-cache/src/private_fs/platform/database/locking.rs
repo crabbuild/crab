@@ -112,12 +112,15 @@ impl DatabaseLock {
                 self.level = level;
             }
             ffi::SQLITE_LOCK_EXCLUSIVE if self.level >= ffi::SQLITE_LOCK_SHARED => {
-                if self.level < ffi::SQLITE_LOCK_PENDING {
+                // Recovery upgrades directly from SHARED. Taking PENDING there
+                // can deadlock a reserved writer that needs this reader to exit;
+                // match SQLite's native VFS and reserve PENDING for that writer.
+                if self.level == ffi::SQLITE_LOCK_RESERVED {
                     lock(file, WRITE_LOCK, PENDING, 1)?;
                     self.level = ffi::SQLITE_LOCK_PENDING;
                 }
-                // Keep PENDING on a busy upgrade. It excludes new readers
-                // while the current readers finish, as SQLite requires.
+                // A reserved writer keeps PENDING on a busy upgrade so new
+                // readers cannot starve it while existing readers finish.
                 lock(file, WRITE_LOCK, SHARED, SHARED_BYTES)?;
                 self.level = level;
             }
@@ -153,6 +156,35 @@ impl DatabaseLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_recovery_upgrade_does_not_block_the_reserved_writer() {
+        let first = tempfile::NamedTempFile::new().unwrap();
+        let writer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(first.path())
+            .unwrap();
+        let mut recovery_lock = DatabaseLock::default();
+        let mut writer_lock = DatabaseLock::default();
+        recovery_lock
+            .acquire(first.as_file(), ffi::SQLITE_LOCK_SHARED)
+            .unwrap();
+        writer_lock
+            .acquire(&writer, ffi::SQLITE_LOCK_SHARED)
+            .unwrap();
+        writer_lock
+            .acquire(&writer, ffi::SQLITE_LOCK_RESERVED)
+            .unwrap();
+
+        assert_eq!(
+            recovery_lock.acquire(first.as_file(), ffi::SQLITE_LOCK_EXCLUSIVE),
+            Err(ffi::SQLITE_BUSY)
+        );
+        // SQLite's busy handler may retry while the recovery connection keeps
+        // SHARED. Only the reserved writer may hold PENDING during that wait.
+        assert_eq!(conflicting_lock(&writer, PENDING, 1).unwrap(), UNLOCK);
+    }
 
     #[test]
     fn exclusion_probe_requires_independent_descriptions_and_releases_its_lock() {
