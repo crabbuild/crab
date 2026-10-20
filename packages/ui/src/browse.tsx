@@ -77,7 +77,7 @@ function ReadmePreview({
           {name}
         </Link>
       </header>
-      <Result state={state} showTiming={false}>
+      <Result state={state}>
         {(content) =>
           content.text === null ? (
             <div className="notice">This README is not a text file.</div>

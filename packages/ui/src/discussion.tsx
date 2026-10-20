@@ -341,6 +341,7 @@ export function Editor({
       </div>
       <div
         id={`${id}-write`}
+        className="editor-write"
         role="tabpanel"
         aria-labelledby={`${id}-write-tab`}
         hidden={preview}

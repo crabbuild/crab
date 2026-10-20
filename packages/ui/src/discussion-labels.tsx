@@ -108,7 +108,7 @@ export function LabelPicker({
               </Button>
             </span>
           </header>
-          <Result state={catalog} showTiming={false}>
+          <Result state={catalog} timingLabel="Labels">
             {(data) => (
               <>
                 {data.items.length ? (
@@ -182,7 +182,7 @@ export function LabelsPage({ repo, csrf }: { repo: Repository; csrf: string }) {
           <p className="muted">Organize issues and pull requests.</p>
         </div>
       </div>
-      <Result state={catalog}>
+      <Result state={catalog} timingLabel="Labels">
         {(data) => (
           <>
             {data.can_manage && !repo.archived && (

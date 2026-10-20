@@ -107,6 +107,7 @@ export function RevisionPicker({
           {...props}
           leadingVisual={icon}
           trailingVisual={TriangleDownIcon}
+          alignContent="start"
           className="revision-picker-anchor"
           aria-label={`Switch branches or tags, current ${label}`}
           title={revision}

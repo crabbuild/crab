@@ -142,6 +142,7 @@ export interface Blame {
   ranges: { start: number; lines: number; commit: Commit }[];
 }
 export interface Timing {
+  url: string;
   roundtrip: number;
   server: string | null;
 }
@@ -257,6 +258,7 @@ export async function request<T>(
       return {
         data: body,
         timing: {
+          url,
           roundtrip: performance.now() - start,
           server: response.headers.get("server-timing"),
         },
@@ -401,6 +403,16 @@ export function useLocation() {
   );
 }
 export function navigate(href: string) {
+  const current = new URL(window.location.href);
+  const destination = new URL(href, current);
+  if (
+    current.searchParams.get("powerbar") === "1" &&
+    destination.origin === current.origin &&
+    !destination.searchParams.has("powerbar")
+  ) {
+    destination.searchParams.set("powerbar", "1");
+    href = destination.pathname + destination.search + destination.hash;
+  }
   if (
     href ===
     window.location.pathname + window.location.search + window.location.hash

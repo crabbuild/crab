@@ -356,7 +356,7 @@ export function App() {
               <Link href="/">Back to repositories</Link>
             </div>
           ) : (
-            <Result state={pageCatalog} showTiming={false}>
+            <Result state={pageCatalog} timingLabel="Repository catalog">
               {(data) =>
                 url.pathname === "/" ? (
                   <div className="catalog">
@@ -792,7 +792,7 @@ function RepositoryPage({
       >
         {view === "settings" ? (
           repo.can_admin ? (
-            <Result state={visibleRefState} showTiming={false}>
+            <Result state={visibleRefState} timingLabel="Repository references">
               {(data) => (
                 <Suspense
                   fallback={
@@ -853,7 +853,7 @@ function RepositoryPage({
             )}
           </IssuesWorkspace>
         ) : view === "pulls" ? (
-          <Result state={visibleRefState} showTiming={false}>
+          <Result state={visibleRefState} timingLabel="Repository references">
             {(data) => (
               <Suspense
                 fallback={
@@ -874,7 +874,7 @@ function RepositoryPage({
             )}
           </Result>
         ) : (
-          <Result state={visibleRefState} showTiming={false}>
+          <Result state={visibleRefState} timingLabel="Repository references">
             {(data) =>
               view === "releases" ? (
                 <Suspense
@@ -1060,17 +1060,6 @@ function RepositoryPage({
                               id="repository-file-tree"
                               className="tree-sidebar"
                             >
-                              <div className="tree-sidebar-header">
-                                <Button
-                                  size="small"
-                                  onClick={() => setShowTree(false)}
-                                  aria-label="Close file tree"
-                                  aria-expanded={true}
-                                >
-                                  <SidebarCollapseIcon />
-                                </Button>
-                                <strong>Files</strong>
-                              </div>
                               <div className="tree-sidebar-controls">
                                 <RepositoryRefControls
                                   repo={repo}
@@ -1105,6 +1094,13 @@ function RepositoryPage({
                                       .getElementById("repository-tree-search")
                                       ?.focus()
                                   }
+                                />
+                                <IconButton
+                                  icon={SidebarCollapseIcon}
+                                  size="small"
+                                  onClick={() => setShowTree(false)}
+                                  aria-label="Close file tree"
+                                  aria-expanded={true}
                                 />
                               </div>
                               <RepositoryTree
@@ -1338,7 +1334,7 @@ function LatestCommit({
       </div>
     );
   return (
-    <Result state={state} showTiming={false}>
+    <Result state={state}>
       {(commit) => (
         <div className="latest-commit">
           <span className="avatar" aria-hidden="true">

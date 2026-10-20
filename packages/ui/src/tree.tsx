@@ -82,6 +82,9 @@ export function RepositoryTree({
       [data-file-tree-search-container] {
         display: none;
       }
+      [data-file-tree-virtualized-scroll] {
+        overscroll-behavior: contain;
+      }
       [data-type="item"][data-item-selected="true"]::after {
         background: var(--fgColor-accent);
         border-radius: 0 6px 6px 0;
