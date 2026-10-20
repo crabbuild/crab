@@ -157,9 +157,9 @@ async fn concurrent_archive_and_duplicate_mutations_keep_their_decisions_after_r
         .initialize(repository)
         .await
         .unwrap();
-    let recorded = crate::archive_race_tests::run(&started.client, repository, &principal).await;
+    let recorded = crate::test_support::archive::run(&started.client, repository, &principal).await;
     stop(started.node).await;
     let restored = runtime::test_node(local.path(), public.local_addr().unwrap()).await;
-    crate::archive_race_tests::verify_recovered(&restored.client, repository, &recorded).await;
+    crate::test_support::archive::verify_recovered(&restored.client, repository, &recorded).await;
     stop(restored.node).await;
 }

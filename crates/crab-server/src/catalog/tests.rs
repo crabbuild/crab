@@ -345,7 +345,7 @@ async fn adopt_rejects_a_reachable_lfs_pointer_without_its_object() {
         size: 7,
         extensions: Vec::new(),
     };
-    crate::test_git::publish_blob(&layout, &pointer.serialize()).await;
+    crate::test_support::git::publish_blob(&layout, &pointer.serialize()).await;
 
     let result = catalog
         .adopt_repository(
@@ -376,7 +376,7 @@ async fn adopt_rejects_a_reachable_crab_pointer_absent_from_the_catalog() {
         "version https://crab.build/spec/v1\nfile-hash {}\nsize 7\n",
         "31".repeat(32)
     );
-    crate::test_git::publish_blob(&layout, pointer.as_bytes()).await;
+    crate::test_support::git::publish_blob(&layout, pointer.as_bytes()).await;
 
     let result = catalog
         .adopt_repository(
@@ -411,7 +411,7 @@ async fn adopt_accepts_a_reachable_lfs_pointer_with_verified_content() {
         size: content.len() as u64,
         extensions: Vec::new(),
     };
-    crate::test_git::publish_blob(&layout, &pointer.serialize()).await;
+    crate::test_support::git::publish_blob(&layout, &pointer.serialize()).await;
     crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix())
         .put(&oid, content)
         .await

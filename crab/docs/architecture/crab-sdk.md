@@ -81,7 +81,7 @@ historical documentation describes a retired implementation.
 | Filters | `crab/src/cmd/init.rs` `DRIVER_CONFIG`; `crab/src/git/worktree_hydration.rs` | Full local mode needs a compatible executable and shared configuration |
 | Managed access | `crates/crab-git/src/url.rs`; `crates/crab-auth-store/src/managed_repository.rs`; `crates/crab-auth/src/managed/client.rs` | Preserve direct/managed classification, grants, prepare/finalize, and lifecycle endpoints |
 | Protected writer | `crates/crab-auth-server/src/receive/workflow.rs` | Final authorization and publication remain server responsibilities |
-| HTTP receive | `crates/crab-server/src/receive/publish.rs`; `receive_tests.rs`, `receive_fault_tests.rs` | Share publication mechanics while retaining HTTP policy; current server rejects forced updates |
+| HTTP receive | `crates/crab-server/src/git/receive/publish.rs`; `receive_tests.rs`, `receive_fault_tests.rs` | Share publication mechanics while retaining HTTP policy; current server rejects forced updates |
 | Release | Supporting crate manifests use `publish = false`; workspace dependencies use paths | Publish the dependency closure deliberately before publishing the SDK |
 
 Existing tests establish starting points, not SDK proof. Every acceptance test

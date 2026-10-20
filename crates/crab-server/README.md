@@ -224,13 +224,13 @@ Read these sources in order:
 
 | Source | Responsibility |
 | --- | --- |
-| [server/http.rs](src/server/http.rs) | Route composition |
+| [server/http.rs](src/server/http/mod.rs) | Route composition |
 | [server/http/boundary.rs](src/server/http/boundary.rs) | Host/session checks and mutation protection |
-| [issues.rs](src/issues.rs) | Route body limit, request extraction, HTTP contract, and typed command/query invocation |
+| [issues.rs](src/api/issues.rs) | Route body limit, request extraction, HTTP contract, and typed command/query invocation |
 | [app.rs](src/app.rs) | Admission timeout, repository access, input validation, and HTTP error mapping |
 | [cells/client.rs](src/cells/client.rs) | Typed requests through native ingress |
 | [cells/application.rs](src/cells/application.rs) | Transaction, replay receipts, and native output gate |
-| [cells/repository.rs](src/cells/repository.rs) | SQLite transaction, submission reservation, number allocation, and typed outcome |
+| [cells/repository/issues.rs](src/cells/repository/issues.rs) | SQLite transaction, submission reservation, number allocation, and typed outcome |
 | [Cellar SDK](https://github.com/crabbuild/cellar) | Native ownership, persistence, recovery, and output durability |
 
 Example JSON body, subject to the server's authentication and mutation checks:
@@ -261,50 +261,62 @@ different lifecycle events:
 | Surface | Ownership |
 | --- | --- |
 | Collaboration middleware in [app.rs](src/app.rs) | Holds an application slot while producing the response; applies a 30-second handler timeout |
-| Release download in [releases.rs](src/releases.rs) | Moves a separate transfer permit and cancellation guard into the response stream |
+| Release download in [releases.rs](src/api/releases/mod.rs) | Moves a separate transfer permit and cancellation guard into the response stream |
 
 Keep body-stream resources with the stream. The middleware timeout cannot stand
 in for transfer deadlines or worker cleanup after a response has been returned.
 The production server initializes eight process-local application slots and
 four deployment-wide Git/LFS/archive/release transfer slots in
-[server.rs](src/server.rs); test fixtures use smaller limits.
+[server/mod.rs](src/server/mod.rs); test fixtures use smaller limits.
 
-Archive downloads in [archive.rs](src/archive.rs) use a channel-backed ZIP body.
+Archive downloads in [archive.rs](src/api/archive.rs) use a channel-backed ZIP body.
 Traversal cancellation must fail that body: finalizing ZIP state for cleanup
 must not turn an incomplete archive into a successful download.
 
 ## Work on this crate
 
 Start with [AGENTS.md](AGENTS.md) for entry points, ownership, and invariants.
-The main source path is `src/main.rs` → `src/server.rs` → request handlers;
+The main source path is `src/main.rs` → `src/cli/mod.rs` → `src/server/mod.rs` → request handlers;
 publication continues into `crab-write`. The frontend lives in
 [`packages/ui`](../../packages/ui).
+
+API, Git, and authentication owners assemble their own routes;
+`server/http/mod.rs` applies the common security boundary after merging them.
+
+Components with children use a single `<component>/mod.rs` entry point. Tests
+live with their owner, including the HTTP authorization suites under
+`auth/tests/http/`. Shared Git and server fixtures live in test-only
+`test_support/`; tests do not depend on another feature's test suite.
 
 The internal owners are:
 
 | Owner | Responsibility |
 | --- | --- |
-| `server.rs` | Startup, shared application state, and ordered shutdown |
+| `cli/` | Command parsing/dispatch, management client, and ECS address discovery |
+| `server/mod.rs` | Startup, shared application state, and ordered shutdown |
 | `server/background.rs` | Catalog refresh and fair projection scheduling |
 | `server/management.rs`, `server/capacity.rs`, `server/storage.rs` | Private management, resource policy, and storage preflight |
-| `repository.rs`, `repository/catalog.rs` | Pinned Git snapshots, maintenance ownership, and atomic catalog installation |
-| `auth.rs`, `auth/state.rs`, `auth/http.rs`, `auth/transport.rs` | Identity, durable sessions, login endpoints, and bounded provider transport |
-| `git_import.rs`, `git_import/source.rs`, `git_import/git.rs` | Import jobs/workflow, source validation, and isolated Git processes |
-| `api.rs`, `api/query.rs`, `api/representation.rs` | Browse HTTP orchestration, Git queries, and wire encoding |
+| `repository/` | Pinned Git snapshots, maintenance, browse projections, and atomic catalog installation |
+| `catalog/` | Durable catalog records and membership audit |
+| `auth/mod.rs`, `auth/state.rs`, `auth/http.rs`, `auth/transport.rs` | Identity, durable sessions, login endpoints, and bounded provider transport |
+| `git_import/mod.rs`, `git_import/source.rs`, `git_import/git.rs` | Import jobs/workflow, source validation, and isolated Git processes |
+| `api/` | Browse HTTP orchestration, feature handlers, Git queries, and wire encoding |
+| `git/` | Native Git protocol, object, receive, and LFS endpoints |
+| `peer/`, `peer/tls/` | Private transport and mutual TLS |
 | `app.rs` | Collaboration admission, authorization, mutation identity, and error mapping |
 | `cells/` | Native ingress, durable transactions, and domain commands/queries |
 
 Authentication always uses shared durable state, including in-memory object-store
 test fixtures; there is no separate process-local authentication mode. Repository
 construction initializes private cache and maintenance state. Settings
-policy stays in `repository_settings.rs`; repository reads do not forward HTTP
+policy stays in `repository/settings.rs`; repository reads do not forward HTTP
 settings operations. HTTP mutation families share one request identity policy in
 `app.rs`; projection retains its own non-HTTP error contract.
 
 Build the frontend before Rust checks. Focused HTTP authentication coverage:
 
 ```sh
-cargo test -p crab-server --locked --lib server::auth_tests
+cargo test -p crab-server --locked --lib auth::tests::http
 cargo clippy -p crab-server --locked --all-targets -- -D warnings
 ```
 

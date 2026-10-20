@@ -200,7 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn scale_down_requests_native_handoff_and_cancels_admission() {
-        let server = crate::repository::maintenance_tests::fixture_without_cells().await;
+        let server = crate::test_support::server::fixture_without_cells().await;
         let response = router(Arc::clone(&server), Router::new())
             .oneshot(
                 Request::post("/internal/cells/v1/scale-down")
@@ -217,7 +217,7 @@ mod tests {
                 cellar::sdk::ShutdownMode::Handoff
             ),
         );
-        crate::repository::maintenance_tests::close(&server).await;
+        crate::test_support::server::close(&server).await;
         assert_eq!(observed, (StatusCode::ACCEPTED, true, true));
     }
 }

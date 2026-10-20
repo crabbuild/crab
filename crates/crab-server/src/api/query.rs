@@ -5,7 +5,7 @@ use super::{
         entry_json, json_attribution_summary, path_history_json,
     },
 };
-use crate::{projection, server::Server};
+use crate::{repository::projection, server::Server};
 use crab_remote_git::{
     Blob, EntryKind, Error, GitPath, HistoryTraversal, OperationKind, PageRequest,
     RemoteGitRepository, RemoteGitSnapshot, Revision, RevisionError, TreeEntry,

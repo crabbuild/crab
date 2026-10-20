@@ -198,7 +198,7 @@ jobs:
       - name: Qualify HTTP receive fault recovery
         run: >-
           cargo "+${SDK_MSRV}" test -p crab-server --locked --lib
-          server::receive_fault_tests::
+          git::receive::tests::faults::
       - name: Qualify CLI publication callers
         run: |
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::push_native::tests::unresolved_plan_blocks_replay_before_ref_admission -- --exact
@@ -392,7 +392,7 @@ jobs:
           --expected-tests 1 --toolchain "$SDK_MSRV"
           --timeout-seconds 1200 --
           cargo "+${SDK_MSRV}" test -p crab-server --locked --lib
-          server::receive_fault_tests::receive_faults_rustfs
+          git::receive::tests::faults::receive_faults_rustfs
           -- --exact --ignored --nocapture
       - name: Qualify local workflows and memory
         shell: bash

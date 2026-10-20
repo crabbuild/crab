@@ -289,7 +289,7 @@ partial-state latency and mixed-load gates are still open.
 Owners: `crates/crab-metadata/src/capsule_protocol/browse.rs`,
 `crates/crab-remote/src/browse_indexes.rs`,
 `crates/crab-read/src/capsule_protocol.rs`,
-`crates/crab-server/src/projection.rs`, `src/maintenance_tests.rs` in that
+`crates/crab-server/src/repository/projection/mod.rs`, `src/maintenance_tests.rs` in that
 crate, and all consumers found by searching `BrowseIndexes` and its layout key.
 
 Exit: hold path-state completion blocked; graph-backed historical reads still
@@ -403,7 +403,7 @@ immutable authoritative inputs, before repeating the complete native Git oracle.
   repeat with different history sizes and the same ref count. Deep background
   payload reads must disappear while Cell heartbeat/control work remains visible.
 
-Owners: `crates/crab-server/src/server.rs`, `src/projection.rs`,
+Owners: `crates/crab-server/src/server/mod.rs`, `src/projection.rs`,
 `src/maintenance.rs`, `src/maintenance_tests.rs`, and runtime admission in
 `crates/crab-remote-git` when supported by contention measurements.
 
@@ -462,7 +462,7 @@ and recovery, without qualifying incremental or bulk push latency.
   workers, client disconnect, failed upload and process restart inventory. A
   worker must drain before its directory/reservation or transfer permit releases.
 
-Owners: `crates/crab-server/src/local_disk.rs`, `src/receive.rs`,
+Owners: `crates/crab-server/src/local_disk/mod.rs`, `src/receive.rs`,
 `src/receive/publish.rs`, `crates/crab-remote/src/prepare.rs`,
 `crates/crab-git/src/incoming_pack.rs`, `src/incoming_pack/prepared.rs` in that
 crate. Extend `local_disk` tests, `receive_tests.rs`, `receive_fault_tests.rs`
@@ -573,11 +573,11 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-http-capsule-qualificati
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-http-capsule-qualification" \
   RUSTC_WRAPPER= cargo test --locked -p crab-git --lib receive_plan::tests
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-http-capsule-qualification" \
-  RUSTC_WRAPPER= cargo test --locked -p crab-server --lib repository::maintenance_tests
+  RUSTC_WRAPPER= cargo test --locked -p crab-server --lib repository::tests
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-http-capsule-qualification" \
-  RUSTC_WRAPPER= cargo test --locked -p crab-server --lib server::receive_tests
+  RUSTC_WRAPPER= cargo test --locked -p crab-server --lib git::receive::tests
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-http-capsule-qualification" \
-  RUSTC_WRAPPER= cargo test --locked -p crab-server --lib server::receive_fault_tests
+  RUSTC_WRAPPER= cargo test --locked -p crab-server --lib git::receive::tests::faults
 ```
 
 Use focused filters for each slice; the list identifies affected proof surfaces,

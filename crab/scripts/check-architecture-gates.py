@@ -2461,7 +2461,7 @@ def check_cell_runtime_server_boundary(root: Path, metadata: dict) -> bool:
                     violations.append(
                         f"{relative}:{number}: native Cellar construction belongs in cells/runtime.rs"
                     )
-            if relative == "crates/crab-server/src/server.rs":
+            if relative == "crates/crab-server/src/server/mod.rs":
                 escaped = production_struct_fields(text, "Server") & CELL_RUNTIME_SERVER_COMPONENT_FIELDS
                 for field in sorted(escaped):
                     violations.append(

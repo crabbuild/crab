@@ -86,9 +86,9 @@ pub(crate) enum Error {
     #[error("Release asset transfer admission failed")]
     ReleaseAssetCoordination(#[source] crab_coordination::CoordinationError),
     #[error("Release tag publication failed")]
-    Release(#[source] Box<crate::receive::ReceiveError>),
+    Release(#[source] Box<crate::git::receive::ReceiveError>),
     #[error("Pull request merge failed")]
-    Merge(#[source] Box<crate::receive::ReceiveError>),
+    Merge(#[source] Box<crate::git::receive::ReceiveError>),
     #[error("Pull request merge object construction failed")]
     MergeObject(#[source] Box<crab_remote::objects::Error>),
     #[error(
@@ -151,7 +151,7 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let expected_lock_conflict = matches!(
             &self,
-            Self::Merge(error) if matches!(error.as_ref(), crate::receive::ReceiveError::Locked)
+            Self::Merge(error) if matches!(error.as_ref(), crate::git::receive::ReceiveError::Locked)
         );
         if !expected_lock_conflict
             && matches!(
@@ -358,7 +358,7 @@ impl IntoResponse for Error {
                 "Invalid JSON request or request body too large",
             ),
             Self::Merge(error)
-                if matches!(error.as_ref(), crate::receive::ReceiveError::Locked) =>
+                if matches!(error.as_ref(), crate::git::receive::ReceiveError::Locked) =>
             {
                 (
                     StatusCode::CONFLICT,

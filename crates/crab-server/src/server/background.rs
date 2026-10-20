@@ -102,34 +102,37 @@ pub(super) async fn sweep_projections(server: Arc<Server>) -> Result<()> {
             let repository = Arc::clone(&repositories[(start + offset) % repositories.len()]);
             let now = Instant::now();
             let probe_started = now;
-            let source =
-                match crate::projection::current_source(&repository, &server, &server.cancellation)
-                    .await
-                {
-                    Ok(source) => source,
-                    Err(error) => {
-                        server.metrics.record_projection_probe(
-                            crate::metrics::ProjectionProbeResult::Error,
-                            probe_started.elapsed(),
-                        );
+            let source = match crate::repository::projection::current_source(
+                &repository,
+                &server,
+                &server.cancellation,
+            )
+            .await
+            {
+                Ok(source) => source,
+                Err(error) => {
+                    server.metrics.record_projection_probe(
+                        crate::metrics::ProjectionProbeResult::Error,
+                        probe_started.elapsed(),
+                    );
+                    tracing::warn!(
+                        repository_id = %repository.id,
+                        error = %error,
+                        "Git projection source probe failed"
+                    );
+                    if let Err(schedule_error) = repository
+                        .schedule_maintenance(&server, MaintenanceTrigger::Repair)
+                        .await
+                    {
                         tracing::warn!(
                             repository_id = %repository.id,
-                            error = %error,
-                            "Git projection source probe failed"
+                            error = %schedule_error,
+                            "Git projection repair could not be scheduled"
                         );
-                        if let Err(schedule_error) = repository
-                            .schedule_maintenance(&server, MaintenanceTrigger::Repair)
-                            .await
-                        {
-                            tracing::warn!(
-                                repository_id = %repository.id,
-                                error = %schedule_error,
-                                "Git projection repair could not be scheduled"
-                            );
-                        }
-                        continue;
                     }
-                };
+                    continue;
+                }
+            };
             let state = states
                 .entry(repository.id)
                 .or_insert_with(|| ProjectionSweepState {

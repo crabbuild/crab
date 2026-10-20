@@ -148,7 +148,7 @@ class CellarBoundaryTests(unittest.TestCase):
     def test_native_construction_is_confined_to_the_runtime_module(self):
         source = "fn start() { Node::start_external(config); }\n"
         for relative, expected in [
-            ("crates/crab-server/src/server.rs", False),
+            ("crates/crab-server/src/server/mod.rs", False),
             ("crates/crab-server/src/cells/runtime.rs", True),
         ]:
             with self.subTest(relative=relative):
@@ -157,12 +157,12 @@ class CellarBoundaryTests(unittest.TestCase):
     def test_product_catalog_and_routing_stay_outside_native_ownership(self):
         self.assertTrue(self.check_source(
             "struct Server { catalog: CatalogStore, cell_capacity: Capacity, repository_cells: Router }\n",
-            relative="crates/crab-server/src/server.rs"))
+            relative="crates/crab-server/src/server/mod.rs"))
 
     def test_retired_runtime_components_cannot_escape_into_server(self):
         self.assertFalse(self.check_source(
             "struct Server { catalog: CatalogStore, follower_store: FollowerStore }\n",
-            relative="crates/crab-server/src/server.rs"))
+            relative="crates/crab-server/src/server/mod.rs"))
 
     def test_removed_workspace_dependency_is_rejected(self):
         self.assertFalse(self.check_source("", ("crab-cell-runtime",)))

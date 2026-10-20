@@ -1031,9 +1031,9 @@ Build the embedded frontend before compiling this crate. Use a target directory 
 npm ci --prefix packages/ui
 npm run build --prefix packages/ui
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-server-dev" \
-  cargo test -p crab-server --locked --lib server::receive_tests
+  cargo test -p crab-server --locked --lib git::receive::tests
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-server-dev" \
-  cargo test -p crab-server --locked --lib server::receive_fault_tests
+  cargo test -p crab-server --locked --lib git::receive::tests::faults
 ```
 
 The ignored RustFS commands and fresh-prefix requirements live in [Native Git push](REFERENCE.md#native-git-push).
@@ -1060,9 +1060,9 @@ Do not solve these gaps with a raw manifest upload, journal-only endpoint, fabri
 
 Read these sources in order before changing the design:
 
-1. `crates/crab-server/src/receive.rs`: HTTP admission, body spool, worker ownership, and public error mapping
-2. `crates/crab-server/src/receive/publish.rs`: policy, leases, snapshot recheck, upload, commit, and readiness
-3. `crates/crab-server/src/receive/validate.rs`: server-selected graph and pack limits
+1. `crates/crab-server/src/git/receive/mod.rs`: HTTP admission, body spool, worker ownership, and public error mapping
+2. `crates/crab-server/src/git/receive/publish.rs`: policy, leases, snapshot recheck, upload, commit, and readiness
+3. `crates/crab-server/src/git/receive/validate.rs`: server-selected graph and pack limits
 4. `crates/crab-remote/src/prepare.rs`: quarantine, graph validation, visibility, immutable upload, and artifact commitment
 5. `crates/crab-remote/src/publication.rs`: sorted leases, GC fences, renewal, uncertain outcomes, and readiness classification
 6. `crates/crab-write/src/journal.rs`: ref batch validation, namespace gate, prepared heads, marker commitment, and compaction

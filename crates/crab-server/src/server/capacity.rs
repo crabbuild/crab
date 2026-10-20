@@ -31,7 +31,7 @@ impl CellRuntimeBudget {
         // transfers on small volumes. Per-transfer reservations enforce capacity.
         let disk_reserve_bytes = (resources.free_disk_bytes / 5).max(GIB);
         let local_disk_bytes = resources.free_disk_bytes.saturating_sub(disk_reserve_bytes);
-        if local_disk_bytes < crate::receive::INITIAL_RECEIVE_RESERVATION {
+        if local_disk_bytes < crate::git::receive::INITIAL_RECEIVE_RESERVATION {
             return Err(crate::Error::Config(
                 "local staging requires capacity for one Git receive",
             ));
@@ -136,7 +136,7 @@ mod tests {
             let budget =
                 CellRuntimeBudget::from_resources(local_resources(3 * GIB, free_disk, 10_000))
                     .unwrap();
-            assert!(budget.local_disk_bytes >= crate::receive::INITIAL_RECEIVE_RESERVATION);
+            assert!(budget.local_disk_bytes >= crate::git::receive::INITIAL_RECEIVE_RESERVATION);
             assert!(budget.disk_reserve_bytes >= GIB);
             assert_eq!(
                 budget.local_disk_bytes + budget.disk_reserve_bytes,

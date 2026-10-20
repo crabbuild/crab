@@ -1008,7 +1008,7 @@ change. The paged reader shares visible attribution and candidate lookup through
 one interpreter. A missing/corrupt advertised page remains an error. Complete
 loads, compaction, resumable prefixes and maintenance scans retain the markers.
 HTTP projection keeps visible-node attribution: its sole caller supplies paths
-from the captured raw directory listing (`crates/crab-server/src/api.rs`).
+from the captured raw directory listing (`crates/crab-server/src/api/mod.rs`).
 
 Upstream release tags were rechecked at their peeled commits: v1.0.1 and v1.2.0
 through v1.2.4 contain no path-state source. Unreleased version 5 is rejected;

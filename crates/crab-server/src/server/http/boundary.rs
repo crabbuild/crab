@@ -241,7 +241,7 @@ async fn archived_mutation_response(
         .get(&(owner.to_owned(), name.to_owned()))
         .filter(|repository| principal.can_read(&repository.config))?;
     app::actor(principal).ok()?;
-    match crate::repository_settings::load_lifecycle(server, &repository).await {
+    match crate::repository::settings::load_lifecycle(server, &repository).await {
         Ok(lifecycle) if lifecycle.archived => Some(app::Error::Archived.into_response()),
         Ok(_) => None,
         Err(error) => Some(error.into_response()),

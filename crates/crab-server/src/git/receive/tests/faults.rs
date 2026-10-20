@@ -1,0 +1,697 @@
+use crate::server::Server;
+use crate::server::http::router;
+use crate::test_support::server as fixtures;
+use axum::body::Body;
+use axum::extract::Request;
+use axum::http::StatusCode;
+use crab_remote_git::RepositoryIdentity;
+use crab_remote_git::RepositoryOptions;
+use crab_storage::Store;
+use crab_storage::StoreLayout;
+use futures_util::stream::BoxStream;
+use http_body_util::BodyExt;
+use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, path::Path,
+};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
+
+#[derive(Clone, Copy, Debug)]
+enum Fault {
+    LostMarkerReply,
+    LostMarkerReadback,
+    RejectedMarker,
+    CancelAfterHead,
+    CancelAfterMarker,
+    ReadinessAfterMarker,
+}
+
+#[derive(Debug)]
+struct FaultStore {
+    inner: Arc<dyn ObjectStore>,
+    marker_prefix: String,
+    root_path: String,
+    committed: std::sync::atomic::AtomicBool,
+    head_path: String,
+    cancel: CancellationToken,
+    fault: Fault,
+}
+
+impl std::fmt::Display for FaultStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("receive-fault-store")
+    }
+}
+
+fn disconnected() -> object_store::Error {
+    object_store::Error::Generic {
+        store: "receive-fault",
+        source: Box::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "lost reply",
+        )),
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for FaultStore {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        let marker = location.as_ref().starts_with(&self.marker_prefix);
+        if marker && matches!(self.fault, Fault::RejectedMarker) {
+            return Err(disconnected());
+        }
+        let result = self.inner.put_opts(location, payload, options).await?;
+        if marker {
+            self.committed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        if marker
+            && matches!(
+                self.fault,
+                Fault::LostMarkerReply | Fault::LostMarkerReadback
+            )
+        {
+            return Err(disconnected());
+        }
+        if (marker && matches!(self.fault, Fault::CancelAfterMarker))
+            || (location.as_ref() == self.head_path && matches!(self.fault, Fault::CancelAfterHead))
+        {
+            self.cancel.cancel();
+        }
+        Ok(result)
+    }
+
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        if matches!(self.fault, Fault::LostMarkerReadback)
+            && self.committed.load(std::sync::atomic::Ordering::SeqCst)
+            && location.as_ref().starts_with(&self.marker_prefix)
+        {
+            return Err(disconnected());
+        }
+        if matches!(self.fault, Fault::ReadinessAfterMarker)
+            && location.as_ref() == self.root_path
+            && self
+                .committed
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(disconnected());
+        }
+        self.inner.get_opts(location, options).await
+    }
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, options).await
+    }
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
+    }
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+async fn body() -> (Vec<u8>, String) {
+    use crate::test_support::git::{git, success};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    success(
+        path,
+        &["init", "--initial-branch=main", "--object-format=sha1", "."],
+    )
+    .await;
+    std::fs::write(path.join("README.md"), "fault qualification\n").unwrap();
+    success(path, &["add", "README.md"]).await;
+    success(path, &["commit", "-m", "fault qualification"]).await;
+    let oid = success(path, &["rev-parse", "HEAD"]).await;
+    let pack = git(path, &["pack-objects", "--stdout", "--all"]).await;
+    assert!(pack.status.success());
+    let command = format!(
+        "{} {oid} refs/heads/main\0report-status atomic\n",
+        "0".repeat(40)
+    );
+    let mut body = format!("{:04x}{command}0000", command.len() + 4).into_bytes();
+    body.extend_from_slice(&pack.stdout);
+    // The HTTP publisher sees only the wire request, never the client's Git files.
+    directory.close().unwrap();
+    (body, oid)
+}
+
+const FAULTS: [Fault; 6] = [
+    Fault::LostMarkerReply,
+    Fault::LostMarkerReadback,
+    Fault::RejectedMarker,
+    Fault::CancelAfterHead,
+    Fault::ReadinessAfterMarker,
+    Fault::CancelAfterMarker,
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
+    use crab_remote::publication::{with_capsule_plan, with_leases};
+    type TestError = Box<dyn std::error::Error + Send + Sync>;
+
+    let (wire, oid) = body().await;
+    let server = fixtures::fixture().await;
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let wire_path = directory.path().join("wire");
+    std::fs::write(&wire_path, wire).unwrap();
+    let mut input = std::io::BufReader::new(std::fs::File::open(wire_path).unwrap());
+    let request = crab_git::receive_wire::read_request(&mut input).unwrap();
+    let names: Vec<_> = request
+        .updates
+        .iter()
+        .map(|update| update.name.clone())
+        .collect();
+    let plan_id = "d".repeat(64);
+    let ttl = Duration::from_secs(60);
+    let cancel = CancellationToken::new();
+    let planned_repo = Arc::clone(&repo);
+    let plan_key = plan_id.clone();
+    let plan_server = Arc::clone(&server);
+    let outcome = with_capsule_plan(
+        &repo.store,
+        &repo.layout,
+        &plan_id,
+        ttl,
+        &cancel,
+        move |cancel| {
+            let plan_id = plan_key.clone();
+            let server = Arc::clone(&plan_server);
+            let repo = Arc::clone(&planned_repo);
+            async move {
+                let leased_repo = Arc::clone(&repo);
+                with_leases(
+                    &repo.store,
+                    &repo.layout,
+                    names,
+                    ttl,
+                    &cancel,
+                    move |_holders, cancel| async move {
+                        let view = leased_repo.open_view().await?;
+                        let visibility = view.git_visibility_index().await?;
+                        let repository = view
+                            .git_repository(
+                                leased_repo.identity.clone(),
+                                server.runtime.clone(),
+                                RepositoryOptions::default(),
+                                4 * 1024 * 1024,
+                                &cancel,
+                            )
+                            .await?;
+                        let prepared = crab_remote::prepare::prepare_capsule(
+                            repository,
+                            visibility,
+                            crab_git::incoming_pack::ScratchSpace::new(
+                                directory.path(),
+                                64_u64 * 1024 * 1024,
+                            ),
+                            Some(input),
+                            request.updates,
+                            BTreeMap::new(),
+                            &cancel,
+                            crab_remote::prepare::Options {
+                                layout: leased_repo.layout.clone(),
+                                graph: crab_git::receive_plan::GraphLimits {
+                                    max_ref_updates: 16,
+                                    max_graph_steps: 1024,
+                                    max_object_bytes: 1024 * 1024,
+                                    max_read_bytes: 4 * 1024 * 1024,
+                                },
+                                pack: crab_git::incoming_pack::ReceiveLimits {
+                                    max_pack_bytes: 4 * 1024 * 1024,
+                                    max_objects: 1024,
+                                    max_object_bytes: 1024 * 1024,
+                                    max_inflated_bytes: 4 * 1024 * 1024,
+                                    max_delta_depth: 128,
+                                },
+                                policy: |_: &str| crab_git::receive_plan::RefPolicy {
+                                    allow_delete: true,
+                                    allow_non_fast_forward: false,
+                                },
+                            },
+                        )
+                        .await?;
+                        let limits = crab_read::dependency_proof::DependencyProofLimits {
+                            max_dependencies: 16,
+                            max_total_file_bytes: 4 * 1024 * 1024,
+                            max_duration: ttl,
+                            lookup: crab_metadata::file_index_lookup::FileIndexLookupLimits {
+                                max_files: 16,
+                                max_shard_visits: 16,
+                                max_shard_bytes: 4 * 1024 * 1024,
+                                max_recipe_entries: 1024,
+                            },
+                            content: crab_read::pointer_proof::PointerProofLimits {
+                                max_file_bytes: 4 * 1024 * 1024,
+                                max_shard_bytes: 4 * 1024 * 1024,
+                                max_xorb_bytes: 4 * 1024 * 1024,
+                                max_read_bytes: 4 * 1024 * 1024,
+                                max_chunks: 1024,
+                                max_duration: ttl,
+                            },
+                        };
+                        let artifacts = prepared.upload_capsule(&view, limits, &cancel).await?;
+                        let outcome = artifacts.commit(Some(&plan_id), ttl, &cancel).await?;
+                        Ok::<_, TestError>(outcome)
+                    },
+                )
+                .await
+            }
+        },
+    )
+    .await
+    .unwrap();
+    let crab_remote::prepare::CapsuleCommitOutcome::Committed { transaction_id } = outcome else {
+        panic!("successful marker must retain commitment");
+    };
+    repo.invalidate().await;
+    let repository = repo
+        .open_current(&server, RepositoryOptions::default(), &cancel)
+        .await
+        .unwrap();
+    let receipt = crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
+        &repo.store,
+        &repo.layout,
+        &plan_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(receipt.transaction().id().unwrap(), transaction_id);
+    assert_eq!(repository.refs().entries[0].target.to_string(), oid);
+    let operation = repository
+        .operation(crab_remote_git::OperationKind::Repository, &cancel)
+        .await
+        .unwrap();
+    let snapshot = repository
+        .snapshot(
+            &crab_remote_git::Revision::from_oid_hex(&oid).unwrap(),
+            &operation,
+        )
+        .await
+        .unwrap();
+    let content = snapshot
+        .read_blob(
+            &crab_remote_git::GitPath::new("README.md").unwrap(),
+            &operation,
+        )
+        .await;
+    let content = operation.finish(content).await.unwrap();
+    assert_eq!(content.bytes.as_ref(), b"fault qualification\n");
+    let mut replayed = false;
+    let blocked = with_capsule_plan(
+        &repo.store,
+        &repo.layout,
+        &plan_id,
+        ttl,
+        &cancel,
+        |_| async {
+            replayed = true;
+            Ok::<_, TestError>(())
+        },
+    )
+    .await;
+    assert!(!replayed);
+    assert!(matches!(
+        blocked
+            .unwrap_err()
+            .downcast_ref::<crab_metadata::error::MetadataError>(),
+        Some(crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. })
+    ));
+    server.cancellation.cancel();
+    server.shutdown_runtimes().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_receive_replays_an_identical_wire_request_from_its_receipt() {
+    let (body, oid) = body().await;
+    let server = fixtures::fixture().await;
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/git/team/repo.git/git-receive-pack")
+            .header("host", "localhost:8788")
+            .header("content-type", "application/x-git-receive-pack-request")
+            .body(Body::from(body.clone()))
+            .unwrap()
+    };
+
+    let first = router(Arc::clone(&server))
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = first.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&first_body).contains("ok refs/heads/main"));
+
+    let replay = router(Arc::clone(&server))
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay_body = replay.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&replay_body).contains("ok refs/heads/main"));
+
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    let view = repo.open_view().await.unwrap();
+    assert_eq!(view.refs().get("refs/heads/main"), Some(&oid));
+    assert_eq!(
+        repo.store
+            .list_prefix(&repo.layout.repo_path("v2/plans"))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    server.cancellation.cancel();
+    server.receives.close();
+    server.receives.wait().await;
+    server.finish_maintenance().await.unwrap();
+    server.shutdown_runtimes().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn receive_faults_preserve_exact_commit_outcomes_and_repair_on_restart() {
+    let (body, oid) = body().await;
+    for fault in FAULTS {
+        exercise(fixtures::fixture().await, fault, &body, &oid).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires fresh isolated RustFS prefixes and environment credentials"]
+async fn receive_faults_rustfs() {
+    let bucket = std::env::var("QUALIFICATION_BUCKET").unwrap();
+    let prefix = std::env::var("QUALIFICATION_PREFIX").unwrap();
+    assert!(prefix.starts_with("qualification/http-receive-"));
+    let store =
+        crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
+            .unwrap();
+    let domain = format!("{prefix}/draining-writer");
+    let writer = crab_coordination::GcFenceLease::acquire_writer(
+        store.inner(),
+        &domain,
+        Duration::from_secs(3),
+    )
+    .await
+    .unwrap();
+    let cancel = CancellationToken::new();
+    let heartbeat =
+        crab_coordination::GcFenceHeartbeat::spawn(&writer, cancel.clone(), Duration::from_secs(1));
+    cancel.cancel();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let other = crab_coordination::GcFenceLease::acquire_writer(
+        store.inner(),
+        &domain,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    heartbeat.stop().await;
+    writer.release().await.unwrap();
+    other.release().await.unwrap();
+    let sweep = crab_coordination::GcFenceLease::acquire_sweep(
+        store.inner(),
+        &domain,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    sweep.release().await.unwrap();
+    let (body, oid) = body().await;
+    for (index, fault) in FAULTS.into_iter().enumerate() {
+        let mut server = fixtures::fixture().await;
+        let repo = Arc::get_mut(&mut server)
+            .unwrap()
+            .repositories
+            .get_mut(&("team".into(), "repo".into()))
+            .unwrap();
+        let prefix = format!("{prefix}/{index}");
+        repo.layout = StoreLayout::new(store.clone(), prefix.clone());
+        repo.store = store.clone();
+        repo.config.bucket = bucket.clone();
+        repo.config.prefix = prefix.clone();
+        repo.identity = RepositoryIdentity::new(format!("s3:{bucket}"), prefix, 1).unwrap();
+        crab_write::capsule_protocol::initialize(
+            &repo.layout,
+            blake3::hash(repo.config.prefix.as_bytes())
+                .to_hex()
+                .as_ref(),
+            "refs/heads/main",
+        )
+        .await
+        .unwrap();
+        exercise(server, fault, &body, &oid).await;
+    }
+}
+
+async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str) {
+    let cancel = server.cancellation.clone();
+    let repo = Arc::get_mut(&mut server)
+        .unwrap()
+        .repositories
+        .get_mut(&("team".into(), "repo".into()))
+        .unwrap();
+    let origin = repo.store.clone();
+    let origin_layout = repo.layout.clone();
+    let config = repo.config.clone();
+    let identity = repo.identity.clone();
+    let faulty = Store::with_retry(
+        Arc::new(FaultStore {
+            inner: Arc::clone(origin.inner()),
+            marker_prefix: format!("{}/", repo.layout.capsule_committed_transactions_prefix()),
+            root_path: repo.layout.capsule_root_path().to_string(),
+            committed: std::sync::atomic::AtomicBool::new(false),
+            head_path: repo
+                .layout
+                .capsule_ref_head_path(&crab_metadata::capsule_protocol::capsule_ref_name_key(
+                    "refs/heads/main",
+                ))
+                .to_string(),
+            cancel,
+            fault,
+        }),
+        crab_storage::RetryPolicy {
+            max_attempts: 1,
+            base: Duration::ZERO,
+            cap: Duration::ZERO,
+        },
+    );
+    repo.store = faulty.clone();
+    repo.layout = StoreLayout::new(faulty, repo.config.prefix.clone());
+    let response = router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/git/team/repo.git/git-receive-pack")
+                .header("host", "localhost:8788")
+                .header("content-type", "application/x-git-receive-pack-request")
+                .body(Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let response = response.into_body().collect().await.unwrap().to_bytes();
+    let acknowledged = matches!(
+        fault,
+        Fault::LostMarkerReply
+            | Fault::CancelAfterHead
+            | Fault::CancelAfterMarker
+            | Fault::ReadinessAfterMarker
+    );
+    let committed = matches!(
+        fault,
+        Fault::LostMarkerReply
+            | Fault::LostMarkerReadback
+            | Fault::RejectedMarker
+            | Fault::CancelAfterHead
+            | Fault::CancelAfterMarker
+            | Fault::ReadinessAfterMarker
+    );
+    if acknowledged {
+        assert_eq!(status, StatusCode::OK, "{fault:?}");
+        assert!(String::from_utf8_lossy(&response).contains("ok refs/heads/main"));
+    } else {
+        assert!(!status.is_success(), "{fault:?}");
+    }
+    assert!(!String::from_utf8_lossy(&response).contains("ng refs/heads/main"));
+    server.cancellation.cancel();
+    server.receives.close();
+    server.receives.wait().await;
+    server.finish_maintenance().await.unwrap();
+    server.shutdown_runtimes().await.unwrap();
+    let view = crab_read::capsule_protocol::open_view(
+        &origin_layout,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 4 * 1024 * 1024,
+            max_frontier_bytes: 16 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        view.refs().get("refs/heads/main").map(String::as_str),
+        committed.then_some(oid),
+        "{fault:?}"
+    );
+    for domain in [origin_layout.global_prefix(), origin_layout.repo_prefix()] {
+        let sweep = crab_coordination::GcFenceLease::acquire_sweep(
+            origin.inner(),
+            domain,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        sweep.release().await.unwrap();
+    }
+    let mut restarted = fixtures::fixture().await;
+    let repo = Arc::get_mut(&mut restarted)
+        .unwrap()
+        .repositories
+        .get_mut(&("team".into(), "repo".into()))
+        .unwrap();
+    repo.store = origin.clone();
+    repo.layout = origin_layout.clone();
+    repo.config = config;
+    repo.identity = identity;
+    let response = router(Arc::clone(&restarted))
+        .oneshot(
+            Request::builder()
+                .uri("/api/repos/team/repo/refs")
+                .header("host", "localhost:8788")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{fault:?}");
+    let value: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        value["refs"].as_array().unwrap().len(),
+        usize::from(committed),
+        "{fault:?}"
+    );
+    if committed {
+        assert_eq!(value["refs"][0]["oid"], oid);
+    }
+    if matches!(fault, Fault::LostMarkerReadback) {
+        let retry = router(Arc::clone(&restarted))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/git/team/repo.git/git-receive-pack")
+                    .header("host", "localhost:8788")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK, "retry after {fault:?}");
+        let retry_body = retry.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&retry_body).contains("ok refs/heads/main"));
+    } else if !committed {
+        let retry = router(Arc::clone(&restarted))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/git/team/repo.git/git-receive-pack")
+                    .header("host", "localhost:8788")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            retry.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ambiguous retry after {fault:?} must remain unreplayed"
+        );
+        let current = restarted
+            .repositories
+            .get(&("team".into(), "repo".into()))
+            .unwrap();
+        let view = current.open_view().await.unwrap();
+        assert!(!view.refs().contains_key("refs/heads/main"));
+    }
+    let blob = router(Arc::clone(&restarted))
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/repos/team/repo/blob?rev={oid}&path=README.md"
+                ))
+                .header("host", "localhost:8788")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        blob.status(),
+        if committed {
+            StatusCode::OK
+        } else {
+            StatusCode::NOT_FOUND
+        },
+        "{fault:?}"
+    );
+    if !committed {
+        restarted.cancellation.cancel();
+        restarted.finish_maintenance().await.unwrap();
+        restarted.shutdown_runtimes().await.unwrap();
+        return;
+    }
+    assert_eq!(
+        blob.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        b"fault qualification\n"
+    );
+    restarted.cancellation.cancel();
+    restarted.finish_maintenance().await.unwrap();
+    restarted.shutdown_runtimes().await.unwrap();
+}

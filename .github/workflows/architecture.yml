@@ -253,7 +253,7 @@ jobs:
             server::peer_e2e_tests::rustfs_cellar_routes_over_mutual_tls_and_recovers_after_handoff \
             -- --ignored --exact --nocapture
           run_test cargo test -p crab-server --locked --lib \
-            server::auth_tests::members::rustfs_delayed_catalog_materialization_cannot_restore_revoked_http_access \
+            auth::tests::http::members::rustfs_delayed_catalog_materialization_cannot_restore_revoked_http_access \
             -- --ignored --exact --nocapture
           run_test cargo test -p crab-server --locked --lib
           run_test cargo test -p crab-server --locked --bin crab-server

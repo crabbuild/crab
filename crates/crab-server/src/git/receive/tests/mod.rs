@@ -1,0 +1,1099 @@
+use crate::test_support::git::{git, success};
+
+mod faults;
+
+use crate::server::Server;
+use crate::server::http::router;
+use crate::test_support::server as fixtures;
+use axum::extract::Request;
+use axum::http::StatusCode;
+use base64::Engine;
+use crab_remote_git::RepositoryIdentity;
+use crab_storage::StoreLayout;
+use std::collections::BTreeMap;
+use std::io::Read as _;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+
+#[test]
+fn scratch_failures_keep_their_http_classification_through_io_wrappers() {
+    use axum::response::IntoResponse;
+    use crab_git::incoming_pack::{IncomingPackError, ScratchError};
+
+    for (source, status) in [
+        (
+            ScratchError::Capacity {
+                required: 9,
+                capacity: 8,
+            },
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+        (
+            ScratchError::Io(std::io::ErrorKind::StorageFull.into()),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let error = IncomingPackError::Io(std::io::Error::other(source));
+        assert_eq!(
+            crate::git::receive::ReceiveError::from(error)
+                .into_response()
+                .status(),
+            status
+        );
+    }
+}
+
+#[tokio::test]
+async fn disconnected_receive_drains_intake_and_returns_transfer_capacity() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+    let server = fixtures::fixture().await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/git/team/repo.git/git-receive-pack")
+        .header("host", "localhost:8788")
+        .header("content-type", "application/x-git-receive-pack-request")
+        .body(Body::from_stream(futures_util::stream::pending::<
+            std::result::Result<axum::body::Bytes, std::io::Error>,
+        >()))
+        .unwrap();
+    let app = router(Arc::clone(&server));
+    let client = tokio::spawn(app.oneshot(request));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while server.receives.is_empty() || server.local_staging.available_mebibytes() == 8 * 1024 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(server.transfer_admission.available_permits(), 3);
+    assert_eq!(server.local_staging.available_mebibytes(), 6 * 1024);
+    client.abort();
+    let _ = client.await;
+    server.receives.close();
+    tokio::time::timeout(Duration::from_secs(2), server.receives.wait())
+        .await
+        .unwrap();
+    assert_eq!(server.transfer_admission.available_permits(), 4);
+    assert_eq!(server.local_staging.available_mebibytes(), 8 * 1024);
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    let view = repo.open_view().await.unwrap();
+    assert!(view.refs().is_empty() && view.capsules().is_empty());
+    server.cancellation.cancel();
+    server.shutdown_runtimes().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_http_push_publishes_exact_objects_and_rejects_rewrites_atomically() {
+    for branch in ["main", "trunk"] {
+        exercise(fixtures::fixture().await, branch).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_receive_exceeds_the_default_repository_budget() {
+    let server = fixtures::fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop = CancellationToken::new();
+    let stopped = stop.clone();
+    let app = router(Arc::clone(&server));
+    let http = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stopped.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let url = format!("http://127.0.0.1:{port}/git/team/repo.git");
+    success(
+        path,
+        &["init", "--initial-branch=main", "--object-format=sha1", "."],
+    )
+    .await;
+    let import_path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("git")
+            .current_dir(import_path)
+            .args(["fast-import", "--quiet"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        for index in 0..10_050 {
+            let body = format!("blob-{index}");
+            writeln!(input, "blob\nmark :{}\ndata {}", index + 1, body.len()).unwrap();
+            writeln!(input, "{body}").unwrap();
+        }
+        writeln!(input, "commit refs/heads/main").unwrap();
+        writeln!(
+            input,
+            "committer Receive test <receive@example.invalid> 0 +0000"
+        )
+        .unwrap();
+        writeln!(input, "data 4\nbase").unwrap();
+        for index in 0..10_050 {
+            writeln!(input, "M 100644 :{} file-{index}", index + 1).unwrap();
+        }
+        writeln!(input).unwrap();
+        drop(input);
+        assert!(child.wait().unwrap().success());
+    })
+    .await
+    .unwrap();
+
+    success(path, &["push", &url, "main"]).await;
+    let tree = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/tree?rev=main&limit=1"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(tree.status(), reqwest::StatusCode::OK);
+
+    stop.cancel();
+    http.await.unwrap();
+    server.cancellation.cancel();
+    server.shutdown_runtimes().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_http_receive_rejects_locked_paths_even_when_the_tip_reverts() {
+    let server = fixtures::fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop = CancellationToken::new();
+    let stopped = stop.clone();
+    let app = router(Arc::clone(&server));
+    let http = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stopped.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let url = format!("http://127.0.0.1:{port}/git/team/repo.git");
+    success(
+        path,
+        &["init", "--initial-branch=main", "--object-format=sha1", "."],
+    )
+    .await;
+    std::fs::write(path.join("locked.bin"), "original\n").unwrap();
+    success(path, &["add", "locked.bin"]).await;
+    success(path, &["commit", "-m", "base"]).await;
+    let base = success(path, &["rev-parse", "HEAD"]).await;
+    success(path, &["push", &url, "main"]).await;
+
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    let manager = crab_lfs::LfsLockManager::lfs(repo.store.clone(), &repo.config.prefix);
+    manager.lock("locked.bin", "another-subject").await.unwrap();
+    std::fs::write(path.join("locked.bin"), "changed\n").unwrap();
+    success(path, &["commit", "-am", "change locked path"]).await;
+    std::fs::write(path.join("locked.bin"), "original\n").unwrap();
+    success(path, &["commit", "-am", "revert locked path"]).await;
+    let rejected = git(path, &["push", &url, "main"]).await;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("path is locked by another user"));
+    assert!(
+        success(path, &["ls-remote", &url, "refs/heads/main"])
+            .await
+            .starts_with(&base)
+    );
+
+    manager.force_unlock("locked.bin").await.unwrap();
+    manager.lock("locked.bin", "operator").await.unwrap();
+    success(path, &["push", &url, "main"]).await;
+
+    stop.cancel();
+    http.await.unwrap();
+    server.cancellation.cancel();
+    server.shutdown_runtimes().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires an isolated local RustFS bucket/prefix and environment credentials"]
+async fn native_http_push_rustfs() {
+    let bucket = std::env::var("QUALIFICATION_BUCKET").unwrap();
+    let prefix = std::env::var("QUALIFICATION_PREFIX").unwrap();
+    assert!(prefix.starts_with("qualification/http-push-"));
+    let store =
+        crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
+            .unwrap();
+    let layout = StoreLayout::new(store.clone(), prefix.clone());
+    crab_write::capsule_protocol::initialize(
+        &layout,
+        blake3::hash(prefix.as_bytes()).to_hex().as_ref(),
+        "refs/heads/main",
+    )
+    .await
+    .unwrap();
+    let mut server = fixtures::fixture().await;
+    let repo = Arc::get_mut(&mut server)
+        .unwrap()
+        .repositories
+        .get_mut(&("team".into(), "repo".into()))
+        .unwrap();
+    repo.identity = RepositoryIdentity::new(format!("s3:{bucket}"), prefix.clone(), 1).unwrap();
+    repo.config.bucket = bucket;
+    repo.config.prefix = prefix;
+    repo.store = store;
+    repo.layout = layout;
+    exercise(server, "trunk").await;
+}
+
+async fn exercise(server: Arc<Server>, branch: &str) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop = CancellationToken::new();
+    let stopped = stop.clone();
+    let app = router(Arc::clone(&server));
+    let http = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stopped.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let url = format!("http://127.0.0.1:{port}/git/team/repo.git");
+    success(
+        path,
+        &[
+            "init",
+            &format!("--initial-branch={branch}"),
+            "--object-format=sha1",
+            ".",
+        ],
+    )
+    .await;
+    std::fs::write(path.join("README.md"), "first content\n").unwrap();
+    success(path, &["add", "README.md"]).await;
+    success(path, &["update-index", "--chmod=+x", "README.md"]).await;
+    success(path, &["commit", "-m", "first commit"]).await;
+    let first = success(path, &["rev-parse", "HEAD"]).await;
+    // A valid Git graph with absent LFS content must fail before artifact upload.
+    std::fs::write(
+        path.join("missing-lfs"),
+        format!(
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize 3\n",
+            "0".repeat(64)
+        ),
+    )
+    .unwrap();
+    success(path, &["add", "missing-lfs"]).await;
+    success(path, &["commit", "-m", "missing content dependency"]).await;
+    let rejected = git(path, &["push", &url, branch]).await;
+    assert!(!rejected.status.success());
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    let before = repo.open_view().await.unwrap();
+    assert!(before.refs().is_empty());
+    assert!(before.capsules().is_empty());
+    assert!(
+        repo.store
+            .list_prefix(&repo.layout.repo_path("packs"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    success(path, &["reset", "--hard", &first]).await;
+    success(path, &["tag", "-a", "v1", "-m", "first tag"]).await;
+    success(path, &["push", &url, "refs/tags/v1"]).await;
+    let response = reqwest::get(format!("http://127.0.0.1:{port}/api/repos/team/repo/refs"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let tag_only: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert!(tag_only["head"].is_null());
+    assert_eq!(tag_only["unborn_head"], "refs/heads/main");
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    let tag_view = repo.open_view().await.unwrap();
+    assert!(!tag_view.capsules().is_empty());
+    assert_eq!(tag_view.head(), "refs/heads/main");
+    assert!(matches!(
+        crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout).await,
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. }
+        })
+    ));
+    repo.schedule_maintenance(&server, crate::repository::MaintenanceTrigger::Repair)
+        .await
+        .unwrap();
+    server.finish_maintenance().await.unwrap();
+    repo.invalidate().await;
+    let indexes = crab_metadata::capsule_protocol::load_browse_indexes(&repo.layout)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        indexes.state_digest(),
+        repo.open_view().await.unwrap().state_digest()
+    );
+    let attribution_url = format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/tree-attribution?rev={first}&limit=100"
+    );
+    let response = reqwest::get(&attribution_url).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let attribution: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(attribution["state"], "ready");
+    assert_eq!(attribution["items"][0]["last_commit"]["oid"], first);
+
+    repo.store
+        .delete(&repo.layout.capsule_browse_indexes_path())
+        .await
+        .unwrap();
+    repo.invalidate().await;
+    let indexing = reqwest::get(&attribution_url).await.unwrap();
+    assert_eq!(indexing.status(), StatusCode::ACCEPTED);
+    assert_eq!(indexing.headers()[reqwest::header::RETRY_AFTER], "2");
+    let indexing: serde_json::Value =
+        serde_json::from_slice(&indexing.bytes().await.unwrap()).unwrap();
+    assert_eq!(indexing["state"], "indexing");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let response = reqwest::get(&attribution_url).await.unwrap();
+            if response.status() == StatusCode::OK {
+                let attribution: serde_json::Value =
+                    serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+                assert_eq!(attribution["state"], "ready");
+                assert_eq!(attribution["items"][0]["last_commit"]["oid"], first);
+                break;
+            }
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+        }
+    })
+    .await
+    .unwrap();
+
+    for corruption in [
+        "missing descriptor",
+        "corrupt descriptor",
+        "malformed record",
+        "oversized record",
+    ] {
+        // Readiness can precede its repair worker's completion. Drain it before
+        // injecting another fault, or that worker can replace the tested record
+        // with legitimate graph-only readiness before the corruption probe.
+        server.finish_maintenance().await.unwrap();
+        let indexes = crab_metadata::capsule_protocol::load_browse_indexes(&repo.layout)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            indexes.state_digest(),
+            repo.open_view().await.unwrap().state_digest()
+        );
+        let path_state_hash = indexes.path_state_hash().unwrap();
+        let descriptor = repo
+            .layout
+            .bulk_manifest_path("path-state", path_state_hash);
+        match corruption {
+            "missing descriptor" => repo.store.delete(&descriptor).await.unwrap(),
+            "corrupt descriptor" => repo
+                .store
+                .put_overwrite(&descriptor, bytes::Bytes::from_static(b"corrupt"))
+                .await
+                .unwrap(),
+            _ => {
+                let size = if corruption == "oversized record" {
+                    8192
+                } else {
+                    1
+                };
+                repo.store
+                    .put_overwrite(
+                        &repo.layout.capsule_browse_indexes_path(),
+                        bytes::Bytes::from(vec![b'!'; size]),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        repo.invalidate().await;
+        let corrupt = reqwest::get(&attribution_url).await.unwrap();
+        assert_eq!(
+            corrupt.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{corruption}"
+        );
+        let corrupt: serde_json::Value =
+            serde_json::from_slice(&corrupt.bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            corrupt["error"]["code"], "path_state_corrupt",
+            "{corruption}"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let response = reqwest::get(&attribution_url).await.unwrap();
+                if response.status() == StatusCode::OK {
+                    let attribution: serde_json::Value =
+                        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+                    assert_eq!(attribution["items"][0]["last_commit"]["oid"], first);
+                    break;
+                }
+                assert!(matches!(
+                    response.status(),
+                    StatusCode::ACCEPTED | StatusCode::SERVICE_UNAVAILABLE
+                ));
+            }
+        })
+        .await
+        .unwrap();
+    }
+    let reader = tempfile::tempdir().unwrap();
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "clone", "--bare", &url, "."],
+    )
+    .await;
+    assert_eq!(
+        success(reader.path(), &["symbolic-ref", "HEAD"]).await,
+        "refs/heads/main"
+    );
+    assert_eq!(
+        success(reader.path(), &["show", "refs/tags/v1:README.md"]).await,
+        "first content"
+    );
+    reader.close().unwrap();
+    success(path, &["push", "--atomic", &url, branch, "refs/tags/v1"]).await;
+    let archive = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/archive?rev={first}"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(archive.status(), StatusCode::OK);
+    assert_eq!(
+        archive.headers()[reqwest::header::CONTENT_TYPE],
+        "application/zip"
+    );
+    assert_eq!(
+        archive.headers()[reqwest::header::CONTENT_DISPOSITION],
+        format!("attachment; filename=\"repo-{}.zip\"", &first[..7])
+    );
+    assert_eq!(archive.headers()["x-crab-commit"], first);
+    let archive = archive.bytes().await.unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(archive)).unwrap();
+    assert!(
+        archive
+            .by_name(&format!("repo-{}/", &first[..7]))
+            .unwrap()
+            .is_dir()
+    );
+    let mut readme = String::new();
+    archive
+        .by_name(&format!("repo-{}/README.md", &first[..7]))
+        .unwrap()
+        .read_to_string(&mut readme)
+        .unwrap();
+    assert_eq!(readme, "first content\n");
+    std::fs::write(path.join("README.md"), "second content\n").unwrap();
+    success(path, &["commit", "-am", "second commit"]).await;
+    let second = success(path, &["rev-parse", "HEAD"]).await;
+    success(path, &["-c", "http.postBuffer=1", "push", &url, branch]).await;
+    let rejected = git(
+        path,
+        &[
+            "push",
+            "--atomic",
+            &url,
+            &format!("+{first}:refs/heads/{branch}"),
+            "HEAD:refs/heads/rejected",
+        ],
+    )
+    .await;
+    assert!(
+        !rejected.status.success(),
+        "non-fast-forward batch was accepted"
+    );
+    for extra in [None, Some("HEAD:refs/heads/replacement")] {
+        let deletion = format!(":refs/heads/{branch}");
+        let mut args = vec!["push", "--atomic", &url, &deletion];
+        args.extend(extra);
+        let rejected = git(path, &args).await;
+        assert!(
+            !rejected.status.success(),
+            "default branch deletion was accepted"
+        );
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("deletion is prohibited"));
+    }
+    success(path, &["push", &url, "HEAD:refs/heads/temporary"]).await;
+    success(path, &["push", &url, ":refs/heads/temporary"]).await;
+    success(path, &["push", &url, "HEAD:refs/tags/existing-object"]).await;
+    success(
+        path,
+        &["push", &url, ":refs/tags/existing-object", ":refs/tags/v1"],
+    )
+    .await;
+
+    let response = reqwest::get(format!("http://127.0.0.1:{port}/api/repos/team/repo/refs"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let visible: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(visible["refs"][0]["oid"], second);
+    assert_eq!(visible["head"]["name"], format!("refs/heads/{branch}"));
+    let readme_path = "524541444d452e6d64";
+    let latest = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/commit?rev={second}&path_hex={readme_path}"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(latest.status(), StatusCode::OK);
+    let latest: serde_json::Value = serde_json::from_slice(&latest.bytes().await.unwrap()).unwrap();
+    assert_eq!(latest["oid"], second);
+    assert_eq!(latest["message"], "second commit\n");
+    assert_eq!(latest["change_kind"], "Modified");
+    let path_history = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/commits?rev={second}&path_hex={readme_path}&limit=1"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(path_history.status(), StatusCode::OK);
+    let path_history: serde_json::Value =
+        serde_json::from_slice(&path_history.bytes().await.unwrap()).unwrap();
+    assert_eq!(path_history["items"][0]["oid"], second);
+    assert_eq!(path_history["items"][0]["change_kind"], "Modified");
+    assert_eq!(path_history["items"].as_array().unwrap().len(), 1);
+    assert!(path_history["next"].is_string());
+    let cursor = path_history["next"].as_str().unwrap();
+    let older_history = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/commits?rev={second}&path_hex={readme_path}&limit=1&cursor={cursor}"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(older_history.status(), StatusCode::OK);
+    let older_history: serde_json::Value =
+        serde_json::from_slice(&older_history.bytes().await.unwrap()).unwrap();
+    assert_eq!(older_history["items"][0]["oid"], first);
+    assert_eq!(older_history["items"][0]["change_kind"], "Added");
+    assert!(older_history["next"].is_null());
+    let pull_commits = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/commits?rev={second}&base={first}&limit=1"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(pull_commits.status(), StatusCode::OK);
+    let pull_commits: serde_json::Value =
+        serde_json::from_slice(&pull_commits.bytes().await.unwrap()).unwrap();
+    assert_eq!(pull_commits["items"][0]["oid"], second);
+    assert_eq!(pull_commits["items"].as_array().unwrap().len(), 1);
+    assert!(pull_commits["next"].is_null());
+    let reader = tempfile::tempdir().unwrap();
+    success(reader.path(), &["init", "--bare", "."]).await;
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "fetch", &url, branch],
+    )
+    .await;
+    assert_eq!(
+        success(reader.path(), &["rev-parse", "FETCH_HEAD"]).await,
+        second
+    );
+    assert_eq!(
+        success(reader.path(), &["show", "FETCH_HEAD:README.md"]).await,
+        "second content"
+    );
+    reader.close().unwrap();
+
+    let browser_payload = serde_json::json!({
+        "branch": format!("refs/heads/{branch}"),
+        "expected_head": second,
+        "path_hex": "646f63732f62726f777365722e747874",
+        "content": "created without a checkout\n",
+        "message": "Create browser file"
+    });
+    let manager = crab_lfs::LfsLockManager::lfs(repo.store.clone(), &repo.config.prefix);
+    manager
+        .lock("docs/browser.txt", "another-subject")
+        .await
+        .unwrap();
+    let locked = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(browser_payload.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(locked.status(), StatusCode::CONFLICT);
+    manager.force_unlock("docs/browser.txt").await.unwrap();
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(browser_payload.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let third = created["commit"].as_str().unwrap().to_owned();
+    assert_eq!(created["branch"], format!("refs/heads/{branch}"));
+    let stale = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": second,
+                "path_hex": "7374616c652e747874",
+                "content": "stale\n",
+                "message": "Stale commit"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let browser_path = "646f63732f62726f777365722e747874";
+    let response = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/search?rev={third}&q=browser&limit=10"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let search: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(search["items"].as_array().unwrap().len(), 1);
+    assert_eq!(search["items"][0]["path_hex"], browser_path);
+    let response = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/file?rev={third}&path_hex={browser_path}"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let file: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let created_blob = file["oid"].as_str().unwrap();
+    let response = reqwest::Client::new()
+        .patch(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": third,
+                "expected_blob": created_blob,
+                "path_hex": browser_path,
+                "content": "edited without a checkout\n",
+                "message": "Edit browser file"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let edited: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let fourth = edited["commit"].as_str().unwrap().to_owned();
+    let response = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/file?rev={fourth}&path_hex={browser_path}"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let file: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(file["text"], "edited without a checkout\n");
+    let edited_blob = file["oid"].as_str().unwrap();
+    let reader = tempfile::tempdir().unwrap();
+    success(reader.path(), &["init", "--bare", "."]).await;
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "fetch", &url, branch],
+    )
+    .await;
+    assert_eq!(
+        success(reader.path(), &["show", "FETCH_HEAD:docs/browser.txt"]).await,
+        "edited without a checkout"
+    );
+    let stale_file = reqwest::Client::new()
+        .delete(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": fourth,
+                "expected_blob": created_blob,
+                "path_hex": browser_path,
+                "message": "Delete stale browser file"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_file.status(), StatusCode::CONFLICT);
+    let response = reqwest::Client::new()
+        .delete(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": fourth,
+                "expected_blob": edited_blob,
+                "path_hex": browser_path,
+                "message": "Delete browser file"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let deleted: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let fifth = deleted["commit"].as_str().unwrap().to_owned();
+    let response = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/search?rev={fifth}&q=browser&limit=10"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let search: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert!(search["items"].as_array().unwrap().is_empty());
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "fetch", &url, branch],
+    )
+    .await;
+    for path in ["FETCH_HEAD:docs/browser.txt", "FETCH_HEAD:docs"] {
+        assert!(
+            !git(reader.path(), &["cat-file", "-e", path])
+                .await
+                .status
+                .success(),
+            "deleted browser path remained visible"
+        );
+    }
+
+    let binary = [0_u8, 255, 10, 0, 128, 1, 2];
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/uploads"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": fifth,
+                "files": [
+                    {
+                        "path_hex": "6173736574732f7261772e62696e",
+                        "content_base64": base64::engine::general_purpose::STANDARD.encode(binary)
+                    },
+                    {
+                        "path_hex": "646f63732f75706c6f61642e747874",
+                        "content_base64": base64::engine::general_purpose::STANDARD.encode("uploaded without a checkout\n")
+                    }
+                ],
+                "message": "Upload browser files"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let uploaded: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let sixth = uploaded["commit"].as_str().unwrap().to_owned();
+    assert_eq!(uploaded["paths_hex"].as_array().unwrap().len(), 2);
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "fetch", &url, branch],
+    )
+    .await;
+    let raw = git(reader.path(), &["show", "FETCH_HEAD:assets/raw.bin"]).await;
+    assert!(raw.status.success());
+    assert_eq!(raw.stdout, binary);
+    assert_eq!(
+        success(reader.path(), &["show", "FETCH_HEAD:docs/upload.txt"]).await,
+        "uploaded without a checkout"
+    );
+
+    let collision = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/uploads"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": sixth,
+                "files": [
+                    {"path_hex": "524541444d452e6d64", "content_base64": "Y29sbGlkZQ=="},
+                    {"path_hex": "61746f6d69632e747874", "content_base64": "bmV2ZXI="}
+                ],
+                "message": "Reject an atomic collision"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(collision.status(), StatusCode::CONFLICT);
+    let advertised = success(path, &["ls-remote", &url, branch]).await;
+    assert_eq!(advertised, format!("{sixth}\trefs/heads/{branch}"));
+    assert!(
+        !git(reader.path(), &["cat-file", "-e", "FETCH_HEAD:atomic.txt"])
+            .await
+            .status
+            .success()
+    );
+
+    let proposal = "browser/proposal";
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": sixth,
+                "new_branch": proposal,
+                "path_hex": "70726f706f73616c2e6d64",
+                "content": "review this change\n",
+                "message": "Propose a browser change"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let proposed: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let proposed_commit = proposed["commit"].as_str().unwrap().to_owned();
+    assert_eq!(proposed["branch"], format!("refs/heads/{proposal}"));
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "fetch", &url, proposal],
+    )
+    .await;
+    assert_eq!(
+        success(reader.path(), &["rev-parse", "FETCH_HEAD"]).await,
+        proposed_commit
+    );
+    assert_eq!(
+        success(reader.path(), &["show", "FETCH_HEAD:proposal.md"]).await,
+        "review this change"
+    );
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "fetch", &url, branch],
+    )
+    .await;
+    assert_eq!(
+        success(reader.path(), &["rev-parse", "FETCH_HEAD"]).await,
+        sixth
+    );
+    assert!(
+        !git(reader.path(), &["cat-file", "-e", "FETCH_HEAD:proposal.md"])
+            .await
+            .status
+            .success(),
+        "proposal changed the source branch"
+    );
+    let duplicate = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": sixth,
+                "new_branch": proposal,
+                "path_hex": "6e657665722e747874",
+                "content": "never published\n",
+                "message": "Reject duplicate proposal branch"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        success(reader.path(), &["ls-remote", &url, proposal]).await,
+        format!("{proposed_commit}\trefs/heads/{proposal}")
+    );
+    let upload_proposal = "browser/upload-proposal";
+    let proposal_binary = [7_u8, 0, 255, 42];
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/uploads"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": sixth,
+                "new_branch": upload_proposal,
+                "files": [{
+                    "path_hex": "70726f706f73616c2e62696e",
+                    "content_base64": base64::engine::general_purpose::STANDARD.encode(proposal_binary)
+                }],
+                "message": "Propose a browser upload"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let proposed_upload: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let proposed_upload_commit = proposed_upload["commit"].as_str().unwrap().to_owned();
+    assert_eq!(
+        proposed_upload["branch"],
+        format!("refs/heads/{upload_proposal}")
+    );
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "fetch", &url, upload_proposal],
+    )
+    .await;
+    let raw = git(reader.path(), &["show", "FETCH_HEAD:proposal.bin"]).await;
+    assert!(raw.status.success());
+    assert_eq!(raw.stdout, proposal_binary);
+    reader.close().unwrap();
+
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    let remote = repo
+        .open_current(&server, server.options, &server.cancellation)
+        .await
+        .unwrap();
+    let refs: BTreeMap<_, _> = remote
+        .refs()
+        .entries
+        .iter()
+        .map(|entry| (entry.name.clone(), entry.target.to_string()))
+        .collect();
+    assert_eq!(
+        refs,
+        BTreeMap::from([
+            (format!("refs/heads/{branch}"), sixth),
+            (format!("refs/heads/{proposal}"), proposed_commit),
+            (
+                format!("refs/heads/{upload_proposal}"),
+                proposed_upload_commit,
+            ),
+        ])
+    );
+    let listing = success(path, &["rev-list", "--objects", "HEAD"]).await;
+    let mut expected = Vec::new();
+    for line in listing.lines() {
+        let oid = line.split_whitespace().next().unwrap();
+        let kind = success(path, &["cat-file", "-t", oid]).await;
+        let output = git(path, &["cat-file", &kind, oid]).await;
+        assert!(output.status.success());
+        expected.push((
+            gix_hash::ObjectId::from_hex(oid.as_bytes()).unwrap(),
+            output.stdout,
+        ));
+    }
+    // The reader must not depend on a surviving client clone or object database.
+    directory.close().unwrap();
+    let operation = remote
+        .operation(
+            crab_remote_git::OperationKind::Repository,
+            &server.cancellation,
+        )
+        .await
+        .unwrap();
+    for (oid, expected) in expected {
+        let actual = operation.read_object(oid).await.unwrap();
+        assert_eq!(actual.data.as_ref(), expected);
+    }
+    operation.finish(Ok(())).await.unwrap();
+    let reference = format!("refs/heads/{branch}");
+    let base = remote
+        .refs()
+        .entries
+        .iter()
+        .find(|entry| entry.name == reference)
+        .unwrap()
+        .target;
+    let response = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/file?rev={base}&path_hex=524541444d452e6d64"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let file: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let response = reqwest::Client::new()
+        .patch(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": reference,
+                "expected_head": base.to_string(),
+                "expected_blob": file["oid"],
+                "new_branch": "mode-proof",
+                "path_hex": "524541444d452e6d64",
+                "content": "executable after browser editing\n",
+                "message": "Preserve executable mode"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mode_reader = tempfile::tempdir().unwrap();
+    success(mode_reader.path(), &["init", "--bare", "."]).await;
+    success(mode_reader.path(), &["fetch", &url, "mode-proof"]).await;
+    let mode = success(mode_reader.path(), &["ls-tree", "FETCH_HEAD", "README.md"]).await;
+    assert!(mode.starts_with("100755 blob "), "{mode}");
+    assert_eq!(
+        success(mode_reader.path(), &["show", "FETCH_HEAD:README.md"]).await,
+        "executable after browser editing"
+    );
+    server.cancellation.cancel();
+    stop.cancel();
+    http.await.unwrap();
+    server.receives.close();
+    server.receives.wait().await;
+    server.finish_maintenance().await.unwrap();
+    server.shutdown_runtimes().await.unwrap();
+}

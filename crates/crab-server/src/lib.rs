@@ -2,43 +2,23 @@
 #![recursion_limit = "256"]
 mod api;
 mod app;
-mod archive;
-#[cfg(test)]
-mod archive_race_tests;
 mod assets;
-mod assignees;
 mod auth;
-mod branches;
 pub mod catalog;
 mod cells;
-mod checks;
 mod config;
-mod contents;
 mod git;
 mod git_import;
-mod git_objects;
 mod integrity;
-mod issues;
-mod labels;
-mod lfs;
 mod local_disk;
-mod maintenance;
-mod members;
 mod metrics;
 mod peer;
-mod peer_tls;
-mod projection;
-mod pulls;
-mod receive;
-mod releases;
 mod repository;
-mod repository_settings;
 mod resources;
 mod server;
-mod statuses;
 mod storage_root;
 #[cfg(test)]
-mod test_git;
+mod test_support;
 mod transfer_admission;
 
 pub use config::{
@@ -143,8 +123,8 @@ impl From<crab_read::ReadError> for Error {
     }
 }
 
-impl From<maintenance::Error> for Error {
-    fn from(source: maintenance::Error) -> Self {
+impl From<repository::maintenance::Error> for Error {
+    fn from(source: repository::maintenance::Error) -> Self {
         Self::Maintenance(Box::new(source))
     }
 }

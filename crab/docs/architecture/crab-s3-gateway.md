@@ -409,7 +409,7 @@ re-preparation policy that preserves unrelated file edits and conditions.
 
 **Source map.** `crates/crab-sdk/src/client.rs`, `crates/crab-remote/src/prepare.rs`,
 `publication.rs`, `crates/crab-write/src/journal.rs`, metadata receipts,
-`crates/crab-server/src/receive/publish.rs` and repository settings.
+`crates/crab-server/src/git/receive/publish.rs` and repository settings.
 
 **Acceptance criteria.** Real SDK create/update/delete/copy-equivalent edits are
 visible through independent Git and SDK reads. Metadata and content never expose
