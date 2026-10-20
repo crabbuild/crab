@@ -228,7 +228,6 @@ struct AuthState {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StoredFlow {
-    #[serde(default)]
     provider: AuthProvider,
     nonce: String,
     verifier: String,
@@ -243,7 +242,6 @@ struct StoredSession {
     identity: Identity,
     csrf: String,
     expires_at: u64,
-    #[serde(default)]
     git_tokens: Vec<Key>,
 }
 
@@ -255,15 +253,7 @@ struct IdentitySessionMarker {
     subject: String,
     session_key: Key,
     expires_at: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     git_tokens: Vec<Key>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct IdentityIndexMigration {
-    started_at: u64,
-    complete_after: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -291,10 +281,6 @@ pub(crate) struct Authentication {
 }
 
 impl Authentication {
-    pub(crate) fn peer_issuer(&self) -> String {
-        self.config.issuer.url().as_str().to_owned()
-    }
-
     pub(crate) async fn new_durable(
         config: OidcConfig,
         root: &crate::storage_root::StorageRoot,
@@ -344,9 +330,6 @@ impl Authentication {
             AuthProvider::Oidc => Some(discover(&config, secret.clone(), &http).await?),
             AuthProvider::GitHub => None,
         };
-        if let Some(state) = &state {
-            state.migration_active().await?;
-        }
         Ok(Self {
             config,
             secret,
@@ -590,40 +573,12 @@ impl Authentication {
             &record.identity.subject,
             &session_key,
         );
-        let marker = match state
+        let (body, _) = state
             .store
             .get_with_etag_bounded(&marker_path, 8 * 1024)
             .await
-        {
-            Ok((body, _)) => serde_json::from_slice::<IdentitySessionMarker>(&body).ok()?,
-            Err(StorageError::NotFound { .. }) if state.migration_active().await.ok()? => {
-                let marker = IdentitySessionMarker {
-                    schema_version: 1,
-                    issuer: record.identity.issuer.clone(),
-                    subject: record.identity.subject.clone(),
-                    session_key,
-                    expires_at: record.expires_at,
-                    git_tokens: Vec::new(),
-                };
-                match state
-                    .store
-                    .create_strict(&marker_path, Bytes::from(serde_json::to_vec(&marker).ok()?))
-                    .await
-                {
-                    Ok(()) => marker,
-                    Err(StorageError::StateConflict { .. }) => {
-                        let (body, _) = state
-                            .store
-                            .get_with_etag_bounded(&marker_path, 8 * 1024)
-                            .await
-                            .ok()?;
-                        serde_json::from_slice::<IdentitySessionMarker>(&body).ok()?
-                    }
-                    Err(_) => return None,
-                }
-            }
-            Err(_) => return None,
-        };
+            .ok()?;
+        let marker: IdentitySessionMarker = serde_json::from_slice(&body).ok()?;
         if marker.schema_version != 1
             || marker.session_key != session_key
             || marker.issuer != record.identity.issuer
@@ -800,33 +755,6 @@ impl Authentication {
             state.cleanup_marker(&marker, &meta.location).await?;
             revoked += 1;
         }
-        // Pre-index binaries can leave live sessions without markers for one
-        // maximum session lifetime. Stream only during this durable rollout window.
-        if state.migration_active().await? {
-            let prefix = ObjectPath::from(format!("{}/sessions/", state.prefix));
-            let mut sessions = state.store.list_stream(&prefix);
-            while let Some(meta) = sessions.next().await {
-                let meta = meta?;
-                let (body, _) = match state
-                    .store
-                    .get_with_etag_bounded(&meta.location, 64 * 1024)
-                    .await
-                {
-                    Ok(value) => value,
-                    Err(StorageError::NotFound { .. }) => continue,
-                    Err(error) => return Err(error.into()),
-                };
-                let record: StoredSession = serde_json::from_slice(&body)?;
-                if record.identity.issuer == issuer && record.identity.subject == subject {
-                    let Some(encoded) = meta.location.as_ref().rsplit('/').next() else {
-                        return Err(AuthError::Invalid);
-                    };
-                    let key = parse_key(encoded).ok_or(AuthError::Invalid)?;
-                    self.remove_session(key).await?;
-                    revoked += 1;
-                }
-            }
-        }
         Ok(revoked)
     }
 }
@@ -850,44 +778,6 @@ impl AuthState {
         }
     }
 
-    async fn migration_active(&self) -> Result<bool, AuthError> {
-        // Auth objects expire by bucket lifecycle after 24 hours. The migration
-        // cutoff must survive that collection or legacy scanning restarts forever.
-        let root = self
-            .prefix
-            .strip_suffix("/auth")
-            .ok_or(AuthError::Invalid)?;
-        let path = ObjectPath::from(format!("{root}/identity-index-migration.json"));
-        let now = now_epoch()?;
-        let (body, _) = match self.store.get_with_etag_bounded(&path, 1024).await {
-            Ok(value) => value,
-            Err(StorageError::NotFound { .. }) => {
-                let migration = IdentityIndexMigration {
-                    started_at: now,
-                    complete_after: now + SESSION_LIFETIME.as_secs(),
-                };
-                match self
-                    .store
-                    .create_strict(&path, Bytes::from(serde_json::to_vec(&migration)?))
-                    .await
-                {
-                    Ok(()) => return Ok(true),
-                    Err(StorageError::StateConflict { .. }) => {
-                        self.store.get_with_etag_bounded(&path, 1024).await?
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let migration: IdentityIndexMigration = serde_json::from_slice(&body)?;
-        if migration.started_at.checked_add(SESSION_LIFETIME.as_secs())
-            != Some(migration.complete_after)
-        {
-            return Err(AuthError::Invalid);
-        }
-        Ok(now < migration.complete_after)
-    }
     fn path(&self, kind: &str, key: &Key) -> ObjectPath {
         ObjectPath::from(format!("{}/{kind}/{}", self.prefix, hex_key(key)))
     }
@@ -912,20 +802,6 @@ impl AuthState {
             hex_key(key)
         ))
     }
-}
-
-fn parse_key(value: &str) -> Option<Key> {
-    if value.len() != 64 {
-        return None;
-    }
-    let mut key = [0; 32];
-    let (pairs, []) = value.as_bytes().as_chunks::<2>() else {
-        return None;
-    };
-    for (slot, pair) in key.iter_mut().zip(pairs) {
-        *slot = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
-    }
-    Some(key)
 }
 
 fn hex_key(key: &Key) -> String {
@@ -1761,12 +1637,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_sessions_self_heal_and_revocation_migration_has_a_durable_cutoff() {
+    async fn session_without_its_identity_marker_is_rejected() {
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
-        let auth = shared_auth(store.clone());
-        let state = auth.state.as_ref().unwrap();
-        state.migration_active().await.unwrap();
-        let record = StoredSession {
+        let auth = shared_auth(store);
+        let session = Arc::new(Session {
             identity: Identity {
                 issuer: "https://id.example".into(),
                 subject: "alice".into(),
@@ -1774,50 +1648,21 @@ mod tests {
             },
             csrf: "csrf".into(),
             expires_at: now_epoch().unwrap() + 600,
-            git_tokens: vec![],
-        };
-        for name in ["heal", "legacy"] {
-            store
-                .create_strict(
-                    &state.path("sessions", &key(name)),
-                    Bytes::from(serde_json::to_vec(&record).unwrap()),
-                )
-                .await
-                .unwrap();
-        }
-        assert!(auth.load_session(key("heal")).await.is_some());
-        assert_eq!(
-            auth.revoke_identity("https://id.example", "alice")
-                .await
-                .unwrap(),
-            2
-        );
-        let now = now_epoch().unwrap();
-        let migration = IdentityIndexMigration {
-            started_at: now - SESSION_LIFETIME.as_secs(),
-            complete_after: now,
-        };
-        store
-            .put_overwrite(
-                &ObjectPath::from("root/.crab/http-server/v1/identity-index-migration.json"),
-                Bytes::from(serde_json::to_vec(&migration).unwrap()),
-            )
+            session_key: key("unindexed"),
+            revoked: AtomicBool::new(false),
+        });
+        auth.store_session(Arc::clone(&session)).await.unwrap();
+        let state = auth.state.as_ref().unwrap();
+        state
+            .delete_if_present(&state.identity_session_path(
+                &session.identity.issuer,
+                &session.identity.subject,
+                &session.session_key,
+            ))
             .await
             .unwrap();
-        store
-            .create_strict(
-                &state.path("sessions", &key("late-legacy")),
-                Bytes::from(serde_json::to_vec(&record).unwrap()),
-            )
-            .await
-            .unwrap();
-        assert!(auth.load_session(key("late-legacy")).await.is_none());
-        assert_eq!(
-            auth.revoke_identity("https://id.example", "alice")
-                .await
-                .unwrap(),
-            0
-        );
+
+        assert!(auth.load_session(session.session_key).await.is_none());
     }
 
     #[tokio::test]

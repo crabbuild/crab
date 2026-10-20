@@ -5,7 +5,7 @@ const MAX_CHECK_STEPS: usize = 50;
 const MAX_CHECK_ANNOTATIONS: usize = 50;
 const MAX_CHECK_OUTPUT_BYTES: u32 = 192 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckStepRecord {
     pub name: String,
     pub status: u8,
@@ -13,7 +13,7 @@ pub(crate) struct CheckStepRecord {
     pub log: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckAnnotationRecord {
     pub path: String,
     pub start_line: u64,
@@ -23,7 +23,7 @@ pub(crate) struct CheckAnnotationRecord {
     pub message: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckOutputRecord {
     pub title: String,
     pub summary: String,
@@ -32,7 +32,7 @@ pub(crate) struct CheckOutputRecord {
     pub annotations: Vec<CheckAnnotationRecord>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckRunRecord {
     pub number: u64,
     pub create_submission_id: [u8; 16],
@@ -50,13 +50,13 @@ pub(crate) struct CheckRunRecord {
     pub updated_at_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckRunDetail {
     pub run: CheckRunRecord,
     pub output: CheckOutputRecord,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckReportInput {
     pub status: u8,
     pub conclusion: Option<u8>,
@@ -64,7 +64,7 @@ pub(crate) struct CheckReportInput {
     pub output: CheckOutputRecord,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CreateCheckRunInput {
     pub submission_id: [u8; 16],
     pub author: RepositoryAuthor,
@@ -73,14 +73,14 @@ pub(crate) struct CreateCheckRunInput {
     pub report: CheckReportInput,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum CreateCheckRunOutcome {
     Created(Box<CheckRunDetail>),
     RequestConflict,
     RunLimit,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct UpdateCheckRunInput {
     pub submission_id: [u8; 16],
     pub actor: RepositoryAuthor,
@@ -90,7 +90,7 @@ pub(crate) struct UpdateCheckRunInput {
     pub report: CheckReportInput,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum UpdateCheckRunOutcome {
     Updated(Box<CheckRunDetail>),
     RequestConflict,
@@ -100,25 +100,25 @@ pub(crate) enum UpdateCheckRunOutcome {
     InvalidTransition,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckRunKey {
     pub oid: String,
     pub number: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckSubmissionKey {
     pub submission_id: [u8; 16],
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ListCheckRunsInput {
     pub oid: String,
     pub before: Option<u64>,
     pub limit: u8,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckRunPage {
     pub runs: Vec<CheckRunRecord>,
     pub next: Option<u64>,
@@ -126,17 +126,15 @@ pub(crate) struct CheckRunPage {
 
 pub(crate) struct CreateCheckRun;
 
-impl Command for CreateCheckRun {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for CreateCheckRun {
     const ID: u32 = 12;
-    const CODEC_VERSION: u32 = 1;
     type Input = CreateCheckRunInput;
     type Output = CreateCheckRunOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_author(&input.author)?;
         validate_oid(&input.oid)?;
         validate_plain(&input.name, 100, "repository check name is invalid")?;
@@ -150,12 +148,12 @@ impl Command for CreateCheckRun {
         })?;
         if let Some(row) = existing[0].rows.first() {
             if result_blob(row, 0)? != digest.as_bytes() {
-                return Ok(CommandResult::Rejected(
+                return Ok(MutationResult::Rejected(
                     CreateCheckRunOutcome::RequestConflict,
                 ));
             }
             let detail = load_check_version(context, result_u64_from_row(row, 1)?, 1)?;
-            return Ok(CommandResult::Success(CreateCheckRunOutcome::Created(
+            return Ok(MutationResult::Success(CreateCheckRunOutcome::Created(
                 Box::new(detail),
             )));
         }
@@ -167,7 +165,7 @@ impl Command for CreateCheckRun {
             )],
         })?;
         if result_u64(&count, 0, 0)? >= MAX_CHECK_RUNS_PER_COMMIT {
-            return Ok(CommandResult::Rejected(CreateCheckRunOutcome::RunLimit));
+            return Ok(MutationResult::Rejected(CreateCheckRunOutcome::RunLimit));
         }
         let sequence = context.sql(&SqlBatch {
             statements: vec![
@@ -182,7 +180,7 @@ impl Command for CreateCheckRun {
             ],
         })?;
         if sequence[0].rows_affected != 1 {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "repository check numbering is exhausted",
             ));
         }
@@ -215,7 +213,7 @@ impl Command for CreateCheckRun {
         })?;
         insert_check_version(context, &run, &input.report.output)?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(CreateCheckRunOutcome::Created(
+        Ok(MutationResult::Success(CreateCheckRunOutcome::Created(
             Box::new(CheckRunDetail {
                 run,
                 output: input.report.output,
@@ -226,17 +224,15 @@ impl Command for CreateCheckRun {
 
 pub(crate) struct UpdateCheckRun;
 
-impl Command for UpdateCheckRun {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for UpdateCheckRun {
     const ID: u32 = 13;
-    const CODEC_VERSION: u32 = 1;
     type Input = UpdateCheckRunInput;
     type Output = UpdateCheckRunOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_author(&input.actor)?;
         validate_oid(&input.oid)?;
         validate_number(input.number)?;
@@ -251,7 +247,7 @@ impl Command for UpdateCheckRun {
         })?;
         if let Some(row) = existing[0].rows.first() {
             if result_blob(row, 0)? != digest.as_bytes() {
-                return Ok(CommandResult::Rejected(
+                return Ok(MutationResult::Rejected(
                     UpdateCheckRunOutcome::RequestConflict,
                 ));
             }
@@ -260,22 +256,22 @@ impl Command for UpdateCheckRun {
                 result_u64_from_row(row, 1)?,
                 result_u64_from_row(row, 2)?,
             )?;
-            return Ok(CommandResult::Success(UpdateCheckRunOutcome::Updated(
+            return Ok(MutationResult::Success(UpdateCheckRunOutcome::Updated(
                 Box::new(detail),
             )));
         }
 
         let Some(current) = load_current_check(context, &input.oid, input.number)? else {
-            return Ok(CommandResult::Rejected(UpdateCheckRunOutcome::NotFound));
+            return Ok(MutationResult::Rejected(UpdateCheckRunOutcome::NotFound));
         };
         if !same_author(&current.run.author, &input.actor) {
-            return Ok(CommandResult::Rejected(UpdateCheckRunOutcome::Forbidden));
+            return Ok(MutationResult::Rejected(UpdateCheckRunOutcome::Forbidden));
         }
         if current.run.version != input.version {
-            return Ok(CommandResult::Rejected(UpdateCheckRunOutcome::Conflict));
+            return Ok(MutationResult::Rejected(UpdateCheckRunOutcome::Conflict));
         }
         if current.run.status == 2 || (current.run.status == 1 && input.report.status == 0) {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 UpdateCheckRunOutcome::InvalidTransition,
             ));
         }
@@ -285,7 +281,7 @@ impl Command for UpdateCheckRun {
             .version
             .checked_add(1)
             .filter(|version| *version <= MAX_NUMBER)
-            .ok_or(cellule_runtime::Error::Command(
+            .ok_or(crate::cells::Error::Invalid(
                 "repository check version is exhausted",
             ))?;
         let run = CheckRunRecord {
@@ -320,7 +316,7 @@ impl Command for UpdateCheckRun {
             )],
         })?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(UpdateCheckRunOutcome::Updated(
+        Ok(MutationResult::Success(UpdateCheckRunOutcome::Updated(
             Box::new(CheckRunDetail {
                 run,
                 output: input.report.output,
@@ -331,17 +327,15 @@ impl Command for UpdateCheckRun {
 
 pub(crate) struct ListCheckRuns;
 
-impl Query for ListCheckRuns {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Read for ListCheckRuns {
     const ID: u32 = 9;
-    const CODEC_VERSION: u32 = 1;
     type Input = ListCheckRunsInput;
     type Output = CheckRunPage;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         validate_oid(&input.oid)?;
         if input.limit == 0
             || u64::from(input.limit) > MAX_CHECK_RUNS_PER_COMMIT
@@ -349,7 +343,7 @@ impl Query for ListCheckRuns {
                 .before
                 .is_some_and(|before| before == 0 || before > MAX_NUMBER)
         {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "repository check page bounds are invalid",
             ));
         }
@@ -368,7 +362,7 @@ impl Query for ListCheckRuns {
             .rows
             .iter()
             .map(|row| check_run_from_row(row))
-            .collect::<cellule_runtime::Result<Vec<_>>>()?;
+            .collect::<crate::cells::Result<Vec<_>>>()?;
         let next = (runs.len() > usize::from(input.limit))
             .then(|| runs[usize::from(input.limit) - 1].number);
         runs.truncate(usize::from(input.limit));
@@ -378,17 +372,15 @@ impl Query for ListCheckRuns {
 
 pub(crate) struct GetCheckRun;
 
-impl Query for GetCheckRun {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Read for GetCheckRun {
     const ID: u32 = 10;
-    const CODEC_VERSION: u32 = 1;
     type Input = CheckRunKey;
     type Output = Option<CheckRunDetail>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         validate_oid(&input.oid)?;
         validate_number(input.number)?;
         load_current_check(context, &input.oid, input.number)
@@ -397,17 +389,15 @@ impl Query for GetCheckRun {
 
 pub(crate) struct GetCheckCreateSubmission;
 
-impl Query for GetCheckCreateSubmission {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Read for GetCheckCreateSubmission {
     const ID: u32 = 11;
-    const CODEC_VERSION: u32 = 1;
     type Input = CheckSubmissionKey;
     type Output = Option<CheckRunDetail>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
                 "SELECT run_number FROM repository_check_create_submissions WHERE request_id = ?",
@@ -424,17 +414,15 @@ impl Query for GetCheckCreateSubmission {
 
 pub(crate) struct GetCheckUpdateSubmission;
 
-impl Query for GetCheckUpdateSubmission {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Read for GetCheckUpdateSubmission {
     const ID: u32 = 12;
-    const CODEC_VERSION: u32 = 1;
     type Input = CheckSubmissionKey;
     type Output = Option<CheckRunDetail>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
                 "SELECT run_number, result_version FROM repository_check_update_submissions WHERE request_id = ?",
@@ -456,10 +444,10 @@ impl Query for GetCheckUpdateSubmission {
 }
 
 fn insert_check_version(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     run: &CheckRunRecord,
     output: &CheckOutputRecord,
-) -> cellule_runtime::Result<()> {
+) -> crate::cells::Result<()> {
     context.sql(&SqlBatch {
         statements: vec![statement(
             "INSERT INTO repository_check_run_versions(run_number, version, create_request_id, author_issuer, author_subject, author_name, oid, name, status, conclusion, details_url, output_title, output, started_at_ms, completed_at_ms, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -488,11 +476,11 @@ fn insert_check_version(
 }
 
 fn load_check_version(
-    context: &impl CheckSqlContext,
+    context: &RepositoryTransaction<'_>,
     number: u64,
     version: u64,
-) -> cellule_runtime::Result<CheckRunDetail> {
-    let result = context.check_sql(&SqlBatch {
+) -> crate::cells::Result<CheckRunDetail> {
+    let result = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT run_number, create_request_id, author_issuer, author_subject, author_name, oid, name, status, conclusion, details_url, output_title, version, started_at_ms, completed_at_ms, created_at_ms, updated_at_ms, output FROM repository_check_run_versions WHERE run_number = ? AND version = ?",
             vec![integer(number)?, integer(version)?],
@@ -503,33 +491,17 @@ fn load_check_version(
         .first()
         .map(|row| check_detail_from_row(row))
         .transpose()?
-        .ok_or(cellule_runtime::Error::Command(
+        .ok_or(crate::cells::Error::Invalid(
             "repository check submission has no result row",
         ))
 }
 
-trait CheckSqlContext {
-    fn check_sql(&self, batch: &SqlBatch) -> cellule_runtime::Result<Vec<SqlResultSet>>;
-}
-
-impl CheckSqlContext for CommandContext<'_, '_> {
-    fn check_sql(&self, batch: &SqlBatch) -> cellule_runtime::Result<Vec<SqlResultSet>> {
-        self.sql(batch)
-    }
-}
-
-impl CheckSqlContext for QueryContext<'_> {
-    fn check_sql(&self, batch: &SqlBatch) -> cellule_runtime::Result<Vec<SqlResultSet>> {
-        self.sql(batch)
-    }
-}
-
 fn load_current_check(
-    context: &impl CheckSqlContext,
+    context: &RepositoryTransaction<'_>,
     oid: &str,
     number: u64,
-) -> cellule_runtime::Result<Option<CheckRunDetail>> {
-    let result = context.check_sql(&SqlBatch {
+) -> crate::cells::Result<Option<CheckRunDetail>> {
+    let result = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT run_number, create_request_id, author_issuer, author_subject, author_name, oid, name, status, conclusion, details_url, output_title, version, started_at_ms, completed_at_ms, created_at_ms, updated_at_ms, output FROM repository_check_run_versions WHERE oid = ? AND run_number = ? ORDER BY version DESC LIMIT 1",
             vec![SqlValue::Text(oid.to_owned()), integer(number)?],
@@ -542,27 +514,26 @@ fn load_current_check(
         .transpose()
 }
 
-fn check_detail_from_row(row: &[SqlValue]) -> cellule_runtime::Result<CheckRunDetail> {
+fn check_detail_from_row(row: &[SqlValue]) -> crate::cells::Result<CheckRunDetail> {
     let run = check_run_from_row(row)?;
     let output = decode_check_output(result_blob(row, 16)?)?;
     if output.title != run.output_title {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository check output title does not match its run",
         ));
     }
     Ok(CheckRunDetail { run, output })
 }
 
-fn check_run_from_row(row: &[SqlValue]) -> cellule_runtime::Result<CheckRunRecord> {
-    let submission = <[u8; 16]>::try_from(result_blob(row, 1)?).map_err(|_| {
-        cellule_runtime::Error::Command("repository check submission ID is invalid")
-    })?;
+fn check_run_from_row(row: &[SqlValue]) -> crate::cells::Result<CheckRunRecord> {
+    let submission = <[u8; 16]>::try_from(result_blob(row, 1)?)
+        .map_err(|_| crate::cells::Error::Invalid("repository check submission ID is invalid"))?;
     let status = u8::try_from(result_u64_from_row(row, 7)?)
-        .map_err(|_| cellule_runtime::Error::Command("repository check status is invalid"))?;
+        .map_err(|_| crate::cells::Error::Invalid("repository check status is invalid"))?;
     let conclusion = result_optional_u64(row, 8)?
         .map(u8::try_from)
         .transpose()
-        .map_err(|_| cellule_runtime::Error::Command("repository check conclusion is invalid"))?;
+        .map_err(|_| crate::cells::Error::Invalid("repository check conclusion is invalid"))?;
     let run = CheckRunRecord {
         number: result_u64_from_row(row, 0)?,
         create_submission_id: submission,
@@ -587,7 +558,7 @@ fn check_run_from_row(row: &[SqlValue]) -> cellule_runtime::Result<CheckRunRecor
     Ok(run)
 }
 
-fn validate_check_run(run: &CheckRunRecord) -> cellule_runtime::Result<()> {
+fn validate_check_run(run: &CheckRunRecord) -> crate::cells::Result<()> {
     validate_number(run.number)?;
     validate_number(run.version)?;
     validate_author(&run.author)?;
@@ -611,20 +582,20 @@ fn validate_check_run(run: &CheckRunRecord) -> cellule_runtime::Result<()> {
         || (run.status != 0 && run.started_at_ms.is_none())
         || (run.status == 2) != run.completed_at_ms.is_some()
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository check timestamps are invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_check_report(report: &CheckReportInput) -> cellule_runtime::Result<()> {
+fn validate_check_report(report: &CheckReportInput) -> crate::cells::Result<()> {
     validate_check_state(report.status, report.conclusion)?;
     validate_target_url(report.details_url.as_deref())?;
     validate_check_output(&report.output)
 }
 
-fn validate_check_output(output: &CheckOutputRecord) -> cellule_runtime::Result<()> {
+fn validate_check_output(output: &CheckOutputRecord) -> crate::cells::Result<()> {
     validate_plain(
         &output.title,
         200,
@@ -635,7 +606,7 @@ fn validate_check_output(output: &CheckOutputRecord) -> cellule_runtime::Result<
         validate_markdown(text, 64 * 1024, false)?;
     }
     if output.steps.len() > MAX_CHECK_STEPS || output.annotations.len() > MAX_CHECK_ANNOTATIONS {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository check output collection is too large",
         ));
     }
@@ -657,7 +628,7 @@ fn validate_check_output(output: &CheckOutputRecord) -> cellule_runtime::Result<
             || annotation.end_line > MAX_NUMBER
             || annotation.level > 2
         {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "repository check annotation is invalid",
             ));
         }
@@ -669,89 +640,89 @@ fn validate_check_output(output: &CheckOutputRecord) -> cellule_runtime::Result<
     encode_check_output(output).map(|_| ())
 }
 
-fn validate_check_state(status: u8, conclusion: Option<u8>) -> cellule_runtime::Result<()> {
+fn validate_check_state(status: u8, conclusion: Option<u8>) -> crate::cells::Result<()> {
     if status > 2
         || conclusion.is_some_and(|value| value > 6)
         || ((status == 2) != conclusion.is_some())
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository check state is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_oid(oid: &str) -> cellule_runtime::Result<()> {
+fn validate_oid(oid: &str) -> crate::cells::Result<()> {
     if oid.len() != 40
         || !oid
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         || oid.bytes().all(|byte| byte == b'0')
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository check commit is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_plain(value: &str, maximum: usize, error: &'static str) -> cellule_runtime::Result<()> {
+fn validate_plain(value: &str, maximum: usize, error: &'static str) -> crate::cells::Result<()> {
     if value.is_empty()
         || value.trim() != value
         || value.chars().count() > maximum
         || value.chars().any(char::is_control)
     {
-        return Err(cellule_runtime::Error::Command(error));
+        return Err(crate::cells::Error::Invalid(error));
     }
     Ok(())
 }
 
-fn validate_markdown(value: &str, maximum: usize, required: bool) -> cellule_runtime::Result<()> {
+fn validate_markdown(value: &str, maximum: usize, required: bool) -> crate::cells::Result<()> {
     if value.len() > maximum || value.contains('\0') || (required && value.trim().is_empty()) {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository check markdown is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_target_url(value: Option<&str>) -> cellule_runtime::Result<()> {
+fn validate_target_url(value: Option<&str>) -> crate::cells::Result<()> {
     let Some(value) = value else {
         return Ok(());
     };
     if value.len() > 2_048 || value.chars().any(char::is_control) {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository check target is invalid",
         ));
     }
     let url = url::Url::parse(value)
-        .map_err(|_| cellule_runtime::Error::Command("repository check target is invalid"))?;
+        .map_err(|_| crate::cells::Error::Invalid("repository check target is invalid"))?;
     crate::config::validate_identity_url(&url, true)
-        .map_err(|_| cellule_runtime::Error::Command("repository check target is invalid"))
+        .map_err(|_| crate::cells::Error::Invalid("repository check target is invalid"))
 }
 
-fn encode_check_output(output: &CheckOutputRecord) -> cellule_runtime::Result<Vec<u8>> {
-    let mut encoder = BoundedEncoder::new(MAX_CHECK_OUTPUT_BYTES)
-        .map_err(|_| cellule_runtime::Error::Command("repository check output is too large"))?;
+fn encode_check_output(output: &CheckOutputRecord) -> crate::cells::Result<Vec<u8>> {
+    let mut encoder = RecordEncoder::new(MAX_CHECK_OUTPUT_BYTES)
+        .map_err(|_| crate::cells::Error::Invalid("repository check output is too large"))?;
     output
         .encode(&mut encoder)
-        .map_err(|_| cellule_runtime::Error::Command("repository check output is too large"))?;
+        .map_err(|_| crate::cells::Error::Invalid("repository check output is too large"))?;
     Ok(encoder.finish())
 }
 
-fn decode_check_output(bytes: &[u8]) -> cellule_runtime::Result<CheckOutputRecord> {
-    let mut decoder = BoundedDecoder::new(bytes, MAX_CHECK_OUTPUT_BYTES)
-        .map_err(|_| cellule_runtime::Error::Command("repository check output is invalid"))?;
+fn decode_check_output(bytes: &[u8]) -> crate::cells::Result<CheckOutputRecord> {
+    let mut decoder = RecordDecoder::new(bytes, MAX_CHECK_OUTPUT_BYTES)
+        .map_err(|_| crate::cells::Error::Invalid("repository check output is invalid"))?;
     let output = CheckOutputRecord::decode(&mut decoder)
-        .map_err(|_| cellule_runtime::Error::Command("repository check output is invalid"))?;
+        .map_err(|_| crate::cells::Error::Invalid("repository check output is invalid"))?;
     decoder
         .finish()
-        .map_err(|_| cellule_runtime::Error::Command("repository check output is invalid"))?;
+        .map_err(|_| crate::cells::Error::Invalid("repository check output is invalid"))?;
     validate_check_output(&output)?;
     Ok(output)
 }
 
-fn create_submission_digest(input: &CreateCheckRunInput) -> cellule_runtime::Result<blake3::Hash> {
+fn create_submission_digest(input: &CreateCheckRunInput) -> crate::cells::Result<blake3::Hash> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"crab.repository.check-create-submission.v1\0");
     hash_text(&mut hasher, &input.author.issuer);
@@ -762,7 +733,7 @@ fn create_submission_digest(input: &CreateCheckRunInput) -> cellule_runtime::Res
     Ok(hasher.finalize())
 }
 
-fn update_submission_digest(input: &UpdateCheckRunInput) -> cellule_runtime::Result<blake3::Hash> {
+fn update_submission_digest(input: &UpdateCheckRunInput) -> crate::cells::Result<blake3::Hash> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"crab.repository.check-update-submission.v1\0");
     hash_text(&mut hasher, &input.actor.issuer);
@@ -774,10 +745,7 @@ fn update_submission_digest(input: &UpdateCheckRunInput) -> cellule_runtime::Res
     Ok(hasher.finalize())
 }
 
-fn hash_report(
-    hasher: &mut blake3::Hasher,
-    report: &CheckReportInput,
-) -> cellule_runtime::Result<()> {
+fn hash_report(hasher: &mut blake3::Hasher, report: &CheckReportInput) -> crate::cells::Result<()> {
     hasher.update(&[report.status]);
     match report.conclusion {
         Some(value) => hasher.update(&[1, value]),
@@ -790,7 +758,7 @@ fn hash_report(
     Ok(())
 }
 
-fn optional_integer(value: Option<u64>) -> cellule_runtime::Result<SqlValue> {
+fn optional_integer(value: Option<u64>) -> crate::cells::Result<SqlValue> {
     value.map_or(Ok(SqlValue::Null), integer)
 }
 
@@ -798,13 +766,13 @@ fn optional_text(value: Option<String>) -> SqlValue {
     value.map_or(SqlValue::Null, SqlValue::Text)
 }
 
-fn result_optional_u64(row: &[SqlValue], column: usize) -> cellule_runtime::Result<Option<u64>> {
+fn result_optional_u64(row: &[SqlValue], column: usize) -> crate::cells::Result<Option<u64>> {
     match row.get(column) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Integer(value)) => u64::try_from(*value)
             .map(Some)
-            .map_err(|_| cellule_runtime::Error::Command("repository result is negative")),
-        _ => Err(cellule_runtime::Error::Command(
+            .map_err(|_| crate::cells::Error::Invalid("repository result is negative")),
+        _ => Err(crate::cells::Error::Invalid(
             "repository query returned an invalid optional integer",
         )),
     }

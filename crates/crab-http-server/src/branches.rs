@@ -406,16 +406,10 @@ async fn set_branch_protections(
     if !principal.can_admin(&repository.config) {
         return Err(Error::AdminPermission);
     }
-    let actor = app::actor(&principal)?;
+    app::actor(&principal)?;
     Ok(Json(
-        repository_settings::replace(
-            &server,
-            repository,
-            &actor,
-            input.expected_version,
-            input.rules,
-        )
-        .await?,
+        repository_settings::replace(&server, repository, input.expected_version, input.rules)
+            .await?,
     ))
 }
 
@@ -434,12 +428,11 @@ async fn set_archive(
     if input.repository != format!("{owner}/{name}") {
         return Err(Error::Input("Enter the full repository name to confirm"));
     }
-    let actor = app::actor(&principal)?;
+    app::actor(&principal)?;
     Ok(Json(
         repository_settings::replace_lifecycle(
             &server,
             repository,
-            &actor,
             input.expected_version,
             input.archived,
         )

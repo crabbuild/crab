@@ -1,11 +1,9 @@
-use cellule_runtime::cell::executor::MutationIdentity;
-use cellule_runtime::client::{Committed, InvocationError};
-use cellule_runtime::identity::RequestId;
+use crate::cells::{Committed, MutationIdentity};
 use futures_util::future::join_all;
 use uuid::Uuid;
 
 use crate::auth::Identity;
-use crate::cells::RepositoryCellRouter;
+use crate::cells::RepositoryClient;
 use crate::cells::repository::{
     CreateLabel, CreateLabelInput, CreateLabelOutcome, GetRepositoryLifecycle, ListLabels,
     ReplaceRepositoryLifecycle, ReplaceRepositoryLifecycleInput, ReplaceRepositoryLifecycleOutcome,
@@ -19,22 +17,13 @@ pub(super) struct RecordedLabel {
 }
 
 pub(super) async fn run(
-    router: &RepositoryCellRouter,
+    client: &RepositoryClient,
     repository: Uuid,
     principal: &Identity,
 ) -> Vec<RecordedLabel> {
-    let labels = router
-        .route(repository, principal, "repository.label.create")
-        .await
-        .unwrap();
-    let lifecycle = router
-        .route(repository, principal, "repository.settings.lifecycle")
-        .await
-        .unwrap();
-    let reader = router
-        .route(repository, principal, "repository.read")
-        .await
-        .unwrap();
+    let labels = client.repository(repository).unwrap();
+    let lifecycle = client.repository(repository).unwrap();
+    let reader = client.repository(repository).unwrap();
     let mut version = reader
         .client
         .query::<GetRepositoryLifecycle>(&reader.target, None, ())
@@ -70,7 +59,7 @@ pub(super) async fn run(
         assert!(matches!(before.output, CreateLabelOutcome::Created(_)));
 
         // Receipts establish order even when peer replies arrive out of order.
-        // Duplicate delivery must retain that same decision and commit sequence.
+        // Duplicate delivery must retain that same decision and application revision.
         let submissions = join_all(inputs[1..5].iter().map(|(identity, input)| {
             let labels = &labels;
             async move {
@@ -114,8 +103,7 @@ pub(super) async fn run(
             .chain(concurrent)
             .chain(std::iter::once(after));
         for ((identity, input), committed) in inputs.into_iter().zip(outcomes) {
-            let precedes_archive =
-                committed.receipt.commit_sequence < archived.receipt.commit_sequence;
+            let precedes_archive = committed.receipt.revision < archived.receipt.revision;
             assert_eq!(
                 matches!(committed.output, CreateLabelOutcome::Created(_)),
                 precedes_archive,
@@ -148,15 +136,11 @@ pub(super) async fn run(
 }
 
 pub(super) async fn verify_recovered(
-    router: &RepositoryCellRouter,
+    client: &RepositoryClient,
     repository: Uuid,
-    principal: &Identity,
     recorded: &[RecordedLabel],
 ) {
-    let labels = router
-        .route(repository, principal, "repository.label.create")
-        .await
-        .unwrap();
+    let labels = client.repository(repository).unwrap();
     for record in recorded {
         let replay = labels
             .client
@@ -164,10 +148,7 @@ pub(super) async fn verify_recovered(
             .await;
         assert_eq!(outcome(replay), record.committed);
     }
-    let reader = router
-        .route(repository, principal, "repository.read")
-        .await
-        .unwrap();
+    let reader = client.repository(repository).unwrap();
     let catalog = reader
         .client
         .query::<ListLabels>(&reader.target, None, ())
@@ -197,23 +178,20 @@ pub(super) async fn verify_recovered(
 }
 
 fn outcome(
-    result: Result<Committed<CreateLabelOutcome>, InvocationError<CreateLabelOutcome>>,
+    result: crate::cells::Result<Committed<CreateLabelOutcome>>,
 ) -> Committed<CreateLabelOutcome> {
-    match result {
-        Ok(committed) if matches!(committed.output, CreateLabelOutcome::Created(_)) => committed,
-        Err(InvocationError::Rejected(committed))
-            if committed.output == CreateLabelOutcome::Archived =>
-        {
-            *committed
-        }
-        other => panic!("archive race did not return an authoritative outcome: {other:?}"),
-    }
+    let committed = result.unwrap();
+    assert!(matches!(
+        committed.output,
+        CreateLabelOutcome::Created(_) | CreateLabelOutcome::Archived
+    ));
+    committed
 }
 
 fn mutation() -> MutationIdentity {
     let now_ms = crate::cells::unix_now_ms().unwrap();
     MutationIdentity {
-        request_id: RequestId::from_bytes(Uuid::now_v7().into_bytes()),
+        request_id: Uuid::now_v7(),
         issued_at_ms: now_ms,
         expires_at_ms: now_ms + 60_000,
     }

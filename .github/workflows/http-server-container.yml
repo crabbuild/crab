@@ -20,16 +20,6 @@ on:
         required: false
         default: false
         type: boolean
-      fleet_image_run:
-        description: "Qualify fleet traffic using the image artifact from this successful run"
-        required: false
-        default: ""
-        type: string
-      fleet_hot_share:
-        description: "Rate-curve fraction directed to Cell 1: 0 uniform, 0.8 skewed, 1 hot"
-        required: false
-        default: 0
-        type: number
   pull_request:
     paths:
       - ".dockerignore"
@@ -46,16 +36,6 @@ on:
         required: false
         default: false
         type: boolean
-      fleet_image_run:
-        description: "Qualify fleet traffic using the image artifact from this successful run"
-        required: false
-        default: ""
-        type: string
-      fleet_hot_share:
-        description: "Rate-curve fraction directed to Cell 1: 0 uniform, 0.8 skewed, 1 hot"
-        required: false
-        default: 0
-        type: number
 
 permissions:
   contents: read
@@ -67,7 +47,6 @@ concurrency:
 
 jobs:
   image:
-    if: ${{ !inputs.fleet_image_run }}
     name: Build and inspect image
     runs-on: ${{ inputs.arm64 && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 45
@@ -99,14 +78,13 @@ jobs:
           jq empty crates/crab-http-server/deploy/ecs/task-definition.example.json
           jq --exit-status '
             .containerDefinitions[0].command[0]
-              | contains("cells release bootstrap --image \"$CRAB_HTTP_SERVER_RELEASE_IMAGE\"") and
-                contains("--peer-advertise-host-from-ecs-metadata") and
+              | contains("--peer-advertise-host-from-ecs-metadata") and
                 contains("unset CRAB_HTTP_CONFIG CRAB_OIDC_CLIENT_SECRET CRAB_STATE_KEY CRAB_PEER_CERTIFICATE CRAB_PEER_PRIVATE_KEY CRAB_PEER_CA")
           ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
           jq --exit-status '
             [.containerDefinitions[0].environment[]
               | select(.name == "CRAB_HTTP_SERVER_RELEASE_IMAGE")]
-              | length == 1
+              | length == 0
           ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
           jq --exit-status '
             [.containerDefinitions[0].secrets[].name] as $names |
@@ -115,10 +93,6 @@ jobs:
              | all(. as $name | $names | index($name)))
           ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
           docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
-          python3 -B -W error::ResourceWarning -m unittest discover \
-            -s crates/crab-http-server/deploy/cell-issue-fleet -p 'test_*.py' -v
-          python3 -B -m unittest discover \
-            -s crates/crab-http-server/tests -p 'test_*.py' -v
           docker compose \
             --file crates/crab-http-server/deploy/compose.yaml \
             --file crates/crab-http-server/deploy/compose.cluster.yaml \
@@ -177,90 +151,21 @@ jobs:
             fi
           done
           bash -n \
-            crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
-            crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh \
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-load-report.sh \
             crates/crab-http-server/deploy/helm/crab-http-server/qualification/verify-workload-identity.sh \
-            crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh \
-            crates/crab-http-server/tests/qualify_compose_cluster.sh
-          crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh
+            crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh
           crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-load-report.sh
           crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh
-          immutable_chart=oci://registry.example.com/charts/crab-http-server@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-          if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
-            CRAB_HTTP_SERVER_EXPECTED_CHART="$immutable_chart" \
-            CRAB_HTTP_SERVER_EXPECTED_IMAGE=crab-http-server:mutable \
-            CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
-            CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true \
-            bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
-              eks crab crab-http-server https://git.example.com \
-              qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
-              > /dev/null 2> "${RUNNER_TEMP}/invalid-image-error"; then
-            echo "qualification accepted a mutable expected image" >&2
-            exit 1
-          fi
-          grep -F 'CRAB_HTTP_SERVER_EXPECTED_IMAGE must be an immutable image reference.' \
-            "${RUNNER_TEMP}/invalid-image-error"
-          immutable_image=registry.example.com/crab-http-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-          if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
-            CRAB_HTTP_SERVER_EXPECTED_CHART=mutable-chart \
-            CRAB_HTTP_SERVER_EXPECTED_IMAGE="$immutable_image" \
-            CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
-            CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true \
-            bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
-              eks crab crab-http-server https://git.example.com \
-              qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
-              > /dev/null 2> "${RUNNER_TEMP}/invalid-chart-error"; then
-            echo "qualification accepted a mutable expected chart" >&2
-            exit 1
-          fi
-          grep -F 'CRAB_HTTP_SERVER_EXPECTED_CHART must be an immutable OCI chart reference.' \
-            "${RUNNER_TEMP}/invalid-chart-error"
-          if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
-            CRAB_HTTP_SERVER_EXPECTED_CHART="$immutable_chart" \
-            CRAB_HTTP_SERVER_EXPECTED_IMAGE="$immutable_image" \
-            CRAB_HTTP_SERVER_RELEASE_TAG=invalid \
-            CRAB_HTTP_SERVER_SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-            CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
-            CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true \
-            bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
-              eks crab crab-http-server https://git.example.com \
-              qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
-              > /dev/null 2> "${RUNNER_TEMP}/invalid-release-tag-error"; then
-            echo "qualification accepted an invalid release tag" >&2
-            exit 1
-          fi
-          grep -F 'CRAB_HTTP_SERVER_RELEASE_TAG must be a stable crab-http-server-vX.Y.Z tag.' \
-            "${RUNNER_TEMP}/invalid-release-tag-error"
-          if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
-            CRAB_HTTP_SERVER_EXPECTED_CHART="$immutable_chart" \
-            CRAB_HTTP_SERVER_EXPECTED_IMAGE="$immutable_image" \
-            CRAB_HTTP_SERVER_RELEASE_TAG=crab-http-server-v0.1.0 \
-            CRAB_HTTP_SERVER_SOURCE_SHA=invalid \
-            CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
-            CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true \
-            bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
-              eks crab crab-http-server https://git.example.com \
-              qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
-              > /dev/null 2> "${RUNNER_TEMP}/invalid-source-sha-error"; then
-            echo "qualification accepted an invalid source commit" >&2
-            exit 1
-          fi
-          grep -F 'CRAB_HTTP_SERVER_SOURCE_SHA must be a lowercase 40-character Git commit.' \
-            "${RUNNER_TEMP}/invalid-source-sha-error"
           docker run --rm --volume "$PWD:/src:ro" "$shellcheck_image" \
             /src/crates/crab-http-server/tests/qualify_abrupt_receive_crash.sh \
             /src/crates/crab-http-server/tests/qualify_backup_restore.sh \
             /src/crates/crab-http-server/tests/hash_backup_restore_objects.sh \
             /src/crates/crab-http-server/deploy/generate-release-manifest.sh \
-            /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
-            /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-capacity-envelope.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-load-report.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/verify-workload-identity.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh \
             /src/crates/crab-http-server/tests/qualify_lfs_locking.sh \
-            /src/crates/crab-http-server/tests/qualify_lfs_range_resume.sh \
-            /src/crates/crab-http-server/tests/qualify_compose_cluster.sh
+            /src/crates/crab-http-server/tests/qualify_lfs_range_resume.sh
           docker run --rm \
             --volume "$PWD/crates/crab-http-server/deploy/compose.Caddyfile:/etc/caddy/Caddyfile:ro" \
             caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d \
@@ -340,15 +245,14 @@ jobs:
             grep -F -- '- "15"' "${rendered}"
             grep -F '"helm.sh/hook": test' "${rendered}"
             grep -F 'kind: Pod' "${rendered}"
-            grep -F 'name: cell-release-bootstrap' "${rendered}"
-            grep -F -- '- bootstrap' "${rendered}"
+            if grep -Fq 'name: cell-release-bootstrap' "${rendered}"; then
+              echo 'native Cellar must start without a release bootstrap' >&2
+              exit 1
+            fi
             grep -F -- '- --peer-advertise-host' "${rendered}"
-            grep -F -- '- --cell-failure-host' "${rendered}"
             # This is the literal Kubernetes env expansion, not a shell substitution.
             # shellcheck disable=SC2016
             grep -F -- '- $(CRAB_POD_IP)' "${rendered}"
-            # shellcheck disable=SC2016
-            grep -F -- '- $(CRAB_NODE_NAME)' "${rendered}"
             grep -F -- 'mountPath: /var/lib/crab' "${rendered}"
             grep -F -- 'path: peer/tls.crt' "${rendered}"
             grep -F -- 'path: peer/tls.key' "${rendered}"
@@ -404,21 +308,13 @@ jobs:
           tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/templates/tests/catalog.yaml'
           tar -tzf "$chart_archive" \
-            | grep -F 'crab-http-server/qualification/qualify-kubernetes.sh'
-          tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/verify-workload-identity.sh'
           tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/test-workload-identity.sh'
           tar -tzf "$chart_archive" \
-            | grep -F 'crab-http-server/qualification/test-capacity-envelope.sh'
-          tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/test-load-report.sh'
           tar -tzf "$chart_archive" \
-            | grep -F 'crab-http-server/qualification/validate-capacity-envelope.jq'
-          tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/validate-load-report.jq'
-          tar -tzf "$chart_archive" \
-            | grep -F 'crab-http-server/qualification/validate-node-profile.jq'
           tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/rbac.example.yaml'
 
@@ -806,173 +702,58 @@ jobs:
           docker run --rm crab-http-server:test --help | grep -F -- "storage-probe"
           docker run --rm crab-http-server:test --config /dev/null repository --help | grep -F -- "create"
           docker run --rm crab-http-server:test --config /dev/null repository --help | grep -F -- "set-members"
-      - name: Set up Rust for cluster receipt validation
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
-        with:
-          toolchain: stable
-      - name: Build the cluster receipt validator
-        run: python3 crab/scripts/cellule-qualification.py build
-      - name: Exercise Compose startup, restore, crash recovery, and restart
-        env:
-          CRAB_HTTP_SERVER_IMAGE: crab-http-server:test
-          CRAB_HTTP_QUALIFIED_IMAGE_REF: ${{ inputs.image_ref || 'source-only' }}
-          CRAB_HTTP_QUALIFIED_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+      - name: Install process qualification dependencies
         run: |
-          cleanup() {
-            result=$?
-            if [ "$result" -ne 0 ]; then
-              docker compose --file crates/crab-http-server/deploy/compose.yaml ps --all || true
-              docker compose --file crates/crab-http-server/deploy/compose.yaml logs --no-color || true
-            fi
-            docker compose --file crates/crab-http-server/deploy/compose.yaml \
-              down --volumes --remove-orphans || true
-            exit "$result"
-          }
-          trap cleanup EXIT
-
-          # The stack pins every image by digest, but the registries rate-limit
-          # anonymous pulls of the shared RustFS image ("toomanyrequests: Rate
-          # exceeded"), which previously surfaced as a Compose qualification
-          # failure. Pull the pinned stack images with bounded backoff first so
-          # a registry hiccup is reported as a registry hiccup.
-          pull_stack_image() {
-            local image="$1" attempt
-            for attempt in 1 2 3 4 5; do
-              if docker pull --quiet "$image"; then
-                return 0
-              fi
-              sleep "$((attempt * 20))"
-            done
-            echo "Registry pull failed after five attempts: ${image}" >&2
-            return 1
-          }
-          while IFS= read -r image; do
-            if [ "$image" = "${CRAB_HTTP_SERVER_IMAGE}" ]; then
-              continue
-            fi
-            pull_stack_image "$image"
-          done < <(docker compose \
-            --file crates/crab-http-server/deploy/compose.yaml \
-            --file crates/crab-http-server/deploy/compose.cluster.yaml \
-            --profile qualification config --images | sort --unique)
-
-          docker compose --file crates/crab-http-server/deploy/compose.yaml \
-            up --detach --no-build --wait --wait-timeout 120
-          docker compose --file crates/crab-http-server/deploy/compose.yaml \
-            run --rm --no-deps repository-init \
-              --config /etc/crab/server.toml storage-probe
-          docker compose --file crates/crab-http-server/deploy/compose.yaml \
-            run --rm --no-deps --entrypoint aws bucket-init \
-              --endpoint-url http://rustfs:9000 s3api list-objects-v2 \
-              --bucket crab-http-server \
-              --prefix repositories/.crab/http-server/v1/auth/preflight/ \
-              --output json \
-            | jq --exit-status '(.Contents // []) | length == 0'
-          printf '%s\n' \
-            'members = [{ subject = "ci-admin", name = "CI Admin", access = "admin" }]' \
-            | docker compose --file crates/crab-http-server/deploy/compose.yaml \
-                run --rm --no-deps --no-TTY repository-init \
-                  --config /etc/crab/server.toml repository create \
-                  --owner demo --name stdin-members --prefix demo/stdin-members \
-                  --members-file - \
-            > "${RUNNER_TEMP}/crab-http-server-stdin-repository.json"
-          jq --exit-status \
-            '.owner == "demo" and .name == "stdin-members" and (.members | any(.subject == "ci-admin" and .access == "admin"))' \
-            "${RUNNER_TEMP}/crab-http-server-stdin-repository.json"
-          printf '%s\n' \
-            'members = [{ subject = "ci-owner", name = "CI Owner", access = "admin" }, { subject = "ci-reader", name = "CI Reader", access = "read" }]' \
-            | docker compose --file crates/crab-http-server/deploy/compose.yaml \
-                run --rm --no-deps --no-TTY repository-init \
-                  --config /etc/crab/server.toml repository set-members \
-                  --owner demo --name stdin-members --members-file - \
-            > "${RUNNER_TEMP}/crab-http-server-updated-members.json"
-          jq --exit-status \
-            '.members | length == 2 and any(.subject == "ci-owner" and .access == "admin") and any(.subject == "ci-reader" and .access == "read")' \
-            "${RUNNER_TEMP}/crab-http-server-updated-members.json"
-          for _ in {1..15}; do
-            curl --fail --silent --show-error \
-              --dump-header "${RUNNER_TEMP}/crab-http-server-headers" \
-              --output "${RUNNER_TEMP}/crab-http-server-repositories.json" \
-              http://127.0.0.1:8788/api/repos
-            if jq --exit-status \
-              '.repositories | any(.owner == "demo" and .name == "stdin-members")' \
-              "${RUNNER_TEMP}/crab-http-server-repositories.json" >/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-          grep --extended-regexp --ignore-case \
-            '^x-request-id: [0-9a-f-]{36}[[:space:]]*$' \
-            "${RUNNER_TEMP}/crab-http-server-headers"
-          docker compose --file crates/crab-http-server/deploy/compose.yaml \
-            run --rm --no-deps metrics-probe \
-              --fail --silent --show-error \
-              --cacert /identity/ca.crt \
-              --cert /identity/peer.crt \
-              --key /identity/peer.key \
-              https://localhost:8789/metrics \
-            | grep -F 'crab_http_server_requests_total{method="get",outcome="2xx"}'
-          jq --exit-status \
-            '.repositories | map(select(.owner == "demo" and (.name == "hello" or .name == "stdin-members"))) | length == 2' \
-            "${RUNNER_TEMP}/crab-http-server-repositories.json"
-
-          crates/crab-http-server/tests/qualify_lfs_range_resume.sh \
-            http://127.0.0.1:8788
-
-          crates/crab-http-server/tests/qualify_lfs_locking.sh \
-            http://127.0.0.1:8788
-
-          crates/crab-http-server/tests/qualify_backup_restore.sh \
-            crates/crab-http-server/deploy/compose.yaml
-
-          crates/crab-http-server/tests/qualify_abrupt_receive_crash.sh \
-            crates/crab-http-server/deploy/compose.yaml
-
-          docker compose --file crates/crab-http-server/deploy/compose.yaml down
-          docker compose --file crates/crab-http-server/deploy/compose.yaml \
-            up --detach --no-build --wait --wait-timeout 120
-          curl --fail --silent --show-error \
-            --output "${RUNNER_TEMP}/crab-http-server-repositories.json" \
-            http://127.0.0.1:8788/api/repos
-          jq --exit-status \
-            '.repositories | map(select(.owner == "demo" and .name == "hello")) | length == 1' \
-            "${RUNNER_TEMP}/crab-http-server-repositories.json"
-
-          CRAB_HTTP_SERVER_IMAGE=crab-http-server:test \
-            CRAB_HTTP_CLUSTER_BUILD=false \
-            CRAB_HTTP_CLUSTER_VALIDATE=true \
-            crates/crab-http-server/tests/qualify_compose_cluster.sh \
-            > "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"
-          source_revision="$(git rev-parse HEAD)"
-          receipt_mode=source-only
-          if [ -n '${{ inputs.image_ref }}' ]; then
-            receipt_mode=release
-          fi
-          python3 crab/scripts/cellule-qualification.py run \
-              validate-cluster "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json" \
-              "$source_revision" "${{ steps.image.outputs.digest }}" "$receipt_mode"
-      - name: Prepare exact-source qualification evidence
-        shell: bash
+          sudo apt-get update -y
+          sudo apt-get install -y awscli openssl git python3
+      - name: Qualify the native image against RustFS and process restart
+        run: |
+          python3 crates/crab-http-server/tests/qualify_cellar_process.py \
+            --image crab-http-server:test \
+            --artifacts "${RUNNER_TEMP}/crab-cellar-process-proof"
+      - name: Bind native process evidence to the checked source and image
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           set -euo pipefail
-          evidence_dir="${RUNNER_TEMP}/crab-cell-runtime-qualification"
+          evidence_dir="${RUNNER_TEMP}/crab-cellar-process-qualification"
           mkdir -p "$evidence_dir"
-          cp "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json" \
-            "$evidence_dir/cluster-receipt.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"])
+          receipts = list((root / "crab-cellar-process-proof").glob("*/receipt.json"))
+          if len(receipts) != 1:
+              raise SystemExit("expected exactly one native process receipt")
+          receipt = json.loads(receipts[0].read_text())
+          if not (receipt["schema"] == 1 and receipt["runtime"] == "cellar"
+                  and receipt["version"] == "0.1.0" and receipt["durable_objects"] > 0
+                  and all(receipt[key] is True for key in
+                          ["repository_creation", "issue_replay", "git_push", "process_restart"])):
+              raise SystemExit("native process proof is incomplete")
+          target = root / "crab-cellar-process-qualification/native-process-receipt.json"
+          target.write_text(json.dumps(receipt, indent=2))
+          PY
           git rev-parse HEAD > "$evidence_dir/source-revision"
-          printf '%s\n' '${{ steps.image.outputs.digest }}' > "$evidence_dir/image-digest"
-          sha256sum "$evidence_dir/cluster-receipt.json" > "$evidence_dir/artifact.sha256"
-          jq --exit-status \
-            --arg source "$(cat "$evidence_dir/source-revision")" \
-            '.version == 6 and ($source | length == 40)' \
-            "$evidence_dir/cluster-receipt.json" >/dev/null
-      - name: Upload exact-source qualification evidence
+          printf '%s\n' "$IMAGE_DIGEST" > "$evidence_dir/image-digest"
+          sha256sum "$evidence_dir/native-process-receipt.json" > "$evidence_dir/artifact.sha256"
+      - name: Upload exact-source native process evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: cell-runtime-qualification-${{ github.run_id }}
-          path: ${{ runner.temp }}/crab-cell-runtime-qualification
+          name: cellar-process-qualification-${{ github.run_id }}
+          path: ${{ runner.temp }}/crab-cellar-process-qualification
           if-no-files-found: error
           retention-days: 14
+      - name: Retain failed process diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cellar-process-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/crab-cellar-process-proof/**/commands.log
+            ${{ runner.temp }}/crab-cellar-process-proof/**/server.log
+          if-no-files-found: warn
       - name: Export the qualified Linux image
         shell: bash
         run: |
@@ -989,118 +770,8 @@ jobs:
       - name: Upload the qualified Linux image
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: cell-runtime-image-${{ github.run_id }}
+          name: http-server-image-${{ github.run_id }}
           path: ${{ runner.temp }}/crab-http-server-qualified-image
           if-no-files-found: error
           compression-level: 0
-          retention-days: 14
-
-  fleet:
-    name: Qualify scheduled fleet traffic and owner loss
-    if: ${{ inputs.fleet_image_run }}
-    runs-on: ${{ inputs.arm64 && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
-    # Bound each phase below the job ceiling so a stalled measurement leaves
-    # time to retain completed points, raw samples and node logs.
-    timeout-minutes: 240
-    permissions:
-      contents: read
-      actions: read
-    env:
-      IMAGE_RUN: ${{ inputs.fleet_image_run }}
-      FLEET_HOT_SHARE: ${{ inputs.fleet_hot_share }}
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          ref: ${{ inputs.source_ref || github.sha }}
-          persist-credentials: false
-      - name: Verify harness and import qualified image
-        timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          [[ "$IMAGE_RUN" =~ ^[0-9]+$ ]]
-          python3 -B -W error::ResourceWarning -m unittest discover \
-            -s crates/crab-http-server/deploy/cell-issue-fleet -p 'test_*.py'
-          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${IMAGE_RUN}" \
-            --jq '.conclusion' | grep --line-regexp success
-          artifact="${RUNNER_TEMP}/fleet-image"
-          project="crab-cell-issue-ci-${GITHUB_RUN_ID}"
-          gh run download "$IMAGE_RUN" --repo "$GITHUB_REPOSITORY" \
-            --name "cell-runtime-image-${IMAGE_RUN}" --dir "$artifact"
-          python3 -B crates/crab-http-server/deploy/cell-issue-fleet/import_image.py \
-            --artifact "$artifact" --project "$project"
-          source_revision="$(cat "$artifact/source-revision")"
-          git fetch --depth=1 origin "$source_revision"
-          git worktree add --detach "${RUNNER_TEMP}/fleet-server-source" "$source_revision"
-          mkdir "${RUNNER_TEMP}/fleet-evidence"
-          cp "$artifact/import-receipt.json" "${RUNNER_TEMP}/fleet-evidence/"
-          git rev-parse HEAD > "${RUNNER_TEMP}/fleet-evidence/harness-revision"
-          docker info --format '{{json .}}' > "${RUNNER_TEMP}/fleet-evidence/docker-info.json"
-          df -k /var/lib/docker > "${RUNNER_TEMP}/fleet-evidence/disk-before.txt"
-      - name: Measure offered-rate curves at 3, 5, 10 and 20 nodes
-        timeout-minutes: 200
-        run: |
-          set -euo pipefail
-          # The existing qualifier requires a clean checkout matching the
-          # image. The fault driver records its separate harness revision.
-          set +e
-          python3 -B "${RUNNER_TEMP}/fleet-server-source/crates/crab-http-server/deploy/cell-issue-fleet/qualify.py" \
-            --state "${RUNNER_TEMP}/fleet-state" \
-            --project "crab-cell-issue-ci-${GITHUB_RUN_ID}" --skip-build \
-            --load-stages --cells 20 --load-rate 5 20 50 5 --load-duration 60 \
-            --load-hot-share "$FLEET_HOT_SHARE" \
-            2>&1 | tee "${RUNNER_TEMP}/fleet-evidence/stages.log"
-          stage_status=("${PIPESTATUS[@]}")
-          set -e
-          [ "${stage_status[1]}" -eq 0 ]
-          python3 - "${stage_status[0]}" "${RUNNER_TEMP}/fleet-state/report.json" <<'PY'
-          import json, os, pathlib, sys
-          status = int(sys.argv[1])
-          report = json.loads(pathlib.Path(sys.argv[2]).read_text())
-          if status not in (0, 2) or report.get("completed") is not True or report.get("passed") is not (status == 0):
-              raise SystemExit("rate curve did not complete its integrity and recovery gates")
-          # Exit 2 retains overload as failed capacity evidence. It must not
-          # prevent the separate unpublished-tail fault measurement.
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-              summary.write("## Fleet offered-rate measurements\n\n")
-              summary.write("Rate-curve hot-Cell fraction (0 is uniform): " + os.environ["FLEET_HOT_SHARE"] + "\n\n")
-              summary.write("All points completed integrity checks. Fully served every point: " + str(report["passed"]) + "\n\n")
-              summary.write("| Nodes | Pairs/s | Fully served | Report |\n| --- | --- | --- | --- |\n")
-              for stage in report["stages"]:
-                  for point in stage["loads"]:
-                      summary.write(f'| {stage["nodes"]} | {point["rate"]} | {point["passed"]} | {point["report"]} |\n')
-          PY
-      - name: Lose an acknowledged unpublished owner during arrivals
-        timeout-minutes: 15
-        run: |
-          set -euo pipefail
-          python3 -B crates/crab-http-server/deploy/cell-issue-fleet/fault.py \
-            --state "${RUNNER_TEMP}/fleet-state" --nodes 20 --cells 20 \
-            --rate 5 --duration 180 --max-in-flight 64 \
-            --output "${RUNNER_TEMP}/fleet-evidence/fault-20" \
-            2>&1 | tee "${RUNNER_TEMP}/fleet-evidence/fault.log"
-      - name: Retain stage reports and final node logs
-        if: always()
-        timeout-minutes: 5
-        run: |
-          set -euo pipefail
-          evidence="${RUNNER_TEMP}/fleet-evidence"
-          state="${RUNNER_TEMP}/fleet-state"
-          mkdir -p "$evidence"
-          if [ -d "$state" ]; then
-            find "$state" -maxdepth 1 -type f \( -name 'report.json' -o -name 'load-*.json' -o -name 'load-*.jsonl' \) \
-              -exec cp {} "$evidence/" \;
-            find "$state" -maxdepth 1 -type d -name '*.traces' -exec cp -R {} "$evidence/" \;
-          fi
-          if [ -f "$state/compose.yaml" ]; then
-            docker compose --file "$state/compose.yaml" --profile five --profile ten --profile twenty \
-              logs --no-color > "$evidence/compose.log" 2>&1
-          fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        timeout-minutes: 5
-        with:
-          name: cell-fleet-qualification-${{ github.run_id }}
-          path: ${{ runner.temp }}/fleet-evidence
-          if-no-files-found: error
           retention-days: 14

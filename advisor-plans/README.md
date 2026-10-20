@@ -1,5 +1,11 @@
 # Crate quality implementation plans
 
+Runtime plans below are historical records of their named source revisions.
+The repository server now embeds native Cellar; use the
+[current runtime contract](../crates/crab-http-server/CELLAR.md) for ownership,
+supported APIs, and release gates. Retired framework plans are not execution
+instructions for the current server.
+
 ## Indexed remote reads and unified staging
 
 Planned on 2026-10-13 against `51435f76bd2`. [037](037-indexed-remote-reads-and-unified-staging.md)

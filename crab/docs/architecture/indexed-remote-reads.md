@@ -1691,8 +1691,8 @@ writer boundaries. Its regression fails before the fix and passes afterward;
 46 catalog and 128 private-filesystem/lifecycle/local-cache tests pass, as does
 strict local-cache all-target Clippy. The full failed workload still needs a
 rerun. The pinned SQLite 3.49.1 is also affected by the upstream WAL-reset
-race; a matched Crab/Cellule dependency upgrade is required before release
-qualification. Remaining consumer, lifecycle and 10 GiB gates still apply.
+race. The server now uses published Cellar 0.1.0; its linked SQLite dependency
+and required fix are recorded in the [native runtime contract](../../../crates/crab-http-server/CELLAR.md). Remaining consumer, lifecycle and 10 GiB gates still apply.
 
 
 ## Prepared reuse retains payloads before recipe sealing

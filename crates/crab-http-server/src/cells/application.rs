@@ -1,0 +1,408 @@
+use cellar::sdk::{
+    Application, Cell, Context, HandlerFuture, Invocation, Output, Registry, Storage,
+};
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
+use std::sync::Arc;
+use uuid::Uuid;
+
+use super::{Error, Result, repository};
+
+pub(crate) use cellar::sdk::storage::SqlValue;
+
+const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+const MAX_RESULT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RETRY_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+pub(crate) const SCRIPT: &str = "crab-repository";
+pub(crate) const CLASS: &str = "Repository";
+pub(crate) const NAMESPACE: &str = "REPOSITORIES";
+pub(crate) const VERSION: &str = "v1";
+pub(crate) const INITIALIZE: u32 = 0;
+
+pub(crate) struct SqlStatement {
+    pub sql: String,
+    pub parameters: Vec<SqlValue>,
+}
+
+pub(crate) struct SqlBatch {
+    pub statements: Vec<SqlStatement>,
+}
+
+pub(crate) struct SqlResultSet {
+    pub rows: Vec<Vec<SqlValue>>,
+    pub rows_affected: u64,
+}
+
+pub(crate) struct RepositoryTransaction<'a> {
+    storage: &'a Storage,
+    now_ms: i64,
+}
+
+impl RepositoryTransaction<'_> {
+    pub(crate) fn now_ms(&self) -> i64 {
+        self.now_ms
+    }
+
+    pub(crate) fn sql(&self, batch: &SqlBatch) -> Result<Vec<SqlResultSet>> {
+        batch
+            .statements
+            .iter()
+            .map(|statement| {
+                let mut cursor = self
+                    .storage
+                    .sql_cursor(&statement.sql, &statement.parameters)
+                    .map_err(Error::sdk)?;
+                let mut rows = Vec::new();
+                let mut bytes = 0usize;
+                while let Some(row) = cursor.next_raw().map_err(Error::sdk)? {
+                    bytes += row
+                        .iter()
+                        .map(|value| match value {
+                            SqlValue::Text(value) => value.len(),
+                            SqlValue::Blob(value) => value.len(),
+                            _ => 8,
+                        })
+                        .sum::<usize>();
+                    if bytes > MAX_RESULT_BYTES {
+                        return Err(Error::Invalid(
+                            "repository SQL result exceeds its byte limit",
+                        ));
+                    }
+                    rows.push(row);
+                }
+                Ok(SqlResultSet {
+                    rows,
+                    rows_affected: cursor.rows_written(),
+                })
+            })
+            .collect()
+    }
+}
+
+pub(crate) trait Mutation {
+    const ID: u32;
+    type Input: DeserializeOwned + Serialize;
+    type Output: DeserializeOwned + Serialize;
+    fn execute(
+        context: &mut RepositoryTransaction<'_>,
+        input: Self::Input,
+    ) -> Result<MutationResult<Self::Output>>;
+}
+
+pub(crate) trait Read {
+    const ID: u32;
+    type Input: DeserializeOwned + Serialize;
+    type Output: DeserializeOwned + Serialize;
+    fn execute(context: &mut RepositoryTransaction<'_>, input: Self::Input)
+    -> Result<Self::Output>;
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum MutationResult<T> {
+    Success(T),
+    Rejected(T),
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MutationIdentity {
+    pub request_id: Uuid,
+    pub issued_at_ms: i64,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Request {
+    pub repository: Uuid,
+    pub operation: u32,
+    pub mutation: Option<MutationIdentity>,
+    pub input: Value,
+    pub minimum: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Reply {
+    pub revision: u64,
+    pub rejected: bool,
+    pub output: Value,
+}
+
+async fn request_bytes(
+    context: &Context,
+    body: cellar::engine_api::RequestBody,
+) -> Result<Vec<u8>> {
+    let mut stream = context.take_body(body).map_err(Error::sdk)?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(std::io::Error::other).map_err(Error::sdk)?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_REQUEST_BYTES {
+            return Err(Error::Invalid("repository request exceeds its byte limit"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+struct RepositoryCell;
+
+impl Cell for RepositoryCell {
+    fn invoke(self: Arc<Self>, context: Context, event: Invocation) -> HandlerFuture<Output> {
+        Box::pin(async move {
+            let Invocation::Fetch(request) = event else {
+                return Ok(Output::Done);
+            };
+            let body = request_bytes(&context, request.body).await?;
+            let request: Request = serde_json::from_slice(&body)?;
+            let storage = context.storage()?;
+            storage.sql_cursor("PRAGMA foreign_keys = ON", &[])?;
+            let now_ms = super::unix_now_ms()?;
+            let reply = storage.transaction_sync(|storage| {
+                if context
+                    .identity()
+                    .and_then(|identity| identity.name.as_deref())
+                    != Some(request.repository.to_string().as_str())
+                {
+                    return Err(
+                        Error::Invalid("repository route and request identity disagree").into(),
+                    );
+                }
+                initialize(
+                    storage,
+                    request.repository,
+                    request.operation == INITIALIZE && request.mutation.is_none(),
+                )?;
+                let mut transaction = RepositoryTransaction { storage, now_ms };
+                Ok(execute(&mut transaction, &request)?)
+            });
+            let response = match reply {
+                Ok(reply) => {
+                    let bytes = serde_json::to_vec(&reply)?;
+                    if bytes.len() > MAX_RESULT_BYTES {
+                        return Err(
+                            Error::Invalid("repository result exceeds its byte limit").into()
+                        );
+                    }
+                    cellar::sdk::http::Response::new(
+                        200,
+                        bytes,
+                        vec![("content-type".into(), "application/json".into())],
+                    )
+                }
+                Err(error) => {
+                    let status = match error.downcast_ref::<Error>() {
+                        Some(Error::Invalid(_) | Error::Json(_)) => 400,
+                        Some(Error::RequestConflict) => 409,
+                        Some(Error::Expired) => 410,
+                        Some(Error::StaleRead) => 412,
+                        _ => 503,
+                    };
+                    tracing::warn!(error = %error, status, "repository Cell invocation failed");
+                    cellar::sdk::http::Response::new(
+                        status,
+                        "{\"error\":\"repository Cell request failed\"}",
+                        vec![("content-type".into(), "application/json".into())],
+                    )
+                }
+            };
+            // SDK response construction retains Cellar's ownership and durability gate.
+            Ok(Output::Http(response.into_http(&context)?))
+        })
+    }
+}
+
+fn initialize(storage: &Storage, repository: Uuid, create: bool) -> Result<()> {
+    let mut tables = storage
+        .sql_cursor(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'repository_identity'",
+            &[],
+        )
+        .map_err(Error::sdk)?;
+    let exists = tables.next_raw().map_err(Error::sdk)?.is_some();
+    drop(tables);
+    if !exists {
+        // Serving must never recreate a Cell whose catalog already says ready.
+        // Only the explicit, unpublished-repository initializer creates schema.
+        if !create {
+            return Err(Error::Invalid("repository Cell has not been initialized"));
+        }
+        let (remaining, _, _) = storage
+            .sql_ingest(include_str!("schema.sql"))
+            .map_err(Error::sdk)?;
+        if !remaining.trim().is_empty() {
+            return Err(Error::Invalid("repository schema contains incomplete SQL"));
+        }
+        storage
+            .sql_cursor(
+                "INSERT INTO repository_identity(singleton, repository_uuid) VALUES (1, ?)",
+                &[SqlValue::Blob(repository.as_bytes().to_vec())],
+            )
+            .map_err(Error::sdk)?;
+    }
+    let mut identity = storage
+        .sql_cursor(
+            "SELECT repository_uuid FROM repository_identity WHERE singleton = 1",
+            &[],
+        )
+        .map_err(Error::sdk)?;
+    if identity.next_raw().map_err(Error::sdk)?
+        != Some(vec![SqlValue::Blob(repository.as_bytes().to_vec())])
+    {
+        return Err(Error::Invalid(
+            "repository Cell identity does not match its catalog",
+        ));
+    }
+    Ok(())
+}
+
+fn execute(context: &mut RepositoryTransaction<'_>, request: &Request) -> Result<Reply> {
+    let Some(identity) = request.mutation else {
+        if request.operation == INITIALIZE {
+            return Ok(Reply {
+                revision: revision(context)?,
+                rejected: false,
+                output: Value::Null,
+            });
+        }
+        let current = revision(context)?;
+        if request.minimum.is_some_and(|minimum| current < minimum) {
+            return Err(Error::StaleRead);
+        }
+        let output = repository::dispatch_read(context, request.operation, request.input.clone())?;
+        return Ok(Reply {
+            revision: revision(context)?,
+            rejected: false,
+            output,
+        });
+    };
+    if identity.expires_at_ms <= identity.issued_at_ms
+        || identity.expires_at_ms.saturating_sub(identity.issued_at_ms) > MAX_RETRY_WINDOW_MS
+        || identity.issued_at_ms > context.now_ms.saturating_add(30_000)
+    {
+        return Err(Error::Invalid("repository command lifetime is invalid"));
+    }
+    // Prune a bounded batch after the retry retention window so
+    // receipts cannot grow forever or turn one command into an unbounded GC.
+    context.storage.sql_cursor(
+        "DELETE FROM repository_command_receipts WHERE request_id IN (SELECT request_id FROM repository_command_receipts WHERE expires_at_ms <= ? ORDER BY expires_at_ms LIMIT 128)",
+        &[SqlValue::Integer(context.now_ms.saturating_sub(MAX_RETRY_WINDOW_MS))],
+    ).map_err(Error::sdk)?;
+    let payload = serde_json::to_vec(&(
+        request.operation,
+        identity.issued_at_ms,
+        identity.expires_at_ms,
+        &request.input,
+    ))?;
+    let digest = blake3::hash(&payload);
+    let mut existing = context
+        .storage
+        .sql_cursor(
+            "SELECT digest, reply FROM repository_command_receipts WHERE request_id = ?",
+            &[SqlValue::Blob(identity.request_id.as_bytes().to_vec())],
+        )
+        .map_err(Error::sdk)?;
+    if let Some(row) = existing.next_raw().map_err(Error::sdk)? {
+        let [SqlValue::Blob(stored_digest), SqlValue::Blob(reply)] = row.as_slice() else {
+            return Err(Error::Invalid("repository command receipt is invalid"));
+        };
+        if stored_digest.as_slice() != digest.as_bytes() {
+            return Err(Error::RequestConflict);
+        }
+        return Ok(serde_json::from_slice(reply)?);
+    }
+    drop(existing);
+    // Replay precedes expiry and archive checks; fresh expired IDs never execute.
+    if identity.expires_at_ms <= context.now_ms {
+        return Err(Error::Expired);
+    }
+    // Rejection rolls application writes back while its receipt commits.
+    // Use the SDK's nested transaction API; raw SQL savepoints are forbidden.
+    let result = context
+        .storage
+        .transaction_sync(|storage| {
+            let mut application = RepositoryTransaction {
+                storage,
+                now_ms: context.now_ms,
+            };
+            let result = repository::dispatch_mutation(
+                &mut application,
+                request.operation,
+                request.input.clone(),
+            )?;
+            if matches!(result, MutationResult::Rejected(_)) {
+                storage.rollback()?;
+            }
+            Ok(result)
+        })
+        .map_err(|error| error.downcast::<Error>().unwrap_or_else(Error::sdk))?;
+    let (rejected, output) = match result {
+        MutationResult::Success(value) => (false, value),
+        MutationResult::Rejected(value) => (true, value),
+    };
+    let reply = Reply {
+        revision: revision(context)?,
+        rejected,
+        output,
+    };
+    let bytes = serde_json::to_vec(&reply)?;
+    if bytes.len() > MAX_RESULT_BYTES {
+        return Err(Error::Invalid(
+            "repository command output exceeds its byte limit",
+        ));
+    }
+    context.storage.sql_cursor(
+        "INSERT INTO repository_command_receipts(request_id, digest, expires_at_ms, reply) VALUES (?, ?, ?, ?)",
+        &[SqlValue::Blob(identity.request_id.as_bytes().to_vec()), SqlValue::Blob(digest.as_bytes().to_vec()), SqlValue::Integer(identity.expires_at_ms), SqlValue::Blob(bytes)],
+    ).map_err(Error::sdk)?;
+    Ok(reply)
+}
+
+fn revision(context: &RepositoryTransaction<'_>) -> Result<u64> {
+    let result = context.sql(&SqlBatch {
+        statements: vec![SqlStatement {
+            sql: "SELECT app_revision FROM repository_identity WHERE singleton = 1".into(),
+            parameters: vec![],
+        }],
+    })?;
+    match result
+        .first()
+        .and_then(|set| set.rows.first())
+        .and_then(|row| row.first())
+    {
+        Some(SqlValue::Integer(value)) => {
+            u64::try_from(*value).map_err(|_| Error::Invalid("repository revision is negative"))
+        }
+        _ => Err(Error::Invalid("repository revision is missing")),
+    }
+}
+
+pub(crate) fn compiled() -> Result<Arc<dyn Application>> {
+    let registry = Registry::new(|context, event| {
+        Box::pin(async move {
+            let Invocation::Fetch(mut request) = event else {
+                return Ok(Output::Done);
+            };
+            let url = url::Url::parse(&request.url)?;
+            // Cellar cannot safely redispatch streamed bodies. This bounded
+            // command envelope must remain replayable when an owner route expires.
+            let body = request_bytes(&context, request.body).await?;
+            request.body = cellar::engine_api::RequestBody::Bytes(body.into());
+            let repository = url
+                .path()
+                .strip_prefix("/repositories/")
+                .and_then(|name| Uuid::parse_str(name).ok())
+                .ok_or(Error::Invalid("repository Cell route is invalid"))?;
+            let response = context
+                .namespace(NAMESPACE)?
+                .get_by_name(&repository.to_string())
+                .fetch(&context, request)
+                .await?;
+            Ok(Output::Http(response))
+        })
+    })
+    .cell(CLASS, |_, _| Ok(Arc::new(RepositoryCell)))
+    .map_err(Error::sdk)?;
+    Ok(Arc::new(registry))
+}

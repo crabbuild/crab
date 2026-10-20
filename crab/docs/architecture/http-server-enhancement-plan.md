@@ -1,5 +1,10 @@
 # Crab HTTP server enhancement delivery plan
 
+Runtime-specific recipes and measurements below describe their recorded source
+revisions. Current server ownership and release gates live in the
+[native Cellar contract](../../../crates/crab-http-server/CELLAR.md); retired
+framework APIs and qualification scripts are no longer available.
+
 Status: execution in progress; implementation slices below require their proof. Baseline:
 `crab-v2` at `8e9b9b0bc7821458c80aadb58e211098f3291199`, which includes
 [PR #508](https://github.com/crabbuild/crab/pull/508). Each slice ends with a

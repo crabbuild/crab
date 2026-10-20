@@ -1789,13 +1789,15 @@ ALLOWED_SERVER_DEV_FIXTURES = {
 }
 CELL_RUNTIME_SERVER_SOURCE_PATHS = ("crates/crab-http-server/src",)
 LEGACY_CELL_PACKAGES = frozenset(
-    {"crab-cell-runtime", "crab-cell-app", "crab-cell-host", "crab-cell-peer-http", "crab-ltx"}
+    {"crab-cell-runtime", "crab-cell-app", "crab-cell-host", "crab-cell-peer-http", "crab-ltx", "cellule-runtime", "cellule-app", "cellule-host", "cellule-store", "cellule-ltx"}
 )
 LEGACY_CELL_IMPORT_PATTERNS = (
     "crab_cell_runtime::", "crab_cell_app::", "crab_cell_host::",
     "crab_cell_peer_http::", "crab_ltx::",
+    "cellule_runtime::", "cellule_app::", "cellule_host::", "cellule_store::", "cellule_ltx::",
 )
 CELL_RUNTIME_SERVER_CONSTRUCTOR_PATTERNS = (
+    "Node::start_external(",
     "CellRuntime::new(",
     "CellRuntime::new_with_replica_host(",
     "CellRuntime::new_with_replica_host_requiring_node_lease(",
@@ -1806,10 +1808,7 @@ CELL_RUNTIME_SERVER_CONSTRUCTOR_PATTERNS = (
 CELL_RUNTIME_SERVER_COMPONENT_FIELDS = frozenset(
     {
         "cell_runtime",
-        "catalog",
         "scheduler_status",
-        "cell_capacity",
-        "repository_cells",
         "peer_receiver",
         "follower_store",
         "node_log_transport",
@@ -1826,7 +1825,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
         "dev": {"crab-git", "crab-xet"},
     },
     "crab-write": {"normal": {"crab-coordination", "crab-types", "crab-git", "crab-metadata", "crab-remote-git", "crab-storage", "crab-xet"}},
-    # The browser server composes Git and repository behavior with Cellule.
+    # The browser server composes Git and repository behavior with native Cellar.
     "crab-http-server": {
         "normal": {
             "crab-coordination",
@@ -2048,8 +2047,7 @@ WORKSPACE_THIRD_PARTY_DEPENDENCIES = {
     "futures-util": "0.3",
     "object_store": {"version": "0.14.1", "default-features": False},
     "reqwest": {"version": "0.12", "default-features": False},
-    # Match pinned Cellule's SQLite linkage and preserve checked unsigned bindings.
-    "rusqlite": {"version": "0.39", "features": ["bundled", "fallible_uint"]},
+    "rusqlite": {"version": "0.31", "features": ["bundled"]},
     "schemars": "0.8",
     "serde": {"version": "1", "features": ["derive"]},
     "serde_json": "1",
@@ -2390,6 +2388,8 @@ def rust_struct_body(text: str, name: str) -> list[str] | None:
     body: list[str] = []
     for index in range(start, len(lines)):
         delta = rust_brace_delta(lines[index], state)
+        if index == start and delta == 0:
+            return [lines[index].split("{", 1)[1].rsplit("}", 1)[0]]
         if index > start:
             body.append(lines[index])
         depth += delta
@@ -2412,10 +2412,10 @@ def production_struct_fields(text: str, name: str) -> set[str]:
             continue
         if stripped.startswith("#") or not stripped:
             continue
-        match = re.match(r"(?:pub(?:\([^)]*\))?\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:", stripped)
-        if match:
+        matches = list(re.finditer(r"(?:^|,)\s*(?:pub(?:\([^)]*\))?\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:", stripped))
+        if matches:
             if not cfg_test:
-                fields.add(match.group(1))
+                fields.update(match.group(1) for match in matches)
             cfg_test = False
         elif not stripped.startswith(","):
             cfg_test = False
@@ -2456,15 +2456,16 @@ def check_cell_runtime_server_boundary(root: Path, metadata: dict) -> bool:
                 if (
                     any(pattern in line for pattern in CELL_RUNTIME_SERVER_CONSTRUCTOR_PATTERNS)
                     and number not in allowed_lines
+                    and relative != "crates/crab-http-server/src/cells/runtime.rs"
                 ):
                     violations.append(
-                        f"{relative}:{number}: direct CellRuntime construction must use CellNodeBuilder"
+                        f"{relative}:{number}: native Cellar construction belongs in cells/runtime.rs"
                     )
             if relative == "crates/crab-http-server/src/server.rs":
                 escaped = production_struct_fields(text, "Server") & CELL_RUNTIME_SERVER_COMPONENT_FIELDS
                 for field in sorted(escaped):
                     violations.append(
-                        f"{relative}: production Server field {field!r} must be retained by CellNode"
+                        f"{relative}: production Server field {field!r} is a retired runtime component; retain native ownership inside Cellar"
                     )
 
     if not violations:

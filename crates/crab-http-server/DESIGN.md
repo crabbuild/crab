@@ -19,12 +19,9 @@ storage, deployment, ownership, cancellation, and recovery boundaries.
 
 Use [the HTTP server reference](REFERENCE.md#native-git-push) for operator commands and route limits. Use this document when changing receive, publication, coordination, or recovery code.
 
-The [next-generation architecture](next-architecture/README.md) designs
-per-repository SQLite/LTX application storage, owner routing and Kubernetes
-failover. The current runtime implements its release/catalog boundary, private
-peer transport, explicit repository Cell initialization, exact-root restore and
-the issue/comment route slice; the linked delivery matrix distinguishes those
-surfaces from remaining target contracts.
+The [native runtime contract](CELLAR.md) describes repository SQLite ownership,
+Cellar persistence, and shutdown. Git publication remains owned by Crab's shared
+write layer.
 
 ## Read the design by responsibility
 
@@ -128,11 +125,9 @@ rules.
 Every logical mutation reads the document with its provider CAS token, validates
 the whole next document, sorts it deterministically, increments `version`, and
 uses conditional create or update. A state conflict restarts the bounded loop.
-Names are unique ignoring case; prefixes and IDs are exactly unique. Version 2
-remains read-compatible; the first successful mutation writes version 3. Version
-1 and future schemas are rejected at the forward-only hard cut instead of being
-upgraded or imported. Do not roll a catalog back to an older binary after a v3
-write.
+Names are unique ignoring case; prefixes and IDs are exactly unique. Only catalog
+schema version 3 is accepted. Audit references must be canonical relative paths;
+older schemas and absolute-path aliases are rejected without conversion.
 
 Membership replacement is a logical catalog mutation. It retains the caller's
 complete presentation-order array, requires an administrator in authenticated
@@ -227,17 +222,13 @@ Logout deletes the durable parent session. Subsequent browser and Git-token
 requests therefore fail on every replica even when token objects remain for
 bounded lifecycle collection. A hashed `(issuer, subject)` reverse index points
 to each durable session, so identity revocation does not expose identities in
-object names or scan the whole auth namespace. During the explicit eight-hour
-rollout window, revocation also streams legacy session records; deployments
-must finish the binary rollout inside that maximum session lifetime. The process
+object names or scan the whole auth namespace. Identity-index markers and stored
+session fields are mandatory; unindexed sessions must sign in again. The process
 does not interrupt a request that already passed authorization; every later
 request resolves the durable parent again and observes revocation. A 24-hour
-object lifecycle on the auth prefix safely collects all state because its
-maximum active lifetime is eight hours.
-The migration cutoff at `.crab/http-server/v1/identity-index-migration.json`
-and replay records at `.crab/http-server/v1/logout-replays/` are deliberately
-outside that lifecycle prefix; replay cleanup must be expiry-aware and
-operator-controlled.
+object lifecycle on the auth prefix collects state after its active lifetime.
+Replay records at `.crab/http-server/v1/logout-replays/` live outside that prefix;
+cleanup must respect signed token expiry.
 
 The provider callback at `/auth/backchannel-logout` accepts a signed OIDC
 Back-Channel Logout Token and revokes only its exact issuer/subject identity.
@@ -1014,7 +1005,7 @@ The design is backed by component, composition, provider, and independent-client
 | Journal and namespace gate | `crab-write::journal` | Conflicting sibling refs, atomic batches, compaction, and holder-safe cleanup tests |
 | Read readiness | `crab-write::generation` | Superseded state, missing proof, cancellation, catalog close, and repeated pass tests |
 | HTTP composition | `crab-http-server::receive` | `receive_tests.rs`, `receive_fault_tests.rs`, authentication tests, and RustFS ignored tests |
-| Multi-cloud runtime | Helm chart, `.github/workflows/http-server-kubernetes-live.yml`, and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` | Fresh-pod read/list/write/CAS/delete preflight plus an attested EKS, GKE, or AKS cross-replica rollout receipt bound to the release source, image/chart digests, and admitted provider workload identity |
+| Multi-cloud runtime | Helm chart and native Cellar integration | Native provider, crash/partition, restore, scale, and upgrade proof bound to the source, image, SDK, and workload identity; release publication remains blocked |
 
 ### Interpret the live fixtures
 

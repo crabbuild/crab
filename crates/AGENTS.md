@@ -24,8 +24,8 @@ Scoped rules for `crates/`. Root `AGENTS.md` also applies.
 - `crab-staging` — local segment staging, chunk indexes, prepared push plans, multipart resume, compaction, and recovery.
 - `crab-coordination` — push locks, write coordination, and feature-gated DynamoDB, Spanner, and Cosmos DB active-active backends.
 - `crab-lfs` — Git LFS object layout, storage access, and integrity checks; pointer parsing remains in `crab-git`.
-- `crab-http-server` consumes the pinned Cellule runtime, application, host,
-  store, and LTX crates. Cellule owns their source and qualification contracts.
+- `crab-http-server` embeds the published Cellar 0.1.0 native SDK. Cellar owns
+  reusable runtime, persistence, and peer protocol contracts.
 
 ### Read, Cache, and Virtual Filesystems
 
@@ -80,13 +80,13 @@ crab-types
 - Server crates are composition boundaries. Do not move server policy or broad dependency sets into lower libraries.
 - Preserve source errors across crate boundaries. Map errors only where the receiving layer adds a real contract or user-facing decision.
 
-## Cellule Boundary
+## Cellar Boundary
 
-`crab-http-server` embeds the pinned Cellule runtime. Keep product HTTP,
-authorization, cloud configuration, and release policy here; change reusable
-Cell and LTX mechanics in [Cellule](https://github.com/crabbuild/cellule).
-Crab's release workflow verifies the exact pinned Cellule qualification
-contracts while binding evidence to the server image and source revision.
+`crab-http-server` embeds the published Cellar native SDK. Product HTTP,
+authorization, cloud configuration, and deployment policy stay here. Reusable
+runtime and LTX mechanics belong in [Cellar](https://github.com/crabbuild/cellar).
+Read `crates/crab-http-server/CELLAR.md` for the storage boundary and verification
+status. Release evidence must exercise the native implementation.
 
 ## Feature Flags
 

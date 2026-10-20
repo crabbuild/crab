@@ -117,21 +117,6 @@ services:
       - no-new-privileges:true
     restart: "no"
 
-  release-init:
-    <<: *server-service
-    command:
-      - --config
-      - /etc/crab/server.toml
-      - cells
-      - release
-      - bootstrap
-      - --image
-      - ${CRAB_HTTP_SERVER_RELEASE_IMAGE:-sha256:1111111111111111111111111111111111111111111111111111111111111111}
-    depends_on:
-      bucket-init:
-        condition: service_completed_successfully
-    restart: "no"
-
   repository-init:
     <<: *server-service
     command:
@@ -148,7 +133,7 @@ services:
       - --description
       - A repository created by Docker Compose
     depends_on:
-      release-init:
+      bucket-init:
         condition: service_completed_successfully
     restart: "no"
 

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::cells::MutationIdentity;
 use axum::{
     Extension, Json, Router,
     extract::{Path, State, rejection::JsonRejection},
@@ -8,9 +9,6 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use cellule_runtime::cell::executor::MutationIdentity;
-use cellule_runtime::client::{Committed, InvocationError, Observed};
-use cellule_runtime::identity::RequestId;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -18,13 +16,10 @@ use uuid::Uuid;
 use crate::{
     app::{self, Error, Result},
     auth::{Identity, Principal},
-    cells::{
-        RepositoryCell,
-        repository::{
-            CreateLabel, CreateLabelInput, CreateLabelOutcome, DeleteLabel, DeleteLabelInput,
-            DeleteLabelOutcome, LabelRecord, ListLabels, RepositoryAuthor, UpdateLabel,
-            UpdateLabelInput, UpdateLabelOutcome,
-        },
+    cells::repository::{
+        CreateLabel, CreateLabelInput, CreateLabelOutcome, DeleteLabel, DeleteLabelInput,
+        DeleteLabelOutcome, LabelRecord, ListLabels, RepositoryAuthor, UpdateLabel,
+        UpdateLabelInput, UpdateLabelOutcome,
     },
     server::{Repository, Server},
 };
@@ -124,13 +119,9 @@ fn view(label: &Label) -> Value {
     })
 }
 
-pub(crate) async fn catalog(
-    server: &Server,
-    repo: &Repository,
-    principal: &Identity,
-) -> Result<Vec<Label>> {
-    let routed = route(server, repo, principal, "repository.read").await?;
-    Ok(query_output(
+pub(crate) async fn catalog(server: &Server, repo: &Repository) -> Result<Vec<Label>> {
+    let routed = crate::app::repository_cell(server, repo)?;
+    Ok(crate::app::query_output(
         routed
             .client
             .query::<ListLabels>(&routed.target, None, ())
@@ -170,8 +161,8 @@ async fn list(
     Path(key): Path<(String, String)>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
-    let actor = app::actor(&principal)?;
-    let labels = catalog(&server, &repo, &actor).await?;
+    app::actor(&principal)?;
+    let labels = catalog(&server, &repo).await?;
     Ok(Json(json!({
         "items": labels.iter().map(view).collect::<Vec<_>>(),
         "can_manage": principal.can_write(&repo.config),
@@ -190,8 +181,8 @@ async fn create(
     }
     let Json(input) = input?;
     let actor = app::actor(&principal)?;
-    let routed = route(&server, &repo, &actor, "repository.label.create").await?;
-    let output = command_output(
+    let routed = crate::app::repository_cell(&server, &repo)?;
+    let output = crate::app::command_output(
         routed
             .client
             .command::<CreateLabel>(
@@ -233,9 +224,9 @@ async fn edit(
         return Err(Error::LabelPermission);
     }
     let Json(input) = input?;
-    let actor = app::actor(&principal)?;
-    let routed = route(&server, &repo, &actor, "repository.label.update").await?;
-    let output = command_output(
+    app::actor(&principal)?;
+    let routed = crate::app::repository_cell(&server, &repo)?;
+    let output = crate::app::command_output(
         routed
             .client
             .command::<UpdateLabel>(
@@ -272,9 +263,9 @@ async fn remove(
         return Err(Error::LabelPermission);
     }
     let Json(input) = input?;
-    let actor = app::actor(&principal)?;
-    let routed = route(&server, &repo, &actor, "repository.label.delete").await?;
-    match command_output(
+    app::actor(&principal)?;
+    let routed = crate::app::repository_cell(&server, &repo)?;
+    match crate::app::command_output(
         routed
             .client
             .command::<DeleteLabel>(
@@ -294,22 +285,6 @@ async fn remove(
     }
 }
 
-async fn route(
-    server: &Server,
-    repository: &Repository,
-    principal: &Identity,
-    action: &'static str,
-) -> Result<RepositoryCell> {
-    let router = server.repository_cells().ok_or(Error::CellUnavailable)?;
-    router
-        .route(repository.id, principal, action)
-        .await
-        .map_err(|error| match error {
-            crate::Error::Cell(source) => Error::Cell(source),
-            source => Error::Repository(source),
-        })
-}
-
 fn repository_author(identity: &Identity) -> RepositoryAuthor {
     RepositoryAuthor {
         issuer: identity.issuer.clone(),
@@ -319,12 +294,12 @@ fn repository_author(identity: &Identity) -> RepositoryAuthor {
 }
 
 fn mutation_identity() -> Result<MutationIdentity> {
-    let now_ms = crate::cells::unix_now_ms().map_err(Error::Repository)?;
+    let now_ms = crate::cells::unix_now_ms().map_err(Error::Cell)?;
     let expires_at_ms = now_ms
         .checked_add(60_000)
         .ok_or(Error::CellContract("Cell request expiry overflowed"))?;
     Ok(MutationIdentity {
-        request_id: RequestId::from_bytes(Uuid::now_v7().into_bytes()),
+        request_id: Uuid::now_v7(),
         issued_at_ms: now_ms,
         expires_at_ms,
     })
@@ -334,28 +309,4 @@ fn submission_id(value: &str) -> Result<[u8; 16]> {
     Uuid::parse_str(&app::submission(value)?)
         .map(Uuid::into_bytes)
         .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
-}
-
-fn command_output<T>(result: std::result::Result<Committed<T>, InvocationError<T>>) -> Result<T> {
-    match result {
-        Ok(committed) => Ok(committed.output),
-        Err(InvocationError::Rejected(committed)) => Ok(committed.output),
-        Err(InvocationError::Pending(_)) => Err(Error::CellPending),
-        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
-        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
-    }
-}
-
-fn query_output<T>(result: std::result::Result<Observed<T>, InvocationError<T>>) -> Result<T> {
-    match result {
-        Ok(observed) => Ok(observed.output),
-        Err(InvocationError::Rejected(_)) => Err(Error::CellContract(
-            "Cell query returned a durable rejection",
-        )),
-        Err(InvocationError::Pending(_)) => Err(Error::CellContract(
-            "Cell query returned pending mutation evidence",
-        )),
-        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
-        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
-    }
 }

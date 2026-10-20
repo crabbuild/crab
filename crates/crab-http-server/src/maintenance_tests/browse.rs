@@ -10,8 +10,7 @@ async fn projection_reads_reuse_the_runtime_cell_during_background_ingestion() {
     crate::projection::state(router, repo.id).await.unwrap();
     // A read-only cold activation is owned but not yet Residency::Resident.
     // Count retained actors rather than using that narrower routing probe.
-    let retained = router.runtime().unreleased_cell_count().await.unwrap();
-    let importer = router.route_projection(repo.id).await.unwrap();
+    let importer = router.repository(repo.id).unwrap();
     let state = tokio::time::timeout(
         Duration::from_secs(1),
         crate::projection::state(router, repo.id),
@@ -19,38 +18,7 @@ async fn projection_reads_reuse_the_runtime_cell_during_background_ingestion() {
     .await;
     drop(importer);
     close(&server).await;
-    assert_eq!((retained, matches!(state, Ok(Ok(_)))), (1, true));
-}
-
-#[tokio::test]
-async fn scheduler_cleanup_preserves_borrowed_projection_and_releases_unused_cell() {
-    let server = fixture().await;
-    let repo = repository(&server);
-    let router = server.repository_cells.as_ref().unwrap();
-    let importer = router.route_projection(repo.id).await.unwrap();
-    let target = importer.target.clone();
-    let release = tokio::time::timeout(
-        Duration::from_secs(1),
-        router.drain_unused_local_target(&target),
-    )
-    .await;
-    let state = tokio::time::timeout(
-        Duration::from_secs(1),
-        crate::projection::state(router, repo.id),
-    )
-    .await;
-    drop(importer);
-    router.drain_unused_local_target(&target).await.unwrap();
-    let retained = router.runtime().unreleased_cell_count().await.unwrap();
-    close(&server).await;
-    assert_eq!(
-        (
-            matches!(release, Ok(Ok(()))),
-            matches!(state, Ok(Ok(_))),
-            retained
-        ),
-        (true, true, 0)
-    );
+    assert!(matches!(state, Ok(Ok(_))));
 }
 
 #[tokio::test]
@@ -82,7 +50,10 @@ async fn projected_attribution_survives_force_push_rewind_with_retained_graph_re
             crate::maintenance::Pass::BackgroundMaintenance,
             Some(crate::maintenance::ProjectionContext {
                 repository_id: repo.id,
-                router: server.repository_cells.as_ref().cloned(),
+                client: server
+                    .repository_cells
+                    .as_ref()
+                    .map(|router| (**router).clone()),
                 metrics: server.metrics.clone(),
                 identity: repo.identity.clone(),
                 runtime: Arc::clone(&server.runtime),

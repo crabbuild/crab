@@ -55,10 +55,9 @@ fn review_view(review: &PullReview, actor: &Identity, current_head: Option<&str>
 async fn pull_and_head(
     server: &Server,
     repo: &crate::server::Repository,
-    actor: &Identity,
     id: u64,
 ) -> Result<(PullRequest, Option<String>)> {
-    let pull = storage::pull(server, repo, actor, id)
+    let pull = storage::pull(server, repo, id)
         .await?
         .ok_or(Error::NotFound)?;
     if let Some(merge) = &pull.merge {
@@ -107,9 +106,9 @@ async fn list(
     let repo = repo.as_ref();
     let id = app::number(id)?;
     let actor = app::actor(&principal)?;
-    let (_, head) = pull_and_head(&server, repo, &actor, id).await?;
+    let (_, head) = pull_and_head(&server, repo, id).await?;
     let limit = u8::try_from(params.limit()?).map_err(|_| Error::Invalid("Invalid review page"))?;
-    let (reviews, next) = storage::reviews(&server, repo, &actor, id, params.before, limit)
+    let (reviews, next) = storage::reviews(&server, repo, id, params.before, limit)
         .await?
         .ok_or(Error::NotFound)?;
     let items = reviews
@@ -144,21 +143,20 @@ async fn create(
     validate_body(&input.body, input.state)?;
     let actor = app::actor(&principal)?;
     let request_id = app::submission(&input.request_id)?;
-    if let Some(review) = storage::review_submission(&server, repo, &actor, id, &request_id).await?
-    {
+    if let Some(review) = storage::review_submission(&server, repo, id, &request_id).await? {
         if !same_author(&review.author, &actor)
             || review.body != input.body
             || review.state != input.state
         {
             return Err(Error::RequestConflict);
         }
-        let (_, head) = pull_and_head(&server, repo, &actor, id).await?;
+        let (_, head) = pull_and_head(&server, repo, id).await?;
         return Ok((
             StatusCode::CREATED,
             Json(review_view(&review, &actor, head.as_deref())),
         ));
     }
-    let (pull, head) = pull_and_head(&server, repo, &actor, id).await?;
+    let (pull, head) = pull_and_head(&server, repo, id).await?;
     if pull.state != PullState::Open {
         return Err(Error::Invalid("Closed pull requests cannot be reviewed"));
     }
@@ -196,8 +194,8 @@ async fn detail(
     let repo = repo.as_ref();
     let id = app::number(id)?;
     let actor = app::actor(&principal)?;
-    let (_, head) = pull_and_head(&server, repo, &actor, id).await?;
-    let review = storage::review(&server, repo, &actor, id, app::number(review)?)
+    let (_, head) = pull_and_head(&server, repo, id).await?;
+    let review = storage::review(&server, repo, id, app::number(review)?)
         .await?
         .ok_or(Error::NotFound)?;
     Ok(Json(review_view(&review, &actor, head.as_deref())))
@@ -222,7 +220,7 @@ async fn edit(
     let Json(input) = input?;
     let actor = app::actor(&principal)?;
     let review_number = app::number(review)?;
-    let existing = storage::review(&server, repo, &actor, id, review_number)
+    let existing = storage::review(&server, repo, id, review_number)
         .await?
         .ok_or(Error::NotFound)?;
     validate_body(&input.body, existing.state)?;
@@ -236,6 +234,6 @@ async fn edit(
         input.body,
     )
     .await?;
-    let (_, head) = pull_and_head(&server, repo, &actor, id).await?;
+    let (_, head) = pull_and_head(&server, repo, id).await?;
     Ok(Json(review_view(&review, &actor, head.as_deref())))
 }

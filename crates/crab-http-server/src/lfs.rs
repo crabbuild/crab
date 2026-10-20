@@ -245,9 +245,9 @@ async fn ensure_active(
     principal: &Principal,
     repository: &Repository,
 ) -> Result<()> {
-    let actor = principal.identity().ok_or(Error::Forbidden)?;
+    principal.identity().ok_or(Error::Forbidden)?;
     if repository
-        .lifecycle(server, &actor)
+        .lifecycle(server)
         .await
         .map_err(|error| Error::Settings(Box::new(error)))?
         .archived

@@ -276,38 +276,6 @@ async fn membership_author_ownership_and_csrf_protect_all_mutations() {
 }
 
 #[tokio::test]
-async fn source_loss_restores_the_published_issue_before_submission_replay() {
-    let h = Harness::new(false).await;
-    let cookie = h.login().await;
-    let issue = write(&h, &cookie, "POST", ROOT, input(1)).await.1;
-    let repo = h.server.repositories.values().into_iter().next().unwrap();
-    h.server
-        .repository_cells
-        .as_ref()
-        .unwrap()
-        .drain_local(repo.id)
-        .await
-        .unwrap();
-    for entry in std::fs::read_dir(h.cell_dir.path()).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            std::fs::remove_dir_all(path).unwrap();
-        } else {
-            std::fs::remove_file(path).unwrap();
-        }
-    }
-    assert_eq!(write(&h, &cookie, "POST", ROOT, input(1)).await.1, issue);
-    assert_eq!(
-        h.json(ROOT, &cookie).await["items"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    h.close().await;
-}
-
-#[tokio::test]
 async fn invalid_inputs_fail_and_legacy_issue_objects_are_not_a_serving_path() {
     let h = Harness::new(false).await;
     let cookie = h.login().await;

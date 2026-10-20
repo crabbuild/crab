@@ -1,10 +1,8 @@
 # Operate and integrate `crab-http-server`
 
-This reference explains how to configure, run, call, and qualify Crab's repository HTTP application. It covers the browser API, native Git transport, Git Large File Storage (LFS), authentication, collaboration data, publication, storage ownership, and current delivery gaps.
-
-> **Development status:** The server supports real repository reads and writes, but production qualification remains incomplete. Read [Completion requirements](#completion-requirements) before deploying it beyond a controlled environment.
-
-Start with [the crate README](README.md) if you need only the build command and source entry points. Use this document when you need an operator or protocol contract.
+The server embeds Cellar 0.1.0. [CELLAR.md](CELLAR.md) defines its native
+storage and lifecycle boundary, retired operator controls, and verification
+limitations. Only native Cellar application storage is supported.
 
 ## Find the contract you need
 
@@ -30,69 +28,26 @@ Use this map to enter the reference without reading it in order.
 
 ## Understand the runtime architecture
 
-One Rust process serves the embedded React application, application programming interface (API), native Git smart HTTP, and LFS. Object storage remains authoritative; local disk holds only bounded temporary artifacts.
-
-```mermaid
-flowchart LR
-    Browser[Browser and React app]
-    Git[Native Git client]
-    CI[CI integration]
-    Server[crab-http-server]
-    Auth[OIDC or GitHub provider]
-    Temp[Temporary pack and index files]
-    Store[(S3, GCS, or Azure Blob root)]
-
-    Browser -->|web pages, API data, ZIP| Server
-    Git -->|protocol v2, receive-pack, LFS| Server
-    CI -->|status and check APIs| Server
-    Server -->|sign-in and key discovery| Auth
-    Server -->|bounded preparation| Temp
-    Server -->|Git, metadata, app state| Store
-```
-
-Normal serving paths do not create a server checkout, run the Git executable, or
-maintain a local Git object database. The browser Git import is an explicit
-background workflow: it runs `git clone --mirror` in Cell-managed staging, then
-pushes Git history and refs through the server's receive-pack endpoint. The
-integration tests may use Git as an independent protocol oracle.
+Crab owns HTTP authentication and authorization, repository policy, the durable
+catalog, Git publication, and embedded browser assets. Cellar owns native Cell
+routing, leases, activation, SQLite/LTX persistence, replication, and recovery.
 
 ### Know which component owns each boundary
 
-| Component | Responsibility |
+| Owner | Responsibility |
 | --- | --- |
-| `crab-http-server` | Routing, HTTP policy, authentication, authorization, durable sessions, catalog refresh, versioned application documents, and response contracts |
-| `crab-remote-git` | Immutable, bounded Git reads from committed object locators and packs |
-| `crab-read` | Snapshot-bound dependency selection and verified Crab pointer reconstruction |
-| `crab-lfs` | LFS object layout, streaming transfer, size checks, and SHA-256 verification |
-| `crab-remote` | Reusable pack preparation, lease orchestration, and publication composition |
-| `crab-write` | Ref-journal commit, compaction, catalog publication, and read readiness |
-| `crab-storage` | Provider construction, object locations, and conditional storage operations |
-| `crab-metadata` | Manifests, refs, visibility evidence, indexes, receipts, and publication formats |
-| `crab-coordination` | Per-ref leases, namespace serialization, and garbage collection (GC) fences |
-| `packages/ui` | React interface, URL state, design tokens, Pierre Trees and Diffs, and accessible interactions |
+| `crab-http-server` | Product HTTP, catalog, authorization, typed repository operations, and private mTLS transport |
+| Cellar 0.1.0 | Native execution domain, ownership, persistence, output durability, and peer protocol |
+| Shared Crab crates | Git objects, storage mechanics, read/write publication, and metadata contracts |
 
 ### Follow one repository read
 
-The read path pins every response to one repository snapshot. Historical links use full commit object IDs (OIDs) so later branch movement does not change their content.
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant H as HTTP boundary
-    participant R as Remote reader
-    participant M as Metadata
-    participant O as Object storage
-
-    C->>H: GET repository resource
-    H->>H: Validate Host and membership
-    H->>R: Open bounded snapshot
-    R->>M: Read manifest, refs, and catalog
-    R->>O: Read exact pack ranges
-    R-->>H: Generation-pinned result
-    H-->>C: JSON, bytes, or stream
-```
-
-If committed refs await indexing, the server runs the shared read-readiness pass and retries the open. The server never invents visibility evidence or rolls back a committed ref.
+The HTTP boundary authorizes the principal against the repository catalog.
+`cells/client.rs` sends the typed operation through native ingress;
+`cells/application.rs` routes by repository UUID and executes a bounded SQL
+transaction. The native SDK supplies the current owner and its output gate.
+Read receipts bind repository identity and application revision. Serving never
+creates missing application schema.
 
 ## Run the current development build
 
@@ -139,7 +94,6 @@ data_dir = "/var/lib/crab/cells"
 local_disk_limit_bytes = 34359738368
 peer_advertise = "https://localhost:8789"
 failure_zone = "local"
-failure_host = "development-node"
 peer_certificate = "/run/secrets/crab-peer/tls.crt"
 peer_private_key = "/run/secrets/crab-peer/tls.key"
 peer_ca = "/run/secrets/crab-peer/ca.crt"
@@ -213,119 +167,34 @@ empty application Cell. A missing, corrupt, or conflicting dependency leaves
 the catalog unchanged. Adopt never converts arbitrary object prefixes, and old
 collaboration application data is not imported.
 
-The initializer prepares its local directory, checks resource admission, and
-builds its private maintenance host before publishing Cell ownership. After a
-local setup failure, correct the directory or available resources and retry
-the same create/adopt command. This does not authorize taking over an existing
-unpublished owner after a crash or a storage failure during initialization.
+The explicit initializer publishes schema using object durability, joins its
+native node, and waits for its temporary lease to expire before marking the
+catalog ready. Repeating create/adopt resumes the same repository identity.
+Existing catalog-ready repositories require their native schema; missing state
+fails startup. There is no previous-runtime storage reader or layout detector.
 
 ```sh
-SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-server"
+SERVER="$CARGO_TARGET_DIR/release/crab-http-server"
 "$SERVER" --config /secure/server.toml repository create \
-  --owner your-team \
-  --name your-project \
-  --prefix your-team/your-project \
-  --default-branch main \
-  --description "Your project" \
-  --members-file /secure/members.toml
-
+  --owner your-team --name your-project --prefix your-team/your-project \
+  --default-branch main --members-file /secure/members.toml
 "$SERVER" --config /secure/server.toml repository list
 "$SERVER" --config /secure/server.toml cells status \
   --owner your-team --name your-project
-"$SERVER" --config /secure/server.toml cells capacity --json --live
-"$SERVER" --config /secure/server.toml cells backup create \
-  --pin 11112222333344445555666677778888
-"$SERVER" --config /secure/server.toml cells backup verify \
-  --pin 11112222333344445555666677778888
-"$SERVER" --config /secure/server.toml cells backup restore \
-  --pin 11112222333344445555666677778888 \
-  --destination-prefix recovery/restore-2026-09-16
-"$SERVER" --config /secure/server.toml cells release activate \
-  --expected-revision 8 --strategy maintenance \
-  --retention-grace-hours 168 --retention-max-deletes 10000
-"$SERVER" --config /secure/server.toml repository set-members \
-  --owner your-team --name your-project \
-  --members-file /secure/members.toml
-"$SERVER" --config /secure/server.toml storage-probe
+"$SERVER" --config /secure/server.toml cells capacity --json
+"$SERVER" --config /secure/server.toml cells runtime
 "$SERVER" --config /secure/server.toml serve
 ```
 
-`storage-probe` validates the complete runtime storage contract: catalog read,
-bounded list, holder-checked conditional create/update, ordinary object write,
-delete, and a post-delete not-found read. `serve` runs the same preflight
-before binding either listener. The unique delete-test object is created below
-`.crab/http-server/v1/auth/preflight/`; normal completion removes it, while the
-provider profile's one-day lifecycle bounds residue after an interrupted
-probe.
+`cells status` uses the running server's private mTLS management listener and
+returns the native runtime version, repository UUID, application revision, and
+lifecycle. `cells capacity --json --live` inspects that server's startup envelope;
+without `--live`, it calculates an envelope for the current process.
 
-`cells status` is a read-only operator view of the durable control record. Its
-versioned JSON includes the Cell and incarnation IDs, lifecycle state, epoch,
-revision, serving session and endpoint, exact LTX root, code/schema pair, and
-next scheduler deadline. It reads object-store authority directly; it does not
-open SQLite, acquire ownership, or extend a lease.
-
-`cells status` and `cells node` validate the selected release descriptor and
-inspect only the requested control/session. They do not scan the fleet's Cell
-inventory on every observation. Full inventory compatibility remains a startup
-and release-activation gate; an unrelated incompatible Cell cannot prevent
-these status commands from inspecting a deployment whose release matches the
-binary. Status still reads fresh authority and signed session state, so this
-does not introduce cached ownership or relax placement qualification.
-
-`cells capacity --json --live` is a read-only mTLS request to the running
-process. It reports that process's retained startup memory limit, free Cell
-volume bytes, configured Cell-volume limit, available file descriptors,
-CPU-derived job credits, and the resulting active-Cell, retained-byte,
-local-disk, scratch, blocking-job, dirty-job and full-recovery admission
-limits. The full-recovery limit stays at two even when the node can run more
-blocking or capture jobs. Omitting `--live` calculates a preflight envelope for
-the command process. Both are qualification inputs, not measured performance
-evidence.
-
-`cells backup create` observes all 256 catalog heads before traversing their
-immutable pages. It binds the selected release record and descriptors, the
-exact catalog revisions, one canonical control per entry, and every verified
-LTX dependency into a strict-created pin. Repeating an existing pin ID verifies
-and returns the original boundary. A signed zero-capacity advertisement covers
-the complete create operation; maintenance drains it before collecting objects,
-while a creator that advertises after the release fence fails its second Ready
-check. `cells backup verify` rereads the complete
-graph and fails closed when any content-addressed dependency is absent or
-corrupt. `cells backup restore` requires a ready pinned release and a canonical
-destination prefix in the configured bucket. It verifies the complete source
-graph before creating the destination identity, uses conditional provider-side
-copies for immutable objects, independently verifies destination descriptors,
-catalog pages and LTX roots, strict-creates unowned `Idle` controls, and writes
-the release and pin pointers only after their dependencies. An exact interrupted
-restore is resumable while an already-used or divergent destination fails
-closed. Cross-provider archive export and server-owned configuration outside
-`cells/v1` remain separate operator work.
-
-Maintenance retention is optional. With `--retention-grace-hours`, the sole
-maintenance executor verifies the exact release, revision-pinned catalog,
-unowned current controls, all retained pins, and their LTX graphs before the
-first delete. It stores reachability in bounded local SQLite scratch, streams
-the application prefix, and considers only recognized V1 immutable paths older
-than the provider-time grace. Unknown layouts and mutable authority are skipped.
-The deletion bound defaults to 10,000 and cannot exceed 100,000. Reaching it
-returns an incomplete-retention error and keeps the release in `Maintenance`;
-repeat the same activation and expected revision until it returns `Ready`.
-
-Membership is supplied separately so the shared server configuration stays
-small and secret-independent:
-
-```toml
-members = [
-  { subject = "provider-subject", name = "Alice", access = "admin" },
-]
-```
-
-Use `repository adopt` with the same identity flags for an existing canonical
-Crab prefix. Owner and name are URL-safe identifiers of at most 100 bytes;
-`api`, `assets`, `auth`, and `git` are reserved owner names. Prefixes and names
-are unique in the catalog, and the relative `.crab` namespace is reserved for
-server state. Successful changes become visible to every replica within five
-seconds without a restart.
+Release bootstrap, pinned-backup, and node-session commands are unavailable. Cellar 0.1.0
+does not supply equivalent APIs. Keep the old deployment and complete storage
+root until an explicit data migration has been verified. A new storage prefix
+is a separate deployment, not an import of collaboration data.
 
 ### Understand local trust mode
 
@@ -412,200 +281,40 @@ Keep these inputs separate:
 
 ### Initialize and run the container
 
-Run the initialization command once with the production mounts, credentials, and configuration. Then start the service behind an HTTPS reverse proxy:
+Use the [deployment profiles](deploy/README.md) to mount configuration, private
+TLS identity, and writable native cache directories. The binary inside the image
+uses the same `repository create`, `repository adopt`, and `serve` commands as the
+local build. No release-bootstrap command or init container runs before serving.
 
-```sh
-docker run --rm --name crab-http-server \
-  --publish 127.0.0.1:8788:8788 \
-  --env-file /secure/crab-storage.env \
-  --mount type=bind,src=/secure/server.toml,dst=/etc/crab/server.toml,readonly \
-  --mount type=bind,src=/secure/oidc-client-secret,dst=/run/secrets/crab-oidc-client-secret,readonly \
-  --mount type=bind,src=/secure/state-key,dst=/run/secrets/crab-state-key,readonly \
-  crab-http-server:local
-```
-
-Run `repository create` or `repository adopt` as a one-shot container with the
-same mounts. Creation and adoption initialize a new empty Cell before returning;
-adoption intentionally does not preserve old collaboration data. A running
-server rejects changed catalog versions containing pending or rootless repositories and marks
-readiness unhealthy; it swaps in ready changes without a restart.
-Catalog snapshots retain their durable revision. Import completion and periodic
-refresh validate Cell readiness through the same installation path and publish
-only newer revisions, so a delayed import cannot restore revoked membership or
-hide repositories installed by a newer refresh. When an authenticated peer
-request targets a repository missing from the execution node's snapshot, that
-node loads and installs the current catalog within the signed request deadline,
-then checks repository membership and the requested action again. Concurrent
-misses share an installation; warm requests and denials for known repositories
-do not reload the catalog. Storage or readiness failures return HTTP 503;
-an unresolved repository or unauthorized principal still receives HTTP 401 on
-the private peer route. Public ingress discovery and membership changes for
-already known repositories still use the five-second poll on other nodes.
-
-The binary's `healthcheck` command calls `/readyz` on the management listener.
-`SIGTERM` and Ctrl-C start the same graceful drain. Repository, catalog,
-identity, and application state remain in object storage; `/var/lib/crab/tmp`
-contains only bounded transient files.
+The Compose `repository-init` service initializes application schema before its
+server starts. Team deployments must initialize cataloged repositories explicitly
+and provide a stable, node-specific advertised peer endpoint.
 
 ### Probe health and scrape metrics
 
-The two probe routes answer different operator questions:
+The public listener serves `/livez`. Private mTLS management serves `/healthz`,
+`/readyz`, `/capacity`, `/integrityz`, and `/metrics`. Readiness checks catalog and
+native admission health plus repository read readiness. Startup verifies every
+ready repository's existing native application schema before public serving.
 
-| Route | Success means | Failure contract |
-| --- | --- | --- |
-| `GET /healthz` | The HTTP process can answer | It does not inspect repository storage |
-| `GET /readyz` | The durable catalog is valid and every cataloged repository can open its current Git view within 10 seconds | HTTP 503 with `Retry-After: 5` |
-| `GET /integrityz` | Every cataloged repository's latest background dependency proof completed | HTTP 202 while pending or superseded; HTTP 503 after a failed proof; the body retains the prior complete proof |
-| `GET /metrics` | Prometheus text exposes request/body lifetime, admission, catalog, repository, receive-worker, and drain signals | It does not perform a storage probe |
-
-Only the management listener serves probes. Every public request retains strict
-canonical `Host` validation.
-`crab_cell_owner_hint_total{outcome="hit|miss|stale|refused"}` counts the peer
-sender's bounded owner observations. A hit saves that sender's control and
-node-directory reads. The public entry router shares that observation to avoid
-catalog/control reads for a warm remote target. Only a serving, published Cell
-can supply the cached description; the receiving node still verifies target,
-control, authorization, and actor admission. Observations expire within five
-seconds and before the signed node lease, with at most 4,096 entries. Refusals
-and ambiguous results clear the observed session; only the existing retryable
-cases take one authoritative retry. A sender lookup removes an expired entry
-before refresh, including when authoritative lookup fails or is canceled.
-
-Forwarded requests reserve retained bytes while waiting. Codec admission uses
-one absolute received transport deadline, and releases its job slot during
-enrollment storage I/O. Structural decoding runs once; signature verification
-rechecks the enrollment lifetime after the wait. Resolution, activation,
-dispatch waiting, and reply encoding share the received deadline. A timed-out
-HTTP wait returns 504; an already accepted mutation can still finish and must
-be resolved by its stable request identity.
-
-Before starting either listener, the process also claims and releases one of
-16 dedicated startup-probe slots in the shared transfer-admission namespace.
-Invalid conditional-write permissions therefore fail startup instead of
-leaving a read-ready server that rejects its first transfer. Probe slots are
-separate from the four live-transfer slots.
-
-Every public response includes a server-generated `x-request-id`. The
-`http_response_ready` log records the same identifier with the method, path,
-status, and elapsed microseconds. This event marks handler completion; body
-delivery may finish later. Set the standard `RUST_LOG` environment variable to
-adjust tracing filters; the default level is `info`.
+`cells metrics` fetches the private Prometheus sample. Crab exports HTTP,
+transfer, admission, catalog, and Git projection metrics; native event metrics
+come from Cellar. `crab_cellar_pending_events`,
+`crab_cellar_retired_events_total`, `crab_cellar_rss_bytes`, and
+`crab_cellar_open_file_descriptors` use actual SDK samples. Native gauges report actual observations.
 
 ### Attribute acknowledged Cell writes
 
-The Compose fleet renderer enables
-`RUST_LOG=info,cellule_runtime::action=debug,crab_http_server::action=debug`
-on Cell nodes. The existing filter controls this diagnostic overhead; include
-it in comparisons and measure with and without tracing before setting limits.
-The load report records each node's configured filter.
+Repository mutations and their replay receipts commit atomically. Rejected
+application writes roll back through a nested SDK transaction while retaining
+their decision. Native response construction uses Cellar's ownership and
+durability output gate. HTTP delivery may still fail after commitment: retry
+with the same submission ID and payload to recover the original outcome.
 
-Scheduled `load.py` reports use schema 5. Raw samples retain each HTTP attempt,
-its status, server request ID and latency, including retries. Successful write
-samples are joined to the stable submission, runtime attempt, Cell/incarnation,
-owner/session, commit sequence and winning `object`, `fleet` or `recorded`
-response source. A `<report>.traces/` directory retains per-node logs and
-`actions.jsonl` before the owner-loss test. Missing or ambiguous attribution
-fails qualification. This includes duplicate owner responses for the same
-runtime attempt: the collector refuses to guess which response arrived.
-
-Recovery and old-owner restart have separate outcomes. `owner_loss` retains
-takeover and acknowledgement checks completed before cleanup;
-`owner_loss.restart` records whether restarting the killed node succeeded.
-When both recovery and restart fail, the original recovery error remains
-alongside the restart error. Either failure fails qualification. The parent
-`report.json` also retains a failed load stage's artifact path. These receipts
-do not qualify faults during an unpublished follower tail: the current
-scheduled fault still waits for publication to drain before killing its owner.
-
-| Timing | Measurement boundary |
-| --- | --- |
-| Client HTTP latency | Retry-inclusive request through decoded response body; individual attempts retained separately |
-| HTTP response readiness | Entry handler lifetime, excluding later body delivery |
-| Authentication | HTTP principal resolution, including session/token storage when used |
-| Archive check | Pre-handler lifecycle policy, including any nested route and query. When `command_checks_archive=true`, this interval records only dispatch; the command checks lifecycle during worker execution. A client-error response can trigger a later policy query outside this interval. |
-| Command route | Issue-create route resolution and activation before client preparation |
-| Client preparation | Description, contract/input validation, wire encoding and request digest before invocation |
-| Typed invocation | Transport invocation and result decoding after request validation |
-| Response enrichment | Issue-create label/assignee enrichment and response-value construction after the command; excludes later JSON encoding/body delivery |
-| Actor queue | Admitted command construction until its execution task starts |
-| Worker queue / execution | Worker admission and queue wait / synchronous command and capture |
-| Capture | LTX total and encode, write, sync, checkpoint observations within worker execution |
-| Proof wait | Proof task lifetime until a winning object/follower proof; excludes earlier node-log submission |
-| Confirmation | Durable-sequence confirmation on the SQL worker after proof |
-| Runtime response | Admitted command construction until a successful reply is released |
-
-These intervals overlap. Do not sum them or subtract percentiles from separate
-histograms; durations use each process's monotonic clock. A `recorded` response
-has no new proof/capture requirement. The client sample supplies acknowledgement;
-an owner reply or handler-ready log alone does not prove receipt by the client.
-Reads retain HTTP samples but do not yet have joined query phases. The report's
-execution-owner and forwarded-write counts come from acknowledged writes only.
-`repository_routes` retains every entry-node route with its static application
-action and outcome. The archive-check and enrichment intervals may contain
-their own routes; only `repository.issue.create` supplies `command_route_us`.
-Preparation must match the exact acknowledged Cell, incarnation, mutation
-request, module and stable operation ID. Missing preparation or boundary events
-fail the current join.
-
-Issue, comment and label mutations read archive state inside the same SQLite
-transaction as their writes. Successful requests therefore avoid a separate
-`GetRepositoryLifecycle` invocation. Fresh mutations after archive return a
-durable rejection; an exact runtime request replay returns its recorded outcome
-before running the handler, including after recovery or unarchive. A new request
-after unarchive can proceed. Existing outcome tags retain their bytes; these
-seven commands use tag zero for `Archived`. Their source digest changes, so
-this is a new release descriptor, not proof of mixed-version rollout.
-
-For these routes, HTTP client-error responses still consult lifecycle policy
-to preserve the archive error's precedence over invalid input shipped in
-v1.2.4. Server errors, including unknown mutation outcomes, retain their original
-status. Other mutation families retain their pre-handler checks; Git and other
-external storage effects require separate ordering proof. Removing one routed
-query is verified by the public HTTP/mTLS fixture, but does not establish an
-improved throughput or latency limit.
-
-The fixture also races duplicate typed label commands against archive across
-four rounds, checks each decision against archive's durable commit sequence,
-then replays all 24 outcomes after owner loss. Exact receipts, accepted rows,
-absent rejected rows and the recovered authority root are checked with both
-memory storage and RustFS 1.0 GA. This bounded concurrency proof is separate
-from sustained load qualification on the Compose fleet.
-
-`action_traces.latency` summarizes each observed phase separately for `all`,
-`local`, `forwarded`, `fleet`, `object` and `recorded` writes. Fault reports add
-the same summaries within each before/during/after population. Every distribution
-retains its sample count; absent proof or capture observations are not zero-time
-measurements. `http_outside_invocation` subtracts the nested typed invocation
-from HTTP response-readiness time for each matched action on the entry node,
-then computes percentiles. This interval includes request-path work and is not
-a network-only estimate. The other phase distributions still overlap.
-
-Replay retained evidence from the repository root, with one `--node-log` for
-every participating node and a new output path. Use the collector revision
-that produced the evidence: older server logs lack the new boundary events
-and cannot qualify their timings with the current collector.
-
-```sh
-python3 -B crates/crab-http-server/deploy/cell-issue-fleet/action_traces.py \
-  --samples /path/to/load.samples.jsonl \
-  --node-log node-01=/path/to/load.traces/node-01.log \
-  --node-log node-02=/path/to/load.traces/node-02.log \
-  --node-log node-03=/path/to/load.traces/node-03.log \
-  --output /path/to/replayed-actions.jsonl
-python3 -B -W error::ResourceWarning -m unittest discover \
-  -s crates/crab-http-server/deploy/cell-issue-fleet -p 'test_*.py' -v
-```
-
-The replay command also writes `replayed-actions.summary.json` beside its
-joined JSONL. Both paths must be new. Retain the raw joined actions alongside
-the summary so phase populations and proof selection remain inspectable.
-
-This qualifier consumes the server's default text formatter. Keep logs intact;
-rotation, filtering, malformed fields or formatter changes must cause a failed
-join instead of a partial success. Logs and joined events are collected in the
-external load process and currently buffered in memory; the arrival ceiling
-bounds sample count, not total log bytes. Very long runs need a bounded streaming
-collector before its memory use can be considered qualified.
+Use the native event metrics, product HTTP logs, and durable process smoke test
+to attribute current runtime behavior. The
+[Cellar contract](CELLAR.md) describes the two durability settings and shutdown
+modes. Mixed-version rollout and protected cloud fault matrices remain unqualified.
 
 ### Keep metric cardinality bounded
 
@@ -772,18 +481,11 @@ Projection summaries include retained graph ordinals, including commits removed
 by force-push. Foreground revision resolution checks visibility before consulting
 those rows. Their presence never grants access to retained history.
 
-Projection reads and ingestion borrow the runtime-owned Cell under the same
-lifetime policy as collaboration requests. Completing a cold state query must
-not drain the actor and wait for a concurrent importer. Scheduler cleanup takes
-exclusive operation access only when it is immediately available; if another
-operation joined the activation, the bounded runtime retains ownership. Runtime
-pressure eviction and node shutdown close retained actors. Explicit migration
-draining still waits for exclusive access and completes its publication barrier.
-
-Schema migration 3 removes unconsumed Git commit fields and parent rows while
-preserving summary bytes and epoch membership. Earlier migration SQL and digests
-remain unchanged. Upgrade existing application Cells through release maintenance
-under the selected descriptor; do not rebuild Cells and lose collaboration data.
+Projection reads and ingestion use the same native repository Cell as
+collaboration. Cellar owns activation, retention, eviction, and shutdown.
+The canonical application schema stores commit summaries and epoch membership;
+it is created only during explicit repository initialization. Serving does not
+run schema migrations or recreate missing application state.
 The full Next.js idle/load gates still require qualification; focused projection
 tests do not establish production throughput.
 
@@ -1036,7 +738,6 @@ data_dir = "/var/lib/crab/cells"
 local_disk_limit_bytes = 34359738368
 peer_advertise = "https://node-1.internal.example:8789"
 failure_zone = "us-west-2a"
-failure_host = "worker-17"
 peer_tls_server_name = "node-1.internal.example"
 peer_certificate = "/run/secrets/crab-peer/tls.crt"
 peer_private_key = "/run/secrets/crab-peer/tls.key"
@@ -1147,8 +848,8 @@ the competing array on a conflict. Browser requests inherit the canonical Origin
 and CSRF checks used by every other unsafe repository API.
 
 Each changed CLI or browser replacement writes a catalog v3 membership audit
-event in the same commit. Version 2 catalogs remain readable, but the first
-write becomes v3; rolling back to a pre-v3 server afterward is unsupported.
+event in the same commit. Only version 3 catalogs and canonical relative audit
+references are accepted; there is no automatic catalog conversion.
 The bounded pending outbox flushes to
 `.crab/http-server/v1/audit/membership/` and is retried after interruption.
 There is no browser audit-history API yet.
@@ -1195,13 +896,10 @@ out of the identity provider. Configure an object-store lifecycle rule that
 deletes objects below `.crab/http-server/v1/auth/` after 24 hours. Active state
 expires within eight hours; the rule only collects consumed flows, expired
 sessions, and token records left after session invalidation.
-The identity-index migration cutoff at
-`.crab/http-server/v1/identity-index-migration.json` and Logout Token replay
-records under `.crab/http-server/v1/logout-replays/` intentionally live outside
-that lifecycle prefix. Keep the cutoff until rollout completes and retain replay
-records at least through their signed token expiry; clean them with an
-operator-controlled, expiry-aware job rather than applying the 24-hour auth
-rule to these coordination records.
+Logout Token replay records under `.crab/http-server/v1/logout-replays/` live
+outside that lifecycle prefix. Retain them through their signed expiry and clean
+them with an expiry-aware operator job. Identity-index markers and stored session
+fields are mandatory; unindexed or older session records require sign-in again.
 
 Register the provider's Back-Channel Logout URI as
 `https://git.example.com/auth/backchannel-logout` with
@@ -1214,9 +912,9 @@ the back-channel event, and a non-empty `sub`; it rejects `nonce` and
 `sid`-only tokens. The raw token is never logged or stored.
 
 Valid delivery revokes every durable browser session and derived Git token for
-the exact `(issuer, subject)` across replicas. The hashed identity-session index
-has an eight-hour compatibility window that also scans pre-index sessions; roll
-out all replicas inside that maximum session lifetime. Verify delivery by
+the exact `(issuer, subject)` across replicas. Revocation visits only the hashed
+identity-session index. Sessions without a matching marker are rejected and must
+sign in again. Verify delivery by
 checking that both a browser request and a Git credential fail on their next
 request. Without a delivered Logout Token, arbitrary provider-side revocation
 still does not invalidate an issued Crab session before expiry.
@@ -1673,7 +1371,7 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, moderation, edit history, activity feeds, and notifications remain unimplemented. Cell backup pin creation, verification, and same-bucket isolated-prefix restore are implemented; cross-provider export and complete product-root restore qualification remain pending.
+Discussion deletion, moderation, edit history, activity feeds, and notifications remain unimplemented. Native backup restore, cross-provider export, and complete product-root restore qualification remain pending.
 
 ## Commit statuses and required checks
 
@@ -1740,221 +1438,50 @@ Required checks bind to the pull request's exact current head. A new head starts
 
 ## Resource and lifecycle limits
 
-This table collects process and transport limits that otherwise span several route families.
+Product HTTP admission remains bounded. Cellar uses its bounded runtime defaults
+and a resident-cell limit derived from process memory and file descriptors.
+`cells capacity --json` reports the startup resource and admission envelope; it
+is not a throughput or production-scale qualification.
 
-| Boundary | Limit | Ownership |
-| --- | ---: | --- |
-| Interactive repository reads | 16 concurrent, 5 minutes, 4 GiB fetched/inflated, 8 MiB response | `server.rs` and `crab-remote-git` |
-| Collaboration handlers | 8 concurrent, 30s | `app.rs` and route middleware |
-| Git fetch, push, LFS, archives, and release assets | 4 concurrent across the deployment | Process-local fast-path semaphore plus renewable object-store CAS slots under `.crab/http-server/v1/admission` |
-| Foreground read-readiness publication | 2 repositories concurrently, 3-minute cooperative budget | `maintenance.rs` |
-| Background browse indexing/projection | One worker per repository, shared two-repository admission; cooperative shutdown drains the complete resumable pass | `maintenance.rs`; immutable builds retain progress instead of restarting on a short timeout |
-| Deep dependency integrity scrub | One renewable owner per deployment; 2 repositories concurrently, 12-minute cooperative budget each, hourly after an immediate first pass | `integrity.rs`; one CAS-protected aggregate report serves `/integrityz`, which remains excluded from `/readyz` |
-| OIDC callbacks | 8 concurrent, 10s per provider request | `auth.rs` |
-| Archive transfer | 10 minutes, 3 GiB encoded response | `archive.rs` |
-| Git receive | 30-minute cooperative budget, 8 GiB body | `receive.rs` |
-| Browser existing-object ref update | 30s | `receive.rs` |
-| LFS transfer | 5 minutes, 512 MiB object | `lfs.rs` and `crab-lfs` |
+`local_disk_limit_bytes` bounds Crab's staging envelope. Native cache usage is
+managed by Cellar; use a filesystem quota for a hard cache-volume bound. Staging
+still checks physical free space and accounts for retained transfer sessions.
 
-Handler completion and response-body completion are different lifecycle events. Archive, release-asset, Git, and LFS streams retain their own permits and cancellation guards until the body finishes or fails.
-
-Server shutdown follows this order:
-
-1. Stop accepting new work after Ctrl-C or `SIGTERM`
-2. Cancel request-scoped work
-3. Drain Axum connections
-4. Close and drain receive workers
-5. Release and drain deployment-wide transfer leases
-6. Drain retained maintenance jobs and lease cleanup
-7. Shut down the shared remote-read runtime
-
-Stateful publication futures are drained instead of aborted. This prevents a dropped handler from abandoning a marker attempt or releasing a GC fence before cleanup finishes.
+Normal termination drains HTTP and Git work, then stops the native node with
+`Preserve`. The private scale-down endpoint requests `Handoff`, which requires a
+successor. Transport stays alive through the native drain. Incomplete shutdown
+returns an error; it does not claim durable completion. See [CELLAR.md](CELLAR.md).
 
 ## Current verification
 
-Run focused checks from the repository root. Use a target directory unique to this checkout:
-
-```sh
-npm test --prefix packages/ui
-npm run typecheck --prefix packages/ui
-npm run format:check --prefix packages/ui
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-http-server-dev" \
-  cargo test -p crab-http-server --locked
-```
-
-Run the read-only live verifier against a revision with a parent and `README.md`:
-
-```sh
-python3 crates/crab-http-server/tests/verify_live.py \
-  --url http://127.0.0.1:8788 \
-  --repository your_team/your_project \
-  --source /path/to/read_only_source \
-  --revision 0123456789012345678901234567890123456789
-```
-
-For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a private Netscape-format cookie file. Never commit that file.
-
-To also exercise the actual process startup, graceful drain, and persisted
-repository reads after restart, use a stopped, bootstrapped deployment:
-
-```sh
-python3 crates/crab-http-server/tests/verify_process.py \
-  --server-binary "$CARGO_TARGET_DIR/release/crab-http-server" \
-  --config /path/to/server.toml --url http://127.0.0.1:8788 \
-  --output "$HOME/Workspace/http-process-proof" -- \
-  --repository your_team/your_project --source /path/to/read_only_source \
-  --revision 0123456789012345678901234567890123456789
-```
-
-The output directory must not already exist. Supply credentials through the
-environment, and keep logs and raw JSON evidence outside the repository.
-
-Run repeatable concurrent HTTP qualification with the Rust load generator:
-
-The [October 11 Next.js/RustFS receipt](../../crab/docs/benchmarks/http-capsule-nextjs-rustfs-20261011.md)
-records current-format correctness, startup/restart proof, endpoint latency,
-origin accounting, and the remaining historical-read, indexing, and bulk-receive
-performance gaps. Its higher-rate runs did not pass the capacity gate.
-
-The [enhancement delivery plan](../../crab/docs/architecture/http-server-enhancement-plan.md)
-defines the follow-up implementation slices, owning code, regression proof and
-acceptance gates for these gaps. Its unchecked slices are planned work.
-
-For durable command throughput, create a JSON template containing a top-level
-`"request_id":"{{request_id}}"`. Run mutations only against a disposable
-repository: the generator assigns a fresh UUIDv7 and creates real state for
-every request.
-
-```sh
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-load-generator" \
-  cargo run -p crab-http-server --release --example qualify_http_load --locked -- \
-  --base-url http://127.0.0.1:8788 \
-  --target 'refs=4@/api/repos/team/project/refs' \
-  --target 'commits=8@/api/repos/team/project/commits?rev=main&limit=20' \
-  --mutation 'issues=8@/api/repos/team/disposable-load/issues|/secure/new-issue.json' \
-  --aggregate-requests-per-second 1000 \
-  --duration-seconds 60 \
-  --warmup-seconds 5 \
-  > http-load.json
-```
-
-Each read or mutation target declares its own concurrency and all targets run together. The
-versioned JSON receipt includes the configured aggregate rate, its minimum
-successful-response count, successful responses, HTTP 429 admission
-rejections, unexpected responses, response bytes, throughput, and p50/p95/p99
-latency. A fixed-rate run fails qualification when it delivers less than 95%
-of the configured successful request count; admission rejections therefore do
-not masquerade as sustained target throughput. The generator fully consumes every body, bounds response bytes, checks
-`/livez` before and after traffic, and exits unsuccessfully on 5xx, unexpected
-non-429 status, transport/body-limit failure, or unhealthy liveness. Use
-`--header-file /secure/load-headers` for one private HTTP header per line; the
-tool neither prints nor stores those values.
-For direct-node qualification through a loopback port-forward, pass
-`--authority git.example.com`. The option accepts only one DNS name or IP
-address without a port and changes the HTTP Host header without changing the
-connection destination.
+| Proof | Executable surface |
+| --- | --- |
+| Native restart, duplicate identity, archive/write ordering | `cells::native_tests` |
+| Signed peer routing over mTLS, owner handoff | `server::peer_e2e_tests` |
+| Real RustFS object publication and handoff | Ignored `rustfs_cellar_routes_over_mutual_tls_and_recovers_after_handoff` test with isolated test settings |
+| HTTP collaboration, authorization, CSRF, replay | `server::auth_tests` fixtures use actual native nodes |
+| Missing schema and membership installation | `server::auth_tests::members` |
+| Retained staging capacity and restart | `local_disk::tests` |
+| Creation, Git push, issue replay, process restart | `tests/qualify_cellar_process.py` |
 
 ### Read the executable evidence map
 
-| Contract | Primary source | Executable evidence |
-| --- | --- | --- |
-| Route composition, Host checks, request correlation, readiness, metrics, and shutdown | `src/server.rs`, `src/metrics.rs` | Server, metrics, authentication, and maintenance tests |
-| OIDC, membership, sessions, tokens, CSRF, and back-channel logout | `src/auth.rs`, `src/members.rs` | `src/auth_tests.rs`, `src/auth_tests/members.rs`, `src/auth_tests/backchannel_logout.rs`, and `src/auth_tests/git_tokens.rs` |
-| Repository reads and raw paths | `src/api.rs` | `tests/verify_live.py` and frontend navigation tests |
-| HTTP capacity and overload behavior | server admission and public routes | `examples/qualify_http_load/main.rs`, its self-hosted tests, and retained JSON receipts |
-| Git protocol version 2 fetch | `src/git.rs` | `tests/verify_git_transport.py` and protocol CI |
-| Native receive, changed-path validation, and recovery | `src/receive.rs`, `src/receive/publish.rs`, `crab-git::receive_plan` | `src/receive_tests.rs` and `src/receive_fault_tests.rs` |
-| LFS transfer, range-resume, file-lock, and authoritative receive contracts | `src/lfs.rs`, `src/receive/publish.rs` | `src/lfs_tests.rs`, `src/receive_tests.rs`, `src/auth_tests/git_tokens.rs`, `tests/qualify_lfs_range_resume.sh`, and `tests/qualify_lfs_locking.sh` |
-| Browser Git writes and settings | `src/contents.rs`, `src/branches.rs`, `src/members.rs` | `src/auth_tests/branches.rs`, membership API tests, and browser settings tests |
-| Issues, labels, and assignees | `src/issues.rs`, `src/cells/repository.rs`, `src/cells/router.rs`, `src/labels.rs`, `src/assignees.rs` | Scoped authenticated Cell publication and source-loss tests |
-| Pulls, reviews, checks, and merge | `src/pulls/`, `src/statuses.rs`, `src/checks.rs` | `src/pulls_tests.rs` and `src/auth_tests/pulls.rs` |
-| Releases and assets | `src/releases.rs` | `src/auth_tests/releases.rs` |
-| Container and multi-cloud deployment contracts | `deploy/Dockerfile`, `deploy/helm/crab-http-server`, `deploy/terraform` | `.github/workflows/http-server-container.yml`, `.github/workflows/http-server-release.yml`, `.github/workflows/http-server-kubernetes-live.yml`, the Helm storage test, and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` |
+The architecture workflow runs native recovery and RustFS handoff proof plus the
+real-process smoke test. The smoke test writes a JSON receipt only after all
+assertions pass and keeps diagnostic logs locally. Historical runtime receipts cannot qualify this implementation.
 
 ### Understand what has been qualified
 
-Current local and CI evidence includes:
-
-- Kubernetes-scale protocol version 2 discovery, partial clone, deepening, large request batches, path search, history, diff, and deep blame
-- Exact commit, tree, blob, archive, LFS, branch, tag, release, pull, merge, status, and check data compared with independent Git clients
-- Native initial pushes, fast-forward updates, branch and tag lifecycle, atomic rejection, fault injection, response loss, cooperative restart recovery, and container `SIGKILL` during an in-flight push
-- OIDC redirects and signed-token validation, key rotation, membership isolation, token scope, identity revocation, Origin checks, CSRF rejection, and back-channel logout validation
-- Browser light, dark, desktop, narrow-screen, keyboard, conflict, and automated Web Content Accessibility Guidelines (WCAG) A/AA checks
-- Container build, non-root identity, stop signal, health command, storage-aware repository readiness, private metrics scrape, Prometheus-validated baseline alerts, runtime inspection, strict Helm lint, and Kubernetes schema validation
-- Complete-root RustFS cold copy into an isolated bucket, exact key/size comparison, byte hashing of every object including shared `.crab/` state, and independent restored Git, issue, and LFS reads. The source forces an atomic branch-and-annotated-tag publication and requires the v2 root, both ref heads, capsule, activation record, committed marker, and LFS body while rejecting v1 root authority; the restored clone matches both object IDs and passes strict Git fsck
-- LFS partial download and byte-identical range resume through the Compose Caddy/server/RustFS stack, including safe full-response fallback for multiple ranges
-- Stock Git LFS lock, list, verify-on-push, and unlock against the Compose Caddy/server/RustFS stack
-- Native Git rejection when another subject owns a changed path, including a change-and-revert history whose final tree matches the original
-
-These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The container crash test proves one in-flight native-push boundary and accepts only the exact old or new ref before a byte-identical retry or clone. The cold-restore test proves the complete fixture root can move to an isolated object prefix without flattening its key namespace and remain readable through independent protocols. In-memory multi-instance tests prove that independent server admission gates share and reuse fixed storage slots. These tests do not establish every crash phase, provider-scale performance, version-selected cloud recovery, or complete manual accessibility.
-
-The packaged Kubernetes gate makes live evidence repeatable, but its existence
-is not provider qualification. Only a successful EKS, GKE, or AKS run and its
-workflow-attested JSON receipt establish that release's cross-replica rollout
-result. The gate also launches a short-lived Restricted peer pod and fails if
-the cluster CNI permits it to reach the private management listener. The
-protected workflow first verifies the deployed image provenance against the
-exact server release tag and source commit. It now derives the expected image
-and chart from the tag's signed release record. The live gate also rejects a
-mismatched installed chart version or missing provider-native workload identity
-injection on either the original or replacement pods.
-
-The chart's disruption budget protects healthy capacity with `minAvailable`
-and marks unhealthy pods `AlwaysAllow` for eviction. This preserves voluntary
-availability without letting a permanently unready pod block a node drain.
+Local proof covers actual native nodes and an isolated RustFS instance, including
+successful Git push and state visible after restart. It does not prove live
+Azure/GCS failure behavior, production scale, backup restore, or mixed-version
+upgrades. Container CI runs native process smoke; release publication remains disabled
+until the broader native qualification contract is implemented and verified.
 
 ### Keep qualification evidence honest
 
-The local [reader and rollout runners](deploy/cell-issue-fleet/README.md)
-accept `--rustfs-port` alongside `--gateway-port` and `--node-port-base` to
-isolate simultaneous Compose projects. Both require
-`--skip-build --runtime-source <commit>` for an existing image; the report
-records the image source separately from the committed runner source.
-The drained fleet-to-object transition updates node configuration while
-preserving the Compose image digest, release identity and provider endpoint.
-
-Use the following interpretation:
-
-| Evidence | What it proves | What it does not prove |
-| --- | --- | --- |
-| Unit test | Local contract and rejection behavior | HTTP composition or real storage |
-| In-memory HTTP test | Routing, authorization, and response semantics | Provider behavior or restart durability |
-| RustFS integration | Real object-store persistence and independent-client result | Production load, region failure, or Internet latency |
-| Browser regression | Rendered behavior and automated accessibility rules | Storage durability or manual assistive technology |
-| Container CI | Reproducible image/runtime metadata, one in-flight `SIGKILL` outcome, and one isolated complete-root cold restore | Cloud orchestration, version-selected provider recovery, every crash phase, or upgrade safety |
-
-The Compose cluster qualifier requires Bash, Docker Compose, curl, jq, and
-Python 3. Its recovery-work counters describe the surviving processes during
-each fault interval. The recovery claimant can differ from the Cell's elected
-successor: sealing a failed node log authorizes subsequent ownership election.
-The first owner-loss interval therefore samples every running survivor; the
-replacement-follower and fallback intervals each leave one eligible process.
-Each process is compared with its own pre-fault snapshot before deltas are
-summed. Missing metrics, counter resets, or a changed container boot fail the
-gate. Raw snapshots remain in `metrics.recovery` in the receipt. Aggregate work
-can include concurrent recovery attempts; exact recovered data and serving
-ownership are proved separately by the existing control and HTTP assertions.
-
-For the first fault, follower selection uses the active log sampled after the
-follower-only write. A fully covered startup log can be replaced before that
-write, so its membership is diagnostic evidence only. The collector requires
-the Cell owner and epoch to remain unchanged across the write, then checks the
-acknowledging log's epoch and membership again immediately before the kill.
-The receipt validator requires that active log and binds the successor and
-selection evidence to its members. The second fault already checks its sole
-replacement member after the write; the object-covered fallback separately
-requires a successor outside the failed log's members. That fallback requires
-the failed log to remain inactive: an active log needs a complete follower
-witness even when all its bytes are object-covered. The Compose qualifier
-therefore expires the original members before issuing the fallback mutation and
-verifies the mutation does not activate fleet durability.
-
-The deterministic evidence tests run without Docker:
-
-```sh
-python3 -B -m unittest discover \
-  -s crates/crab-http-server/tests -p test_recovery_work.py -v
-```
+Bind future release evidence to the exact source, image, SDK version, and provider
+configuration exercised. Qualification must exercise the native implementation.
 
 ## Completion requirements
 
@@ -1962,7 +1489,7 @@ The server is complete only when a real account can perform the workflow and obs
 
 | Surface | Required evidence | Status |
 | --- | --- | --- |
-| Multi-replica deployment | One Rust binary, durable CAS catalog and identity state, private management probes, graceful drain, hardened Helm profile, reproducible container, and portable cross-replica gate | Implemented with a protected GitHub OIDC evidence workflow; each provider release still requires a successful recorded live run |
+| Multi-replica deployment | One Rust binary, durable CAS catalog and identity state, private management probes, graceful drain, hardened Helm profile, reproducible container, and portable cross-replica gate | Native mTLS routing and handoff tested locally; protected provider qualification must be migrated and rerun |
 | Repository browsing | Refs, byte-preserving paths, history, files, blame, downloads, freshness, and empty/error states against real repositories | In progress |
 | Diff and tree interface | Pierre Trees and Diffs, correct modes and binary handling, bounded large-repository behavior, and keyboard navigation | In progress |
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
@@ -1970,7 +1497,7 @@ The server is complete only when a real account can perform the workflow and obs
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
 | Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; activity, moderation, history, and notifications remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
-| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Kubernetes controls, one RustFS in-flight `SIGKILL` path, one complete-root cold restore, verified Cell backup pins and same-bucket isolated restore, bounded Prometheus metrics, request correlation, and runbook implemented; cross-provider export and broader live qualification remain |
+| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Native process restart and owner handoff tested; native metrics and shutdown wiring implemented. Backup restore, crash matrices, upgrades, and provider qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |
 
 ### Track known operational gaps
@@ -1984,7 +1511,7 @@ The remaining production gaps include:
 - Production throughput and provider-level admission qualification
 - Membership audit history and immediate arbitrary provider revocation when no Logout Token is delivered
 - Repository creation and adoption exist in the CLI; browser import remains
-- Version-selected complete product-root restore qualification for Git, shared identity state, Cell pins, immutable LTX graphs, and release assets across providers
+- Version-selected complete product-root restore qualification for Git, shared identity state, native Cellar metadata, immutable LTX graphs, and release assets across providers
 - Manual assistive-technology audits and broader workflow coverage
 - Successful EKS, GKE, and AKS live-workflow receipts; rollback, alert-tuning, and disaster-recovery qualification
 - First tagged server image/chart publication and registry-attestation verification

@@ -2,19 +2,17 @@ use super::*;
 
 pub(crate) struct UpdateIssue;
 
-impl Command for UpdateIssue {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for UpdateIssue {
     const ID: u32 = 3;
-    const CODEC_VERSION: u32 = 1;
     type Input = UpdateIssueInput;
     type Output = UpdateIssueOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
-            return Ok(CommandResult::Rejected(UpdateIssueOutcome::Archived));
+            return Ok(MutationResult::Rejected(UpdateIssueOutcome::Archived));
         }
         validate_number(input.number)?;
         validate_number(input.version)?;
@@ -25,7 +23,7 @@ impl Command for UpdateIssue {
             && input.label_ids.is_none()
             && input.assignee_subjects.is_none()
         {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "repository issue update has no changes",
             ));
         }
@@ -36,7 +34,7 @@ impl Command for UpdateIssue {
             validate_body(body, false)?;
         }
         if input.state.is_some_and(|state| state > 1) {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "repository issue state is invalid",
             ));
         }
@@ -51,10 +49,10 @@ impl Command for UpdateIssue {
                             vec![integer(*label)?],
                         ))
                     })
-                    .collect::<cellule_runtime::Result<Vec<_>>>()?;
+                    .collect::<crate::cells::Result<Vec<_>>>()?;
                 let existing = context.sql(&SqlBatch { statements })?;
                 if existing.iter().any(|result| result.rows.is_empty()) {
-                    return Ok(CommandResult::Rejected(UpdateIssueOutcome::LabelInvalid));
+                    return Ok(MutationResult::Rejected(UpdateIssueOutcome::LabelInvalid));
                 }
             }
         }
@@ -69,23 +67,23 @@ impl Command for UpdateIssue {
             )],
         })?;
         let Some(row) = current[0].rows.first() else {
-            return Ok(CommandResult::Rejected(UpdateIssueOutcome::NotFound));
+            return Ok(MutationResult::Rejected(UpdateIssueOutcome::NotFound));
         };
         let mut issue = issue_from_row(row)?;
         let author_change = input.title.is_some() || input.body.is_some() || input.state.is_some();
         if author_change && !same_author(&issue.author, &input.actor) {
-            return Ok(CommandResult::Rejected(UpdateIssueOutcome::Forbidden));
+            return Ok(MutationResult::Rejected(UpdateIssueOutcome::Forbidden));
         }
         if input.label_ids.is_some() && !input.can_manage_metadata {
-            return Ok(CommandResult::Rejected(UpdateIssueOutcome::LabelForbidden));
+            return Ok(MutationResult::Rejected(UpdateIssueOutcome::LabelForbidden));
         }
         if input.assignee_subjects.is_some() && !input.can_manage_metadata {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 UpdateIssueOutcome::AssigneeForbidden,
             ));
         }
         if issue.version != input.version {
-            return Ok(CommandResult::Rejected(UpdateIssueOutcome::Conflict));
+            return Ok(MutationResult::Rejected(UpdateIssueOutcome::Conflict));
         }
 
         if let Some(value) = input.title {
@@ -107,7 +105,7 @@ impl Command for UpdateIssue {
             .version
             .checked_add(1)
             .filter(|version| *version <= MAX_NUMBER)
-            .ok_or(cellule_runtime::Error::Command(
+            .ok_or(crate::cells::Error::Invalid(
                 "repository issue version is exhausted",
             ))?;
         issue.updated_at_ms = timestamp(context.now_ms())?;
@@ -128,10 +126,10 @@ impl Command for UpdateIssue {
             )],
         })?;
         if updated[0].rows_affected != 1 {
-            return Ok(CommandResult::Rejected(UpdateIssueOutcome::Conflict));
+            return Ok(MutationResult::Rejected(UpdateIssueOutcome::Conflict));
         }
         advance_revision(context)?;
-        Ok(CommandResult::Success(UpdateIssueOutcome::Updated(
+        Ok(MutationResult::Success(UpdateIssueOutcome::Updated(
             Box::new(issue),
         )))
     }
@@ -139,19 +137,17 @@ impl Command for UpdateIssue {
 
 pub(crate) struct UpdateComment;
 
-impl Command for UpdateComment {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for UpdateComment {
     const ID: u32 = 4;
-    const CODEC_VERSION: u32 = 1;
     type Input = UpdateCommentInput;
     type Output = UpdateCommentOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
-            return Ok(CommandResult::Rejected(UpdateCommentOutcome::Archived));
+            return Ok(MutationResult::Rejected(UpdateCommentOutcome::Archived));
         }
         validate_number(input.key.issue)?;
         validate_number(input.key.number)?;
@@ -165,21 +161,21 @@ impl Command for UpdateComment {
             )],
         })?;
         let Some(row) = current[0].rows.first() else {
-            return Ok(CommandResult::Rejected(UpdateCommentOutcome::NotFound));
+            return Ok(MutationResult::Rejected(UpdateCommentOutcome::NotFound));
         };
         let mut comment = comment_from_row(row)?;
         if !same_author(&comment.author, &input.actor) {
-            return Ok(CommandResult::Rejected(UpdateCommentOutcome::Forbidden));
+            return Ok(MutationResult::Rejected(UpdateCommentOutcome::Forbidden));
         }
         if comment.version != input.version {
-            return Ok(CommandResult::Rejected(UpdateCommentOutcome::Conflict));
+            return Ok(MutationResult::Rejected(UpdateCommentOutcome::Conflict));
         }
         comment.body = input.body;
         comment.version = comment
             .version
             .checked_add(1)
             .filter(|version| *version <= MAX_NUMBER)
-            .ok_or(cellule_runtime::Error::Command(
+            .ok_or(crate::cells::Error::Invalid(
                 "repository comment version is exhausted",
             ))?;
         comment.updated_at_ms = timestamp(context.now_ms())?;
@@ -197,10 +193,10 @@ impl Command for UpdateComment {
             )],
         })?;
         if updated[0].rows_affected != 1 {
-            return Ok(CommandResult::Rejected(UpdateCommentOutcome::Conflict));
+            return Ok(MutationResult::Rejected(UpdateCommentOutcome::Conflict));
         }
         advance_revision(context)?;
-        Ok(CommandResult::Success(UpdateCommentOutcome::Updated(
+        Ok(MutationResult::Success(UpdateCommentOutcome::Updated(
             comment,
         )))
     }
@@ -208,20 +204,18 @@ impl Command for UpdateComment {
 
 pub(crate) struct ListIssues;
 
-impl Query for ListIssues {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Read for ListIssues {
     const ID: u32 = 3;
-    const CODEC_VERSION: u32 = 1;
     type Input = ListIssuesInput;
     type Output = IssuePage;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         validate_list(input.before, input.limit)?;
         if input.state > 2 {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "repository issue filter is invalid",
             ));
         }
@@ -277,17 +271,15 @@ impl Query for ListIssues {
 
 pub(crate) struct ListComments;
 
-impl Query for ListComments {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Read for ListComments {
     const ID: u32 = 4;
-    const CODEC_VERSION: u32 = 1;
     type Input = ListCommentsInput;
     type Output = CommentPage;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         validate_number(input.issue)?;
         validate_list(input.before, input.limit)?;
         let exists = context.sql(&SqlBatch {
@@ -385,19 +377,17 @@ impl From<IssueRecord> for IssueSummary {
 
 pub(crate) struct CreateLabel;
 
-impl Command for CreateLabel {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for CreateLabel {
     const ID: u32 = 8;
-    const CODEC_VERSION: u32 = 1;
     type Input = CreateLabelInput;
     type Output = CreateLabelOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
-            return Ok(CommandResult::Rejected(CreateLabelOutcome::Archived));
+            return Ok(MutationResult::Rejected(CreateLabelOutcome::Archived));
         }
         validate_author(&input.author)?;
         validate_label_fields(&input.name, &input.color, input.description.as_deref())?;
@@ -410,7 +400,9 @@ impl Command for CreateLabel {
         })?;
         if let Some(row) = reservation[0].rows.first() {
             if result_blob(row, 0)? != payload_digest.as_bytes() {
-                return Ok(CommandResult::Rejected(CreateLabelOutcome::RequestConflict));
+                return Ok(MutationResult::Rejected(
+                    CreateLabelOutcome::RequestConflict,
+                ));
             }
             let number = result_u64_from_row(row, 1)?;
             let current = context.sql(&SqlBatch {
@@ -419,16 +411,13 @@ impl Command for CreateLabel {
                     vec![integer(number)?],
                 )],
             })?;
-            let label = current[0]
-                .rows
-                .first()
-                .ok_or(cellule_runtime::Error::Command(
-                    "repository label submission has no label row",
-                ))?;
+            let label = current[0].rows.first().ok_or(crate::cells::Error::Invalid(
+                "repository label submission has no label row",
+            ))?;
             if !matches!(label.get(7), Some(SqlValue::Null)) {
-                return Ok(CommandResult::Rejected(CreateLabelOutcome::NotFound));
+                return Ok(MutationResult::Rejected(CreateLabelOutcome::NotFound));
             }
-            return Ok(CommandResult::Success(CreateLabelOutcome::Created(
+            return Ok(MutationResult::Success(CreateLabelOutcome::Created(
                 label_from_row(label)?,
             )));
         }
@@ -441,7 +430,7 @@ impl Command for CreateLabel {
             )],
         })?;
         if !conflict[0].rows.is_empty() {
-            return Ok(CommandResult::Rejected(CreateLabelOutcome::NameConflict));
+            return Ok(MutationResult::Rejected(CreateLabelOutcome::NameConflict));
         }
         let sequence = context.sql(&SqlBatch {
             statements: vec![
@@ -456,7 +445,7 @@ impl Command for CreateLabel {
             ],
         })?;
         if sequence[0].rows_affected != 1 {
-            return Ok(CommandResult::Rejected(CreateLabelOutcome::LimitReached));
+            return Ok(MutationResult::Rejected(CreateLabelOutcome::LimitReached));
         }
         let now = timestamp(context.now_ms())?;
         let label = LabelRecord {
@@ -497,28 +486,26 @@ impl Command for CreateLabel {
             ],
         })?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(CreateLabelOutcome::Created(label)))
+        Ok(MutationResult::Success(CreateLabelOutcome::Created(label)))
     }
 }
 
 pub(crate) struct UpdateLabel;
 
-impl Command for UpdateLabel {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for UpdateLabel {
     const ID: u32 = 9;
-    const CODEC_VERSION: u32 = 1;
     type Input = UpdateLabelInput;
     type Output = UpdateLabelOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
-            return Ok(CommandResult::Rejected(UpdateLabelOutcome::Archived));
+            return Ok(MutationResult::Rejected(UpdateLabelOutcome::Archived));
         }
         if input.number == 0 || input.number > MAX_REPOSITORY_LABELS {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "repository label number is invalid",
             ));
         }
@@ -531,11 +518,11 @@ impl Command for UpdateLabel {
             )],
         })?;
         let Some(row) = current[0].rows.first() else {
-            return Ok(CommandResult::Rejected(UpdateLabelOutcome::NotFound));
+            return Ok(MutationResult::Rejected(UpdateLabelOutcome::NotFound));
         };
         let mut label = label_from_row(row)?;
         if label.version != input.version {
-            return Ok(CommandResult::Rejected(UpdateLabelOutcome::Conflict));
+            return Ok(MutationResult::Rejected(UpdateLabelOutcome::Conflict));
         }
         let name_key = input.name.to_lowercase();
         let conflict = context.sql(&SqlBatch {
@@ -545,7 +532,7 @@ impl Command for UpdateLabel {
             )],
         })?;
         if !conflict[0].rows.is_empty() {
-            return Ok(CommandResult::Rejected(UpdateLabelOutcome::NameConflict));
+            return Ok(MutationResult::Rejected(UpdateLabelOutcome::NameConflict));
         }
         label.name = input.name;
         label.color = input.color;
@@ -554,7 +541,7 @@ impl Command for UpdateLabel {
             .version
             .checked_add(1)
             .filter(|version| *version <= MAX_NUMBER)
-            .ok_or(cellule_runtime::Error::Command(
+            .ok_or(crate::cells::Error::Invalid(
                 "repository label version is exhausted",
             ))?;
         label.updated_at_ms = timestamp(context.now_ms())?;
@@ -577,31 +564,29 @@ impl Command for UpdateLabel {
             )],
         })?;
         if updated[0].rows_affected != 1 {
-            return Ok(CommandResult::Rejected(UpdateLabelOutcome::Conflict));
+            return Ok(MutationResult::Rejected(UpdateLabelOutcome::Conflict));
         }
         advance_revision(context)?;
-        Ok(CommandResult::Success(UpdateLabelOutcome::Updated(label)))
+        Ok(MutationResult::Success(UpdateLabelOutcome::Updated(label)))
     }
 }
 
 pub(crate) struct DeleteLabel;
 
-impl Command for DeleteLabel {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for DeleteLabel {
     const ID: u32 = 10;
-    const CODEC_VERSION: u32 = 1;
     type Input = DeleteLabelInput;
     type Output = DeleteLabelOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
-            return Ok(CommandResult::Rejected(DeleteLabelOutcome::Archived));
+            return Ok(MutationResult::Rejected(DeleteLabelOutcome::Archived));
         }
         if input.number == 0 || input.number > MAX_REPOSITORY_LABELS {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "repository label number is invalid",
             ));
         }
@@ -613,17 +598,17 @@ impl Command for DeleteLabel {
             )],
         })?;
         let Some(row) = current[0].rows.first() else {
-            return Ok(CommandResult::Rejected(DeleteLabelOutcome::NotFound));
+            return Ok(MutationResult::Rejected(DeleteLabelOutcome::NotFound));
         };
         if let Some(SqlValue::Integer(deleted)) = row.get(1) {
             return if u64::try_from(*deleted).ok() == Some(input.version) {
-                Ok(CommandResult::Success(DeleteLabelOutcome::Deleted))
+                Ok(MutationResult::Success(DeleteLabelOutcome::Deleted))
             } else {
-                Ok(CommandResult::Rejected(DeleteLabelOutcome::NotFound))
+                Ok(MutationResult::Rejected(DeleteLabelOutcome::NotFound))
             };
         }
         if result_u64_from_row(row, 0)? != input.version {
-            return Ok(CommandResult::Rejected(DeleteLabelOutcome::Conflict));
+            return Ok(MutationResult::Rejected(DeleteLabelOutcome::Conflict));
         }
         let deleted = context.sql(&SqlBatch {
             statements: vec![statement(
@@ -636,26 +621,24 @@ impl Command for DeleteLabel {
             )],
         })?;
         if deleted[0].rows_affected != 1 {
-            return Ok(CommandResult::Rejected(DeleteLabelOutcome::Conflict));
+            return Ok(MutationResult::Rejected(DeleteLabelOutcome::Conflict));
         }
         advance_revision(context)?;
-        Ok(CommandResult::Success(DeleteLabelOutcome::Deleted))
+        Ok(MutationResult::Success(DeleteLabelOutcome::Deleted))
     }
 }
 
 pub(crate) struct ListLabels;
 
-impl Query for ListLabels {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Read for ListLabels {
     const ID: u32 = 6;
-    const CODEC_VERSION: u32 = 1;
     type Input = ();
     type Output = LabelCatalog;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         (): Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
                 "SELECT number, name, color, description, version, created_at_ms, updated_at_ms FROM repository_labels WHERE deleted_version IS NULL ORDER BY name_key, number",
@@ -663,7 +646,7 @@ impl Query for ListLabels {
             )],
         })?;
         if result[0].rows.len() > MAX_REPOSITORY_LABELS as usize {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "repository label catalog exceeds its bound",
             ));
         }
@@ -671,24 +654,22 @@ impl Query for ListLabels {
             .rows
             .iter()
             .map(|row| label_from_row(row))
-            .collect::<cellule_runtime::Result<Vec<_>>>()?;
+            .collect::<crate::cells::Result<Vec<_>>>()?;
         Ok(LabelCatalog { labels })
     }
 }
 
 pub(crate) struct CreateCommitStatus;
 
-impl Command for CreateCommitStatus {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for CreateCommitStatus {
     const ID: u32 = 11;
-    const CODEC_VERSION: u32 = 1;
     type Input = CreateCommitStatusInput;
     type Output = CreateCommitStatusOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_author(&input.author)?;
         validate_status_fields(
             &input.oid,
@@ -709,18 +690,18 @@ impl Command for CreateCommitStatus {
         })?;
         if let Some(row) = existing[0].rows.first() {
             if result_blob(row, 0)? != payload_digest.as_bytes() {
-                return Ok(CommandResult::Rejected(
+                return Ok(MutationResult::Rejected(
                     CreateCommitStatusOutcome::RequestConflict,
                 ));
             }
             let status = status_from_row(&row[1..12])?;
-            return Ok(CommandResult::Success(CreateCommitStatusOutcome::Created(
+            return Ok(MutationResult::Success(CreateCommitStatusOutcome::Created(
                 Box::new(status),
             )));
         }
 
         if !status_context_available(context, &input.oid, &input.context)? {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 CreateCommitStatusOutcome::ContextLimit,
             ));
         }
@@ -737,7 +718,7 @@ impl Command for CreateCommitStatus {
             ],
         })?;
         if sequence[0].rows_affected != 1 {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 CreateCommitStatusOutcome::SubmissionLimit,
             ));
         }
@@ -780,7 +761,7 @@ impl Command for CreateCommitStatus {
             )],
         })?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(CreateCommitStatusOutcome::Created(
+        Ok(MutationResult::Success(CreateCommitStatusOutcome::Created(
             Box::new(status),
         )))
     }
@@ -788,17 +769,15 @@ impl Command for CreateCommitStatus {
 
 pub(crate) struct ListCommitStatuses;
 
-impl Query for ListCommitStatuses {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Read for ListCommitStatuses {
     const ID: u32 = 7;
-    const CODEC_VERSION: u32 = 1;
     type Input = String;
     type Output = CommitStatusCatalog;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         oid: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         validate_status_fields(&oid, "status", 0, None, None)?;
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
@@ -807,7 +786,7 @@ impl Query for ListCommitStatuses {
             )],
         })?;
         if result[0].rows.len() > MAX_STATUS_SUBMISSIONS as usize {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "repository commit status catalog exceeds its bound",
             ));
         }
@@ -822,7 +801,7 @@ impl Query for ListCommitStatuses {
             previous = Some(key);
         }
         if statuses.len() > MAX_STATUS_CONTEXTS as usize {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "repository commit status contexts exceed their bound",
             ));
         }
@@ -832,17 +811,15 @@ impl Query for ListCommitStatuses {
 
 pub(crate) struct GetCommitStatusSubmission;
 
-impl Query for GetCommitStatusSubmission {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Read for GetCommitStatusSubmission {
     const ID: u32 = 8;
-    const CODEC_VERSION: u32 = 1;
     type Input = CommitStatusSubmissionKey;
     type Output = Option<CommitStatusRecord>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         key: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         validate_status_fields(&key.oid, "status", 0, None, None)?;
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
@@ -862,10 +839,10 @@ impl Query for GetCommitStatusSubmission {
 }
 
 fn status_context_available(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     oid: &str,
     status_context: &str,
-) -> cellule_runtime::Result<bool> {
+) -> crate::cells::Result<bool> {
     let context_key = status_context.to_lowercase();
     let result = context.sql(&SqlBatch {
         statements: vec![

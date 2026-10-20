@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Instant};
 
+use crate::cells::MutationIdentity;
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
@@ -8,9 +9,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use cellule_runtime::cell::executor::MutationIdentity;
-use cellule_runtime::client::{Committed, InvocationError, Observed, Receipt};
-use cellule_runtime::identity::{IncarnationId, RequestId};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -19,18 +17,15 @@ use crate::{
     app::{Error, Result, actor, body, number, repository, submission, title},
     assignees::{self, Assignee},
     auth::{Identity, Principal},
-    cells::{
-        RepositoryCell,
-        repository::{
-            CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
-            CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment,
-            GetIssueDetail, IssueRecord, IssueSummary, ListComments, ListCommentsInput, ListIssues,
-            ListIssuesInput, RepositoryAuthor, UpdateComment, UpdateCommentInput,
-            UpdateCommentOutcome, UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
-        },
+    cells::repository::{
+        CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
+        CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment,
+        GetIssueDetail, IssueRecord, IssueSummary, ListComments, ListCommentsInput, ListIssues,
+        ListIssuesInput, RepositoryAuthor, UpdateComment, UpdateCommentInput, UpdateCommentOutcome,
+        UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
     },
     labels::{self, Label},
-    server::{Repository, Server},
+    server::Server,
 };
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
@@ -197,8 +192,8 @@ async fn list(
     let author = actor(&principal)?;
     let assignees = assignees::available(&repo, &author);
     let can_manage_metadata = principal.can_write(&repo.config);
-    let routed = route(&server, &repo, &author, "repository.read").await?;
-    let page = query_output(
+    let routed = crate::app::repository_cell(&server, &repo)?;
+    let page = crate::app::query_output(
         routed
             .client
             .query::<ListIssues>(
@@ -216,7 +211,7 @@ async fn list(
     let labels = if page.items.iter().all(|issue| issue.label_ids.is_empty()) {
         vec![]
     } else {
-        labels::catalog(&server, &repo, &author).await?
+        labels::catalog(&server, &repo).await?
     };
     let items = page
         .items
@@ -245,8 +240,8 @@ async fn create(
     let author = actor(&principal)?;
     let title = title(&input.title)?;
     body(&input.body, false)?;
-    let routed = route(&server, &repo, &author, "repository.issue.create").await?;
-    let output = command_output(
+    let routed = crate::app::repository_cell(&server, &repo)?;
+    let output = crate::app::command_output(
         routed
             .client
             .command::<CreateIssue>(
@@ -272,7 +267,7 @@ async fn create(
     let labels = if issue.label_ids.is_empty() {
         vec![]
     } else {
-        labels::catalog(&server, &repo, &author).await?
+        labels::catalog(&server, &repo).await?
     };
     let assignees = assignees::available(&repo, &author);
     let response = (
@@ -310,70 +305,24 @@ async fn detail(
 ) -> Result<Response> {
     let repo = repository(&server, &principal, &(owner, name))?;
     let author = actor(&principal)?;
-    let (issue, receipt, reader_node, labels) = match params.read.as_deref() {
-        None | Some("owner") => {
-            if params.after_incarnation.is_some() || params.after_sequence.is_some() {
-                return Err(Error::Invalid("Replica receipt requires read=replica"));
-            }
-            let routed = route(&server, &repo, &author, "repository.read").await?;
-            let issue = query_output(
-                routed
-                    .client
-                    .query::<GetIssueDetail>(&routed.target, None, number(id)?)
-                    .await,
-            )?;
-            (issue.issue, None, None, issue.labels.labels)
-        }
-        Some("replica") => {
-            let router = server.repository_cells().ok_or(Error::CellUnavailable)?;
-            let minimum = match (params.after_incarnation.as_deref(), params.after_sequence) {
-                (None, None) => None,
-                (Some(incarnation), Some(commit_sequence)) => {
-                    if incarnation.len() != 32
-                        || !incarnation
-                            .bytes()
-                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                    {
-                        return Err(Error::Invalid("Invalid replica receipt incarnation"));
-                    }
-                    let bytes = u128::from_str_radix(incarnation, 16)
-                        .map_err(|_| Error::Invalid("Invalid replica receipt incarnation"))?
-                        .to_be_bytes();
-                    Some(Receipt {
-                        cell: router
-                            .repository_target(repo.id)
-                            .map_err(Error::Cell)?
-                            .cell_id(),
-                        incarnation: IncarnationId::from_bytes(bytes),
-                        commit_sequence,
-                    })
-                }
-                _ => {
-                    return Err(Error::Invalid(
-                        "Replica receipt requires incarnation and sequence",
-                    ));
-                }
-            };
-            let local = server
-                .peer_receiver()
-                .and_then(|receiver| receiver.read_replicas())
-                .ok_or(Error::Cell(cellule_runtime::Error::ReplicaUnavailable))?;
-            let (observed, reader_node) = router
-                .query_replica::<GetIssueDetail>(repo.id, &author, &local, minimum, number(id)?)
-                .await
-                .map_err(Error::Cell)?;
-            (
-                observed.output.issue,
-                Some(observed.receipt),
-                Some(reader_node),
-                observed.output.labels.labels,
-            )
-        }
-        Some(_) => return Err(Error::Invalid("Read mode must be owner or replica")),
-    };
+    if params.read.as_deref().is_some_and(|mode| mode != "owner")
+        || params.after_incarnation.is_some()
+        || params.after_sequence.is_some()
+    {
+        return Err(Error::Invalid("Cellar supports owner-routed issue reads"));
+    }
+    let routed = crate::app::repository_cell(&server, &repo)?;
+    let detail = crate::app::query_output(
+        routed
+            .client
+            .query::<GetIssueDetail>(&routed.target, None, number(id)?)
+            .await,
+    )?;
+    let issue = detail.issue;
+    let labels = detail.labels.labels;
     let issue = issue.ok_or(Error::NotFound)?;
     let assignees = assignees::available(&repo, &author);
-    let mut response = Json(issue_view(
+    let response = Json(issue_view(
         &issue,
         &author,
         &labels,
@@ -382,33 +331,6 @@ async fn detail(
         true,
     ))
     .into_response();
-    if let Some(receipt) = receipt {
-        response.headers_mut().insert(
-            "x-crab-cell-incarnation",
-            format!(
-                "{:032x}",
-                u128::from_be_bytes(*receipt.incarnation.as_bytes())
-            )
-            .parse()
-            .map_err(|_| Error::CellContract("replica receipt header failed"))?,
-        );
-        response.headers_mut().insert(
-            "x-crab-cell-sequence",
-            receipt
-                .commit_sequence
-                .to_string()
-                .parse()
-                .map_err(|_| Error::CellContract("replica sequence header failed"))?,
-        );
-    }
-    if let Some(reader_node) = reader_node {
-        response.headers_mut().insert(
-            "x-crab-cell-reader",
-            format!("{:032x}", u128::from_be_bytes(*reader_node.as_bytes()))
-                .parse()
-                .map_err(|_| Error::CellContract("replica reader header failed"))?,
-        );
-    }
     Ok(response)
 }
 
@@ -448,7 +370,7 @@ async fn edit(
         return Err(Error::AssigneePermission);
     }
     let labels = if input.label_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
-        labels::catalog(&server, &repo, &author).await?
+        labels::catalog(&server, &repo).await?
     } else {
         vec![]
     };
@@ -465,8 +387,8 @@ async fn edit(
         .assignees
         .map(|value| assignees::validate_selection(value, &assignees))
         .transpose()?;
-    let routed = route(&server, &repo, &author, "repository.issue.update").await?;
-    let output = command_output(
+    let routed = crate::app::repository_cell(&server, &repo)?;
+    let output = crate::app::command_output(
         routed
             .client
             .command::<UpdateIssue>(
@@ -503,7 +425,7 @@ async fn edit(
     // An edit without label changes can return existing selections. Reuse any
     // catalog fetched for validation; otherwise fetch only for actual rendering.
     let labels = if labels.is_empty() && !issue.label_ids.is_empty() {
-        labels::catalog(&server, &repo, &author).await?
+        labels::catalog(&server, &repo).await?
     } else {
         labels
     };
@@ -528,8 +450,8 @@ async fn comments(
     if params.state.is_some() || params.q.is_some() {
         return Err(Error::Invalid("Comments do not support list filters"));
     }
-    let routed = route(&server, &repo, &author, "repository.read").await?;
-    let page = query_output(
+    let routed = crate::app::repository_cell(&server, &repo)?;
+    let page = crate::app::query_output(
         routed
             .client
             .query::<ListComments>(
@@ -572,8 +494,8 @@ async fn comment(
     let Json(input) = input?;
     let author = actor(&principal)?;
     body(&input.body, true)?;
-    let routed = route(&server, &repo, &author, "repository.comment.create").await?;
-    let output = command_output(
+    let routed = crate::app::repository_cell(&server, &repo)?;
+    let output = crate::app::command_output(
         routed
             .client
             .command::<CreateComment>(
@@ -604,8 +526,8 @@ async fn comment_detail(
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &(owner, name))?;
     let author = actor(&principal)?;
-    let routed = route(&server, &repo, &author, "repository.read").await?;
-    let comment = query_output(
+    let routed = crate::app::repository_cell(&server, &repo)?;
+    let comment = crate::app::query_output(
         routed
             .client
             .query::<GetComment>(
@@ -639,8 +561,8 @@ async fn edit_comment(
     let Json(input) = input?;
     let author = actor(&principal)?;
     body(&input.body, true)?;
-    let routed = route(&server, &repo, &author, "repository.comment.update").await?;
-    let output = command_output(
+    let routed = crate::app::repository_cell(&server, &repo)?;
+    let output = crate::app::command_output(
         routed
             .client
             .command::<UpdateComment>(
@@ -668,29 +590,13 @@ async fn edit_comment(
     Ok(Json(comment_view(&comment, &author)))
 }
 
-async fn route(
-    server: &Server,
-    repository: &Repository,
-    principal: &Identity,
-    action: &'static str,
-) -> Result<RepositoryCell> {
-    let router = server.repository_cells().ok_or(Error::CellUnavailable)?;
-    router
-        .route(repository.id, principal, action)
-        .await
-        .map_err(|error| match error {
-            crate::Error::Cell(source) => Error::Cell(source),
-            source => Error::Repository(source),
-        })
-}
-
 fn mutation_identity() -> Result<MutationIdentity> {
-    let now_ms = crate::cells::unix_now_ms().map_err(Error::Repository)?;
+    let now_ms = crate::cells::unix_now_ms().map_err(Error::Cell)?;
     let expires_at_ms = now_ms
         .checked_add(60_000)
         .ok_or(Error::CellContract("Cell request expiry overflowed"))?;
     Ok(MutationIdentity {
-        request_id: RequestId::from_bytes(Uuid::now_v7().into_bytes()),
+        request_id: Uuid::now_v7(),
         issued_at_ms: now_ms,
         expires_at_ms,
     })
@@ -700,28 +606,4 @@ fn submission_id(value: &str) -> Result<[u8; 16]> {
     Uuid::parse_str(&submission(value)?)
         .map(Uuid::into_bytes)
         .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
-}
-
-fn command_output<T>(result: std::result::Result<Committed<T>, InvocationError<T>>) -> Result<T> {
-    match result {
-        Ok(committed) => Ok(committed.output),
-        Err(InvocationError::Rejected(committed)) => Ok(committed.output),
-        Err(InvocationError::Pending(_)) => Err(Error::CellPending),
-        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
-        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
-    }
-}
-
-fn query_output<T>(result: std::result::Result<Observed<T>, InvocationError<T>>) -> Result<T> {
-    match result {
-        Ok(observed) => Ok(observed.output),
-        Err(InvocationError::Rejected(_)) => Err(Error::CellContract(
-            "Cell query returned a durable rejection",
-        )),
-        Err(InvocationError::Pending(_)) => Err(Error::CellContract(
-            "Cell query returned pending mutation evidence",
-        )),
-        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
-        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
-    }
 }

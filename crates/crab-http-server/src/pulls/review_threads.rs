@@ -113,10 +113,9 @@ struct Comparison {
 async fn load_pull(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     number: u64,
 ) -> Result<pull_storage::PullRequest> {
-    pull_storage::pull(server, repo, actor, number)
+    pull_storage::pull(server, repo, number)
         .await?
         .ok_or(Error::NotFound)
 }
@@ -328,7 +327,7 @@ async fn list(
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
     let actor = app::actor(&principal)?;
-    let pull = load_pull(&server, repo, &actor, app::number(id)?).await?;
+    let pull = load_pull(&server, repo, app::number(id)?).await?;
     let comparison = comparison(&server, repo, &pull).await?;
     let path = params
         .path_hex
@@ -339,7 +338,6 @@ async fn list(
     let page = thread_storage::threads(
         &server,
         repo,
-        &actor,
         PullReviewThreadListInput {
             pull: pull.number,
             before: params.before,
@@ -382,9 +380,9 @@ async fn detail(
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
     let actor = app::actor(&principal)?;
-    let pull = load_pull(&server, repo, &actor, app::number(id)?).await?;
+    let pull = load_pull(&server, repo, app::number(id)?).await?;
     let comparison = comparison(&server, repo, &pull).await?;
-    let thread = thread_storage::thread(&server, repo, &actor, pull.number, app::number(thread)?)
+    let thread = thread_storage::thread(&server, repo, pull.number, app::number(thread)?)
         .await?
         .ok_or(Error::NotFound)?;
     let (_, path) = parse_path(&path_hex(&thread.path))?;
@@ -413,7 +411,7 @@ async fn create(
     let repo = repo.as_ref();
     let Json(input) = input?;
     let actor = app::actor(&principal)?;
-    let pull = load_pull(&server, repo, &actor, app::number(id)?).await?;
+    let pull = load_pull(&server, repo, app::number(id)?).await?;
     if pull.state != pull_storage::PullState::Open {
         return Err(Error::Invalid("Closed pull requests cannot be reviewed"));
     }
@@ -423,7 +421,7 @@ async fn create(
     }
     let request_id = app::submission(&input.request_id)?;
     if let Some(existing) =
-        thread_storage::thread_submission(&server, repo, &actor, pull.number, &request_id).await?
+        thread_storage::thread_submission(&server, repo, pull.number, &request_id).await?
     {
         if !same_author(&existing.author, &actor)
             || existing.body != input.body
@@ -540,7 +538,7 @@ async fn edit(
     if let Some(Some(suggested_text)) = &input.suggested_text {
         validate_text(suggested_text, false)?;
     }
-    let pull = load_pull(&server, repo, &actor, app::number(id)?).await?;
+    let pull = load_pull(&server, repo, app::number(id)?).await?;
     let number = app::number(thread)?;
     let updated = thread_storage::update_thread(
         &server,
@@ -600,11 +598,10 @@ async fn list_replies(
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
     let actor = app::actor(&principal)?;
-    let pull = load_pull(&server, repo, &actor, app::number(id)?).await?;
+    let pull = load_pull(&server, repo, app::number(id)?).await?;
     let page = thread_storage::replies(
         &server,
         repo,
-        &actor,
         crate::cells::repository::PullReviewReplyListInput {
             pull: pull.number,
             thread: app::number(thread)?,
@@ -631,12 +628,11 @@ async fn create_reply(
     let Json(input) = input?;
     validate_text(&input.body, true)?;
     let actor = app::actor(&principal)?;
-    let pull = load_pull(&server, repo, &actor, app::number(id)?).await?;
+    let pull = load_pull(&server, repo, app::number(id)?).await?;
     let thread = app::number(thread)?;
     let request_id = app::submission(&input.request_id)?;
     if let Some(existing) =
-        thread_storage::reply_submission(&server, repo, &actor, pull.number, thread, &request_id)
-            .await?
+        thread_storage::reply_submission(&server, repo, pull.number, thread, &request_id).await?
     {
         if !same_author(&existing.author, &actor) || existing.body != input.body {
             return Err(Error::RequestConflict);
@@ -666,11 +662,10 @@ async fn reply_detail(
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
     let actor = app::actor(&principal)?;
-    let pull = load_pull(&server, repo, &actor, app::number(id)?).await?;
+    let pull = load_pull(&server, repo, app::number(id)?).await?;
     let reply = thread_storage::reply(
         &server,
         repo,
-        &actor,
         pull.number,
         app::number(thread)?,
         app::number(reply)?,
@@ -691,7 +686,7 @@ async fn edit_reply(
     let Json(input) = input?;
     validate_text(&input.body, true)?;
     let actor = app::actor(&principal)?;
-    let pull = load_pull(&server, repo, &actor, app::number(id)?).await?;
+    let pull = load_pull(&server, repo, app::number(id)?).await?;
     let reply = thread_storage::update_reply(
         &server,
         repo,

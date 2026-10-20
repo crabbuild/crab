@@ -103,14 +103,14 @@ class WorkspaceDependencyTests(unittest.TestCase):
                     result = GATES.check_workspace_dependency_policy({"packages": packages})
                 self.assertEqual(result, expected)
 
-    def test_sqlite_policy_requires_the_cellule_version_and_checked_unsigned_bindings(self):
+    def test_sqlite_policy_requires_the_published_cellar_linkage(self):
         manifest = (GATES.repo_root() / "Cargo.toml").read_text(encoding="utf-8")
         entry = next(line for line in manifest.splitlines() if line.startswith("rusqlite = "))
         cases = (
-            ('{ version = "0.39", features = ["bundled", "fallible_uint"] }', True),
+            ('{ version = "0.31", features = ["bundled"] }', True),
             ('{ version = "0.34", features = ["bundled"] }', False),
-            ('{ version = "0.39", features = ["bundled"] }', False),
-            ('{ version = "0.39", features = ["bundled", "fallible_uint", "blob"] }', False),
+            ('{ version = "0.39", features = ["bundled", "fallible_uint"] }', False),
+            ('{ version = "0.31", features = ["bundled", "blob"] }', False),
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -124,11 +124,12 @@ class WorkspaceDependencyTests(unittest.TestCase):
                     self.assertEqual(result, expected)
 
 
-class CelluleBoundaryTests(unittest.TestCase):
-    def check_source(self, source: str, dependencies: tuple[str, ...] = ()) -> bool:
+class CellarBoundaryTests(unittest.TestCase):
+    def check_source(self, source: str, dependencies: tuple[str, ...] = (),
+                     relative: str = "crates/crab-http-server/src/lib.rs") -> bool:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            path = root / "crates/crab-http-server/src/lib.rs"
+            path = root / relative
             path.parent.mkdir(parents=True)
             path.write_text(source, encoding="utf-8")
             metadata = {"packages": [{
@@ -138,12 +139,35 @@ class CelluleBoundaryTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 return GATES.check_cell_runtime_server_boundary(root, metadata)
 
-    def test_cellule_import_is_admitted(self):
-        self.assertTrue(self.check_source("use cellule_runtime::CellRuntime;\n"))
+    def test_cellar_import_is_admitted(self):
+        self.assertTrue(self.check_source("use cellar::sdk::Node;\n"))
+
+    def test_cellule_import_is_rejected(self):
+        self.assertFalse(self.check_source("use cellule_runtime::CellRuntime;\n"))
+
+    def test_native_construction_is_confined_to_the_runtime_module(self):
+        source = "fn start() { Node::start_external(config); }\n"
+        for relative, expected in [
+            ("crates/crab-http-server/src/server.rs", False),
+            ("crates/crab-http-server/src/cells/runtime.rs", True),
+        ]:
+            with self.subTest(relative=relative):
+                self.assertEqual(self.check_source(source, relative=relative), expected)
+
+    def test_product_catalog_and_routing_stay_outside_native_ownership(self):
+        self.assertTrue(self.check_source(
+            "struct Server { catalog: CatalogStore, cell_capacity: Capacity, repository_cells: Router }\n",
+            relative="crates/crab-http-server/src/server.rs"))
+
+    def test_retired_runtime_components_cannot_escape_into_server(self):
+        self.assertFalse(self.check_source(
+            "struct Server { catalog: CatalogStore, follower_store: FollowerStore }\n",
+            relative="crates/crab-http-server/src/server.rs"))
 
     def test_removed_workspace_dependency_is_rejected(self):
         self.assertFalse(self.check_source("", ("crab-cell-runtime",)))
         self.assertFalse(self.check_source("", ("crab-ltx",)))
+        self.assertFalse(self.check_source("", ("cellule-runtime",)))
 
     def test_removed_import_is_rejected_even_in_tests(self):
         self.assertFalse(self.check_source("#[cfg(test)] mod tests { use crab_ltx::CellReplica; }\n"))

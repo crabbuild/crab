@@ -20,11 +20,11 @@ impl PullReviewThreadSide {
         }
     }
 
-    fn from_code(value: u64) -> cellule_runtime::Result<Self> {
+    fn from_code(value: u64) -> crate::cells::Result<Self> {
         match value {
             0 => Ok(Self::Old),
             1 => Ok(Self::New),
-            _ => Err(cellule_runtime::Error::Command(
+            _ => Err(crate::cells::Error::Invalid(
                 "repository pull review thread side is invalid",
             )),
         }
@@ -216,17 +216,15 @@ pub(crate) enum UpdatePullReviewReplyOutcome {
 
 pub(crate) struct CreatePullReviewThread;
 
-impl Command for CreatePullReviewThread {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_PULL_REVIEW_THREAD_CREATE_COMMAND_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Mutation for CreatePullReviewThread {
+    const ID: u32 = 32;
     type Input = CreatePullReviewThreadInput;
     type Output = CreatePullReviewThreadOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_create_thread(&input)?;
         let digest = thread_digest(&input);
         let existing = context.sql(&SqlBatch {
@@ -240,7 +238,7 @@ impl Command for CreatePullReviewThread {
         })?;
         if let Some(row) = existing[0].rows.first() {
             if result_blob(row, 0)? != digest.as_bytes() {
-                return Ok(CommandResult::Rejected(
+                return Ok(MutationResult::Rejected(
                     CreatePullReviewThreadOutcome::RequestConflict,
                 ));
             }
@@ -251,21 +249,21 @@ impl Command for CreatePullReviewThread {
                     number: result_u64_from_row(row, 1)?,
                 },
             )?
-            .ok_or(cellule_runtime::Error::Command(
+            .ok_or(crate::cells::Error::Invalid(
                 "repository pull review thread submission has no thread",
             ))?;
-            return Ok(CommandResult::Success(
+            return Ok(MutationResult::Success(
                 CreatePullReviewThreadOutcome::Created(Box::new(record)),
             ));
         }
         let state = pull_state(context, input.pull)?;
         let Some(state) = state else {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 CreatePullReviewThreadOutcome::PullNotFound,
             ));
         };
         if state != 0 {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 CreatePullReviewThreadOutcome::PullClosed,
             ));
         }
@@ -311,7 +309,7 @@ impl Command for CreatePullReviewThread {
             ],
         })?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(
+        Ok(MutationResult::Success(
             CreatePullReviewThreadOutcome::Created(Box::new(record)),
         ))
     }
@@ -319,34 +317,32 @@ impl Command for CreatePullReviewThread {
 
 pub(crate) struct UpdatePullReviewThread;
 
-impl Command for UpdatePullReviewThread {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_PULL_REVIEW_THREAD_UPDATE_COMMAND_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Mutation for UpdatePullReviewThread {
+    const ID: u32 = 33;
     type Input = UpdatePullReviewThreadInput;
     type Output = UpdatePullReviewThreadOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_number(input.key.pull)?;
         validate_number(input.key.number)?;
         validate_number(input.version)?;
         validate_author(&input.actor)?;
         if input.body.is_none() && input.suggested_text.is_none() && input.resolved.is_none() {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "repository pull review thread update is empty",
             ));
         }
         let Some(mut record) = load_thread(context, input.key.clone())? else {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 UpdatePullReviewThreadOutcome::NotFound,
             ));
         };
         if input.body.is_some() || input.suggested_text.is_some() {
             if !same_author(&record.author, &input.actor) {
-                return Ok(CommandResult::Rejected(
+                return Ok(MutationResult::Rejected(
                     UpdatePullReviewThreadOutcome::Forbidden,
                 ));
             }
@@ -356,19 +352,19 @@ impl Command for UpdatePullReviewThread {
             if let Some(suggested_text) = &input.suggested_text {
                 validate_suggested_text(suggested_text.as_deref())?;
                 if record.side == PullReviewThreadSide::Old && suggested_text.is_some() {
-                    return Err(cellule_runtime::Error::Command(
+                    return Err(crate::cells::Error::Invalid(
                         "old pull review thread anchors cannot have suggestions",
                     ));
                 }
             }
         }
         if input.resolved.is_some() && !input.can_resolve {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 UpdatePullReviewThreadOutcome::Forbidden,
             ));
         }
         if record.version != input.version {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 UpdatePullReviewThreadOutcome::Conflict,
             ));
         }
@@ -396,7 +392,7 @@ impl Command for UpdatePullReviewThread {
             statements: vec![update_thread_statement(&record, old_version)?],
         })?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(
+        Ok(MutationResult::Success(
             UpdatePullReviewThreadOutcome::Updated(Box::new(record)),
         ))
     }
@@ -404,17 +400,15 @@ impl Command for UpdatePullReviewThread {
 
 pub(crate) struct CreatePullReviewReply;
 
-impl Command for CreatePullReviewReply {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_PULL_REVIEW_REPLY_CREATE_COMMAND_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Mutation for CreatePullReviewReply {
+    const ID: u32 = 34;
     type Input = CreatePullReviewReplyInput;
     type Output = CreatePullReviewReplyOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_number(input.pull)?;
         validate_number(input.thread)?;
         validate_author(&input.author)?;
@@ -428,7 +422,7 @@ impl Command for CreatePullReviewReply {
         )?
         .is_none()
         {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 CreatePullReviewReplyOutcome::ThreadNotFound,
             ));
         }
@@ -445,7 +439,7 @@ impl Command for CreatePullReviewReply {
         })?;
         if let Some(row) = existing[0].rows.first() {
             if result_blob(row, 0)? != digest.as_bytes() {
-                return Ok(CommandResult::Rejected(
+                return Ok(MutationResult::Rejected(
                     CreatePullReviewReplyOutcome::RequestConflict,
                 ));
             }
@@ -457,10 +451,10 @@ impl Command for CreatePullReviewReply {
                     number: result_u64_from_row(row, 1)?,
                 },
             )?
-            .ok_or(cellule_runtime::Error::Command(
+            .ok_or(crate::cells::Error::Invalid(
                 "repository pull review reply submission has no reply",
             ))?;
-            return Ok(CommandResult::Success(
+            return Ok(MutationResult::Success(
                 CreatePullReviewReplyOutcome::Created(record),
             ));
         }
@@ -492,7 +486,7 @@ impl Command for CreatePullReviewReply {
             ],
         })?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(
+        Ok(MutationResult::Success(
             CreatePullReviewReplyOutcome::Created(record),
         ))
     }
@@ -500,17 +494,15 @@ impl Command for CreatePullReviewReply {
 
 pub(crate) struct UpdatePullReviewReply;
 
-impl Command for UpdatePullReviewReply {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_PULL_REVIEW_REPLY_UPDATE_COMMAND_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Mutation for UpdatePullReviewReply {
+    const ID: u32 = 35;
     type Input = UpdatePullReviewReplyInput;
     type Output = UpdatePullReviewReplyOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_number(input.key.pull)?;
         validate_number(input.key.thread)?;
         validate_number(input.key.number)?;
@@ -518,17 +510,17 @@ impl Command for UpdatePullReviewReply {
         validate_author(&input.actor)?;
         validate_body(&input.body, true)?;
         let Some(mut record) = load_reply(context, input.key.clone())? else {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 UpdatePullReviewReplyOutcome::NotFound,
             ));
         };
         if !same_author(&record.author, &input.actor) {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 UpdatePullReviewReplyOutcome::Forbidden,
             ));
         }
         if record.version != input.version {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 UpdatePullReviewReplyOutcome::Conflict,
             ));
         }
@@ -550,7 +542,7 @@ impl Command for UpdatePullReviewReply {
             )],
         })?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(
+        Ok(MutationResult::Success(
             UpdatePullReviewReplyOutcome::Updated(record),
         ))
     }
@@ -558,17 +550,15 @@ impl Command for UpdatePullReviewReply {
 
 pub(crate) struct GetPullReviewThread;
 
-impl Query for GetPullReviewThread {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_PULL_REVIEW_THREAD_GET_QUERY_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Read for GetPullReviewThread {
+    const ID: u32 = 29;
     type Input = PullReviewThreadKey;
     type Output = Option<PullReviewThreadRecord>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         key: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         validate_thread_key(&key)?;
         load_thread_query(context, key)
     }
@@ -576,17 +566,15 @@ impl Query for GetPullReviewThread {
 
 pub(crate) struct ListPullReviewThreads;
 
-impl Query for ListPullReviewThreads {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_PULL_REVIEW_THREAD_LIST_QUERY_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Read for ListPullReviewThreads {
+    const ID: u32 = 30;
     type Input = PullReviewThreadListInput;
     type Output = Option<PullReviewThreadPage>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         validate_thread_list(&input)?;
         if !pull_exists_query(context, input.pull)? {
             return Ok(None);
@@ -595,7 +583,7 @@ impl Query for ListPullReviewThreads {
         let items = rows
             .iter()
             .map(|row| thread_from_row(row))
-            .collect::<cellule_runtime::Result<Vec<_>>>()?;
+            .collect::<crate::cells::Result<Vec<_>>>()?;
         let (items, next) = bounded_page(items, input.limit, |item| item.number)?;
         Ok(Some(PullReviewThreadPage { items, next }))
     }
@@ -603,18 +591,16 @@ impl Query for ListPullReviewThreads {
 
 pub(crate) struct GetPullReviewThreadSubmission;
 
-impl Query for GetPullReviewThreadSubmission {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_PULL_REVIEW_THREAD_SUBMISSION_QUERY_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Read for GetPullReviewThreadSubmission {
+    const ID: u32 = 31;
     type Input = PullReviewThreadSubmissionKey;
     type Output = Option<PullReviewThreadRecord>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         key: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
-        let pull = key.pull.ok_or(cellule_runtime::Error::Command(
+    ) -> crate::cells::Result<Self::Output> {
+        let pull = key.pull.ok_or(crate::cells::Error::Invalid(
             "repository pull review thread submission scope is invalid",
         ))?;
         validate_number(pull)?;
@@ -637,17 +623,15 @@ impl Query for GetPullReviewThreadSubmission {
 
 pub(crate) struct GetPullReviewReply;
 
-impl Query for GetPullReviewReply {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_PULL_REVIEW_REPLY_GET_QUERY_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Read for GetPullReviewReply {
+    const ID: u32 = 32;
     type Input = PullReviewReplyKey;
     type Output = Option<PullReviewReplyRecord>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         key: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         validate_reply_key(&key)?;
         load_reply_query(context, key)
     }
@@ -655,17 +639,15 @@ impl Query for GetPullReviewReply {
 
 pub(crate) struct ListPullReviewReplies;
 
-impl Query for ListPullReviewReplies {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_PULL_REVIEW_REPLY_LIST_QUERY_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Read for ListPullReviewReplies {
+    const ID: u32 = 33;
     type Input = PullReviewReplyListInput;
     type Output = Option<PullReviewReplyPage>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         validate_reply_list(&input)?;
         if !thread_exists_query(context, input.pull, input.thread)? {
             return Ok(None);
@@ -674,7 +656,7 @@ impl Query for ListPullReviewReplies {
         let items = rows
             .iter()
             .map(|row| reply_from_row(row))
-            .collect::<cellule_runtime::Result<Vec<_>>>()?;
+            .collect::<crate::cells::Result<Vec<_>>>()?;
         let (items, next) = bounded_page(items, input.limit, |item| item.number)?;
         Ok(Some(PullReviewReplyPage { items, next }))
     }
@@ -682,21 +664,19 @@ impl Query for ListPullReviewReplies {
 
 pub(crate) struct GetPullReviewReplySubmission;
 
-impl Query for GetPullReviewReplySubmission {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_PULL_REVIEW_REPLY_SUBMISSION_QUERY_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Read for GetPullReviewReplySubmission {
+    const ID: u32 = 34;
     type Input = PullReviewReplySubmissionKey;
     type Output = Option<PullReviewReplyRecord>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         key: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
-        let pull = key.pull.ok_or(cellule_runtime::Error::Command(
+    ) -> crate::cells::Result<Self::Output> {
+        let pull = key.pull.ok_or(crate::cells::Error::Invalid(
             "repository pull review reply submission scope is invalid",
         ))?;
-        let thread = key.thread.ok_or(cellule_runtime::Error::Command(
+        let thread = key.thread.ok_or(crate::cells::Error::Invalid(
             "repository pull review reply submission scope is invalid",
         ))?;
         validate_number(pull)?;
@@ -735,7 +715,7 @@ fn same_author(left: &RepositoryAuthor, right: &RepositoryAuthor) -> bool {
     left.issuer == right.issuer && left.subject == right.subject
 }
 
-fn validate_create_thread(input: &CreatePullReviewThreadInput) -> cellule_runtime::Result<()> {
+fn validate_create_thread(input: &CreatePullReviewThreadInput) -> crate::cells::Result<()> {
     validate_number(input.pull)?;
     validate_author(&input.author)?;
     validate_body(&input.body, true)?;
@@ -749,14 +729,14 @@ fn validate_create_thread(input: &CreatePullReviewThreadInput) -> cellule_runtim
     match input.side {
         PullReviewThreadSide::Old => {
             if input.old_blob_oid.is_none() || input.suggested_text.is_some() {
-                return Err(cellule_runtime::Error::Command(
+                return Err(crate::cells::Error::Invalid(
                     "old pull review thread anchor is invalid",
                 ));
             }
         }
         PullReviewThreadSide::New => {
             if input.new_blob_oid.is_none() {
-                return Err(cellule_runtime::Error::Command(
+                return Err(crate::cells::Error::Invalid(
                     "new pull review thread anchor is invalid",
                 ));
             }
@@ -765,18 +745,18 @@ fn validate_create_thread(input: &CreatePullReviewThreadInput) -> cellule_runtim
     Ok(())
 }
 
-fn validate_thread_key(key: &PullReviewThreadKey) -> cellule_runtime::Result<()> {
+fn validate_thread_key(key: &PullReviewThreadKey) -> crate::cells::Result<()> {
     validate_number(key.pull)?;
     validate_number(key.number)
 }
 
-fn validate_reply_key(key: &PullReviewReplyKey) -> cellule_runtime::Result<()> {
+fn validate_reply_key(key: &PullReviewReplyKey) -> crate::cells::Result<()> {
     validate_number(key.pull)?;
     validate_number(key.thread)?;
     validate_number(key.number)
 }
 
-fn validate_thread_list(input: &PullReviewThreadListInput) -> cellule_runtime::Result<()> {
+fn validate_thread_list(input: &PullReviewThreadListInput) -> crate::cells::Result<()> {
     validate_number(input.pull)?;
     validate_list(input.before, input.limit)?;
     if input
@@ -784,7 +764,7 @@ fn validate_thread_list(input: &PullReviewThreadListInput) -> cellule_runtime::R
         .as_ref()
         .is_some_and(|path| validate_path(path).is_err())
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository pull review thread path is invalid",
         ));
     }
@@ -792,7 +772,7 @@ fn validate_thread_list(input: &PullReviewThreadListInput) -> cellule_runtime::R
         || (input.outdated.is_some()
             && (input.comparison_base_oid.is_none() || input.comparison_head_oid.is_none()))
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository pull review thread comparison is incomplete",
         ));
     }
@@ -805,63 +785,63 @@ fn validate_thread_list(input: &PullReviewThreadListInput) -> cellule_runtime::R
     Ok(())
 }
 
-fn validate_reply_list(input: &PullReviewReplyListInput) -> cellule_runtime::Result<()> {
+fn validate_reply_list(input: &PullReviewReplyListInput) -> crate::cells::Result<()> {
     validate_number(input.pull)?;
     validate_number(input.thread)?;
     validate_list(input.before, input.limit)
 }
 
-fn validate_path(path: &[u8]) -> cellule_runtime::Result<()> {
+fn validate_path(path: &[u8]) -> crate::cells::Result<()> {
     if path.is_empty() || path.len() > 1024 || path.contains(&0) {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository pull review thread path is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_oid(value: &str) -> cellule_runtime::Result<()> {
+fn validate_oid(value: &str) -> crate::cells::Result<()> {
     if value.len() != 40
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         || value.bytes().all(|byte| byte == b'0')
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository pull review thread object ID is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_oid_option(value: &Option<String>) -> cellule_runtime::Result<()> {
+fn validate_oid_option(value: &Option<String>) -> crate::cells::Result<()> {
     if let Some(value) = value {
         validate_oid(value)?;
     }
     Ok(())
 }
 
-fn validate_lines(start_line: u64, end_line: u64) -> cellule_runtime::Result<()> {
+fn validate_lines(start_line: u64, end_line: u64) -> crate::cells::Result<()> {
     validate_number(start_line)?;
     validate_number(end_line)?;
     if end_line < start_line || end_line - start_line >= 200 {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository pull review thread line range is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_suggested_text(value: Option<&str>) -> cellule_runtime::Result<()> {
+fn validate_suggested_text(value: Option<&str>) -> crate::cells::Result<()> {
     if value.is_some_and(|value| value.len() > MAX_SUGGESTED_TEXT_BYTES || value.contains('\0')) {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository pull review suggestion is invalid",
         ));
     }
     Ok(())
 }
 
-fn pull_state(context: &CommandContext<'_, '_>, pull: u64) -> cellule_runtime::Result<Option<u64>> {
+fn pull_state(context: &RepositoryTransaction<'_>, pull: u64) -> crate::cells::Result<Option<u64>> {
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT state FROM repository_pulls WHERE number = ?",
@@ -876,10 +856,10 @@ fn pull_state(context: &CommandContext<'_, '_>, pull: u64) -> cellule_runtime::R
 }
 
 fn next_number(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     table: &str,
     pull: u64,
-) -> cellule_runtime::Result<u64> {
+) -> crate::cells::Result<u64> {
     let insert = format!(
         "INSERT INTO {table}(pull_number, last) VALUES (?, 1) ON CONFLICT(pull_number) DO UPDATE SET last = last + 1 WHERE last < 9007199254740991"
     );
@@ -893,7 +873,7 @@ fn next_number(
         ],
     })?;
     if result[0].rows_affected != 1 {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository pull review numbering is exhausted",
         ));
     }
@@ -901,10 +881,10 @@ fn next_number(
 }
 
 fn next_reply_number(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     pull: u64,
     thread: u64,
-) -> cellule_runtime::Result<u64> {
+) -> crate::cells::Result<u64> {
     let result = context.sql(&SqlBatch {
         statements: vec![
             statement(
@@ -918,7 +898,7 @@ fn next_reply_number(
         ],
     })?;
     if result[0].rows_affected != 1 {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository pull review reply numbering is exhausted",
         ));
     }
@@ -973,9 +953,7 @@ fn reply_digest(input: &CreatePullReviewReplyInput) -> blake3::Hash {
     hasher.finalize()
 }
 
-fn insert_thread_statement(
-    record: &PullReviewThreadRecord,
-) -> cellule_runtime::Result<SqlStatement> {
+fn insert_thread_statement(record: &PullReviewThreadRecord) -> crate::cells::Result<SqlStatement> {
     Ok(statement(
         "INSERT INTO repository_pull_review_threads(pull_number, number, author_issuer, author_subject, author_name, body, suggested_text, base_oid, head_oid, path, old_blob_oid, new_blob_oid, side, start_line, end_line, resolved, resolved_by_issuer, resolved_by_subject, resolved_by_name, resolved_at_ms, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         vec![
@@ -1009,7 +987,7 @@ fn insert_thread_statement(
 fn update_thread_statement(
     record: &PullReviewThreadRecord,
     old_version: u64,
-) -> cellule_runtime::Result<SqlStatement> {
+) -> crate::cells::Result<SqlStatement> {
     let mut statement = insert_thread_statement(record)?;
     statement.sql = "UPDATE repository_pull_review_threads SET body = ?, suggested_text = ?, resolved = ?, resolved_by_issuer = ?, resolved_by_subject = ?, resolved_by_name = ?, resolved_at_ms = ?, version = ?, updated_at_ms = ? WHERE pull_number = ? AND number = ? AND version = ?".into();
     statement.parameters = vec![
@@ -1029,7 +1007,7 @@ fn update_thread_statement(
     Ok(statement)
 }
 
-fn insert_reply_statement(record: &PullReviewReplyRecord) -> cellule_runtime::Result<SqlStatement> {
+fn insert_reply_statement(record: &PullReviewReplyRecord) -> crate::cells::Result<SqlStatement> {
     Ok(statement(
         "INSERT INTO repository_pull_review_replies(pull_number, thread_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         vec![
@@ -1053,7 +1031,7 @@ fn optional_text(value: &Option<String>) -> SqlValue {
         .map_or(SqlValue::Null, |value| SqlValue::Text(value.clone()))
 }
 
-fn optional_integer(value: Option<u64>) -> cellule_runtime::Result<SqlValue> {
+fn optional_integer(value: Option<u64>) -> crate::cells::Result<SqlValue> {
     value.map_or(Ok(SqlValue::Null), integer)
 }
 
@@ -1067,9 +1045,9 @@ fn optional_author_field(
 }
 
 fn load_thread(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     key: PullReviewThreadKey,
-) -> cellule_runtime::Result<Option<PullReviewThreadRecord>> {
+) -> crate::cells::Result<Option<PullReviewThreadRecord>> {
     validate_thread_key(&key)?;
     let result = context.sql(&SqlBatch {
         statements: vec![thread_select_statement(key.pull, key.number)?],
@@ -1082,9 +1060,9 @@ fn load_thread(
 }
 
 fn load_thread_query(
-    context: &QueryContext<'_>,
+    context: &RepositoryTransaction<'_>,
     key: PullReviewThreadKey,
-) -> cellule_runtime::Result<Option<PullReviewThreadRecord>> {
+) -> crate::cells::Result<Option<PullReviewThreadRecord>> {
     validate_thread_key(&key)?;
     let result = context.sql(&SqlBatch {
         statements: vec![thread_select_statement(key.pull, key.number)?],
@@ -1096,19 +1074,19 @@ fn load_thread_query(
         .transpose()
 }
 
-fn thread_select_statement(pull: u64, number: u64) -> cellule_runtime::Result<SqlStatement> {
+fn thread_select_statement(pull: u64, number: u64) -> crate::cells::Result<SqlStatement> {
     Ok(statement(
         "SELECT pull_number, number, author_issuer, author_subject, author_name, body, suggested_text, base_oid, head_oid, path, old_blob_oid, new_blob_oid, side, start_line, end_line, resolved, resolved_by_issuer, resolved_by_subject, resolved_by_name, resolved_at_ms, version, created_at_ms, updated_at_ms FROM repository_pull_review_threads WHERE pull_number = ? AND number = ?",
         vec![integer(pull)?, integer(number)?],
     ))
 }
 
-fn thread_from_row(row: &[SqlValue]) -> cellule_runtime::Result<PullReviewThreadRecord> {
+fn thread_from_row(row: &[SqlValue]) -> crate::cells::Result<PullReviewThreadRecord> {
     let resolved = result_u64_from_row(row, 15)?;
     let resolved_by = optional_author(row, 16)?;
     let resolved_at_ms = result_optional_u64(row, 19)?;
     if (resolved == 0) != resolved_by.is_none() || (resolved == 0) != resolved_at_ms.is_none() {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository pull review thread resolution is invalid",
         ));
     }
@@ -1137,7 +1115,7 @@ fn thread_from_row(row: &[SqlValue]) -> cellule_runtime::Result<PullReviewThread
     Ok(record)
 }
 
-fn validate_thread_record(record: &PullReviewThreadRecord) -> cellule_runtime::Result<()> {
+fn validate_thread_record(record: &PullReviewThreadRecord) -> crate::cells::Result<()> {
     validate_number(record.pull)?;
     validate_number(record.number)?;
     validate_author(&record.author)?;
@@ -1152,18 +1130,18 @@ fn validate_thread_record(record: &PullReviewThreadRecord) -> cellule_runtime::R
     if record.side == PullReviewThreadSide::Old
         && (record.old_blob_oid.is_none() || record.suggested_text.is_some())
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "old pull review thread record is invalid",
         ));
     }
     if record.side == PullReviewThreadSide::New && record.new_blob_oid.is_none() {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "new pull review thread record is invalid",
         ));
     }
     validate_number(record.version)?;
     if record.updated_at_ms < record.created_at_ms {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository pull review thread timestamp is invalid",
         ));
     }
@@ -1174,9 +1152,9 @@ fn validate_thread_record(record: &PullReviewThreadRecord) -> cellule_runtime::R
 }
 
 fn load_reply(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     key: PullReviewReplyKey,
-) -> cellule_runtime::Result<Option<PullReviewReplyRecord>> {
+) -> crate::cells::Result<Option<PullReviewReplyRecord>> {
     validate_reply_key(&key)?;
     let result = context.sql(&SqlBatch {
         statements: vec![reply_select_statement(&key)?],
@@ -1189,9 +1167,9 @@ fn load_reply(
 }
 
 fn load_reply_query(
-    context: &QueryContext<'_>,
+    context: &RepositoryTransaction<'_>,
     key: PullReviewReplyKey,
-) -> cellule_runtime::Result<Option<PullReviewReplyRecord>> {
+) -> crate::cells::Result<Option<PullReviewReplyRecord>> {
     validate_reply_key(&key)?;
     let result = context.sql(&SqlBatch {
         statements: vec![reply_select_statement(&key)?],
@@ -1203,7 +1181,7 @@ fn load_reply_query(
         .transpose()
 }
 
-fn reply_select_statement(key: &PullReviewReplyKey) -> cellule_runtime::Result<SqlStatement> {
+fn reply_select_statement(key: &PullReviewReplyKey) -> crate::cells::Result<SqlStatement> {
     Ok(statement(
         "SELECT pull_number, thread_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms FROM repository_pull_review_replies WHERE pull_number = ? AND thread_number = ? AND number = ?",
         vec![
@@ -1214,7 +1192,7 @@ fn reply_select_statement(key: &PullReviewReplyKey) -> cellule_runtime::Result<S
     ))
 }
 
-fn reply_from_row(row: &[SqlValue]) -> cellule_runtime::Result<PullReviewReplyRecord> {
+fn reply_from_row(row: &[SqlValue]) -> crate::cells::Result<PullReviewReplyRecord> {
     let record = PullReviewReplyRecord {
         pull: result_u64_from_row(row, 0)?,
         thread: result_u64_from_row(row, 1)?,
@@ -1232,14 +1210,14 @@ fn reply_from_row(row: &[SqlValue]) -> cellule_runtime::Result<PullReviewReplyRe
     validate_body(&record.body, true)?;
     validate_number(record.version)?;
     if record.updated_at_ms < record.created_at_ms {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository pull review reply timestamp is invalid",
         ));
     }
     Ok(record)
 }
 
-fn author_from_row(row: &[SqlValue], start: usize) -> cellule_runtime::Result<RepositoryAuthor> {
+fn author_from_row(row: &[SqlValue], start: usize) -> crate::cells::Result<RepositoryAuthor> {
     Ok(RepositoryAuthor {
         issuer: result_text(row, start)?,
         subject: result_text(row, start + 1)?,
@@ -1250,7 +1228,7 @@ fn author_from_row(row: &[SqlValue], start: usize) -> cellule_runtime::Result<Re
 fn optional_author(
     row: &[SqlValue],
     start: usize,
-) -> cellule_runtime::Result<Option<RepositoryAuthor>> {
+) -> crate::cells::Result<Option<RepositoryAuthor>> {
     let issuer = result_optional_text(row, start)?;
     let subject = result_optional_text(row, start + 1)?;
     let name = result_optional_text(row, start + 2)?;
@@ -1261,28 +1239,28 @@ fn optional_author(
             subject,
             name,
         })),
-        _ => Err(cellule_runtime::Error::Command(
+        _ => Err(crate::cells::Error::Invalid(
             "repository pull review thread resolver is invalid",
         )),
     }
 }
 
-fn result_optional_u64(row: &[SqlValue], column: usize) -> cellule_runtime::Result<Option<u64>> {
+fn result_optional_u64(row: &[SqlValue], column: usize) -> crate::cells::Result<Option<u64>> {
     match row.get(column) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Integer(value)) => u64::try_from(*value)
             .map(Some)
-            .map_err(|_| cellule_runtime::Error::Command("repository result is negative")),
-        _ => Err(cellule_runtime::Error::Command(
+            .map_err(|_| crate::cells::Error::Invalid("repository result is negative")),
+        _ => Err(crate::cells::Error::Invalid(
             "repository query returned invalid optional integer",
         )),
     }
 }
 
 fn list_threads(
-    context: &QueryContext<'_>,
+    context: &RepositoryTransaction<'_>,
     input: &PullReviewThreadListInput,
-) -> cellule_runtime::Result<Vec<Vec<SqlValue>>> {
+) -> crate::cells::Result<Vec<Vec<SqlValue>>> {
     let upper = input.before.map_or(MAX_NUMBER, |value| value - 1);
     let mut sql = String::from(
         "SELECT pull_number, number, author_issuer, author_subject, author_name, body, suggested_text, base_oid, head_oid, path, old_blob_oid, new_blob_oid, side, start_line, end_line, resolved, resolved_by_issuer, resolved_by_subject, resolved_by_name, resolved_at_ms, version, created_at_ms, updated_at_ms FROM repository_pull_review_threads WHERE pull_number = ? AND number <= ?",
@@ -1300,19 +1278,19 @@ fn list_threads(
         Some(false) => {
             sql.push_str(" AND base_oid = ? AND head_oid = ?");
             parameters.push(SqlValue::Text(input.comparison_base_oid.clone().ok_or(
-                cellule_runtime::Error::Command("thread comparison is incomplete"),
+                crate::cells::Error::Invalid("thread comparison is incomplete"),
             )?));
             parameters.push(SqlValue::Text(input.comparison_head_oid.clone().ok_or(
-                cellule_runtime::Error::Command("thread comparison is incomplete"),
+                crate::cells::Error::Invalid("thread comparison is incomplete"),
             )?));
         }
         Some(true) => {
             sql.push_str(" AND NOT (base_oid = ? AND head_oid = ?)");
             parameters.push(SqlValue::Text(input.comparison_base_oid.clone().ok_or(
-                cellule_runtime::Error::Command("thread comparison is incomplete"),
+                crate::cells::Error::Invalid("thread comparison is incomplete"),
             )?));
             parameters.push(SqlValue::Text(input.comparison_head_oid.clone().ok_or(
-                cellule_runtime::Error::Command("thread comparison is incomplete"),
+                crate::cells::Error::Invalid("thread comparison is incomplete"),
             )?));
         }
         None => {}
@@ -1327,9 +1305,9 @@ fn list_threads(
 }
 
 fn list_replies(
-    context: &QueryContext<'_>,
+    context: &RepositoryTransaction<'_>,
     input: &PullReviewReplyListInput,
-) -> cellule_runtime::Result<Vec<Vec<SqlValue>>> {
+) -> crate::cells::Result<Vec<Vec<SqlValue>>> {
     let upper = input.before.map_or(MAX_NUMBER, |value| value - 1);
     Ok(context.sql(&SqlBatch {
         statements: vec![statement(
@@ -1346,7 +1324,7 @@ fn list_replies(
         .clone())
 }
 
-fn pull_exists_query(context: &QueryContext<'_>, pull: u64) -> cellule_runtime::Result<bool> {
+fn pull_exists_query(context: &RepositoryTransaction<'_>, pull: u64) -> crate::cells::Result<bool> {
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT 1 FROM repository_pulls WHERE number = ?",
@@ -1357,10 +1335,10 @@ fn pull_exists_query(context: &QueryContext<'_>, pull: u64) -> cellule_runtime::
 }
 
 fn thread_exists_query(
-    context: &QueryContext<'_>,
+    context: &RepositoryTransaction<'_>,
     pull: u64,
     thread: u64,
-) -> cellule_runtime::Result<bool> {
+) -> crate::cells::Result<bool> {
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT 1 FROM repository_pull_review_threads WHERE pull_number = ? AND number = ?",
@@ -1374,15 +1352,14 @@ fn bounded_page<T: Serialize>(
     items: Vec<T>,
     requested: u8,
     number: impl Fn(&T) -> u64,
-) -> cellule_runtime::Result<(Vec<T>, Option<u64>)> {
+) -> crate::cells::Result<(Vec<T>, Option<u64>)> {
     let total = items.len();
     let mut used =
         4 + br#"{"items":["#.len() + br#"],"next":"#.len() + MAX_NUMBER.to_string().len() + 1;
     let mut kept = Vec::with_capacity(total);
     for item in items {
-        let encoded = serde_json::to_vec(&item).map_err(|_| {
-            cellule_runtime::Error::Command("repository pull review page is invalid")
-        })?;
+        let encoded = serde_json::to_vec(&item)
+            .map_err(|_| crate::cells::Error::Invalid("repository pull review page is invalid"))?;
         let separator = usize::from(!kept.is_empty());
         if used
             .checked_add(separator + encoded.len())
@@ -1394,7 +1371,7 @@ fn bounded_page<T: Serialize>(
         kept.push(item);
     }
     if kept.is_empty() && total != 0 {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository pull review page exceeds the limit",
         ));
     }
@@ -1404,18 +1381,17 @@ fn bounded_page<T: Serialize>(
     Ok((kept, next))
 }
 
-fn next_version(value: u64) -> cellule_runtime::Result<u64> {
+fn next_version(value: u64) -> crate::cells::Result<u64> {
     value
         .checked_add(1)
         .filter(|value| *value < MAX_NUMBER)
-        .ok_or(cellule_runtime::Error::Command(
+        .ok_or(crate::cells::Error::Invalid(
             "repository pull review version is exhausted",
         ))
 }
 
 #[cfg(test)]
 mod tests {
-    use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, WireValue};
 
     use super::*;
 
@@ -1530,13 +1506,8 @@ mod tests {
             created_at_ms: 41,
             updated_at_ms: 42,
         };
-        let mut encoder = BoundedEncoder::new(1024 * 1024).unwrap();
-        record.encode(&mut encoder).unwrap();
-        let bytes = encoder.finish();
-        assert!(bytes.len() < 1024 * 1024);
-        let mut decoder = BoundedDecoder::new(&bytes, 1024 * 1024).unwrap();
-        let decoded = PullReviewThreadRecord::decode(&mut decoder).unwrap();
-        decoder.finish().unwrap();
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let decoded: PullReviewThreadRecord = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded, record);
         assert_eq!(decoded.path, vec![0xff, b'.', b't', b'x', b't']);
     }

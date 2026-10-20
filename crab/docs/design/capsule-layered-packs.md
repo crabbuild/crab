@@ -1,5 +1,10 @@
 # Protocol v2 Stable Layered Packs
 
+Runtime-specific recipes and measurements below describe their recorded source
+revisions. Current server ownership and release gates live in the
+[native Cellar contract](../../../crates/crab-http-server/CELLAR.md); retired
+framework APIs and qualification scripts are no longer available.
+
 Current development checkpoint format is `CRBCKP06`: visibility dictionaries,
 ref closures and transitions use authenticated pages rooted in the footer.
 Git views load those pages lazily; explicit catalog access remains a complete

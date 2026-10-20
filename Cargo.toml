@@ -34,11 +34,7 @@ repository = "https://github.com/crabbuild/crab"
 rust-version = "1.97"
 
 [workspace.dependencies]
-cellule-runtime = { git = "https://github.com/crabbuild/cellule", rev = "25809dc7a3acc37411776d79f526512088e466c3", default-features = false }
-cellule-app = { git = "https://github.com/crabbuild/cellule", rev = "25809dc7a3acc37411776d79f526512088e466c3", default-features = false }
-cellule-host = { git = "https://github.com/crabbuild/cellule", rev = "25809dc7a3acc37411776d79f526512088e466c3", default-features = false }
-cellule-ltx = { git = "https://github.com/crabbuild/cellule", rev = "25809dc7a3acc37411776d79f526512088e466c3", default-features = false }
-cellule-store = { git = "https://github.com/crabbuild/cellule", rev = "25809dc7a3acc37411776d79f526512088e466c3", default-features = false }
+cellar = { package = "cellar-main", version = "=0.1.0" }
 crab-auth = { version = "=0.1.0", path = "crates/crab-auth", default-features = false }
 crab-auth-server = { version = "=1.2.4", path = "crates/crab-auth-server", default-features = false }
 crab-auth-store = { version = "=0.1.0", path = "crates/crab-auth-store", default-features = false }
@@ -136,7 +132,7 @@ globset = "0.4"
 object_store = { version = "0.14.1", default-features = false }
 prost = "0.13"
 reqwest = { version = "0.12", default-features = false }
-rusqlite = { version = "0.39", features = ["bundled", "fallible_uint"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
 schemars = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

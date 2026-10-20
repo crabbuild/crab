@@ -1,5 +1,9 @@
 # Deploy Crab for a team on Kubernetes
 
+> Native Cellar 0.1.0 profiles are under qualification. Protected provider/fault
+> evidence and published image/chart releases remain pending. See
+> [the migration guide](../../../CELLAR.md).
+
 This chart runs `crab-http-server` on Amazon Elastic Kubernetes Service (EKS), Google Kubernetes Engine (GKE), or Azure Kubernetes Service (AKS). Combine one generated provider overlay with one provider-neutral team overlay, create the application and peer-identity Secrets, and install one chart. The chart renders the server configuration and manages replicas, probes, disruption budget, network policy, optional ingress, and optional autoscaling. HTTPS ingress also needs a TLS Secret, usually managed by the platform or cert-manager.
 
 > Production qualification is still incomplete. Read [Production boundaries](#production-boundaries) before serving critical repositories.
@@ -316,17 +320,8 @@ the verified package returned by
 downloaded file avoids resolving a mutable registry version between
 verification and rollout.
 
-Every pod first runs the same immutable image as a `cell-release-bootstrap` init
-container. On a new storage root, concurrent pods converge on one deterministic
-first-install operation and complete it. On an upgrade, prepare the new compiled
-release before changing `image.digest`; the init container validates the exact
-prepared/activating candidate but does not complete the operator-owned
-activation. After the rollout admission checks, execute the immutable image's
-`cells release activate --strategy compatible --minimum-eligible-nodes 3`
-command with the prepared revision. Keep this value aligned with the intended
-live quorum; the command counts current signed advertisements rather than trusting
-the Deployment replica field. A different desired descriptor or image keeps the
-pod unstarted instead of silently replacing release state.
+Pods start the native Cellar runtime directly. Mixed-version rollout and rollback
+must be qualified before release. See [the runtime contract](../../../CELLAR.md).
 
 The Deployment becomes ready only after a pod can read and validate the durable
 catalog and open the current Git view of every discovered repository. Confirm
@@ -399,202 +394,26 @@ The command uses one conditional catalog update and fails on a concurrent
 catalog change. Review `repository list` before retrying so a stale operator
 decision cannot overwrite newer membership. Browser administrators can make the
 same complete replacement in **Settings → Members** with the session CSRF token;
-both paths produce a durable membership audit event. The first catalog mutation
-after a v2 deployment writes v3, so do not roll the chart back to a binary that
-cannot read v3.
+both paths produce a durable membership audit event. Only version 3 catalogs
+with canonical relative audit paths are accepted.
 
 Register `https://git.example.com/auth/backchannel-logout` with the OIDC
 provider and set `backchannel_logout_session_required=false`. It accepts signed
 subject-scoped Logout Tokens and returns 200 for valid or replayed delivery,
-400 for invalid delivery. It does not support `sid`-only tokens. Complete the
-identity-index rollout within eight hours so legacy sessions remain revocable;
-then prove a test user's browser sessions and scoped Git token fail after a
-provider logout delivery.
+400 for invalid delivery. It does not support `sid`-only tokens. Sessions require
+a matching identity-index marker; unindexed sessions must sign in again. Prove a
+test user's browser sessions and scoped Git token fail after provider logout.
 
 ## Qualify the live deployment
 
-Create a dedicated qualification repository, sign in through OIDC, and issue a
-write-scoped Git token for it. Then run the provider-neutral qualification
-script from a trusted operator workstation with `kubectl`, Git LFS, `curl`, and
-`jq` installed. Reuse the verified release record rather than transcribing its
-identity fields:
+The chart is a deployment profile. Native provider, crash/partition, restore,
+scale, and upgrade qualification remain required before production release.
+Use [the native verification guide](../../../CELLAR.md#verification) for current
+process and peer smoke proof; these checks do not qualify a cloud deployment.
 
-```sh
-CARGO_TARGET_DIR=/secure/crab-http-load-target \
-  cargo build -p crab-http-server --release --example qualify_http_load --locked
-export CRAB_HTTP_SERVER_LOAD_GENERATOR=/secure/crab-http-load-target/release/examples/qualify_http_load
-export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
-export CRAB_HTTP_SERVER_EXPECTED_IMAGE="$(jq --raw-output .image.reference crab-http-server-release.json)"
-export CRAB_HTTP_SERVER_EXPECTED_CHART="$(jq --raw-output .chart.reference crab-http-server-release.json)"
-export CRAB_HTTP_SERVER_RELEASE_TAG="$(jq --raw-output .tag crab-http-server-release.json)"
-export CRAB_HTTP_SERVER_SOURCE_SHA="$(jq --raw-output .source_commit crab-http-server-release.json)"
-export CRAB_HTTP_SERVER_NODE_PROFILE=medium
-export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
-export CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true
-
-bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
-  eks crab crab-http-server https://git.example.com \
-  your_team qualification /secure/crab-eks-qualification.json
-```
-
-Replace `eks` with `gke` or `aks`. The two explicit approvals are required
-because this test creates and retains a uniquely named branch, performs a rolling
-restart, locates the current repository Cell owner, and force-deletes that Pod
-without a grace period. Never run it
-against a repository where qualification branches are forbidden by policy.
-The per-node load phase also retains roughly 180,000 commit-status submissions
-across eight synthetic repository Cells (24 commits per Cell); use a disposable
-qualification namespace and repository prefix.
-The expected image, release tag, and source commit are required for release
-evidence. The script rejects a deployment whose manifest reference differs or
-a source identity that is not a stable server tag and lowercase Git commit.
-
-The test fails unless it can prove all of these boundaries:
-
-- At least three ready replicas run on separate nodes and at least two zones whose provider
-  identities match the declared EKS, GKE, or AKS target
-- Every original and replacement pod has the provider's admitted workload
-  identity contract: EKS Pod Identity token injection, GKE's annotated
-  Kubernetes-to-Google service account link, or AKS Workload ID token injection
-- Every original, rolled, and owner-loss replacement Pod returns a valid live
-  Cell capacity envelope bound to its Kubernetes Pod UID, and its effective
-  CPU, memory, and local-disk capacity match the selected node profile. Disk
-  capacity is the smaller of backing filesystem size and configured limit; the
-  reported limit must equal the Deployment's `emptyDir.sizeLimit`
-- Every original Pod independently sustains 1,000 aggregate authenticated Cell
-  mutations/s for 60 seconds with at least 95% successful responses across the
-  eight synthetic Cells. Reports retain p50/p95/p99 latency, admission
-  rejections, and the exact Pod UID
-- The Deployment uses an immutable digest, a private ClusterIP Service, the
-  signed release's chart version, the chart NetworkPolicy, TLS ingress,
-  hardened containers, and no automatic Kubernetes API token
-- A short-lived Restricted peer pod cannot reach the private management port,
-  proving that the cluster CNI enforces the rendered NetworkPolicy
-- Every existing and replacement pod passes storage-backed readiness
-- OIDC login begins through the public HTTPS ingress with a secure flow cookie
-  and request ID
-- A write-scoped Git token works directly against two different replicas
-- A Git LFS object written through one replica is byte-identical through
-  another replica
-- An owner-held LFS lock permits its write and survives shared storage access
-- Public Git reads remain continuously available during a zero-unavailable
-  rolling replacement
-- Every pod is replaced and the committed branch remains byte-identical
-- The durable Cell control identifies one serving owner whose endpoint matches a
-  ready Pod
-- Forced loss of that owner removes its ephemeral SQLite directory; a different
-  session takes over at a higher epoch, restores the exact digest, transaction
-  ID, checksum, and commit sequence, serves the committed status, and publishes
-  another status visible through a third replica
-
-The script writes a secret-free JSON evidence receipt containing the provider,
-image and chart digests, release tag and source commit, workload identity
-mechanism and Kubernetes ServiceAccount, repository, qualification branch and
-commit, payload digest, selected node profile, per-Pod load reports, capacity
-envelopes before traffic, after load, after the rollout, and after owner loss,
-rollout probes and failures, and explicit
-successful checks including the installed chart version,
-management-network-isolation result, deleted owner Pod UID, old/new owner
-sessions, takeover epochs, the complete root before and after takeover, and the
-strictly newer root after continuation. It also records completion time.
-Retain it with the release record. The Git token remains only in process memory
-and must still be rotated or revoked after qualification according to team
-policy.
-
-### Retain evidence with GitHub Actions
-
-`.github/workflows/http-server-kubernetes-live.yml` runs the same gate from a
-protected GitHub environment. Dispatch it from the release tag, select the
-provider, provide the dedicated repository and HTTPS origin, and explicitly
-approve both the write/rollout and abrupt owner-loss fault. The job downloads and verifies the
-tag's signed release record, derives the expected image and chart without
-operator transcription, verifies both registry attestations, rejects a
-different deployed image, signs the verified receipt, and retains the receipt
-plus its offline attestation bundle for 90 days.
-
-After downloading the workflow artifact, verify its receipt against the exact
-qualification workflow and release tag:
-
-```sh
-gh attestation verify receipt.json \
-  --repo crabbuild/crab \
-  --signer-workflow crabbuild/crab/.github/workflows/http-server-kubernetes-live.yml \
-  --source-ref refs/tags/crab-http-server-v0.1.0 \
-  --source-digest release_commit_here
-```
-
-Use `--bundle receipt.attestation.json` to verify the retained bundle instead
-of fetching the attestation from GitHub. A valid signature proves the receipt
-bytes and workflow identity; the receipt's checks still prove only the named
-cluster, deployment, repository, release, and completion time.
-
-Use `ubuntu-latest` only when the cluster API and public Crab origin are
-reachable from a hosted runner. Select a dedicated self-hosted runner label for
-private EKS or AKS endpoints. For GKE, also select `internal` when that runner
-reaches the private control-plane address, or `connect-gateway` when the runner
-identity is authorized for the fleet gateway. A self-hosted runner needs Bash,
-`kubectl`, Git LFS, `curl`, `jq`, GitHub CLI with artifact-attestation support,
-and the provider CLI used by its selected authentication path. The AKS path
-installs a pinned `kubelogin` release before requesting non-admin cluster
-credentials.
-
-The environment needs one secret:
-
-| Secret | Purpose |
-| --- | --- |
-| `CRAB_HTTP_SERVER_QUALIFICATION_GIT_TOKEN` | Write-scoped Crab token for only the dedicated qualification repository |
-
-Use a separate protected environment for each provider, such as
-`crab-http-server-live-eks`, `crab-http-server-live-gke`, and
-`crab-http-server-live-aks`. This keeps cluster identities, release-tag
-policies, reviewers, and evidence ownership independent. Do not place all
-three cloud identities in the default example environment merely to reduce
-setup steps.
-
-Configure only the variables for the selected platform:
-
-| Platform | Protected-environment variables |
-| --- | --- |
-| EKS | `CRAB_HTTP_SERVER_EKS_GITHUB_ROLE_ARN`, `CRAB_HTTP_SERVER_EKS_REGION`, `CRAB_HTTP_SERVER_EKS_CLUSTER` |
-| GKE | `CRAB_HTTP_SERVER_GKE_GITHUB_IDENTITY_PROVIDER`, `CRAB_HTTP_SERVER_GKE_GITHUB_SERVICE_ACCOUNT`, `CRAB_HTTP_SERVER_GKE_PROJECT`, `CRAB_HTTP_SERVER_GKE_CLUSTER`, `CRAB_HTTP_SERVER_GKE_LOCATION` |
-| AKS | `CRAB_HTTP_SERVER_AKS_GITHUB_CLIENT_ID`, `CRAB_HTTP_SERVER_AKS_TENANT_ID`, `CRAB_HTTP_SERVER_AKS_SUBSCRIPTION_ID`, `CRAB_HTTP_SERVER_AKS_RESOURCE_GROUP`, `CRAB_HTTP_SERVER_AKS_CLUSTER` |
-
-These identify a GitHub OIDC federation dedicated to qualification; they are
-not the pod's storage workload identity. Give the runner identity only enough
-cloud permission to obtain user credentials for the named cluster. Bind it in
-Kubernetes to read the named Namespace, Deployment, Service, Ingress,
-NetworkPolicy, PodDisruptionBudget, HorizontalPodAutoscaler, workload
-ServiceAccount, pods, and hosting nodes; execute and port-forward to Crab pods;
-create and delete the short-lived Restricted network-isolation probe pod; and
-patch only the Crab Deployment for the approved restart. Do not grant the
-runner object-storage credentials or cluster-admin. Protect the environment
-with required reviewers and restrict which release tags may deploy to it.
-
-Start from `qualification/rbac.example.yaml`. Replace its provider-mapped
-group, namespace, Deployment resource name, and workload ServiceAccount name
-before applying it. Keep Crab in a dedicated namespace: pod exec and
-port-forward permissions cannot be limited to a label selector by Kubernetes
-RBAC, and Kubernetes cannot restrict pod creation by resource name. Singleton
-Service, ServiceAccount, ingress, NetworkPolicy, disruption-budget, and HPA
-reads are name-scoped. The example grants no access to Secrets and permits only
-`get`—not `list`—for the dynamically discovered hosting nodes and the named
-namespace.
-
-Use the provider's GitHub federation guidance for the runner identity:
-[AWS IAM OIDC](https://github.com/aws-actions/configure-aws-credentials#oidc),
-[Google Cloud Workload Identity Federation](https://github.com/google-github-actions/auth#workload-identity-federation),
-or [Azure Login with OIDC](https://github.com/Azure/login#login-with-openid-connect-oidc).
-
-An unpacked OCI chart contains the same script at
-`crab-http-server/qualification/qualify-kubernetes.sh`, so this gate does not
-require a source checkout. Invoke it with `bash`; Helm packages regular files
-without preserving their executable mode.
-
-During termination, Kubernetes marks the pod endpoint non-ready before running
-the chart's 15-second pre-stop delay. Crab keeps serving during that interval so
-Service and ingress routes can converge before `SIGTERM` starts the application
-drain. The 630-second pod grace period preserves more than ten minutes after the
-pre-stop delay.
+Workload identity can be inspected independently with
+`qualification/verify-workload-identity.sh`. Keep cluster access separate from
+the server's object-storage identity.
 
 ## Enable HTTPS ingress
 

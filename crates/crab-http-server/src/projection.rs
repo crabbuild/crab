@@ -3,10 +3,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use cellule_runtime::cell::executor::MutationIdentity;
-use cellule_runtime::client::{CellClient, Committed, InvocationError};
-use cellule_runtime::identity::CellTarget;
-use cellule_runtime::identity::RequestId;
+use crate::cells::MutationIdentity;
+use crate::cells::{Committed, RepositoryClient};
 use crab_metadata::manifest_store::RepositorySnapshot;
 use crab_metadata::path_state::{PathStateItem, PathStateReader, PathStateRecord};
 use crab_metadata::split_commit_graph::{SplitCommitGraph, load_split_commit_graph};
@@ -15,7 +13,7 @@ use crab_storage::{Store, StoreLayout};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::cells::{RepositoryCellRouter, repository::projection};
+use crate::cells::repository::projection;
 
 pub(crate) use projection::AttributionItem;
 
@@ -32,7 +30,7 @@ pub(crate) async fn reconcile(
     context: crate::maintenance::ProjectionContext,
     cancellation: &CancellationToken,
 ) -> crate::Result<Option<projection::SourceIdentity>> {
-    let Some(router) = context.router else {
+    let Some(client) = context.client else {
         return Ok(None);
     };
     let store = layout.store();
@@ -57,8 +55,8 @@ pub(crate) async fn reconcile(
             cancellation,
         )
         .await?;
-    let cell = router.route_projection(context.repository_id).await?;
-    let target = cell.target.clone();
+    let cell = client.repository(context.repository_id)?;
+    let target = cell.target;
     let client = cell.client.clone();
     let result = build_epoch(
         store,
@@ -97,8 +95,8 @@ pub(crate) async fn reconcile(
 }
 
 async fn collect_epochs(
-    client: &CellClient,
-    target: &CellTarget,
+    client: &RepositoryClient,
+    target: &Uuid,
     source: &projection::SourceIdentity,
 ) -> crate::Result<()> {
     apply_batch(
@@ -208,27 +206,27 @@ fn path_state_error(error: crab_metadata::error::MetadataError) -> crate::Error 
 }
 
 pub(crate) async fn state(
-    router: &RepositoryCellRouter,
+    client: &RepositoryClient,
     repository_id: Uuid,
 ) -> crate::Result<projection::ProjectionStateView> {
-    let cell = router.route_projection(repository_id).await?;
+    let cell = client.repository(repository_id)?;
     cell.client
         .query::<projection::GetProjectionState>(&cell.target, None, projection::ProjectionState)
         .await
         .map(|observed| observed.output)
-        .map_err(invocation_error)
+        .map_err(crate::Error::Cell)
 }
 
 pub(crate) async fn attribution(
-    router: &RepositoryCellRouter,
+    client: &RepositoryClient,
     repository_id: Uuid,
     source_token: &str,
     commit_oid: &[u8],
     paths: Vec<Vec<u8>>,
 ) -> crate::Result<projection::AttributionResponse> {
     let batches = attribution_batches(source_token, commit_oid, paths)?;
-    let cell = router.route_projection(repository_id).await?;
-    let target = cell.target.clone();
+    let cell = client.repository(repository_id)?;
+    let target = cell.target;
     let mut items = Vec::new();
     for paths in batches {
         let input = serde_json::to_vec(&projection::AttributionQuery {
@@ -240,7 +238,7 @@ pub(crate) async fn attribution(
             .client
             .query::<projection::GetProjectionAttribution>(&target, None, input)
             .await
-            .map_err(invocation_error)?;
+            .map_err(crate::Error::Cell)?;
         let response: projection::AttributionResponse =
             serde_json::from_slice(&observed.output).map_err(crate::Error::Json)?;
         if response.state != "ready" {
@@ -307,8 +305,8 @@ async fn build_epoch(
     layout: &StoreLayout<Store>,
     options: RepositoryOptions,
     repository: &RemoteGitRepository,
-    client: &CellClient,
-    target: &CellTarget,
+    client: &RepositoryClient,
+    target: &Uuid,
     source: &projection::SourceIdentity,
     snapshot: &RepositorySnapshot,
     metrics: &crate::metrics::Metrics,
@@ -395,8 +393,8 @@ async fn build_epoch_contents(
     layout: &StoreLayout<Store>,
     options: RepositoryOptions,
     repository: &RemoteGitRepository,
-    client: &CellClient,
-    target: &CellTarget,
+    client: &RepositoryClient,
+    target: &Uuid,
     source: &projection::SourceIdentity,
     snapshot: &RepositorySnapshot,
     epoch: u64,
@@ -473,8 +471,8 @@ async fn project_attribution(
     store: &Store,
     graph: &SplitCommitGraph,
     path_state: &PathStateReader,
-    client: &CellClient,
-    target: &CellTarget,
+    client: &RepositoryClient,
+    target: &Uuid,
     source: &projection::SourceIdentity,
     epoch: u64,
     metrics: &crate::metrics::Metrics,
@@ -671,8 +669,8 @@ fn commit_row(ordinal: u32, record: &PathStateRecord) -> projection::CommitRow {
 }
 
 async fn send_json_batch<T: serde::Serialize>(
-    client: &CellClient,
-    target: &CellTarget,
+    client: &RepositoryClient,
+    target: &Uuid,
     operation: u8,
     epoch: u64,
     source: &projection::SourceIdentity,
@@ -712,8 +710,8 @@ async fn send_json_batch<T: serde::Serialize>(
 }
 
 async fn apply_batch(
-    client: &CellClient,
-    target: &CellTarget,
+    client: &RepositoryClient,
+    target: &Uuid,
     operation: u8,
     epoch: u64,
     source: &[u8],
@@ -728,7 +726,7 @@ async fn apply_batch(
     let committed: Committed<projection::ProjectionAck> = client
         .command::<projection::ApplyProjectionBatch>(target, mutation_identity()?, input)
         .await
-        .map_err(invocation_error)?;
+        .map_err(crate::Error::Cell)?;
     Ok(committed.output)
 }
 
@@ -738,23 +736,10 @@ fn mutation_identity() -> crate::Result<MutationIdentity> {
         .checked_add(60_000)
         .ok_or(crate::Error::Config("projection request expiry overflowed"))?;
     Ok(MutationIdentity {
-        request_id: RequestId::from_bytes(Uuid::now_v7().into_bytes()),
+        request_id: Uuid::now_v7(),
         issued_at_ms: now_ms,
         expires_at_ms,
     })
-}
-
-fn invocation_error<T>(error: InvocationError<T>) -> crate::Error {
-    match error {
-        InvocationError::NotStarted(error) => crate::Error::Cell(error),
-        InvocationError::Rejected(_) => crate::Error::Cell(cellule_runtime::Error::Command(
-            "projection command rejected",
-        )),
-        InvocationError::Pending(_) => crate::Error::Cell(cellule_runtime::Error::Command(
-            "projection command pending",
-        )),
-        InvocationError::InvalidPublishedResult { source, .. } => crate::Error::Cell(*source),
-    }
 }
 
 fn decode_sha1(value: &str) -> crate::Result<Vec<u8>> {

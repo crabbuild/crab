@@ -3,8 +3,9 @@
 Crab's repository HTTP application: one Rust server embeds the React UI and
 serves repositories from the operator's object storage.
 
-**Development status:** production qualification is incomplete. Read the
-[completion matrix](REFERENCE.md#completion-requirements) before deployment.
+**Development status:** Cellar migration and production qualification are in progress.
+Read [the native runtime contract and outstanding release gates](CELLAR.md)
+before deployment. Historical runtime receipts do not qualify this implementation.
 
 Capsule browse indexing is background work, independent of native Git receive.
 Canonical attribution is available without a Cell projection; configured Cells
@@ -32,35 +33,26 @@ reader; reconciliation imports only consumed ref, summary and attribution rows.
 It streams authenticated path-state pages into provisional Cell epochs without
 rereading raw Git commits. Retained summaries cannot authorize a revision: the
 foreground reader still checks current ref visibility before querying the Cell.
-Schema migration 3 preserves existing summaries and epoch membership while
-removing unconsumed Git fields. Existing Cells upgrade through release maintenance;
-their collaboration data must not be discarded to rebuild browse metadata.
+New repository Cells use one canonical schema containing only consumed commit
+summaries and attribution data. Only native Cellar application storage is
+supported; no previous-runtime reader or importer is provided.
 Projection reads and ingestion borrow runtime-owned Cells like collaboration
 requests. Cold read completion does not drain the Cell or wait for ingestion.
-Scheduler cleanup releases an unused cold activation only when no other operation
-holds it; runtime budgets, pressure eviction and node shutdown own retained Cells.
+Cellar owns retained Cells, idle eviction, pressure policy, and node shutdown.
 The current unshipped path-state codec interns raw components per layer and
 rejects aggregate writes above the reader budget before publishing any layers.
 The full Next.js/RustFS idle and mixed-load qualification remains in progress.
 
 ## Architecture
 
-![Crab HTTP server and pinned Cellule architecture](../../diagram/crab-http-next-architecture/cellule-boundary.svg)
-
-The server owns HTTP policy and application workflows. It uses the pinned
-[Cellule](https://github.com/crabbuild/cellule) runtime for Cell execution and
-LTX publication; shared Crab crates own Git reading, validation, and storage
-mechanics. Issues,
-comments, Labels, commit statuses, check runs, branch protections, repository
-lifecycle, Pull requests, reviews, and Release metadata use typed Rust commands
-against one SQLite/LTX Cell per repository. The remote-owner path is verified
-from the public HTTP listener through the private mTLS listener to an advanced
-LTX root. No serving route reads or writes the retired collaboration object
-trees. Normal serving paths create no Git checkout or local Git object database;
-the explicit browser Git import workflow runs a time-bounded
-`git clone --mirror` in Cell-managed staging and pushes the result through the
-native receive-pack path. Sources are limited to the operator's configured Git
-host allowlist.
+The server embeds the published [Cellar 0.1.0](https://github.com/crabbuild/cellar)
+native SDK. Crab owns HTTP authorization and product policy; Cellar owns Cell
+execution, leases, routing, SQLite/LTX persistence, and output durability. Issues,
+comments, labels, checks, branch protections, pull requests, reviews, releases,
+and browse projections use one native Cell per repository. Git objects and the
+catalog retain their existing Crab storage paths. Private peer traffic crosses
+the existing mTLS boundary. See [CELLAR.md](CELLAR.md) for initialization,
+shutdown, provider configuration, and the native storage boundary.
 
 Authenticated repository administrators manage the complete member list in
 **Settings → Members** or through the conditional CLI replacement command.
@@ -68,7 +60,7 @@ Both paths commit the same catalog revision and durable membership audit event.
 OIDC providers can also revoke an identity's Crab browser sessions and derived
 Git tokens through the documented back-channel logout endpoint. GitHub OAuth
 uses the same server-side browser session contract but does not provide signed
-OIDC logout tokens. The exact API, catalog migration, and rollout contracts are in
+OIDC logout tokens. The exact API, catalog, and identity contracts are in
 [Team sign-in](REFERENCE.md#team-sign-in).
 
 ## Browser navigation
@@ -120,12 +112,8 @@ durability-log followers. The default `fleet` profile can acknowledge a
 follower-fsynced cut before the object root is published. Switching a running
 fleet requires draining its old owner sessions, proving object coverage of
 their accepted cuts, and retiring their logs before relying on the all-node-loss
-contract. Read-replica routing remains under
-[Plan 036](../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md).
-Explicit issue-detail replica reads prefer the selected reader with the fewest
-outstanding attempts at this ingress, rotating ties. Selection and retries
-share one five-second request deadline. The count spans this ingress's Cells
-and is released on cancellation; it does not represent fleet-wide query load.
+contract. Reads use the authoritative owner; configurable replicas and explicit replica
+reads are retired in the Cellar migration.
 
 For the fastest local start, use Docker Engine with Compose v2:
 
@@ -160,62 +148,20 @@ credentials. Then create a cataloged repository and start:
 
 ```sh
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
-  cells release bootstrap --image sha256:IMAGE_MANIFEST_DIGEST
-"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
   repository create --owner team --name project --prefix team/project
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
   storage-probe
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
   cells capacity --json
-"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
-  cells backup create --pin 11112222333344445555666677778888
-"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
-  cells backup verify --pin 11112222333344445555666677778888
-"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
-  cells backup restore --pin 11112222333344445555666677778888 \
-  --destination-prefix recovery/team-2026-09-16
-"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
-  cells release activate --expected-revision 8 --strategy maintenance \
-  --retention-grace-hours 168 --retention-max-deletes 10000
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml serve
 ```
 
-`cells release bootstrap` converges concurrent first-install callers on one
-exact descriptor/image and resumes only the activation operation it created.
-For an operator-prepared upgrade it validates and admits the candidate without
-completing activation; it refuses to replace another desired release. `serve`
-rejects startup before binding either listener unless the compiled descriptor is
-the selected ready release or the selected compatible rollout candidate.
-`repository create` also publishes the repository's initial SQLite/LTX Cell and
-does not return until its catalog state is ready. `repository adopt` records an
-existing canonical Git repository, publishes a new empty application Cell and
-does not return until that Cell is ready. It does not preserve old collaboration
-application data.
-The server refuses startup for pending, missing or rootless repository Cells.
-`storage-probe` fails unless the workload can read and list the configured
-root, perform conditional coordination writes, create and delete an object,
-and observe that deletion. `serve` runs the same preflight before binding its
-listeners. `cells capacity --json` reports the resource-derived Cell admission
-envelope without claiming that the node has met a throughput target.
-
-`cells backup create` snapshots all catalog heads, requires one exact control
-per catalog entry, verifies the selected release and every reachable LTX
-dependency, and strict-creates the pin pointer last. Reusing a pin ID verifies
-and returns the existing boundary. Creation advertises a signed zero-capacity
-worker for its complete operation, so maintenance either waits for an in-flight
-pin or fences it before publication. `cells backup verify` independently reopens
-the pin and fails closed on a missing or corrupt dependency. `cells backup
-restore` conditionally copies the verified graph to a canonical isolated prefix
-in the configured bucket, publishes unowned `Idle` controls, then publishes the
-catalog, release, and pin commit points. Repeating an offline restore adopts
-only exact existing state; divergent destination state fails closed.
-
-Maintenance retention is opt-in. Supplying `--retention-grace-hours` verifies
-current controls and every backup pin before streaming the Cell application
-prefix and deleting recognized V1 immutable objects older than the grace.
-`--retention-max-deletes` accepts 1 through 100,000 and defaults to 10,000.
-Reaching the bound leaves the release in `Maintenance`; repeat the same
-activation until it returns `Ready`.
+`repository create` publishes the initial native Cell before marking its catalog
+entry ready. `repository adopt` initializes an empty collaboration Cell for an
+existing Git repository; it does not import application data from another runtime.
+`cells capacity --json` reports admission limits. `cells runtime` reports the
+native runtime version. The supported management surface and retired commands
+are listed in [CELLAR.md](CELLAR.md).
 
 The bucket or container must already exist. `repository adopt` can publish an
 existing canonical repository; it does not convert arbitrary objects into a
@@ -229,19 +175,13 @@ and a canonical HTTPS origin. For container deployment, use the
 
 ## Find the relevant contract
 
-For the proposed SQLite/LTX storage and multi-node ownership architecture, read
-[the next-generation design index](next-architecture/README.md). Focused topics under
-`next-architecture/` cover [ownership and load balancing](next-architecture/ownership-and-load-balancing.md),
-[SQLite/LTX publication](next-architecture/storage-protocol.md),
-[Kubernetes operation](next-architecture/deployment-and-operations.md), and the
-[hard cutover](next-architecture/hard-cutover.md). These describe intended
-behavior and acceptance gates separately from the current implementation.
+Read [CELLAR.md](CELLAR.md) for the native runtime, storage, and lifecycle
+boundary. [DESIGN.md](DESIGN.md) covers Git publication ownership.
 
 | Task | Read |
 | --- | --- |
 | Configure catalog, storage root, temporary space, and credentials | [Development setup](REFERENCE.md#run-the-current-development-build) |
 | Start locally with Docker Compose | [Local Compose stack](deploy/README.md#start-locally-with-docker-compose) |
-| Simulate 3 → 5 → 10 → 20 one-GiB Cell service nodes | [Compose KV reference service](examples/compose_kv_service/README.md) |
 | Deploy on EKS, GKE, AKS, or ECS | [Deployment profiles](deploy/README.md) |
 | Probe readiness and drain the service | [Container operation](REFERENCE.md#run-the-container) |
 | Scrape metrics and define alerts | [Operations runbook](deploy/operations.md#observe-requests-and-capacity) |
@@ -271,9 +211,10 @@ Read these sources in order:
 | [server.rs](src/server.rs) | Route composition, host/session checks, and mutation protection |
 | [issues.rs](src/issues.rs) | Route body limit, request extraction, HTTP contract, and typed command/query invocation |
 | [app.rs](src/app.rs) | Admission timeout, repository access, input validation, and HTTP error mapping |
-| [cells/router.rs](src/cells/router.rs) | Published-root validation plus local-owner restore or authenticated peer dispatch |
+| [cells/client.rs](src/cells/client.rs) | Typed requests through native ingress |
+| [cells/application.rs](src/cells/application.rs) | Transaction, replay receipts, and native output gate |
 | [cells/repository.rs](src/cells/repository.rs) | SQLite transaction, submission reservation, number allocation, and typed outcome |
-| [Cellule LTX](https://github.com/crabbuild/cellule/tree/70c3c218fafc815b951a40d4df1b50bba15b7d4c/crates/cellule-ltx) | Verified immutable publication and exact source-loss restore |
+| [Cellar SDK](https://github.com/crabbuild/cellar) | Native ownership, persistence, recovery, and output durability |
 
 Example JSON body, subject to the server's authentication and mutation checks:
 
