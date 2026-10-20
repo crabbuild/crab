@@ -196,8 +196,14 @@ impl CapsuleArtifacts {
                 ),
             );
         }
-        let capsule =
-            crab_metadata::capsule_protocol::Capsule::build(&transaction, self.packs, sections)?;
+        // Capsule encoding hashes complete packs. It must not occupy the
+        // executor that renews the caller's ref and runtime leases.
+        let encoding_transaction = transaction.clone();
+        let packs = self.packs;
+        let capsule = tokio::task::spawn_blocking(move || {
+            crab_metadata::capsule_protocol::Capsule::build(&encoding_transaction, packs, sections)
+        })
+        .await??;
         tracing::info!(
             phase = "capsule_encode",
             %transaction_id,
