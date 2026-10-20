@@ -1,24 +1,19 @@
-use cellule_runtime::cell::executor::MutationIdentity;
-use cellule_runtime::client::{Committed, InvocationError, Observed};
-use cellule_runtime::identity::RequestId;
+use crate::cells::MutationIdentity;
 use uuid::Uuid;
 
 use super::{Release, ReleaseAsset};
 use crate::{
     app::{Error, Result},
     auth::Identity,
-    cells::{
-        RepositoryCell,
-        repository::{
-            AttachReleaseAsset, AttachReleaseAssetInput, AttachReleaseAssetOutcome,
-            CompleteReleasePublication, CompleteReleasePublicationInput,
-            CompleteReleasePublicationOutcome, CreateRelease, CreateReleaseInput,
-            CreateReleaseOutcome, DeleteRelease, DeleteReleaseAsset, DeleteReleaseAssetInput,
-            DeleteReleaseAssetOutcome, DeleteReleaseInput, DeleteReleaseOutcome, GetRelease,
-            GetReleaseByTag, ListReleases, ReleaseAssetReservation, ReleaseListInput,
-            ReleaseRecord, ReserveReleaseAsset, ReserveReleaseAssetInput,
-            ReserveReleaseAssetOutcome, UpdateRelease, UpdateReleaseInput, UpdateReleaseOutcome,
-        },
+    cells::repository::{
+        AttachReleaseAsset, AttachReleaseAssetInput, AttachReleaseAssetOutcome,
+        CompleteReleasePublication, CompleteReleasePublicationInput,
+        CompleteReleasePublicationOutcome, CreateRelease, CreateReleaseInput, CreateReleaseOutcome,
+        DeleteRelease, DeleteReleaseAsset, DeleteReleaseAssetInput, DeleteReleaseAssetOutcome,
+        DeleteReleaseInput, DeleteReleaseOutcome, GetRelease, GetReleaseByTag, ListReleases,
+        ReleaseAssetReservation, ReleaseListInput, ReleaseRecord, ReserveReleaseAsset,
+        ReserveReleaseAssetInput, ReserveReleaseAssetOutcome, UpdateRelease, UpdateReleaseInput,
+        UpdateReleaseOutcome,
     },
     server::{Repository, Server},
 };
@@ -65,11 +60,10 @@ pub(super) enum AssetReservationOutcome {
 pub(super) async fn release(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     number: u64,
 ) -> Result<Option<Release>> {
-    let routed = route(server, repo, actor, "repository.read").await?;
-    query_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    crate::app::query_output(
         routed
             .client
             .query::<GetRelease>(&routed.target, None, number)
@@ -81,11 +75,10 @@ pub(super) async fn release(
 pub(super) async fn release_by_tag(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     tag: String,
 ) -> Result<Option<Release>> {
-    let routed = route(server, repo, actor, "repository.read").await?;
-    query_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    crate::app::query_output(
         routed
             .client
             .query::<GetReleaseByTag>(&routed.target, None, tag)
@@ -97,14 +90,13 @@ pub(super) async fn release_by_tag(
 pub(super) async fn list(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     before: Option<u64>,
     limit: u8,
     include_drafts: bool,
     query: Option<String>,
 ) -> Result<(Vec<Release>, Option<u64>)> {
-    let routed = route(server, repo, actor, "repository.read").await?;
-    let page = query_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    let page = crate::app::query_output(
         routed
             .client
             .query::<ListReleases>(
@@ -130,8 +122,8 @@ pub(super) async fn create(
     repo: &Repository,
     input: NewRelease,
 ) -> Result<ReleaseMutation> {
-    let routed = route(server, repo, &input.author, "repository.release.create").await?;
-    match command_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    match crate::app::command_output(
         routed
             .client
             .command::<CreateRelease>(
@@ -162,12 +154,11 @@ pub(super) async fn create(
 pub(super) async fn update(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     number: u64,
     input: ReleaseUpdate,
 ) -> Result<ReleaseMutation> {
-    let routed = route(server, repo, actor, "repository.release.update").await?;
-    match command_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    match crate::app::command_output(
         routed
             .client
             .command::<UpdateRelease>(
@@ -196,7 +187,6 @@ pub(super) async fn update(
 pub(super) async fn complete_publication(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     release: &Release,
     tag_oid: String,
 ) -> Result<Release> {
@@ -204,8 +194,8 @@ pub(super) async fn complete_publication(
         .publication_pending
         .as_ref()
         .ok_or(Error::ReleaseConflict)?;
-    let routed = route(server, repo, actor, "repository.release.update").await?;
-    match command_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    match crate::app::command_output(
         routed
             .client
             .command::<CompleteReleasePublication>(
@@ -228,12 +218,11 @@ pub(super) async fn complete_publication(
 pub(super) async fn delete(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     number: u64,
     version: u64,
 ) -> Result<()> {
-    let routed = route(server, repo, actor, "repository.release.update").await?;
-    match command_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    match crate::app::command_output(
         routed
             .client
             .command::<DeleteRelease>(
@@ -255,14 +244,8 @@ pub(super) async fn reserve_asset(
     repo: &Repository,
     reservation: AssetReservation,
 ) -> Result<AssetReservationOutcome> {
-    let routed = route(
-        server,
-        repo,
-        &reservation.uploader,
-        "repository.release.asset",
-    )
-    .await?;
-    match command_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    match crate::app::command_output(
         routed
             .client
             .command::<ReserveReleaseAsset>(
@@ -297,14 +280,8 @@ pub(super) async fn attach_asset(
     size: u64,
     digest: String,
 ) -> Result<Release> {
-    let routed = route(
-        server,
-        repo,
-        &reservation.uploader,
-        "repository.release.asset",
-    )
-    .await?;
-    match command_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    match crate::app::command_output(
         routed
             .client
             .command::<AttachReleaseAsset>(
@@ -332,13 +309,12 @@ pub(super) async fn attach_asset(
 pub(super) async fn delete_asset(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     release: u64,
     request_id: &str,
     version: u64,
 ) -> Result<Release> {
-    let routed = route(server, repo, actor, "repository.release.asset").await?;
-    match command_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    match crate::app::command_output(
         routed
             .client
             .command::<DeleteReleaseAsset>(
@@ -423,22 +399,6 @@ fn from_author(value: crate::cells::repository::RepositoryAuthor) -> Identity {
     }
 }
 
-async fn route(
-    server: &Server,
-    repository: &Repository,
-    principal: &Identity,
-    action: &'static str,
-) -> Result<RepositoryCell> {
-    let router = server.repository_cells().ok_or(Error::CellUnavailable)?;
-    router
-        .route(repository.id, principal, action)
-        .await
-        .map_err(|error| match error {
-            crate::Error::Cell(source) => Error::Cell(source),
-            source => Error::Repository(source),
-        })
-}
-
 fn submission_id(value: &str) -> Result<[u8; 16]> {
     Uuid::parse_str(value)
         .map(Uuid::into_bytes)
@@ -446,36 +406,12 @@ fn submission_id(value: &str) -> Result<[u8; 16]> {
 }
 
 fn mutation_identity() -> Result<MutationIdentity> {
-    let now_ms = crate::cells::unix_now_ms().map_err(Error::Repository)?;
+    let now_ms = crate::cells::unix_now_ms().map_err(Error::Cell)?;
     Ok(MutationIdentity {
-        request_id: RequestId::from_bytes(Uuid::now_v7().into_bytes()),
+        request_id: Uuid::now_v7(),
         issued_at_ms: now_ms,
         expires_at_ms: now_ms
             .checked_add(60_000)
             .ok_or(Error::CellContract("Cell request expiry overflowed"))?,
     })
-}
-
-fn command_output<T>(result: std::result::Result<Committed<T>, InvocationError<T>>) -> Result<T> {
-    match result {
-        Ok(committed) => Ok(committed.output),
-        Err(InvocationError::Rejected(committed)) => Ok(committed.output),
-        Err(InvocationError::Pending(_)) => Err(Error::CellPending),
-        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
-        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
-    }
-}
-
-fn query_output<T>(result: std::result::Result<Observed<T>, InvocationError<T>>) -> Result<T> {
-    match result {
-        Ok(observed) => Ok(observed.output),
-        Err(InvocationError::Rejected(_)) => Err(Error::CellContract(
-            "Cell query returned a durable rejection",
-        )),
-        Err(InvocationError::Pending(_)) => Err(Error::CellContract(
-            "Cell query returned pending mutation evidence",
-        )),
-        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
-        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
-    }
 }

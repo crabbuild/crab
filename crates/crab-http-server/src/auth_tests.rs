@@ -16,21 +16,6 @@ use url::Url;
 const KEY_ONE: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIBERERERERERERERERERERERERERERERERERERERERER\n-----END PRIVATE KEY-----";
 const KEY_TWO: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEICIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIi\n-----END PRIVATE KEY-----";
 
-struct UnavailablePeer;
-
-impl cellule_runtime::peer::PeerRoundTrip for UnavailablePeer {
-    fn send(
-        &self,
-        _target: cellule_runtime::CellTarget,
-        _request: Vec<u8>,
-        _remaining_ms: u32,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>,
-    > {
-        Box::pin(async { Err(cellule_runtime::Error::CellNotActive) })
-    }
-}
-
 struct Provider {
     issuer: String,
     rotated: AtomicBool,
@@ -222,7 +207,6 @@ struct Harness {
     provider: Arc<Provider>,
     server: Arc<Server>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
-    cell_dir: tempfile::TempDir,
 }
 
 impl Harness {
@@ -335,81 +319,22 @@ impl Harness {
             .await
             .unwrap();
         repository.id = record.id;
-        let cell_identity = cellule_runtime::cell::application::ApplicationIdentity::new(
-            cellule_runtime::TenantId::from_bytes([2; 16]),
-            cellule_runtime::ApplicationId::from_bytes([3; 16]),
-        );
-        let cell_layout = cellule_runtime::ltx::CellStorageLayout::new(
-            cellule_store::Store::new(admission_store.inner().clone()),
-            object_store::path::Path::from("test-cells"),
-            *cell_identity.application().as_bytes(),
-        );
-        let registry = Arc::new(crate::cells::compiled_registry().unwrap());
-        crate::cells::bootstrap_release_at(
-            &cell_layout,
-            cell_identity,
-            &registry,
-            &format!("sha256:{}", "a".repeat(64)),
-        )
-        .await
-        .unwrap();
-        let cell_dir = tempfile::TempDir::new().unwrap();
-        let application = crate::cells::compiled_application().unwrap();
-        crate::cells::initialize_repository_at(
-            &cell_layout,
-            cell_identity,
-            &registry,
-            &application,
-            cell_dir.path(),
-            32 * 1024 * 1024 * 1024,
-            "https://initializer.test:8081".into(),
-            repository.id,
-        )
-        .await
-        .unwrap();
-        let cell_session = cellule_runtime::SessionId::from_bytes([4; 16]);
-        let cell_runtime = cellule_runtime::CellRuntime::new(
-            cellule_runtime::SqlWorkerPool::new(1, 16).unwrap(),
-            16 * 1024 * 1024,
-            cell_session,
-        )
-        .unwrap();
-        let repository_cells = crate::cells::RepositoryCellRouter::new(
-            cell_identity,
-            cell_layout.clone(),
-            Arc::clone(&registry),
-            cell_runtime.clone(),
-            crate::cells::RepositoryCellPeer::new(
-                crate::peer::PeerOwnerHints::default(),
-                cellule_runtime::node::NodeDirectory::new(
-                    cell_layout,
-                    cellule_runtime::Digest::from_bytes([6; 32]),
-                    cellule_runtime::Digest::from_bytes([7; 32]),
-                    registry.release_digest(),
-                ),
-                Arc::new(cellule_runtime::peer::PeerSigner::new(
-                    cell_session,
-                    registry.release_digest(),
-                    ed25519_dalek::SigningKey::from_bytes(&[5; 32]),
-                )),
-                Arc::new(UnavailablePeer),
-                cellule_runtime::control::Owner {
-                    session: cell_session,
-                    endpoint: "https://server.test:8081".into(),
-                },
-            ),
-            cell_dir.path().to_path_buf(),
-        )
-        .unwrap();
+        let cells = crate::cells::runtime::TestRuntime::start(address).await;
+        cells
+            .client
+            .repository(repository.id)
+            .unwrap()
+            .client
+            .initialize(repository.id)
+            .await
+            .unwrap();
         let server = Arc::new(Server {
             repositories: BTreeMap::from([(("team".into(), "private".into()), repository)]).into(),
             runtime: Arc::new(RemoteGitRuntime::default()),
-            cell_runtime,
-            cell_node: None,
-            repository_cells: Some(repository_cells),
-            peer_receiver: None,
-            follower_store: None,
-            node_log_transport: None,
+            repository_cells: Some(cells.client.clone()),
+            cell_services: None,
+            cell_test_runtime: Some(cells),
+            shutdown_mode: tokio::sync::watch::channel(cellar::sdk::ShutdownMode::Preserve).0,
             options: RepositoryOptions::default(),
             cursor_key: [7; 32],
             admission: Semaphore::new(16),
@@ -428,12 +353,8 @@ impl Harness {
             git_import: None,
             catalog_healthy: AtomicBool::new(false),
             node_healthy: AtomicBool::new(false),
-            scheduler_status: crate::cells::SchedulerStatus::new(
-                crate::cells::unix_now_ms().unwrap(),
-            )
-            .unwrap(),
             cell_capacity: super::test_cell_capacity_report(),
-            metrics: crate::metrics::Metrics::new(&[]).unwrap(),
+            metrics: crate::metrics::Metrics::new().unwrap(),
         });
         let app = router(Arc::clone(&server));
         let task = tokio::spawn(async move {
@@ -448,7 +369,6 @@ impl Harness {
             provider,
             server,
             tasks: vec![task, provider_task],
-            cell_dir,
         }
     }
 

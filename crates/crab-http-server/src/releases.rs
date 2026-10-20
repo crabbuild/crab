@@ -334,8 +334,8 @@ async fn finish_publication(
             Err(Error::ReleaseConflict)
         };
     }
-    let actor = app::actor(principal)?;
-    storage::complete_publication(server, repo, &actor, &release, tag_oid).await
+    app::actor(principal)?;
+    storage::complete_publication(server, repo, &release, tag_oid).await
 }
 
 async fn create(
@@ -395,8 +395,8 @@ async fn visible_release(
     principal: &Principal,
     number: u64,
 ) -> Result<Release> {
-    let actor = app::actor(principal)?;
-    let release = storage::release(server, repo, &actor, app::number(number)?).await?;
+    app::actor(principal)?;
+    let release = storage::release(server, repo, app::number(number)?).await?;
     visible_release_record(release, principal.can_write(&repo.config))
 }
 
@@ -480,7 +480,7 @@ async fn upload_asset(
         return Err(Error::ReleasePermission);
     }
     let actor = app::actor(&principal)?;
-    if repo.lifecycle(&server, &actor).await?.archived {
+    if repo.lifecycle(&server).await?.archived {
         return Err(Error::Archived);
     }
     let number = app::number(number)?;
@@ -568,9 +568,8 @@ async fn upload_asset(
             let expected_hash = *blake3.finalize().as_bytes();
             let repo = app::repository(&worker_server, &principal, &key)?;
             let repo = repo.as_ref();
-            let actor = app::actor(&principal)?;
-            if repo.lifecycle(&worker_server, &actor).await?.archived
-                || !principal.can_write(&repo.config)
+            app::actor(&principal)?;
+            if repo.lifecycle(&worker_server).await?.archived || !principal.can_write(&repo.config)
             {
                 return Err(Error::Archived);
             }
@@ -611,15 +610,14 @@ async fn remove_asset(
     if !principal.can_write(&repo.config) {
         return Err(Error::ReleasePermission);
     }
-    let actor = app::actor(&principal)?;
-    if repo.lifecycle(&server, &actor).await?.archived {
+    app::actor(&principal)?;
+    if repo.lifecycle(&server).await?.archived {
         return Err(Error::Archived);
     }
     let Json(input) = input?;
     let release = storage::delete_asset(
         &server,
         repo,
-        &actor,
         app::number(number)?,
         &asset_id,
         input.version,
@@ -646,8 +644,8 @@ async fn detail_by_tag(
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let (tag, _) = tag_name(&tag)?;
-    let actor = app::actor(&principal)?;
-    let release = storage::release_by_tag(&server, &repo, &actor, tag).await?;
+    app::actor(&principal)?;
+    let release = storage::release_by_tag(&server, &repo, tag).await?;
     let release = visible_release_record(release, principal.can_write(&repo.config))?;
     Ok(Json(view(&release)))
 }
@@ -667,11 +665,10 @@ async fn edit(
     let Json(input) = input?;
     let title = app::title(&input.title)?;
     app::body(&input.body, false)?;
-    let actor = app::actor(&principal)?;
+    app::actor(&principal)?;
     let release = match storage::update(
         &server,
         repo,
-        &actor,
         app::number(number)?,
         storage::ReleaseUpdate {
             version: input.version,
@@ -703,8 +700,8 @@ async fn remove(
         return Err(Error::ReleasePermission);
     }
     let Json(input) = input?;
-    let actor = app::actor(&principal)?;
-    storage::delete(&server, repo, &actor, app::number(number)?, input.version).await?;
+    app::actor(&principal)?;
+    storage::delete(&server, repo, app::number(number)?, input.version).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -720,11 +717,10 @@ async fn list(
     let limit = u8::try_from(parameters.limit()?)
         .map_err(|_| Error::Invalid("Release page size or cursor is invalid"))?;
     let query = parameters.query()?;
-    let actor = app::actor(&principal)?;
+    app::actor(&principal)?;
     let (releases, next) = storage::list(
         &server,
         repo,
-        &actor,
         parameters.before,
         limit,
         include_drafts,

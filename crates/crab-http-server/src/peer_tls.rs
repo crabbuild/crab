@@ -9,11 +9,9 @@ use std::{
 };
 
 use axum::extract::connect_info::Connected;
-use cellule_runtime::Digest as CellDigest;
 use ed25519_dalek::{SigningKey, pkcs8::DecodePrivateKey};
 use rustls::{
-    CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig,
-    SignatureScheme,
+    ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig, SignatureScheme,
     client::{
         WebPkiServerVerifier,
         danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
@@ -30,18 +28,13 @@ use crate::{CellsConfig, Error, Result};
 
 const ED25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const FLEET_DIGEST_DOMAIN: &[u8] = b"crab.peer-ca.v1\0";
 
 /// Loaded private peer identity and its verified mTLS server configuration.
 pub(crate) struct LoadedPeerTls {
     config: Arc<ServerConfig>,
-    certificates: Vec<CertificateDer<'static>>,
-    private_key: PrivateKeyDer<'static>,
-    roots: Arc<RootCertStore>,
-    server_name: ServerName<'static>,
+    client: PeerTlsClient,
+    #[cfg(test)]
     signing_key: SigningKey,
-    certificate: CellDigest,
-    fleet: CellDigest,
 }
 
 impl LoadedPeerTls {
@@ -82,17 +75,13 @@ impl LoadedPeerTls {
                 source: Box::new(source),
             })?;
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
-        let certificate = sha256_digest(certificates[0].as_ref());
 
+        let client = PeerTlsClient::new(certificates, private_key, roots, server_name)?;
         Ok(Self {
             config: Arc::new(config),
-            certificates,
-            private_key,
-            roots,
-            server_name,
+            client,
+            #[cfg(test)]
             signing_key,
-            certificate,
-            fleet: fleet_digest(&authorities),
         })
     }
 
@@ -103,80 +92,73 @@ impl LoadedPeerTls {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn signing_key(&self) -> &SigningKey {
         &self.signing_key
     }
 
-    pub(crate) const fn certificate(&self) -> CellDigest {
-        self.certificate
-    }
-
-    pub(crate) const fn fleet(&self) -> CellDigest {
-        self.fleet
-    }
-
     pub(crate) fn client_identity(&self) -> PeerTlsClient {
-        PeerTlsClient {
-            certificates: self.certificates.clone(),
-            private_key: self.private_key.clone_key(),
-            roots: Arc::clone(&self.roots),
-            server_name: self.server_name.clone(),
-        }
+        self.client.clone()
     }
 }
 
-/// Fleet-authenticated client identity that pins every request to one enrolled leaf.
+/// Fleet-authenticated TLS connector with CA and server-name verification.
+#[derive(Clone)]
 pub(crate) struct PeerTlsClient {
-    certificates: Vec<CertificateDer<'static>>,
-    private_key: PrivateKeyDer<'static>,
-    roots: Arc<RootCertStore>,
+    config: Arc<ClientConfig>,
     server_name: ServerName<'static>,
 }
 
-impl Clone for PeerTlsClient {
-    fn clone(&self) -> Self {
-        Self {
-            certificates: self.certificates.clone(),
-            private_key: self.private_key.clone_key(),
-            roots: Arc::clone(&self.roots),
-            server_name: self.server_name.clone(),
-        }
-    }
-}
-
 impl PeerTlsClient {
-    pub(crate) fn client(
-        &self,
-        certificate: CellDigest,
-        public_key: [u8; 32],
-    ) -> Result<reqwest::Client> {
-        let verifier = WebPkiServerVerifier::builder(Arc::clone(&self.roots))
+    fn new(
+        certificates: Vec<CertificateDer<'static>>,
+        private_key: PrivateKeyDer<'static>,
+        roots: Arc<RootCertStore>,
+        server_name: ServerName<'static>,
+    ) -> Result<Self> {
+        let verifier = WebPkiServerVerifier::builder(roots)
             .build()
             .map_err(|source| Error::PeerTls {
                 context: "Cell peer CA cannot verify servers",
                 source: Box::new(source),
             })?;
-        let verifier = Arc::new(PinnedServerVerifier {
+        let verifier = Arc::new(FleetServerVerifier {
             verifier,
-            certificate,
-            public_key,
-            server_name: self.server_name.clone(),
+            server_name: server_name.clone(),
         });
         let mut config = ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(verifier)
-            .with_client_auth_cert(self.certificates.clone(), self.private_key.clone_key())
+            .with_client_auth_cert(certificates, private_key)
             .map_err(|source| Error::PeerTls {
                 context: "Cell peer client identity is invalid",
                 source: Box::new(source),
             })?;
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        Ok(Self {
+            config: Arc::new(config),
+            server_name,
+        })
+    }
+
+    pub(crate) async fn connect(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> io::Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
+        let stream = tokio::net::TcpStream::connect((host, port)).await?;
+        tokio_rustls::TlsConnector::from(Arc::clone(&self.config))
+            .connect(self.server_name.clone(), stream)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn client(&self) -> Result<reqwest::Client> {
         reqwest::Client::builder()
             .https_only(true)
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .pool_idle_timeout(Duration::from_secs(30))
-            .pool_max_idle_per_host(8)
-            .use_preconfigured_tls(config)
+            .use_preconfigured_tls((*self.config).clone())
             .build()
             .map_err(|source| Error::PeerTls {
                 context: "Cell peer HTTP client initialization failed",
@@ -186,14 +168,12 @@ impl PeerTlsClient {
 }
 
 #[derive(Debug)]
-struct PinnedServerVerifier {
+struct FleetServerVerifier {
     verifier: Arc<WebPkiServerVerifier>,
-    certificate: CellDigest,
-    public_key: [u8; 32],
     server_name: ServerName<'static>,
 }
 
-impl ServerCertVerifier for PinnedServerVerifier {
+impl ServerCertVerifier for FleetServerVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
@@ -209,10 +189,6 @@ impl ServerCertVerifier for PinnedServerVerifier {
             ocsp_response,
             now,
         )?;
-        let key = certificate_public_key(end_entity).map_err(|_| pin_error())?;
-        if sha256_digest(end_entity.as_ref()) != self.certificate || key != self.public_key {
-            return Err(pin_error());
-        }
         Ok(verified)
     }
 
@@ -241,19 +217,16 @@ impl ServerCertVerifier for PinnedServerVerifier {
     }
 }
 
-const fn pin_error() -> rustls::Error {
-    rustls::Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure)
-}
-
 /// Identity extracted only after rustls validates the complete client chain.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PeerTlsIdentity {
-    certificate: CellDigest,
+    certificate: [u8; 32],
     public_key: [u8; 32],
 }
 
+#[cfg(test)]
 impl PeerTlsIdentity {
-    pub(crate) const fn certificate(&self) -> CellDigest {
+    pub(crate) const fn certificate(&self) -> [u8; 32] {
         self.certificate
     }
 
@@ -450,24 +423,8 @@ fn certificate_public_key(certificate: &CertificateDer<'_>) -> Result<[u8; 32]> 
         ))
 }
 
-fn sha256_digest(bytes: &[u8]) -> CellDigest {
-    CellDigest::from_bytes(Sha256::digest(bytes).into())
-}
-
-fn fleet_digest(authorities: &[CertificateDer<'static>]) -> CellDigest {
-    let mut authorities = authorities
-        .iter()
-        .map(|certificate| certificate.as_ref())
-        .collect::<Vec<_>>();
-    authorities.sort_unstable();
-    authorities.dedup();
-    let mut digest = Sha256::new();
-    digest.update(FLEET_DIGEST_DOMAIN);
-    for authority in authorities {
-        digest.update((authority.len() as u64).to_be_bytes());
-        digest.update(authority);
-    }
-    CellDigest::from_bytes(digest.finalize().into())
+fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
 }
 
 fn install_crypto_provider() {

@@ -521,12 +521,7 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
             .unwrap()
             .is_empty()
     );
-    let actor = crate::auth::Identity {
-        issuer: h.provider.issuer.clone(),
-        subject: "alice-id".into(),
-        name: "Alice".into(),
-    };
-    crate::repository_settings::replace_lifecycle(&h.server, &repo, &actor, 0, true)
+    crate::repository_settings::replace_lifecycle(&h.server, &repo, 0, true)
         .await
         .unwrap();
     assert_eq!(
@@ -562,7 +557,7 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         delete_release(&h, &alice, csrf, 3, 1).await,
         StatusCode::FORBIDDEN
     );
-    crate::repository_settings::replace_lifecycle(&h.server, &repo, &actor, 1, false)
+    crate::repository_settings::replace_lifecycle(&h.server, &repo, 1, false)
         .await
         .unwrap();
 

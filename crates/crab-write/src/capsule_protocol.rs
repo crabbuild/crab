@@ -283,7 +283,10 @@ pub async fn prepare_publication_with_ref_head_bases(
         }
     }
 
-    let run = capsule_leaf_run(capsule)?;
+    // Leaf authentication scans the full payload. Keep lease renewal and
+    // other async work schedulable while encoding a large publication.
+    let capsule = capsule.clone();
+    let run = tokio::task::spawn_blocking(move || capsule_leaf_run(&capsule)).await??;
     let prepared = try_join_all(transaction.edits().iter().zip(snapshots).map(
         |(edit, snapshot)| {
             prepare_ref_successor(
@@ -2146,6 +2149,42 @@ mod tests {
             Vec::new(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn large_publication_keeps_the_async_runtime_available() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/responsive".to_owned());
+        let base = initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction = transaction(&base, None, &"2".repeat(40));
+        let capsule = Capsule::build(
+            &transaction,
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from(vec![0; 16 * 1024 * 1024]),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "4".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let publication = tokio::spawn(async move {
+            started.send(()).unwrap();
+            prepare_publication(&router, base, &transaction, &capsule).await
+        });
+        ready.await.unwrap();
+        // Lease-renewal tasks must run while a large leaf is encoded, even
+        // when storage itself never suspends the publication future.
+        assert!(!publication.is_finished());
+        publication.await.unwrap().unwrap();
     }
 
     #[tokio::test]

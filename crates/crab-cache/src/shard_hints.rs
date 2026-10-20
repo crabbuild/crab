@@ -237,12 +237,10 @@ fn inspect_database_at_with_limits(
     let interrupt_cancel = cancel.clone();
     // SQLite calls this between VM operations, not inside blocking VFS I/O.
     // Keep lock admission bounded separately; this is not a hard syscall deadline.
-    database
-        .progress_handler(
-            progress_ops,
-            Some(move || interrupt_cancel.is_cancelled() || Instant::now() >= deadline),
-        )
-        .map_err(|source| inspection_error(&path, source, cancel, deadline, timeout))?;
+    database.progress_handler(
+        progress_ops,
+        Some(move || interrupt_cancel.is_cancelled() || Instant::now() >= deadline),
+    );
     let transaction = database
         .transaction_with_behavior(TransactionBehavior::Deferred)
         .map_err(|source| inspection_error(&path, source, cancel, deadline, timeout))?;

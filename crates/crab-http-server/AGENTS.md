@@ -9,6 +9,9 @@ Owns the repository HTTP application, native Git endpoints, authentication, and 
 
 ## Read first
 
+Read `crates/crab-http-server/CELLAR.md` for native Cellar storage, lifecycle,
+and migration limitations.
+
 1. `crates/crab-http-server/src/main.rs` — CLI configuration and lifecycle entry.
 2. `crates/crab-http-server/src/server.rs` — `serve / router / Repository::open_current`: repository catalog, routing, and runtime.
 3. `crates/crab-http-server/src/app.rs` — `admit / repository`: request repository/principal boundary and error mapping.
@@ -19,6 +22,12 @@ Trace one path: `crates/crab-http-server/src/main.rs` → `serve` in
 `crates/crab-http-server/src/server.rs` → router/handler composition.
 Receive continues through `crates/crab-http-server/src/receive.rs` to the
 shared publication owner `crates/crab-write/src/journal.rs`.
+
+The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns
+typed ingress, `src/cells/application.rs` owns transaction/replay dispatch, and
+`src/cells/schema.sql` is the canonical initial schema. HTTP authorization and
+Cell error mapping stay in `src/app.rs`. No previous-runtime readers or catalog
+and session migration paths are supported.
 
 ## Common changes
 

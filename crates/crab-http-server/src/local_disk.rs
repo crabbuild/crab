@@ -27,10 +27,96 @@ pub(crate) enum Error {
     Worker(#[from] tokio::task::JoinError),
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct DiskBudget(Arc<DiskBudgetState>);
+
+#[derive(Debug)]
+struct DiskBudgetState {
+    capacity: u64,
+    used: AtomicU64,
+}
+
+#[derive(Debug)]
+pub(crate) struct DiskReservation {
+    budget: DiskBudget,
+    bytes: AtomicU64,
+}
+
+impl DiskBudget {
+    pub(crate) fn new(capacity: u64) -> Self {
+        Self(Arc::new(DiskBudgetState {
+            capacity,
+            used: AtomicU64::new(0),
+        }))
+    }
+    pub(crate) fn capacity(&self) -> u64 {
+        self.0.capacity
+    }
+    pub(crate) fn used(&self) -> u64 {
+        self.0.used.load(Ordering::Acquire)
+    }
+    pub(crate) fn available(&self) -> u64 {
+        self.capacity().saturating_sub(self.used())
+    }
+    fn acquire(&self, bytes: u64) -> Result<(), Error> {
+        self.0
+            .used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes)
+                    .filter(|used| *used <= self.capacity())
+            })
+            .map(|_| ())
+            .map_err(|_| Error::Busy(None))
+    }
+    pub(crate) fn try_reserve(&self, bytes: u64) -> Result<DiskReservation, Error> {
+        self.acquire(bytes)?;
+        Ok(DiskReservation {
+            budget: self.clone(),
+            bytes: AtomicU64::new(bytes),
+        })
+    }
+}
+
+impl DiskReservation {
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Acquire)
+    }
+    pub(crate) fn resize(&self, desired: u64) -> Result<(), Error> {
+        loop {
+            let previous = self.bytes();
+            let growth = desired.saturating_sub(previous);
+            self.budget.acquire(growth)?;
+            match self.bytes.compare_exchange(
+                previous,
+                desired,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.budget
+                        .0
+                        .used
+                        .fetch_sub(previous.saturating_sub(desired), Ordering::AcqRel);
+                    return Ok(());
+                }
+                Err(_) => {
+                    self.budget.0.used.fetch_sub(growth, Ordering::AcqRel);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for DiskReservation {
+    fn drop(&mut self) {
+        self.budget.0.used.fetch_sub(self.bytes(), Ordering::AcqRel);
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct LocalStaging {
     root: Arc<PathBuf>,
-    budget: cellule_runtime::ltx::DiskBudget,
+    budget: DiskBudget,
     disk_reserve_bytes: u64,
     restart_inventory: Option<Arc<RestartDiskInventory>>,
     #[cfg(test)]
@@ -39,7 +125,7 @@ pub(crate) struct LocalStaging {
 
 #[derive(Debug)]
 struct RestartDiskInventory {
-    _reservation: cellule_runtime::ltx::DiskReservation,
+    _reservation: DiskReservation,
     bytes: u64,
     sessions: usize,
 }
@@ -59,7 +145,7 @@ impl RestartDiskInventory {
 impl LocalStaging {
     pub(crate) fn new(
         root: PathBuf,
-        budget: cellule_runtime::ltx::DiskBudget,
+        budget: DiskBudget,
         disk_reserve_bytes: u64,
     ) -> Result<Self, Error> {
         if budget.capacity() == 0 {
@@ -78,17 +164,19 @@ impl LocalStaging {
 
     pub(crate) fn new_with_restart_inventory(
         root: PathBuf,
-        budget: cellule_runtime::ltx::DiskBudget,
+        budget: DiskBudget,
         disk_reserve_bytes: u64,
         data_dir: &Path,
         current_session: &Path,
     ) -> Result<Self, Error> {
+        // Staging owns its session directory now that Cellar has a separate
+        // cache root. Inventory must see the new session before checking it.
+        let mut staging = Self::new(root, budget.clone(), disk_reserve_bytes)?;
         let inventory = Arc::new(reserve_restart_inventory(
             data_dir,
             current_session,
-            budget.clone(),
+            budget,
         )?);
-        let mut staging = Self::new(root, budget, disk_reserve_bytes)?;
         staging.restart_inventory = Some(inventory);
         Ok(staging)
     }
@@ -97,12 +185,7 @@ impl LocalStaging {
     pub(crate) fn for_test() -> Self {
         let owner = Arc::new(tempfile::TempDir::new().unwrap());
         let root = owner.path().join("staging");
-        let mut staging = Self::new(
-            root,
-            cellule_runtime::ltx::DiskBudget::new(8 * 1024 * MIB),
-            0,
-        )
-        .unwrap();
+        let mut staging = Self::new(root, DiskBudget::new(8 * 1024 * MIB), 0).unwrap();
         staging._root_owner = Some(owner);
         staging
     }
@@ -250,7 +333,7 @@ impl crab_git::incoming_pack::ScratchAdmission for StagingAdmission {
 fn reserve_restart_inventory(
     data_dir: &Path,
     current_session: &Path,
-    budget: cellule_runtime::ltx::DiskBudget,
+    budget: DiskBudget,
 ) -> Result<RestartDiskInventory, Error> {
     let sessions = data_dir.join("sessions");
     let current_name = current_session
@@ -334,7 +417,7 @@ fn invalid_inventory(message: &'static str) -> io::Error {
 
 pub(crate) struct StagingDirectory {
     directory: tempfile::TempDir,
-    _reservation: cellule_runtime::ltx::DiskReservation,
+    _reservation: DiskReservation,
 }
 
 impl StagingDirectory {
@@ -355,7 +438,7 @@ mod tests {
             (32 * 1024, 96 * 1024, StatusCode::TOO_MANY_REQUESTS),
         ] {
             let owner = tempfile::TempDir::new().unwrap();
-            let budget = cellule_runtime::ltx::DiskBudget::new(128 * 1024);
+            let budget = DiskBudget::new(128 * 1024);
             let staging =
                 LocalStaging::new(owner.path().join("staging"), budget.clone(), 0).unwrap();
             let directory = staging
@@ -424,7 +507,7 @@ mod tests {
         .unwrap();
         std::fs::write(current.join("new.sqlite"), [0_u8; 101]).unwrap();
 
-        let budget = cellule_runtime::ltx::DiskBudget::new(40);
+        let budget = DiskBudget::new(40);
         let inventory = reserve_restart_inventory(data.path(), &current, budget.clone()).unwrap();
 
         assert_eq!(inventory.bytes(), 40);
@@ -444,7 +527,7 @@ mod tests {
         std::fs::write(cell.join(".crab-compaction-source-indexes"), [0_u8; 13]).unwrap();
         std::fs::write(cell.join(".crab-recovery-bundle"), [0_u8; 17]).unwrap();
 
-        let budget = cellule_runtime::ltx::DiskBudget::new(30);
+        let budget = DiskBudget::new(30);
         let inventory = reserve_restart_inventory(data.path(), &current, budget.clone()).unwrap();
 
         assert_eq!(inventory.bytes(), 30);
@@ -462,7 +545,7 @@ mod tests {
         std::fs::create_dir_all(&current).unwrap();
         std::fs::write(stale.join("cell.sqlite"), [0_u8; 9]).unwrap();
 
-        let budget = cellule_runtime::ltx::DiskBudget::new(8);
+        let budget = DiskBudget::new(8);
         assert!(matches!(
             reserve_restart_inventory(data.path(), &current, budget.clone()),
             Err(Error::Busy(Some(_)))
@@ -477,9 +560,8 @@ mod tests {
         let stale = sessions.join("stale-session");
         let current = sessions.join("current-session");
         std::fs::create_dir_all(&stale).unwrap();
-        std::fs::create_dir_all(&current).unwrap();
         std::fs::write(stale.join("cell.sqlite"), [0_u8; 7]).unwrap();
-        let budget = cellule_runtime::ltx::DiskBudget::new(16);
+        let budget = DiskBudget::new(16);
 
         let staging = LocalStaging::new_with_restart_inventory(
             current.join("transfers"),
@@ -504,7 +586,7 @@ mod tests {
         for restart in 0..3 {
             let current = sessions.join(format!("session-{restart}"));
             std::fs::create_dir_all(&current).unwrap();
-            let budget = cellule_runtime::ltx::DiskBudget::new(50);
+            let budget = DiskBudget::new(50);
             let staging = LocalStaging::new_with_restart_inventory(
                 current.join("transfers"),
                 budget.clone(),
@@ -526,7 +608,7 @@ mod tests {
 
         let current = sessions.join("session-3");
         std::fs::create_dir_all(&current).unwrap();
-        let budget = cellule_runtime::ltx::DiskBudget::new(50);
+        let budget = DiskBudget::new(50);
         let staging = LocalStaging::new_with_restart_inventory(
             current.join("transfers"),
             budget.clone(),
@@ -560,24 +642,16 @@ mod tests {
         std::os::windows::fs::symlink_file(data.path().join("outside"), stale.join("link"))
             .unwrap();
 
-        let error = reserve_restart_inventory(
-            data.path(),
-            &current,
-            cellule_runtime::ltx::DiskBudget::new(16),
-        )
-        .unwrap_err();
+        let error =
+            reserve_restart_inventory(data.path(), &current, DiskBudget::new(16)).unwrap_err();
         assert!(matches!(error, Error::Io(source) if source.kind() == io::ErrorKind::InvalidData));
     }
 
     #[tokio::test]
     async fn capacity_precedes_creation_and_releases_with_the_directory() {
         let owner = tempfile::TempDir::new().unwrap();
-        let staging = LocalStaging::new(
-            owner.path().join("staging"),
-            cellule_runtime::ltx::DiskBudget::new(2 * MIB),
-            0,
-        )
-        .unwrap();
+        let staging =
+            LocalStaging::new(owner.path().join("staging"), DiskBudget::new(2 * MIB), 0).unwrap();
         let cancellation = CancellationToken::new();
         let first = staging.create(2 * MIB, &cancellation).await.unwrap();
         assert!(first.path().starts_with(owner.path()));
@@ -595,7 +669,7 @@ mod tests {
     #[tokio::test]
     async fn staging_shares_capacity_with_cell_disk_reservations() {
         let owner = tempfile::TempDir::new().unwrap();
-        let budget = cellule_runtime::ltx::DiskBudget::new(2 * MIB);
+        let budget = DiskBudget::new(2 * MIB);
         let staging = LocalStaging::new(owner.path().join("staging"), budget.clone(), 0).unwrap();
         let cell = budget.try_reserve(MIB + 1).unwrap();
 
@@ -610,12 +684,8 @@ mod tests {
     #[tokio::test]
     async fn staging_reservation_grows_without_overcommitting_shared_capacity() {
         let owner = tempfile::TempDir::new().unwrap();
-        let staging = LocalStaging::new(
-            owner.path().join("staging"),
-            cellule_runtime::ltx::DiskBudget::new(3 * MIB),
-            0,
-        )
-        .unwrap();
+        let staging =
+            LocalStaging::new(owner.path().join("staging"), DiskBudget::new(3 * MIB), 0).unwrap();
         let directory = staging
             .create(MIB, &CancellationToken::new())
             .await
@@ -635,8 +705,7 @@ mod tests {
     async fn oversized_and_cancelled_requests_never_create_a_directory() {
         let owner = tempfile::TempDir::new().unwrap();
         let root = owner.path().join("staging");
-        let staging =
-            LocalStaging::new(root.clone(), cellule_runtime::ltx::DiskBudget::new(MIB), 0).unwrap();
+        let staging = LocalStaging::new(root.clone(), DiskBudget::new(MIB), 0).unwrap();
         assert!(matches!(
             staging.create(2 * MIB, &CancellationToken::new()).await,
             Err(Error::TooLarge)
@@ -656,12 +725,7 @@ mod tests {
         let root = owner.path().join("staging");
         std::fs::create_dir_all(&root).unwrap();
         let reserve = u64::MAX - MIB;
-        let staging = LocalStaging::new(
-            root.clone(),
-            cellule_runtime::ltx::DiskBudget::new(MIB),
-            reserve,
-        )
-        .unwrap();
+        let staging = LocalStaging::new(root.clone(), DiskBudget::new(MIB), reserve).unwrap();
         assert!(matches!(
             staging.create(1, &CancellationToken::new()).await,
             Err(Error::Busy(None))

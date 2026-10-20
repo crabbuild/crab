@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::*;
 
 const MAX_RELEASE_ASSETS: usize = 96;
-const MAX_PAGE_WIRE_BYTES: usize = 1024 * 1024;
+const MAX_PAGE_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -204,17 +204,15 @@ pub(crate) struct ReleaseSubmissionKey {
 
 pub(crate) struct CreateRelease;
 
-impl Command for CreateRelease {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for CreateRelease {
     const ID: u32 = 24;
-    const CODEC_VERSION: u32 = 1;
     type Input = CreateReleaseInput;
     type Output = CreateReleaseOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_create(&input)?;
         let digest = release_digest(&input);
         let existing = context.sql(&SqlBatch { statements: vec![statement(
@@ -223,19 +221,19 @@ impl Command for CreateRelease {
         )] })?;
         if let Some(row) = existing[0].rows.first() {
             if result_blob(row, 0)? != digest.as_bytes() {
-                return Ok(CommandResult::Rejected(
+                return Ok(MutationResult::Rejected(
                     CreateReleaseOutcome::RequestConflict,
                 ));
             }
             let release = load_release(context, result_u64_from_row(row, 1)?)?.ok_or(
-                cellule_runtime::Error::Command("repository release submission has no release"),
+                crate::cells::Error::Invalid("repository release submission has no release"),
             )?;
             if release.deleted {
-                return Ok(CommandResult::Rejected(
+                return Ok(MutationResult::Rejected(
                     CreateReleaseOutcome::ReleaseConflict,
                 ));
             }
-            return Ok(CommandResult::Success(create_outcome(release)));
+            return Ok(MutationResult::Success(create_outcome(release)));
         }
         let claimed = context.sql(&SqlBatch {
             statements: vec![statement(
@@ -244,7 +242,7 @@ impl Command for CreateRelease {
             )],
         })?;
         if !claimed[0].rows.is_empty() {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 CreateReleaseOutcome::ReleaseConflict,
             ));
         }
@@ -253,7 +251,7 @@ impl Command for CreateRelease {
             statement("SELECT last FROM repository_sequences WHERE kind = 'release'", vec![]),
         ] })?;
         if sequence[0].rows_affected != 1 {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "repository release numbering is exhausted",
             ));
         }
@@ -295,7 +293,7 @@ impl Command for CreateRelease {
             statement("INSERT INTO repository_release_tag_claims(tag_name, request_id, release_number) VALUES (?, ?, ?)", vec![SqlValue::Text(release.tag_name.clone()), SqlValue::Blob(release.create_submission_id.to_vec()), integer(release.number)?]),
         ] })?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(create_outcome(release)))
+        Ok(MutationResult::Success(create_outcome(release)))
     }
 }
 
@@ -309,26 +307,24 @@ fn create_outcome(release: ReleaseRecord) -> CreateReleaseOutcome {
 
 pub(crate) struct UpdateRelease;
 
-impl Command for UpdateRelease {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for UpdateRelease {
     const ID: u32 = 25;
-    const CODEC_VERSION: u32 = 1;
     type Input = UpdateReleaseInput;
     type Output = UpdateReleaseOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_number(input.number)?;
         validate_number(input.version)?;
         validate_title(&input.title)?;
         validate_body(&input.body, false)?;
         let Some(mut release) = load_release(context, input.number)? else {
-            return Ok(CommandResult::Rejected(UpdateReleaseOutcome::NotFound));
+            return Ok(MutationResult::Rejected(UpdateReleaseOutcome::NotFound));
         };
         if release.deleted {
-            return Ok(CommandResult::Rejected(UpdateReleaseOutcome::NotFound));
+            return Ok(MutationResult::Rejected(UpdateReleaseOutcome::NotFound));
         }
         if let Some(pending) = &release.publication_pending {
             let same = pending.expected_version == input.version
@@ -337,15 +333,15 @@ impl Command for UpdateRelease {
                 && pending.prerelease == input.prerelease
                 && !input.draft;
             return if same {
-                Ok(CommandResult::Success(
+                Ok(MutationResult::Success(
                     UpdateReleaseOutcome::PublicationPending(Box::new(release)),
                 ))
             } else {
-                Ok(CommandResult::Rejected(UpdateReleaseOutcome::Conflict))
+                Ok(MutationResult::Rejected(UpdateReleaseOutcome::Conflict))
             };
         }
         if release.version != input.version {
-            return Ok(CommandResult::Rejected(UpdateReleaseOutcome::Conflict));
+            return Ok(MutationResult::Rejected(UpdateReleaseOutcome::Conflict));
         }
         let old_version = release.version;
         let now = timestamp(context.now_ms())?;
@@ -360,7 +356,7 @@ impl Command for UpdateRelease {
             release.updated_at_ms = now;
             update_release_row(context, &release, old_version)?;
             advance_revision(context)?;
-            return Ok(CommandResult::Success(
+            return Ok(MutationResult::Success(
                 UpdateReleaseOutcome::PublicationPending(Box::new(release)),
             ));
         }
@@ -375,7 +371,7 @@ impl Command for UpdateRelease {
         release.updated_at_ms = now;
         update_release_row(context, &release, old_version)?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(UpdateReleaseOutcome::Updated(
+        Ok(MutationResult::Success(UpdateReleaseOutcome::Updated(
             Box::new(release),
         )))
     }
@@ -383,29 +379,27 @@ impl Command for UpdateRelease {
 
 pub(crate) struct CompleteReleasePublication;
 
-impl Command for CompleteReleasePublication {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for CompleteReleasePublication {
     const ID: u32 = 26;
-    const CODEC_VERSION: u32 = 1;
     type Input = CompleteReleasePublicationInput;
     type Output = CompleteReleasePublicationOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_number(input.number)?;
         if input.expected_version > 0 {
             validate_number(input.expected_version)?;
         }
         validate_oid(&input.tag_oid)?;
         let Some(mut release) = load_release(context, input.number)? else {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 CompleteReleasePublicationOutcome::NotFound,
             ));
         };
         if release.deleted {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 CompleteReleasePublicationOutcome::NotFound,
             ));
         }
@@ -413,17 +407,17 @@ impl Command for CompleteReleasePublication {
             return if release.tag_oid.as_deref() == Some(&input.tag_oid)
                 && release.version == publication_result_version(input.expected_version)?
             {
-                Ok(CommandResult::Success(
+                Ok(MutationResult::Success(
                     CompleteReleasePublicationOutcome::Completed(Box::new(release)),
                 ))
             } else {
-                Ok(CommandResult::Rejected(
+                Ok(MutationResult::Rejected(
                     CompleteReleasePublicationOutcome::Conflict,
                 ))
             };
         };
         if pending.expected_version != input.expected_version {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 CompleteReleasePublicationOutcome::Conflict,
             ));
         }
@@ -440,7 +434,7 @@ impl Command for CompleteReleasePublication {
         release.updated_at_ms = now;
         update_release_row(context, &release, old_version)?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(
+        Ok(MutationResult::Success(
             CompleteReleasePublicationOutcome::Completed(Box::new(release)),
         ))
     }
@@ -448,36 +442,34 @@ impl Command for CompleteReleasePublication {
 
 pub(crate) struct DeleteRelease;
 
-impl Command for DeleteRelease {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for DeleteRelease {
     const ID: u32 = 27;
-    const CODEC_VERSION: u32 = 1;
     type Input = DeleteReleaseInput;
     type Output = DeleteReleaseOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_number(input.number)?;
         validate_number(input.version)?;
         let Some(mut release) = load_release(context, input.number)? else {
-            return Ok(CommandResult::Rejected(DeleteReleaseOutcome::NotFound));
+            return Ok(MutationResult::Rejected(DeleteReleaseOutcome::NotFound));
         };
         if release.deleted {
             return if input.version.checked_add(1) == Some(release.version) {
-                Ok(CommandResult::Success(DeleteReleaseOutcome::Deleted))
+                Ok(MutationResult::Success(DeleteReleaseOutcome::Deleted))
             } else {
-                Ok(CommandResult::Rejected(DeleteReleaseOutcome::NotFound))
+                Ok(MutationResult::Rejected(DeleteReleaseOutcome::NotFound))
             };
         }
         if release.publication_pending.is_some() {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 DeleteReleaseOutcome::PublicationPending,
             ));
         }
         if release.version != input.version {
-            return Ok(CommandResult::Rejected(DeleteReleaseOutcome::Conflict));
+            return Ok(MutationResult::Rejected(DeleteReleaseOutcome::Conflict));
         }
         let old_version = release.version;
         release.version = next_version(release.version)?;
@@ -488,32 +480,30 @@ impl Command for DeleteRelease {
             statement("DELETE FROM repository_release_tag_claims WHERE release_number = ? AND request_id = ?", vec![integer(release.number)?, SqlValue::Blob(release.create_submission_id.to_vec())]),
         ] })?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(DeleteReleaseOutcome::Deleted))
+        Ok(MutationResult::Success(DeleteReleaseOutcome::Deleted))
     }
 }
 
 pub(crate) struct ReserveReleaseAsset;
 
-impl Command for ReserveReleaseAsset {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for ReserveReleaseAsset {
     const ID: u32 = 28;
-    const CODEC_VERSION: u32 = 1;
     type Input = ReserveReleaseAssetInput;
     type Output = ReserveReleaseAssetOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         let reservation = input.reservation;
         validate_reservation(&reservation)?;
         let Some(release) = load_release(context, reservation.release)? else {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 ReserveReleaseAssetOutcome::NotFound,
             ));
         };
         if release.deleted {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 ReserveReleaseAssetOutcome::NotFound,
             ));
         }
@@ -521,26 +511,26 @@ impl Command for ReserveReleaseAsset {
         let existing = context.sql(&SqlBatch { statements: vec![statement("SELECT payload_digest, attached FROM repository_release_asset_submissions WHERE release_number = ? AND request_id = ?", vec![integer(reservation.release)?, SqlValue::Blob(reservation.request_id.to_vec())])] })?;
         if let Some(row) = existing[0].rows.first() {
             if result_blob(row, 0)? != digest.as_bytes() {
-                return Ok(CommandResult::Rejected(
+                return Ok(MutationResult::Rejected(
                     ReserveReleaseAssetOutcome::RequestConflict,
                 ));
             }
             if result_u64_from_row(row, 1)? == 1 {
-                return Ok(CommandResult::Success(
+                return Ok(MutationResult::Success(
                     ReserveReleaseAssetOutcome::Attached(Box::new(release)),
                 ));
             }
-            return Ok(CommandResult::Success(
+            return Ok(MutationResult::Success(
                 ReserveReleaseAssetOutcome::Reserved(reservation),
             ));
         }
         if release.version != reservation.expected_version {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 ReserveReleaseAssetOutcome::Conflict,
             ));
         }
         if release.assets.len() >= MAX_RELEASE_ASSETS {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 ReserveReleaseAssetOutcome::AssetLimit,
             ));
         }
@@ -549,13 +539,13 @@ impl Command for ReserveReleaseAsset {
             statement("SELECT 1 FROM repository_release_asset_submissions WHERE release_number = ? AND name = ?", vec![integer(reservation.release)?, SqlValue::Text(reservation.name.clone())]),
         ] })?;
         if name.iter().any(|result| !result.rows.is_empty()) {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 ReserveReleaseAssetOutcome::NameConflict,
             ));
         }
         context.sql(&SqlBatch { statements: vec![statement("INSERT INTO repository_release_asset_submissions(release_number, request_id, payload_digest, expected_version, name) VALUES (?, ?, ?, ?, ?)", vec![integer(reservation.release)?, SqlValue::Blob(reservation.request_id.to_vec()), SqlValue::Blob(digest.as_bytes().to_vec()), integer(reservation.expected_version)?, SqlValue::Text(reservation.name.clone())])] })?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(
+        Ok(MutationResult::Success(
             ReserveReleaseAssetOutcome::Reserved(reservation),
         ))
     }
@@ -563,34 +553,36 @@ impl Command for ReserveReleaseAsset {
 
 pub(crate) struct AttachReleaseAsset;
 
-impl Command for AttachReleaseAsset {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for AttachReleaseAsset {
     const ID: u32 = 29;
-    const CODEC_VERSION: u32 = 1;
     type Input = AttachReleaseAssetInput;
     type Output = AttachReleaseAssetOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_reservation(&input.reservation)?;
         validate_asset_result(input.size, &input.digest)?;
         let Some(mut release) = load_release(context, input.reservation.release)? else {
-            return Ok(CommandResult::Rejected(AttachReleaseAssetOutcome::NotFound));
+            return Ok(MutationResult::Rejected(
+                AttachReleaseAssetOutcome::NotFound,
+            ));
         };
         if release.deleted {
-            return Ok(CommandResult::Rejected(AttachReleaseAssetOutcome::NotFound));
+            return Ok(MutationResult::Rejected(
+                AttachReleaseAssetOutcome::NotFound,
+            ));
         }
         let digest = asset_reservation_digest(&input.reservation);
         let submission = context.sql(&SqlBatch { statements: vec![statement("SELECT payload_digest, attached FROM repository_release_asset_submissions WHERE release_number = ? AND request_id = ?", vec![integer(input.reservation.release)?, SqlValue::Blob(input.reservation.request_id.to_vec())])] })?;
         let Some(row) = submission[0].rows.first() else {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 AttachReleaseAssetOutcome::RequestConflict,
             ));
         };
         if result_blob(row, 0)? != digest.as_bytes() {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 AttachReleaseAssetOutcome::RequestConflict,
             ));
         }
@@ -605,20 +597,22 @@ impl Command for AttachReleaseAsset {
                     && asset.size == input.size
                     && asset.digest == input.digest
             }) {
-                Ok(CommandResult::Success(AttachReleaseAssetOutcome::Attached(
-                    Box::new(release),
-                )))
+                Ok(MutationResult::Success(
+                    AttachReleaseAssetOutcome::Attached(Box::new(release)),
+                ))
             } else {
-                Ok(CommandResult::Rejected(
+                Ok(MutationResult::Rejected(
                     AttachReleaseAssetOutcome::RequestConflict,
                 ))
             };
         }
         if release.version != input.reservation.expected_version {
-            return Ok(CommandResult::Rejected(AttachReleaseAssetOutcome::Conflict));
+            return Ok(MutationResult::Rejected(
+                AttachReleaseAssetOutcome::Conflict,
+            ));
         }
         if release.assets.len() >= MAX_RELEASE_ASSETS {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 AttachReleaseAssetOutcome::AssetLimit,
             ));
         }
@@ -627,7 +621,7 @@ impl Command for AttachReleaseAsset {
             .iter()
             .any(|asset| asset.name == input.reservation.name)
         {
-            return Ok(CommandResult::Rejected(
+            return Ok(MutationResult::Rejected(
                 AttachReleaseAssetOutcome::NameConflict,
             ));
         }
@@ -654,42 +648,48 @@ impl Command for AttachReleaseAsset {
             .assets
             .sort_by(|left, right| left.name.cmp(&right.name));
         advance_revision(context)?;
-        Ok(CommandResult::Success(AttachReleaseAssetOutcome::Attached(
-            Box::new(release),
-        )))
+        Ok(MutationResult::Success(
+            AttachReleaseAssetOutcome::Attached(Box::new(release)),
+        ))
     }
 }
 
 pub(crate) struct DeleteReleaseAsset;
 
-impl Command for DeleteReleaseAsset {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Mutation for DeleteReleaseAsset {
     const ID: u32 = 30;
-    const CODEC_VERSION: u32 = 1;
     type Input = DeleteReleaseAssetInput;
     type Output = DeleteReleaseAssetOutcome;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_number(input.release)?;
         validate_number(input.version)?;
         let Some(mut release) = load_release(context, input.release)? else {
-            return Ok(CommandResult::Rejected(DeleteReleaseAssetOutcome::NotFound));
+            return Ok(MutationResult::Rejected(
+                DeleteReleaseAssetOutcome::NotFound,
+            ));
         };
         if release.deleted {
-            return Ok(CommandResult::Rejected(DeleteReleaseAssetOutcome::NotFound));
+            return Ok(MutationResult::Rejected(
+                DeleteReleaseAssetOutcome::NotFound,
+            ));
         }
         if release.version != input.version {
-            return Ok(CommandResult::Rejected(DeleteReleaseAssetOutcome::Conflict));
+            return Ok(MutationResult::Rejected(
+                DeleteReleaseAssetOutcome::Conflict,
+            ));
         }
         let Some(index) = release
             .assets
             .iter()
             .position(|asset| asset.request_id == input.request_id)
         else {
-            return Ok(CommandResult::Rejected(DeleteReleaseAssetOutcome::NotFound));
+            return Ok(MutationResult::Rejected(
+                DeleteReleaseAssetOutcome::NotFound,
+            ));
         };
         let old_version = release.version;
         release.assets.remove(index);
@@ -701,7 +701,7 @@ impl Command for DeleteReleaseAsset {
             update_release_statement(&release, old_version)?,
         ] })?;
         advance_revision(context)?;
-        Ok(CommandResult::Success(DeleteReleaseAssetOutcome::Deleted(
+        Ok(MutationResult::Success(DeleteReleaseAssetOutcome::Deleted(
             Box::new(release),
         )))
     }
@@ -709,17 +709,15 @@ impl Command for DeleteReleaseAsset {
 
 pub(crate) struct GetRelease;
 
-impl Query for GetRelease {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Read for GetRelease {
     const ID: u32 = 24;
-    const CODEC_VERSION: u32 = 1;
     type Input = u64;
     type Output = Option<ReleaseRecord>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         number: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         validate_number(number)?;
         load_release_query(context, number)
     }
@@ -727,17 +725,15 @@ impl Query for GetRelease {
 
 pub(crate) struct GetReleaseByTag;
 
-impl Query for GetReleaseByTag {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_RELEASE_TAG_QUERY_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Read for GetReleaseByTag {
+    const ID: u32 = 37;
     type Input = String;
     type Output = Option<ReleaseRecord>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         tag: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         validate_tag_name(&tag)?;
         // Tag claims are unique and indexed. Resolve the record in this query's
         // snapshot instead of scanning release pages or opening a second Cell.
@@ -760,17 +756,15 @@ impl Query for GetReleaseByTag {
 
 pub(crate) struct GetReleaseSubmission;
 
-impl Query for GetReleaseSubmission {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Read for GetReleaseSubmission {
     const ID: u32 = 25;
-    const CODEC_VERSION: u32 = 1;
     type Input = ReleaseSubmissionKey;
     type Output = Option<ReleaseRecord>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         key: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
                 "SELECT release_number FROM repository_release_submissions WHERE request_id = ?",
@@ -790,17 +784,15 @@ impl Query for GetReleaseSubmission {
 
 pub(crate) struct ListReleases;
 
-impl Query for ListReleases {
-    const MODULE: &'static str = RepositoryModule::NAME;
+impl Read for ListReleases {
     const ID: u32 = 26;
-    const CODEC_VERSION: u32 = 1;
     type Input = ReleaseListInput;
     type Output = ReleasePage;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         validate_list(input.before, input.limit)?;
         validate_query(input.query.as_deref())?;
         let query = input.query.as_ref().map(|query| query.to_lowercase());
@@ -812,7 +804,7 @@ impl Query for ListReleases {
             let number = result_u64_from_row(row, 0)?;
             last_examined = Some(number);
             let release = load_release_query(context, number)?.ok_or(
-                cellule_runtime::Error::Command("repository release list row disappeared"),
+                crate::cells::Error::Invalid("repository release list row disappeared"),
             )?;
             let visible = !release.deleted
                 && (input.include_drafts
@@ -848,7 +840,7 @@ impl Query for ListReleases {
     }
 }
 
-fn validate_create(input: &CreateReleaseInput) -> cellule_runtime::Result<()> {
+fn validate_create(input: &CreateReleaseInput) -> crate::cells::Result<()> {
     validate_author(&input.author)?;
     validate_tag_name(&input.tag_name)?;
     validate_oid(&input.target_oid)?;
@@ -856,7 +848,7 @@ fn validate_create(input: &CreateReleaseInput) -> cellule_runtime::Result<()> {
     validate_body(&input.body, false)
 }
 
-fn validate_tag_name(value: &str) -> cellule_runtime::Result<()> {
+fn validate_tag_name(value: &str) -> crate::cells::Result<()> {
     if value.is_empty()
         || value.len() > 255
         || value.trim() != value
@@ -864,28 +856,28 @@ fn validate_tag_name(value: &str) -> cellule_runtime::Result<()> {
         || value.chars().any(char::is_control)
         || crab_git::validate_push_refname(&format!("refs/tags/{value}")).is_err()
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository release tag is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_oid(value: &str) -> cellule_runtime::Result<()> {
+fn validate_oid(value: &str) -> crate::cells::Result<()> {
     if value.len() != 40
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         || value.bytes().all(|byte| byte == b'0')
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository release object ID is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_reservation(value: &ReleaseAssetReservation) -> cellule_runtime::Result<()> {
+fn validate_reservation(value: &ReleaseAssetReservation) -> crate::cells::Result<()> {
     validate_number(value.release)?;
     validate_number(value.expected_version)?;
     validate_author(&value.uploader)?;
@@ -902,21 +894,21 @@ fn validate_reservation(value: &ReleaseAssetReservation) -> cellule_runtime::Res
         || value.content_type.len() > 255
         || value.content_type.chars().any(char::is_control)
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository release asset reservation is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_asset_result(size: u64, digest: &str) -> cellule_runtime::Result<()> {
+fn validate_asset_result(size: u64, digest: &str) -> crate::cells::Result<()> {
     if size > crate::server::MAX_DEPENDENCY_FILE_BYTES
         || digest.len() != 64
         || !digest
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository release asset result is invalid",
         ));
     }
@@ -952,16 +944,16 @@ fn asset_reservation_digest(value: &ReleaseAssetReservation) -> blake3::Hash {
     hasher.finalize()
 }
 
-fn next_version(value: u64) -> cellule_runtime::Result<u64> {
+fn next_version(value: u64) -> crate::cells::Result<u64> {
     value
         .checked_add(1)
         .filter(|value| *value < MAX_NUMBER)
-        .ok_or(cellule_runtime::Error::Command(
+        .ok_or(crate::cells::Error::Invalid(
             "repository release version is exhausted",
         ))
 }
 
-fn publication_result_version(expected_version: u64) -> cellule_runtime::Result<u64> {
+fn publication_result_version(expected_version: u64) -> crate::cells::Result<u64> {
     if expected_version == 0 {
         Ok(1)
     } else {
@@ -969,14 +961,14 @@ fn publication_result_version(expected_version: u64) -> cellule_runtime::Result<
     }
 }
 
-fn optional_wire<T: WireValue>(value: &Option<T>) -> cellule_runtime::Result<SqlValue> {
+fn optional_record<T: StoredRecord>(value: &Option<T>) -> crate::cells::Result<SqlValue> {
     match value {
         Some(value) => {
-            let mut encoder = BoundedEncoder::new(512 * 1024).map_err(|_| {
-                cellule_runtime::Error::Command("repository release publication is too large")
+            let mut encoder = RecordEncoder::new(512 * 1024).map_err(|_| {
+                crate::cells::Error::Invalid("repository release publication is too large")
             })?;
             value.encode(&mut encoder).map_err(|_| {
-                cellule_runtime::Error::Command("repository release publication is too large")
+                crate::cells::Error::Invalid("repository release publication is too large")
             })?;
             Ok(SqlValue::Blob(encoder.finish()))
         }
@@ -984,35 +976,35 @@ fn optional_wire<T: WireValue>(value: &Option<T>) -> cellule_runtime::Result<Sql
     }
 }
 
-fn decode_optional_wire<T: WireValue>(value: &SqlValue) -> cellule_runtime::Result<Option<T>> {
+fn decode_optional_record<T: StoredRecord>(value: &SqlValue) -> crate::cells::Result<Option<T>> {
     match value {
         SqlValue::Null => Ok(None),
         SqlValue::Blob(bytes) => {
-            let mut decoder = BoundedDecoder::new(bytes, 512 * 1024).map_err(|_| {
-                cellule_runtime::Error::Command("repository release publication is invalid")
+            let mut decoder = RecordDecoder::new(bytes, 512 * 1024).map_err(|_| {
+                crate::cells::Error::Invalid("repository release publication is invalid")
             })?;
             let value = T::decode(&mut decoder).map_err(|_| {
-                cellule_runtime::Error::Command("repository release publication is invalid")
+                crate::cells::Error::Invalid("repository release publication is invalid")
             })?;
             decoder.finish().map_err(|_| {
-                cellule_runtime::Error::Command("repository release publication is invalid")
+                crate::cells::Error::Invalid("repository release publication is invalid")
             })?;
             Ok(Some(value))
         }
-        _ => Err(cellule_runtime::Error::Command(
+        _ => Err(crate::cells::Error::Invalid(
             "repository release publication is invalid",
         )),
     }
 }
 
-fn insert_release(release: &ReleaseRecord) -> cellule_runtime::Result<SqlStatement> {
+fn insert_release(release: &ReleaseRecord) -> crate::cells::Result<SqlStatement> {
     Ok(statement(
         "INSERT INTO repository_releases(number, create_request_id, author_issuer, author_subject, author_name, tag_name, tag_oid, target_oid, title, body, prerelease, draft, publication_pending, version, created_at_ms, published_at_ms, updated_at_ms, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         release_values(release)?,
     ))
 }
 
-fn release_values(release: &ReleaseRecord) -> cellule_runtime::Result<Vec<SqlValue>> {
+fn release_values(release: &ReleaseRecord) -> crate::cells::Result<Vec<SqlValue>> {
     Ok(vec![
         integer(release.number)?,
         SqlValue::Blob(release.create_submission_id.to_vec()),
@@ -1029,7 +1021,7 @@ fn release_values(release: &ReleaseRecord) -> cellule_runtime::Result<Vec<SqlVal
         SqlValue::Text(release.body.clone()),
         SqlValue::Integer(i64::from(release.prerelease)),
         SqlValue::Integer(i64::from(release.draft)),
-        optional_wire(&release.publication_pending)?,
+        optional_record(&release.publication_pending)?,
         integer(release.version)?,
         integer(release.created_at_ms)?,
         release
@@ -1045,7 +1037,7 @@ fn release_values(release: &ReleaseRecord) -> cellule_runtime::Result<Vec<SqlVal
 fn update_release_statement(
     release: &ReleaseRecord,
     expected_version: u64,
-) -> cellule_runtime::Result<SqlStatement> {
+) -> crate::cells::Result<SqlStatement> {
     Ok(statement(
         "UPDATE repository_releases SET tag_oid = ?, title = ?, body = ?, prerelease = ?, draft = ?, publication_pending = ?, version = ?, published_at_ms = ?, updated_at_ms = ?, deleted = ? WHERE number = ? AND version = ?",
         vec![
@@ -1057,7 +1049,7 @@ fn update_release_statement(
             SqlValue::Text(release.body.clone()),
             SqlValue::Integer(i64::from(release.prerelease)),
             SqlValue::Integer(i64::from(release.draft)),
-            optional_wire(&release.publication_pending)?,
+            optional_record(&release.publication_pending)?,
             integer(release.version)?,
             release
                 .published_at_ms
@@ -1073,15 +1065,15 @@ fn update_release_statement(
 }
 
 fn update_release_row(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     release: &ReleaseRecord,
     expected_version: u64,
-) -> cellule_runtime::Result<()> {
+) -> crate::cells::Result<()> {
     let result = context.sql(&SqlBatch {
         statements: vec![update_release_statement(release, expected_version)?],
     })?;
     if result[0].rows_affected != 1 {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository release update lost its transaction",
         ));
     }
@@ -1093,9 +1085,9 @@ fn release_select() -> &'static str {
 }
 
 fn load_release(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     number: u64,
-) -> cellule_runtime::Result<Option<ReleaseRecord>> {
+) -> crate::cells::Result<Option<ReleaseRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![
         statement(release_select(), vec![integer(number)?]),
         statement("SELECT request_id, name, content_type, size, digest, uploader_issuer, uploader_subject, uploader_name, created_at_ms FROM repository_release_assets WHERE release_number = ? ORDER BY name", vec![integer(number)?]),
@@ -1108,9 +1100,9 @@ fn load_release(
 }
 
 fn load_release_query(
-    context: &QueryContext<'_>,
+    context: &RepositoryTransaction<'_>,
     number: u64,
-) -> cellule_runtime::Result<Option<ReleaseRecord>> {
+) -> crate::cells::Result<Option<ReleaseRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![
         statement(release_select(), vec![integer(number)?]),
         statement("SELECT request_id, name, content_type, size, digest, uploader_issuer, uploader_subject, uploader_name, created_at_ms FROM repository_release_assets WHERE release_number = ? ORDER BY name", vec![integer(number)?]),
@@ -1125,14 +1117,13 @@ fn load_release_query(
 fn release_from_rows(
     row: &[SqlValue],
     asset_rows: &[Vec<SqlValue>],
-) -> cellule_runtime::Result<ReleaseRecord> {
-    let submission = <[u8; 16]>::try_from(result_blob(row, 1)?).map_err(|_| {
-        cellule_runtime::Error::Command("repository release submission ID is invalid")
-    })?;
+) -> crate::cells::Result<ReleaseRecord> {
+    let submission = <[u8; 16]>::try_from(result_blob(row, 1)?)
+        .map_err(|_| crate::cells::Error::Invalid("repository release submission ID is invalid"))?;
     let assets = asset_rows
         .iter()
         .map(|row| asset_from_row(row))
-        .collect::<cellule_runtime::Result<Vec<_>>>()?;
+        .collect::<crate::cells::Result<Vec<_>>>()?;
     Ok(ReleaseRecord {
         number: result_u64_from_row(row, 0)?,
         create_submission_id: submission,
@@ -1144,7 +1135,7 @@ fn release_from_rows(
         body: result_text(row, 9)?,
         prerelease: result_bool(row, 10)?,
         draft: result_bool(row, 11)?,
-        publication_pending: decode_optional_wire(&row[12])?,
+        publication_pending: decode_optional_record(&row[12])?,
         version: result_u64_from_row(row, 13)?,
         created_at_ms: result_u64_from_row(row, 14)?,
         published_at_ms: optional_u64(row, 15)?,
@@ -1154,11 +1145,10 @@ fn release_from_rows(
     })
 }
 
-fn asset_from_row(row: &[SqlValue]) -> cellule_runtime::Result<ReleaseAssetRecord> {
+fn asset_from_row(row: &[SqlValue]) -> crate::cells::Result<ReleaseAssetRecord> {
     Ok(ReleaseAssetRecord {
-        request_id: <[u8; 16]>::try_from(result_blob(row, 0)?).map_err(|_| {
-            cellule_runtime::Error::Command("repository release asset ID is invalid")
-        })?,
+        request_id: <[u8; 16]>::try_from(result_blob(row, 0)?)
+            .map_err(|_| crate::cells::Error::Invalid("repository release asset ID is invalid"))?,
         name: result_text(row, 1)?,
         content_type: result_text(row, 2)?,
         size: result_u64_from_row(row, 3)?,
@@ -1168,7 +1158,7 @@ fn asset_from_row(row: &[SqlValue]) -> cellule_runtime::Result<ReleaseAssetRecor
     })
 }
 
-fn author_from_row(row: &[SqlValue], start: usize) -> cellule_runtime::Result<RepositoryAuthor> {
+fn author_from_row(row: &[SqlValue], start: usize) -> crate::cells::Result<RepositoryAuthor> {
     Ok(RepositoryAuthor {
         issuer: result_text(row, start)?,
         subject: result_text(row, start + 1)?,
@@ -1176,33 +1166,33 @@ fn author_from_row(row: &[SqlValue], start: usize) -> cellule_runtime::Result<Re
     })
 }
 
-fn optional_text(row: &[SqlValue], index: usize) -> cellule_runtime::Result<Option<String>> {
+fn optional_text(row: &[SqlValue], index: usize) -> crate::cells::Result<Option<String>> {
     match row.get(index) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Text(value)) => Ok(Some(value.clone())),
-        _ => Err(cellule_runtime::Error::Command(
+        _ => Err(crate::cells::Error::Invalid(
             "repository release row is invalid",
         )),
     }
 }
 
-fn optional_u64(row: &[SqlValue], index: usize) -> cellule_runtime::Result<Option<u64>> {
+fn optional_u64(row: &[SqlValue], index: usize) -> crate::cells::Result<Option<u64>> {
     match row.get(index) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Integer(value)) => u64::try_from(*value)
             .map(Some)
-            .map_err(|_| cellule_runtime::Error::Command("repository release row is invalid")),
-        _ => Err(cellule_runtime::Error::Command(
+            .map_err(|_| crate::cells::Error::Invalid("repository release row is invalid")),
+        _ => Err(crate::cells::Error::Invalid(
             "repository release row is invalid",
         )),
     }
 }
 
-fn result_bool(row: &[SqlValue], index: usize) -> cellule_runtime::Result<bool> {
+fn result_bool(row: &[SqlValue], index: usize) -> crate::cells::Result<bool> {
     match result_u64_from_row(row, index)? {
         0 => Ok(false),
         1 => Ok(true),
-        _ => Err(cellule_runtime::Error::Command(
+        _ => Err(crate::cells::Error::Invalid(
             "repository release row is invalid",
         )),
     }
@@ -1210,18 +1200,18 @@ fn result_bool(row: &[SqlValue], index: usize) -> cellule_runtime::Result<bool> 
 
 fn bounded_release_page(
     items: Vec<ReleaseRecord>,
-) -> cellule_runtime::Result<(Vec<ReleaseRecord>, bool)> {
+) -> crate::cells::Result<(Vec<ReleaseRecord>, bool)> {
     let total = items.len();
     let mut used =
         4 + br#"{"items":["#.len() + br#"],"next":"#.len() + MAX_NUMBER.to_string().len() + 1;
     let mut kept = Vec::with_capacity(total);
     for item in items {
         let encoded = serde_json::to_vec(&item)
-            .map_err(|_| cellule_runtime::Error::Command("repository release row is invalid"))?;
+            .map_err(|_| crate::cells::Error::Invalid("repository release row is invalid"))?;
         let separator = usize::from(!kept.is_empty());
         if used
             .checked_add(separator + encoded.len())
-            .is_none_or(|size| size > MAX_PAGE_WIRE_BYTES)
+            .is_none_or(|size| size > MAX_PAGE_BYTES)
         {
             break;
         }
@@ -1229,7 +1219,7 @@ fn bounded_release_page(
         kept.push(item);
     }
     if kept.is_empty() && total != 0 {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "repository release exceeds the page limit",
         ));
     }

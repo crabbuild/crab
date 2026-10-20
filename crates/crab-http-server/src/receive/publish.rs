@@ -426,7 +426,7 @@ async fn publish_attempt(
     let refs = view.refs().clone();
     let visibility = view.git_visibility_index().await?;
     let has_branch = refs.keys().any(|name| name.starts_with("refs/heads/"));
-    let actor = principal.identity().ok_or(ReceiveError::Forbidden)?;
+    principal.identity().ok_or(ReceiveError::Forbidden)?;
     let initial_head = (!has_branch)
         .then(|| {
             request
@@ -444,7 +444,7 @@ async fn publish_attempt(
             )
         });
     let protections = entry
-        .branch_protections(server, &actor)
+        .branch_protections(server)
         .await
         .map_err(|error| ReceiveError::Settings(Box::new(error)))?;
     let protected = input.publication == Publication::NativePush
@@ -693,9 +693,9 @@ async fn commit_prepared(
     if !principal.can_write(&entry.config) {
         return Err(ReceiveError::Forbidden);
     }
-    let actor = principal.identity().ok_or(ReceiveError::Forbidden)?;
+    principal.identity().ok_or(ReceiveError::Forbidden)?;
     if entry
-        .lifecycle(server, &actor)
+        .lifecycle(server)
         .await
         .map_err(|error| ReceiveError::Settings(Box::new(error)))?
         .archived

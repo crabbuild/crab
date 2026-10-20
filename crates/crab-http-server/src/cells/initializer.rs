@@ -1,429 +1,131 @@
-use std::{path::Path, sync::Arc};
-
-use cellule_app::CompiledApplication;
-use cellule_host::CellNodeBuilder;
-use cellule_runtime::cell::actor::CellHandle;
-use cellule_runtime::cell::application::ApplicationIdentity;
-use cellule_runtime::cell::catalog::CatalogRole;
-use cellule_runtime::cell::catalog::{CatalogEntry, CatalogProof, CellCatalog};
-use cellule_runtime::cell::worker::SqlWorkerPool;
-use cellule_runtime::control::authority::CellAuthority;
-use cellule_runtime::control::{ControlState, Owner};
-use cellule_runtime::identity::IncarnationId;
-use cellule_runtime::identity::{CellTarget, SessionId};
-use cellule_runtime::ltx::CellReplica;
-use cellule_runtime::ltx::CellStorageLayout;
-use cellule_runtime::recovery::release::{ReleaseState, ReleaseStore};
-use cellule_runtime::registry::Registry;
+use cellar::sdk::{NodeOutcome, ShutdownMode};
+use tokio::net::TcpListener;
 use uuid::Uuid;
 
-use super::{REPOSITORY_NAMESPACE, initialize_repository_schema, repository_replica_limits};
-use crate::catalog::RepositoryApplicationState;
-use crate::{Config, Error, Result};
-
-const INITIALIZE_MAILBOX_BYTES: usize = 16 * 1024 * 1024;
+use crate::{
+    Config, Error, Result,
+    catalog::{CatalogStore, RepositoryApplicationState},
+};
 
 pub(crate) async fn initialize_repository(config: &Config, repository: Uuid) -> Result<()> {
-    let catalog = crate::catalog::CatalogStore::from_config(config)?;
+    let catalog = CatalogStore::from_config(config)?;
     let (document, _) = catalog.load().await?;
     let record = document
         .repositories
         .iter()
         .find(|record| record.id == repository)
         .ok_or(crate::catalog::CatalogError::NotFound)?;
-    let startup = super::verify_startup_release(config).await?;
-    require_ready_release(&startup.layout, startup.identity, &startup.registry).await?;
     if record.application == RepositoryApplicationState::CellReady {
-        return verify_repository_cells(
-            &startup.layout,
-            startup.identity,
-            [(repository, record.application)],
-        )
-        .await;
+        return Ok(());
     }
-    initialize_repository_at(
-        &startup.layout,
-        startup.identity,
-        &startup.registry,
-        &startup.application,
-        &config.cells.data_dir,
-        config.cells.local_disk_limit_bytes,
-        config.cells.peer_advertise.to_string(),
-        repository,
+    std::fs::create_dir_all(&config.cells.data_dir)?;
+    let local = tempfile::Builder::new()
+        .prefix("crab-cellar-init-")
+        .tempdir_in(&config.cells.data_dir)?;
+    let public = TcpListener::bind("127.0.0.1:0").await?;
+    let internal = TcpListener::bind("127.0.0.1:0").await?;
+    let address = internal.local_addr()?;
+    let mut maintenance = config.clone();
+    maintenance.cells.data_dir = local.path().to_owned();
+    // The initializer has no lasting local cache or peer. Catalog readiness
+    // must therefore be backed by object publication before it exits.
+    maintenance.cells.durability = crate::CellDurabilityMode::Object;
+    maintenance.cells.peer_advertise = url::Url::parse(&format!("https://{address}"))
+        .map_err(|_| Error::Config("repository initialization address is invalid"))?;
+    // Only a not-yet-published repository enters this short-lived node. Publish
+    // readiness after its Cellar domain has flushed and joined, so serving
+    // nodes cannot route new traffic to the initializer's loopback endpoint.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .map_err(|source| Error::Cell(super::Error::sdk(source)))?;
+    let node_name = format!("crab-init-{}", Uuid::now_v7());
+    let started = match super::runtime::start(
+        &maintenance,
+        public.local_addr()?,
+        internal,
+        node_name.clone(),
+        client.clone(),
+        client,
+        1,
     )
-    .await?;
+    .await
+    {
+        Ok(started) => started,
+        Err(error) => {
+            // Failed startup cannot prove that all begun native work joined.
+            let _retained = local.keep();
+            return Err(error.into());
+        }
+    };
+    let initialized: Result<()> = async {
+        let cell = started.client.repository(repository)?;
+        cell.client.initialize(repository).await?;
+        Ok(())
+    }
+    .await;
+    let stopped = match started.node.shutdown(ShutdownMode::Preserve).await {
+        Ok(stopped) => stopped,
+        Err(error) => {
+            let _retained = local.keep();
+            return Err(super::Error::sdk(error).into());
+        }
+    };
+    let NodeOutcome::Stopped(report) = stopped else {
+        let _retained = local.keep();
+        return Err(Error::Config(
+            "repository initialization lost its Cellar node",
+        ));
+    };
+    if !report.ingress_drained
+        || !report.application_work_drained
+        || !report.cells_drained
+        || report.drain_timed_out
+    {
+        // A failed drain may leave recovery evidence in this directory.
+        let _retained = local.keep();
+        return Err(Error::Config(
+            "repository initialization did not complete its Cellar drain",
+        ));
+    }
+    initialized?;
+    wait_for_initializer_lease(config, &node_name).await?;
     catalog.mark_cell_ready(repository).await?;
     Ok(())
 }
 
-pub(crate) async fn initialize_repository_at(
-    layout: &CellStorageLayout,
-    identity: ApplicationIdentity,
-    registry: &Registry,
-    application: &Arc<CompiledApplication>,
-    data_dir: &Path,
-    local_disk_limit_bytes: u64,
-    endpoint: String,
-    repository: Uuid,
-) -> Result<()> {
-    let target = CellTarget::new(
-        identity.tenant(),
-        identity.application(),
-        REPOSITORY_NAMESPACE,
-        repository.as_bytes(),
-    )?;
-    let session = SessionId::from_bytes(Uuid::now_v7().into_bytes());
-    let owner = Owner { session, endpoint };
-    // An offline initializer cannot fence a previous unleased owner. Admit its
-    // local resources before publishing ownership so setup failures remain retryable.
-    std::fs::create_dir_all(data_dir)?;
-    let directory = tempfile::Builder::new()
-        .prefix("crab-cell-repository-init-")
-        .tempdir_in(data_dir)?;
-    let budget = crate::server::CellRuntimeBudget::from_resources(crate::peer::local_resources(
-        data_dir,
-        local_disk_limit_bytes,
-    )?)?;
-    let local_disk = budget.local_disk();
-    let cell_node = CellNodeBuilder::new(Arc::clone(application))
-        .with_runtime(SqlWorkerPool::new(1, 1)?, INITIALIZE_MAILBOX_BYTES)
-        .with_replica_host(budget.replica_host(local_disk, directory.path().to_owned()))
-        .with_session(session)
-        .build_unleased_for_maintenance()?;
-    let runtime = cell_node.runtime();
-    let result: Result<()> = async {
-        let (proof, authority) = provision_repository(layout, identity, registry, &target).await?;
-        let observed = match authority.load(target.cell_id()).await? {
-            Some(observed) => observed,
-            None => {
-                authority
-                    .create_initial(
-                        &proof,
-                        IncarnationId::from_bytes(Uuid::now_v7().into_bytes()),
-                        owner.clone(),
-                    )
-                    .await?
-            }
-        };
-        let replica = CellReplica::new(
-            layout.clone(),
-            *target.cell_id().as_bytes(),
-            *observed.value().incarnation.as_bytes(),
-            repository_replica_limits(),
-        )
-        .map_err(cellule_runtime::Error::from)?;
-        let destination = directory.path().join(format!("{}.sqlite", Uuid::now_v7()));
-        let handle = match (observed.value().state, observed.value().root.is_some()) {
-            (ControlState::Recovering, false) => {
-                let repository_bytes = repository.into_bytes();
-                let initialize = move |transaction: &rusqlite::Transaction<'_>| {
-                    initialize_repository_schema(transaction)?;
-                    transaction.execute(
-                        "INSERT INTO repository_identity(singleton, repository_uuid) VALUES (1, ?1)",
-                        [repository_bytes.as_slice()],
-                    )?;
-                    Ok(())
-                };
-                if observed.value().owner.as_ref() == Some(&owner) {
-                    runtime
-                        .bootstrap(
-                            proof,
-                            replica,
-                            authority.clone(),
-                            observed,
-                            destination,
-                            initialize,
-                        )
-                        .await?
-                } else {
-                    return Err(Error::Config(
-                        "offline repository initialization cannot fence an existing Cell owner",
-                    ));
+async fn wait_for_initializer_lease(config: &Config, node: &str) -> Result<()> {
+    let bucket = super::runtime::bucket(config)?;
+    let ownership = cellar::ownership_store::BucketOwnership::new(
+        bucket.clone(),
+        bucket,
+        node.to_owned(),
+        String::new(),
+    );
+    let domain = cellar::sdk::ExecutionDomain::new(tokio::runtime::Handle::current());
+    // Preserve closes the initializer safely without requiring a successor.
+    // Its last lease must expire before the catalog sends serving traffic to it.
+    let settled = domain
+        .run(async {
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                loop {
+                    let lease = ownership
+                        .read_node_lease(node)
+                        .await
+                        .map_err(super::Error::sdk)?;
+                    let now = cellar::ownership_store::now_ms();
+                    let remaining = lease.map_or(0, |lease| lease.expires_ms.saturating_sub(now));
+                    if remaining == 0 {
+                        return Ok::<(), super::Error>(());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(remaining.min(250))).await;
                 }
-            }
-            (ControlState::Idle, true) => {
-                runtime
-                    .acquire_idle_restored(
-                        proof,
-                        replica,
-                        authority.clone(),
-                        observed,
-                        destination,
-                        owner.clone(),
-                    )
-                    .await?
-            }
-            (ControlState::Recovering | ControlState::Serving, true) => {
-                return Err(Error::Config(
-                    "offline repository initialization cannot take over an owned Cell",
-                ));
-            }
-            (ControlState::Tombstoned, _) => {
-                return Err(Error::Config("repository Cell is tombstoned"));
-            }
-            _ => {
-                return Err(Error::Config(
-                    "repository Cell control cannot be initialized or restored",
-                ));
-            }
-        };
-        verify_repository_identity(&handle, repository).await?;
-        handle.drain().await?;
-        let control = authority
-            .load(target.cell_id())
-            .await?
-            .ok_or(Error::Config("initialized repository Cell lost its control"))?;
-        if control.value().state != ControlState::Idle || control.value().owner.is_some() {
-            return Err(Error::Config(
-                "initialized repository Cell did not release to idle",
-            ));
-        }
-        Ok(())
-    }
-    .await;
-    let shutdown = cell_node.shutdown().await;
-    match (result, shutdown) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error.into()),
-    }
-}
-
-async fn verify_repository_identity(handle: &CellHandle, repository: Uuid) -> Result<()> {
-    let observed = handle
-        .query(32, 16, |connection| {
-            connection
-                .query_row(
-                    "SELECT repository_uuid FROM repository_identity WHERE singleton = 1",
-                    [],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .map_err(cellule_runtime::Error::from)
+            })
+            .await
+            .map_err(super::Error::sdk)?
         })
-        .await?;
-    if observed.as_slice() != repository.as_bytes() {
-        return Err(Error::Config(
-            "repository Cell identity differs from the catalog repository",
-        ));
-    }
+        .await;
+    domain.shutdown().await;
+    settled.map_err(super::Error::sdk)??;
     Ok(())
-}
-
-async fn require_ready_release(
-    layout: &CellStorageLayout,
-    identity: ApplicationIdentity,
-    registry: &Registry,
-) -> Result<()> {
-    let release = ReleaseStore::new(layout.clone(), identity)?
-        .load()
-        .await?
-        .ok_or(Error::Config("Cell application release is not activated"))?;
-    if release.record().state() != ReleaseState::Ready
-        || release.record().current() != Some(registry.release_digest())
-    {
-        return Err(Error::Config(
-            "repository creation requires this binary's ready Cell release",
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) async fn verify_repository_cells(
-    layout: &CellStorageLayout,
-    identity: ApplicationIdentity,
-    repositories: impl IntoIterator<Item = (Uuid, RepositoryApplicationState)>,
-) -> Result<()> {
-    let catalog = CellCatalog::new(layout.clone(), identity.tenant());
-    let authority = CellAuthority::new(layout.clone());
-    for (repository, state) in repositories {
-        if state != RepositoryApplicationState::CellReady {
-            return Err(Error::Config(
-                "cataloged repository application has not completed Cell initialization",
-            ));
-        }
-        let target = CellTarget::new(
-            identity.tenant(),
-            identity.application(),
-            REPOSITORY_NAMESPACE,
-            repository.as_bytes(),
-        )?;
-        catalog
-            .lookup(target.cell_id())
-            .await?
-            .ok_or(Error::Config(
-                "cataloged repository has not been initialized into a Cell",
-            ))?;
-        let control = authority
-            .load(target.cell_id())
-            .await?
-            .ok_or(Error::Config("cataloged repository Cell has no control"))?;
-        if control.value().root.is_none() || control.value().state == ControlState::Tombstoned {
-            return Err(Error::Config(
-                "cataloged repository Cell has no published application root",
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub(crate) async fn provision_repository(
-    layout: &CellStorageLayout,
-    identity: ApplicationIdentity,
-    registry: &Registry,
-    target: &CellTarget,
-) -> Result<(CatalogProof, CellAuthority)> {
-    let catalog = CellCatalog::new(layout.clone(), identity.tenant());
-    let (code, schema) = registry
-        .current_cell_version(REPOSITORY_NAMESPACE, CatalogRole::Application)
-        .ok_or(cellule_runtime::Error::Registry(
-            "repository module is not registered",
-        ))?;
-    let proof = ReleaseStore::new(layout.clone(), identity)?
-        .provision(
-            &catalog,
-            registry,
-            CatalogEntry::new(target, CatalogRole::Application, code, schema)?,
-        )
-        .await?;
-    Ok((proof, CellAuthority::new(layout.clone())))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use cellule_runtime::control::ControlState;
-    use cellule_runtime::control::authority::CellAuthority;
-    use cellule_runtime::identity::{ApplicationId, CellTarget, TenantId};
-    use object_store::{memory::InMemory, path::Path as ObjectPath};
-
-    use super::*;
-
-    #[tokio::test]
-    async fn local_preflight_failure_leaves_repository_retryable() {
-        let identity = ApplicationIdentity::new(
-            TenantId::from_bytes([41; 16]),
-            ApplicationId::from_bytes([42; 16]),
-        );
-        let layout = CellStorageLayout::new(
-            cellule_store::Store::new(Arc::new(InMemory::new())),
-            ObjectPath::from("repository-preflight"),
-            *identity.application().as_bytes(),
-        );
-        let registry = super::super::compiled_registry().unwrap();
-        super::super::bootstrap_release_at(
-            &layout,
-            identity,
-            &registry,
-            &format!("sha256:{}", "a".repeat(64)),
-        )
-        .await
-        .unwrap();
-        let application = super::super::compiled_application().unwrap();
-        let local = tempfile::TempDir::new().unwrap();
-        let blocked_directory = local.path().join("file");
-        std::fs::write(&blocked_directory, b"occupied").unwrap();
-
-        for (id, failed_path, disk_limit) in [
-            (43, local.path(), 1024),
-            (44, blocked_directory.as_path(), 32 * 1024 * 1024 * 1024),
-        ] {
-            let repository = Uuid::from_bytes([id; 16]);
-            let failed = initialize_repository_at(
-                &layout,
-                identity,
-                &registry,
-                &application,
-                failed_path,
-                disk_limit,
-                "https://initializer.internal:8081".into(),
-                repository,
-            )
-            .await;
-            assert!(matches!(failed, Err(Error::Config(_) | Error::Io(_))));
-
-            initialize_repository_at(
-                &layout,
-                identity,
-                &registry,
-                &application,
-                local.path(),
-                32 * 1024 * 1024 * 1024,
-                "https://initializer.internal:8081".into(),
-                repository,
-            )
-            .await
-            .unwrap();
-            verify_repository_cells(
-                &layout,
-                identity,
-                [(repository, RepositoryApplicationState::CellReady)],
-            )
-            .await
-            .unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn publishes_and_verifies_an_exact_retry() {
-        let identity = ApplicationIdentity::new(
-            TenantId::from_bytes([31; 16]),
-            ApplicationId::from_bytes([32; 16]),
-        );
-        let layout = CellStorageLayout::new(
-            cellule_store::Store::new(Arc::new(InMemory::new())),
-            ObjectPath::from("repository-initializer"),
-            *identity.application().as_bytes(),
-        );
-        let registry = super::super::compiled_registry().unwrap();
-        super::super::bootstrap_release_at(
-            &layout,
-            identity,
-            &registry,
-            &format!("sha256:{}", "a".repeat(64)),
-        )
-        .await
-        .unwrap();
-        let repository = Uuid::from_bytes([33; 16]);
-        let local = tempfile::TempDir::new().unwrap();
-        let application = super::super::compiled_application().unwrap();
-
-        for _ in 0..2 {
-            initialize_repository_at(
-                &layout,
-                identity,
-                &registry,
-                &application,
-                local.path(),
-                32 * 1024 * 1024 * 1024,
-                "https://initializer.internal:8081".into(),
-                repository,
-            )
-            .await
-            .unwrap();
-        }
-
-        verify_repository_cells(
-            &layout,
-            identity,
-            [(repository, RepositoryApplicationState::CellReady)],
-        )
-        .await
-        .unwrap();
-        let target = CellTarget::new(
-            identity.tenant(),
-            identity.application(),
-            REPOSITORY_NAMESPACE,
-            repository.as_bytes(),
-        )
-        .unwrap();
-        let control = CellAuthority::new(layout)
-            .load(target.cell_id())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(control.value().state, ControlState::Idle);
-        assert!(control.value().root.is_some());
-        assert!(control.value().owner.is_none());
-    }
 }

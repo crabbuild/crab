@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::cells::MutationIdentity;
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
@@ -8,9 +9,6 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cellule_runtime::cell::executor::MutationIdentity;
-use cellule_runtime::client::{Committed, InvocationError, Observed};
-use cellule_runtime::identity::RequestId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -18,15 +16,12 @@ use uuid::Uuid;
 use crate::{
     app::{self, Error, Result},
     auth::{Identity, Principal},
-    cells::{
-        RepositoryCell,
-        repository::{
-            CheckAnnotationRecord, CheckOutputRecord, CheckReportInput, CheckRunDetail,
-            CheckRunKey, CheckRunRecord, CheckStepRecord, CheckSubmissionKey, CreateCheckRun,
-            CreateCheckRunInput, CreateCheckRunOutcome, GetCheckCreateSubmission, GetCheckRun,
-            GetCheckUpdateSubmission, ListCheckRuns, ListCheckRunsInput, RepositoryAuthor,
-            UpdateCheckRun, UpdateCheckRunInput, UpdateCheckRunOutcome,
-        },
+    cells::repository::{
+        CheckAnnotationRecord, CheckOutputRecord, CheckReportInput, CheckRunDetail, CheckRunKey,
+        CheckRunRecord, CheckStepRecord, CheckSubmissionKey, CreateCheckRun, CreateCheckRunInput,
+        CreateCheckRunOutcome, GetCheckCreateSubmission, GetCheckRun, GetCheckUpdateSubmission,
+        ListCheckRuns, ListCheckRunsInput, RepositoryAuthor, UpdateCheckRun, UpdateCheckRunInput,
+        UpdateCheckRunOutcome,
     },
     server::{Repository, Server},
     statuses,
@@ -313,8 +308,8 @@ async fn create(
     input.request_id = Uuid::from_bytes(submission_id).to_string();
     input.head_sha = parsed_oid.to_string();
     let actor = app::actor(&principal)?;
-    let read = route(&server, repo, &actor, "repository.read").await?;
-    if let Some(saved) = query_output(
+    let read = crate::app::repository_cell(&server, repo)?;
+    if let Some(saved) = crate::app::query_output(
         read.client
             .query::<GetCheckCreateSubmission>(
                 &read.target,
@@ -326,8 +321,8 @@ async fn create(
         if !same_create(&saved, &actor, &input)? {
             return Err(Error::RequestConflict);
         }
-        let routed = route(&server, repo, &actor, "repository.check.create").await?;
-        let detail = created_check(command_output(
+        let routed = crate::app::repository_cell(&server, repo)?;
+        let detail = created_check(crate::app::command_output(
             routed
                 .client
                 .command::<CreateCheckRun>(
@@ -345,8 +340,8 @@ async fn create(
     if !principal.can_write(&repo.config) {
         return Err(Error::CheckPermission);
     }
-    let routed = route(&server, repo, &actor, "repository.check.create").await?;
-    let detail = created_check(command_output(
+    let routed = crate::app::repository_cell(&server, repo)?;
+    let detail = created_check(crate::app::command_output(
         routed
             .client
             .command::<CreateCheckRun>(
@@ -379,9 +374,9 @@ async fn list(
             "Check run pages require limit 1–50 and a positive before cursor",
         ));
     }
-    let actor = app::actor(&principal)?;
-    let routed = route(&server, repo, &actor, "repository.read").await?;
-    let page = query_output(
+    app::actor(&principal)?;
+    let routed = crate::app::repository_cell(&server, repo)?;
+    let page = crate::app::query_output(
         routed
             .client
             .query::<ListCheckRuns>(
@@ -416,9 +411,9 @@ async fn detail(
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
     let oid = statuses::require_commit(&server, repo, statuses::parse_oid(&oid)?).await?;
-    let actor = app::actor(&principal)?;
-    let routed = route(&server, repo, &actor, "repository.read").await?;
-    let detail = query_output(
+    app::actor(&principal)?;
+    let routed = crate::app::repository_cell(&server, repo)?;
+    let detail = crate::app::query_output(
         routed
             .client
             .query::<GetCheckRun>(
@@ -461,8 +456,8 @@ async fn edit(
         &input.output,
     )?;
     let actor = app::actor(&principal)?;
-    let read = route(&server, repo, &actor, "repository.read").await?;
-    if let Some(saved) = query_output(
+    let read = crate::app::repository_cell(&server, repo)?;
+    if let Some(saved) = crate::app::query_output(
         read.client
             .query::<GetCheckUpdateSubmission>(
                 &read.target,
@@ -474,8 +469,8 @@ async fn edit(
         if !same_update(&saved, &actor, &oid, number, &input)? {
             return Err(Error::RequestConflict);
         }
-        let routed = route(&server, repo, &actor, "repository.check.update").await?;
-        let detail = updated_check(command_output(
+        let routed = crate::app::repository_cell(&server, repo)?;
+        let detail = updated_check(crate::app::command_output(
             routed
                 .client
                 .command::<UpdateCheckRun>(
@@ -493,8 +488,8 @@ async fn edit(
     if !principal.can_write(&repo.config) {
         return Err(Error::CheckPermission);
     }
-    let routed = route(&server, repo, &actor, "repository.check.update").await?;
-    let detail = updated_check(command_output(
+    let routed = crate::app::repository_cell(&server, repo)?;
+    let detail = updated_check(crate::app::command_output(
         routed
             .client
             .command::<UpdateCheckRun>(
@@ -508,14 +503,9 @@ async fn edit(
     Ok(Json(detail_view(&run, &output)?))
 }
 
-pub(crate) async fn latest(
-    server: &Server,
-    repo: &Repository,
-    principal: &Identity,
-    oid: &str,
-) -> Result<Vec<CheckRun>> {
-    let routed = route(server, repo, principal, "repository.read").await?;
-    let page = query_output(
+pub(crate) async fn latest(server: &Server, repo: &Repository, oid: &str) -> Result<Vec<CheckRun>> {
+    let routed = crate::app::repository_cell(server, repo)?;
+    let page = crate::app::query_output(
         routed
             .client
             .query::<ListCheckRuns>(
@@ -824,22 +814,6 @@ fn updated_check(outcome: UpdateCheckRunOutcome) -> Result<CheckRunDetail> {
     }
 }
 
-async fn route(
-    server: &Server,
-    repository: &Repository,
-    principal: &Identity,
-    action: &'static str,
-) -> Result<RepositoryCell> {
-    let router = server.repository_cells().ok_or(Error::CellUnavailable)?;
-    router
-        .route(repository.id, principal, action)
-        .await
-        .map_err(|error| match error {
-            crate::Error::Cell(source) => Error::Cell(source),
-            source => Error::Repository(source),
-        })
-}
-
 fn repository_author(identity: &Identity) -> RepositoryAuthor {
     RepositoryAuthor {
         issuer: identity.issuer.clone(),
@@ -855,37 +829,13 @@ fn submission_id(value: &str) -> Result<[u8; 16]> {
 }
 
 fn mutation_identity() -> Result<MutationIdentity> {
-    let now_ms = crate::cells::unix_now_ms().map_err(Error::Repository)?;
+    let now_ms = crate::cells::unix_now_ms().map_err(Error::Cell)?;
     let expires_at_ms = now_ms
         .checked_add(60_000)
         .ok_or(Error::CellContract("Cell request expiry overflowed"))?;
     Ok(MutationIdentity {
-        request_id: RequestId::from_bytes(Uuid::now_v7().into_bytes()),
+        request_id: Uuid::now_v7(),
         issued_at_ms: now_ms,
         expires_at_ms,
     })
-}
-
-fn command_output<T>(result: std::result::Result<Committed<T>, InvocationError<T>>) -> Result<T> {
-    match result {
-        Ok(committed) => Ok(committed.output),
-        Err(InvocationError::Rejected(committed)) => Ok(committed.output),
-        Err(InvocationError::Pending(_)) => Err(Error::CellPending),
-        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
-        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
-    }
-}
-
-fn query_output<T>(result: std::result::Result<Observed<T>, InvocationError<T>>) -> Result<T> {
-    match result {
-        Ok(observed) => Ok(observed.output),
-        Err(InvocationError::Rejected(_)) => Err(Error::CellContract(
-            "Cell query returned a durable rejection",
-        )),
-        Err(InvocationError::Pending(_)) => Err(Error::CellContract(
-            "Cell query returned pending mutation evidence",
-        )),
-        Err(InvocationError::InvalidPublishedResult { source, .. }) => Err(Error::Cell(*source)),
-        Err(InvocationError::NotStarted(source)) => Err(Error::Cell(source)),
-    }
 }

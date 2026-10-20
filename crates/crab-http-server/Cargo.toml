@@ -12,9 +12,7 @@ bytes = { workspace = true }
 blake3 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 crab-read = { workspace = true }
-cellule-runtime = { workspace = true }
-cellule-app = { workspace = true }
-cellule-host = { workspace = true }
+cellar = { workspace = true }
 crab-lfs = { workspace = true }
 crab-git = { workspace = true }
 gix-hash = { workspace = true }
@@ -32,15 +30,15 @@ fs4 = "0.13.1"
 jsonwebtoken.workspace = true
 flate2 = { workspace = true }
 http-body = "1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 crab-remote-git = { workspace = true }
 crab-storage = { workspace = true }
-cellule-store = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 rand = "0.9"
-rusqlite.workspace = true
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 object_store = { workspace = true }
-reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
+reqwest = { workspace = true, features = ["rustls-tls", "socks", "stream"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 rustls = "0.23"
@@ -64,7 +62,5 @@ zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-cellule-runtime = { workspace = true, features = ["test-support"] }
-cellule-ltx = { workspace = true, features = ["replica"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

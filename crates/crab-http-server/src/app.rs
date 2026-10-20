@@ -96,12 +96,10 @@ pub(crate) enum Error {
     RequestConflict,
     #[error("Collaboration Cell routing is unavailable")]
     CellUnavailable,
-    #[error("Collaboration write outcome requires resolution")]
-    CellPending,
     #[error("Collaboration Cell contract failed: {0}")]
     CellContract(&'static str),
     #[error("Collaboration Cell operation failed")]
-    Cell(#[source] cellule_runtime::Error),
+    Cell(#[source] crate::cells::Error),
     #[error("Collaboration storage failed")]
     Storage(#[from] StorageError),
     #[error("Collaboration data encoding failed")]
@@ -114,6 +112,17 @@ pub(crate) enum Error {
     Repository(#[from] crate::Error),
 }
 pub(crate) type Result<T> = std::result::Result<T, Error>;
+
+pub(crate) fn repository_cell(
+    server: &Server,
+    repository: &Repository,
+) -> Result<crate::cells::RepositoryCell> {
+    server
+        .repository_cells()
+        .ok_or(Error::CellUnavailable)?
+        .repository(repository.id)
+        .map_err(Error::Cell)
+}
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
@@ -290,43 +299,30 @@ impl IntoResponse for Error {
                 "submission_conflict",
                 "This submission ID was already used for different content; check the existing discussion before submitting again",
             ),
-            Self::Cell(cellule_runtime::Error::Capacity(_)) => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "busy",
-                "Collaboration requests are busy; retry the same submission shortly",
-            ),
-            Self::Cell(cellule_runtime::Error::ReplicaBehind { .. }) => (
+            Self::Cell(crate::cells::Error::StaleRead) => (
                 StatusCode::CONFLICT,
-                "replica_behind",
-                "Read replicas have not reached the requested Cell receipt",
+                "stale_read",
+                "Repository Cell has not reached the requested revision",
             ),
-            Self::Cell(cellule_runtime::Error::ReplicaUnavailable) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "replica_unavailable",
-                "No selected read replica is currently ready",
-            ),
-            Self::CellPending => (
+            Self::Cell(crate::cells::Error::Pending { .. }) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "outcome_unknown",
                 "The write may have completed; retry the same submission to resolve it",
             ),
-            Self::CellUnavailable
-            | Self::Cell(
-                cellule_runtime::Error::CellNotActive
-                | cellule_runtime::Error::CellDraining
-                | cellule_runtime::Error::RuntimeClosed
-                | cellule_runtime::Error::Fenced
-                | cellule_runtime::Error::PendingPublication
-                | cellule_runtime::Error::Deadline,
-            ) => (
+            Self::CellUnavailable | Self::Cell(crate::cells::Error::Unavailable) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "cell_unavailable",
                 "Repository collaboration is temporarily unavailable; retry the same submission shortly",
             ),
-            Self::Cell(cellule_runtime::Error::PeerAuthorization(_)) => (
-                StatusCode::FORBIDDEN,
-                "forbidden",
-                "Repository collaboration authorization was denied",
+            Self::Cell(crate::cells::Error::RequestConflict) => (
+                StatusCode::CONFLICT,
+                "submission_conflict",
+                "This submission ID was already used for different content",
+            ),
+            Self::Cell(crate::cells::Error::Expired) => (
+                StatusCode::GONE,
+                "request_expired",
+                "Repository request expired before it could execute",
             ),
             Self::CellContract(_) | Self::Cell(_) => (
                 StatusCode::BAD_GATEWAY,
@@ -483,4 +479,18 @@ pub(crate) fn body(value: &str, required: bool) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+pub(crate) fn command_output<T>(
+    result: crate::cells::Result<crate::cells::Committed<T>>,
+) -> Result<T> {
+    result
+        .map(|committed| committed.output)
+        .map_err(Error::Cell)
+}
+
+pub(crate) fn query_output<T>(
+    result: crate::cells::Result<crate::cells::Observed<T>>,
+) -> Result<T> {
+    result.map(|observed| observed.output).map_err(Error::Cell)
 }

@@ -1,12 +1,9 @@
 //! Rebuildable Git browse projections stored in the repository Cell.
 
-use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, WireValue};
-use cellule_runtime::primitives::sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
-use cellule_runtime::registry::{CellModule, Command, Query, RegistryBuilder};
-use cellule_runtime::registry::{CommandContext, CommandResult, QueryContext};
+use crate::cells::application::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
 use serde::{Deserialize, Serialize};
 
-use super::RepositoryModule;
+use crate::cells::application::{Mutation, MutationResult, Read, RepositoryTransaction};
 
 pub(crate) const OP_BEGIN: u8 = 1;
 pub(crate) const OP_REFS: u8 = 2;
@@ -21,7 +18,7 @@ const MAX_BATCH_BYTES: usize = 700 * 1024;
 const MAX_BATCH_ROWS: usize = 256;
 const MAX_SQL_STATEMENTS: usize = 128;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ProjectionBatch {
     pub operation: u8,
     pub epoch_id: u64,
@@ -29,105 +26,19 @@ pub(crate) struct ProjectionBatch {
     pub payload: Vec<u8>,
 }
 
-impl WireValue for ProjectionBatch {
-    fn encode(
-        &self,
-        encoder: &mut BoundedEncoder,
-    ) -> Result<(), cellule_runtime::codec::CodecError> {
-        if self.source.len() > MAX_SOURCE_BYTES || self.payload.len() > MAX_BATCH_BYTES {
-            return Err(cellule_runtime::codec::CodecError::Limit);
-        }
-        encoder.write_u8(self.operation)?;
-        encoder.write_u64(self.epoch_id)?;
-        encoder.write_bytes(&self.source)?;
-        encoder.write_bytes(&self.payload)
-    }
-
-    fn decode(
-        decoder: &mut BoundedDecoder<'_>,
-    ) -> Result<Self, cellule_runtime::codec::CodecError> {
-        let operation = decoder.read_u8()?;
-        let epoch_id = decoder.read_u64()?;
-        let source = decoder.read_bytes()?;
-        let payload = decoder.read_bytes()?;
-        if source.len() > MAX_SOURCE_BYTES || payload.len() > MAX_BATCH_BYTES {
-            return Err(cellule_runtime::codec::CodecError::Limit);
-        }
-        Ok(Self {
-            operation,
-            epoch_id,
-            source: source.to_vec(),
-            payload: payload.to_vec(),
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ProjectionAck {
     pub epoch_id: Option<u64>,
 }
 
-impl WireValue for ProjectionAck {
-    fn encode(
-        &self,
-        encoder: &mut BoundedEncoder,
-    ) -> Result<(), cellule_runtime::codec::CodecError> {
-        self.epoch_id.encode(encoder)
-    }
-
-    fn decode(
-        decoder: &mut BoundedDecoder<'_>,
-    ) -> Result<Self, cellule_runtime::codec::CodecError> {
-        Ok(Self {
-            epoch_id: Option::<u64>::decode(decoder)?,
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ProjectionState;
 
-impl WireValue for ProjectionState {
-    fn encode(
-        &self,
-        _encoder: &mut BoundedEncoder,
-    ) -> Result<(), cellule_runtime::codec::CodecError> {
-        Ok(())
-    }
-
-    fn decode(
-        _decoder: &mut BoundedDecoder<'_>,
-    ) -> Result<Self, cellule_runtime::codec::CodecError> {
-        Ok(Self)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ProjectionStateView {
     pub ready_epoch: Option<u64>,
     pub source_token: Option<String>,
     pub generation: Option<u64>,
-}
-
-impl WireValue for ProjectionStateView {
-    fn encode(
-        &self,
-        encoder: &mut BoundedEncoder,
-    ) -> Result<(), cellule_runtime::codec::CodecError> {
-        self.ready_epoch.encode(encoder)?;
-        self.source_token.encode(encoder)?;
-        self.generation.encode(encoder)
-    }
-
-    fn decode(
-        decoder: &mut BoundedDecoder<'_>,
-    ) -> Result<Self, cellule_runtime::codec::CodecError> {
-        Ok(Self {
-            ready_epoch: Option::<u64>::decode(decoder)?,
-            source_token: Option::<String>::decode(decoder)?,
-            generation: Option::<u64>::decode(decoder)?,
-        })
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -195,25 +106,22 @@ pub(crate) struct AttributionBatch {
 
 pub(crate) struct ApplyProjectionBatch;
 
-impl Command for ApplyProjectionBatch {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_PROJECTION_COMMAND_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Mutation for ApplyProjectionBatch {
+    const ID: u32 = 31;
     type Input = ProjectionBatch;
     type Output = ProjectionAck;
 
     fn execute(
-        context: &mut CommandContext<'_, '_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if input.source.len() > MAX_SOURCE_BYTES || input.payload.len() > MAX_BATCH_BYTES {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "projection batch exceeds input limit",
             ));
         }
-        let source: SourceIdentity = serde_json::from_slice(&input.source).map_err(|_| {
-            cellule_runtime::Error::Command("projection source identity is invalid")
-        })?;
+        let source: SourceIdentity = serde_json::from_slice(&input.source)
+            .map_err(|_| crate::cells::Error::Invalid("projection source identity is invalid"))?;
         validate_source(&source)?;
         let payload = &input.payload;
         let epoch_id = match input.operation {
@@ -222,7 +130,7 @@ impl Command for ApplyProjectionBatch {
                 require_epoch(context, input.epoch_id, &source)?;
                 let rows: Vec<RefRow> = decode_payload(payload)?;
                 if rows.len() > MAX_BATCH_ROWS {
-                    return Err(cellule_runtime::Error::Command(
+                    return Err(crate::cells::Error::Invalid(
                         "projection ref batch is too large",
                     ));
                 }
@@ -233,7 +141,7 @@ impl Command for ApplyProjectionBatch {
                 require_epoch(context, input.epoch_id, &source)?;
                 let rows: Vec<CommitRow> = decode_payload(payload)?;
                 if rows.len() > MAX_BATCH_ROWS {
-                    return Err(cellule_runtime::Error::Command(
+                    return Err(crate::cells::Error::Invalid(
                         "projection commit batch is too large",
                     ));
                 }
@@ -247,7 +155,7 @@ impl Command for ApplyProjectionBatch {
                     || batch.edges.len() > MAX_BATCH_ROWS.saturating_mul(8)
                     || batch.roots.len() > MAX_BATCH_ROWS
                 {
-                    return Err(cellule_runtime::Error::Command(
+                    return Err(crate::cells::Error::Invalid(
                         "projection attribution batch is too large",
                     ));
                 }
@@ -269,29 +177,25 @@ impl Command for ApplyProjectionBatch {
                 None
             }
             _ => {
-                return Err(cellule_runtime::Error::Command(
-                    "unknown projection operation",
-                ));
+                return Err(crate::cells::Error::Invalid("unknown projection operation"));
             }
         };
         super::advance_revision(context)?;
-        Ok(CommandResult::Success(ProjectionAck { epoch_id }))
+        Ok(MutationResult::Success(ProjectionAck { epoch_id }))
     }
 }
 
 pub(crate) struct GetProjectionState;
 
-impl Query for GetProjectionState {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_PROJECTION_STATE_QUERY_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Read for GetProjectionState {
+    const ID: u32 = 27;
     type Input = ProjectionState;
     type Output = ProjectionStateView;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         _input: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
+    ) -> crate::cells::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
                 "SELECT s.ready_epoch, e.source_token, e.manifest_generation FROM git_projection_state s LEFT JOIN git_projection_epochs e ON e.epoch_id = s.ready_epoch WHERE s.singleton = 1",
@@ -299,7 +203,7 @@ impl Query for GetProjectionState {
             )],
         })?;
         let Some(row) = result[0].rows.first() else {
-            return Err(cellule_runtime::Error::Command(
+            return Err(crate::cells::Error::Invalid(
                 "projection state row is missing",
             ));
         };
@@ -336,38 +240,27 @@ pub(crate) struct AttributionResponse {
 
 pub(crate) struct GetProjectionAttribution;
 
-impl Query for GetProjectionAttribution {
-    const MODULE: &'static str = RepositoryModule::NAME;
-    const ID: u32 = super::super::REPOSITORY_PROJECTION_ATTRIBUTION_QUERY_ID;
-    const CODEC_VERSION: u32 = 1;
+impl Read for GetProjectionAttribution {
+    const ID: u32 = 28;
     type Input = Vec<u8>;
     type Output = Vec<u8>;
 
     fn execute(
-        context: &mut QueryContext<'_>,
+        context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
-    ) -> cellule_runtime::Result<Self::Output> {
-        let request: AttributionQuery = serde_json::from_slice(&input).map_err(|_| {
-            cellule_runtime::Error::Command("projection attribution input is invalid")
-        })?;
+    ) -> crate::cells::Result<Self::Output> {
+        let request: AttributionQuery = serde_json::from_slice(&input)
+            .map_err(|_| crate::cells::Error::Invalid("projection attribution input is invalid"))?;
         let response = attribution(context, &request)?;
-        serde_json::to_vec(&response).map_err(|_| {
-            cellule_runtime::Error::Command("projection attribution output is invalid")
-        })
+        serde_json::to_vec(&response)
+            .map_err(|_| crate::cells::Error::Invalid("projection attribution output is invalid"))
     }
 }
 
-pub(crate) fn register(registry: &mut RegistryBuilder) -> cellule_runtime::Result<()> {
-    registry.bind_command::<ApplyProjectionBatch>()?;
-    registry.bind_query::<GetProjectionState>()?;
-    registry.bind_query::<GetProjectionAttribution>()?;
-    Ok(())
-}
-
 fn attribution(
-    context: &QueryContext<'_>,
+    context: &RepositoryTransaction<'_>,
     request: &AttributionQuery,
-) -> cellule_runtime::Result<AttributionResponse> {
+) -> crate::cells::Result<AttributionResponse> {
     if request.source_token.len() > 128
         || request.commit_oid.len() != 20
         || request.paths.len() > 200
@@ -376,7 +269,7 @@ fn attribution(
             .iter()
             .any(|path| path.is_empty() || path.len() > 1024 * 1024 || path.contains(&0))
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "projection attribution input is out of bounds",
         ));
     }
@@ -496,9 +389,9 @@ fn attribution(
 }
 
 fn begin(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     source: &SourceIdentity,
-) -> cellule_runtime::Result<Option<u64>> {
+) -> crate::cells::Result<Option<u64>> {
     let existing = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT epoch_id, state FROM git_projection_epochs WHERE source_token = ?",
@@ -508,11 +401,9 @@ fn begin(
     if let Some(row) = existing[0].rows.first() {
         let epoch_id = match row.first() {
             Some(SqlValue::Integer(value)) => u64::try_from(*value)
-                .map_err(|_| cellule_runtime::Error::Command("projection epoch is negative"))?,
+                .map_err(|_| crate::cells::Error::Invalid("projection epoch is negative"))?,
             _ => {
-                return Err(cellule_runtime::Error::Command(
-                    "projection epoch is invalid",
-                ));
+                return Err(crate::cells::Error::Invalid("projection epoch is invalid"));
             }
         };
         let state = result_text(row, 1)?;
@@ -545,7 +436,7 @@ fn begin(
                         "UPDATE git_projection_epochs SET state = 'building', started_at_ms = ?, verified_at_ms = NULL WHERE epoch_id = ?",
                         vec![
                             integer(u64::try_from(context.now_ms()).map_err(|_| {
-                                cellule_runtime::Error::Command(
+                                crate::cells::Error::Invalid(
                                     "projection timestamp is negative",
                                 )
                             })?)?,
@@ -565,11 +456,9 @@ fn begin(
         )],
     })?;
     let previous = result_u64(&result, 0, 0)?;
-    let epoch_id = previous
-        .checked_add(1)
-        .ok_or(cellule_runtime::Error::Command(
-            "projection epoch is exhausted",
-        ))?;
+    let epoch_id = previous.checked_add(1).ok_or(crate::cells::Error::Invalid(
+        "projection epoch is exhausted",
+    ))?;
     context.sql(&SqlBatch {
         statements: vec![statement(
             "UPDATE git_projection_epochs SET state = 'superseded' WHERE state IN ('building', 'verifying') AND source_token <> ?",
@@ -591,7 +480,7 @@ fn begin(
                 optional_text_value(source.path_state_hash.as_deref()),
                 SqlValue::Blob(source.head_ref.clone()),
                 integer(u64::try_from(context.now_ms()).map_err(|_| {
-                    cellule_runtime::Error::Command("projection timestamp is negative")
+                    crate::cells::Error::Invalid("projection timestamp is negative")
                 })?)?,
             ],
         )],
@@ -601,11 +490,11 @@ fn begin(
 }
 
 fn update_probe_state(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     source: &SourceIdentity,
-) -> cellule_runtime::Result<()> {
+) -> crate::cells::Result<()> {
     let now = u64::try_from(context.now_ms())
-        .map_err(|_| cellule_runtime::Error::Command("projection timestamp is negative"))?;
+        .map_err(|_| crate::cells::Error::Invalid("projection timestamp is negative"))?;
     context.sql(&SqlBatch {
         statements: vec![statement(
             "UPDATE git_projection_state SET desired_source_token = ?, desired_manifest_generation = ?, desired_manifest_etag = ?, desired_journal_digest = ?, last_probe_at_ms = ?, next_probe_at_ms = ? WHERE singleton = 1",
@@ -623,10 +512,10 @@ fn update_probe_state(
 }
 
 fn apply_refs(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     epoch_id: u64,
     rows: &[RefRow],
-) -> cellule_runtime::Result<()> {
+) -> crate::cells::Result<()> {
     let mut statements = Vec::with_capacity(rows.len());
     for row in rows {
         statements.push(statement(
@@ -648,10 +537,10 @@ fn apply_refs(
 }
 
 fn apply_commits(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     epoch_id: u64,
     rows: &[CommitRow],
-) -> cellule_runtime::Result<()> {
+) -> crate::cells::Result<()> {
     let mut statements = Vec::with_capacity(rows.len().saturating_mul(2));
     for row in rows {
         statements.push(statement(
@@ -677,10 +566,10 @@ fn apply_commits(
 }
 
 fn apply_attribution(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     epoch_id: u64,
     batch: &AttributionBatch,
-) -> cellule_runtime::Result<()> {
+) -> crate::cells::Result<()> {
     let mut statements = Vec::new();
     for node in &batch.nodes {
         statements.push(statement(
@@ -718,17 +607,17 @@ fn apply_attribution(
 }
 
 fn promote(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     epoch_id: u64,
     source: &SourceIdentity,
-) -> cellule_runtime::Result<()> {
+) -> crate::cells::Result<()> {
     verify_epoch(context, epoch_id, source)?;
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
             "UPDATE git_projection_epochs SET state = 'ready', verified_at_ms = ? WHERE epoch_id = ? AND source_token = ? AND state = 'building'",
             vec![
                 integer(u64::try_from(context.now_ms()).map_err(|_| {
-                    cellule_runtime::Error::Command("projection timestamp is negative")
+                    crate::cells::Error::Invalid("projection timestamp is negative")
                 })?)?,
                 integer(epoch_id)?,
                 text(&source.source_token),
@@ -736,7 +625,7 @@ fn promote(
         )],
     })?;
     if result[0].rows_affected != 1 {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "projection epoch cannot be promoted",
         ));
     }
@@ -750,10 +639,10 @@ fn promote(
 }
 
 fn verify_epoch(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     epoch_id: u64,
     source: &SourceIdentity,
-) -> cellule_runtime::Result<()> {
+) -> crate::cells::Result<()> {
     let result = context.sql(&SqlBatch {
         statements: vec![
             statement(
@@ -775,7 +664,7 @@ fn verify_epoch(
         ],
     })?;
     let Some(row) = result[0].rows.first() else {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "projection epoch count is missing",
         ));
     };
@@ -784,7 +673,7 @@ fn verify_epoch(
     let maximum = result_i64(row, 2)?;
     if count != 0 && (minimum != 0 || maximum < 0 || u64::try_from(maximum).ok() != Some(count - 1))
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "projection commit ordinals are not contiguous",
         ));
     }
@@ -792,14 +681,14 @@ fn verify_epoch(
         || (source.path_state_hash.is_some() && !result[2].rows.is_empty())
         || (source.path_state_hash.is_some() && !result[3].rows.is_empty())
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "projection epoch has dangling rows",
         ));
     }
     Ok(())
 }
 
-fn supersede(context: &CommandContext<'_, '_>, epoch_id: u64) -> cellule_runtime::Result<()> {
+fn supersede(context: &RepositoryTransaction<'_>, epoch_id: u64) -> crate::cells::Result<()> {
     context.sql(&SqlBatch {
         statements: vec![statement(
             "UPDATE git_projection_epochs SET state = 'superseded' WHERE epoch_id = ? AND state = 'building'",
@@ -809,7 +698,7 @@ fn supersede(context: &CommandContext<'_, '_>, epoch_id: u64) -> cellule_runtime
     Ok(())
 }
 
-fn collect(context: &CommandContext<'_, '_>) -> cellule_runtime::Result<()> {
+fn collect(context: &RepositoryTransaction<'_>) -> crate::cells::Result<()> {
     let keep = r#"
         WITH keep(epoch_id) AS (
             SELECT ready_epoch
@@ -885,14 +774,12 @@ fn collect(context: &CommandContext<'_, '_>) -> cellule_runtime::Result<()> {
 }
 
 fn require_epoch(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     epoch_id: u64,
     source: &SourceIdentity,
-) -> cellule_runtime::Result<()> {
+) -> crate::cells::Result<()> {
     if epoch_id == 0 {
-        return Err(cellule_runtime::Error::Command(
-            "projection epoch is missing",
-        ));
+        return Err(crate::cells::Error::Invalid("projection epoch is missing"));
     }
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
@@ -901,19 +788,17 @@ fn require_epoch(
         )],
     })?;
     let Some(row) = result[0].rows.first() else {
-        return Err(cellule_runtime::Error::Command(
-            "projection epoch is missing",
-        ));
+        return Err(crate::cells::Error::Invalid("projection epoch is missing"));
     };
     if result_text(row, 0)? != source.source_token || result_text(row, 1)? != "building" {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "projection epoch identity or state differs",
         ));
     }
     Ok(())
 }
 
-fn validate_source(source: &SourceIdentity) -> cellule_runtime::Result<()> {
+fn validate_source(source: &SourceIdentity) -> crate::cells::Result<()> {
     if source.source_token.is_empty()
         || source.source_token.len() > 128
         || source.manifest_etag.len() > 1024
@@ -922,16 +807,16 @@ fn validate_source(source: &SourceIdentity) -> cellule_runtime::Result<()> {
         || source.git_validation_digest.len() > 128
         || source.head_ref.len() > 1024
     {
-        return Err(cellule_runtime::Error::Command(
+        return Err(crate::cells::Error::Invalid(
             "projection source identity is out of bounds",
         ));
     }
     Ok(())
 }
 
-fn decode_payload<T: for<'de> Deserialize<'de>>(payload: &[u8]) -> cellule_runtime::Result<T> {
+fn decode_payload<T: for<'de> Deserialize<'de>>(payload: &[u8]) -> crate::cells::Result<T> {
     serde_json::from_slice(payload)
-        .map_err(|_| cellule_runtime::Error::Command("projection batch payload is invalid"))
+        .map_err(|_| crate::cells::Error::Invalid("projection batch payload is invalid"))
 }
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
@@ -942,9 +827,9 @@ fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
 }
 
 fn execute_statements(
-    context: &CommandContext<'_, '_>,
+    context: &RepositoryTransaction<'_>,
     mut statements: Vec<SqlStatement>,
-) -> cellule_runtime::Result<()> {
+) -> crate::cells::Result<()> {
     while !statements.is_empty() {
         let count = statements.len().min(MAX_SQL_STATEMENTS);
         let tail = statements.split_off(count);
@@ -954,9 +839,9 @@ fn execute_statements(
     Ok(())
 }
 
-fn integer(value: u64) -> cellule_runtime::Result<SqlValue> {
+fn integer(value: u64) -> crate::cells::Result<SqlValue> {
     Ok(SqlValue::Integer(i64::try_from(value).map_err(|_| {
-        cellule_runtime::Error::Command("projection integer exceeds SQLite range")
+        crate::cells::Error::Invalid("projection integer exceeds SQLite range")
     })?))
 }
 
@@ -968,64 +853,64 @@ fn optional_text_value(value: Option<&str>) -> SqlValue {
     value.map_or(SqlValue::Null, text)
 }
 
-fn result_u64(sets: &[SqlResultSet], set: usize, column: usize) -> cellule_runtime::Result<u64> {
+fn result_u64(sets: &[SqlResultSet], set: usize, column: usize) -> crate::cells::Result<u64> {
     match sets
         .get(set)
         .and_then(|set| set.rows.first())
         .and_then(|row| row.get(column))
     {
         Some(SqlValue::Integer(value)) => u64::try_from(*value)
-            .map_err(|_| cellule_runtime::Error::Command("projection integer is negative")),
-        _ => Err(cellule_runtime::Error::Command(
+            .map_err(|_| crate::cells::Error::Invalid("projection integer is negative")),
+        _ => Err(crate::cells::Error::Invalid(
             "projection query returned invalid integer",
         )),
     }
 }
 
-fn result_text(row: &[SqlValue], column: usize) -> cellule_runtime::Result<String> {
+fn result_text(row: &[SqlValue], column: usize) -> crate::cells::Result<String> {
     match row.get(column) {
         Some(SqlValue::Text(value)) => Ok(value.clone()),
-        _ => Err(cellule_runtime::Error::Command(
+        _ => Err(crate::cells::Error::Invalid(
             "projection query returned invalid text",
         )),
     }
 }
 
-fn result_i64(row: &[SqlValue], column: usize) -> cellule_runtime::Result<i64> {
+fn result_i64(row: &[SqlValue], column: usize) -> crate::cells::Result<i64> {
     match row.get(column) {
         Some(SqlValue::Integer(value)) => Ok(*value),
-        _ => Err(cellule_runtime::Error::Command(
+        _ => Err(crate::cells::Error::Invalid(
             "projection query returned invalid integer",
         )),
     }
 }
 
-fn blob(row: &[SqlValue], column: usize) -> cellule_runtime::Result<Vec<u8>> {
+fn blob(row: &[SqlValue], column: usize) -> crate::cells::Result<Vec<u8>> {
     match row.get(column) {
         Some(SqlValue::Blob(value)) => Ok(value.clone()),
-        _ => Err(cellule_runtime::Error::Command(
+        _ => Err(crate::cells::Error::Invalid(
             "projection query returned invalid blob",
         )),
     }
 }
 
-fn optional_u64(row: &[SqlValue], column: usize) -> cellule_runtime::Result<Option<u64>> {
+fn optional_u64(row: &[SqlValue], column: usize) -> crate::cells::Result<Option<u64>> {
     match row.get(column) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Integer(value)) => u64::try_from(*value)
             .map(Some)
-            .map_err(|_| cellule_runtime::Error::Command("projection integer is negative")),
-        _ => Err(cellule_runtime::Error::Command(
+            .map_err(|_| crate::cells::Error::Invalid("projection integer is negative")),
+        _ => Err(crate::cells::Error::Invalid(
             "projection query returned invalid optional integer",
         )),
     }
 }
 
-fn optional_text(row: &[SqlValue], column: usize) -> cellule_runtime::Result<Option<String>> {
+fn optional_text(row: &[SqlValue], column: usize) -> crate::cells::Result<Option<String>> {
     match row.get(column) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Text(value)) => Ok(Some(value.clone())),
-        _ => Err(cellule_runtime::Error::Command(
+        _ => Err(crate::cells::Error::Invalid(
             "projection query returned invalid optional text",
         )),
     }

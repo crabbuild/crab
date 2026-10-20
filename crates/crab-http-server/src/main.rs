@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use crab_http_server::catalog::CatalogStore;
 use crab_http_server::{RepositoryAccess, RepositoryMember};
 use serde::Deserialize;
@@ -26,8 +26,6 @@ struct Arguments {
     peer_advertise_host_from_ecs_metadata: bool,
     #[arg(long, global = true)]
     cell_failure_zone: Option<String>,
-    #[arg(long, global = true)]
-    cell_failure_host: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -70,99 +68,8 @@ enum CellsCommand {
         #[arg(long)]
         name: String,
     },
-    /// Report whether one exact node boot session is currently live.
-    Node {
-        #[arg(long)]
-        session: String,
-        #[arg(long, required = true)]
-        json: bool,
-    },
-    /// Inspect or administer compiled Cell releases.
-    Release {
-        #[command(subcommand)]
-        command: CellReleaseCommand,
-    },
-    /// Create or verify immutable application backup pins.
-    Backup {
-        #[command(subcommand)]
-        command: CellBackupCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum CellReleaseCommand {
-    /// Print the exact canonical descriptor compiled into this binary.
-    Inspect {
-        #[arg(long, required = true)]
-        json: bool,
-    },
-    /// Upload the compiled descriptor and conditionally select it for rollout.
-    Prepare {
-        #[arg(long)]
-        expected_revision: u64,
-        #[arg(long)]
-        image: String,
-    },
-    /// Initialize an empty application or admit this binary's selected release.
-    Bootstrap {
-        #[arg(long)]
-        image: String,
-    },
-    /// Verify every cataloged Cell and publish the prepared release as current.
-    Activate {
-        #[arg(long)]
-        expected_revision: u64,
-        #[arg(long, value_enum)]
-        strategy: ActivationStrategy,
-        #[arg(long, required_if_eq("strategy", "compatible"))]
-        minimum_eligible_nodes: Option<usize>,
-        /// Delete immutable objects older than this many hours during maintenance.
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-        retention_grace_hours: Option<u64>,
-        /// Bound immutable-object deletions in this maintenance pass.
-        #[arg(
-            long,
-            requires = "retention_grace_hours",
-            value_parser = clap::value_parser!(u64).range(1..=100_000)
-        )]
-        retention_max_deletes: Option<u64>,
-    },
-    /// Print the canonical durable release selection.
-    Status,
-    /// List a bounded page of pending or failed Cell migrations.
-    Migrations {
-        #[arg(long)]
-        after: Option<String>,
-        #[arg(long, default_value_t = 100)]
-        limit: usize,
-    },
-}
-
-#[derive(Subcommand)]
-enum CellBackupCommand {
-    /// Pin the current release, catalog, controls, and exact LTX roots.
-    Create {
-        #[arg(long)]
-        pin: String,
-    },
-    /// Reopen one pin and verify every immutable dependency.
-    Verify {
-        #[arg(long)]
-        pin: String,
-    },
-    /// Restore one pin into an isolated prefix in the configured bucket.
-    Restore {
-        #[arg(long)]
-        pin: String,
-        #[arg(long)]
-        destination_prefix: String,
-    },
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum ActivationStrategy {
-    Compatible,
-    Maintenance,
+    /// Inspect the compiled Cellar application version.
+    Runtime,
 }
 
 #[derive(Subcommand)]
@@ -277,10 +184,7 @@ async fn main() -> crab_http_server::Result<()> {
     } else if arguments.peer_advertise_host_from_ecs_metadata {
         config.set_peer_advertise_host(&ecs::peer_advertise_host().await?)?;
     }
-    config.set_cell_failure_domain(
-        arguments.cell_failure_zone.as_deref(),
-        arguments.cell_failure_host.as_deref(),
-    )?;
+    config.set_cell_failure_zone(arguments.cell_failure_zone.as_deref())?;
     match arguments.command.unwrap_or(Command::Serve) {
         Command::Serve => crab_http_server::serve(config).await,
         Command::Healthcheck => healthcheck(&config).await,
@@ -308,107 +212,12 @@ async fn cells(
         }
         CellsCommand::Metrics => management_body(config, "/metrics").await?,
         CellsCommand::Status { owner, name } => {
-            crab_http_server::repository_cell_status(config, &owner, &name).await?
+            let path = format!("/internal/repositories/{owner}/{name}/cell");
+            management_body(config, &path).await?
         }
-        CellsCommand::Node {
-            session,
-            json: true,
-        } => crab_http_server::cell_node_status(config, &session).await?,
-        CellsCommand::Node { json: false, .. } => {
-            return Err(crab_http_server::Error::Config("--json is required"));
+        CellsCommand::Runtime => {
+            serde_json::to_vec(&serde_json::json!({"runtime": "cellar", "version": "0.1.0"}))?
         }
-        CellsCommand::Release {
-            command: CellReleaseCommand::Inspect { json: true },
-        } => crab_http_server::cell_release_descriptor()?,
-        CellsCommand::Release {
-            command: CellReleaseCommand::Inspect { json: false },
-        } => return Err(crab_http_server::Error::Config("--json is required")),
-        CellsCommand::Release {
-            command:
-                CellReleaseCommand::Prepare {
-                    expected_revision,
-                    image,
-                },
-        } => crab_http_server::prepare_cell_release(config, expected_revision, &image).await?,
-        CellsCommand::Release {
-            command: CellReleaseCommand::Bootstrap { image },
-        } => crab_http_server::bootstrap_cell_release(config, &image).await?,
-        CellsCommand::Release {
-            command:
-                CellReleaseCommand::Activate {
-                    expected_revision,
-                    strategy: ActivationStrategy::Compatible,
-                    minimum_eligible_nodes,
-                    retention_grace_hours,
-                    retention_max_deletes,
-                },
-        } => {
-            if retention_grace_hours.is_some() || retention_max_deletes.is_some() {
-                return Err(crab_http_server::Error::Config(
-                    "compatible activation does not accept retention options",
-                ));
-            }
-            let Some(minimum_eligible_nodes) = minimum_eligible_nodes else {
-                return Err(crab_http_server::Error::Config(
-                    "compatible activation requires --minimum-eligible-nodes",
-                ));
-            };
-            crab_http_server::activate_cell_release(
-                config,
-                expected_revision,
-                minimum_eligible_nodes,
-            )
-            .await?
-        }
-        CellsCommand::Release {
-            command:
-                CellReleaseCommand::Activate {
-                    expected_revision,
-                    strategy: ActivationStrategy::Maintenance,
-                    minimum_eligible_nodes,
-                    retention_grace_hours,
-                    retention_max_deletes,
-                },
-        } => {
-            if minimum_eligible_nodes.is_some() {
-                return Err(crab_http_server::Error::Config(
-                    "maintenance activation does not accept --minimum-eligible-nodes",
-                ));
-            }
-            let retention_grace = retention_grace_hours
-                .map(|hours| {
-                    hours.checked_mul(60 * 60).map(Duration::from_secs).ok_or(
-                        crab_http_server::Error::Config("Cell retention grace is too large"),
-                    )
-                })
-                .transpose()?;
-            crab_http_server::enter_cell_maintenance(
-                config,
-                expected_revision,
-                retention_grace,
-                retention_max_deletes,
-            )
-            .await?
-        }
-        CellsCommand::Release {
-            command: CellReleaseCommand::Status,
-        } => crab_http_server::cell_release_status(config).await?,
-        CellsCommand::Release {
-            command: CellReleaseCommand::Migrations { after, limit },
-        } => crab_http_server::cell_release_migrations(config, after.as_deref(), limit).await?,
-        CellsCommand::Backup {
-            command: CellBackupCommand::Create { pin },
-        } => crab_http_server::create_cell_backup(config, &pin).await?,
-        CellsCommand::Backup {
-            command: CellBackupCommand::Verify { pin },
-        } => crab_http_server::verify_cell_backup(config, &pin).await?,
-        CellsCommand::Backup {
-            command:
-                CellBackupCommand::Restore {
-                    pin,
-                    destination_prefix,
-                },
-        } => crab_http_server::restore_cell_backup(config, &pin, &destination_prefix).await?,
     };
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&bytes)?;
@@ -427,7 +236,7 @@ async fn live_capacity(config: &crab_http_server::Config) -> crab_http_server::R
 
 async fn management_body(
     config: &crab_http_server::Config,
-    path: &'static str,
+    path: &str,
 ) -> crab_http_server::Result<Vec<u8>> {
     Ok(management_get(config, path)
         .await?
@@ -439,7 +248,7 @@ async fn management_body(
 
 async fn management_get(
     config: &crab_http_server::Config,
-    path: &'static str,
+    path: &str,
 ) -> crab_http_server::Result<reqwest::Response> {
     let mut identity = std::fs::read(&config.cells.peer_certificate)?;
     identity.extend_from_slice(&std::fs::read(&config.cells.peer_private_key)?);
@@ -474,7 +283,7 @@ async fn management_get(
 
 fn management_target(
     config: &crab_http_server::Config,
-    path: &'static str,
+    path: &str,
 ) -> crab_http_server::Result<(url::Url, Option<(String, std::net::SocketAddr)>)> {
     let mut url = config.cells.peer_advertise.clone();
     let tls_name = config
@@ -632,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn cell_failure_domain_is_a_global_option() {
+    fn cell_failure_zone_is_a_global_option() {
         let arguments = Arguments::try_parse_from([
             "crab-http-server",
             "--config",
@@ -640,13 +449,10 @@ mod tests {
             "serve",
             "--cell-failure-zone",
             "zone-a",
-            "--cell-failure-host",
-            "worker-17",
         ])
         .unwrap();
 
         assert_eq!(arguments.cell_failure_zone.as_deref(), Some("zone-a"));
-        assert_eq!(arguments.cell_failure_host.as_deref(), Some("worker-17"));
     }
 
     #[test]
@@ -662,7 +468,6 @@ mod tests {
                 local_disk_limit_bytes: 32 * 1024 * 1024 * 1024,
                 peer_advertise: "https://10.42.3.17:8789".parse().unwrap(),
                 failure_zone: None,
-                failure_host: None,
                 peer_tls_server_name: Some("crab-http-server-peer".into()),
                 peer_certificate: "/run/secrets/crab/peer/tls.crt".into(),
                 peer_private_key: "/run/secrets/crab/peer/tls.key".into(),
@@ -704,6 +509,24 @@ mod tests {
     }
 
     #[test]
+    fn cells_runtime_selects_the_native_application() {
+        let args = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "runtime",
+        ])
+        .unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Cells {
+                command: CellsCommand::Runtime
+            })
+        ));
+    }
+
+    #[test]
     fn cells_metrics_is_a_private_management_command() {
         let arguments = Arguments::try_parse_from([
             "crab-http-server",
@@ -720,40 +543,6 @@ mod tests {
                 command: CellsCommand::Metrics
             })
         ));
-    }
-
-    #[test]
-    fn release_inspect_requires_the_json_contract() {
-        let arguments = Arguments::try_parse_from([
-            "crab-http-server",
-            "--config",
-            "server.toml",
-            "cells",
-            "release",
-            "inspect",
-            "--json",
-        ])
-        .unwrap();
-        assert!(matches!(
-            arguments.command,
-            Some(Command::Cells {
-                command: CellsCommand::Release {
-                    command: CellReleaseCommand::Inspect { json: true }
-                }
-            })
-        ));
-
-        assert!(
-            Arguments::try_parse_from([
-                "crab-http-server",
-                "--config",
-                "server.toml",
-                "cells",
-                "release",
-                "inspect",
-            ])
-            .is_err()
-        );
     }
 
     #[test]
@@ -842,373 +631,6 @@ mod tests {
             ])
             .is_err()
         );
-    }
-
-    #[test]
-    fn cell_node_status_requires_an_exact_session_and_json() {
-        let arguments = Arguments::try_parse_from([
-            "crab-http-server",
-            "--config",
-            "server.toml",
-            "cells",
-            "node",
-            "--session",
-            "11111111111111111111111111111111",
-            "--json",
-        ])
-        .unwrap();
-        assert!(matches!(
-            arguments.command,
-            Some(Command::Cells {
-                command: CellsCommand::Node {
-                    session,
-                    json: true
-                }
-            }) if session == "11111111111111111111111111111111"
-        ));
-
-        assert!(
-            Arguments::try_parse_from([
-                "crab-http-server",
-                "--config",
-                "server.toml",
-                "cells",
-                "node",
-                "--session",
-                "11111111111111111111111111111111",
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn cell_backup_commands_require_one_pin_and_restore_prefix() {
-        let pin = "11111111111111111111111111111111";
-        let create = Arguments::try_parse_from([
-            "crab-http-server",
-            "--config",
-            "server.toml",
-            "cells",
-            "backup",
-            "create",
-            "--pin",
-            pin,
-        ])
-        .unwrap();
-        assert!(matches!(
-            create.command,
-            Some(Command::Cells {
-                command: CellsCommand::Backup {
-                    command: CellBackupCommand::Create { pin: parsed }
-                }
-            }) if parsed == pin
-        ));
-
-        let verify = Arguments::try_parse_from([
-            "crab-http-server",
-            "--config",
-            "server.toml",
-            "cells",
-            "backup",
-            "verify",
-            "--pin",
-            pin,
-        ])
-        .unwrap();
-        assert!(matches!(
-            verify.command,
-            Some(Command::Cells {
-                command: CellsCommand::Backup {
-                    command: CellBackupCommand::Verify { pin: parsed }
-                }
-            }) if parsed == pin
-        ));
-
-        let restore = Arguments::try_parse_from([
-            "crab-http-server",
-            "--config",
-            "server.toml",
-            "cells",
-            "backup",
-            "restore",
-            "--pin",
-            pin,
-            "--destination-prefix",
-            "qualification/restored-cells",
-        ])
-        .unwrap();
-        assert!(matches!(
-            restore.command,
-            Some(Command::Cells {
-                command: CellsCommand::Backup {
-                    command: CellBackupCommand::Restore {
-                        pin: parsed,
-                        destination_prefix,
-                    }
-                }
-            }) if parsed == pin && destination_prefix == "qualification/restored-cells"
-        ));
-
-        assert!(
-            Arguments::try_parse_from([
-                "crab-http-server",
-                "--config",
-                "server.toml",
-                "cells",
-                "backup",
-                "create",
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn release_bootstrap_prepare_activate_and_status_match_the_administration_contract() {
-        let bootstrap = Arguments::try_parse_from([
-            "crab-http-server",
-            "--config",
-            "server.toml",
-            "cells",
-            "release",
-            "bootstrap",
-            "--image",
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ])
-        .unwrap();
-        assert!(matches!(
-            bootstrap.command,
-            Some(Command::Cells {
-                command: CellsCommand::Release {
-                    command: CellReleaseCommand::Bootstrap { .. }
-                }
-            })
-        ));
-
-        let prepare = Arguments::try_parse_from([
-            "crab-http-server",
-            "--config",
-            "server.toml",
-            "cells",
-            "release",
-            "prepare",
-            "--expected-revision",
-            "7",
-            "--image",
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ])
-        .unwrap();
-        assert!(matches!(
-            prepare.command,
-            Some(Command::Cells {
-                command: CellsCommand::Release {
-                    command: CellReleaseCommand::Prepare {
-                        expected_revision: 7,
-                        ..
-                    }
-                }
-            })
-        ));
-
-        let activate = Arguments::try_parse_from([
-            "crab-http-server",
-            "--config",
-            "server.toml",
-            "cells",
-            "release",
-            "activate",
-            "--expected-revision",
-            "8",
-            "--strategy",
-            "compatible",
-            "--minimum-eligible-nodes",
-            "2",
-        ])
-        .unwrap();
-        assert!(matches!(
-            activate.command,
-            Some(Command::Cells {
-                command: CellsCommand::Release {
-                    command: CellReleaseCommand::Activate {
-                        expected_revision: 8,
-                        strategy: ActivationStrategy::Compatible,
-                        minimum_eligible_nodes: Some(2),
-                        retention_grace_hours: None,
-                        retention_max_deletes: None,
-                    }
-                }
-            })
-        ));
-        assert!(
-            Arguments::try_parse_from([
-                "crab-http-server",
-                "--config",
-                "server.toml",
-                "cells",
-                "release",
-                "activate",
-                "--expected-revision",
-                "8",
-                "--strategy",
-                "compatible",
-            ])
-            .is_err()
-        );
-
-        let maintenance = Arguments::try_parse_from([
-            "crab-http-server",
-            "--config",
-            "server.toml",
-            "cells",
-            "release",
-            "activate",
-            "--expected-revision",
-            "8",
-            "--strategy",
-            "maintenance",
-        ])
-        .unwrap();
-        assert!(matches!(
-            maintenance.command,
-            Some(Command::Cells {
-                command: CellsCommand::Release {
-                    command: CellReleaseCommand::Activate {
-                        expected_revision: 8,
-                        strategy: ActivationStrategy::Maintenance,
-                        minimum_eligible_nodes: None,
-                        retention_grace_hours: None,
-                        retention_max_deletes: None,
-                    }
-                }
-            })
-        ));
-
-        let retention = Arguments::try_parse_from([
-            "crab-http-server",
-            "--config",
-            "server.toml",
-            "cells",
-            "release",
-            "activate",
-            "--expected-revision",
-            "8",
-            "--strategy",
-            "maintenance",
-            "--retention-grace-hours",
-            "168",
-            "--retention-max-deletes",
-            "25000",
-        ])
-        .unwrap();
-        assert!(matches!(
-            retention.command,
-            Some(Command::Cells {
-                command: CellsCommand::Release {
-                    command: CellReleaseCommand::Activate {
-                        expected_revision: 8,
-                        strategy: ActivationStrategy::Maintenance,
-                        minimum_eligible_nodes: None,
-                        retention_grace_hours: Some(168),
-                        retention_max_deletes: Some(25_000),
-                    }
-                }
-            })
-        ));
-        assert!(
-            Arguments::try_parse_from([
-                "crab-http-server",
-                "--config",
-                "server.toml",
-                "cells",
-                "release",
-                "activate",
-                "--expected-revision",
-                "8",
-                "--strategy",
-                "maintenance",
-                "--retention-max-deletes",
-                "25000",
-            ])
-            .is_err()
-        );
-        assert!(
-            Arguments::try_parse_from([
-                "crab-http-server",
-                "--config",
-                "server.toml",
-                "cells",
-                "release",
-                "activate",
-                "--expected-revision",
-                "8",
-                "--strategy",
-                "maintenance",
-                "--retention-grace-hours",
-                "0",
-            ])
-            .is_err()
-        );
-        assert!(
-            Arguments::try_parse_from([
-                "crab-http-server",
-                "--config",
-                "server.toml",
-                "cells",
-                "release",
-                "activate",
-                "--expected-revision",
-                "8",
-                "--strategy",
-                "maintenance",
-                "--retention-grace-hours",
-                "168",
-                "--retention-max-deletes",
-                "100001",
-            ])
-            .is_err()
-        );
-
-        let status = Arguments::try_parse_from([
-            "crab-http-server",
-            "--config",
-            "server.toml",
-            "cells",
-            "release",
-            "status",
-        ])
-        .unwrap();
-        assert!(matches!(
-            status.command,
-            Some(Command::Cells {
-                command: CellsCommand::Release {
-                    command: CellReleaseCommand::Status
-                }
-            })
-        ));
-
-        let migrations = Arguments::try_parse_from([
-            "crab-http-server",
-            "--config",
-            "server.toml",
-            "cells",
-            "release",
-            "migrations",
-            "--after",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "--limit",
-            "25",
-        ])
-        .unwrap();
-        assert!(matches!(
-            migrations.command,
-            Some(Command::Cells {
-                command: CellsCommand::Release {
-                    command: CellReleaseCommand::Migrations {
-                        after: Some(after),
-                        limit: 25,
-                    }
-                }
-            }) if after == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        ));
     }
 
     #[test]

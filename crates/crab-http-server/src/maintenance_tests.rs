@@ -16,21 +16,6 @@ mod browse;
 #[path = "maintenance_tests/probes.rs"]
 mod probes;
 
-struct UnavailableRoundTrip;
-
-impl cellule_runtime::peer::PeerRoundTrip for UnavailableRoundTrip {
-    fn send(
-        &self,
-        _target: cellule_runtime::CellTarget,
-        _request: Vec<u8>,
-        _remaining_ms: u32,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>,
-    > {
-        Box::pin(async { Err(cellule_runtime::Error::CellNotActive) })
-    }
-}
-
 pub(crate) async fn fixture_without_cells() -> Arc<Server> {
     fixture_with_store(Store::new(Arc::new(object_store::memory::InMemory::new()))).await
 }
@@ -67,12 +52,10 @@ async fn fixture_with_store(store: Store) -> Arc<Server> {
         )])
         .into(),
         runtime: Arc::new(RemoteGitRuntime::default()),
-        cell_runtime: start_test_cell_runtime(),
-        cell_node: None,
         repository_cells: None,
-        peer_receiver: None,
-        follower_store: None,
-        node_log_transport: None,
+        cell_services: None,
+        cell_test_runtime: None,
+        shutdown_mode: tokio::sync::watch::channel(cellar::sdk::ShutdownMode::Preserve).0,
         options: RepositoryOptions::default(),
         cursor_key: [0; 32],
         admission: Semaphore::new(16),
@@ -91,10 +74,8 @@ async fn fixture_with_store(store: Store) -> Arc<Server> {
         catalog: None,
         catalog_healthy: AtomicBool::new(false),
         node_healthy: AtomicBool::new(false),
-        scheduler_status: crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap())
-            .unwrap(),
         cell_capacity: super::test_cell_capacity_report(),
-        metrics: crate::metrics::Metrics::new(&[]).unwrap(),
+        metrics: crate::metrics::Metrics::new().unwrap(),
     })
 }
 
@@ -107,7 +88,7 @@ pub(crate) fn init_test_tracing() {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INIT.get_or_init(|| {
         let _ = tracing_subscriber::fmt()
-            .with_env_filter("cellule_runtime=warn,crab_http_server=warn")
+            .with_env_filter("cellar=warn,crab_http_server=warn")
             .with_test_writer()
             .try_init();
     });
@@ -115,89 +96,21 @@ pub(crate) fn init_test_tracing() {
 
 pub(super) async fn fixture() -> Arc<Server> {
     init_test_tracing();
-    static CELL_DIRS: std::sync::OnceLock<std::sync::Mutex<Vec<tempfile::TempDir>>> =
-        std::sync::OnceLock::new();
-
     let mut server = fixture_without_cells().await;
-    server.cell_runtime.shutdown().await.unwrap();
-    let repository = server
-        .repositories
-        .get(&("team".into(), "repo".into()))
-        .unwrap();
-    let identity = cellule_runtime::cell::application::ApplicationIdentity::new(
-        cellule_runtime::TenantId::from_bytes([31; 16]),
-        cellule_runtime::ApplicationId::from_bytes([32; 16]),
-    );
-    let layout = cellule_runtime::ltx::CellStorageLayout::new(
-        cellule_store::Store::new(repository.store.inner().clone()),
-        object_store::path::Path::from("maintenance-test-cells"),
-        *identity.application().as_bytes(),
-    );
-    let registry = Arc::new(crate::cells::compiled_registry().unwrap());
-    crate::cells::bootstrap_release_at(
-        &layout,
-        identity,
-        &registry,
-        &format!("sha256:{}", "b".repeat(64)),
-    )
-    .await
-    .unwrap();
-    let cell_dir = tempfile::TempDir::new().unwrap();
-    let application = crate::cells::compiled_application().unwrap();
-    crate::cells::initialize_repository_at(
-        &layout,
-        identity,
-        &registry,
-        &application,
-        cell_dir.path(),
-        32 * 1024 * 1024 * 1024,
-        "https://initializer.test:8081".into(),
-        repository.id,
-    )
-    .await
-    .unwrap();
-    let cell_session = cellule_runtime::SessionId::from_bytes([33; 16]);
-    let cell_runtime = cellule_runtime::CellRuntime::new(
-        cellule_runtime::SqlWorkerPool::new(1, 16).unwrap(),
-        16 * 1024 * 1024,
-        cell_session,
-    )
-    .unwrap();
-    let router = crate::cells::RepositoryCellRouter::new(
-        identity,
-        layout.clone(),
-        Arc::clone(&registry),
-        cell_runtime.clone(),
-        crate::cells::RepositoryCellPeer::new(
-            crate::peer::PeerOwnerHints::default(),
-            cellule_runtime::node::NodeDirectory::new(
-                layout,
-                cellule_runtime::Digest::from_bytes([34; 32]),
-                cellule_runtime::Digest::from_bytes([35; 32]),
-                registry.release_digest(),
-            ),
-            Arc::new(cellule_runtime::peer::PeerSigner::new(
-                cell_session,
-                registry.release_digest(),
-                ed25519_dalek::SigningKey::from_bytes(&[36; 32]),
-            )),
-            Arc::new(UnavailableRoundTrip),
-            cellule_runtime::control::Owner {
-                session: cell_session,
-                endpoint: "https://server.test:8081".into(),
-            },
-        ),
-        cell_dir.path().to_path_buf(),
-    )
-    .unwrap();
-    CELL_DIRS
-        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
-        .lock()
-        .unwrap()
-        .push(cell_dir);
+    let cells = crate::cells::runtime::TestRuntime::start("127.0.0.1:8788".parse().unwrap()).await;
+    for repository in server.repositories.values() {
+        cells
+            .client
+            .repository(repository.id)
+            .unwrap()
+            .client
+            .initialize(repository.id)
+            .await
+            .unwrap();
+    }
     let mutable = Arc::get_mut(&mut server).unwrap();
-    mutable.cell_runtime = cell_runtime;
-    mutable.repository_cells = Some(router);
+    mutable.repository_cells = Some(cells.client.clone());
+    mutable.cell_test_runtime = Some(cells);
     server
 }
 
@@ -443,44 +356,8 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
         store.clone(),
         "catalog",
     )));
-    let identity = cellule_runtime::cell::application::ApplicationIdentity::new(
-        cellule_runtime::TenantId::from_bytes([1; 16]),
-        cellule_runtime::ApplicationId::from_bytes([2; 16]),
-    );
-    let layout = cellule_runtime::ltx::CellStorageLayout::new(
-        cellule_store::Store::new(store.inner().clone()),
-        object_store::path::Path::from("catalog"),
-        *identity.application().as_bytes(),
-    );
-    let registry = Arc::new(crate::cells::compiled_registry().unwrap());
-    let resolver = crate::peer::LocalCellResolver::new(
-        layout.clone(),
-        identity,
-        server.cell_runtime.clone(),
-        server.cell_runtime.telemetry_handle(),
-    );
-    let releases =
-        cellule_runtime::recovery::release::ReleaseStore::new(layout.clone(), identity).unwrap();
-    server.peer_receiver = Some(crate::peer::PeerReceiver::new(
-        cellule_runtime::identity::NodeId::from_bytes([9; 16]),
-        cellule_runtime::SessionId::from_bytes([9; 16]),
-        cellule_runtime::node::NodeDirectory::new(
-            layout,
-            cellule_runtime::Digest::from_bytes([3; 32]),
-            cellule_runtime::Digest::from_bytes([4; 32]),
-            registry.release_digest(),
-        ),
-        registry,
-        Arc::new(releases),
-        resolver,
-        Arc::new(UnavailableRoundTrip),
-        None,
-    ));
     server.catalog_healthy.store(true, Ordering::Release);
     server.node_healthy.store(true, Ordering::Release);
-    server
-        .scheduler_status
-        .mark_completed(crate::cells::unix_now_ms().unwrap());
 }
 
 #[tokio::test]
@@ -488,7 +365,7 @@ async fn readiness_opens_every_repository_before_admitting_traffic() {
     let mut server = fixture().await;
     enable_catalog_readiness(&mut server);
 
-    let response = management_router(Arc::clone(&server))
+    let response = management_router(Arc::clone(&server), Router::new())
         .oneshot(
             Request::builder()
                 .uri("/readyz")
@@ -508,7 +385,7 @@ async fn readiness_rejects_a_server_that_is_draining() {
     enable_catalog_readiness(&mut server);
     server.cancellation.cancel();
 
-    let response = management_router(Arc::clone(&server))
+    let response = management_router(Arc::clone(&server), Router::new())
         .oneshot(
             Request::builder()
                 .uri("/readyz")
@@ -534,7 +411,7 @@ async fn readiness_rejects_a_draining_cell_runtime() {
     enable_catalog_readiness(&mut server);
     server.shutdown_runtimes().await.unwrap();
 
-    let response = management_router(Arc::clone(&server))
+    let response = management_router(Arc::clone(&server), Router::new())
         .oneshot(
             Request::builder()
                 .uri("/readyz")
@@ -555,53 +432,9 @@ async fn readiness_rejects_a_draining_cell_runtime() {
 }
 
 #[tokio::test]
-async fn readiness_rejects_a_stalled_cell_scheduler() {
-    let mut server = fixture().await;
-    enable_catalog_readiness(&mut server);
-    let now_ms = crate::cells::unix_now_ms().unwrap();
-    let stalled = crate::cells::SchedulerStatus::new(now_ms - 15_000).unwrap();
-    stalled.mark_completed(now_ms - 15_000);
-    Arc::get_mut(&mut server).unwrap().scheduler_status = stalled;
-
-    let response = management_router(Arc::clone(&server))
-        .oneshot(
-            Request::builder()
-                .uri("/readyz")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    close(&server).await;
-}
-
-#[tokio::test]
-async fn readiness_requires_the_first_cell_scheduler_cycle() {
-    let mut server = fixture().await;
-    enable_catalog_readiness(&mut server);
-    Arc::get_mut(&mut server).unwrap().scheduler_status =
-        crate::cells::SchedulerStatus::new(crate::cells::unix_now_ms().unwrap()).unwrap();
-
-    let response = management_router(Arc::clone(&server))
-        .oneshot(
-            Request::builder()
-                .uri("/readyz")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    close(&server).await;
-}
-
-#[tokio::test]
 async fn integrity_proof_is_reported_separately_from_readiness() {
     let server = fixture_without_cells().await;
-    let management = management_router(Arc::clone(&server));
+    let management = management_router(Arc::clone(&server), Router::new());
     let pending = management
         .clone()
         .oneshot(

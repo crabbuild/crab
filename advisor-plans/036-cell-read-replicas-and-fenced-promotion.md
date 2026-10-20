@@ -449,7 +449,7 @@ volumes recovered the identical root and recruited two replacements. A RustFS
 outage returned `replica_unavailable` without data, then recovered without
 receipt regression. RustFS descriptor admission was explicit and verified.
 
-[Source-bound measurements and fault receipts](../crates/crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-25-read-replicas.md)
+[Source-bound measurements and fault receipts](https://github.com/crabbuild/crab/blob/d78b010cd207d154c403c63683fac3735f4811ce/crates/crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-25-read-replicas.md)
 record timings, per-node distribution, sampled resources, raw-report hash,
 and limits. Replica reads were slower than owner reads in this single-host
 workload at that revision; membership scans and fresh authority gates were in

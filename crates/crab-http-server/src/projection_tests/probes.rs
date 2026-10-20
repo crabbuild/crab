@@ -222,7 +222,7 @@ async fn contended_generation_owner_cannot_prove_completed_maintenance() {
         crate::maintenance::Pass::BackgroundMaintenance,
         Some(crate::maintenance::ProjectionContext {
             repository_id: repository.id,
-            router: None,
+            client: None,
             metrics: server.metrics.clone(),
             identity: repository.identity.clone(),
             runtime: Arc::clone(&server.runtime),

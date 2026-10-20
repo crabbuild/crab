@@ -63,8 +63,6 @@ pub struct CellsConfig {
     #[serde(default)]
     pub failure_zone: Option<String>,
     #[serde(default)]
-    pub failure_host: Option<String>,
-    #[serde(default)]
     pub peer_tls_server_name: Option<String>,
     pub peer_certificate: PathBuf,
     pub peer_private_key: PathBuf,
@@ -77,10 +75,10 @@ pub struct CellsConfig {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CellDurabilityMode {
-    /// Allow fsynced node followers to prove a cut before object publication.
+    /// Use Cellar's native fleet durability policy.
     #[default]
     Fleet,
-    /// Require the exact S3 root and Cell-control CAS before acknowledgement.
+    /// Require Cellar object-store publication before acknowledgement.
     Object,
 }
 
@@ -152,17 +150,10 @@ impl Config {
         self.validate()
     }
 
-    /// Overrides the node topology labels used for follower placement.
-    pub fn set_cell_failure_domain(
-        &mut self,
-        zone: Option<&str>,
-        host: Option<&str>,
-    ) -> Result<()> {
+    /// Overrides the region advertised by the native Cellar node.
+    pub fn set_cell_failure_zone(&mut self, zone: Option<&str>) -> Result<()> {
         if let Some(zone) = zone {
             self.cells.failure_zone = Some(zone.into());
-        }
-        if let Some(host) = host {
-            self.cells.failure_host = Some(host.into());
         }
         self.validate()
     }
@@ -309,10 +300,16 @@ fn validate_cells(cells: &CellsConfig, management_listen: SocketAddr) -> Result<
             "cells.peer_tls_server_name must be a DNS name without a port",
         ));
     }
-    cellule_runtime::node::NodeFailureDomain::new(
-        cells.failure_zone.clone(),
-        cells.failure_host.clone(),
-    )?;
+    if let Some(label) = cells.failure_zone.as_deref()
+        && (label.is_empty()
+            || label.len() > 256
+            || label.trim() != label
+            || label.chars().any(char::is_control))
+    {
+        return Err(Error::Config(
+            "Cell region labels must be nonempty text of at most 256 bytes",
+        ));
+    }
     Ok(())
 }
 
@@ -661,15 +658,12 @@ mod tests {
     }
 
     #[test]
-    fn cell_failure_domains_are_optional_bounded_topology_labels() {
+    fn cell_failure_zone_is_an_optional_bounded_region_label() {
         let mut config = local_config("s3://bucket/repositories");
-        config
-            .set_cell_failure_domain(Some("us-west-2a"), Some("worker-17"))
-            .unwrap();
+        config.set_cell_failure_zone(Some("us-west-2a")).unwrap();
         assert_eq!(config.cells.failure_zone.as_deref(), Some("us-west-2a"));
-        assert_eq!(config.cells.failure_host.as_deref(), Some("worker-17"));
 
-        config.cells.failure_host = Some("worker 17".into());
+        config.cells.failure_zone = Some("invalid\nzone".into());
         assert!(config.validate().is_err());
     }
 

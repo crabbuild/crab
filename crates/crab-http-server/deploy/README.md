@@ -1,5 +1,9 @@
 # Deployment profiles
 
+The server embeds Cellar 0.1.0. Native process smoke and peer handoff have been
+verified locally; provider, fault, restore, scale, and upgrade qualification are
+required before release. See [the runtime contract](../CELLAR.md).
+
 `crab-http-server` has one provider-neutral runtime contract, a one-command local stack, and checked-in deployment profiles for three cloud storage providers:
 
 ```mermaid
@@ -14,7 +18,7 @@ flowchart LR
 
 | Target | Deployment asset | Workload identity | Status |
 | --- | --- | --- | --- |
-| Local Docker | `compose.yaml` | Synthetic local credentials | Qualified in container CI |
+| Local Docker | `compose.yaml` | Synthetic local credentials | Native process smoke passed; container qualification pending |
 | EKS | `helm/crab-http-server` | EKS Pod Identity association | Recommended team profile; live qualification required |
 | GKE | `helm/crab-http-server` | GKE Workload Identity Federation | Recommended team profile; live qualification required |
 | AKS | `helm/crab-http-server` | AKS Workload ID | Recommended team profile; live qualification required |
@@ -36,17 +40,10 @@ Azure versions remain unexpired because its available lifecycle condition cannot
 measure age since becoming noncurrent safely. Provider cost alerts and the
 restore runbook remain operator responsibilities.
 
-Container CI stops the local writers, copies the complete storage root to an
-isolated object prefix, compares every key and object body, then verifies the
-restored catalog through native Git, issue, and LFS clients. This proves the
-portable recovery shape, but provider version selection and regional recovery
-still require a live drill.
-
-The same container path uploads a 1 MiB LFS object, interrupts its logical
-download after an initial byte range, resumes the remaining range through
-Caddy, and requires the reconstructed file to match byte-for-byte.
-It also drives the stock Git LFS client through lock creation, listing,
-verify-on-push, and unlock against durable RustFS lock records.
+Container CI exercises repository creation, an issue mutation and identical replay,
+Git push, and process restart against a private RustFS instance. It retains a
+native receipt bound to the exact source and image digest. Backup restore, LFS
+faults, and broader provider matrices require new native qualification.
 
 The server image also includes the system `git` executable for the browser's
 Git import workflow. That workflow copies Git history and refs only; it does
@@ -54,16 +51,10 @@ not include Git LFS payload migration. Configure `[import].allowed_hosts` and
 allow the server workload outbound HTTPS/SSH to those hosts (or through the
 configured proxy) when this workflow is enabled.
 
-Server release tags have their own contract, independent of the Crab CLI. An
-annotated `crab-http-server-vX.Y.Z` tag matching the server crate publishes a
-qualified AMD64/ARM64 image to GHCR with immutable version and source-commit
-tags, an OCI Helm chart, an SBOM, and provenance attestations. Exact-source
-qualification rejects fixable HIGH or CRITICAL image vulnerabilities before
-publication. Kubernetes deployments still pin the resulting image manifest
-digest. A GitHub Release retains the packaged chart and a signed JSON deployment
-record that binds the tag and source commit to both registry digests and the
-chart package checksum. The publisher never overwrites an existing image tag
-or chart version.
+Release publication is disabled until native qualification binds the exact
+source, image, SDK version, and provider configuration. The container workflow
+builds candidates and retains process-smoke receipts; it does not publish a
+qualified server release.
 
 ## Start locally with Docker Compose
 
@@ -94,11 +85,8 @@ unauthenticated local-trust invariant. The management listener and RustFS are
 not published to the host. Compose creates the peer CA and leaf once in a
 persistent identity volume, so ordinary container recreation remains in the
 same Cell fleet. A partial identity volume fails closed instead of silently
-creating a different fleet. A one-shot `release-init` service converges concurrent
-first-install callers on the exact Cell descriptor and image before repository
-initialization or server startup. It resumes only its own bootstrap operation,
-admits an operator-prepared candidate without activating it, and never replaces
-a different desired release.
+creating a different fleet. The repository initializer publishes its initial native SQLite root before
+server startup.
 Compose then waits until the catalog is valid and every repository can open its
 current Git view. This profile is for local development and evaluation, not
 remote or multi-user service. Caddy preserves the validated external loopback
@@ -128,16 +116,6 @@ Inspect or stop the stack without deleting repositories:
 ```sh
 docker compose --file crates/crab-http-server/deploy/compose.yaml exec server \
   crab-http-server --config /etc/crab/server.toml cells capacity --json --live
-docker compose --file crates/crab-http-server/deploy/compose.yaml exec server \
-  crab-http-server --config /etc/crab/server.toml cells backup create \
-  --pin 11112222333344445555666677778888
-docker compose --file crates/crab-http-server/deploy/compose.yaml exec server \
-  crab-http-server --config /etc/crab/server.toml cells backup verify \
-  --pin 11112222333344445555666677778888
-docker compose --file crates/crab-http-server/deploy/compose.yaml exec server \
-  crab-http-server --config /etc/crab/server.toml cells backup restore \
-  --pin 11112222333344445555666677778888 \
-  --destination-prefix recovery/compose-restore
 docker compose --file crates/crab-http-server/deploy/compose.yaml logs --follow server proxy
 docker compose --file crates/crab-http-server/deploy/compose.yaml down
 ```
@@ -150,13 +128,8 @@ admission ceiling even when the host filesystem is larger. Record it beside
 live RSS, file-descriptor, latency and RustFS measurements when qualifying a
 node profile.
 
-The backup commands operate on object-store state, not the disposable Cell
-tmpfs. Reusing the same nonzero lowercase pin ID is idempotent and re-verifies
-the existing release, catalog, controls, and reachable LTX graph. Restore uses
-conditional same-bucket copies and publishes the destination release and pin
-only after the copied graph verifies. Keep the destination offline during the
-operation. Cross-provider export and product data outside `cells/v1` remain
-separate operator work.
+The local-disk limit bounds Crab staging. Native Cellar cache needs an
+appropriate filesystem quota; it does not share the staging budget.
 
 `docker compose down --volumes` permanently removes the local RustFS and peer
 identity volumes, including the catalog and every repository. The next start
@@ -166,12 +139,10 @@ therefore creates a new, empty Cell fleet. The defaults need no
 | Variable | Default | Purpose |
 |---|---|---|
 | `CRAB_HTTP_SERVER_PORT` | `8788` | Localhost port published by Docker |
-| `CRAB_HTTP_SERVER_RELEASE_IMAGE` | `sha256:` plus 64 `1` digits | Synthetic nonzero image identity recorded by local release bootstrap |
 | `CRAB_TMP_SIZE` | `2g` | Bounded receive-pack and index scratch space |
 | `CRAB_HTTP_SERVER_IMAGE` | `crab-http-server:local` | Server image name or prebuilt image reference |
 
-The local Compose stack, Cell issue fleet, KV example and Cell/LTX recovery
-CI pin RustFS `1.0.0-glibc` GA by its multi-platform image digest. Use a fresh
+The local Compose stack and native process qualification pin RustFS `1.0.0-glibc` GA by its multi-platform image digest. Use a fresh
 project and volume for qualification; earlier beta.8 records retain their original
 provider identity and do not qualify GA. The GA image has passed local
 Colima startup, bucket creation, peer certificate initialization and the
@@ -189,86 +160,15 @@ CRAB_HTTP_SERVER_IMAGE=ghcr.io/crabbuild/crab-http-server@sha256:qualified_diges
     up --detach --no-build --wait
 ```
 
-### Qualify three local Cell processes
+### Qualify the native runtime
 
-For an issue and label application that grows through 3, 5, 10, and 20
-individually limited Cell containers against RustFS, use the
-[Cell issue fleet example](cell-issue-fleet/README.md). Its 1 GiB node profile
-is experimental and has separate qualification evidence.
+Build the binary with the external `CARGO_TARGET_DIR`, then run
+`tests/qualify_cellar_process.py` as described in [the runtime guide](../CELLAR.md).
+The native peer tests cover mTLS routing and graceful owner handoff. The process
+script covers HTTP, Git publication, and restart recovery against RustFS.
 
-The cluster overlay runs four independent server containers and one real
-RustFS origin. Each server has its own Cell tmpfs. They share a dedicated,
-long-lived Docker network-namespace sidecar so every unauthenticated listener
-can remain on loopback without coupling peer restarts to node A; this keeps the
-same local-trust boundary as the one-node profile.
-
-```mermaid
-flowchart LR
-    Client[Qualification client] --> LB[Caddy round-robin :18880]
-    LB --> A[Node A\n127.0.0.1:8788]
-    LB --> B[Node B\n127.0.0.1:8888]
-    LB --> C[Node C\n127.0.0.1:8988]
-    LB --> D[Node D\n127.0.0.1:9188]
-    A & B & C & D --> Origin[(RustFS)]
-    B -. first SIGKILL .-> LostB[Owner B local SQLite removed]
-    A -. pause past lease .-> Reenroll[C replaces follower A with B]
-    C -. second SIGKILL .-> LostC[Owner C local SQLite removed]
-    B -->|verified follower tail| C
-    C -->|verified replacement tail| B
-    B -. third SIGKILL .-> LostB2[All B log followers unavailable]
-    D -->|bounded any-node fallback| Recovered[Exact RustFS root restored]
-```
-
-Run the repeatable owner-loss qualification from the repository root:
-
-```sh
-crates/crab-http-server/tests/qualify_compose_cluster.sh
-```
-
-The script builds the current source by default, creates a uniquely named
-Compose project, and then:
-
-1. Records the live admission envelope from all four processes.
-2. Sends a durable issue mutation directly to node B and proves A, C, D, and the
-   round-robin endpoint route to B over the private mTLS peer protocol.
-3. Blocks immutable Cell-object writes, commits through follower fsync, sends
-   `SIGKILL` to B, and destroys its local SQLite files.
-4. Waits until B's exact signed boot-session advertisement expires.
-5. Reads through C and requires a higher epoch, a different session, and the
-   same complete LTX root: digest, transaction ID, checksum, and commit sequence.
-6. Writes a second issue through C and requires a different digest plus higher
-   transaction ID and commit sequence.
-7. Restarts B with empty local Cell storage and proves it routes to C.
-8. Pauses follower A past its signed lease, writes through object coverage,
-   and requires C to recruit B into a higher node-log epoch.
-9. Blocks immutable objects again and commits through the replacement follower.
-10. Sends `SIGKILL` to C, destroys its local SQLite files, and requires B to
-    recover both follower-only commits before serving further reads.
-11. Restarts the needed local processes, records B's exact inactive log and a
-    live non-member candidate, then stops every original log member and waits
-    for their signed advertisements to expire.
-12. Publishes an object-covered label while B's log remains inactive, sends
-    `SIGKILL` to B, and requires the non-member to recover the exact RustFS
-    root and all labels without a follower witness.
-
-Success prints a JSON receipt containing all three failovers' sessions, epochs
-and complete roots, the original member sets, follower replacement evidence,
-the non-member fallback identity, all follower-only/object-covered responses,
-and each process's admission envelope. Advertisement expiry fields come from
-the last signed live advertisement, so a delayed poll cannot make a valid
-recovery appear to precede expiry. The trap clears an injected bucket
-policy and removes only the uniquely named qualification project and its
-volumes. Set
-`CRAB_HTTP_CLUSTER_BUILD=false` to reuse an already-built
-`CRAB_HTTP_SERVER_IMAGE`.
-
-This is real process-loss, source-loss, peer-routing, follower replacement,
-follower-affine recovery, and bounded non-member fallback evidence. The
-qualification fixture uses a dedicated, long-lived network-namespace sidecar,
-so node A or D can self-fence without preventing another node from restarting;
-B and C are independently killed and lose their tmpfs. The gate is not a
-production multi-Pod partition test.
-Lost control-CAS responses are covered by a deterministic scheduler regression.
+Native multi-process crash, partition, restore, scale, and provider matrices
+remain release gates.
 
 ## Deploy for a team
 
@@ -309,7 +209,7 @@ Complete the setup in this order:
    the Kubernetes Secret, and install the chart.
 6. Run `helm test` to prove a fresh workload can read, list, write, conditionally update, and delete through its cloud workload identity.
 7. Create the first repository through a running pod.
-8. Run the portable multi-replica qualification locally or through the protected GitHub Actions workflow before admitting critical repositories.
+8. Complete and run the native multi-replica provider/fault qualification before admitting critical repositories; the historical protected workflow currently fails closed.
 
 Do not grant team members direct write credentials for the storage root. Git,
 LFS, browser, and administration traffic must pass through the server so its
@@ -359,17 +259,14 @@ then publishes `cell_ready`. `set-members` uses one conditional catalog update
 and reports a conflict instead of replaying a stale decision over a concurrent
 change. Browser Settings → Members uses the same revision contract and CSRF
 protection. Both paths create one durable membership audit event with the
-accepted catalog change. Version 2 catalogs remain readable, but the first
-write upgrades the catalog to v3; do not roll a v3 storage root back to an older
-server binary. Every running replica checks the catalog every five seconds and
+accepted catalog change. Only version 3 catalogs with canonical relative audit
+paths are accepted. Every running replica checks the catalog every five seconds and
 swaps routing only after all records pass Cell readiness validation; in-flight
 requests retain the previous repository handle.
 
 Back-channel delivery invalidates all browser sessions and derived Git tokens
-for the Logout Token's exact issuer and subject. The identity index has an
-eight-hour compatibility window for sessions created by the pre-index binary.
-Complete the rollout inside that maximum session lifetime; do not leave old and
-new server binaries coexisting beyond it. A valid or replayed delivery returns
+for the Logout Token's exact issuer and subject. The identity index is mandatory;
+sessions without a matching marker require sign-in again. A valid or replayed delivery returns
 200, while malformed or invalid tokens return 400.
 
 ## Why Lambda is excluded

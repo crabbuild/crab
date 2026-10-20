@@ -76,19 +76,19 @@ async fn pull_view(
         |merge| merge.head_oid.as_str(),
     );
     let branches_available = pull.merge.is_some() || current.is_some();
-    let protections = repo.branch_protections(server, actor).await?;
+    let protections = repo.branch_protections(server).await?;
     let protection = protections.protection(&pull.base_ref);
     let (statuses, check_runs) = match protection {
         Some(rule) if !rule.required_checks.is_empty() => (
-            statuses::latest(server, repo, actor, head_oid).await?,
-            checks::latest(server, repo, actor, head_oid).await?,
+            statuses::latest(server, repo, head_oid).await?,
+            checks::latest(server, repo, head_oid).await?,
         ),
         _ => (vec![], vec![]),
     };
     let labels = if pull.label_ids.is_empty() {
         vec![]
     } else {
-        labels::catalog(server, repo, actor).await?
+        labels::catalog(server, repo).await?
     };
     let assignees = assignees::available(repo, actor);
     let requirements = merge_requirements(pull, protection, head_oid, &statuses, &check_runs);
@@ -353,11 +353,11 @@ async fn list(
     let query = app::search_query(params.q.as_deref())?;
     let assignees = assignees::available(repo, &actor);
     let (pulls, next) =
-        storage::list_pulls(&server, repo, &actor, params.before, limit, state, query).await?;
+        storage::list_pulls(&server, repo, params.before, limit, state, query).await?;
     let labels = if pulls.iter().all(|pull| pull.label_ids.is_empty()) {
         vec![]
     } else {
-        labels::catalog(&server, repo, &actor).await?
+        labels::catalog(&server, repo).await?
     };
     let items = pulls
         .iter()
@@ -422,7 +422,7 @@ async fn create(
     if input.base_ref == input.head_ref {
         return Err(Error::Invalid("Base and head branches must differ"));
     }
-    if let Some(pull) = storage::pull_submission(&server, repo, &actor, &request_id).await? {
+    if let Some(pull) = storage::pull_submission(&server, repo, &request_id).await? {
         if !same_author(&pull.author, &actor)
             || pull.title != title
             || pull.body != input.body
@@ -501,7 +501,7 @@ async fn detail(
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
     let actor = app::actor(&principal)?;
-    let pull = storage::pull(&server, repo, &actor, app::number(id)?)
+    let pull = storage::pull(&server, repo, app::number(id)?)
         .await?
         .ok_or(Error::NotFound)?;
     let repository = repo
@@ -546,7 +546,7 @@ async fn edit(
     let Json(input) = input?;
     let actor = app::actor(&principal)?;
     let number = app::number(id)?;
-    let pull = storage::pull(&server, repo, &actor, number)
+    let pull = storage::pull(&server, repo, number)
         .await?
         .ok_or(Error::NotFound)?;
     let label_change = input.label_ids.is_some();
@@ -587,7 +587,7 @@ async fn edit(
         return Err(Error::Invalid("No pull request changes supplied"));
     }
     let labels = if needs_label_catalog {
-        labels::catalog(&server, repo, &actor).await?
+        labels::catalog(&server, repo).await?
     } else {
         vec![]
     };
@@ -665,7 +665,7 @@ async fn comments(
     let actor = app::actor(&principal)?;
     let limit =
         u8::try_from(params.limit()?).map_err(|_| Error::Invalid("Invalid pull request page"))?;
-    let (comments, next) = storage::comments(&server, repo, &actor, id, params.before, limit)
+    let (comments, next) = storage::comments(&server, repo, id, params.before, limit)
         .await?
         .ok_or(Error::NotFound)?;
     let items = comments
@@ -714,15 +714,9 @@ async fn comment_detail(
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
     let actor = app::actor(&principal)?;
-    let comment = storage::comment(
-        &server,
-        repo,
-        &actor,
-        app::number(id)?,
-        app::number(comment)?,
-    )
-    .await?
-    .ok_or(Error::NotFound)?;
+    let comment = storage::comment(&server, repo, app::number(id)?, app::number(comment)?)
+        .await?
+        .ok_or(Error::NotFound)?;
     Ok(Json(comment_view(&comment, &actor)))
 }
 

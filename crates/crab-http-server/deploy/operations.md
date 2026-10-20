@@ -1,536 +1,127 @@
-# Operate a Crab team deployment
+# Operate a native Cellar deployment
 
-This runbook covers preflight checks, rollouts, rollback, secret rotation, incident triage, and restore qualification for `crab-http-server`. Use it with the Kubernetes chart. Provider infrastructure and identity remain owned by your platform team.
-
-> The deployment assets don’t complete production qualification. Record live evidence for every gate in [Qualify a release](#qualify-a-release).
-
-Operator workstations need `kubectl`, Helm 3, GitHub CLI with
-artifact-attestation support, `jq`, OpenSSL, Git, and Git LFS.
+Use [CELLAR.md](../CELLAR.md) for runtime ownership and durability, and the
+[Helm guide](helm/crab-http-server/README.md) for deployment configuration.
+Release publication is disabled until the native provider, fault, restore,
+scale, and upgrade matrix is qualified against an exact source and image.
 
 ## Know the state boundaries
 
-Object storage is authoritative. Pods and their scratch volumes are disposable.
+The configured storage root contains the repository catalog, identity state,
+Git objects, shared xorbs/shards, and native `.crab/cellar/` objects. Protect the
+complete root as one recovery unit. A different prefix creates another
+deployment; it does not migrate application data.
 
-```mermaid
-flowchart TB
-    Root[(Configured storage root)]
-    Catalog[.crab/http-server/v1/catalog.json]
-    Auth[.crab/http-server/v1/auth/]
-    Repositories[Cataloged repository prefixes]
-    Shared[.crab xorbs, shards, and ref registry]
-    Git[Git, refs, packs, manifests, LFS]
-    Cells[cells/v1 SQLite roots and LTX objects]
-    Root --> Catalog
-    Root --> Auth
-    Root --> Repositories
-    Root --> Shared
-    Repositories --> Git
-    Repositories --> Cells
-    Pod[Pod scratch] -. disposable .-> Repositories
-```
+Local staging and Cellar cache have separate owners. `local_disk_limit_bytes`
+bounds Crab staging admission. Put the Cellar cache on a filesystem with an
+appropriate quota; the SDK does not share Crab's staging reservation budget.
+Keep recovery files until the native node has completed shutdown.
 
-Protect the entire configured root as one recovery unit. Don’t restore only the catalog, only Git objects, or only the `app/v1` namespace.
+## Run preflight checks
 
-## Run the preflight checks
+Before starting a deployment:
 
-Complete these checks before the first install and every infrastructure change:
+1. Verify workload identity can access only the configured storage root.
+2. Keep the management listener private. Nodes require the same peer CA and a
+   valid client/server certificate. Permit peer traffic and monitoring through
+   the intended network policy.
+3. Configure the same storage root, identity provider, public URL, and state key
+   on every server. Register the exact sign-in and back-channel logout URLs.
+4. Check filesystem quota, staging capacity, descriptors, and memory against the
+   deployment's resource limits.
+5. Render the Helm chart and review the image digest, workload identity,
+   listener addresses, network rules, secret mounts, and termination settings.
 
-1. Confirm bucket or container versioning and retention policies.
-2. Confirm the workload identity grants access only below the configured root,
-   while node, VM, and default Kubernetes identities have no access to it.
-3. Confirm egress policies and proxies preserve provider identity, object storage, DNS, and the configured OIDC endpoints.
-4. Confirm all replicas use the same provider, container, root prefix, OIDC client, public URL, and state key.
-5. Confirm the OIDC provider accepts the exact `/auth/callback` redirect URI.
-6. Confirm the ingress preserves the canonical `Host` header and streams bodies without buffering.
-7. Confirm port 8789 has no Service, ingress, or public load-balancer listener.
-8. Confirm the NetworkPolicy-capable CNI enforces the explicit public and monitoring source selectors.
-9. Confirm the dedicated namespace pins Pod Security `enforce`, `audit`, and
-   `warn` to `restricted:v1.29` or a reviewed newer policy version.
-10. Confirm the monitoring source can scrape port 8789 and ordinary peer pods cannot.
-11. Confirm the cluster can schedule three replicas on separate nodes across at least two zones.
-12. Confirm scratch capacity covers the largest qualified pack, LFS object, and concurrent transfers.
-13. For automated live qualification, confirm each provider has a separate
-    protected GitHub environment using OIDC, required reviewers, release-tag
-    restrictions, and cluster-scoped credentials without storage access.
-
-For an official release, download its deployment record first. This is the
-single signed source for the release commit and the immutable image and chart
-coordinates used below:
+Run these commands with the deployment's config and ambient storage credentials:
 
 ```sh
-gh release download crab-http-server-v0.1.0 \
-  --repo crabbuild/crab \
-  --pattern 'crab-http-server-*'
-source_commit=$(jq --raw-output .source_commit crab-http-server-release.json)
-gh attestation verify crab-http-server-release.json \
-  --bundle crab-http-server-release.attestation.json \
-  --repo crabbuild/crab \
-  --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml \
-  --source-ref refs/tags/crab-http-server-v0.1.0 \
-  --source-digest "$source_commit" \
-  --deny-self-hosted-runners
-chart_package=$(jq --raw-output .chart.package crab-http-server-release.json)
-expected_package_digest=$(jq --raw-output .chart.package_digest crab-http-server-release.json)
-actual_package_digest="sha256:$(openssl dgst -sha256 "$chart_package" | awk '{print $NF}')"
-test "$actual_package_digest" = "$expected_package_digest"
-image_reference=$(jq --raw-output .image.reference crab-http-server-release.json)
-chart_reference=$(jq --raw-output .chart.reference crab-http-server-release.json)
+crab-http-server --config /etc/crab/server.toml storage-probe
+crab-http-server --config /etc/crab/server.toml cells capacity --json
+crab-http-server --config /etc/crab/server.toml cells runtime
 ```
 
-Render and validate the release before applying it:
-
-```sh
-helm lint crates/crab-http-server/deploy/helm/crab-http-server \
-  --strict \
-  --values /secure/crab-provider-values.yaml \
-  --values /secure/crab-team-values.yaml
-helm template crab-http-server \
-  crates/crab-http-server/deploy/helm/crab-http-server \
-  --namespace crab \
-  --values /secure/crab-provider-values.yaml \
-  --values /secure/crab-team-values.yaml \
-  > /secure/crab-http-server-rendered.yaml
-```
-
-Review the rendered image digest, Service ports, ServiceAccount, NetworkPolicy, Secret name, storage URL, and ingress host. Keep the rendered file private because inline server configuration appears in it.
-
-The chart runs the immutable server image as a `cell-release-bootstrap` init
-container. A fresh root is initialized once even when several pods start
-concurrently. Before upgrading an existing release, run `cells release prepare`
-from the verified new image against the same configuration and expected release
-revision. The init container admits that exact candidate without taking over its
-activation operation; a different desired descriptor or image fails closed.
-
-For an official image, verify GitHub provenance against the pinned digest and
-the dedicated server release workflow:
-
-```sh
-gh attestation verify \
-  "oci://${image_reference}" \
-  --repo crabbuild/crab \
-  --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml \
-  --source-ref refs/tags/crab-http-server-v0.1.0 \
-  --source-digest "$source_commit" \
-  --deny-self-hosted-runners
-```
-
-Authenticate to GHCR first when the package is private. Also inspect the image
-index and confirm that every architecture scheduled by the cluster is present.
-Verify the OCI chart by its separately reported digest before installation:
-
-```sh
-gh attestation verify \
-  "$chart_reference" \
-  --repo crabbuild/crab \
-  --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml \
-  --source-ref refs/tags/crab-http-server-v0.1.0 \
-  --source-digest "$source_commit" \
-  --deny-self-hosted-runners
-```
-
-## Deploy or upgrade
-
-Use a rolling upgrade with the chart’s zero-unavailable strategy:
-
-```sh
-helm upgrade --install crab-http-server \
-  crates/crab-http-server/deploy/helm/crab-http-server \
-  --namespace crab --create-namespace \
-  --values /secure/crab-provider-values.yaml \
-  --values /secure/crab-team-values.yaml \
-  --atomic --history-max 10 --timeout 15m
-kubectl --namespace crab rollout status deployment/crab-http-server \
-  --timeout=15m
-```
-
-Before binding either listener, server startup validates bounded listing,
-holder-checked coordination writes, ordinary object writes, deletion, and
-post-delete visibility. The startup and readiness probes then read the durable
-catalog and open the current Git view of every cataloged repository. A
-replacement pod stays out of endpoint routing while shared read-index
-maintenance is pending. The liveness probe checks only whether the management
-process answers HTTP. `helm test` repeats the complete storage contract from a
-fresh workload-identity pod.
-
-Verify each pod rather than relying on Deployment availability alone:
-
-```sh
-kubectl --namespace crab get pods \
-  -l app.kubernetes.io/name=crab-http-server -o wide
-kubectl --namespace crab logs deployment/crab-http-server \
-  --all-pods=true --since=10m
-kubectl --namespace crab exec deployment/crab-http-server -- \
-  crab-http-server --config /etc/crab/http-server/server.toml repository list
-kubectl --namespace crab exec deployment/crab-http-server -- \
-  crab-http-server --config /etc/crab/http-server/server.toml \
-  cells capacity --json --live
-helm test crab-http-server --namespace crab --logs --timeout 3m
-```
-
-The Helm test uses a fresh pod and the release workload identity to read the
-catalog, perform a bounded list, complete a holder-checked CAS acquire/release,
-write and delete a unique object, and confirm that object is no longer visible.
-A passing test proves that a newly scheduled workload can load the
-configuration, Secret, cloud identity, and durable root with the storage
-permissions the server needs; it does not prove the public ingress or
-cross-replica data plane.
-
-## Manage repository membership
-
-Keep the desired complete membership array in a private operator file. Replace
-membership through a running pod rather than editing the catalog object:
-
-```sh
-kubectl --namespace crab exec --stdin deployment/crab-http-server -- \
-  crab-http-server --config /etc/crab/http-server/server.toml \
-  repository set-members --owner your_team --name your_project \
-  --members-file - < /secure/crab-members.toml
-```
-
-Authenticated deployments require the replacement to retain at least one
-administrator. The command makes one conditional catalog update. If another
-operator changed the catalog concurrently, inspect `repository list`, reconcile
-the full intended membership, and retry. Settings → Members uses the same
-complete replacement, catalog revision, and browser CSRF protection; a browser
-conflict preserves its draft until an administrator explicitly reloads. Healthy
-replicas enforce the new membership after their next five-second catalog poll
-and successful materialization; already admitted requests retain their prior
-repository snapshot.
-
-Every accepted change from the CLI or browser commits a membership audit event
-with its actor, digests, revision, timestamp, and prior-chain pointer. The
-catalog's single pending outbox flushes the immutable event under
-`.crab/http-server/v1/audit/membership/`; a flush warning is retryable and does
-not make an accepted change unaudited. The catalog reads v2 but writes v3 on its
-first mutation. Treat that as a rollback boundary: do not return this storage
-root to a pre-v3 binary.
-
-## Register and verify back-channel logout
-
-Register `https://git.example.com/auth/backchannel-logout` at the OIDC provider
-with `backchannel_logout_session_required=false`. Crab accepts signed,
-subject-scoped Logout Tokens only; report provider incompatibility rather than
-mapping a `sid`-only token to a user. Provider signing-key rotation is
-rediscovered on delivery. A successful or repeated delivery returns HTTP 200;
-invalid input returns HTTP 400 without revocation.
-
-Deploy the identity-session index to every replica within eight hours, the
-maximum browser-session lifetime. During that one compatibility window identity
-revocation also streams legacy session records; after it expires, only the
-hashed index is used. Test the provider integration with a dedicated account:
-sign in twice, issue a scoped Git token, deliver logout, then verify that both
-browser sessions and the Git credential fail on their next request. Request logs
-retain normal request IDs and outcomes; never collect or paste a raw Logout
-Token into logs, tickets, or commands.
-The identity-index cutoff at `.crab/http-server/v1/identity-index-migration.json`
-and replay records under `.crab/http-server/v1/logout-replays/` are outside the
-24-hour `.crab/http-server/v1/auth/` lifecycle rule. Retain replay records until
-their signed expiry and remove them only with an expiry-aware operator job.
+Create or adopt repositories through the catalog CLI. Initialization publishes
+the empty repository Cell with object durability before marking it ready.
+Serving verifies every ready repository's existing schema before opening the
+public listener; missing application state is an error.
 
 ## Observe requests and capacity
 
-Each public response includes `x-request-id`. Its completion log records the same `request_id`, HTTP method, path, status, and elapsed milliseconds. Set `RUST_LOG` through `extraEnv` when you need a different tracing filter.
-
-Monitor these platform and application signals:
-
-| Signal | Investigate when |
-| --- | --- |
-| Ready replicas | Fewer than two pods remain ready |
-| Restarts and termination reason | A pod restarts or exits without a planned rollout |
-| CPU throttling | Sustained throttling precedes request latency or HPA growth |
-| Scratch usage and eviction | Free scratch approaches the largest qualified concurrent workload |
-| `crab_http_server_requests_total` and request duration | Error rate or tail duration changes from the recorded baseline |
-| Response-body errors and aborts | A stream fails after headers or a client/proxy disconnects early |
-| Admission available permits | A class remains saturated instead of returning to capacity |
-| `crab_http_server_transfer_admission_rejections_total` | `capacity` grows under shared-slot pressure, or `coordination` grows when storage-backed admission fails |
-| `crab_http_server_catalog_healthy` | Any pod reports `0` |
-| `crab_http_server_catalog_refresh_failures_total` | The counter increases |
-| `crab_http_server_receive_workers` | Workers remain after request traffic settles |
-| `crab_http_server_draining` | A pod reports `1` outside a planned rollout |
-| `crab_http_server_cell_runtime_active_cells` | Usage approaches the resource-derived active-Cell capacity |
-| `crab_http_server_cell_runtime_retained_bytes` | Node-wide retained work approaches its byte capacity |
-| `crab_http_server_cell_runtime_local_disk_reserved_bytes` | Replica reservations approach the shared local-disk capacity |
-| `crab_cell_scheduler_ticks_total` | `stale`, `rejected`, or `unresolved` grows without applied Ticks |
-| `crab_cell_scheduler_items_total` | Maintenance advances plateau while Cells keep committing |
-| `crab_cell_catalog_reads_total` and `crab_cell_catalog_read_seconds` | One routing decision costs more than one `head` and one `page` read, or the metadata tail grows with the Cell population |
-| `crab_cell_control_reads_total` and `crab_cell_control_read_seconds` | Control reads per cycle grow with the Cell population rather than with due work, or a cold route needs more than the expected pair of reads |
-| `crab_cell_activation_phase_seconds` | A cold route's `root_open`, `restore`, or `activate` phase grows while `ownership` stays flat, which points at the object store or local disk rather than at ownership contention. A `resume` phase means the wake continued a local database, so a re-acquired Cell with no `resume` sample is falling back to a restore |
-| `crab_cell_primitive_operations_total` | A primitive module's `failed` or `rejected` rate rises above its baseline |
-| `crab_cell_primitive_operation_seconds` | One primitive module's command or query tail grows |
-| `crab_cell_pressure_tier` | A node reports `constrained`, `shedding`, or `critical`; `shedding` means it is releasing settled Cells |
-| `repository catalog refresh failed` | Running pods stop discovering catalog changes |
-| Publication or LFS transfer failures | A write may need client retry or operator outcome inspection |
-| LFS lock conflicts | Inspect the lock owner and ID; use force unlock only after confirming the holder no longer owns the edit |
-
-Scrape `GET /metrics` on each pod's private management port over mTLS. The
-chart can add a Prometheus Operator `PodMonitor`, an independent monitoring
-client Secret, and a management-port NetworkPolicy rule for an explicit
-monitoring source. Never reuse the Cell peer Secret for monitoring. Keep port
-8789 absent from public Services and ingress. Alert thresholds need a workload baseline; start with catalog health,
-new catalog-refresh failures, sustained zero local admission permits, repeated
-deployment-wide admission rejections, response-body errors, and unexpected
-drain state.
-
-Before a capacity qualification run, save `cells capacity --json --live` and
-`cells metrics` from every pod. They record the running server's startup memory, disk, descriptor and CPU inputs and
-the resulting active-Cell, retained-byte, blocking-job, dirty-job, recovery-job
-and scratch budgets. The reported disk limit must equal the Pod's
-`emptyDir.sizeLimit`; otherwise the application and kubelet enforce different
-ceilings. Treat it as admission evidence only: latency, throughput, RSS,
-descriptors, local bytes and object-store cost still require a measured workload
-receipt.
-
-The Kubernetes release qualifier runs the tagged-source load generator against
-each Pod through a direct port-forward while preserving the public HTTP
-authority. Each node must sustain 1,000 aggregate authenticated mutations/s for
-60 seconds with at least 95% success across eight repository Cells (64 total
-commit-status targets). Treat the three bound Pod reports as the per-node
-throughput evidence; a separate one-Cell run measures the hot-Cell admission
-limit, and neither run replaces the provider latency envelope.
-
-## Roll back a failed release
-
-Stop a rollout when readiness fails, restarts grow, or live verification fails:
+The private mTLS listener exposes `/healthz`, `/readyz`, `/integrityz`,
+`/capacity`, and `/metrics`. Readiness includes native admission, catalog health,
+and repository Git read readiness.
 
 ```sh
-kubectl --namespace crab rollout pause deployment/crab-http-server
-helm --namespace crab history crab-http-server
-helm --namespace crab rollback crab-http-server previous_revision_here \
-  --wait --timeout 15m
+crab-http-server --config /etc/crab/server.toml cells capacity --json --live
+crab-http-server --config /etc/crab/server.toml cells metrics
+crab-http-server --config /etc/crab/server.toml cells status --owner team --name project
 ```
 
-Replace `previous_revision_here` with a known-good Helm revision. Don’t roll back the storage root or catalog automatically: a newer process may have committed durable writes before rollback.
+Watch request errors and latency, transfer/admission rejections, catalog refresh
+failures, staging pressure, and Git projection freshness. Native samples include
+`crab_cellar_pending_events`, `crab_cellar_retired_events_total`,
+`crab_cellar_rss_bytes`, and `crab_cellar_open_file_descriptors`.
 
-After rollback, verify repository listing, fetch, and one dedicated test-repository push. Inspect an uncertain push before repeating a destructive ref update. A catalog that has received its first v3 membership write cannot roll back to a pre-v3 binary; use a compatible forward fix instead.
+A mutation response can be lost after commitment. Retry the original submission
+ID with the same payload to recover its decision. A new ID represents a new
+mutation. Preserve request IDs and diagnostic logs when investigating uncertain
+writes; keep credentials and raw identity tokens out of logs.
 
-## Rotate secrets
+## Manage membership and sessions
 
-Rotate the OIDC client secret without changing the state key:
+Use **Settings → Members** or conditional `repository members replace` to update
+membership. Both publish the catalog revision and durable audit event. Servers
+refresh the catalog periodically; already-admitted operations can finish under
+their captured membership.
+
+Back-channel logout accepts signed, subject-scoped OIDC Logout Tokens. Test with
+a dedicated identity: sign in twice, issue a Git token, deliver logout, and verify
+that both browser sessions and the derived credential fail on their next request.
+The identity-session index is mandatory. Sessions without a matching marker are
+rejected; the server neither repairs old records nor scans the entire session
+namespace during revocation.
+
+The 24-hour auth lifecycle applies below `.crab/http-server/v1/auth/`.
+Logout replay records live separately under `.crab/http-server/v1/logout-replays/`;
+retain them through their signed expiry and collect them with an expiry-aware job.
+Keep the state key stable across replicas and process replacement. Rotate peer
+certificates with valid overlap under the configured CA and verify mTLS before
+withdrawing the previous certificate.
+
+## Drain or restart a node
+
+Normal termination uses native `Preserve` shutdown for restart at the same peer
+address. Public handlers and background work drain before Cellar; the private
+peer transport remains available until native shutdown finishes. The server
+has a 110-second shutdown deadline and reports an incomplete drain as an error.
+The chart retains its pre-stop routing delay and termination grace period.
+
+For permanent scale-down, keep a successor running and send an authenticated
+mTLS request to the node's private management address:
 
 ```sh
-kubectl --namespace crab create secret generic crab-http-server \
-  --from-file=oidc-client-secret=/secure/crab-http-server/oidc-client-secret \
-  --from-file=state-key=/secure/crab-http-server/state-key \
-  --dry-run=client -o yaml | kubectl apply -f -
-helm upgrade crab-http-server \
-  crates/crab-http-server/deploy/helm/crab-http-server \
-  --namespace crab \
-  --values /secure/crab-provider-values.yaml \
-  --values /secure/crab-team-values.yaml \
-  --set-string rolloutToken="$(date -u +%Y%m%dT%H%M%SZ)" \
-  --atomic --history-max 10 --timeout 15m
+curl --fail --cacert /run/secrets/crab-peer/ca.crt \
+  --cert /run/secrets/crab-peer/tls.crt \
+  --key /run/secrets/crab-peer/tls.key \
+  --request POST https://NODE:8789/internal/cells/v1/scale-down
 ```
 
-Verify a new sign-in after the rollout. Existing sessions remain valid because they use the durable state key and shared object-storage records.
+HTTP 202 acknowledges the handoff request. Verify process shutdown and a
+successful repository read/write through a surviving node before removing its
+storage. The last node uses normal termination, since handoff needs a successor.
+Do not assume mixed-version rollback or cross-provider restore works without
+qualification against the chosen SDK and provider.
 
-Rotate the state key only for compromise recovery. That rotation invalidates browser sessions and in-flight sign-in transactions. Record the incident, replace the Secret, roll every pod, and require every member to sign in again.
+## Qualify changes
 
-## Respond to incidents
+Run the isolated native process smoke described in
+[CELLAR.md](../CELLAR.md#verification). It exercises issue mutation/replay, Git
+push, process restart, and persisted application state against RustFS. Native
+peer tests cover mTLS and stale-owner handoff. Container CI binds its smoke
+receipt to the checked-out source and image digest.
 
-Start with the request ID, pod state, and readiness result:
-
-```sh
-kubectl --namespace crab get deployment,pods,events
-kubectl --namespace crab logs deployment/crab-http-server \
-  --all-pods=true --since=30m | grep 'request_id_from_response_here'
-kubectl --namespace crab exec deployment/crab-http-server -- \
-  crab-http-server --config /etc/crab/http-server/server.toml healthcheck
-```
-
-Use this triage map:
-
-| Symptom | Likely boundary | First action |
-| --- | --- | --- |
-| Readiness returns 503 | Catalog access, provider credentials, invalid catalog, or repository read-index maintenance | Inspect readiness warnings, workload identity events, and maintenance logs |
-| Public requests return 403 | Canonical host mismatch | Compare the ingress host with `config.auth.publicUrl` and the preserved `Host` header |
-| Browser requests return 401 | OIDC session or membership | Verify issuer, clock, shared state key, and stable provider subject |
-| Back-channel logout returns 400 | Provider token or registration | Verify the exact URI, signed subject-scoped token, issuer/audience, `jti`, event claim, and clock; do not log the token |
-| Git push disconnects | Ingress timeout, pod termination, or publication failure | Find the request ID, inspect logs, then compare the remote ref before retrying |
-| Pod is evicted | Scratch or node pressure | Preserve object storage, increase scratch or node capacity, and requalify concurrency |
-| New repository stays absent | Catalog refresh failure | Run `repository list`, inspect refresh warnings, and restart only after storage access works |
-| Rollout never becomes available | Configuration, identity, or catalog failure | Read the failing pod termination message and `/readyz` warnings |
-
-When the optional `PrometheusRule` is enabled, route its fixed severities and
-attach the runbook URL through Helm values:
-
-| Alert | Meaning | First action |
-| --- | --- | --- |
-| `CrabHttpServerMetricsMissing` | No catalog-health sample for 10 minutes | Check pod discovery, the metrics NetworkPolicy source, and Prometheus targets |
-| `CrabHttpServerCatalogUnavailable` | A replica reports catalog failure continuously | Check workload identity, provider availability, and catalog warnings before rolling pods |
-| `CrabHttpServerCatalogRefreshFailing` | More than three refresh failures in 15 minutes | Correlate provider errors and catalog versions across replicas |
-| `CrabHttpServerGitAdmissionExhausted` | A replica has no free Git permits for a sustained interval | Inspect active transfers and latency; scale only after checking storage saturation |
-| `CrabHttpServerDeploymentAdmissionRejecting` | Shared transfer capacity rejected repeated work across replicas | Inspect transfer duration and object-storage saturation; scaling replicas alone does not add transfer slots |
-| `CrabHttpServerTransferCoordinationFailing` | Storage-backed admission repeatedly failed | Check workload identity, object-store availability, and conditional-write permissions |
-| `CrabHttpServerHighErrorRate` | More than 5% of at least 20 requests return 5xx | Group completion logs by request ID and identify the failing route and storage boundary |
-
-Keep these defaults until a live load test establishes a better baseline.
-Silencing catalog or missing-metrics alerts during ordinary rollout can hide a
-failed replacement, so use a bounded maintenance window instead of a permanent
-mute.
-
-Don’t repair object storage by editing catalog JSON, ref markers, manifests, or coordination records directly. Use the repository administration commands or a reviewed recovery tool.
-
-The container gate kills Crab after a new immutable pack appears during a 128 MB native push. A fresh process must expose exactly the old or new ref. The same push must become idempotently successful within the publication lease and recovery budget, and an independent clone must reconstruct every byte within that budget. Readiness keeps the replacement out of endpoint routing while startup indexing converges. Git browse projection rebuilds are not cut off by the catalog pass budget, so a large repository may remain indexing longer than one recovery window; watch projection build metrics and verify the ready state before declaring the replacement healthy. Repeat this test with provider storage and pod replacement before production use.
-
-## Drain a deployment
-
-Keep the chart's 630-second termination grace period. Kubernetes marks a
-terminating endpoint non-ready, then the pre-stop hook keeps Crab serving for
-15 seconds while Service and ingress routes converge. `SIGTERM` starts the
-application drain after that delay, leaving more than the complete ten-minute
-operation budget for Axum handlers, tracked publications, maintenance, and
-repository runtime shutdown.
-
-Before planned cluster or node maintenance:
-
-1. Confirm at least three ready replicas.
-2. Confirm the PodDisruptionBudget reports one allowed disruption and retains
-   `unhealthyPodEvictionPolicy: AlwaysAllow`.
-3. Confirm endpoint and ingress deregistration complete during the pre-stop delay and connection-drain timeouts preserve active streams.
-4. Replace one pod and complete a test fetch and push.
-5. Continue one pod at a time.
-
-AWS Fargate limits a container stop timeout to 120 seconds. The checked-in ECS profile cannot preserve Crab’s full ten-minute operation budget during task replacement. Treat Fargate as an evaluation profile until abrupt-crash and replacement qualification closes that gap.
-
-## Run the portable live qualification
-
-After preflight and before admitting critical repositories, create a dedicated
-qualification repository and issue a short-lived write token through **Git
-access**. Run the same provider-neutral test on EKS, GKE, and AKS:
-
-```sh
-CARGO_TARGET_DIR=/secure/crab-http-load-target \
-  cargo build -p crab-http-server --release --example qualify_http_load --locked
-export CRAB_HTTP_SERVER_LOAD_GENERATOR=/secure/crab-http-load-target/release/examples/qualify_http_load
-export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
-export CRAB_HTTP_SERVER_EXPECTED_IMAGE="$(jq --raw-output .image.reference crab-http-server-release.json)"
-export CRAB_HTTP_SERVER_EXPECTED_CHART="$(jq --raw-output .chart.reference crab-http-server-release.json)"
-export CRAB_HTTP_SERVER_RELEASE_TAG="$(jq --raw-output .tag crab-http-server-release.json)"
-export CRAB_HTTP_SERVER_SOURCE_SHA="$(jq --raw-output .source_commit crab-http-server-release.json)"
-export CRAB_HTTP_SERVER_NODE_PROFILE=medium
-export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
-export CRAB_HTTP_SERVER_APPROVE_OWNER_LOSS=true
-
-bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
-  gke crab crab-http-server https://git.example.com \
-  your_team qualification /secure/crab-gke-qualification.json
-```
-
-Both mutation approvals are deliberately explicit. The script checks the rendered
-runtime controls, provider-matching placement across nodes and zones, readiness
-on every pod, the provider-native workload identity injection on both original
-and replacement pods, the installed signed chart version, public OIDC
-initiation, effective management-port NetworkPolicy isolation from an ordinary
-peer, direct authenticated Git traffic through two distinct replicas,
-byte-identical LFS transfer, lock-owner publication, uninterrupted Git
-discovery while Kubernetes replaces every pod, and exact repository state after
-force-deleting the serving Cell owner. A successor session must take over at a
-higher epoch and publish a new status visible through another replica. It leaves a unique branch as
-durable evidence and writes a secret-free JSON receipt bound to the supplied
-release tag, source commit, image, and chart. Review and retain that receipt
-with the release record; revoke the qualification token afterward.
-The load phase retains roughly 180,000 status submissions and 192 synthetic
-commits, so the qualification repository must be disposable.
-
-For repeatable retained evidence, dispatch
-`.github/workflows/http-server-kubernetes-live.yml` from the release tag. Its
-protected environment obtains short-lived cluster credentials through GitHub
-OIDC, verifies the selected tag's signed release record and both registry
-artifacts, derives the expected deployment image from that record, runs the
-same gate, verifies and signs the receipt, and uploads it with an offline
-attestation bundle. Keep this runner
-identity separate from Crab's pod storage identity and restrict it to the named
-cluster and Deployment.
-
-A failed run is a failed release gate. Preserve pod events, ingress logs,
-application request IDs, the evidence path, and the unique branch before
-rollback. Do not edit the JSON receipt to turn a partial run into a pass.
-
-## Qualify backup and restore
-
-Enable provider-native versioning before writing repositories. Configure cross-region or cross-project copies according to your recovery point objective (RPO) and recovery time objective (RTO). Don’t apply the 24-hour authentication lifecycle rule outside `.crab/http-server/v1/auth/`.
-
-Test restore without overwriting the active root:
-
-1. Select one consistent provider backup or version timestamp.
-2. Restore the complete configured root to a new isolated bucket or container.
-   That root includes its shared `.crab/` xorbs, shards, and coordination
-   records.
-3. Create a separate configuration that points only to the restored root.
-4. Start one isolated server with no public ingress.
-5. Run `repository list` and compare every cataloged owner, name, and prefix.
-6. Fetch every ref from representative repositories with an independent Git client.
-7. Download and verify representative LFS objects, release assets, issues, pulls, and settings.
-8. Record restored object counts, selected version, RPO, RTO, and failures.
-9. Delete the isolated test only after retaining the evidence.
-
-For Terraform-managed S3 and GCS roots, the selected noncurrent version must be
-inside `recovery_version_retention_days` (90 days by default). Azure repository
-versions are intentionally not lifecycle-expired because its available policy
-measures version creation age rather than time since becoming noncurrent. In
-all three providers, use an independently retained backup for recovery points
-outside the object-version window.
-
-The container gate repeats the portable core of this drill against RustFS. It
-stops source writers, copies the complete configured root into a distinct bucket,
-compares the complete key and size set, and hashes every source/restored body.
-An explicit object in the root's shared `.crab/` namespace proves that external
-Crab data is included. The gate starts an isolated server against the restored
-bucket, then an independent client verifies the catalog, Git commit, issue, and
-LFS object before the source stack returns to service.
-
-Do not round-trip a Crab root through an ordinary filesystem sync. Object
-storage can contain both a key such as `locks/internal/gc-fence/state` and
-children below `locks/internal/gc-fence/state/`; a filesystem cannot represent
-both at once. Use provider-native version restore or object-to-object copy that
-preserves the complete key namespace.
-
-Crab has no point-in-time restore coordinator. Provider tooling must produce a
-consistent full-prefix view, select the intended object versions, and retain
-provider metadata. A live restore drill must still prove RPO, RTO, shared OIDC
-state, and regional recovery for your workload.
-
-## Reclaim Cell immutable objects
-
-Run retention only through maintenance activation. First create and verify a
-backup pin, record the prepared release revision, and stop normal serving:
-
-```bash
-crab-http-server --config /secure/server.toml cells release activate \
-  --expected-revision 8 --strategy maintenance \
-  --retention-grace-hours 168 --retention-max-deletes 10000
-```
-
-The executor waits for serving nodes and in-flight backup creators to withdraw.
-It then verifies current controls and every retained pin before deletion. Keep
-provider versioning enabled: collection removes current object versions and the
-provider's noncurrent-version policy remains the recovery boundary.
-
-Retain the structured `completed offline Cell retention pass` event with its
-listed, reachable, eligible, grace, deleted, and complete fields. If the command
-reports that the deletion limit was reached, do not start the fleet. Repeat the
-same command and expected revision until activation returns a `Ready` release.
-An owner-present error, missing digest, corrupt graph, listing failure, or
-unknown release change is a failed maintenance pass and requires investigation.
-
-## Qualify a release
-
-A team release needs Level 3 or higher evidence: a user action, a real durable side effect, and an independently visible result.
-
-Record these gates against a dedicated storage root:
-
-- Install three or more replicas across zones
-- Complete OIDC login when callbacks can reach either replica
-- Create a repository and observe it from every replica within five seconds
-- Push and fetch branches and tags with an independent Git client
-- Upload an LFS object larger than ingress buffering thresholds, interrupt its download, and resume it with a byte range
-- Lock an LFS-tracked path, confirm another writer sees it in `theirs`, verify that writer's standard pre-push hook stops, then unlock it
-- Replace one pod during fetch, push, and archive scenarios
-- Upgrade and roll back one release without losing committed state
-- Restore the complete root to an isolated bucket or container and repeat read verification
-- Confirm the management listener is unreachable through Service, ingress, and peer pods
-- Scrape every pod and exercise request, body-error, admission, catalog-health, and drain signals
-- Confirm no static provider credential exists in Secret, ConfigMap, pod environment, or rendered manifests
-- Verify the deployed image and chart digests, signer workflow, source commit, AMD64/ARM64 index, SBOM, and provenance
-
-Static rendering, unit tests, and localhost RustFS tests don’t replace these gates. Keep the recorded evidence with the release decision.
+Production release still requires native multi-process crash and partition
+proof, complete-root restore, provider identity and fault behavior, measured
+scale/resource envelopes, and upgrade/rollback proof. Preserve raw evidence and
+bind it to source, image, SDK version, provider, and configuration. A smoke
+receipt alone cannot open the release publication gate.

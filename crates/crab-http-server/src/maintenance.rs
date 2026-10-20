@@ -65,7 +65,7 @@ async fn publish(
 
 pub(crate) struct ProjectionContext {
     pub(crate) repository_id: Uuid,
-    pub(crate) router: Option<crate::cells::RepositoryCellRouter>,
+    pub(crate) client: Option<crate::cells::RepositoryClient>,
     pub(crate) metrics: crate::metrics::Metrics,
     pub(crate) identity: RepositoryIdentity,
     pub(crate) runtime: Arc<RemoteGitRuntime>,
@@ -112,7 +112,7 @@ pub(crate) async fn run(
             let indexed = indexed?;
             let repository_id = projection.repository_id;
             let reconciled = async {
-                if projection.router.is_some() {
+                if projection.client.is_some() {
                     crate::projection::reconcile(&layout, projection, &cancel).await
                 } else if indexed.is_some() {
                     let view = crate::projection::open_view(&layout).await?;

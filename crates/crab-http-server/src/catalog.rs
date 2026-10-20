@@ -43,11 +43,8 @@ pub struct CatalogRecord {
     pub prefix: String,
     pub placement_generation: u64,
     pub application: RepositoryApplicationState,
-    #[serde(default)]
     pub description: String,
-    #[serde(default)]
     pub members: Vec<RepositoryMember>,
-    #[serde(default)]
     pub protected_branches: Vec<BranchProtection>,
 }
 
@@ -116,24 +113,8 @@ impl Default for CatalogDocument {
 }
 
 impl CatalogDocument {
-    fn normalize_audit_paths(&mut self) -> Result<(), CatalogError> {
-        if let Some(head) = self.membership_audit_head.as_mut() {
-            *head = canonical_audit_reference(head)
-                .ok_or(CatalogError::Invalid("membership audit path is invalid"))?;
-        }
-        if let Some(event) = self.pending_membership_audit.as_mut()
-            && let Some(previous) = event.previous.as_mut()
-        {
-            *previous = canonical_audit_reference(previous)
-                .ok_or(CatalogError::Invalid("membership audit path is invalid"))?;
-        }
-        Ok(())
-    }
-
     fn validate(&self, root: &StorageRoot) -> Result<(), CatalogError> {
-        if !matches!(self.schema_version, 2 | SCHEMA_VERSION)
-            || self.repositories.len() > MAX_REPOSITORIES
-        {
+        if self.schema_version != SCHEMA_VERSION || self.repositories.len() > MAX_REPOSITORIES {
             return Err(CatalogError::Invalid(
                 "unsupported schema or repository count",
             ));
@@ -168,9 +149,6 @@ impl CatalogDocument {
             .membership_audit_head
             .as_ref()
             .is_some_and(|path| !valid_audit_path(path))
-            || (self.schema_version == 2
-                && (self.membership_audit_head.is_some()
-                    || self.pending_membership_audit.is_some()))
         {
             return Err(CatalogError::Invalid("membership audit chain is invalid"));
         }
@@ -215,19 +193,18 @@ fn valid_actor(actor: &MembershipActor) -> bool {
     })
 }
 
-fn canonical_audit_reference(path: &str) -> Option<String> {
-    let marker = format!("{MEMBERSHIP_AUDIT_RELATIVE_PREFIX}/");
-    let suffix = path.rsplit_once(&marker)?.1;
-    let file = suffix.strip_suffix(".json")?;
-    let (version, id) = file.split_once('-')?;
-    if !version.parse::<u64>().is_ok_and(|value| value > 0) || Uuid::parse_str(id).is_err() {
-        return None;
-    }
-    Some(format!("{MEMBERSHIP_AUDIT_RELATIVE_PREFIX}/{suffix}"))
-}
-
 fn valid_audit_path(path: &str) -> bool {
-    canonical_audit_reference(path).is_some_and(|canonical| canonical == path)
+    let prefix = format!("{MEMBERSHIP_AUDIT_RELATIVE_PREFIX}/");
+    let Some(file) = path
+        .strip_prefix(&prefix)
+        .and_then(|path| path.strip_suffix(".json"))
+    else {
+        return false;
+    };
+    let Some((version, id)) = file.split_once('-') else {
+        return false;
+    };
+    version.parse::<u64>().is_ok_and(|value| value > 0) && Uuid::parse_str(id).is_ok()
 }
 
 fn membership_digest(members: &[RepositoryMember]) -> Result<String, CatalogError> {
@@ -302,12 +279,10 @@ impl CatalogStore {
             Err(error) => return Err(error.into()),
         };
         let schema: CatalogSchema = serde_json::from_slice(&body)?;
-        if !matches!(schema.schema_version, 2 | SCHEMA_VERSION) {
+        if schema.schema_version != SCHEMA_VERSION {
             return Err(CatalogError::Invalid("unsupported catalog schema"));
         }
-        let mut document: CatalogDocument = serde_json::from_slice(&body)?;
-        document.normalize_audit_paths()?;
-        // Version 2 had no audit fields. It remains readable until its next write.
+        let document: CatalogDocument = serde_json::from_slice(&body)?;
         document.validate(&self.root)?;
         Ok((document, Some(etag)))
     }
@@ -530,7 +505,6 @@ impl CatalogStore {
             .version
             .checked_add(1)
             .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
-        document.schema_version = SCHEMA_VERSION;
         document.pending_membership_audit = Some(MembershipAuditEvent {
             id: Uuid::now_v7(),
             repository_id: updated.id,
@@ -624,7 +598,6 @@ impl CatalogStore {
                 .version
                 .checked_add(1)
                 .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
-            document.schema_version = SCHEMA_VERSION;
             document.validate(&self.root)?;
             if self.write_document(&document, etag).await? {
                 return Ok(updated);
@@ -665,7 +638,6 @@ impl CatalogStore {
                 .version
                 .checked_add(1)
                 .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
-            document.schema_version = SCHEMA_VERSION;
             document.repositories.push(record.clone());
             document.normalize();
             if !record.members.is_empty() {
@@ -748,54 +720,6 @@ mod tests {
             name: "Alice".into(),
             access: crate::RepositoryAccess::Admin,
         }
-    }
-
-    #[tokio::test]
-    async fn v2_first_membership_write_migrates_and_preserves_repository() {
-        let catalog = catalog();
-        let original = catalog
-            .create_repository(
-                "team".into(),
-                "project".into(),
-                "team/project".into(),
-                "main".into(),
-                "description".into(),
-                vec![],
-            )
-            .await
-            .unwrap();
-        let (mut document, _) = catalog.load().await.unwrap();
-        document.schema_version = 2;
-        catalog
-            .root
-            .store
-            .put_overwrite(
-                &catalog.path,
-                Bytes::from(serde_json::to_vec(&document).unwrap()),
-            )
-            .await
-            .unwrap();
-        assert_eq!(catalog.load().await.unwrap().0, document);
-        let changed = catalog
-            .replace_members(
-                "team",
-                "project",
-                document.version,
-                vec![admin()],
-                actor(),
-                true,
-            )
-            .await
-            .unwrap();
-        let (after, _) = catalog.load().await.unwrap();
-        assert_eq!(after.schema_version, 3);
-        assert_eq!(
-            changed,
-            CatalogRecord {
-                members: vec![admin()],
-                ..original
-            }
-        );
     }
 
     #[tokio::test]
@@ -965,20 +889,20 @@ mod tests {
 
         assert_eq!(restored.load().await.unwrap().0, document);
 
-        let mut legacy = document;
-        legacy.membership_audit_head = Some(source.root.path(&head).to_string());
+        let mut invalid = document;
+        invalid.membership_audit_head = Some(source.root.path(&head).to_string());
         restored_root
             .store
             .put_overwrite(
                 &restored.path,
-                Bytes::from(serde_json::to_vec(&legacy).unwrap()),
+                Bytes::from(serde_json::to_vec(&invalid).unwrap()),
             )
             .await
             .unwrap();
-        assert_eq!(
-            restored.load().await.unwrap().0.membership_audit_head,
-            Some(head)
-        );
+        assert!(matches!(
+            restored.load().await,
+            Err(CatalogError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -1238,31 +1162,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_catalog_is_rejected_at_the_hard_cut() {
+    async fn unsupported_catalog_schemas_are_rejected() {
         let catalog = catalog();
-        let body = serde_json::to_vec(&serde_json::json!({
-            "schema_version": 1,
-            "version": 4,
-            "repositories": [{
-                "id": "00000000-0000-0000-0000-000000000007",
-                "owner": "team",
-                "name": "project",
-                "prefix": "team/project",
-                "placement_generation": 1
-            }]
-        }))
-        .unwrap();
-        catalog
-            .root
-            .store
-            .put_overwrite(&catalog.path, Bytes::from(body))
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            catalog.load().await,
-            Err(CatalogError::Invalid("unsupported catalog schema"))
-        ));
+        for schema_version in [1, 2, 4] {
+            let document = CatalogDocument {
+                schema_version,
+                ..Default::default()
+            };
+            catalog
+                .root
+                .store
+                .put_overwrite(
+                    &catalog.path,
+                    Bytes::from(serde_json::to_vec(&document).unwrap()),
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(catalog.load().await, Err(CatalogError::Invalid(_))),
+                "schema {schema_version}"
+            );
+        }
     }
 
     #[tokio::test]

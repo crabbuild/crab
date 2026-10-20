@@ -65,39 +65,6 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      initContainers:
-        - name: cell-release-bootstrap
-          image: {{ include "crab-http-server.image" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args:
-            - --config
-            - /etc/crab/http-server/server.toml
-            - cells
-            - release
-            - bootstrap
-            - --image
-            - {{ required "image.digest is required" .Values.image.digest | quote }}
-          terminationMessagePolicy: FallbackToLogsOnError
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: [ALL]
-          resources:
-            {{- toYaml .Values.resources | nindent 12 }}
-          {{- with .Values.extraEnv }}
-          env:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          volumeMounts:
-            - name: config
-              mountPath: /etc/crab/http-server
-              readOnly: true
-            - name: secrets
-              mountPath: /run/secrets/crab
-              readOnly: true
-            - name: scratch
-              mountPath: /var/lib/crab
       containers:
         - name: crab-http-server
           image: {{ include "crab-http-server.image" . | quote }}
@@ -107,8 +74,6 @@ spec:
             - /etc/crab/http-server/server.toml
             - --peer-advertise-host
             - $(CRAB_POD_IP)
-            - --cell-failure-host
-            - $(CRAB_NODE_NAME)
           terminationMessagePolicy: FallbackToLogsOnError
           securityContext:
             allowPrivilegeEscalation: false
@@ -155,10 +120,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            - name: CRAB_NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
           {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
           {{- end }}

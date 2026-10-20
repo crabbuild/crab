@@ -15,7 +15,6 @@ use crate::{
     },
     server::{Repository, Server},
 };
-use cellule_runtime::client::{Committed, InvocationError, Observed};
 
 #[derive(Clone, Debug)]
 pub(super) struct PullReviewThread {
@@ -82,12 +81,11 @@ pub(super) struct NewPullReviewReply {
 pub(super) async fn thread(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     pull: u64,
     number: u64,
 ) -> Result<Option<PullReviewThread>> {
-    let routed = storage::route(server, repo, actor, "repository.read").await?;
-    query_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    crate::app::query_output(
         routed
             .client
             .query::<GetPullReviewThread>(
@@ -103,11 +101,10 @@ pub(super) async fn thread(
 pub(super) async fn threads(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     input: PullReviewThreadListInput,
 ) -> Result<Option<(Vec<PullReviewThread>, Option<u64>)>> {
-    let routed = storage::route(server, repo, actor, "repository.read").await?;
-    let page = query_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    let page = crate::app::query_output(
         routed
             .client
             .query::<ListPullReviewThreads>(&routed.target, None, input)
@@ -119,12 +116,11 @@ pub(super) async fn threads(
 pub(super) async fn thread_submission(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     pull: u64,
     request_id: &str,
 ) -> Result<Option<PullReviewThread>> {
-    let routed = storage::route(server, repo, actor, "repository.read").await?;
-    query_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    crate::app::query_output(
         routed
             .client
             .query::<GetPullReviewThreadSubmission>(
@@ -146,9 +142,8 @@ pub(super) async fn create_thread(
     pull: u64,
     input: NewPullReviewThread,
 ) -> Result<PullReviewThread> {
-    let routed =
-        storage::route(server, repo, &input.author, "repository.pull.review.thread").await?;
-    match command_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    match crate::app::command_output(
         routed
             .client
             .command::<CreatePullReviewThread>(
@@ -188,9 +183,8 @@ pub(super) async fn update_thread(
     number: u64,
     input: PullReviewThreadEdit,
 ) -> Result<PullReviewThread> {
-    let routed =
-        storage::route(server, repo, &input.actor, "repository.pull.review.thread").await?;
-    match command_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    match crate::app::command_output(
         routed
             .client
             .command::<UpdatePullReviewThread>(
@@ -218,13 +212,12 @@ pub(super) async fn update_thread(
 pub(super) async fn reply(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     pull: u64,
     thread: u64,
     number: u64,
 ) -> Result<Option<PullReviewReply>> {
-    let routed = storage::route(server, repo, actor, "repository.read").await?;
-    query_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    crate::app::query_output(
         routed
             .client
             .query::<GetPullReviewReply>(
@@ -244,11 +237,10 @@ pub(super) async fn reply(
 pub(super) async fn replies(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     input: PullReviewReplyListInput,
 ) -> Result<Option<(Vec<PullReviewReply>, Option<u64>)>> {
-    let routed = storage::route(server, repo, actor, "repository.read").await?;
-    let page = query_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    let page = crate::app::query_output(
         routed
             .client
             .query::<ListPullReviewReplies>(&routed.target, None, input)
@@ -260,13 +252,12 @@ pub(super) async fn replies(
 pub(super) async fn reply_submission(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
     pull: u64,
     thread: u64,
     request_id: &str,
 ) -> Result<Option<PullReviewReply>> {
-    let routed = storage::route(server, repo, actor, "repository.read").await?;
-    query_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    crate::app::query_output(
         routed
             .client
             .query::<GetPullReviewReplySubmission>(
@@ -290,9 +281,8 @@ pub(super) async fn create_reply(
     thread: u64,
     input: NewPullReviewReply,
 ) -> Result<PullReviewReply> {
-    let routed =
-        storage::route(server, repo, &input.author, "repository.pull.review.thread").await?;
-    match command_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    match crate::app::command_output(
         routed
             .client
             .command::<CreatePullReviewReply>(
@@ -324,8 +314,8 @@ pub(super) async fn update_reply(
     version: u64,
     body: String,
 ) -> Result<PullReviewReply> {
-    let routed = storage::route(server, repo, &actor, "repository.pull.review.thread").await?;
-    match command_output(
+    let routed = crate::app::repository_cell(server, repo)?;
+    match crate::app::command_output(
         routed
             .client
             .command::<UpdatePullReviewReply>(
@@ -383,12 +373,4 @@ fn from_reply(value: PullReviewReplyRecord) -> PullReviewReply {
         created_at: value.created_at_ms,
         updated_at: value.updated_at_ms,
     }
-}
-
-fn command_output<T>(result: std::result::Result<Committed<T>, InvocationError<T>>) -> Result<T> {
-    storage::command_output(result)
-}
-
-fn query_output<T>(result: std::result::Result<Observed<T>, InvocationError<T>>) -> Result<T> {
-    storage::query_output(result)
 }

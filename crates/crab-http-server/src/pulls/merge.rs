@@ -154,10 +154,10 @@ async fn finish(
         if base.as_deref() != Some(record.base_oid.as_str())
             || head.as_deref() != Some(record.head_oid.as_str())
         {
-            storage::abort_merge(server, repo, &actor, pull.number, record).await?;
+            storage::abort_merge(server, repo, pull.number, record).await?;
             return Err(Error::MergeConflict);
         }
-        let latest = storage::pull(server, repo, &actor, pull.number)
+        let latest = storage::pull(server, repo, pull.number)
             .await?
             .ok_or(Error::NotFound)?;
         if latest.state != PullState::Open
@@ -166,7 +166,7 @@ async fn finish(
                 .as_ref()
                 .is_none_or(|pending| pending.request_id != record.request_id)
         {
-            storage::abort_merge(server, repo, &actor, pull.number, record).await?;
+            storage::abort_merge(server, repo, pull.number, record).await?;
             return Err(Error::MergeConflict);
         }
         let update = match record.method {
@@ -195,11 +195,11 @@ async fn finish(
                 {
                     Ok(plan) if plan.oid.to_string() == record.commit_oid => plan,
                     Ok(_) => {
-                        storage::abort_merge(server, repo, &actor, pull.number, record).await?;
+                        storage::abort_merge(server, repo, pull.number, record).await?;
                         return Err(Error::MergeConflict);
                     }
                     Err(Error::MergeConflict) => {
-                        storage::abort_merge(server, repo, &actor, pull.number, record).await?;
+                        storage::abort_merge(server, repo, pull.number, record).await?;
                         return Err(Error::MergeConflict);
                     }
                     Err(error) => return Err(error),
@@ -227,13 +227,13 @@ async fn finish(
             {
                 let error = map_receive(error);
                 if matches!(&error, Error::MergeConflict) {
-                    storage::abort_merge(server, repo, &actor, pull.number, record).await?;
+                    storage::abort_merge(server, repo, pull.number, record).await?;
                 }
                 return Err(error);
             }
         }
     }
-    let pull = storage::complete_merge(server, repo, &actor, pull.number, record).await?;
+    let pull = storage::complete_merge(server, repo, pull.number, record).await?;
     pull_view(
         &pull,
         &actor,
@@ -260,7 +260,7 @@ async fn execute(
     let Json(input) = input?;
     let actor = app::actor(&principal)?;
     let request_id = app::submission(&input.request_id)?;
-    let pull = storage::pull(&server, repo, &actor, id)
+    let pull = storage::pull(&server, repo, id)
         .await?
         .ok_or(Error::NotFound)?;
     let candidate = NewPullMerge {
@@ -315,7 +315,7 @@ async fn execute(
         return Ok((StatusCode::OK, Json(value)));
     }
     if let Some(record) = storage::recover_merge(&server, repo, &candidate, id).await? {
-        let pull = storage::begin_merge(&server, repo, &candidate.author, id, &record).await?;
+        let pull = storage::begin_merge(&server, repo, id, &record).await?;
         let value = finish(&server, &principal, repo, &pull, &record).await?;
         return Ok((StatusCode::OK, Json(value)));
     }
@@ -335,12 +335,12 @@ async fn execute(
     }
     // These reads order merge admission before later status or check-run updates.
     // Once the reservation exists, retries recover that admitted publication.
-    let protections = repo.branch_protections(&server, &candidate.author).await?;
+    let protections = repo.branch_protections(&server).await?;
     let protection = protections.protection(&pull.base_ref);
     let (statuses, check_runs) = match protection {
         Some(rule) if !rule.required_checks.is_empty() => (
-            statuses::latest(&server, repo, &candidate.author, &candidate.head_oid).await?,
-            checks::latest(&server, repo, &candidate.author, &candidate.head_oid).await?,
+            statuses::latest(&server, repo, &candidate.head_oid).await?,
+            checks::latest(&server, repo, &candidate.head_oid).await?,
         ),
         _ => (vec![], vec![]),
     };
@@ -355,7 +355,7 @@ async fn execute(
     {
         return Err(Error::MergeBlocked);
     }
-    let created_at = u64::try_from(crate::cells::unix_now_ms().map_err(Error::Repository)?)
+    let created_at = u64::try_from(crate::cells::unix_now_ms().map_err(Error::Cell)?)
         .map_err(|_| Error::CellContract("Cell clock is negative"))?;
     let commit_oid = match candidate.method {
         MergeMethod::FastForward => oid(&candidate.head_oid)?,
@@ -375,7 +375,7 @@ async fn execute(
     };
     let record =
         storage::reserve_merge(&server, repo, id, &candidate, commit_oid, created_at).await?;
-    let pull = storage::begin_merge(&server, repo, &candidate.author, id, &record).await?;
+    let pull = storage::begin_merge(&server, repo, id, &record).await?;
     let value = finish(&server, &principal, repo, &pull, &record).await?;
     Ok((StatusCode::OK, Json(value)))
 }

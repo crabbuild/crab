@@ -87,7 +87,6 @@ impl IdentityFiles {
             local_disk_limit_bytes: 32 * 1024 * 1024 * 1024,
             peer_advertise: endpoint,
             failure_zone: None,
-            failure_host: None,
             peer_tls_server_name: None,
             peer_certificate: self.certificate.clone(),
             peer_private_key: self.private_key.clone(),
@@ -122,19 +121,6 @@ fn stable_tls_name_allows_a_node_specific_advertised_ip() {
     LoadedPeerTls::load(&config).unwrap();
 }
 
-#[test]
-fn fleet_digest_is_independent_of_ca_order_and_duplicates() {
-    let first = IdentityFiles::generate();
-    let second = IdentityFiles::generate();
-    let first_ca = load_certificates(&first.ca).unwrap().remove(0);
-    let second_ca = load_certificates(&second.ca).unwrap().remove(0);
-
-    let ordered = fleet_digest(&[first_ca.clone(), second_ca.clone()]);
-    let reordered = fleet_digest(&[second_ca, first_ca.clone(), first_ca]);
-
-    assert_eq!(ordered, reordered);
-}
-
 #[tokio::test]
 async fn listener_requires_mtls_and_exposes_the_verified_leaf_identity() {
     let files = IdentityFiles::generate();
@@ -144,17 +130,17 @@ async fn listener_requires_mtls_and_exposes_the_verified_leaf_identity() {
         files.config(Url::parse(&format!("https://127.0.0.1:{}", address.port())).unwrap());
     config.peer_tls_server_name = Some("localhost".into());
     let loaded = LoadedPeerTls::load(&config).unwrap();
-    let certificate = loaded.certificate();
+    let certificate = sha256_digest(load_certificates(&files.certificate).unwrap()[0].as_ref());
     let public_key = loaded.signing_key().verifying_key().to_bytes();
     let peer_client = loaded.client_identity();
-    let expected = format!("{}:{}", encode(certificate.as_bytes()), encode(&public_key));
+    let expected = format!("{}:{}", encode(&certificate), encode(&public_key));
     let app = Router::new().route(
         "/identity",
         get(
             |ConnectInfo(identity): ConnectInfo<PeerTlsIdentity>| async move {
                 format!(
                     "{}:{}",
-                    encode(identity.certificate().as_bytes()),
+                    encode(&identity.certificate()),
                     encode(&identity.public_key())
                 )
             },
@@ -177,16 +163,11 @@ async fn listener_requires_mtls_and_exposes_the_verified_leaf_identity() {
     let anonymous = client_builder(roots.clone()).build().unwrap();
     assert!(anonymous.get(&url).send().await.is_err());
 
-    let client = peer_client.client(certificate, public_key).unwrap();
+    let client = peer_client.client().unwrap();
     assert_eq!(
         client.get(&url).send().await.unwrap().text().await.unwrap(),
         expected
     );
-    let wrong_pin = peer_client
-        .client(CellDigest::from_bytes([9; 32]), public_key)
-        .unwrap();
-    assert!(wrong_pin.get(&url).send().await.is_err());
-
     shutdown_tx.send(()).unwrap();
     server.await.unwrap().unwrap();
 }
