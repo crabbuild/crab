@@ -1554,6 +1554,7 @@ impl RemoteGitReader {
             }
         }
 
+        let mut cached_bases = HashMap::new();
         loop {
             check_cancelled(cancellation)?;
             let mut missing = Vec::new();
@@ -1563,6 +1564,7 @@ impl RemoteGitReader {
                     *oid,
                     0,
                     &entries,
+                    &cached_bases,
                     &mut visited,
                     &mut missing,
                     self.limits.max_delta_depth,
@@ -1573,7 +1575,22 @@ impl RemoteGitReader {
             if missing.is_empty() {
                 break;
             }
-            for batch in missing.chunks(DELTA_PREFETCH_BATCH_SIZE) {
+            // Match the point reader's reuse of verified delta bases. Fetching
+            // them again for every batch multiplies origin reads on deep packs.
+            let mut uncached = Vec::new();
+            for oid in missing {
+                let key = crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, oid);
+                match self
+                    .verified_cached_object(&key, self.limits.max_object_bytes)
+                    .await?
+                {
+                    Some(object) => {
+                        cached_bases.insert(oid, object.as_ref().clone());
+                    }
+                    None => uncached.push(oid),
+                }
+            }
+            for batch in uncached.chunks(DELTA_PREFETCH_BATCH_SIZE) {
                 let fetched = self
                     .read_packed_many_with_session(
                         session,
@@ -1599,6 +1616,7 @@ impl RemoteGitReader {
             self.limits.max_inflated_entry_bytes,
             self.limits.max_delta_depth,
         );
+        resolver.objects = cached_bases;
         let mut objects = Vec::with_capacity(requested.len());
         for requested_chunk in requested.chunks(MATERIALIZE_CHUNK_SIZE) {
             check_cancelled(cancellation)?;
@@ -3296,11 +3314,12 @@ fn collect_missing_delta_bases(
     oid: gix_hash::ObjectId,
     depth: usize,
     entries: &HashMap<gix_hash::ObjectId, RemoteGitPackedEntry>,
+    cached: &HashMap<gix_hash::ObjectId, GitObject>,
     visited: &mut HashMap<gix_hash::ObjectId, usize>,
     missing: &mut Vec<gix_hash::ObjectId>,
     max_delta_depth: usize,
 ) -> Result<()> {
-    if visited.get(&oid).is_some_and(|known| *known <= depth) {
+    if cached.contains_key(&oid) || visited.get(&oid).is_some_and(|known| *known <= depth) {
         return Ok(());
     }
     visited.insert(oid, depth);
@@ -3322,6 +3341,7 @@ fn collect_missing_delta_bases(
         base_oid,
         depth.saturating_add(1),
         entries,
+        cached,
         visited,
         missing,
         max_delta_depth,
@@ -5806,8 +5826,16 @@ mod tests {
         let mut visited = HashMap::new();
         let mut missing = Vec::new();
         for requested in [oid(1), oid(4)] {
-            collect_missing_delta_bases(requested, 0, &entries, &mut visited, &mut missing, 128)
-                .expect("delta dependency walk");
+            collect_missing_delta_bases(
+                requested,
+                0,
+                &entries,
+                &HashMap::new(),
+                &mut visited,
+                &mut missing,
+                128,
+            )
+            .expect("delta dependency walk");
         }
 
         missing.sort_unstable();

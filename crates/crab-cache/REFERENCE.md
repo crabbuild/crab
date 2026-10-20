@@ -213,6 +213,10 @@ each other; payload descriptor clones intentionally retain one shared lease.
 
 ## Database generation binding
 
+SQLite recovery upgrades from SHARED directly to EXCLUSIVE, without taking
+PENDING. Only a RESERVED writer retains PENDING while waiting for readers;
+otherwise a recovery reader can block the writer it is waiting to finish.
+
 Private SQLite connections also retain the main descriptor and a shared lease
 on a `-owner` file recording its device/inode. Opens, namespace cleanup, page
 I/O, and new database/WAL locks reject a different main or owner inode. New

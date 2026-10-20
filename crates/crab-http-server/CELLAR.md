@@ -75,7 +75,10 @@ Supported `cells` commands are `capacity --json [--live]`, `metrics`,
 storage probing remain available. Reads use the authoritative Cell owner. `local_disk_limit_bytes` bounds the
 Crab staging envelope; Cellar 0.1.0 has no injected shared disk budget. Place its
 cache on a filesystem with an appropriate quota. Physical free-space checks
-still guard staging admission.
+still guard staging admission. Staging reserves 20% of available disk
+(at least 1 GiB) for filesystem and native cache headroom and requires space for
+one initial Git receive reservation. Transfer reservations enforce the remaining
+capacity; small disks do not imply support for arbitrarily large imports.
 
 `failure_zone` maps to the native Cellar region. Management uses the native
 runtime directly; there are no release bootstrap/prepare/activate, pinned

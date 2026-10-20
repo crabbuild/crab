@@ -704,8 +704,9 @@ jobs:
           docker run --rm crab-http-server:test --config /dev/null repository --help | grep -F -- "set-members"
       - name: Install process qualification dependencies
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y pipx openssl git python3
+          git --version
+          openssl version
+          python3 --version
           pipx install awscli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Qualify the native image against RustFS and process restart

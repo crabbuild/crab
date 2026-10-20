@@ -27,11 +27,13 @@ impl CellRuntimeBudget {
                 "Cellar requires at least 1 GiB effective memory",
             ));
         }
-        let disk_reserve_bytes = (resources.free_disk_bytes / 5).max(10 * GIB);
+        // Keep filesystem and Cellar cache headroom while admitting bounded
+        // transfers on small volumes. Per-transfer reservations enforce capacity.
+        let disk_reserve_bytes = (resources.free_disk_bytes / 5).max(GIB);
         let local_disk_bytes = resources.free_disk_bytes.saturating_sub(disk_reserve_bytes);
-        if local_disk_bytes < 20 * GIB {
+        if local_disk_bytes < crate::receive::INITIAL_RECEIVE_RESERVATION {
             return Err(crate::Error::Config(
-                "Cellar requires at least 20 GiB usable local disk",
+                "local staging requires capacity for one Git receive",
             ));
         }
         let memory = resources
@@ -129,6 +131,21 @@ mod tests {
     }
 
     #[test]
+    fn cell_runtime_budget_admits_small_volumes_with_headroom() {
+        for free_disk in [3 * GIB, 20_000_000_000] {
+            let budget =
+                CellRuntimeBudget::from_resources(local_resources(3 * GIB, free_disk, 10_000))
+                    .unwrap();
+            assert!(budget.local_disk_bytes >= crate::receive::INITIAL_RECEIVE_RESERVATION);
+            assert!(budget.disk_reserve_bytes >= GIB);
+            assert_eq!(
+                budget.local_disk_bytes + budget.disk_reserve_bytes,
+                free_disk
+            );
+        }
+    }
+
+    #[test]
     fn cell_runtime_budget_rejects_insufficient_memory() {
         assert!(
             CellRuntimeBudget::from_resources(local_resources(GIB - 1, 30 * GIB, 10_000)).is_err()
@@ -138,7 +155,7 @@ mod tests {
     #[test]
     fn cell_runtime_budget_rejects_insufficient_disk() {
         assert!(
-            CellRuntimeBudget::from_resources(local_resources(2 * GIB, 30 * GIB - 1, 10_000))
+            CellRuntimeBudget::from_resources(local_resources(2 * GIB, 3 * GIB - 1, 10_000))
                 .is_err()
         );
     }

@@ -1,0 +1,10 @@
+{
+  admin off
+  auto_https off
+}
+:8080 {
+  reverse_proxy 127.0.0.1:8788 {
+    header_up Host localhost:8788
+    flush_interval -1
+  }
+}
