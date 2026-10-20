@@ -781,7 +781,7 @@ qualification.
 The locked normal-dependency tree has 35 distinct package names for default
 features and 337 for `remote` on this host. Default features include no other
 Crab crate. Neither tree includes `crab`, `crab-read`, `crab-lfs`, `crab-vfs`,
-`crab-http-server`, `crab-cache` or `crab-cache-store`. These are dependency-tree
+`crab-server`, `crab-cache` or `crab-cache-store`. These are dependency-tree
 observations, not final packaging or cross-platform feature-closure proof.
 
 `crab-remote-git` now supports per-operation aggregate limits on the same
@@ -961,7 +961,7 @@ not the planned 32 MiB RustFS/live-cloud qualification.
 
 Normal dependency trees are recorded in `sdk-remote-tree.txt` and
 `sdk-content-tree.txt`. The metadata-only tree excludes `crab-lfs`; content adds
-it. Both exclude `crab`, `crab-http-server`, `crab-vfs` and `crab-read`. The last
+it. Both exclude `crab`, `crab-server`, `crab-vfs` and `crab-read`. The last
 exclusion reflects unfinished Crab hydration, not completion of that feature.
 The lockfile adds SDK edges to existing packages; no upstream version or
 checksum changes were introduced.
@@ -1667,7 +1667,7 @@ resource measurements, and transport-attempt accounting still need qualification
   seconds). Caller-owned cancellation after the first hydrated Data frame for
   both Crab and LFS returns `Cancelled`; explicit close then drains successfully.
   The same test retains early-close coverage without caller cancellation.
-- `sdk-archive-http-check.log`: `cargo +stable check -p crab-http-server --locked`
+- `sdk-archive-http-check.log`: `cargo +stable check -p crab-server --locked`
   passes for the affected consumer and shared owners. This closes the consumer
   compile gap above; it is not an HTTP archive end-to-end qualification.
 

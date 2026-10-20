@@ -196,7 +196,7 @@ Published Rust API versioning remains part of the release gate.
 - `crab-write`: page durability, incremental builders, compaction and checkpoints.
 - `crab-remote-git`: bounded queries, operation admission and explicit cleanup.
 - `crab-remote`: maintenance coordination and state-fenced derived publication.
-- `crab-http-server`: canonical reads, projection ingestion and readiness behavior.
+- `crab-server`: canonical reads, projection ingestion and readiness behavior.
 - CLI push/protected receive/SDK/VFS/fsck/GC: relevant sibling contract consumers.
 
 Every format/read change records caller, callee, sibling, error and lifecycle
@@ -1008,7 +1008,7 @@ change. The paged reader shares visible attribution and candidate lookup through
 one interpreter. A missing/corrupt advertised page remains an error. Complete
 loads, compaction, resumable prefixes and maintenance scans retain the markers.
 HTTP projection keeps visible-node attribution: its sole caller supplies paths
-from the captured raw directory listing (`crates/crab-http-server/src/api.rs`).
+from the captured raw directory listing (`crates/crab-server/src/api/mod.rs`).
 
 Upstream release tags were rechecked at their peeled commits: v1.0.1 and v1.2.0
 through v1.2.4 contain no path-state source. Unreleased version 5 is rejected;
@@ -1692,7 +1692,7 @@ writer boundaries. Its regression fails before the fix and passes afterward;
 strict local-cache all-target Clippy. The full failed workload still needs a
 rerun. The pinned SQLite 3.49.1 is also affected by the upstream WAL-reset
 race. The server now uses published Cellar 0.1.0; its linked SQLite dependency
-and required fix are recorded in the [native runtime contract](../../../crates/crab-http-server/CELLAR.md). Remaining consumer, lifecycle and 10 GiB gates still apply.
+and required fix are recorded in the [native runtime contract](../../../crates/crab-server/CELLAR.md). Remaining consumer, lifecycle and 10 GiB gates still apply.
 
 
 ## Prepared reuse retains payloads before recipe sealing

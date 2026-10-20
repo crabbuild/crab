@@ -72,7 +72,7 @@ runs on blocking workers that retain admission after caller cancellation. The
 ordinary receipt-aware path uses the same body verifier when a receipt misses.
 
 `LfsLockManager` provides the shared CAS-backed LFS lock record format at
-`{prefix}/lfs/locks/{blake3(path)}`. `crab-http-server` uses this manager for
+`{prefix}/lfs/locks/{blake3(path)}`. `crab-server` uses this manager for
 the Git LFS File Locking API. The CLI uses the same namespace through a
 separate lock manager, so changes here do not automatically reach that CLI
 surface.

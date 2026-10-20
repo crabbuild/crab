@@ -252,7 +252,7 @@ mkdir -p "$CRAB_LTX_TARGET"
 | Replica tests | `CARGO_TARGET_DIR="$CRAB_LTX_TARGET" cargo test -p crab-ltx --features replica --locked` | all tests and doctests pass |
 | Lint | `CARGO_TARGET_DIR="$CRAB_LTX_TARGET" cargo clippy -p crab-ltx --all-targets --features replica --locked -- -D warnings` | exit 0, no warnings |
 | Runtime consumer | `CARGO_TARGET_DIR="$CRAB_LTX_TARGET" cargo test -p crab-cell-runtime --locked` | all tests pass |
-| HTTP consumer | `CARGO_TARGET_DIR="$CRAB_LTX_TARGET" cargo check -p crab-http-server --locked` | exit 0 |
+| HTTP consumer | `CARGO_TARGET_DIR="$CRAB_LTX_TARGET" cargo check -p crab-server --locked` | exit 0 |
 | Crab perf runner | `CARGO_TARGET_DIR="$CRAB_LTX_TARGET" cargo test --manifest-path crates/crab-ltx/perf/crab/Cargo.toml --locked` | exit 0 |
 | Celld perf runner | `CARGO_TARGET_DIR="$CRAB_LTX_TARGET" cargo test --manifest-path crates/crab-ltx/perf/celld/Cargo.toml --locked` | exit 0 |
 
@@ -534,7 +534,7 @@ CARGO_TARGET_DIR="$CRAB_LTX_TARGET" cargo test -p crab-ltx \
 CARGO_TARGET_DIR="$CRAB_LTX_TARGET" cargo clippy -p crab-ltx \
   --all-targets --features replica --locked -- -D warnings
 CARGO_TARGET_DIR="$CRAB_LTX_TARGET" cargo test -p crab-cell-runtime --locked
-CARGO_TARGET_DIR="$CRAB_LTX_TARGET" cargo check -p crab-http-server --locked
+CARGO_TARGET_DIR="$CRAB_LTX_TARGET" cargo check -p crab-server --locked
 ```
 
 Expected: every command exits 0. Do not change tests, snapshots, inventories,
@@ -592,7 +592,7 @@ parent-directory barrier in `Db::durability_barrier()`. The default
 - `cargo fmt --all -- --check`;
 - minimal and `replica` `crab-ltx` tests, including doctests;
 - `cargo clippy -p crab-ltx --all-targets --features replica --locked -- -D warnings`;
-- `crab-cell-runtime` tests and `crab-http-server` check;
+- `crab-cell-runtime` tests and `crab-server` check;
 - focused streamed-compaction fault, cleanup, no-clobber, and byte-identical
   restore tests;
 - both perf-runner unit-test packages and three 11-round/2-warmup benchmark
@@ -870,7 +870,7 @@ Stop and report; do not improvise if:
   ordinary unambiguous error;
 - retaining the verified image exceeds `max_database_bytes`, keeps both the
   encoded chain and decoded image, or leaks mutable image access publicly;
-- a direct `crab-cell-runtime` or `crab-http-server` consumer requires a public
+- a direct `crab-cell-runtime` or `crab-server` consumer requires a public
   compatibility alias or second recovery path;
 - any verification command fails twice after a reasonable source fix;
 - the controlled candidate misses the performance gate twice;

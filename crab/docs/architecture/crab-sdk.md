@@ -53,7 +53,7 @@ Git CLI flag or every preview capability in Crab's existing Git matrix.
   Git invokes Crab's clean/smudge filter when handling hydrated worktrees.
   The earlier suggestion of a completely helper-free local profile omitted
   this dependency. Remote operations remain independent of both executables.
-- Managed Crab control-plane APIs and `crab-http-server` application APIs are
+- Managed Crab control-plane APIs and `crab-server` application APIs are
   different contracts. The managed client already has repository lifecycle
   methods; incomplete HTTP application administration does not block them.
 - Historical `crab-sdk` references describe a retired read-first package. Its
@@ -81,7 +81,7 @@ historical documentation describes a retired implementation.
 | Filters | `crab/src/cmd/init.rs` `DRIVER_CONFIG`; `crab/src/git/worktree_hydration.rs` | Full local mode needs a compatible executable and shared configuration |
 | Managed access | `crates/crab-git/src/url.rs`; `crates/crab-auth-store/src/managed_repository.rs`; `crates/crab-auth/src/managed/client.rs` | Preserve direct/managed classification, grants, prepare/finalize, and lifecycle endpoints |
 | Protected writer | `crates/crab-auth-server/src/receive/workflow.rs` | Final authorization and publication remain server responsibilities |
-| HTTP receive | `crates/crab-http-server/src/receive/publish.rs`; `receive_tests.rs`, `receive_fault_tests.rs` | Share publication mechanics while retaining HTTP policy; current server rejects forced updates |
+| HTTP receive | `crates/crab-server/src/git/receive/publish.rs`; `receive_tests.rs`, `receive_fault_tests.rs` | Share publication mechanics while retaining HTTP policy; current server rejects forced updates |
 | Release | Supporting crate manifests use `publish = false`; workspace dependencies use paths | Publish the dependency closure deliberately before publishing the SDK |
 
 Existing tests establish starting points, not SDK proof. Every acceptance test
@@ -128,7 +128,7 @@ only after documenting its semver support obligation. `bytes::Bytes`, Tokio
 owns leases, fences, verified object preparation, commit coordination, and
 outcome recovery. It accepts caller policy through a narrow admission boundary.
 HTTP authorization, branch protection, sessions, and application state remain
-in `crab-http-server`. Protected receive remains a server composition and must
+in `crab-server`. Protected receive remains a server composition and must
 not trust a client's declaration that a push was authorized.
 
 The CLI consumes shared services directly; it need not depend on the public SDK.
@@ -521,7 +521,7 @@ Reauthorization/placement changes invalidate the handle before fetching new
 remote data. Do not combine caches or continuation cursors across principals.
 Previously returned bytes cannot be revoked; document that ordinary limitation.
 
-The `crab-http-server` smart HTTP transport is supported through Git for its
+The `crab-server` smart HTTP transport is supported through Git for its
 qualified Git operations in the local profile. REST application management and
 remote-only HTTP browsing are excluded from 1.0; they require a separately
 versioned application API contract. Direct object-store and managed-store

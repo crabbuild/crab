@@ -126,14 +126,14 @@ class WorkspaceDependencyTests(unittest.TestCase):
 
 class CellarBoundaryTests(unittest.TestCase):
     def check_source(self, source: str, dependencies: tuple[str, ...] = (),
-                     relative: str = "crates/crab-http-server/src/lib.rs") -> bool:
+                     relative: str = "crates/crab-server/src/lib.rs") -> bool:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / relative
             path.parent.mkdir(parents=True)
             path.write_text(source, encoding="utf-8")
             metadata = {"packages": [{
-                "name": "crab-http-server",
+                "name": "crab-server",
                 "dependencies": [{"name": name} for name in dependencies],
             }]}
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -148,8 +148,8 @@ class CellarBoundaryTests(unittest.TestCase):
     def test_native_construction_is_confined_to_the_runtime_module(self):
         source = "fn start() { Node::start_external(config); }\n"
         for relative, expected in [
-            ("crates/crab-http-server/src/server.rs", False),
-            ("crates/crab-http-server/src/cells/runtime.rs", True),
+            ("crates/crab-server/src/server/mod.rs", False),
+            ("crates/crab-server/src/cells/runtime.rs", True),
         ]:
             with self.subTest(relative=relative):
                 self.assertEqual(self.check_source(source, relative=relative), expected)
@@ -157,12 +157,12 @@ class CellarBoundaryTests(unittest.TestCase):
     def test_product_catalog_and_routing_stay_outside_native_ownership(self):
         self.assertTrue(self.check_source(
             "struct Server { catalog: CatalogStore, cell_capacity: Capacity, repository_cells: Router }\n",
-            relative="crates/crab-http-server/src/server.rs"))
+            relative="crates/crab-server/src/server/mod.rs"))
 
     def test_retired_runtime_components_cannot_escape_into_server(self):
         self.assertFalse(self.check_source(
             "struct Server { catalog: CatalogStore, follower_store: FollowerStore }\n",
-            relative="crates/crab-http-server/src/server.rs"))
+            relative="crates/crab-server/src/server/mod.rs"))
 
     def test_removed_workspace_dependency_is_rejected(self):
         self.assertFalse(self.check_source("", ("crab-cell-runtime",)))

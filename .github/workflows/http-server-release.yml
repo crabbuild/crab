@@ -2,7 +2,7 @@ name: HTTP server release image
 
 on:
   push:
-    tags: ["crab-http-server-v*"]
+    tags: ["crab-server-v*"]
   workflow_dispatch:
 
 permissions:
@@ -17,5 +17,5 @@ jobs:
       - name: Block publication until the native contract is qualified
         run: |
           echo '::error::Native Cellar release publication is disabled. A fixed SQLite dependency plus provider, crash/partition, restore, scale, and upgrade qualification must bind the exact source and image before publication.'
-          echo 'See crates/crab-http-server/CELLAR.md. Container process smoke remains available in http-server-container.yml.'
+          echo 'See crates/crab-server/CELLAR.md. Container process smoke remains available in http-server-container.yml.'
           exit 1

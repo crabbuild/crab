@@ -44,7 +44,7 @@
   <text x="110" y="264" class="detail">browser · Git · API</text>
 
   <rect x="255" y="145" width="260" height="60" rx="10" fill="#164255" stroke="#22d3ee"/>
-  <text x="385" y="171" class="name">crab-http-server</text>
+  <text x="385" y="171" class="name">crab-server</text>
   <text x="385" y="190" class="detail">routes · auth · lifecycle</text>
   <rect x="255" y="255" width="260" height="70" rx="10" fill="#164255" stroke="#22d3ee"/>
   <text x="385" y="283" class="name">Repository Cell router</text>

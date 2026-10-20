@@ -1,0 +1,12 @@
+{
+  "name": "crab-server-cloudflare",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@cloudflare/containers": "0.3.7",
+    "jose": "6.2.13"
+  },
+  "devDependencies": {
+    "wrangler": "4.151.3"
+  }
+}

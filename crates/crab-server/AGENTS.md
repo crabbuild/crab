@@ -1,0 +1,117 @@
+# crab-server
+
+Root `AGENTS.md` and `crates/AGENTS.md` apply. Read
+`crates/crab-server/README.md` for crate usage. Paths below are repository-root-relative.
+
+## Purpose and ownership
+
+Owns the repository HTTP application, native Git endpoints, authentication, and embedded React assets. It composes remote-git/read/write/storage APIs; shared Git and storage mechanics remain in their owner crates.
+
+## Read first
+
+Read `crates/crab-server/CELLAR.md` for native Cellar storage, lifecycle,
+and migration limitations.
+
+1. `crates/crab-server/src/main.rs` — thin binary entry; `src/cli/mod.rs` owns command parsing and dispatch, with ECS discovery and CLI tests beside it.
+2. `crates/crab-server/src/server/mod.rs` — `serve`: process composition and ordered shutdown; `src/server/http/mod.rs` composes routes and `src/repository/mod.rs` owns pinned reads and maintenance.
+3. `crates/crab-server/src/app.rs` — `admit / repository`: request repository/principal boundary and error mapping.
+4. `crates/crab-server/src/auth/mod.rs` — `Principal / Authentication`: identity and configuration; `auth/state.rs` owns durable sessions, `auth/http.rs` owns login/session endpoints, and `auth/transport.rs` bounds provider requests.
+5. `crates/crab-server/src/git/receive/mod.rs` — `receive / publish_objects`: bounded native receive and publication orchestration.
+
+Trace one path: `crates/crab-server/src/main.rs` → `src/cli/mod.rs` → `serve` in
+`crates/crab-server/src/server/mod.rs` → router/handler composition.
+Receive continues through `crates/crab-server/src/git/receive/mod.rs` to the
+shared publication owner `crates/crab-write/src/journal.rs`.
+
+The Cell repository facade in `src/cells/repository/mod.rs` exposes typed
+operations. `models.rs` owns common records/inputs, `issues.rs` owns issue and
+comment operations, and `dispatch.rs` owns operation-ID decoding and dispatch.
+
+The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns
+typed ingress, `src/cells/application.rs` owns transaction/replay dispatch, and
+`src/cells/schema.sql` is the canonical initial schema. HTTP authorization and
+Cell error mapping stay in `src/app.rs`. No previous-runtime readers or catalog
+and session migration paths are supported.
+
+## Module layout
+
+- Use `<component>/mod.rs` for every component with child modules; keep its
+  implementation, submodules, and tests in that directory. Avoid custom `#[path]`
+  mounts and sibling `<component>.rs` entry points.
+- `api/` owns browser HTTP feature handlers and route assembly; `git/` owns native Git, object,
+  receive, and LFS endpoints and their route assembly. `auth/` assembles login
+  and session routes. `server/http/mod.rs` applies the common security boundary
+  after merging these routers. Shared request policy remains in `app.rs`.
+- `repository/` owns pinned reads, catalog materialization, maintenance, and
+  browse projections. Its `settings.rs` supplies policy to both browser and
+  native Git paths. `catalog/` owns durable catalog persistence and membership.
+- `peer/` owns private transport with TLS in `peer/tls/`; `server/` composes these
+  owners and manages ordered startup/shutdown.
+- Keep unit tests with their module. Put larger suites in `<component>/tests/`;
+  share only reusable setup through `test_support/`, gated by `cfg(test)`.
+
+## Common changes
+
+| Task | Start here | Also inspect |
+| --- | --- | --- |
+| HTTP receive | `crates/crab-server/src/git/receive/mod.rs` | `crates/crab-write/src/journal.rs` |
+| Content reads | `crates/crab-server/src/api/contents.rs` | `crates/crab-remote-git/src/snapshot.rs` |
+| Auth or routing | `crates/crab-server/src/server/http/mod.rs` | `crates/crab-server/src/server/http/boundary.rs`, `src/auth/mod.rs` |
+| Read readiness | `crates/crab-server/src/repository/mod.rs` | `src/server/background.rs`, `src/repository/maintenance.rs`, `crates/crab-write/src/generation.rs` |
+| Management and capacity | `crates/crab-server/src/server/management.rs` | `src/server/capacity.rs`, `src/metrics/mod.rs` |
+| Git imports | `crates/crab-server/src/git_import/mod.rs` | `src/git_import/source.rs` (validation), `src/git_import/git.rs` (process isolation) |
+| Browse APIs | `crates/crab-server/src/api/mod.rs` | `src/api/query.rs` (Git queries), `src/api/representation.rs` (encoding/ranges) |
+
+## Invariants
+
+- Keep transport identity/session checks and repository authorization before storage or Git effects; inspect auth and app boundary together.
+  Source: `crates/crab-server/src/app.rs`.
+- Git receive validation, publication outcome, and protocol acknowledgement are distinct steps; trace validate/publish and fault tests before changing error mapping.
+  Source: `crates/crab-server/src/git/receive/mod.rs`.
+- Repository operations and maintenance share long-lived runtime ownership; preserve explicit shutdown/draining when changing listener lifecycle.
+  Source: `crates/crab-server/src/server/mod.rs`.
+
+## Features and platform
+
+No declared Cargo features. Both library and auto-discovered main binary exist. `crates/crab-server/build.rs` requires packages/ui/dist/index.html and rejects symlink assets. Build the frontend before any Cargo check/test/build for this crate; Node requirements are in its README.
+
+## Verification
+
+Tests live under their owner: `api/tests.rs`, `auth/tests/`,
+`catalog/tests.rs`, `git/receive/tests/`, `git/lfs/tests.rs`,
+`api/pulls/tests.rs`, and `repository/tests/`. `server/peer_e2e_tests.rs`
+exercises process composition and native peer handoff.
+Shared setup lives in test-only `src/test_support/`; feature suites never import
+fixtures from another suite. Git commands/history belong in `test_support/git.rs`,
+server/Cell lifecycle fixtures in `test_support/server.rs`, peer identities
+in `test_support/tls.rs`, and archive-race recovery checks in
+`test_support/archive.rs`.
+
+Run from repository root. The target below is the example for worktree `089c`;
+replace it with a unique directory for your checkout. Before compilation, verify
+`$HOME/Workspace` resolves to the mounted workspace volume and the target is
+writable. Stop if unavailable; never fall back to a local target directory.
+
+```sh
+npm ci --prefix packages/ui
+npm run build --prefix packages/ui
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-089c" cargo test -p crab-server --locked --lib auth::tests::http
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-089c" cargo test -p crab-server --locked --lib git::receive::tests
+```
+
+These are focused checks, not full runtime qualification. Use affected-consumer
+checks and dedicated CI for broader behavior; existing interface/behavior slices
+are in `crab/scripts/check-crate-interface-builds.py` and
+`crab/scripts/check-crate-behavior.py`.
+
+## Related documentation
+
+- `crates/crab-server/README.md` — quick start and reading routes.
+- `crates/crab-server/REFERENCE.md` — detailed contracts and qualification history.
+- `crates/crab-server/Cargo.toml` — dependency and feature authority.
+
+Read `crates/crab-server/build.rs` and `packages/ui/package.json` for embedding changes. Dedicated image/service proof: `.github/workflows/http-server-container.yml`; native fetch proof: `.github/workflows/git-protocol-v2-partial-clone.yml`. Browser UI changes require their own frontend checks.
+
+Update this guide when entry points, ownership, invariants, features, or test
+routes change. Keep detailed API preconditions in rustdoc rather than copying
+them into a second specification.

@@ -16,7 +16,7 @@ Owns bounded filesystem-free Git reads from committed manifests, catalogs, and i
 5. `crates/crab-remote-git/src/operation.rs` — `OperationContext::finish`: budgets, cancellation, and explicit finish.
 6. `crates/crab-remote-git/src/reader.rs` — `RemoteGitReader::read_with_session`: object lookup and verified decoding.
 
-Trace one path: HTTP repository opening in `crates/crab-http-server/src/server.rs`
+Trace one path: HTTP repository opening in `crates/crab-server/src/server/mod.rs`
 → `RemoteGitRepository::open` in `crates/crab-remote-git/src/repository.rs`
 → manifest/catalog acquisition from `crates/crab-metadata/src/manifest_store.rs`
 and `crates/crab-metadata/src/git_object_locator`.
@@ -25,7 +25,7 @@ and `crates/crab-metadata/src/git_object_locator`.
 
 | Task | Start here | Also inspect |
 | --- | --- | --- |
-| Repository consistency | `crates/crab-remote-git/src/repository.rs` | `crates/crab-http-server/src/server.rs` |
+| Repository consistency | `crates/crab-remote-git/src/repository.rs` | `crates/crab-server/src/server/mod.rs` |
 | Object range/decode | `crates/crab-remote-git/src/reader.rs` | `crates/crab-remote-git/src/pack.rs` |
 | Bounded recursive listing | `crates/crab-remote-git/src/tree_listing.rs` | `crates/crab-s3-gateway/src/gateway.rs` |
 | Operation lifetime | `crates/crab-remote-git/src/operation.rs` | `crates/crab-remote-git/src/runtime.rs` |
