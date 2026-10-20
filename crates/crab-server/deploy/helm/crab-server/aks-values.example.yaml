@@ -1,0 +1,10 @@
+config:
+  storageUrl: az://teamstorage/crab-repositories/repositories
+
+serviceAccount:
+  name: crab-server
+  annotations:
+    azure.workload.identity/client-id: replace-with-managed-identity-client-id
+
+podLabels:
+  azure.workload.identity/use: "true"

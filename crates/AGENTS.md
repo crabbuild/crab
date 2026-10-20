@@ -24,14 +24,14 @@ Scoped rules for `crates/`. Root `AGENTS.md` also applies.
 - `crab-staging` — local segment staging, chunk indexes, prepared push plans, multipart resume, compaction, and recovery.
 - `crab-coordination` — push locks, write coordination, and feature-gated DynamoDB, Spanner, and Cosmos DB active-active backends.
 - `crab-lfs` — Git LFS object layout, storage access, and integrity checks; pointer parsing remains in `crab-git`.
-- `crab-http-server` embeds the published Cellar 0.1.0 native SDK. Cellar owns
+- `crab-server` embeds the published Cellar 0.1.0 native SDK. Cellar owns
   reusable runtime, persistence, and peer protocol contracts.
 
 ### Read, Cache, and Virtual Filesystems
 
 - `crab-cache` — cache keys, roots, local-cache contracts, remote client contracts, probes, profiles, shard hints, and Xet chunk-cache handles.
 - `crab-cache-store` — read-through `crab-storage` adapter that composes local and optional remote caches with origin reads.
-- `crab-http-server` — repository application HTTP APIs, configured bucket catalog, embedded React assets, and browser transport policy; top-level composition over remote Git and storage.
+- `crab-server` — repository application HTTP APIs, configured bucket catalog, embedded React assets, and browser transport policy; top-level composition over remote Git and storage.
 - `crab-cache-server` — cache-service configuration, persistence, origin access, auth, HTTP handlers, eviction, metrics, preflight, and server runtime.
 - `crab-write` — shared Git catalog publication/lifecycle and journal commit/compaction; consumers own authorization, ref leases, generation-service election and GC fencing.
 - `crab-read` — fetch admission, ref advertisement, selection, term resolution, and verified hydration across cache, metadata, storage, and Xet.
@@ -82,10 +82,10 @@ crab-types
 
 ## Cellar Boundary
 
-`crab-http-server` embeds the published Cellar native SDK. Product HTTP,
+`crab-server` embeds the published Cellar native SDK. Product HTTP,
 authorization, cloud configuration, and deployment policy stay here. Reusable
 runtime and LTX mechanics belong in [Cellar](https://github.com/crabbuild/cellar).
-Read `crates/crab-http-server/CELLAR.md` for the storage boundary and verification
+Read `crates/crab-server/CELLAR.md` for the storage boundary and verification
 status. Release evidence must exercise the native implementation.
 
 ## Feature Flags

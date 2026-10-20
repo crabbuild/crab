@@ -1745,7 +1745,7 @@ DELETED_WORKFLOW_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
     "pub use yaml::",
 }
 PRIVATE_INTERNAL_PACKAGES = {
-    "crab-http-server",
+    "crab-server",
     "crab-s3-gateway",
     "crab-vfs",
     "crab-workflow",
@@ -1778,16 +1778,16 @@ SHIPPED_BINARY_PACKAGES = {
 SERVER_PACKAGES = {
     "crab-auth-server",
     "crab-cache-server",
-    "crab-http-server",
+    "crab-server",
     "crab-s3-gateway",
 }
 ALLOWED_SERVER_DEV_FIXTURES = {
-    "crab-http-server": set(),
+    "crab-server": set(),
     "crab-auth-server": set(),
     "crab-cache-server": {"crab", "crab-cache-store"},
     "crab-s3-gateway": set(),
 }
-CELL_RUNTIME_SERVER_SOURCE_PATHS = ("crates/crab-http-server/src",)
+CELL_RUNTIME_SERVER_SOURCE_PATHS = ("crates/crab-server/src",)
 LEGACY_CELL_PACKAGES = frozenset(
     {"crab-cell-runtime", "crab-cell-app", "crab-cell-host", "crab-cell-peer-http", "crab-ltx", "cellule-runtime", "cellule-app", "cellule-host", "cellule-store", "cellule-ltx"}
 )
@@ -1826,7 +1826,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
     },
     "crab-write": {"normal": {"crab-coordination", "crab-types", "crab-git", "crab-metadata", "crab-remote-git", "crab-storage", "crab-xet"}},
     # The browser server composes Git and repository behavior with native Cellar.
-    "crab-http-server": {
+    "crab-server": {
         "normal": {
             "crab-coordination",
             "crab-git",
@@ -1958,7 +1958,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
 }
 WORKSPACE_DEPENDENCY_PATHS = {
     "crab-write": "crates/crab-write",
-    "crab-http-server": "crates/crab-http-server",
+    "crab-server": "crates/crab-server",
     "crab-auth": "crates/crab-auth",
     "crab-auth-server": "crates/crab-auth-server",
     "crab-auth-store": "crates/crab-auth-store",
@@ -2456,12 +2456,12 @@ def check_cell_runtime_server_boundary(root: Path, metadata: dict) -> bool:
                 if (
                     any(pattern in line for pattern in CELL_RUNTIME_SERVER_CONSTRUCTOR_PATTERNS)
                     and number not in allowed_lines
-                    and relative != "crates/crab-http-server/src/cells/runtime.rs"
+                    and relative != "crates/crab-server/src/cells/runtime.rs"
                 ):
                     violations.append(
                         f"{relative}:{number}: native Cellar construction belongs in cells/runtime.rs"
                     )
-            if relative == "crates/crab-http-server/src/server.rs":
+            if relative == "crates/crab-server/src/server.rs":
                 escaped = production_struct_fields(text, "Server") & CELL_RUNTIME_SERVER_COMPONENT_FIELDS
                 for field in sorted(escaped):
                     violations.append(
@@ -2472,7 +2472,7 @@ def check_cell_runtime_server_boundary(root: Path, metadata: dict) -> bool:
         print("ok: removed Cell packages stay outside the workspace and server")
         return True
 
-    print("error: crab-http-server escaped the canonical Cell runtime boundary:", file=sys.stderr)
+    print("error: crab-server escaped the canonical Cell runtime boundary:", file=sys.stderr)
     for violation in violations:
         print(f"  {violation}", file=sys.stderr)
     return False

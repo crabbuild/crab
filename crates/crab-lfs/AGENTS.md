@@ -18,7 +18,7 @@ Trace one transfer path: `crab/src/lfs/transfer_agent.rs` →
 `LfsObjectStore::put_stream_with_size` in
 `crates/crab-lfs/src/object_store.rs` → `Store`/multipart transport from
 `crates/crab-storage/src/store.rs`. Trace lock protocol composition separately
-through `crates/crab-http-server/src/lfs.rs`.
+through `crates/crab-server/src/lfs.rs`.
 
 ## Common changes
 

@@ -161,8 +161,8 @@ jobs:
 
       - name: Check HTTP server
         run: |
-          cargo clippy -p crab-http-server --all-targets --locked -- -D warnings
-          cargo test -p crab-http-server --example qualify_http_load --locked
+          cargo clippy -p crab-server --all-targets --locked -- -D warnings
+          cargo test -p crab-server --example qualify_http_load --locked
 
       - name: Check formatting
         run: cargo fmt --all -- --check

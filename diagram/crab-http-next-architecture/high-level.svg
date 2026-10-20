@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1240" role="img" aria-labelledby="title description">
-  <title id="title">crab-http-server next architecture — high-level design</title>
+  <title id="title">crab-server next architecture — high-level design</title>
   <desc id="description">Proposed Kubernetes deployment. Browser, Git and API clients enter any Crab Pod through a TLS edge. Collaboration requests run on the repository owner, locally or through authenticated peer transport. The owner writes one SQLite database per repository UUID and captures WAL changes as LTX. It uploads LTX and manifests before conditionally publishing ownership and the durable head in one control record. The existing Git runtime serves Git operations against object storage. Local databases are disposable and restore from the published LTX graph. Deployment uses a hard cutover with offline import and verification.</desc>
   <defs>
     <style>
@@ -158,6 +158,6 @@
   <text x="1380" y="1211" class="foot" text-anchor="end">PROPOSED DESIGN · SQLite/LTX runtime not yet implemented</text>
 
   <text x="60" y="36" class="eyebrow">CRAB / HIGH-LEVEL SYSTEM DESIGN</text>
-  <text x="60" y="78" class="title">crab-http-server · next architecture</text>
+  <text x="60" y="78" class="title">crab-server · next architecture</text>
   <text x="60" y="102" class="subtitle">Repository-scoped SQLite · embedded LTX replication · object-store authority</text>
 </svg>

@@ -15,7 +15,7 @@ Owns Git discovery, refs, pointers, packs, and bounded protocol mechanics. Trans
 4. `crates/crab-git/src/pack.rs` — `verify_pack_sha1 / install_pack_file_from_path`: pack/index integrity and installation.
 5. `crates/crab-git/src/refname.rs` — `validate_push_refname / validate_ref_namespace`: individual names versus final namespace validation.
 
-Trace one path: `crates/crab-http-server/src/receive/validate.rs` → `validate` in
+Trace one path: `crates/crab-server/src/receive/validate.rs` → `validate` in
 `crates/crab-git/src/receive_plan.rs` → `validate_ref_namespace` in
 `crates/crab-git/src/refname.rs`. Publication remains above this chain.
 
@@ -23,9 +23,9 @@ Trace one path: `crates/crab-http-server/src/receive/validate.rs` → `validate`
 
 | Task | Start here | Also inspect |
 | --- | --- | --- |
-| Native receive validation | `crates/crab-git/src/receive_plan.rs` | `crates/crab-http-server/src/receive/validate.rs` |
+| Native receive validation | `crates/crab-git/src/receive_plan.rs` | `crates/crab-server/src/receive/validate.rs` |
 | Pack decoding | `crates/crab-git/src/incoming_pack.rs`, `crates/crab-git/src/delta.rs` | `crates/crab-remote-git/src/reader.rs` |
-| Streaming pack construction | `crates/crab-git/src/pack_writer.rs` | `crates/crab-http-server/src/receive.rs` |
+| Streaming pack construction | `crates/crab-git/src/pack_writer.rs` | `crates/crab-server/src/receive.rs` |
 | Pointer classification | `crates/crab-git/src/pointer_detect.rs` | `crates/crab-types/src/pointer.rs` |
 
 ## Invariants

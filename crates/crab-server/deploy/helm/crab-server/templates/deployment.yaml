@@ -1,0 +1,191 @@
+{{- range $key := list "app.kubernetes.io/name" "app.kubernetes.io/instance" }}
+{{- if hasKey $.Values.podLabels $key }}
+{{- fail (printf "podLabels.%s is owned by the chart" $key) }}
+{{- end }}
+{{- end }}
+{{- range $key := list "checksum/managed-config" "crab.build/rollout-token" "prometheus.io/scrape" "prometheus.io/path" "prometheus.io/port" }}
+{{- if hasKey $.Values.podAnnotations $key }}
+{{- fail (printf "podAnnotations.%s is owned by the chart" $key) }}
+{{- end }}
+{{- end }}
+{{- include "crab-server.validateAvailability" . }}
+{{- include "crab-server.validateExtraEnv" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "crab-server.fullname" . }}
+  labels:
+    {{- include "crab-server.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  minReadySeconds: {{ .Values.minReadySeconds }}
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "crab-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "crab-server.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/managed-config: {{ if .Values.config.existingConfigMap }}""{{ else }}{{ include "crab-server.managedConfig" . | sha256sum | quote }}{{ end }}
+        {{- with .Values.rolloutToken }}
+        crab.build/rollout-token: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "crab-server.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      enableServiceLinks: false
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: crab-server
+          image: {{ include "crab-server.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config
+            - /etc/crab/http-server/server.toml
+            - --peer-advertise-host
+            - $(CRAB_POD_IP)
+          terminationMessagePolicy: FallbackToLogsOnError
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /usr/bin/sleep
+                  - "15"
+          ports:
+            - name: http
+              containerPort: 8788
+              protocol: TCP
+            - name: management
+              containerPort: 8789
+              protocol: TCP
+          startupProbe:
+            exec:
+              command:
+                - crab-server
+                - --config
+                - /etc/crab/http-server/server.toml
+                - healthcheck
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          readinessProbe:
+            exec:
+              command:
+                - crab-server
+                - --config
+                - /etc/crab/http-server/server.toml
+                - healthcheck
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          livenessProbe:
+            tcpSocket:
+              port: management
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          env:
+            - name: CRAB_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/crab/http-server
+              readOnly: true
+            - name: secrets
+              mountPath: /run/secrets/crab
+              readOnly: true
+            - name: scratch
+              mountPath: /var/lib/crab
+      topologySpreadConstraints:
+        {{- range .Values.topologySpreadConstraints }}
+        - maxSkew: {{ .maxSkew }}
+          {{- with .minDomains }}
+          minDomains: {{ . }}
+          {{- end }}
+          topologyKey: {{ .topologyKey }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "crab-server.selectorLabels" $ | nindent 14 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "crab-server.configMapName" . }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.config.key }}
+                path: server.toml
+        - name: secrets
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: {{ required "secrets.existingSecret is required" .Values.secrets.existingSecret }}
+                  items:
+                    {{- with .Values.secrets.oidcClientSecretKey }}
+                    - key: {{ . }}
+                      path: oidc-client-secret
+                    {{- end }}
+                    - key: {{ .Values.secrets.stateKeyKey }}
+                      path: state-key
+              - secret:
+                  name: {{ required "cells.existingSecret is required" .Values.cells.existingSecret }}
+                  items:
+                    - key: {{ .Values.cells.certificateKey }}
+                      path: peer/tls.crt
+                    - key: {{ .Values.cells.privateKeyKey }}
+                      path: peer/tls.key
+                    - key: {{ .Values.cells.caKey }}
+                      path: peer/ca.crt
+        - name: scratch
+          emptyDir:
+            sizeLimit: {{ .Values.scratch.sizeBytes | quote }}

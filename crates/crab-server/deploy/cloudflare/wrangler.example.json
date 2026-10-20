@@ -1,0 +1,53 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "crab-server",
+  "main": "index.js",
+  "compatibility_date": "2026-10-20",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "git.example.com",
+      "custom_domain": true
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CRAB",
+        "class_name": "CrabContainer"
+      }
+    ]
+  },
+  "exports": {
+    "CrabContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "containers": [
+    {
+      "class_name": "CrabContainer",
+      "image": "./Dockerfile",
+      "max_instances": 1,
+      "instance_type": {
+        "vcpu": 1,
+        "memory_mib": 3072,
+        "disk_mb": 20000
+      },
+      "observability": {
+        "logs": {
+          "enabled": true
+        }
+      }
+    }
+  ],
+  "vars": {
+    "R2_ENDPOINT": "https://ACCOUNT_ID.r2.cloudflarestorage.com",
+    "ACCESS_TEAM": "TEAM.cloudflareaccess.com",
+    "ACCESS_AUD": "ACCESS_APPLICATION_AUDIENCE"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

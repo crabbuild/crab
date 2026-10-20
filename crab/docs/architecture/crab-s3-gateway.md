@@ -15,12 +15,12 @@ the authority for the currently delivered behavior.
 ## Outcome and ownership
 
 Create `crates/crab-s3-gateway` as a separate server composition boundary,
-parallel to `crab-http-server`. Existing S3 clients connect over HTTPS using
+parallel to `crab-server`. Existing S3 clients connect over HTTPS using
 Crab-issued access credentials. The gateway translates S3 operations into SDK
 repository operations. Backend bucket names and storage placement stay private
 to the repository catalog; clients address logical repository names.
 
-`crab-http-server/src/lib.rs` exposes server configuration, initialization and
+`crab-server/src/lib.rs` exposes server configuration, initialization and
 serving; its private authentication and receive handlers are not a reusable S3
 service. Its `src/server.rs` composes storage and remote reads, while
 `src/receive/publish.rs` integrates repository policy and publication. Reuse
@@ -409,7 +409,7 @@ re-preparation policy that preserves unrelated file edits and conditions.
 
 **Source map.** `crates/crab-sdk/src/client.rs`, `crates/crab-remote/src/prepare.rs`,
 `publication.rs`, `crates/crab-write/src/journal.rs`, metadata receipts,
-`crates/crab-http-server/src/receive/publish.rs` and repository settings.
+`crates/crab-server/src/receive/publish.rs` and repository settings.
 
 **Acceptance criteria.** Real SDK create/update/delete/copy-equivalent edits are
 visible through independent Git and SDK reads. Metadata and content never expose

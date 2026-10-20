@@ -346,4 +346,4 @@ SQLite 3.45.0 predates the upstream
 [WAL-reset fix](https://www.sqlite.org/wal.html#walreset). The race can corrupt a
 WAL database when separate connections write and checkpoint concurrently.
 A matched dependency upgrade carrying that fix remains a release blocker.
-See the [native runtime contract](../crab-http-server/CELLAR.md).
+See the [native runtime contract](../crab-server/CELLAR.md).

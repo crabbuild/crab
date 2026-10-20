@@ -2,7 +2,7 @@
 
 Runtime-specific recipes and measurements below describe their recorded source
 revisions. Current server ownership and release gates live in the
-[native Cellar contract](../../../crates/crab-http-server/CELLAR.md); retired
+[native Cellar contract](../../../crates/crab-server/CELLAR.md); retired
 framework APIs and qualification scripts are no longer available.
 
 Current development checkpoint format is `CRBCKP06`: visibility dictionaries,

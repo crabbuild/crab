@@ -249,20 +249,20 @@ jobs:
               return 1
             fi
           }
-          run_test cargo test -p crab-http-server --locked --lib \
+          run_test cargo test -p crab-server --locked --lib \
             server::peer_e2e_tests::rustfs_cellar_routes_over_mutual_tls_and_recovers_after_handoff \
             -- --ignored --exact --nocapture
-          run_test cargo test -p crab-http-server --locked --lib \
+          run_test cargo test -p crab-server --locked --lib \
             server::auth_tests::members::rustfs_delayed_catalog_materialization_cannot_restore_revoked_http_access \
             -- --ignored --exact --nocapture
-          run_test cargo test -p crab-http-server --locked --lib
-          run_test cargo test -p crab-http-server --locked --bin crab-http-server
+          run_test cargo test -p crab-server --locked --lib
+          run_test cargo test -p crab-server --locked --bin crab-server
 
       - name: Qualify repository creation, Git push, and real process restart
         run: |
-          cargo build -p crab-http-server --locked --bin crab-http-server
-          python3 crates/crab-http-server/tests/qualify_cellar_process.py \
-            --binary "$CARGO_TARGET_DIR/debug/crab-http-server" \
+          cargo build -p crab-server --locked --bin crab-server
+          python3 crates/crab-server/tests/qualify_cellar_process.py \
+            --binary "$CARGO_TARGET_DIR/debug/crab-server" \
             --artifacts "${RUNNER_TEMP}/crab-cellar-process-proof"
       - name: Retain native process evidence
         if: always()
