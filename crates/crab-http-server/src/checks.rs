@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::cells::MutationIdentity;
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
@@ -20,10 +19,11 @@ use crate::{
         CheckAnnotationRecord, CheckOutputRecord, CheckReportInput, CheckRunDetail, CheckRunKey,
         CheckRunRecord, CheckStepRecord, CheckSubmissionKey, CreateCheckRun, CreateCheckRunInput,
         CreateCheckRunOutcome, GetCheckCreateSubmission, GetCheckRun, GetCheckUpdateSubmission,
-        ListCheckRuns, ListCheckRunsInput, RepositoryAuthor, UpdateCheckRun, UpdateCheckRunInput,
+        ListCheckRuns, ListCheckRunsInput, UpdateCheckRun, UpdateCheckRunInput,
         UpdateCheckRunOutcome,
     },
-    server::{Repository, Server},
+    repository::Repository,
+    server::Server,
     statuses,
 };
 
@@ -327,7 +327,7 @@ async fn create(
                 .client
                 .command::<CreateCheckRun>(
                     &routed.target,
-                    mutation_identity()?,
+                    crate::app::mutation_identity()?,
                     create_input(submission_id, &actor, input),
                 )
                 .await,
@@ -346,7 +346,7 @@ async fn create(
             .client
             .command::<CreateCheckRun>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 create_input(submission_id, &actor, input),
             )
             .await,
@@ -475,7 +475,7 @@ async fn edit(
                 .client
                 .command::<UpdateCheckRun>(
                     &routed.target,
-                    mutation_identity()?,
+                    crate::app::mutation_identity()?,
                     update_input(submission_id, &actor, oid, number, input),
                 )
                 .await,
@@ -494,7 +494,7 @@ async fn edit(
             .client
             .command::<UpdateCheckRun>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 update_input(submission_id, &actor, oid, number, input),
             )
             .await,
@@ -555,7 +555,7 @@ fn create_input(
 ) -> CreateCheckRunInput {
     CreateCheckRunInput {
         submission_id,
-        author: repository_author(actor),
+        author: crate::cells::repository::RepositoryAuthor::from(actor),
         oid: input.head_sha,
         name: input.name,
         report: report(
@@ -576,7 +576,7 @@ fn update_input(
 ) -> UpdateCheckRunInput {
     UpdateCheckRunInput {
         submission_id,
-        actor: repository_author(actor),
+        actor: crate::cells::repository::RepositoryAuthor::from(actor),
         oid,
         number,
         version: input.version,
@@ -814,28 +814,8 @@ fn updated_check(outcome: UpdateCheckRunOutcome) -> Result<CheckRunDetail> {
     }
 }
 
-fn repository_author(identity: &Identity) -> RepositoryAuthor {
-    RepositoryAuthor {
-        issuer: identity.issuer.clone(),
-        subject: identity.subject.clone(),
-        name: identity.name.clone(),
-    }
-}
-
 fn submission_id(value: &str) -> Result<[u8; 16]> {
     Uuid::parse_str(&app::submission(value)?)
         .map(Uuid::into_bytes)
         .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
-}
-
-fn mutation_identity() -> Result<MutationIdentity> {
-    let now_ms = crate::cells::unix_now_ms().map_err(Error::Cell)?;
-    let expires_at_ms = now_ms
-        .checked_add(60_000)
-        .ok_or(Error::CellContract("Cell request expiry overflowed"))?;
-    Ok(MutationIdentity {
-        request_id: Uuid::now_v7(),
-        issued_at_ms: now_ms,
-        expires_at_ms,
-    })
 }

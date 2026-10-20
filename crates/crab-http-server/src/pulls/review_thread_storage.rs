@@ -13,7 +13,8 @@ use crate::{
         UpdatePullReviewReply, UpdatePullReviewReplyInput, UpdatePullReviewReplyOutcome,
         UpdatePullReviewThread, UpdatePullReviewThreadInput, UpdatePullReviewThreadOutcome,
     },
-    server::{Repository, Server},
+    repository::Repository,
+    server::Server,
 };
 
 #[derive(Clone, Debug)]
@@ -148,11 +149,11 @@ pub(super) async fn create_thread(
             .client
             .command::<CreatePullReviewThread>(
                 &routed.target,
-                storage::mutation_identity()?,
+                crate::app::mutation_identity()?,
                 CreatePullReviewThreadInput {
                     pull,
                     submission_id: storage::submission_id(&input.request_id)?,
-                    author: storage::to_author(&input.author),
+                    author: crate::cells::repository::RepositoryAuthor::from(&input.author),
                     body: input.body,
                     suggested_text: input.suggested_text,
                     base_oid: input.base_oid,
@@ -189,10 +190,10 @@ pub(super) async fn update_thread(
             .client
             .command::<UpdatePullReviewThread>(
                 &routed.target,
-                storage::mutation_identity()?,
+                crate::app::mutation_identity()?,
                 UpdatePullReviewThreadInput {
                     key: PullReviewThreadKey { pull, number },
-                    actor: storage::to_author(&input.actor),
+                    actor: crate::cells::repository::RepositoryAuthor::from(&input.actor),
                     can_resolve: input.can_resolve,
                     version: input.version,
                     body: input.body,
@@ -287,12 +288,12 @@ pub(super) async fn create_reply(
             .client
             .command::<CreatePullReviewReply>(
                 &routed.target,
-                storage::mutation_identity()?,
+                crate::app::mutation_identity()?,
                 CreatePullReviewReplyInput {
                     pull,
                     thread,
                     submission_id: storage::submission_id(&input.request_id)?,
-                    author: storage::to_author(&input.author),
+                    author: crate::cells::repository::RepositoryAuthor::from(&input.author),
                     body: input.body,
                 },
             )
@@ -320,14 +321,14 @@ pub(super) async fn update_reply(
             .client
             .command::<UpdatePullReviewReply>(
                 &routed.target,
-                storage::mutation_identity()?,
+                crate::app::mutation_identity()?,
                 UpdatePullReviewReplyInput {
                     key: PullReviewReplyKey {
                         pull,
                         thread,
                         number,
                     },
-                    actor: storage::to_author(&actor),
+                    actor: crate::cells::repository::RepositoryAuthor::from(&actor),
                     version,
                     body,
                 },

@@ -1,4 +1,3 @@
-use crate::cells::MutationIdentity;
 use uuid::Uuid;
 
 use super::{Release, ReleaseAsset};
@@ -15,7 +14,8 @@ use crate::{
         ReserveReleaseAssetInput, ReserveReleaseAssetOutcome, UpdateRelease, UpdateReleaseInput,
         UpdateReleaseOutcome,
     },
-    server::{Repository, Server},
+    repository::Repository,
+    server::Server,
 };
 
 pub(super) struct NewRelease {
@@ -128,10 +128,10 @@ pub(super) async fn create(
             .client
             .command::<CreateRelease>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 CreateReleaseInput {
                     submission_id: submission_id(&input.submission_id)?,
-                    author: to_author(&input.author),
+                    author: crate::cells::repository::RepositoryAuthor::from(&input.author),
                     tag_name: input.tag_name,
                     target_oid: input.target_oid,
                     title: input.title,
@@ -163,7 +163,7 @@ pub(super) async fn update(
             .client
             .command::<UpdateRelease>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 UpdateReleaseInput {
                     number,
                     version: input.version,
@@ -200,7 +200,7 @@ pub(super) async fn complete_publication(
             .client
             .command::<CompleteReleasePublication>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 CompleteReleasePublicationInput {
                     number: release.number,
                     expected_version: pending.expected_version,
@@ -227,7 +227,7 @@ pub(super) async fn delete(
             .client
             .command::<DeleteRelease>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 DeleteReleaseInput { number, version },
             )
             .await,
@@ -250,7 +250,7 @@ pub(super) async fn reserve_asset(
             .client
             .command::<ReserveReleaseAsset>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 ReserveReleaseAssetInput {
                     reservation: to_reservation(&reservation)?,
                 },
@@ -286,7 +286,7 @@ pub(super) async fn attach_asset(
             .client
             .command::<AttachReleaseAsset>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 AttachReleaseAssetInput {
                     reservation: to_reservation(reservation)?,
                     size,
@@ -319,7 +319,7 @@ pub(super) async fn delete_asset(
             .client
             .command::<DeleteReleaseAsset>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 DeleteReleaseAssetInput {
                     release,
                     request_id: submission_id(request_id)?,
@@ -341,7 +341,7 @@ fn to_reservation(value: &AssetReservation) -> Result<ReleaseAssetReservation> {
         expected_version: value.expected_version,
         name: value.name.clone(),
         content_type: value.content_type.clone(),
-        uploader: to_author(&value.uploader),
+        uploader: crate::cells::repository::RepositoryAuthor::from(&value.uploader),
     })
 }
 
@@ -383,14 +383,6 @@ fn from_release(value: ReleaseRecord) -> Release {
     }
 }
 
-fn to_author(value: &Identity) -> crate::cells::repository::RepositoryAuthor {
-    crate::cells::repository::RepositoryAuthor {
-        issuer: value.issuer.clone(),
-        subject: value.subject.clone(),
-        name: value.name.clone(),
-    }
-}
-
 fn from_author(value: crate::cells::repository::RepositoryAuthor) -> Identity {
     Identity {
         issuer: value.issuer,
@@ -403,15 +395,4 @@ fn submission_id(value: &str) -> Result<[u8; 16]> {
     Uuid::parse_str(value)
         .map(Uuid::into_bytes)
         .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
-}
-
-fn mutation_identity() -> Result<MutationIdentity> {
-    let now_ms = crate::cells::unix_now_ms().map_err(Error::Cell)?;
-    Ok(MutationIdentity {
-        request_id: Uuid::now_v7(),
-        issued_at_ms: now_ms,
-        expires_at_ms: now_ms
-            .checked_add(60_000)
-            .ok_or(Error::CellContract("Cell request expiry overflowed"))?,
-    })
 }

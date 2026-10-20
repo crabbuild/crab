@@ -19,11 +19,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
-use crate::{
-    app,
-    auth::Principal,
-    server::{Repository, Server},
-};
+use crate::{app, auth::Principal, repository::Repository, server::Server};
 
 const CONTENT_TYPE: &str = "application/vnd.git-lfs+json";
 const BUDGET: Duration = Duration::from_secs(5 * 60);
@@ -246,8 +242,7 @@ async fn ensure_active(
     repository: &Repository,
 ) -> Result<()> {
     principal.identity().ok_or(Error::Forbidden)?;
-    if repository
-        .lifecycle(server)
+    if crate::repository_settings::load_lifecycle(server, repository)
         .await
         .map_err(|error| Error::Settings(Box::new(error)))?
         .archived

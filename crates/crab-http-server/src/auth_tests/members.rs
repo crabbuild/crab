@@ -21,7 +21,9 @@ async fn catalog_installation_preserves_revocation_before_http_access() {
         .await
         .unwrap();
     // Installing the current durable membership must precede HTTP access.
-    *h.server.repositories.current.write().unwrap() = RepositoryIndex::new(0, BTreeMap::new());
+    h.server
+        .repositories
+        .replace(RepositoryIndex::new(1, BTreeMap::new()));
     let (document, _) = catalog.load().await.unwrap();
     h.server.install_catalog(document).await.unwrap();
     let response = h
@@ -121,9 +123,11 @@ async fn delayed_catalog_materialization_preserves_http_denial(h: Harness) {
     assert_eq!(denied.status(), StatusCode::NOT_FOUND);
     // Resume an import holding the pre-revocation snapshot after refresh has
     // already installed the membership mutation accepted through public HTTP.
-    h.server
-        .repositories
-        .replace(materialize_catalog(&catalog, delayed).await.unwrap());
+    h.server.repositories.replace(
+        crate::repository::catalog::materialize(&catalog, delayed)
+            .await
+            .unwrap(),
+    );
     let response = h
         .http
         .get(format!("{}/api/repos/team/private/labels", h.origin))

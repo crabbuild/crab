@@ -140,7 +140,7 @@ async fn build_merge_commit(
 async fn finish(
     server: &Arc<Server>,
     principal: &Principal,
-    repo: &crate::server::Repository,
+    repo: &crate::repository::Repository,
     pull: &PullRequest,
     record: &PullMerge,
 ) -> Result<Value> {
@@ -335,7 +335,7 @@ async fn execute(
     }
     // These reads order merge admission before later status or check-run updates.
     // Once the reservation exists, retries recover that admitted publication.
-    let protections = repo.branch_protections(&server).await?;
+    let protections = crate::repository_settings::load(&server, repo).await?;
     let protection = protections.protection(&pull.base_ref);
     let (statuses, check_runs) = match protection {
         Some(rule) if !rule.required_checks.is_empty() => (

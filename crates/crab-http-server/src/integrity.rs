@@ -10,7 +10,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::server::{Repository, Server};
+use crate::{repository::Repository, server::Server};
 
 pub(crate) const SCRUB_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const REPORT_RETRY_INTERVAL: Duration = Duration::from_secs(30);

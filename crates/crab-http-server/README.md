@@ -208,7 +208,8 @@ Read these sources in order:
 
 | Source | Responsibility |
 | --- | --- |
-| [server.rs](src/server.rs) | Route composition, host/session checks, and mutation protection |
+| [server/http.rs](src/server/http.rs) | Route composition |
+| [server/http/boundary.rs](src/server/http/boundary.rs) | Host/session checks and mutation protection |
 | [issues.rs](src/issues.rs) | Route body limit, request extraction, HTTP contract, and typed command/query invocation |
 | [app.rs](src/app.rs) | Admission timeout, repository access, input validation, and HTTP error mapping |
 | [cells/client.rs](src/cells/client.rs) | Typed requests through native ingress |
@@ -262,6 +263,27 @@ Start with [AGENTS.md](AGENTS.md) for entry points, ownership, and invariants.
 The main source path is `src/main.rs` → `src/server.rs` → request handlers;
 publication continues into `crab-write`. The frontend lives in
 [`packages/ui`](../../packages/ui).
+
+The internal owners are:
+
+| Owner | Responsibility |
+| --- | --- |
+| `server.rs` | Startup, shared application state, and ordered shutdown |
+| `server/background.rs` | Catalog refresh and fair projection scheduling |
+| `server/management.rs`, `server/capacity.rs`, `server/storage.rs` | Private management, resource policy, and storage preflight |
+| `repository.rs`, `repository/catalog.rs` | Pinned Git snapshots, maintenance ownership, and atomic catalog installation |
+| `auth.rs`, `auth/state.rs`, `auth/http.rs`, `auth/transport.rs` | Identity, durable sessions, login endpoints, and bounded provider transport |
+| `git_import.rs`, `git_import/source.rs`, `git_import/git.rs` | Import jobs/workflow, source validation, and isolated Git processes |
+| `api.rs`, `api/query.rs`, `api/representation.rs` | Browse HTTP orchestration, Git queries, and wire encoding |
+| `app.rs` | Collaboration admission, authorization, mutation identity, and error mapping |
+| `cells/` | Native ingress, durable transactions, and domain commands/queries |
+
+Authentication always uses shared durable state, including in-memory object-store
+test fixtures; there is no separate process-local authentication mode. Repository
+construction initializes private cache and maintenance state. Settings
+policy stays in `repository_settings.rs`; repository reads do not forward HTTP
+settings operations. HTTP mutation families share one request identity policy in
+`app.rs`; projection retains its own non-HTTP error contract.
 
 Build the frontend before Rust checks. Focused HTTP authentication coverage:
 

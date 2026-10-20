@@ -1,11 +1,33 @@
-use super::*;
+use crate::RepositoryConfig;
+use crate::catalog::CatalogStore;
+use crate::repository::MaintenanceSchedule;
+use crate::repository::MaintenanceTrigger;
+use crate::repository::Repository;
+use crate::server::Server;
+use crate::server::http::router;
+use axum::Router;
 use axum::body::Body;
+use axum::extract::Request;
+use axum::http::StatusCode;
+use bytes::Bytes;
 use crab_metadata::capsule_protocol::{
     Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind,
     CapsuleTransaction, CapsuleVisibilityDelta,
 };
 use crab_metadata::git_visibility::GitVisibilityEdit;
+use crab_remote_git::RemoteGitRuntime;
+use crab_remote_git::RepositoryIdentity;
+use crab_remote_git::RepositoryOptions;
+use crab_storage::Store;
+use crab_storage::StoreLayout;
+use object_store::path::Path as ObjectPath;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use crate::test_git::history as git_history;
@@ -26,56 +48,33 @@ async fn fixture_with_store(store: Store) -> Arc<Server> {
     crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
         .await
         .unwrap();
-    Arc::new(Server {
-        repositories: BTreeMap::from([(
-            ("team".into(), "repo".into()),
-            Repository {
-                id: uuid::Uuid::from_bytes([1; 16]),
-                config: RepositoryConfig {
-                    owner: "team".into(),
-                    name: "repo".into(),
-                    bucket: "memory".into(),
-                    prefix: "maintenance".into(),
-                    default_branch: "main".into(),
-                    description: String::new(),
-                    members: vec![],
-                    protected_branches: vec![],
-                },
-                identity: RepositoryIdentity::new("memory", "maintenance", 1).unwrap(),
-                store,
-                layout,
-                pinned: Mutex::new(None),
-                projection_source: Mutex::new(None),
-                maintenance: Mutex::new(MaintenanceState::default()),
-                integrity: crate::integrity::Status::default(),
-            },
-        )])
-        .into(),
-        runtime: Arc::new(RemoteGitRuntime::default()),
-        repository_cells: None,
-        cell_services: None,
-        cell_test_runtime: None,
-        shutdown_mode: tokio::sync::watch::channel(cellar::sdk::ShutdownMode::Preserve).0,
-        options: RepositoryOptions::default(),
-        cursor_key: [0; 32],
-        admission: Semaphore::new(16),
-        transfer_admission: crate::transfer_admission::TransferAdmission::new(
-            admission_store,
-            "test/.crab/http-server/v1/admission".into(),
-            4,
-        ),
-        local_staging: crate::local_disk::LocalStaging::for_test(),
-        app_admission: Semaphore::new(8),
-        maintenance_admission: Arc::new(Semaphore::new(2)),
-        cancellation: CancellationToken::new(),
-        receives: tokio_util::task::TaskTracker::new(),
-        auth: None,
-        git_import: None,
-        catalog: None,
-        catalog_healthy: AtomicBool::new(false),
-        node_healthy: AtomicBool::new(false),
-        cell_capacity: super::test_cell_capacity_report(),
-        metrics: crate::metrics::Metrics::new().unwrap(),
+    Arc::new({
+        Server::for_test(
+            BTreeMap::from([(
+                ("team".into(), "repo".into()),
+                Repository::new(
+                    uuid::Uuid::from_bytes([1; 16]),
+                    RepositoryConfig {
+                        owner: "team".into(),
+                        name: "repo".into(),
+                        bucket: "memory".into(),
+                        prefix: "maintenance".into(),
+                        default_branch: "main".into(),
+                        description: String::new(),
+                        members: vec![],
+                        protected_branches: vec![],
+                    },
+                    layout,
+                    RepositoryIdentity::new("memory", "maintenance", 1).unwrap(),
+                ),
+            )])
+            .into(),
+            crate::transfer_admission::TransferAdmission::new(
+                admission_store,
+                "test/.crab/http-server/v1/admission".into(),
+                4,
+            ),
+        )
     })
 }
 
@@ -94,7 +93,7 @@ pub(crate) fn init_test_tracing() {
     });
 }
 
-pub(super) async fn fixture() -> Arc<Server> {
+pub(crate) async fn fixture() -> Arc<Server> {
     init_test_tracing();
     let mut server = fixture_without_cells().await;
     let cells = crate::cells::runtime::TestRuntime::start("127.0.0.1:8788".parse().unwrap()).await;
@@ -365,7 +364,7 @@ async fn readiness_opens_every_repository_before_admitting_traffic() {
     let mut server = fixture().await;
     enable_catalog_readiness(&mut server);
 
-    let response = management_router(Arc::clone(&server), Router::new())
+    let response = crate::server::management::router(Arc::clone(&server), Router::new())
         .oneshot(
             Request::builder()
                 .uri("/readyz")
@@ -385,7 +384,7 @@ async fn readiness_rejects_a_server_that_is_draining() {
     enable_catalog_readiness(&mut server);
     server.cancellation.cancel();
 
-    let response = management_router(Arc::clone(&server), Router::new())
+    let response = crate::server::management::router(Arc::clone(&server), Router::new())
         .oneshot(
             Request::builder()
                 .uri("/readyz")
@@ -411,7 +410,7 @@ async fn readiness_rejects_a_draining_cell_runtime() {
     enable_catalog_readiness(&mut server);
     server.shutdown_runtimes().await.unwrap();
 
-    let response = management_router(Arc::clone(&server), Router::new())
+    let response = crate::server::management::router(Arc::clone(&server), Router::new())
         .oneshot(
             Request::builder()
                 .uri("/readyz")
@@ -434,7 +433,7 @@ async fn readiness_rejects_a_draining_cell_runtime() {
 #[tokio::test]
 async fn integrity_proof_is_reported_separately_from_readiness() {
     let server = fixture_without_cells().await;
-    let management = management_router(Arc::clone(&server), Router::new());
+    let management = crate::server::management::router(Arc::clone(&server), Router::new());
     let pending = management
         .clone()
         .oneshot(
@@ -880,7 +879,7 @@ async fn attribution_schedules_repair_for_a_corrupt_pinned_descriptor() {
         &repo.identity,
         Arc::clone(&server.runtime),
         server.options,
-        2 * GIB,
+        2 * 1024 * 1024 * 1024,
         &server.cancellation,
     )
     .await

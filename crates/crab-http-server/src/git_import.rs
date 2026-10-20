@@ -1,9 +1,11 @@
+mod git;
+mod source;
+use git::{configure_git, default_branch, mirror_refs, mirror_size, push_mirror, run_git};
+use source::{GitImportRequest, ValidatedImport, validate_request};
+
 use std::{
     collections::{HashMap, HashSet},
-    io,
     net::SocketAddr,
-    path::Path,
-    process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -16,36 +18,25 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::Command,
-    sync::RwLock,
-};
-use tokio_util::sync::CancellationToken;
-use url::{Host, Url};
+use tokio::{process::Command, sync::RwLock};
 use uuid::Uuid;
 
 use crate::{
     Config, RepositoryAccess, RepositoryMember, app,
     auth::{Identity, Principal},
     catalog::CatalogStore,
-    server::{MaintenanceTrigger, Server},
+    repository::MaintenanceTrigger,
+    server::Server,
 };
 
 const MAX_ACTIVE_JOBS: usize = 4;
 const MAX_RETAINED_JOBS: usize = 256;
 const JOB_RETENTION: Duration = Duration::from_secs(60 * 60);
-const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const MAX_TOKEN_BYTES: usize = 512;
-const MAX_DESCRIPTION_CHARS: usize = 1_000;
 const MAX_IMPORT_REFS: usize = 100_000;
 const MAX_IMPORT_MIRROR_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const IMPORT_MIRROR_RESERVE_MARGIN: u64 = 64 * 1024 * 1024;
-const MAX_GIT_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
-const MAX_PUSH_ATTEMPTS: usize = 3;
-const PUSH_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub(crate) struct ImportContext {
@@ -216,27 +207,6 @@ struct GitImportStatus {
 struct ImportedRepository {
     owner: String,
     name: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GitImportRequest {
-    source: String,
-    owner: String,
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    token: Option<String>,
-}
-
-#[derive(Clone)]
-struct ValidatedImport {
-    source: String,
-    owner: String,
-    name: String,
-    description: String,
-    token: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -512,7 +482,7 @@ async fn import_repository(
         .await
     {
         Ok(directory) => directory,
-        Err(error) => return Err(map_staging_error(error)),
+        Err(error) => return Err(ImportError::Staging(error)),
     };
     let mirror = directory.path().join("repository.git");
     let mut clone = Command::new("git");
@@ -536,7 +506,7 @@ async fn import_repository(
     server
         .local_staging
         .resize(&directory, mirror_reservation)
-        .map_err(map_staging_error)?;
+        .map_err(ImportError::Staging)?;
 
     let default_branch = default_branch(&mirror, &cancellation).await?;
     context
@@ -621,533 +591,6 @@ async fn import_repository(
     Ok(())
 }
 
-fn map_staging_error(error: crate::local_disk::Error) -> ImportError {
-    ImportError::Staging(error)
-}
-
-async fn mirror_size(path: &Path) -> Result<u64, ImportError> {
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || directory_size(&path))
-        .await
-        .map_err(|error| ImportError::Io(io::Error::other(error)))?
-        .map_err(ImportError::Io)
-}
-
-fn directory_size(path: &Path) -> io::Result<u64> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    let file_type = metadata.file_type();
-    if file_type.is_symlink() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Git mirror contains a symbolic link",
-        ));
-    }
-    if file_type.is_file() {
-        return Ok(metadata.len());
-    }
-    if !file_type.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Git mirror contains a special file",
-        ));
-    }
-    std::fs::read_dir(path)?.try_fold(0_u64, |total, entry| {
-        let size = directory_size(&entry?.path())?;
-        total
-            .checked_add(size)
-            .ok_or_else(|| io::Error::other("Git mirror size overflowed"))
-    })
-}
-
-async fn push_mirror(
-    mirror: &Path,
-    destination: &str,
-    internal_key: &str,
-    cancellation: &CancellationToken,
-) -> Result<(), ImportError> {
-    let mut attempt = 0;
-    loop {
-        let mut push = Command::new("git");
-        push.current_dir(mirror)
-            .args(["push", "--quiet", "--atomic", "--mirror"])
-            .arg(destination);
-        configure_git(&mut push, None, Some(internal_key));
-        match run_git(push, cancellation, Some(internal_key)).await {
-            Ok(_) => return Ok(()),
-            Err(error)
-                if matches!(&error, ImportError::Git(_)) && attempt + 1 < MAX_PUSH_ATTEMPTS =>
-            {
-                attempt += 1;
-                tracing::warn!(
-                    attempt,
-                    max_attempts = MAX_PUSH_ATTEMPTS,
-                    error = ?error,
-                    "Git import publication failed; retrying"
-                );
-                let delay = PUSH_RETRY_DELAY
-                    .checked_mul(attempt as u32)
-                    .unwrap_or(PUSH_RETRY_DELAY);
-                tokio::select! {
-                    () = cancellation.cancelled() => return Err(ImportError::Cancelled),
-                    () = tokio::time::sleep(delay) => {}
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-async fn mirror_refs(
-    path: &Path,
-    cancellation: &CancellationToken,
-) -> Result<Vec<String>, ImportError> {
-    let mut refs = Command::new("git");
-    refs.current_dir(path)
-        .args(["for-each-ref", "--format=%(refname)"]);
-    configure_git(&mut refs, None, None);
-    let output = run_git(refs, cancellation, None).await?;
-    if output.len() > MAX_GIT_OUTPUT_BYTES {
-        return Err(ImportError::Git(
-            "Git source advertised too much ref metadata".into(),
-        ));
-    }
-    Ok(output
-        .lines()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .collect())
-}
-
-async fn default_branch(
-    path: &Path,
-    cancellation: &CancellationToken,
-) -> Result<String, ImportError> {
-    let mut symbolic = Command::new("git");
-    symbolic
-        .current_dir(path)
-        .args(["symbolic-ref", "--short", "HEAD"]);
-    configure_git(&mut symbolic, None, None);
-    match run_git(symbolic, cancellation, None).await {
-        Ok(branch) => {
-            let branch = branch.trim();
-            if valid_branch(branch) {
-                return Ok(branch.to_owned());
-            }
-        }
-        Err(ImportError::Git(_)) => {}
-        Err(error) => return Err(error),
-    }
-
-    let mut refs = Command::new("git");
-    refs.current_dir(path)
-        .args(["for-each-ref", "--format=%(refname:strip=2)", "refs/heads"]);
-    configure_git(&mut refs, None, None);
-    let refs = run_git(refs, cancellation, None).await?;
-    let mut branches = refs.lines().filter(|branch| valid_branch(branch));
-    branches
-        .find(|branch| *branch == "main")
-        .or_else(|| {
-            let mut fallback = refs.lines().filter(|branch| valid_branch(branch));
-            fallback.find(|branch| *branch == "master")
-        })
-        .or_else(|| refs.lines().find(|branch| valid_branch(branch)))
-        .map(str::to_owned)
-        .ok_or(ImportError::Git("Git source has no branch".into()))
-}
-
-fn configure_git(command: &mut Command, source_token: Option<&str>, internal_key: Option<&str>) {
-    command
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", empty_git_config())
-        .env_remove("GIT_CONFIG_PARAMETERS")
-        .env("GIT_CONFIG_COUNT", "2")
-        .env("GIT_CONFIG_KEY_0", "credential.helper")
-        .env("GIT_CONFIG_VALUE_0", "")
-        .env("GIT_CONFIG_KEY_1", "http.followRedirects")
-        .env("GIT_CONFIG_VALUE_1", "false");
-    if let Some(token) = source_token {
-        command
-            .env("GIT_CONFIG_COUNT", "3")
-            .env("GIT_CONFIG_KEY_2", "http.extraHeader")
-            .env(
-                "GIT_CONFIG_VALUE_2",
-                format!("Authorization: Bearer {token}"),
-            );
-    }
-    if let Some(key) = internal_key {
-        command
-            .env("GIT_CONFIG_COUNT", "3")
-            .env("GIT_CONFIG_KEY_2", "http.extraHeader")
-            .env(
-                "GIT_CONFIG_VALUE_2",
-                format!("X-Crab-Internal-Import: {key}"),
-            );
-    }
-}
-
-fn empty_git_config() -> &'static str {
-    if cfg!(windows) { "NUL" } else { "/dev/null" }
-}
-
-async fn run_git(
-    mut command: Command,
-    cancellation: &CancellationToken,
-    secret: Option<&str>,
-) -> Result<String, ImportError> {
-    command
-        .kill_on_drop(true)
-        .env_remove("GIT_TRACE")
-        .env_remove("GIT_TRACE_CURL")
-        .env_remove("GIT_CURL_VERBOSE")
-        .env_remove("GIT_TRACE_PACKET")
-        .env("LC_ALL", "C")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(ImportError::Io)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| ImportError::Io(io::Error::other("git stdout was not piped for import")))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| ImportError::Io(io::Error::other("git stderr was not piped for import")))?;
-    let (status, stdout, stderr) = tokio::select! {
-        result = tokio::time::timeout(GIT_COMMAND_TIMEOUT, async {
-            let (stdout, stderr) = tokio::try_join!(
-                read_git_output(stdout),
-                read_git_output(stderr),
-            )?;
-            let status = child.wait().await.map_err(GitOutputError::Io)?;
-            Ok::<_, GitOutputError>((status, stdout, stderr))
-        }) => {
-            match result {
-                Ok(Ok(output)) => output,
-                Ok(Err(GitOutputError::Limit)) => {
-                    return Err(ImportError::Git(
-                        "Git command output exceeded the import limit".into(),
-                    ));
-                }
-                Ok(Err(GitOutputError::Io(error))) => return Err(ImportError::Io(error)),
-                Err(_) => return Err(ImportError::Timeout),
-            }
-        }
-        () = cancellation.cancelled() => return Err(ImportError::Cancelled),
-    };
-    if !status.success() {
-        let mut detail = String::from_utf8_lossy(&stderr).trim().to_owned();
-        if let Some(secret) = secret.filter(|secret| !secret.is_empty()) {
-            detail = detail.replace(secret, "[redacted]");
-        }
-        if detail.is_empty() {
-            detail = "git exited unsuccessfully".into();
-        }
-        detail.truncate(512);
-        return Err(ImportError::Git(detail));
-    }
-    Ok(String::from_utf8_lossy(&stdout).into_owned())
-}
-
-#[derive(Debug)]
-enum GitOutputError {
-    Io(io::Error),
-    Limit,
-}
-
-async fn read_git_output<R>(mut reader: R) -> Result<Vec<u8>, GitOutputError>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut output = Vec::new();
-    let mut buffer = [0_u8; 8 * 1024];
-    loop {
-        let read = reader.read(&mut buffer).await.map_err(GitOutputError::Io)?;
-        if read == 0 {
-            return Ok(output);
-        }
-        if output.len().saturating_add(read) > MAX_GIT_OUTPUT_BYTES {
-            return Err(GitOutputError::Limit);
-        }
-        output.extend_from_slice(&buffer[..read]);
-    }
-}
-
-fn validate_request(
-    request: GitImportRequest,
-    allowed_hosts: &[String],
-) -> Result<ValidatedImport, ImportError> {
-    let source = normalize_source(&request.source, allowed_hosts)?;
-    let owner = identifier(request.owner, "owner")?;
-    let name = identifier(request.name, "name")?;
-    let description = request.description.unwrap_or_default().trim().to_owned();
-    if description.chars().count() > MAX_DESCRIPTION_CHARS
-        || description.chars().any(char::is_control)
-    {
-        return Err(ImportError::Invalid(
-            "description must be at most 1,000 characters without controls",
-        ));
-    }
-    let token = request
-        .token
-        .map(|token| token.trim().to_owned())
-        .filter(|token| !token.is_empty());
-    if token.as_deref().is_some_and(|token| {
-        token.len() > MAX_TOKEN_BYTES || token.bytes().any(|byte| !byte.is_ascii_graphic())
-    }) {
-        return Err(ImportError::Invalid("the Git source token is invalid"));
-    }
-    if token.is_some() && !source.starts_with("https://") {
-        return Err(ImportError::Invalid(
-            "source tokens require an HTTPS Git URL",
-        ));
-    }
-    Ok(ValidatedImport {
-        source,
-        owner,
-        name,
-        description,
-        token,
-    })
-}
-
-fn normalize_source(value: &str, allowed_hosts: &[String]) -> Result<String, ImportError> {
-    let value = value.trim();
-    if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_control()) {
-        return Err(ImportError::Invalid(
-            "source must be an allowed HTTPS or SSH clone URL",
-        ));
-    }
-    if let Some(path) = value
-        .strip_prefix("github.com:")
-        .or_else(|| value.strip_prefix("git@github.com:"))
-    {
-        return normalize_github_path(path, allowed_hosts);
-    }
-    if !value.contains("://") && !value.starts_with("git@") {
-        let mut segments = value.split('/');
-        let owner = segments.next().unwrap_or_default();
-        let name = segments.next().unwrap_or_default();
-        if segments.next().is_none() && valid_identifier(owner) && valid_identifier(name) {
-            return normalize_github_path(value, allowed_hosts);
-        }
-        return Err(ImportError::Invalid(
-            "source must be an allowed HTTPS or SSH clone URL",
-        ));
-    }
-    if let Some(rest) = value.strip_prefix("git@")
-        && let Some((host, path)) = rest.split_once(':')
-    {
-        return normalize_ssh_source(host, path, allowed_hosts);
-    }
-    let url = Url::parse(value)
-        .map_err(|_| ImportError::Invalid("source must be an allowed HTTPS or SSH clone URL"))?;
-    if !matches!(url.scheme(), "https" | "ssh")
-        || url.host_str().is_none()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(ImportError::Invalid(
-            "source must be an allowed HTTPS or SSH clone URL",
-        ));
-    }
-    let host = url
-        .host_str()
-        .ok_or(ImportError::Invalid("source host is required"))?;
-    if has_dot_path_segment(value) {
-        return Err(ImportError::Invalid("source repository path is invalid"));
-    }
-    let host = normalize_host(host)?;
-    require_allowed_host(&host, allowed_hosts)?;
-    if url.scheme() == "https" && !url.username().is_empty() {
-        return Err(ImportError::Invalid(
-            "HTTPS source URLs must not contain a username",
-        ));
-    }
-    if url.scheme() == "ssh" && !url.username().is_empty() && url.username() != "git" {
-        return Err(ImportError::Invalid(
-            "SSH source URLs must use the git user",
-        ));
-    }
-    let path = normalize_source_path(url.path())?;
-    if host == "github.com" {
-        if url.scheme() == "ssh" && url.port().is_some() {
-            return Err(ImportError::Invalid(
-                "GitHub SSH URLs must use the default SSH port",
-            ));
-        }
-        let port = url
-            .port()
-            .map_or_else(String::new, |port| format!(":{port}"));
-        return Ok(format!("https://github.com{port}/{path}"));
-    }
-    let scheme = url.scheme();
-    let user = if scheme == "ssh" { "git@" } else { "" };
-    let port = url
-        .port()
-        .map_or_else(String::new, |port| format!(":{port}"));
-    let host = format_url_host(&host);
-    Ok(format!("{scheme}://{user}{host}{port}/{path}"))
-}
-
-fn normalize_github_path(path: &str, allowed_hosts: &[String]) -> Result<String, ImportError> {
-    require_allowed_host("github.com", allowed_hosts)?;
-    let path = normalize_source_path(path)?;
-    let mut segments = path.trim_end_matches(".git").split('/');
-    let owner = segments.next().unwrap_or_default();
-    let name = segments.next().unwrap_or_default();
-    if segments.next().is_some() || !valid_identifier(owner) || !valid_identifier(name) {
-        return Err(ImportError::Invalid(
-            "GitHub shorthand must be owner/repository",
-        ));
-    }
-    Ok(format!("https://github.com/{owner}/{name}.git"))
-}
-
-fn normalize_ssh_source(
-    host: &str,
-    path: &str,
-    allowed_hosts: &[String],
-) -> Result<String, ImportError> {
-    let host = normalize_host(host)?;
-    require_allowed_host(&host, allowed_hosts)?;
-    let path = normalize_source_path(path)?;
-    if host == "github.com" {
-        return normalize_github_path(&path, allowed_hosts);
-    }
-    Ok(format!("ssh://git@{}/{path}", format_url_host(&host)))
-}
-
-fn format_url_host(host: &str) -> String {
-    if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_owned()
-    }
-}
-
-fn has_dot_path_segment(value: &str) -> bool {
-    let Some(scheme_end) = value.find("://") else {
-        return false;
-    };
-    let authority_start = scheme_end + 3;
-    let Some(path_offset) = value[authority_start..].find('/') else {
-        return false;
-    };
-    let path_start = authority_start + path_offset;
-    let path_end = value[path_start..]
-        .find(['?', '#'])
-        .map_or(value.len(), |offset| path_start + offset);
-    value[path_start..path_end]
-        .split('/')
-        .any(is_dot_path_segment)
-}
-
-fn is_dot_path_segment(segment: &str) -> bool {
-    let mut decoded = String::with_capacity(segment.len());
-    let bytes = segment.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2]))
-        {
-            decoded.push(char::from(high * 16 + low));
-            index += 3;
-        } else {
-            decoded.push(char::from(bytes[index]));
-            index += 1;
-        }
-    }
-    matches!(decoded.as_str(), "." | "..")
-}
-
-fn hex(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn normalize_host(value: &str) -> Result<String, ImportError> {
-    let host = Host::parse(value).map_err(|_| ImportError::Invalid("source host is invalid"))?;
-    let normalized = match host {
-        Host::Domain(value) => value.to_ascii_lowercase(),
-        Host::Ipv4(value) => value.to_string(),
-        Host::Ipv6(value) => value.to_string(),
-    };
-    if normalized.is_empty() || normalized.len() > 253 {
-        return Err(ImportError::Invalid("source host is invalid"));
-    }
-    Ok(normalized)
-}
-
-fn require_allowed_host(host: &str, allowed_hosts: &[String]) -> Result<(), ImportError> {
-    if allowed_hosts.iter().any(|allowed| allowed == host) {
-        Ok(())
-    } else {
-        Err(ImportError::Invalid(
-            "source host is not enabled by the server import allowlist",
-        ))
-    }
-}
-
-fn normalize_source_path(value: &str) -> Result<String, ImportError> {
-    let path = value.trim_matches('/');
-    if path.is_empty()
-        || path.len() > 4_096
-        || path.chars().any(char::is_control)
-        || path.bytes().any(|byte| matches!(byte, b'?' | b'#'))
-    {
-        return Err(ImportError::Invalid("source repository path is invalid"));
-    }
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    if path.is_empty()
-        || path
-            .split('/')
-            .any(|segment| segment.is_empty() || is_dot_path_segment(segment))
-    {
-        return Err(ImportError::Invalid("source repository path is invalid"));
-    }
-    Ok(format!("{path}.git"))
-}
-
-#[cfg(test)]
-fn normalize_github_source(value: &str) -> Result<String, ImportError> {
-    normalize_source(value, &["github.com".to_owned()])
-}
-
-fn identifier(value: String, field: &'static str) -> Result<String, ImportError> {
-    let value = value.trim().to_owned();
-    if !valid_identifier(&value)
-        || (field == "owner" && matches!(value.as_str(), "api" | "assets" | "auth" | "git"))
-    {
-        return Err(ImportError::Invalid(
-            "owner and name must be URL-safe identifiers",
-        ));
-    }
-    Ok(value)
-}
-
-fn valid_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 100
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        && !matches!(value, "." | "..")
-}
-
-fn valid_branch(value: &str) -> bool {
-    !value.is_empty()
-        && !value.starts_with("refs/")
-        && crab_git::validate_push_refname(&format!("refs/heads/{value}")).is_ok()
-}
-
 fn actor_key(actor: &Identity) -> String {
     format!("{}\0{}", actor.issuer, actor.subject)
 }
@@ -1194,65 +637,6 @@ fn encode_path_segment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn normalizes_github_locators_without_credentials() {
-        for value in [
-            "denoland/celld",
-            "https://github.com/denoland/celld.git",
-            "git@github.com:denoland/celld.git",
-            "ssh://git@github.com/denoland/celld",
-        ] {
-            assert_eq!(
-                normalize_github_source(value).unwrap(),
-                "https://github.com/denoland/celld.git"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_source_credentials_and_non_github_hosts() {
-        for value in [
-            "https://user:secret@github.com/team/repo",
-            "https://github.com/team/repo?token=secret",
-            "https://gitlab.com/team/repo",
-            "team/repo/extra",
-        ] {
-            assert!(normalize_github_source(value).is_err(), "{value}");
-        }
-    }
-
-    #[test]
-    fn accepts_allowlisted_git_hosts_and_rejects_untrusted_transports() {
-        let allowed = ["github.com".to_owned(), "gitlab.com".to_owned()];
-        assert_eq!(
-            normalize_source("https://gitlab.com/group/repo", &allowed).unwrap(),
-            "https://gitlab.com/group/repo.git"
-        );
-        assert_eq!(
-            normalize_source("https://gitlab.com/group/subgroup/repo.git", &allowed,).unwrap(),
-            "https://gitlab.com/group/subgroup/repo.git"
-        );
-        assert_eq!(
-            normalize_source("git@gitlab.com:group/repo.git", &allowed).unwrap(),
-            "ssh://git@gitlab.com/group/repo.git"
-        );
-        let ipv6 = ["2001:db8::7".to_owned()];
-        assert_eq!(
-            normalize_source("ssh://git@[2001:db8::7]:2222/group/repo", &ipv6).unwrap(),
-            "ssh://git@[2001:db8::7]:2222/group/repo.git"
-        );
-        for value in [
-            "https://gitlab.com/group/repo?token=secret",
-            "https://gitlab.com/group/../repo",
-            "https://gitlab.com/group/%2e%2e/repo",
-            "git@gitlab.com:group/repo?token=secret",
-            "git://gitlab.com/group/repo",
-            "https://example.com/group/repo",
-        ] {
-            assert!(normalize_source(value, &allowed).is_err(), "{value}");
-        }
-    }
 
     #[test]
     fn receive_authorization_is_narrow() {

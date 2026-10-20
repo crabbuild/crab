@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::cells::MutationIdentity;
 use axum::{
     Extension, Json, Router,
     extract::{Path, State, rejection::JsonRejection},
@@ -21,9 +20,10 @@ use crate::{
     auth::{Identity, Principal},
     cells::repository::{
         CommitStatusRecord, CommitStatusSubmissionKey, CreateCommitStatus, CreateCommitStatusInput,
-        CreateCommitStatusOutcome, GetCommitStatusSubmission, ListCommitStatuses, RepositoryAuthor,
+        CreateCommitStatusOutcome, GetCommitStatusSubmission, ListCommitStatuses,
     },
-    server::{Repository, Server},
+    repository::Repository,
+    server::Server,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -283,10 +283,10 @@ async fn create(
                 .client
                 .command::<CreateCommitStatus>(
                     &routed.target,
-                    mutation_identity()?,
+                    crate::app::mutation_identity()?,
                     CreateCommitStatusInput {
                         submission_id: request_id,
-                        author: repository_author(&candidate.author),
+                        author: crate::cells::repository::RepositoryAuthor::from(&candidate.author),
                         oid: candidate.oid,
                         context: candidate.context,
                         state: status_state_code(candidate.state),
@@ -309,10 +309,10 @@ async fn create(
             .client
             .command::<CreateCommitStatus>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 CreateCommitStatusInput {
                     submission_id: request_id,
-                    author: repository_author(&author),
+                    author: crate::cells::repository::RepositoryAuthor::from(&author),
                     oid,
                     context: input.context,
                     state: status_state_code(input.state),
@@ -326,30 +326,10 @@ async fn create(
     Ok((StatusCode::CREATED, Json(status_view(&status))))
 }
 
-fn repository_author(identity: &Identity) -> RepositoryAuthor {
-    RepositoryAuthor {
-        issuer: identity.issuer.clone(),
-        subject: identity.subject.clone(),
-        name: identity.name.clone(),
-    }
-}
-
 fn submission_id(value: &str) -> Result<[u8; 16]> {
     Uuid::parse_str(&app::submission(value)?)
         .map(Uuid::into_bytes)
         .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
-}
-
-fn mutation_identity() -> Result<MutationIdentity> {
-    let now_ms = crate::cells::unix_now_ms().map_err(Error::Cell)?;
-    let expires_at_ms = now_ms
-        .checked_add(60_000)
-        .ok_or(Error::CellContract("Cell request expiry overflowed"))?;
-    Ok(MutationIdentity {
-        request_id: Uuid::now_v7(),
-        issued_at_ms: now_ms,
-        expires_at_ms,
-    })
 }
 
 fn status_state_code(state: StatusState) -> u8 {

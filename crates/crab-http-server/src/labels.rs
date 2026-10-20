@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::cells::MutationIdentity;
 use axum::{
     Extension, Json, Router,
     extract::{Path, State, rejection::JsonRejection},
@@ -15,13 +14,14 @@ use uuid::Uuid;
 
 use crate::{
     app::{self, Error, Result},
-    auth::{Identity, Principal},
+    auth::Principal,
     cells::repository::{
         CreateLabel, CreateLabelInput, CreateLabelOutcome, DeleteLabel, DeleteLabelInput,
-        DeleteLabelOutcome, LabelRecord, ListLabels, RepositoryAuthor, UpdateLabel,
-        UpdateLabelInput, UpdateLabelOutcome,
+        DeleteLabelOutcome, LabelRecord, ListLabels, UpdateLabel, UpdateLabelInput,
+        UpdateLabelOutcome,
     },
-    server::{Repository, Server},
+    repository::Repository,
+    server::Server,
 };
 
 pub(crate) type Label = LabelRecord;
@@ -187,10 +187,10 @@ async fn create(
             .client
             .command::<CreateLabel>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 CreateLabelInput {
                     submission_id: submission_id(&input.request_id)?,
-                    author: repository_author(&actor),
+                    author: crate::cells::repository::RepositoryAuthor::from(&actor),
                     name: name(&input.name)?,
                     color: color(&input.color)?,
                     description: description(input.description)?,
@@ -231,7 +231,7 @@ async fn edit(
             .client
             .command::<UpdateLabel>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 UpdateLabelInput {
                     number: app::number(number)?,
                     version: input.version,
@@ -270,7 +270,7 @@ async fn remove(
             .client
             .command::<DeleteLabel>(
                 &routed.target,
-                mutation_identity()?,
+                crate::app::mutation_identity()?,
                 DeleteLabelInput {
                     number: app::number(number)?,
                     version: input.version,
@@ -283,26 +283,6 @@ async fn remove(
         DeleteLabelOutcome::NotFound => Err(Error::LabelNotFound),
         DeleteLabelOutcome::Conflict => Err(Error::Conflict),
     }
-}
-
-fn repository_author(identity: &Identity) -> RepositoryAuthor {
-    RepositoryAuthor {
-        issuer: identity.issuer.clone(),
-        subject: identity.subject.clone(),
-        name: identity.name.clone(),
-    }
-}
-
-fn mutation_identity() -> Result<MutationIdentity> {
-    let now_ms = crate::cells::unix_now_ms().map_err(Error::Cell)?;
-    let expires_at_ms = now_ms
-        .checked_add(60_000)
-        .ok_or(Error::CellContract("Cell request expiry overflowed"))?;
-    Ok(MutationIdentity {
-        request_id: Uuid::now_v7(),
-        issued_at_ms: now_ms,
-        expires_at_ms,
-    })
 }
 
 fn submission_id(value: &str) -> Result<[u8; 16]> {

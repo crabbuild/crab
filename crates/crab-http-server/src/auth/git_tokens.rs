@@ -1,6 +1,24 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-use super::*;
+use super::{
+    AuthError, AuthState, Authentication, GitToken, Key, Principal, STATE_CAS_ATTEMPTS, Session,
+    StoredGitToken, StoredSession, key, now_epoch,
+};
+use crate::{RepositoryAccess, server::Server};
+use axum::{
+    Extension, Json,
+    extract::State,
+    http::{HeaderMap, StatusCode, header},
+};
+use bytes::Bytes;
+use crab_storage::StorageError;
+use openidconnect::CsrfToken;
+use serde::Deserialize;
+use serde_json::json;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,11 +66,7 @@ impl Authentication {
     }
 
     pub(super) async fn load_git_token(&self, token_key: Key) -> Option<Arc<GitToken>> {
-        let Some(state) = &self.state else {
-            let mut tokens = self.git_tokens.lock().await;
-            tokens.retain(|_, token| token.active());
-            return tokens.get(&token_key).cloned();
-        };
+        let state = &self.state;
         let body = state
             .store
             .get_with_etag_bounded(&state.path("git-tokens", &token_key), 64 * 1024)
@@ -107,21 +121,7 @@ impl Authentication {
         token_key: Key,
         token: Arc<GitToken>,
     ) -> Result<(), AuthError> {
-        let Some(state) = &self.state else {
-            let mut tokens = self.git_tokens.lock().await;
-            tokens.retain(|_, token| token.active());
-            if tokens.len() >= 4096
-                || tokens
-                    .values()
-                    .filter(|candidate| Arc::ptr_eq(&candidate.session, &token.session))
-                    .count()
-                    >= 10
-            {
-                return Err(AuthError::Busy);
-            }
-            tokens.insert(token_key, token);
-            return Ok(());
-        };
+        let state = &self.state;
         let record = StoredGitToken {
             session_key: token.session.session_key,
             owner: token.owner.clone(),
@@ -190,47 +190,46 @@ impl Authentication {
     }
 
     pub(super) async fn remove_git_tokens(&self, session: &Arc<Session>) -> Result<(), AuthError> {
-        if let Some(state) = &self.state {
-            let session_path = state.path("sessions", &session.session_key);
-            let mut token_keys = None;
-            for _ in 0..STATE_CAS_ATTEMPTS {
-                let (body, etag) = state
-                    .store
-                    .get_with_etag_bounded(&session_path, 64 * 1024)
-                    .await
-                    .map_err(|error| match error {
-                        StorageError::NotFound { .. } => AuthError::Invalid,
-                        other => AuthError::Storage(other),
-                    })?;
-                let mut stored: StoredSession = serde_json::from_slice(&body)?;
-                let keys = std::mem::take(&mut stored.git_tokens);
-                match state
-                    .store
-                    .update(
-                        &session_path,
-                        Bytes::from(serde_json::to_vec(&stored)?),
-                        etag,
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        token_keys = Some(keys);
-                        break;
-                    }
-                    Err(StorageError::StateConflict { .. }) => continue,
-                    Err(error) => return Err(error.into()),
+        let state = &self.state;
+        let session_path = state.path("sessions", &session.session_key);
+        let mut token_keys = None;
+        for _ in 0..STATE_CAS_ATTEMPTS {
+            let (body, etag) = state
+                .store
+                .get_with_etag_bounded(&session_path, 64 * 1024)
+                .await
+                .map_err(|error| match error {
+                    StorageError::NotFound { .. } => AuthError::Invalid,
+                    other => AuthError::Storage(other),
+                })?;
+            let mut stored: StoredSession = serde_json::from_slice(&body)?;
+            let keys = std::mem::take(&mut stored.git_tokens);
+            match state
+                .store
+                .update(
+                    &session_path,
+                    Bytes::from(serde_json::to_vec(&stored)?),
+                    etag,
+                )
+                .await
+            {
+                Ok(_) => {
+                    token_keys = Some(keys);
+                    break;
                 }
+                Err(StorageError::StateConflict { .. }) => continue,
+                Err(error) => return Err(error.into()),
             }
-            let token_keys = token_keys.ok_or(AuthError::Busy)?;
-            for token_key in token_keys {
-                match state
-                    .store
-                    .delete(&state.path("git-tokens", &token_key))
-                    .await
-                {
-                    Ok(()) | Err(StorageError::NotFound { .. }) => {}
-                    Err(error) => return Err(error.into()),
-                }
+        }
+        let token_keys = token_keys.ok_or(AuthError::Busy)?;
+        for token_key in token_keys {
+            match state
+                .store
+                .delete(&state.path("git-tokens", &token_key))
+                .await
+            {
+                Ok(()) | Err(StorageError::NotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
             }
         }
         self.git_tokens.lock().await.retain(|_, token| {

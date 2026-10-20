@@ -31,6 +31,7 @@ mod projection;
 mod pulls;
 mod receive;
 mod releases;
+mod repository;
 mod repository_settings;
 mod resources;
 mod server;
@@ -44,12 +45,13 @@ pub use config::{
     AuthProvider, BranchProtection, CellDurabilityMode, CellsConfig, Config, GitHubConfig,
     ImportConfig, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember, StorageConfig,
 };
-pub use server::{probe_storage, serve};
+pub use server::serve;
+pub use server::storage::probe_storage;
 
 /// Returns the resource-derived Cell admission envelope for this process.
 pub fn cell_capacity(config: &Config) -> Result<Vec<u8>> {
     config.validate()?;
-    server::cell_capacity_report(&config.cells.data_dir, config.cells.local_disk_limit_bytes)
+    server::capacity::report(&config.cells.data_dir, config.cells.local_disk_limit_bytes)
 }
 
 /// Initializes the empty application Cell for one newly cataloged repository.

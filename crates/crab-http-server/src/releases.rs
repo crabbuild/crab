@@ -20,7 +20,8 @@ use crate::{
     app::{self, Error, Result},
     auth::{Identity, Principal},
     receive::{self, ReceiveError},
-    server::{Repository, Server},
+    repository::Repository,
+    server::Server,
     statuses,
 };
 
@@ -480,7 +481,10 @@ async fn upload_asset(
         return Err(Error::ReleasePermission);
     }
     let actor = app::actor(&principal)?;
-    if repo.lifecycle(&server).await?.archived {
+    if crate::repository_settings::load_lifecycle(&server, repo)
+        .await?
+        .archived
+    {
         return Err(Error::Archived);
     }
     let number = app::number(number)?;
@@ -569,7 +573,10 @@ async fn upload_asset(
             let repo = app::repository(&worker_server, &principal, &key)?;
             let repo = repo.as_ref();
             app::actor(&principal)?;
-            if repo.lifecycle(&worker_server).await?.archived || !principal.can_write(&repo.config)
+            if crate::repository_settings::load_lifecycle(&worker_server, repo)
+                .await?
+                .archived
+                || !principal.can_write(&repo.config)
             {
                 return Err(Error::Archived);
             }
@@ -611,7 +618,10 @@ async fn remove_asset(
         return Err(Error::ReleasePermission);
     }
     app::actor(&principal)?;
-    if repo.lifecycle(&server).await?.archived {
+    if crate::repository_settings::load_lifecycle(&server, repo)
+        .await?
+        .archived
+    {
         return Err(Error::Archived);
     }
     let Json(input) = input?;

@@ -19,7 +19,8 @@ use crate::{
     auth::{Identity, Principal},
     checks::{self, CheckRun},
     labels::{self, Label},
-    server::{Repository, Server},
+    repository::Repository,
+    server::Server,
     statuses::{self, CommitStatus, StatusState},
 };
 
@@ -76,7 +77,7 @@ async fn pull_view(
         |merge| merge.head_oid.as_str(),
     );
     let branches_available = pull.merge.is_some() || current.is_some();
-    let protections = repo.branch_protections(server).await?;
+    let protections = crate::repository_settings::load(server, repo).await?;
     let protection = protections.protection(&pull.base_ref);
     let (statuses, check_runs) = match protection {
         Some(rule) if !rule.required_checks.is_empty() => (

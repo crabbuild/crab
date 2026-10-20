@@ -17,7 +17,8 @@ use crate::{
     app::{self, Error, Result},
     auth::{Identity, Principal},
     cells::repository::{PullReviewThreadListInput, PullReviewThreadSide},
-    server::{Repository, Server},
+    repository::Repository,
+    server::Server,
 };
 
 const MAX_NUMBER: u64 = 9_007_199_254_740_991;

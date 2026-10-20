@@ -589,6 +589,9 @@ async fn attribution_restart_reuses_the_verified_thirty_two_commit_checkpoint() 
         complete.commit_graph_hash().to_owned(),
         None,
     )
+    .unwrap()
+    // Attribution is interrupted; already verified physical readiness survives.
+    .with_object_index(complete.object_index_hash().unwrap().to_owned())
     .unwrap();
     let view = repo
         .open_view()
