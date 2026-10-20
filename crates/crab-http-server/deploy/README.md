@@ -23,6 +23,7 @@ flowchart LR
 | GKE | `helm/crab-http-server` | GKE Workload Identity Federation | Recommended team profile; live qualification required |
 | AKS | `helm/crab-http-server` | AKS Workload ID | Recommended team profile; live qualification required |
 | ECS/Fargate | `ecs/task-definition.example.json` | ECS task role | Evaluation profile; replacement grace is too short |
+| Cloudflare Containers / R2 | `cloudflare/` | Bucket-scoped S3 credentials behind Cloudflare Access | Single-operator evaluation; native release gates apply |
 
 The Kubernetes chart generates configuration from typed values, runs three or more replicas,
 private probes and Prometheus metrics, an optional Prometheus Operator

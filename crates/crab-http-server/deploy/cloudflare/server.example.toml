@@ -1,0 +1,15 @@
+listen = "127.0.0.1:8788"
+management_listen = "127.0.0.1:8789"
+
+[storage]
+url = "s3://BUCKET/repositories"
+
+[cells]
+data_dir = "/var/lib/crab/cells"
+local_disk_limit_bytes = 20000000000
+peer_advertise = "https://127.0.0.1:8789"
+peer_tls_server_name = "localhost"
+peer_certificate = "/etc/crab/peer.crt"
+peer_private_key = "/etc/crab/peer.key"
+peer_ca = "/etc/crab/ca.crt"
+durability = "object"
