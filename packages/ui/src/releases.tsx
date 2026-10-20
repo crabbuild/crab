@@ -292,7 +292,7 @@ function ReleaseList({
     endpoint(repo, "releases", { before, limit: "20", query }),
   );
   return (
-    <Result state={releases} showTiming={false}>
+    <Result state={releases}>
       {(page) => (
         <>
           {page.items.length ? (
@@ -392,7 +392,7 @@ function ReleaseDetail({
     endpoint(repo, `releases/tag/${encodeURIComponent(tag)}`),
   );
   return (
-    <Result state={release} showTiming={false}>
+    <Result state={release}>
       {(current) => (
         <div className="release-detail">
           <Link

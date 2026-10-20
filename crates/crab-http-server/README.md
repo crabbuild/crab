@@ -70,6 +70,18 @@ and **Settings** appear in that order; commit history lives under Code.
 **Go to file** (keyboard `T`) opens file search, and **Add file** offers the
 existing create and upload actions.
 
+Pull request conversations show merge requirements above the comment editor.
+Choose a merge method, review the commit message, and confirm the merge; an
+uncertain publication can be retried using the original submission.
+
+Request timing widgets are hidden by default. Add `?powerbar=1` to a browser
+page (or `&powerbar=1` when it already has a query) to show component timings.
+Each timing badge outlines its complete widget; hover the badge to highlight
+that boundary. Nested outlines identify nested requests contributing to a view.
+Expand a widget to inspect its API URL and the server's `Server-Timing` header.
+The displayed duration includes network transfer and JSON parsing, not React
+rendering. In-app navigation retains the flag; `powerbar=0` disables it.
+
 | Page | Path after `/{owner}/{name}` |
 | --- | --- |
 | Repository default branch | Root |

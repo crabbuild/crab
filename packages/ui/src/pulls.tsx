@@ -367,7 +367,7 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
           Refresh
         </Button>
       </div>
-      <Result state={page}>
+      <Result state={page} timingLabel="Pull requests">
         {(data) => (
           <>
             {data.items.length ? (
@@ -651,7 +651,7 @@ function PullDetail({
       : undefined;
   return (
     <section className="pulls-page pull-detail">
-      <Result state={pull}>
+      <Result state={pull} timingLabel="Pull request">
         {(data) => (
           <>
             <div className="pull-title">
@@ -1046,7 +1046,7 @@ function PullReviewThreads({
           </div>
         </form>
       )}
-      <Result state={threads}>
+      <Result state={threads} timingLabel="Review threads">
         {() => (
           <div className="inline-review-list">
             <div className="section-heading">
@@ -1094,7 +1094,7 @@ function PullReviewThreads({
         <summary>
           Outdated conversations ({outdatedThreads.items.length})
         </summary>
-        <Result state={outdatedThreads}>
+        <Result state={outdatedThreads} timingLabel="Outdated review threads">
           {() =>
             outdatedThreads.items.length ? (
               <div className="inline-review-list">
@@ -1437,7 +1437,7 @@ function ReviewReplies({
           <span className="muted">{replies.items.length}</span>
         )}
       </div>
-      <Result state={replies}>
+      <Result state={replies} timingLabel="Thread replies">
         {() =>
           replies.items.map((reply) => (
             <ReviewReplyItem
@@ -1603,7 +1603,7 @@ function PullCommits({
           Refresh
         </Button>
       </div>
-      <Result state={commits}>
+      <Result state={commits} timingLabel="Pull request commits">
         {(page) => (
           <>
             {page.items.length ? (
@@ -1680,9 +1680,9 @@ function PullConversation({
         </header>
         <DiscussionMarkdown>{pull.body}</DiscussionMarkdown>
       </article>
-      <Result state={comments}>
+      <Result state={comments} timingLabel="Conversation comments">
         {(commentPage) => (
-          <Result state={reviews}>
+          <Result state={reviews} timingLabel="Pull request reviews">
             {(reviewPage) => (
               <PullTimeline
                 comments={commentPage.items}
@@ -1693,8 +1693,11 @@ function PullConversation({
         )}
       </Result>
       {!repo.archived && (
+        <MergePanel repo={repo} pull={pull} csrf={csrf} refresh={refresh} />
+      )}
+      {!repo.archived && (
         <form
-          className="panel discussion-form"
+          className="discussion-form pull-comment-form"
           onSubmit={async (event) => {
             event.preventDefault();
             const input = { body };
@@ -1709,7 +1712,7 @@ function PullConversation({
             }
           }}
         >
-          <h3>Join the conversation</h3>
+          <h3>Add a comment</h3>
           <Editor
             id="pull-comment"
             label="Comment"
@@ -1720,13 +1723,6 @@ function PullConversation({
           />
           <Failure message={commentMutation.error} />
           <div className="discussion-actions">
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={commentMutation.pending || !body.trim()}
-            >
-              {commentMutation.pending ? "Commenting…" : "Comment"}
-            </Button>
             {pull.can_manage && (
               <Button
                 type="button"
@@ -1749,14 +1745,16 @@ function PullConversation({
                   : "Reopen pull request"}
               </Button>
             )}
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={commentMutation.pending || !body.trim()}
+            >
+              {commentMutation.pending ? "Commenting…" : "Comment"}
+            </Button>
           </div>
           <Failure message={stateMutation.error} />
         </form>
-      )}
-      {!repo.archived && (
-        <div className="notice pull-merge-note">
-          <MergePanel repo={repo} pull={pull} csrf={csrf} refresh={refresh} />
-        </div>
       )}
     </div>
   );
@@ -1776,12 +1774,13 @@ function MergePanel({
   const mutation = useMutation(csrf);
   const submission = useSubmission();
   const pending = pull.merge_pending;
+  const [confirming, setConfirming] = useState(false);
   const [method, setMethod] = useState<"merge_commit" | "fast_forward">(
     "merge_commit",
   );
-  const defaultMessage = `Merge pull request #${pull.number} from ${branch(pull.head_ref)}`;
-  const [message, setMessage] = useState(defaultMessage);
-  const selectedMethod = pending?.method ?? method;
+  const [message, setMessage] = useState(
+    `Merge pull request #${pull.number} from ${branch(pull.head_ref)}`,
+  );
   const requirements = pull.merge_requirements;
   const protection = repo.protected_branches.find(
     (rule) => rule.branch === branch(pull.base_ref),
@@ -1790,171 +1789,228 @@ function MergePanel({
     requirements.required_approvals === 0 ||
     (requirements.changes_requested === 0 &&
       requirements.approvals >= requirements.required_approvals);
+
+  async function merge() {
+    // A pending publication must replay the exact original submission, even if
+    // current branch tips or the form have changed since the first attempt.
+    const input = pending
+      ? {
+          version: pending.pull_version,
+          method: pending.method,
+          base_oid: pending.base_oid,
+          head_oid: pending.head_oid,
+          message: pending.message,
+        }
+      : {
+          version: pull.version,
+          method,
+          base_oid: pull.base_oid,
+          head_oid: pull.head_oid,
+          message: method === "merge_commit" ? message : "",
+        };
+    const merged = await mutation.run<PullRequest>(
+      endpoint(repo, `pulls/${pull.number}/merge`),
+      "POST",
+      { ...input, request_id: pending?.request_id ?? submission(input) },
+    );
+    if (merged) refresh();
+  }
+
   if (pull.merge)
     return (
-      <>
-        <GitMergeIcon className="merge-status-icon" />
-        <div>
-          <strong>Pull request merged</strong>
-          <p>
-            {pull.merge.author}{" "}
-            {pull.merge.method === "merge_commit"
-              ? "created merge commit"
-              : "fast-forwarded commit"}{" "}
-            <code>{short(pull.merge.commit_oid)}</code> into{" "}
-            <code>{branch(pull.base_ref)}</code>{" "}
-            {timestamp(pull.merge.created_at)}.
-          </p>
+      <section className="pull-merge-note merged" aria-label="Merge status">
+        <div className="merge-summary">
+          <GitMergeIcon className="merge-status-icon" size={24} />
+          <div>
+            <strong>Pull request merged</strong>
+            <p>
+              {pull.merge.author}{" "}
+              {pull.merge.method === "merge_commit"
+                ? "created merge commit"
+                : "fast-forwarded commit"}{" "}
+              <code>{short(pull.merge.commit_oid)}</code> into{" "}
+              <code>{branch(pull.base_ref)}</code>{" "}
+              {timestamp(pull.merge.created_at)}.
+            </p>
+          </div>
         </div>
-      </>
+      </section>
     );
   if (pull.state === "closed")
     return (
-      <>
-        <GitPullRequestClosedIcon />
-        <div>
-          <strong>This pull request is closed</strong>
-          <p>Reopen it before merging these commits.</p>
+      <section className="pull-merge-note closed" aria-label="Merge status">
+        <div className="merge-summary">
+          <GitPullRequestClosedIcon size={24} />
+          <div>
+            <strong>This pull request is closed</strong>
+            <p>Reopen it before merging these commits.</p>
+          </div>
         </div>
-      </>
+      </section>
     );
-  if (!pull.branches_available && !pending)
-    return (
-      <>
-        <GitMergeIcon />
-        <div>
-          <strong>This pull request cannot be merged</strong>
-          <p>The base or head branch is unavailable.</p>
-        </div>
-      </>
-    );
+  const unavailable = !pull.branches_available && !pending;
+  const ready = requirements.satisfied && !unavailable;
+  const StatusIcon = pending
+    ? ClockIcon
+    : ready
+      ? CheckCircleFillIcon
+      : ShieldLockIcon;
   return (
-    <>
-      <GitMergeIcon />
-      <div className="merge-action">
-        <strong>
-          {pending
-            ? `${pending.author} started ${pending.method === "merge_commit" ? "a merge commit" : "a fast-forward merge"}`
-            : !requirements.satisfied
-              ? "Merging is blocked"
-              : "Merge requirements are satisfied"}
-        </strong>
-        <p>
-          Crab verifies ancestry, dependency content, visibility, and the exact
-          branch tips again while holding the base ref lock.
-        </p>
-        {protection && (
-          <p className="protected-branch-note">
-            <ShieldLockIcon />
-            <span>
-              <code>{branch(pull.base_ref)}</code> is protected. Direct pushes
-              are blocked; this exact head can publish through the pull request
-              merge path.
-            </span>
-          </p>
-        )}
+    <section
+      className={`pull-merge-note ${pending ? "pending" : ready ? "ready" : "blocked"}`}
+      aria-label="Merge status"
+    >
+      {!unavailable && (
         <RequiredChecks
           repo={repo}
           pull={pull}
           requirements={requirements}
           refresh={refresh}
         />
-        {pull.can_merge ? (
-          <div className="merge-controls">
-            {!pending && (
+      )}
+      <div className="merge-summary">
+        <StatusIcon size={24} />
+        <div className="merge-action">
+          <strong>
+            {pending
+              ? `${pending.author} started ${pending.method === "merge_commit" ? "a merge commit" : "a fast-forward merge"}`
+              : unavailable
+                ? "This pull request cannot be merged"
+                : ready
+                  ? "Merge requirements are satisfied"
+                  : "Merging is blocked"}
+          </strong>
+          <p>
+            {unavailable ? (
+              "The base or head branch is unavailable."
+            ) : pending ? (
+              "Retry to confirm the outcome of the original merge."
+            ) : (
               <>
-                <ActionMenu>
-                  <ActionMenu.Button>
-                    {method === "merge_commit"
-                      ? "Create a merge commit"
-                      : "Fast-forward only"}
-                  </ActionMenu.Button>
-                  <ActionMenu.Overlay width="medium">
-                    <ActionList selectionVariant="single">
-                      <ActionList.Item
-                        selected={method === "merge_commit"}
-                        onSelect={() => setMethod("merge_commit")}
-                      >
-                        Create a merge commit
-                        <ActionList.Description variant="block">
-                          Add all commits with a two-parent merge commit.
-                        </ActionList.Description>
-                      </ActionList.Item>
-                      <ActionList.Item
-                        selected={method === "fast_forward"}
-                        onSelect={() => setMethod("fast_forward")}
-                      >
-                        Fast-forward only
-                        <ActionList.Description variant="block">
-                          Move the base branch only when it is an ancestor.
-                        </ActionList.Description>
-                      </ActionList.Item>
-                    </ActionList>
-                  </ActionMenu.Overlay>
-                </ActionMenu>
-                {method === "merge_commit" && (
-                  <TextInput
-                    block
-                    aria-label="Merge commit message"
-                    value={message}
-                    maxLength={256}
-                    onChange={(event) => setMessage(event.target.value)}
-                  />
-                )}
+                Merge <code>{branch(pull.head_ref)}</code> into{" "}
+                <code>{branch(pull.base_ref)}</code>. Branches are checked again
+                when merging.
               </>
             )}
-            <Button
-              variant="primary"
-              disabled={mutation.pending}
-              onClick={async () => {
-                const input = pending
-                  ? {
-                      version: pending.pull_version,
-                      method: pending.method,
-                      base_oid: pending.base_oid,
-                      head_oid: pending.head_oid,
-                      message: pending.message,
-                    }
-                  : {
-                      version: pull.version,
-                      method: selectedMethod,
-                      base_oid: pull.base_oid,
-                      head_oid: pull.head_oid,
-                      message: selectedMethod === "merge_commit" ? message : "",
-                    };
-                const merged = await mutation.run<PullRequest>(
-                  endpoint(repo, `pulls/${pull.number}/merge`),
-                  "POST",
-                  {
-                    ...input,
-                    request_id: pending?.request_id ?? submission(input),
-                  },
-                );
-                if (merged) refresh();
-              }}
-            >
-              {mutation.pending
-                ? "Merging…"
-                : pending
-                  ? "Retry merge"
-                  : "Merge pull request"}
-            </Button>
-          </div>
-        ) : repo.access === "write" && !reviewsSatisfied ? (
-          <p className="merge-blocked-note">
-            <XCircleFillIcon />
-            <span>
+          </p>
+          {!unavailable && protection && (
+            <p className="protected-branch-note">
+              <ShieldLockIcon />{" "}
+              <span>
+                <code>{branch(pull.base_ref)}</code> is protected.
+              </span>
+            </p>
+          )}
+          {!unavailable && !reviewsSatisfied && (
+            <p className="merge-blocked-note">
               {requirements.changes_requested > 0
                 ? `${requirements.changes_requested} current change request${requirements.changes_requested === 1 ? "" : "s"} must be resolved.`
                 : `${Math.max(0, requirements.required_approvals - requirements.approvals)} more approving review${requirements.required_approvals - requirements.approvals === 1 ? " is" : "s are"} required.`}
-            </span>
-          </p>
-        ) : repo.access === "read" ? (
-          <p className="muted">Write access is required to merge.</p>
-        ) : null}
-        <Failure message={mutation.error} />
+            </p>
+          )}
+        </div>
       </div>
-    </>
+      {!unavailable && (
+        <div className="merge-footer">
+          {pull.can_merge ? (
+            <div className="merge-controls">
+              {!pending && !confirming && (
+                <div className="merge-method-row">
+                  <Button variant="primary" onClick={() => setConfirming(true)}>
+                    Merge pull request
+                  </Button>
+                  <ActionMenu>
+                    <ActionMenu.Button>
+                      {method === "merge_commit"
+                        ? "Create a merge commit"
+                        : "Fast-forward only"}
+                    </ActionMenu.Button>
+                    <ActionMenu.Overlay width="medium">
+                      <ActionList selectionVariant="single">
+                        <ActionList.Item
+                          selected={method === "merge_commit"}
+                          onSelect={() => setMethod("merge_commit")}
+                        >
+                          Create a merge commit
+                          <ActionList.Description variant="block">
+                            Add all commits with a two-parent merge commit.
+                          </ActionList.Description>
+                        </ActionList.Item>
+                        <ActionList.Item
+                          selected={method === "fast_forward"}
+                          onSelect={() => setMethod("fast_forward")}
+                        >
+                          Fast-forward only
+                          <ActionList.Description variant="block">
+                            Move the base branch only when it is an ancestor.
+                          </ActionList.Description>
+                        </ActionList.Item>
+                      </ActionList>
+                    </ActionMenu.Overlay>
+                  </ActionMenu>
+                </div>
+              )}
+              {(pending || confirming) && (
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void merge();
+                  }}
+                >
+                  {!pending && method === "merge_commit" && (
+                    <label className="merge-message">
+                      Commit message
+                      <TextInput
+                        block
+                        autoFocus
+                        aria-label="Merge commit message"
+                        value={message}
+                        maxLength={256}
+                        disabled={mutation.pending}
+                        onChange={(event) => setMessage(event.target.value)}
+                      />
+                    </label>
+                  )}
+                  <div className="merge-method-row">
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      disabled={
+                        mutation.pending ||
+                        (!pending &&
+                          method === "merge_commit" &&
+                          !message.trim())
+                      }
+                    >
+                      {mutation.pending
+                        ? "Merging…"
+                        : pending
+                          ? "Retry merge"
+                          : "Confirm merge"}
+                    </Button>
+                    {!pending && (
+                      <Button
+                        disabled={mutation.pending}
+                        onClick={() => setConfirming(false)}
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                  </div>
+                </form>
+              )}
+            </div>
+          ) : (
+            <p className="muted">
+              {repo.access === "read"
+                ? "Write access is required to merge."
+                : "Complete the requirements above to enable merging."}
+            </p>
+          )}
+          <Failure message={mutation.error} />
+        </div>
+      )}
+    </section>
   );
 }
 

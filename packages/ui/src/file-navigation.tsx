@@ -1,6 +1,6 @@
 import { repoHref, revisionAddress } from "./repository-route";
 import { Fragment, useState } from "react";
-import { Button, IconButton } from "@primer/react";
+import { IconButton } from "@primer/react";
 import {
   CheckIcon,
   CopyIcon,
@@ -104,14 +104,12 @@ export function FileNavigation({
 }) {
   return (
     <div className="file-navigation">
-      <Button
-        size="small"
+      <IconButton
+        icon={SidebarExpandIcon}
         onClick={onOpenTree}
         aria-label="Open file tree"
         aria-expanded={false}
-      >
-        <SidebarExpandIcon />
-      </Button>
+      />
       <RevisionPicker
         refs={refs}
         revision={revision}

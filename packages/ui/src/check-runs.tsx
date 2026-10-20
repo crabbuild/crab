@@ -125,7 +125,7 @@ export function CheckRuns({
   );
   return (
     <section className="check-runs" aria-label="Checks">
-      <Result state={page} showTiming={false}>
+      <Result state={page} timingLabel="Check runs">
         {(data) =>
           data.items.length ? (
             <>
@@ -184,7 +184,7 @@ export function CheckRuns({
                 )}
               </aside>
               <div className="check-run-detail">
-                <Result state={detail}>
+                <Result state={detail} timingLabel="Check details">
                   {(run) => <CheckRunDetail run={run} />}
                 </Result>
               </div>

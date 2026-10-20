@@ -1090,7 +1090,7 @@ function DiffView({
         </SegmentedControl>
       </div>
       {load ? (
-        <Result state={state} showTiming={false}>
+        <Result state={state}>
           {() =>
             files ? (
               <MultiFileDiff<InlineDiffThread>

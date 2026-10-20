@@ -1,7 +1,7 @@
 import { Component } from "react";
 import type { AnchorHTMLAttributes, ReactNode } from "react";
 import { Button, Spinner } from "@primer/react";
-import { navigate, type Loaded } from "./api";
+import { navigate, useLocation, type Loaded } from "./api";
 
 export function Link({
   href = "/",
@@ -33,12 +33,16 @@ export function Link({
 export function Result<T>({
   state,
   children,
-  showTiming = true,
+  timingLabel,
 }: {
   state: Loaded<T> & { retry: () => void };
   children: (data: T) => ReactNode;
-  showTiming?: boolean;
+  timingLabel?: string;
 }) {
+  const location = useLocation();
+  const powerbar =
+    new URL(location, window.location.origin).searchParams.get("powerbar") ===
+    "1";
   if (state.error)
     return (
       <div className="notice error" role="alert">
@@ -53,20 +57,35 @@ export function Result<T>({
         <Spinner size="small" /> Loading repository data…
       </div>
     );
+  const content = children(state.data);
+  if (!powerbar || !state.timing) return <>{content}</>;
+  const label = timingLabel ?? state.timing.url;
   return (
-    <>
-      {children(state.data)}
-      {showTiming && state.timing && (
-        <details className="timing">
-          <summary>Request timing</summary>
-          <div title={state.timing.server ?? undefined}>
-            {state.timing.roundtrip.toFixed(1)} ms round trip{" "}
-            <span aria-hidden="true">·</span>{" "}
-            <span>Object storage → browser</span>
-          </div>
-        </details>
-      )}
-    </>
+    <div
+      className="timing-widget"
+      role="group"
+      aria-label={`${label} request widget`}
+    >
+      <details className="timing" aria-label={`${label} request timing`}>
+        <summary>
+          <span>{label}</span>
+          <strong>{state.timing.roundtrip.toFixed(1)} ms</strong>
+        </summary>
+        <div className="timing-details">
+          <code>{state.timing.url}</code>
+          <p>
+            Round trip includes the request, response transfer, and JSON
+            parsing.
+          </p>
+          {state.timing.server && (
+            <p>
+              Server-Timing: <code>{state.timing.server}</code>
+            </p>
+          )}
+        </div>
+      </details>
+      {content}
+    </div>
   );
 }
 export function short(oid: string) {

@@ -95,7 +95,7 @@ function AssigneePicker({
               ×
             </Button>
           </header>
-          <Result state={catalog} showTiming={false}>
+          <Result state={catalog} timingLabel="Assignees">
             {(data) => (
               <>
                 <fieldset disabled={mutation.pending}>

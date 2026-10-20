@@ -360,7 +360,7 @@ export function EditRelease({
     endpoint(repo, `releases/tag/${encodeURIComponent(tag)}`),
   );
   return (
-    <Result state={release} showTiming={false}>
+    <Result state={release}>
       {(current) => (
         <EditReleaseForm
           key={`${current.number}:${current.version}`}

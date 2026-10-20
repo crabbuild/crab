@@ -355,7 +355,10 @@ test("pull request creation, discussion, and files follow the GitHub review flow
         state = "closed";
         return route.fulfill({ json: pull() });
       }
-      return route.fulfill({ json: pull() });
+      return route.fulfill({
+        headers: { "Server-Timing": "handler;dur=12.5" },
+        json: pull(),
+      });
     }
     if (/\/pulls\/\d+\/comments$/.test(path)) {
       if (request.method() === "POST") {
@@ -569,6 +572,52 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(page.locator(".pull-summary")).toContainText(
     "feature/docs into main",
   );
+  await expect(page.locator(".timing")).toHaveCount(0);
+  await expect(page.locator(".timing-widget")).toHaveCount(0);
+  const mergePosition = await page.locator(".pull-merge-note").boundingBox();
+  const commentPosition = await page
+    .locator(".pull-comment-form")
+    .boundingBox();
+  expect(mergePosition!.y + mergePosition!.height).toBeLessThan(
+    commentPosition!.y,
+  );
+  await page.goto("/team/project/pull/2?powerbar=1");
+  for (const component of [
+    "Pull request",
+    "Conversation comments",
+    "Pull request reviews",
+  ]) {
+    const timing = page.locator(
+      `details[aria-label="${component} request timing"]`,
+    );
+    await expect(timing.locator("summary")).toContainText(/\d+\.\d ms/);
+    await expect(timing.locator("..")).toHaveClass("timing-widget");
+    await timing.locator("summary").click();
+    await expect(timing.locator("code").first()).toContainText(
+      "/api/repos/team/project/pulls/2",
+    );
+  }
+  await expect(
+    page.locator('details[aria-label="Pull request request timing"]'),
+  ).toContainText("handler;dur=12.5");
+  const pullWidget = page.getByRole("group", {
+    name: "Pull request request widget",
+    exact: true,
+  });
+  await expect(
+    pullWidget.getByRole("heading", { name: /Document the feature #2/ }),
+  ).toBeVisible();
+  await expect(pullWidget.locator(".pull-merge-note")).toBeVisible();
+  await expect(
+    pullWidget.getByRole("textbox", { name: "Comment", exact: true }),
+  ).toBeVisible();
+  const widgetBounds = (await pullWidget.boundingBox())!;
+  const mergeBounds = (await pullWidget
+    .locator(".pull-merge-note")
+    .boundingBox())!;
+  expect(mergeBounds.y + mergeBounds.height).toBeLessThanOrEqual(
+    widgetBounds.y + widgetBounds.height,
+  );
   await expect(page.locator(".pull-merge-note")).toContainText(
     "main is protected",
   );
@@ -587,6 +636,9 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expectNoAccessibilityViolations(page);
 
   await page.getByRole("link", { name: "Checks", exact: true }).click();
+  await expect(page).toHaveURL(/powerbar=1/);
+  await page.goto(page.url().replace("?powerbar=1", "?powerbar=0"));
+  await expect(page.locator(".timing")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "ci/test" })).toBeVisible();
   await expect(page.locator(".check-run-content")).toContainText(
     "The required test suite passed.",
@@ -719,6 +771,20 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await page.reload();
   await page
     .getByRole("button", { name: "Merge pull request", exact: true })
+    .click();
+  await expect(
+    page.getByRole("textbox", { name: "Merge commit message" }),
+  ).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Confirm merge", exact: true }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Merge pull request", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Confirm merge", exact: true })
     .click();
   await expect(page.getByRole("alert")).toContainText(
     "The merge may have completed",

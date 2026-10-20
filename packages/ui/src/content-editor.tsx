@@ -502,7 +502,7 @@ export function EditFile({
     endpoint(repo, "file", { rev: expectedHead, path_hex: pathHex }),
   );
   return (
-    <Result state={state} showTiming={false}>
+    <Result state={state}>
       {(content) =>
         content.text === null || content.classification !== "OrdinaryGit" ? (
           <div className="notice error" role="alert">
@@ -615,7 +615,7 @@ export function DeleteFile({
     endpoint(repo, "file", { rev: expectedHead, path_hex: pathHex }),
   );
   return (
-    <Result state={state} showTiming={false}>
+    <Result state={state}>
       {(content) => (
         <DeleteFileForm
           repo={repo}

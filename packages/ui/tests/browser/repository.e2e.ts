@@ -1711,6 +1711,119 @@ test("blame and source panes resize with pointer and keyboard controls", async (
   await expect(separator).toHaveAttribute("aria-valuenow", "48");
 });
 
+test("file tree controls align the branch picker and place collapse after search", async ({
+  page,
+}) => {
+  await page.goto(`/team/project/blob/main/README.md`);
+  const sidebar = page.locator(".tree-sidebar");
+  await expect(sidebar.getByText("Files", { exact: true })).toHaveCount(0);
+  const branch = sidebar.getByRole("button", {
+    name: /^Switch branches or tags/,
+  });
+  const search = sidebar.getByRole("button", { name: "Focus file search" });
+  const collapse = sidebar.getByRole("button", { name: "Close file tree" });
+  const searchBounds = await search.boundingBox();
+  const collapseBounds = await collapse.boundingBox();
+  expect(collapseBounds!.x).toBeGreaterThan(
+    searchBounds!.x + searchBounds!.width,
+  );
+  expect(collapseBounds!.y).toBe(searchBounds!.y);
+  const iconOffset = await branch.evaluate((node) => {
+    const icon = node.querySelector('[data-component="leadingVisual"]')!;
+    return (
+      icon.getBoundingClientRect().left - node.getBoundingClientRect().left
+    );
+  });
+  expect(iconOffset).toBeLessThan(16);
+  const arrowOffset = await branch.evaluate((node) => {
+    const arrow = node.querySelector('[data-component="trailingVisual"]')!;
+    return (
+      node.getBoundingClientRect().right - arrow.getBoundingClientRect().right
+    );
+  });
+  expect(arrowOffset).toBeLessThan(16);
+
+  await branch.click();
+  const dialog = page.getByRole("dialog", { name: "Switch branches/tags" });
+  await expect(dialog).toBeVisible();
+  expect((await dialog.boundingBox())!.x).toBeCloseTo(
+    (await branch.boundingBox())!.x,
+    0,
+  );
+  await page.keyboard.press("Escape");
+  await search.click();
+  await expect(page.locator("#repository-tree-search")).toBeFocused();
+});
+
+test("file tree scrolls independently and its resize grip follows the sticky pane", async ({
+  page,
+}) => {
+  const source = "A line of repository content.\n".repeat(200);
+  await routePreviewFiles(page, {
+    "long.txt": { text: source, bytes: strToU8(source) },
+  });
+  await page.route("**/api/repos/team/project/tree?*", (route) =>
+    route.fulfill({
+      json: {
+        items: Array.from({ length: 100 }, (_, index) => {
+          const path = `file-${index}.txt`;
+          return {
+            path,
+            path_hex: pathHex(path),
+            kind: "Blob",
+            oid,
+            mode: "100644",
+          };
+        }),
+        next: null,
+        commit: oid,
+        generation: 1,
+        directory_oid: oid,
+      },
+    }),
+  );
+  await page.goto(`/team/project/blob/main/long.txt`);
+  const sidebar = page.locator(".tree-sidebar");
+  const separator = page.getByRole("separator", {
+    name: "Resize file tree pane",
+  });
+  const treeScroll = sidebar.locator(
+    '[data-file-tree-virtualized-scroll="true"]',
+  );
+  await expect(treeScroll).toBeVisible();
+  await expect(treeScroll).toHaveCSS("overscroll-behavior-y", "contain");
+  await treeScroll.hover();
+  const pagePosition = await page.evaluate(() => window.scrollY);
+  await page.mouse.wheel(0, 10000);
+  await expect
+    .poll(() => treeScroll.evaluate((node) => node.scrollTop))
+    .toBeGreaterThan(0);
+  const treePosition = await treeScroll.evaluate((node) => node.scrollTop);
+  await page.mouse.wheel(0, 10000);
+  await expect
+    .poll(() => page.evaluate(() => window.scrollY))
+    .toBe(pagePosition);
+
+  for (const scrollTop of [900, Number.MAX_SAFE_INTEGER]) {
+    await page.evaluate((top) => window.scrollTo(0, top), scrollTop);
+    await expect
+      .poll(async () => {
+        const pane = (await sidebar.boundingBox())!;
+        const divider = (await separator.boundingBox())!;
+        return Math.abs(
+          divider.y + divider.height / 2 - (pane.y + pane.height / 2),
+        );
+      })
+      .toBeLessThanOrEqual(1);
+    await expect
+      .poll(() => treeScroll.evaluate((node) => node.scrollTop))
+      .toBe(treePosition);
+  }
+  await expect(separator).toBeInViewport();
+  await separator.press("ArrowRight");
+  await expect(separator).toHaveAttribute("aria-valuenow", "380");
+});
+
 test("file tree and content panes resize with pointer and keyboard controls", async ({
   page,
 }) => {
