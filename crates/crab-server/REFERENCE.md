@@ -1288,10 +1288,57 @@ With the server running, explicitly initialize its shared native Directory:
 
 The command uses the configured private mTLS management listener. It is
 idempotent, leaves repository state unchanged and does not enroll accounts.
-`GET /internal/directory` reports `missing` or `ready` with the directory's
-revision. Missing preparation returns 503 `directory_unavailable` from profile
+`cells directory-status` and `GET /internal/directory` report `missing`,
+`outdated`, `migrating`, or `ready` with the current format/progress/revision. Missing preparation returns 503 `directory_unavailable` from profile
 APIs and nonempty issue/PR lists; ordinary repository readiness does not imply
 Directory readiness. Prepare it before enabling the updated UI/list contract.
+
+Directory format 2 separates immutable qualified account identities from optional
+public profiles. Existing format-1 directories require an explicit upgrade:
+
+```sh
+"$SERVER" --config /secure/server.toml cells directory-status
+"$SERVER" --config /secure/server.toml cells migrate-directory
+```
+
+Deploy all serving peers together before migration. Initialization does not
+convert an old directory. Ordinary Directory operations return a visible
+503 `schema_upgrade_required` until the upgrade finishes. The private command
+copies at most 100 profiles per native transaction and persists its cursor;
+rerun after interruption to resume. Existing UUIDs, names, handles, profile
+versions, timestamps, enrollment reservations and command receipts are preserved.
+Source table renames stop old code from creating new profile writes during the
+copy, but mixed-version serving remains unsupported. After the final atomic
+format switch, retired tables and migration progress are removed. Only migration
+code reads format 1. The 100-row limit also fits maximum-width Unicode identity
+records within the native SQL byte bound. Repository records and the discussion
+index do not change.
+
+A trusted operator can reserve stable account UUIDs before public enrollment:
+
+```json
+[
+  {"issuer":"https://identity.example","subject":"opaque-provider-subject"}
+]
+```
+
+Save that array as a private identity file, then run:
+
+```sh
+"$SERVER" --config /secure/server.toml cells register-accounts --identities-file accounts.json
+```
+
+The private mTLS command accepts 1–100 explicit qualified identities in a file
+of at most 256 KiB and returns ordered `ids` plus the native revision. Duplicate
+or repeated keys return the same UUID without another account mutation. Different
+issuers with the same subject remain separate accounts. Registration creates no
+public username, profile, repository, owner, organization, team or project grant.
+Do not derive issuer/subject keys from names or owner labels. Profile enrollment
+reuses a registered UUID; when no account exists it creates that identity and its
+profile in the same native transaction. Public profile/list DTOs stay unchanged,
+and accounts without a chosen profile remain absent from public handle results.
+Existing subject-based assignments and membership still require their separate
+explicit actor-ID migration; this registry does not silently reinterpret them.
 
 Open `/-/profile` through the header's profile icon to choose a public username
 and display name. The stable profile URL is `/-/users/{actor-uuid}`; `-` is a
@@ -1743,7 +1790,7 @@ Serving data currently uses these roots:
 
 | Root | Content |
 | --- | --- |
-| Directory Cell/LTX namespace | Qualified private account keys, stable public profiles, enrollment submissions and command receipts |
+| Directory Cell/LTX namespace | Stable qualified accounts, optional public profiles, enrollment submissions, explicit migration progress and command receipts |
 | Repository Cell/LTX namespace | Issues, comments, labels, commit statuses, check runs, branch protections, lifecycle, Pulls/reviews, Releases/asset references, counters, publication intent, and permanent submission ledgers |
 | `app/v1/issues` | Retired issue documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/pulls` | Retired Pull documents; serving ignores them and operators delete them at hard cutover |

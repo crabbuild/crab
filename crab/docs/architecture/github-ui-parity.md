@@ -155,6 +155,16 @@ together, with no schema/index upgrade or previous-output reader. Non-enrolled
 authors, integration-account filtering and recent-contributor ordering remain
 separate model and UX work.
 
+Directory format 2 now gives each qualified account an immutable UUID separately
+from its optional public profile. Explicit private registration supports identities
+that have not enrolled; later enrollment keeps that ID and grants no access.
+Existing profile UUIDs, versions, attributes, reservations and receipts survive
+bounded native migration, rollback and restart. Ordinary Directory operations
+reject format 1 until the private upgrade completes; no serving compatibility
+reader is added. This is a prerequisite for actor-based assignees and participants.
+Current subject assignments, cached candidate selection, native grant cutover and
+the missing Assignee list filter remain unfinished.
+
 Other actor/project/type predicates and complete GitHub workspace controls
 remain delivery work. This slice does not finish the full parity checklist.
 
@@ -520,6 +530,26 @@ enrollment or schema/index rebuild. Five reaction ordering watermarks advanced
 from 1279 to 1281; `api/reactions/` intentionally reports the repository receipt
 revision. All reaction groups, record versions and other captured fields were
 unchanged. This does not finish the full parity goal.
+
+The private-account/schema-2 slice passed 359 isolated server tests (five existing
+ignored), strict all-target Clippy, all-target checking, builds and architecture
+gates. Native fixtures use an exact copy of the committed format-1 input schema.
+They cover issuer separation, registration idempotence without public enrollment,
+100-row progress, mid-upgrade restart/replay, preserved profiles/submission retries,
+whole-batch rollback including DDL, and maximum-width Unicode identities at the
+SQL byte limit. No dependency or snapshot/inventory baseline was changed.
+
+Real-process proof started the previous binary against RustFS, then stopped it
+and started the new binary over its committed schema-1 data. Profile reads were
+rejected until the private CLI migration completed. Old UUIDs/data survived;
+private registration followed by UI enrollment kept the same ID, survived another
+restart, and gave the new user no repository access. The existing Git, review,
+merge, search and authorization qualification also passed, leaving 73 durable
+Cellar objects. The persistent preview explicitly upgraded its empty Directory
+and retained all 18 captured collaboration resources exactly across both
+repositories, with no profile enrollment or repository/index rebuild. Cached
+assignee candidates, assignment actor migration and the Assignee list menu still
+need implementation; this is not complete GitHub parity or SDK release approval.
 
 ## Primary references
 

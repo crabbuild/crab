@@ -17,7 +17,7 @@ impl Read for ResolveHandles {
             .iter()
             .map(|handle| {
                 let rows = context.query(
-                    "SELECT issuer, subject FROM actors WHERE handle = ?",
+                    "SELECT a.issuer, a.subject FROM accounts a JOIN profiles p ON p.id = a.id WHERE p.handle = ?",
                     &[SqlValue::Text(handle.clone())],
                 )?;
                 match rows.rows.first().map(Vec::as_slice) {
@@ -67,7 +67,7 @@ impl Read for CompleteHandles {
         // when the directory is large; completion never scans display names.
         let upper = format!("{prefix}~");
         let sql = format!(
-            "SELECT {COLUMNS} FROM actors WHERE handle >= ? AND handle < ? ORDER BY handle LIMIT 21"
+            "SELECT {COLUMNS} FROM profiles p WHERE p.handle >= ? AND p.handle < ? ORDER BY p.handle LIMIT 21"
         );
         let rows = context.query(&sql, &[SqlValue::Text(prefix), SqlValue::Text(upper)])?;
         let mut items = rows

@@ -94,6 +94,15 @@ The reviewer sidebar requests or cancels reviews from current repository members
 Submitted reviews fulfill matching requests; stale changes require explicit
 reload. Requests invite review and retain the existing branch protection rules.
 
+Stable qualified account UUIDs now exist independently of public profiles.
+Private `cells register-accounts --identities-file` registration creates no
+username or permissions; later enrollment keeps the same UUID. Existing native
+Directory format 1 needs explicit `cells migrate-directory`, which preserves
+profiles and resumes bounded work after interruption. `cells directory-status`
+reports preparation state. Update peers together; repository records and the
+search index are unchanged. Assignment and native grant migrations remain work.
+See [account preparation](REFERENCE.md#prepare-and-use-account-profiles).
+
 Issue and PR lists include a searchable Labels menu with colors, descriptions,
 multiple selections, exclusions and a no-label option. Choosing labels requires
 all selected labels; Alt+click or Alt+Enter toggles exclusion. The menu stays

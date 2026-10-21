@@ -221,6 +221,11 @@ impl IntoResponse for Error {
                 "profile_exists",
                 "Your profile is already registered; reload to edit it",
             ),
+            Self::Cell(crate::cells::Error::SchemaUnavailable) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "schema_upgrade_required",
+                "Your server needs an update. Contact your administrator.",
+            ),
             Self::Cell(crate::cells::Error::NotInitialized) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "directory_unavailable",

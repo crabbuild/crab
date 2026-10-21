@@ -34,6 +34,8 @@ pub enum Error {
     Unavailable,
     #[error("Cell requires explicit initialization")]
     NotInitialized,
+    #[error("Cell schema requires explicit migration")]
+    SchemaUnavailable,
     #[error("discussion index requires explicit preparation")]
     IndexUnavailable,
     #[error("Cell command may have committed; retry with the same submission ID")]

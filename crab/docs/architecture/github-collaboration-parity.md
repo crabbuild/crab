@@ -279,3 +279,13 @@ qualified. Directory read 8 has a bounded matches/truncation output and requires
 coordinated peers. This adds no grant store or canonical schema change; recent
 contributors, non-enrolled participants and the broader actor/project models
 remain unfinished.
+
+Directory format 2 separates private accounts from optional public profiles.
+Qualified registration has stable UUIDs, exact realm separation and no implicit
+grant effect. Existing format-1 profile identity/data/submissions migrate in
+bounded atomic frames with durable progress; a new-code old-data process upgrade
+and later UI enrollment preserve identity across restart. Explicit private CLI
+operations own preparation and registration. Subject-based assignment migration,
+current candidate resolution, actor-based filters, organization/team authority
+and cross-authority fencing remain delivery work; the registry does not guess
+those bindings from names or owner strings.

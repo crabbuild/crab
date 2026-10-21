@@ -167,6 +167,7 @@ impl CellClient {
                 StatusCode::PRECONDITION_FAILED => Err(Error::StaleRead),
                 StatusCode::PRECONDITION_REQUIRED => Err(Error::NotInitialized),
                 StatusCode::FAILED_DEPENDENCY => Err(Error::IndexUnavailable),
+                StatusCode::LOCKED => Err(Error::SchemaUnavailable),
                 StatusCode::RANGE_NOT_SATISFIABLE => Err(Error::StaleSearch),
                 StatusCode::BAD_REQUEST => Err(Error::Invalid("Cell rejected the request")),
                 _ => Err(Error::Unavailable),
@@ -179,6 +180,7 @@ impl CellClient {
                 error @ (Error::RequestConflict
                 | Error::Expired
                 | Error::Invalid(_)
+                | Error::SchemaUnavailable
                 | Error::NotInitialized
                 | Error::IndexUnavailable
                 | Error::StaleSearch),

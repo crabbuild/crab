@@ -267,7 +267,12 @@ impl Cell for ApplicationCell {
                 let create = request.operation == INITIALIZE && request.mutation.is_none();
                 match request.target {
                     Address::Repository(id) => repository::initialize(&transaction, id, create)?,
-                    Address::Directory => directory::initialize(&transaction, create)?,
+                    Address::Directory => directory::initialize(
+                        &transaction,
+                        create,
+                        request.operation,
+                        request.mutation.is_some(),
+                    )?,
                 }
                 Ok(execute(&mut transaction, &request)?)
             });
@@ -287,6 +292,7 @@ impl Cell for ApplicationCell {
                     let status = match error.downcast_ref::<Error>() {
                         Some(Error::Invalid(_) | Error::Json(_)) => 400,
                         Some(Error::IndexUnavailable) => 424,
+                        Some(Error::SchemaUnavailable) => 423,
                         Some(Error::NotInitialized) => 428,
                         Some(Error::StaleSearch) => 416,
                         Some(Error::RequestConflict) => 409,

@@ -39,10 +39,20 @@ and existing Repository class/namespace are unchanged because Cellar uses these
 names in durable identities. Repository SQL/KV records and stored replay replies
 retain their formats.
 
-`cells/directory/schema.sql` is a separate initial schema. Run
+Directory format 2 separates `accounts` from optional `profiles`. Canonical
+bootstrap DDL lives in `cells/directory/identity.sql`, `schema.sql`,
+`accounts/schema.sql` and `profiles/schema.sql`. Run
 `cells initialize-directory` through the running server's private mTLS listener
 before exposing profiles or nonempty issue/PR lists. Repeating initialization
-verifies the existing schema; reads and writes never install tables. Missing
+verifies the current schema; reads and writes never install tables. Format 1
+requires `cells migrate-directory`: bounded native transactions preserve actor
+UUIDs, profile versions/data, enrollment reservations and receipts. Progress is
+durable across restart, and invalid source records roll back the whole current
+batch, including schema preparation. Only the explicit migration reads retired
+tables; other operations fail closed until format 2 is ready. Private native
+423 signals preparation required and becomes public 503 `schema_upgrade_required`.
+The typed `DirectoryState` is shared with the CLI; `cells directory-status` reports
+outdated/migrating/ready state. Peers must update together. Missing
 preparation returns a visible 503 `directory_unavailable` from profile APIs and
 author-enriched lists. Global readiness still verifies repositories; it does
 not certify Directory readiness. This directory
@@ -55,6 +65,12 @@ publication and LFS upload refresh grants at their late authorization checkpoint
 This is not a native membership migration or atomic authority fencing. Git-token
 format 2 adds the stable UUID; previous tokens require revocation/reissue and
 coordinated replica deployment. Sessions and canonical Cell schemas are unchanged.
+
+`cells register-accounts --identities-file` creates stable IDs for explicit
+qualified private accounts without requiring or inventing a public profile.
+Enrollment reuses those IDs. Account registration grants no repository or other
+permissions. This is an identity foundation for assignment/participant/owner
+models, not a native grant cutover or a migration of existing subject assignments.
 
 List author enrichment uses the bounded native `LookupActors` read (Directory
 operation 6). It resolves qualified private keys into public UUID/handle/name

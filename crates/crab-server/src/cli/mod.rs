@@ -54,6 +54,15 @@ enum Command {
 enum CellsCommand {
     /// Initialize the shared native actor directory without changing repositories.
     InitializeDirectory,
+    /// Print the shared Directory schema and migration state.
+    DirectoryStatus,
+    /// Explicitly migrate the shared Directory in restartable bounded batches.
+    MigrateDirectory,
+    /// Register stable private account identities without creating public profiles or grants.
+    RegisterAccounts {
+        #[arg(long)]
+        identities_file: PathBuf,
+    },
     /// Print the resource-derived Cell admission envelope.
     Capacity {
         #[arg(long, required = true)]
@@ -212,6 +221,31 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
                 .map_err(|source| crab_server::Error::Healthcheck { source })?
                 .to_vec()
         }
+        CellsCommand::DirectoryStatus => management_body(config, "/internal/directory").await?,
+        CellsCommand::MigrateDirectory => migrate_directory(config).await?,
+        CellsCommand::RegisterAccounts { identities_file } => {
+            let mut bytes = Vec::new();
+            std::fs::File::open(identities_file)?
+                .take(256 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 256 * 1024 {
+                return Err(crab_server::Error::Config(
+                    "account identity file exceeds 256 KiB",
+                ));
+            }
+            let identities: serde_json::Value = serde_json::from_slice(&bytes)?;
+            management_request(
+                config,
+                reqwest::Method::POST,
+                "/internal/directory/accounts",
+                Some(&identities),
+            )
+            .await?
+            .bytes()
+            .await
+            .map_err(|source| crab_server::Error::Healthcheck { source })?
+            .to_vec()
+        }
         CellsCommand::Capacity {
             json: true,
             live: true,
@@ -263,7 +297,7 @@ async fn management_request(
     config: &crab_server::Config,
     method: reqwest::Method,
     path: &str,
-    body: Option<&crab_server::RebuildSearchInput>,
+    body: Option<&serde_json::Value>,
 ) -> crab_server::Result<reqwest::Response> {
     let mut identity = std::fs::read(&config.cells.peer_certificate)?;
     identity.extend_from_slice(&std::fs::read(&config.cells.peer_private_key)?);
@@ -300,6 +334,33 @@ async fn management_request(
         .map_err(|source| crab_server::Error::Healthcheck { source })
 }
 
+async fn migrate_directory(config: &crab_server::Config) -> crab_server::Result<Vec<u8>> {
+    loop {
+        let bytes = management_request(
+            config,
+            reqwest::Method::POST,
+            "/internal/directory/migrate",
+            None,
+        )
+        .await?
+        .bytes()
+        .await
+        .map_err(|source| crab_server::Error::Healthcheck { source })?;
+        let progress: crab_server::DirectoryState = serde_json::from_slice(&bytes)?;
+        match progress {
+            crab_server::DirectoryState::Ready { .. } => return Ok(bytes.to_vec()),
+            crab_server::DirectoryState::Migrating { copied } => {
+                tracing::info!(copied, "migrating Directory accounts")
+            }
+            crab_server::DirectoryState::Outdated { .. } => {
+                return Err(crab_server::Error::Config(
+                    "Directory migration did not start",
+                ));
+            }
+        }
+    }
+}
+
 async fn rebuild_search(
     config: &crab_server::Config,
     owner: &str,
@@ -315,10 +376,10 @@ async fn rebuild_search(
         crab_server::SearchIndexStatus::Building { .. } => None,
     };
     let mut status = if let Some(expected) = begin {
-        let input = crab_server::RebuildSearchInput::Begin {
+        let input = serde_json::to_value(crab_server::RebuildSearchInput::Begin {
             expected,
             generation: uuid::Uuid::now_v7(),
-        };
+        })?;
         serde_json::from_slice(
             &management_request(config, reqwest::Method::POST, &path, Some(&input))
                 .await?
@@ -345,10 +406,10 @@ async fn rebuild_search(
                 ref progress,
             } => {
                 tracing::info!(phase = ?progress.phase, processed = progress.processed, "preparing discussion index");
-                let input = crab_server::RebuildSearchInput::Step {
+                let input = serde_json::to_value(crab_server::RebuildSearchInput::Step {
                     generation,
                     version: progress.version,
-                };
+                })?;
                 status = serde_json::from_slice(
                     &management_request(config, reqwest::Method::POST, &path, Some(&input))
                         .await?

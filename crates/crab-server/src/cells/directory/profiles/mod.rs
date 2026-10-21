@@ -55,7 +55,7 @@ pub(crate) fn validate_handle(handle: &str) -> std::result::Result<(), &'static 
 }
 fn handle_taken(context: &Transaction<'_>, handle: &str, actor: Option<Uuid>) -> Result<bool> {
     let rows = context.query(
-        "SELECT id FROM actors WHERE handle = ?",
+        "SELECT id FROM profiles WHERE handle = ?",
         &[SqlValue::Text(handle.into())],
     )?;
     match rows.rows.first().map(Vec::as_slice) {
@@ -86,7 +86,7 @@ impl Mutation for CreateProfile {
             &input.name,
         ))?);
         let submission = context.query(
-            "SELECT digest, actor_id FROM actor_submissions WHERE request_id = ?",
+            "SELECT digest, actor_id FROM profile_submissions WHERE request_id = ?",
             &[SqlValue::Blob(input.submission_id.as_bytes().to_vec())],
         )?;
         if let Some(row) = submission.rows.first() {
@@ -108,20 +108,21 @@ impl Mutation for CreateProfile {
         }
         let now = u64::try_from(context.now_ms())
             .map_err(|_| Error::Invalid("profile clock is negative"))?;
+        let (id, _) = accounts::ensure(context, &input.identity)?;
         let actor = ActorProfile {
-            id: Uuid::now_v7(),
+            id,
             handle: input.handle,
             name: input.name,
             version: 1,
             created_at_ms: now,
             updated_at_ms: now,
         };
-        context.query("INSERT INTO actors(id, issuer, subject, handle, name, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, 1, ?, ?)", &[
-            SqlValue::Blob(actor.id.as_bytes().to_vec()), SqlValue::Text(input.identity.issuer), SqlValue::Text(input.identity.subject),
-            SqlValue::Text(actor.handle.clone()), SqlValue::Text(actor.name.clone()), SqlValue::Integer(context.now_ms()), SqlValue::Integer(context.now_ms()),
+        context.query("INSERT INTO profiles(id, handle, name, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, 1, ?, ?)", &[
+            SqlValue::Blob(actor.id.as_bytes().to_vec()), SqlValue::Text(actor.handle.clone()), SqlValue::Text(actor.name.clone()),
+            SqlValue::Integer(context.now_ms()), SqlValue::Integer(context.now_ms()),
         ])?;
         context.query(
-            "INSERT INTO actor_submissions(request_id, digest, actor_id) VALUES (?, ?, ?)",
+            "INSERT INTO profile_submissions(request_id, digest, actor_id) VALUES (?, ?, ?)",
             &[
                 SqlValue::Blob(input.submission_id.as_bytes().to_vec()),
                 SqlValue::Blob(digest.as_bytes().to_vec()),
@@ -176,7 +177,7 @@ impl Mutation for EditProfile {
             .max(actor.updated_at_ms);
         let updated = i64::try_from(actor.updated_at_ms)
             .map_err(|_| Error::Invalid("profile timestamp exceeds its range"))?;
-        context.query("UPDATE actors SET handle = ?, name = ?, version = ?, updated_at_ms = ? WHERE id = ? AND version = ?", &[
+        context.query("UPDATE profiles SET handle = ?, name = ?, version = ?, updated_at_ms = ? WHERE id = ? AND version = ?", &[
             SqlValue::Text(actor.handle.clone()), SqlValue::Text(actor.name.clone()), SqlValue::Integer(i64::try_from(actor.version).map_err(|_| Error::Invalid("profile version exceeds its range"))?),
             SqlValue::Integer(updated), SqlValue::Blob(actor.id.as_bytes().to_vec()), SqlValue::Integer(i64::try_from(input.version).map_err(|_| Error::Invalid("profile version exceeds its range"))?),
         ])?;
