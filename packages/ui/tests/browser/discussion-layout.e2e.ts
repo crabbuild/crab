@@ -12,7 +12,7 @@ async function fixture(page: Page) {
     number: 1,
     title: "Keep navigation predictable",
     state: "open",
-    author: "Alice",
+    author: { name: "Alice", profile: null },
     created_at: 1700000000000,
     comment_count: 3,
     reaction_count: 0,

@@ -30,6 +30,12 @@ async fn json_request(
 #[tokio::test(flavor = "multi_thread")]
 async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     let server = fixtures::fixture().await;
+    server
+        .cells()
+        .unwrap()
+        .initialize(crate::cells::Address::Directory)
+        .await
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let stop = CancellationToken::new();

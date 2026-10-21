@@ -60,6 +60,9 @@ commands and reads declare their native class. Repository initialization lives
 in `src/cells/repository/schema.rs`, using the canonical `src/cells/schema.sql`.
 `src/cells/directory/` owns qualified private identity keys and stable public
 actor profiles; its `profiles/` commands and schema have colocated tests.
+`cells/directory/lookup/` owns bounded qualified-identity reads and minimal public
+actor summaries. `api/profiles/attribution/` deduplicates list authors into one
+Directory read; issue and PR handlers recheck durable membership afterward.
 `src/api/profiles/` exposes session-authenticated profile reads/edits without
 exposing authentication claims. `src/server/management/directory.rs` owns explicit
 private initialization; serving never creates its schema implicitly. HTTP authorization and
@@ -117,6 +120,7 @@ Tests live under their owner: `api/tests.rs`, `auth/tests/`,
 `api/<feature>/tests.rs`, `auth/<feature>/tests.rs`, `catalog/tests.rs`,
 `cells/repository/<feature>/tests.rs`, `cells/directory/tests.rs`,
 `cells/directory/profiles/tests.rs`, `git/receive/tests/`, `git/lfs/tests.rs`,
+`cells/directory/lookup/tests.rs`, `api/profiles/attribution/tests.rs`,
 `api/pulls/tests/`, and `repository/tests/`. `server/peer_e2e_tests.rs`
 exercises process composition and native peer handoff.
 Shared setup lives in test-only `src/test_support/`; feature suites never import

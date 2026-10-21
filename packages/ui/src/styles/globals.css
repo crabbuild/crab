@@ -2457,6 +2457,11 @@ main {
   flex: 1;
   min-width: 0;
 }
+.discussion-author {
+  overflow-wrap: anywhere;
+  text-decoration-line: underline;
+  text-underline-offset: 2px;
+}
 .issue-list .pull-branches code {
   overflow-wrap: anywhere;
 }

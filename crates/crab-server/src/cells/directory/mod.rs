@@ -12,7 +12,9 @@ pub(in crate::cells) const NAMESPACE: &str = "DIRECTORY";
 const MAX_VERSION: u64 = 9_007_199_254_740_991;
 const COLUMNS: &str = "id, handle, name, version, created_at_ms, updated_at_ms";
 
+mod lookup;
 mod profiles;
+pub(crate) use lookup::{ActorSummary, LookupActors};
 pub(crate) use profiles::{
     CreateProfile, CreateProfileInput, EditProfile, EditProfileInput, ProfileOutcome,
     validate_profile,
@@ -29,9 +31,9 @@ pub(crate) struct IdentityKey {
 impl IdentityKey {
     pub(crate) fn validate(&self) -> Result<()> {
         if self.issuer.is_empty()
-            || self.issuer.len() > 4096
+            || self.issuer.chars().count() > 4096
             || self.subject.is_empty()
-            || self.subject.len() > 1024
+            || self.subject.chars().count() > 1024
             || self.issuer.chars().any(char::is_control)
             || self.subject.chars().any(char::is_control)
         {
@@ -185,6 +187,7 @@ pub(in crate::cells) fn dispatch_read(
         GetOwnProfile::ID => invoke_read::<GetOwnProfile>(context, input),
         GetActor::ID => invoke_read::<GetActor>(context, input),
         GetDirectoryRevision::ID => invoke_read::<GetDirectoryRevision>(context, input),
+        LookupActors::ID => invoke_read::<LookupActors>(context, input),
         _ => Err(Error::Invalid("unknown directory query")),
     }
 }

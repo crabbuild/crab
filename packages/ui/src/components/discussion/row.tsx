@@ -13,6 +13,7 @@ import { repoHref } from "@/lib/repository-route";
 import { DiscussionCommentCount } from "./list";
 import { AssigneeAvatars } from "./metadata";
 import { timestamp } from "./time";
+import { Author } from "./author";
 
 export type DiscussionItem = IssueListItem | PullListItem;
 
@@ -51,7 +52,8 @@ export function DiscussionRow({
         </Link>
         <LabelBadges labels={item.labels} />
         <p className="muted">
-          #{item.number} opened {timestamp(item.created_at)} by {item.author}
+          #{item.number} opened {timestamp(item.created_at)} by{" "}
+          <Author author={item.author} />
         </p>
         {item.kind === "pull" && (
           <p className="pull-branches muted">

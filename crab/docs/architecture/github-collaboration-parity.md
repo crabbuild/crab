@@ -182,8 +182,9 @@ HTTP routes and `/-/profile`/`/-/users/{uuid}` pages support enrollment,
 versioned edits, explicit stale-draft recovery and reload. No Fern code was
 copied. No organization/team/project grants, owner registry or catalog authority
 cutover is implemented; matching a handle with an existing catalog owner grants
-nothing. Discussion author snapshots and subject-based assignments have not yet
-been integrated with public actors. The authority phase remains incomplete.
+nothing. List authors now resolve their qualified snapshots to public actors;
+detail/comment/review attribution and subject-based assignments remain separate
+work. The authority phase remains incomplete.
 
 The slice passed 325 isolated server tests (five existing ignored cases), 107 UI
 unit tests and 72 browser tests, plus builds, Clippy and architecture checks.
@@ -226,6 +227,20 @@ both discussion kinds against RustFS; domain records remained unchanged.
 These presentation preferences are not saved views or account settings. The
 [UI evidence](github-ui-parity.md#verification-and-completion) records remaining
 workflow and accessibility gaps.
+
+The attribution slice connects mixed issue/PR lists and PR-only lists to current
+public actors through one bounded native Directory read. It retains historical
+source names and never guesses identity from a handle or display name. Both HTTP
+owners recheck durable membership after enrichment; names do not grant access.
+It passed 336 isolated server tests (five existing ignored), 107 unit tests and
+86 browser tests, plus final maximum-handle/mobile-containment cases. Native
+lookup succeeds after mTLS owner handoff; a real embedded RustFS browser workflow
+followed author links and retained attribution across restart/index rebuild.
+The preview's two repositories remained unchanged, with no profile enrolled.
+Detail/comment/review attribution, assignee integration, actor search and the
+organization/project authority cutover remain unfinished. Directory preparation
+is now required before serving nonempty author-enriched lists; its schema and
+repository/index formats are unchanged.
 
 [CELLAR.md](../../../crates/crab-server/CELLAR.md) already records a release
 blocker: the published SDK links SQLite 3.45.0, before the upstream WAL-reset

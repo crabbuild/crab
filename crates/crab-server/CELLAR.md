@@ -41,11 +41,21 @@ retain their formats.
 
 `cells/directory/schema.sql` is a separate initial schema. Run
 `cells initialize-directory` through the running server's private mTLS listener
-before exposing profiles. Repeating initialization verifies the existing schema;
-reads and writes never install tables. Missing preparation returns a visible
-503 `directory_unavailable` from profile APIs. Global readiness still verifies
-repositories; it does not certify the optional profile directory. This directory
+before exposing profiles or nonempty issue/PR lists. Repeating initialization
+verifies the existing schema; reads and writes never install tables. Missing
+preparation returns a visible 503 `directory_unavailable` from profile APIs and
+author-enriched lists. Global readiness still verifies repositories; it does
+not certify Directory readiness. This directory
 adds no organization, team, project or repository grant authority.
+
+List author enrichment uses the bounded native `LookupActors` read (Directory
+operation 6). It resolves qualified private keys into public UUID/handle/name
+summaries in one snapshot, with no repository record or schema change. Directory
+identity validation counts Unicode scalar values, matching SQLite length bounds
+and valid stored repository identities. Lists recheck durable membership after
+the separate Directory read; profiles never act as grants. Counts/cursors keep
+their repository snapshot. Prepare Directory before enabling this DTO contract
+and update peers together; unsupported operations have no fallback reader.
 
 `cells/schema.sql` owns canonical repository domain tables;
 `cells/repository/search/index/schema.sql` owns the derived discussion index. Initialization
@@ -202,6 +212,21 @@ script retains label-choice and filter restart receipts. Both persistent
 preview repositories compared unchanged after the server-only update. Label
 choices reuse canonical SQL records and format-2 indexes, requiring no rebuild.
 UI/server builds, all-target Clippy, formatting and architecture checks passed.
+
+The list-attribution slice passed 336 isolated server tests (five existing
+ignored), including the new Directory lookup after native mTLS owner handoff
+in object and fleet durability modes. It also passed 107 UI unit tests, 86
+browser tests, final focused maximum-handle/mobile-containment checks, builds,
+all-target Clippy, formatting and architecture checks. These reads add no
+repository/index format or stored-reply migration; the new private Directory
+operation and list DTO require matching application versions and explicit
+Directory preparation.
+The embedded UI followed real RustFS-backed mixed-list author links to a stable
+public profile, including a maximum-length handle in dark/mobile layout.
+Attribution survived process restart and index rebuild; the process script
+retains the new attribution-restart receipt alongside existing Git/merge proof.
+The persistent preview's two repositories compared unchanged after its update,
+and its operator profile remains unenrolled.
 
 These checks do not qualify mixed-version upgrades, protected cloud fault
 matrices, or production scale. Release publication remains disabled by a direct workflow gate until those

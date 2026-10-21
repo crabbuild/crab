@@ -74,6 +74,7 @@ fn issue_view(
 }
 
 fn issue_summary_view(
+    authors: &super::profiles::attribution::Authors,
     issue: &IssueSummary,
     labels: &[crate::cells::repository::search::index::LabelSummary],
     assignees: &[Assignee],
@@ -83,7 +84,7 @@ fn issue_summary_view(
         "number": issue.number,
         "title": issue.title,
         "state": state_name(issue.state),
-        "author": issue.author.name,
+        "author": authors.view(&issue.author),
         "version": issue.version,
         "created_at": issue.created_at_ms,
         "updated_at": issue.updated_at_ms,
@@ -180,13 +181,25 @@ async fn list(
             .query::<ListDiscussions>(&routed.target, None, params.input("is:issue is:open")?)
             .await,
     )?;
+    let authors = super::profiles::attribution::Authors::load(
+        &server,
+        &principal,
+        page.items.iter().map(|item| match item {
+            DiscussionSummary::Issue(issue) => &issue.author,
+            DiscussionSummary::Pull(pull) => &pull.author,
+        }),
+    )
+    .await?;
+    app::membership(&server, &principal, &repo).await?;
     let items = page
         .items
         .iter()
         .map(|item| match item {
-            DiscussionSummary::Issue(issue) => issue_summary_view(issue, &page.labels, &assignees),
+            DiscussionSummary::Issue(issue) => {
+                issue_summary_view(&authors, issue, &page.labels, &assignees)
+            }
             DiscussionSummary::Pull(pull) => {
-                super::pulls::pull_list_view(pull, &page.labels, &assignees)
+                super::pulls::pull_list_view(&authors, pull, &page.labels, &assignees)
             }
         })
         .collect::<Vec<_>>();

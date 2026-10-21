@@ -397,6 +397,7 @@ export async function mockPullRequest(page: Page) {
             ? [
                 {
                   ...item,
+                  author: { name: item.author, profile: null },
                   kind: "pull",
                   comment_count: comments.length,
                   reaction_count: 0,

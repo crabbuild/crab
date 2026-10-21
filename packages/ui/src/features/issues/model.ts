@@ -1,4 +1,5 @@
 import type { DiscussionTotals, ListLabel } from "@/components/discussion/list";
+import type { DiscussionAuthor } from "@/components/discussion/author";
 import type { ReactionSummary } from "@/components/discussion/reactions";
 import type { RepositoryLabel, RepositoryAssignee } from "@/lib/api";
 
@@ -23,10 +24,8 @@ export interface Issue extends Comment {
 export type IssueListItem = DiscussionTotals & {
   kind: "issue";
   labels: ListLabel[];
-} & Pick<
-    Issue,
-    "number" | "title" | "state" | "author" | "created_at" | "assignees"
-  >;
+  author: DiscussionAuthor;
+} & Pick<Issue, "number" | "title" | "state" | "created_at" | "assignees">;
 export interface Page<T> {
   items: T[];
   next: number | null;

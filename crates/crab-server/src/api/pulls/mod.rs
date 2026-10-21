@@ -272,6 +272,7 @@ fn merge_requirements(
 }
 
 pub(super) fn pull_list_view(
+    authors: &super::profiles::attribution::Authors,
     pull: &PullSummary,
     labels: &[crate::cells::repository::search::index::LabelSummary],
     assignees: &[Assignee],
@@ -285,7 +286,7 @@ pub(super) fn pull_list_view(
         "number": pull.number,
         "title": pull.title,
         "state": pull.state,
-        "author": pull.author.name,
+        "author": authors.view(&pull.author),
         "base_ref": pull.base_ref,
         "head_ref": pull.head_ref,
         "created_at": pull.created_at_ms,
@@ -312,10 +313,17 @@ async fn list(
             .query::<ListPulls>(&routed.target, None, params.input("is:open")?)
             .await,
     )?;
+    let authors = super::profiles::attribution::Authors::load(
+        &server,
+        &principal,
+        page.items.iter().map(|pull| &pull.author),
+    )
+    .await?;
+    app::membership(&server, &principal, repo).await?;
     let pulls = &page.items;
     let items = pulls
         .iter()
-        .map(|pull| pull_list_view(pull, &page.labels, &assignees))
+        .map(|pull| pull_list_view(&authors, pull, &page.labels, &assignees))
         .collect::<Vec<_>>();
     Ok(Json(
         json!({"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation}),

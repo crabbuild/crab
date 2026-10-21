@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 #[tokio::test]
 async fn completion_uses_authorized_repository_labels_and_bounds_cursor_input() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let cookie = h.login().await;
     let root = "/api/repos/team/private";
     let response = h.write(reqwest::Method::POST, &format!("{root}/labels"), &cookie, json!({
@@ -56,6 +57,7 @@ async fn completion_uses_authorized_repository_labels_and_bounds_cursor_input() 
 #[tokio::test]
 async fn issue_workspace_returns_tagged_pull_results_and_paginates_colliding_numbers() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let cookie = h.login().await;
     let root = "/api/repos/team/private";
     let token: Value = h
@@ -91,7 +93,10 @@ async fn issue_workspace_returns_tagged_pull_results_and_paginates_colliding_num
     assert_eq!(pulls["items"][0]["kind"], "pull");
     assert_eq!(pulls["items"][0]["draft"], true);
     assert!(pulls["items"][0].get("body").is_none());
-    assert!(pulls["items"][0]["author"].is_string());
+    assert_eq!(
+        pulls["items"][0]["author"],
+        json!({"name":"Alice","profile":null})
+    );
     let query = format!("{root}/issues?q=is%3Aopen&sort=comments&direction=asc&limit=1");
     let first = h.json(&query, &cookie).await;
     assert_eq!(first["matching"], 2);
@@ -144,6 +149,7 @@ async fn issue_workspace_returns_tagged_pull_results_and_paginates_colliding_num
 async fn milestone_options_and_queries_follow_real_assignment_versions_and_repository_access() {
     use reqwest::Method;
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let cookie = h.login().await;
     let root = "/api/repos/team/private";
     let milestone: Value = h.write(Method::POST, &format!("{root}/milestones"), &cookie,
@@ -324,6 +330,7 @@ async fn milestone_options_and_queries_follow_real_assignment_versions_and_repos
 async fn label_choices_preserve_query_destinations_and_recheck_durable_access() {
     use reqwest::Method;
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let cookie = h.login().await;
     let root = "/api/repos/team/private";
     let label: Value = h

@@ -26,7 +26,7 @@ async function searchFixture(page: Page) {
             number: 1,
             title: "Keyboard focus",
             state: "open",
-            author: "Alice",
+            author: { name: "Alice", profile: null },
             created_at: 1700000000000,
             labels: [],
             assignees: [],
@@ -216,7 +216,7 @@ for (const view of ["issues", "pulls"] as const) {
               number: 1,
               kind: view === "issues" ? "issue" : "pull",
               title: "Indexed discussion",
-              author: "Alice",
+              author: { name: "Alice", profile: null },
               state:
                 params.get("q") === "keyboard is:closed" ? "closed" : "open",
               created_at: 1700000000000,
@@ -346,7 +346,7 @@ test("issue search renders mixed kinds with colliding numbers and follows pull l
   await mockPullRequest(page);
   const common = {
     number: 2,
-    author: "Alice",
+    author: { name: "Alice", profile: null },
     created_at: 1700000000000,
     labels: [],
     assignees: [],

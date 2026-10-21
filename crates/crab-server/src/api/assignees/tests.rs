@@ -34,6 +34,7 @@ async fn write(
 #[tokio::test]
 async fn repository_members_are_assignable_by_writers() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let alice = h.login().await;
     let catalog = h.json(ASSIGNEES, &alice).await;
     assert_eq!(

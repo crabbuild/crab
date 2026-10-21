@@ -693,7 +693,7 @@ test.beforeEach(async ({ page }) => {
               number: url.searchParams.get("q") === "is:closed" ? 43 : 42,
               comment_count: 0,
               reaction_count: 0,
-              author: "Alice",
+              author: { name: "Alice", profile: null },
               body: null,
               title: "Keep object storage reads bounded",
               state:

@@ -41,6 +41,7 @@ async fn write(
 #[tokio::test]
 async fn issues_comments_edits_and_replays_preserve_durable_state() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let cookie = h.login().await;
     let (status, issue) = write(&h, &cookie, "POST", ROOT, input(1)).await;
     assert_eq!(status, StatusCode::CREATED);
@@ -141,6 +142,7 @@ async fn issues_comments_edits_and_replays_preserve_durable_state() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_creation_is_idempotent_and_sparse_pages_do_not_duplicate_issues() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let cookie = h.login().await;
     let results = futures_util::future::join_all(
         (0..8).map(|i| write(&h, &cookie, "POST", ROOT, input(if i < 4 { 1 } else { i }))),
@@ -199,6 +201,7 @@ async fn concurrent_creation_is_idempotent_and_sparse_pages_do_not_duplicate_iss
 #[tokio::test]
 async fn membership_author_ownership_and_csrf_protect_all_mutations() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let alice = h.login().await;
     let issue = write(&h, &alice, "POST", ROOT, input(1)).await.1;
     let path = format!("{ROOT}/{}", issue["number"]);
@@ -284,6 +287,7 @@ async fn membership_author_ownership_and_csrf_protect_all_mutations() {
 #[tokio::test]
 async fn invalid_inputs_fail_and_legacy_issue_objects_are_not_a_serving_path() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let cookie = h.login().await;
     for value in [
         json!({"request_id":"../escape","title":"Title","body":""}),
@@ -330,6 +334,7 @@ async fn invalid_inputs_fail_and_legacy_issue_objects_are_not_a_serving_path() {
 #[tokio::test]
 async fn advanced_search_preserves_caseful_operators_and_reports_invalid_syntax() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let cookie = h.login().await;
     for (index, title, body) in [
         (1, "Keyboard focus", "Accessibility"),

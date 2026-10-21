@@ -168,7 +168,9 @@ async fn qualify_handoff(
     };
     use crate::cells::{
         Address,
-        directory::{CreateProfile, CreateProfileInput, GetActor, IdentityKey, ProfileOutcome},
+        directory::{
+            CreateProfile, CreateProfileInput, GetActor, IdentityKey, LookupActors, ProfileOutcome,
+        },
     };
     first
         .cells
@@ -185,6 +187,7 @@ async fn qualify_handoff(
         handle: "alice".into(),
         name: "Alice".into(),
     };
+    let lookup_identity = profile_input.identity.clone();
     // A command ID is scoped to its authority. Reusing it for the repository
     // must neither conflict with nor replay the directory's decision.
     let actor = first
@@ -232,6 +235,16 @@ async fn qualify_handoff(
         .await
         .unwrap();
     assert_eq!(restored_actor.output.as_ref(), Some(profile));
+    let lookup = remote
+        .client
+        .query::<LookupActors>(
+            Address::Directory,
+            Some(actor.receipt),
+            vec![lookup_identity],
+        )
+        .await
+        .unwrap();
+    assert_eq!(lookup.output, vec![Some(profile.clone().into())]);
 
     let replayed = remote
         .client

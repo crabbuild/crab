@@ -27,6 +27,15 @@ pub(crate) struct Harness {
 }
 
 impl Harness {
+    pub(crate) async fn initialize_directory(&self) {
+        self.server
+            .cells()
+            .unwrap()
+            .initialize(crate::cells::Address::Directory)
+            .await
+            .unwrap();
+    }
+
     pub(crate) async fn write(
         &self,
         method: reqwest::Method,

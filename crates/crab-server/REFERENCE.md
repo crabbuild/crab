@@ -1270,7 +1270,8 @@ The command uses the configured private mTLS management listener. It is
 idempotent, leaves repository state unchanged and does not enroll accounts.
 `GET /internal/directory` reports `missing` or `ready` with the directory's
 revision. Missing preparation returns 503 `directory_unavailable` from profile
-APIs; ordinary repository readiness does not imply profile readiness.
+APIs and nonempty issue/PR lists; ordinary repository readiness does not imply
+Directory readiness. Prepare it before enabling the updated UI/list contract.
 
 Open `/-/profile` through the header's profile icon to choose a public username
 and display name. The stable profile URL is `/-/users/{actor-uuid}`; `-` is a
@@ -1302,10 +1303,30 @@ lost reply without another write; other stale edits return 409. The UI retains
 the draft and offers an explicit choice of saved values or rebasing that draft.
 Renaming preserves the actor UUID and never changes repository permissions.
 
-Profiles currently establish public identities only. Existing discussion author
-snapshots and catalog membership remain unchanged; organization/team authority,
-owner registration and profile-backed authors/assignees are unfinished. Choosing
-a handle matching a catalog owner label does not acquire ownership.
+Issue/PR list authors use `{name, profile}`: `name` is the recorded display-name
+snapshot; `profile` is either `{id, handle, name}` from the current Directory or
+null when that qualified account has not enrolled. The browser links the current
+handle to the stable UUID; it never guesses a handle from the snapshot name.
+The old list-author string shape is removed. Detail, comment, review and other
+attribution contracts retain their existing display names pending their own
+integration; assignments and catalog membership are also unchanged.
+
+The HTTP owner deduplicates at most 50 page authors into one native Directory
+read. Its private `LookupActors` operation accepts at most 100 qualified keys,
+returns minimal public summaries in input order and uses one Directory snapshot.
+It performs indexed identity lookups rather than a catalog scan. Inputs count
+Unicode scalar values, matching SQLite schema bounds and stored repository
+identities. Native receipt/class checks still apply. Both list handlers recheck
+durable repository membership after enrichment. Repository counts/cursors and
+Directory display names have separate snapshots; enrichment is not a distributed
+transaction or an access grant. A rename neither rewrites source records nor
+requires a discussion-index rebuild. Prepare the Directory before this list
+contract is deployed, and update all native fleet peers together for its new
+read operation. No missing-schema reader or old DTO alias is supplied.
+
+Organization/team authority, owner registration, detail/assignee integration
+and actor-backed search remain unfinished. Choosing a handle matching a catalog
+owner label does not acquire ownership.
 
 ### Use the collaboration route families
 

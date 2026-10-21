@@ -24,6 +24,8 @@ use crate::{
     server::Server,
 };
 
+pub(in crate::api) mod attribution;
+
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/profile", get(own).post(create).patch(edit))

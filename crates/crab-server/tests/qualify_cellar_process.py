@@ -307,6 +307,8 @@ with open(run / "commands.log", "w") as log:
         created = request("/api/repos/team/project/issues", body)
         number = created["number"]
         assert request("/api/repos/team/project/issues", body)["number"] == number
+        author_summary = {"name": "Local operator", "profile": {key: actor_profile[key] for key in ["id", "handle", "name"]}}
+        assert request("/api/repos/team/project/issues")["items"][0]["author"] == author_summary
         issue_path = f"/api/repos/team/project/issues/{number}"
         reaction_path = f"/api/repos/team/project/reactions/issues/{number}"
         reaction = request(reaction_path, {"kind": "heart", "active": True}, method="PUT")
@@ -407,6 +409,7 @@ with open(run / "commands.log", "w") as log:
         wait()
         assert request("/api/profile")["profile"] == actor_profile
         assert request("/api/actors/" + profile_id) == actor_profile
+        assert request("/api/repos/team/project/issues?q=is%3Aissue")["items"][0]["author"] == author_summary
         restored = request(f"/api/repos/team/project/issues/{number}")
         assert restored["title"] == body["title"]
         assert restored["reactions"]["groups"] == reaction["groups"]
@@ -558,6 +561,7 @@ with open(run / "commands.log", "w") as log:
             "issue_replay": True,
             "actor_directory_restart": True,
             "actor_profile_retry": True,
+            "actor_attribution_restart": True,
             "discussion_search_restart": True,
             "mixed_discussion_cursor_restart": True,
             "search_suggestions_restart": True,

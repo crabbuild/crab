@@ -73,6 +73,7 @@ async fn report_check(
 #[tokio::test]
 async fn pull_routes_require_membership_and_csrf_before_repository_access() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let alice = h.login().await;
     assert_eq!(
         h.http
@@ -126,6 +127,7 @@ async fn pull_routes_require_membership_and_csrf_before_repository_access() {
 #[tokio::test]
 async fn pull_review_decisions_require_another_member_and_follow_the_exact_head() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let alice = h.login().await;
     let alice_session = h.json("/api/session", &alice).await;
     let alice_csrf = alice_session["csrf"].as_str().unwrap();
@@ -805,7 +807,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
             "draft":false,
             "title":"Proposed change",
             "state":"open",
-            "author":"Alice",
+            "author":{"name":"Alice","profile":null},
             "base_ref":"refs/heads/main",
             "head_ref":"refs/heads/feature",
             "created_at":assigned.1["created_at"],

@@ -138,8 +138,9 @@ keys map to stable UUIDs; chosen handles/names can change without changing IDs
 or granting repository/organization access. Schema preparation is explicit via
 `cells initialize-directory`; reads never create it. The form handles lost
 replies, stale versions, handle collisions and unavailable preparation without
-claiming an unsaved result. Existing authors/assignees are not yet linked to
-these profiles. Owners, organization/team/project grants and their explicit
+claiming an unsaved result. List authors now link to these profiles as described
+below; detail attribution and assignees remain separate work. Owners,
+organization/team/project grants and their explicit
 catalog authority cutover remain required; the combined model checklist above
 stays incomplete.
 
@@ -191,6 +192,18 @@ lists; they are not account preferences or saved views. If browser storage is
 denied, the current component still supports the interaction in memory.
 Personal navigation, saved views, bulk selection and the rest of the workspace
 checklist remain unfinished.
+
+List attribution now distinguishes the stored author name from its optional
+current public actor summary. A bounded native Directory read resolves unique
+qualified keys for both mixed and PR-only pages. Enrolled authors link their
+current username to a stable UUID; unenrolled accounts retain plain recorded
+names. Renames do not rewrite discussions or their indexes. Authentication
+claims never appear in the author DTO. After enrichment, both HTTP handlers
+recheck durable membership. Missing Directory preparation fails visibly and can
+be retried after explicit initialization. Git credentials retain their existing
+exclusion from browser list/profile routes. The UI consumes one object contract
+without a string alias. Detail/comment/review attribution, assignee profiles
+and actor-based filtering are still unfinished; public names grant no authority.
 
 ## Data and query contracts
 
@@ -359,6 +372,25 @@ revision; `api/reactions/mod.rs` supplies that ordering watermark rather than a
 per-target record version. Counts, membership and every other record field
 compared unchanged. No native schema, query, dependency or configuration
 contract changes in this slice; personal views and full parity remain open.
+
+The list-attribution slice passed 336 isolated server tests (five existing
+ignored), 107 UI unit tests and all 86 browser tests. Final focused cases cover
+the maximum-length handle and toolbar/author containment with diagnostics on
+mobile. Native/HTTP proof covers qualified issuer separation, lookup bounds,
+Unicode identities, read-only receipts, current profile names, unchanged source
+records, absent preparation, scoped-token rejection and revoked durable grants.
+The new lookup also succeeds after native mTLS owner handoff in object and fleet
+durability modes. Both list kinds share the same HTTP owner and row renderer;
+detail/comment/review contracts retain their existing behavior and remain a
+follow-up, not a second list-author path. UI/server builds, all-target Clippy,
+formatting and architecture checks passed. The embedded UI completed a real
+RustFS mixed-list-to-public-profile workflow, including a 39-character username
+in dark mobile layout with diagnostics enabled. Toolbar buttons and author
+links stayed inside the panel without hidden horizontal scrolling. Attribution
+survived process restart and index rebuild alongside the existing Git, review,
+merge, label and milestone qualification. Both persistent preview repositories
+compared unchanged after their server update; no profile was enrolled there.
+These qualify the implemented slice, not the remaining parity checklist.
 
 ## Primary references
 
