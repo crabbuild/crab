@@ -249,6 +249,8 @@ main {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-height: 52px;
+  line-height: 20px;
   border: 1px solid var(--borderColor-default);
   border-radius: var(--borderRadius-medium);
   background: var(--bgColor-default);
@@ -256,6 +258,9 @@ main {
 }
 .latest-commit a {
   color: var(--fgColor-default);
+}
+.latest-commit .oid {
+  font-size: inherit;
 }
 .latest-commit-error {
   color: var(--fgColor-muted);
@@ -4337,7 +4342,6 @@ main {
   border: 0;
   border-bottom: 1px solid var(--borderColor-default);
   border-radius: 0;
-  min-height: 52px;
   padding: 12px 16px;
 }
 .repository-readme {
@@ -4421,7 +4425,7 @@ main {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: 14px;
   white-space: nowrap;
 }
 .timing summary:hover {
@@ -4687,9 +4691,6 @@ main {
 .repo-file-workspace .breadcrumb {
   min-height: 36px;
   margin-bottom: 12px;
-}
-.repo-file-workspace .latest-commit {
-  min-height: 52px;
 }
 .create-file {
   max-width: 1180px;
