@@ -1325,7 +1325,7 @@ contract is deployed, and update all native fleet peers together for its new
 read operation. No missing-schema reader or old DTO alias is supplied.
 
 Organization/team authority, owner registration, detail/assignee integration
-and actor-backed search remain unfinished. Choosing a handle matching a catalog
+and other actor-backed predicates remain unfinished. Choosing a handle matching a catalog
 owner label does not acquire ownership.
 
 ### Use the collaboration route families
@@ -1366,7 +1366,8 @@ support up to five nested groups. Quote phrases and multiword label names.
 
 Supported qualifiers are `is:open`, `is:closed`, `is:merged`, `is:unmerged`,
 `is:issue`, `is:pr`, `state:open`, `state:closed`, `draft:true`, `draft:false`,
-`label:name`, `milestone:"title"`, `no:label`, `no:assignee`, and `no:milestone`. `is:closed` includes merged PRs.
+`label:name`, `milestone:"title"`, `author:username`, `author:@me`, `no:label`,
+`no:assignee`, and `no:milestone`. `is:closed` includes merged PRs.
 Repeated label qualifiers mean AND; comma-separated label names mean OR.
 Milestone titles match exactly, case-insensitively, including closed milestones.
 Quote spaces, commas, colons or escaped quotation marks as literal title content.
@@ -1375,15 +1376,29 @@ issues and PRs. Counts use the same authoritative predicate as results.
 Prefix a term or qualifier with `-` to exclude it. Missing-metadata qualifiers
 cannot be negated. Unknown qualifiers and malformed syntax return 400.
 
+Author usernames match current Directory handles case-insensitively; `@me`
+binds the authenticated qualified account even without a public profile.
+Unknown handles match no records; exclusion, AND/OR and grouping retain their
+normal meanings. Display names never resolve identities. Renames release the old
+handle without rewriting discussion records; handles are not access grants.
+Private native list inputs carry exactly the ordered bindings extracted from
+the query. Public HTTP parameters cannot supply those bindings. Directory reads
+7/8 resolve at most 64 handles or complete at most 20 indexed handle prefixes;
+completion returns public handles/names only. Update all native peers together.
+Integration-account author syntax and assignee/reviewer predicates remain open.
+
 `GET .../discussion-search?query=label:he&cursor=8` returns authorized
 repository suggestions and syntax feedback. `cursor`, `start`, and `end` count
 browser UTF-16 units; replacement offsets enclose the current token.
 Suggestions discover both kinds, draft/merge predicates, and up to 20 active
-labels without crossing the repository authorization boundary.
+labels or public author usernames without crossing the repository authorization boundary.
 
 Lists query a native SQLite/FTS5 projection across all matching records. Each
 response includes `matching` for the exact query, `counts: {open, closed,
-merged}`, and `navigation`. A global positive Open/Closed conjunction produces
+merged}`, `authored_by_me`, and `navigation`. `authored_by_me` identifies a
+global positive `author:@me` conjunction; excluded self terms and self terms
+inside OR groups do not select the personal view. The UI uses that native result
+for its Created by me/Authored by me navigation. A global positive Open/Closed conjunction produces
 `navigation: {kind:"state", selected, open, closed}`. Those counters describe
 its destination queries; closed includes merged PRs. Other searches produce
 `navigation: {kind:"results"}` and retain the exact predicate, showing the total
@@ -1409,11 +1424,13 @@ BM25 ranks for positive text terms; terms shorter than three Unicode scalars
 retain literal substring matching without trigram ranking. `direction` is
 `desc` (default) or `asc`. Discussion number, then kind, break ties in the same direction.
 `next` is null on the last page. Cursors bind the repository, query, endpoint kind scope,
-ordering, generation and revision. Malformed cursors return 400; changed
+ordering, resolved author identities, generation and revision. Reassigning a
+handle invalidates its old cursor even without a repository mutation. Malformed cursors return 400; changed
 queries or index contents return 409 `stale_search_cursor`. Restart at the first
 page to obtain a fresh snapshot. Comment pagination remains numeric.
 
-Milestone filtering requires discussion index format 2. Format-1 indexes report
+The current discussion index format is 3, adding a qualified author-identity
+projection to format 2’s milestone catalog. Older indexes report
 `outdated`; run the explicit rebuild below before admitting indexed traffic.
 It rebuilds only derived tables and preserves canonical milestone and assignment
 records. Clearing, milestone catalog preparation and discussion projection are
@@ -1425,7 +1442,7 @@ private mTLS listener. This bounded operation resumes after interruption and
 blocks fresh mutations and indexed reads until complete. Missing/building
 indexes return 503 `discussion_index_unavailable`; detail reads and recorded
 command replays remain available. The command never recreates domain records.
-Actor qualifiers and advanced metadata predicates remain delivery work. Release
+Other actor qualifiers and advanced metadata predicates remain delivery work. Release
 search retains its separate plain-text contract.
 
 ### Browse activity

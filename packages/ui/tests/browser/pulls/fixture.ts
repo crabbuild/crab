@@ -410,6 +410,7 @@ export async function mockPullRequest(page: Page) {
             closed: matches && item.state !== "open" ? 1 : 0,
             merged: matches && item.state === "merged" ? 1 : 0,
           },
+          authored_by_me: false,
           matching: matches ? 1 : 0,
           navigation: query
             ? { kind: "results" }

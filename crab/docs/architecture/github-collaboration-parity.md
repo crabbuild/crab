@@ -247,3 +247,10 @@ blocker: the published SDK links SQLite 3.45.0, before the upstream WAL-reset
 fix. A matched dependency upgrade and native release qualification remain
 required; a UI smoke test cannot remove that blocker. Dependency changes need
 their existing explicit approval. Cloudflare compute remains stopped.
+
+The author-search slice adds qualified native predicates, bounded Directory
+handle completion and real created/authored-by-me navigation. Current index
+format 3 needs explicit rebuilds of older derived indexes; no source-record
+migration or compatibility reader is added. Handle bindings also belong to
+cursor fingerprints. Other actor predicates, organizations/teams and Projects
+remain unfinished; a public handle still grants no authority.

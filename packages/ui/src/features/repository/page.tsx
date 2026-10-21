@@ -426,6 +426,7 @@ export function RepositoryPage({
         ) : issuesView ? (
           <DiscussionWorkspace
             repo={repo}
+            url={url}
             view={view}
             showNavigation={discussionNavigation}
           >
@@ -464,6 +465,7 @@ export function RepositoryPage({
         ) : view === "pulls" ? (
           <DiscussionWorkspace
             repo={repo}
+            url={url}
             view="pulls"
             showNavigation={discussionNavigation}
           >

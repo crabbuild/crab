@@ -39,6 +39,7 @@ pub(crate) struct SearchInput {
     pub query: Option<String>,
     pub sort: Sort,
     pub direction: Direction,
+    pub authors: Vec<super::super::authors::Binding>,
 }
 impl Default for SearchInput {
     fn default() -> Self {
@@ -48,6 +49,7 @@ impl Default for SearchInput {
             query: None,
             sort: Sort::Created,
             direction: Direction::Desc,
+            authors: Vec::new(),
         }
     }
 }
@@ -78,6 +80,7 @@ pub(crate) struct Page<T> {
     pub next: Option<String>,
     pub counts: StateCounts,
     pub matching: u64,
+    pub authored_by_me: bool,
     pub navigation: super::super::navigation::StateNavigation,
     pub labels: Vec<LabelSummary>,
 }
@@ -159,10 +162,11 @@ struct Candidate {
 }
 
 #[derive(Default)]
-struct Bindings {
+struct Bindings<'a> {
     values: Vec<SqlValue>,
+    authors: &'a [super::super::authors::Binding],
 }
-impl Bindings {
+impl Bindings<'_> {
     fn bind(&mut self, value: SqlValue) -> String {
         self.values.push(value);
         format!("?{}", self.values.len())
@@ -182,6 +186,9 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     let generation = ensure_ready(context)?;
     let revision = revision(context)?;
     let query = Query::parse(input.query.as_deref()).map_err(crate::cells::Error::Invalid)?;
+    query
+        .validate_authors(&input.authors)
+        .map_err(crate::cells::Error::Invalid)?;
     let identity = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT repository_uuid FROM repository_identity WHERE singleton = 1",
@@ -202,6 +209,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         input.sort,
         input.direction,
         &query.expression,
+        &input.authors,
     ))?)
     .to_hex()
     .to_string();
@@ -219,7 +227,10 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     }) {
         return Err(crate::cells::Error::StaleSearch);
     }
-    let mut bindings = Bindings::default();
+    let mut bindings = Bindings {
+        authors: &input.authors,
+        ..Bindings::default()
+    };
     let kind_clause = kind_filter(subject_kind, &mut bindings);
     // Each counter describes its navigation query, even when the current query
     // selects only closed work. Rows and both targets share this native snapshot.
@@ -256,7 +267,10 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         .ok_or(crate::cells::Error::Invalid(
             "discussion count exceeds its range",
         ))?;
-    let mut bindings = Bindings::default();
+    let mut bindings = Bindings {
+        authors: &input.authors,
+        ..Bindings::default()
+    };
     let kind_clause = kind_filter(subject_kind, &mut bindings);
     let predicate = expression(&query.expression, &mut bindings);
     let filter = format!("{kind_clause} AND ({predicate})");
@@ -401,12 +415,13 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         next,
         counts,
         matching,
+        authored_by_me: query.authored_by_me(),
         navigation,
         labels,
     })
 }
 
-fn kind_filter(subject_kind: Option<SubjectKind>, bindings: &mut Bindings) -> String {
+fn kind_filter(subject_kind: Option<SubjectKind>, bindings: &mut Bindings<'_>) -> String {
     match subject_kind {
         Some(subject_kind) => {
             let value = bindings.bind(SqlValue::Integer(kind(subject_kind)));
@@ -416,7 +431,7 @@ fn kind_filter(subject_kind: Option<SubjectKind>, bindings: &mut Bindings) -> St
     }
 }
 
-fn expression(expression: &Expression, bindings: &mut Bindings) -> String {
+fn expression(expression: &Expression, bindings: &mut Bindings<'_>) -> String {
     match expression {
         Expression::All => "1".into(),
         Expression::Not(inner) => format!("NOT ({})",self::expression(inner, bindings)),
@@ -440,6 +455,16 @@ fn expression(expression: &Expression, bindings: &mut Bindings) -> String {
                 let values = names.iter().map(|name|bindings.text(name)).collect::<Vec<_>>().join(",");
                 format!("EXISTS (SELECT 1 FROM discussion_index_labels dl JOIN repository_labels l ON l.number = dl.label WHERE dl.document = d.rowid AND l.deleted_version IS NULL AND l.name_key IN ({values}))")
             }
+            Term::Author(name) => {
+                let identity = bindings.authors.iter().find(|binding| binding.name == *name).and_then(|binding| binding.identity);
+                match identity {
+                    Some(identity) => {
+                        let value = bindings.bind(SqlValue::Blob(identity.to_vec()));
+                        format!("EXISTS (SELECT 1 FROM discussion_index_authors a WHERE a.document = d.rowid AND a.identity = {value})")
+                    }
+                    None => "0".into(),
+                }
+            }
             Term::Milestone(title) => {
                 let value = bindings.text(title);
                 format!("EXISTS (SELECT 1 FROM discussion_index_milestones dm JOIN discussion_index_milestone_catalog m ON m.number = dm.milestone WHERE dm.document = d.rowid AND m.title_key = {value})")
@@ -460,7 +485,7 @@ fn expression(expression: &Expression, bindings: &mut Bindings) -> String {
 fn quote(text: &str) -> String {
     format!("\"{}\"", text.replace('"', "\"\""))
 }
-fn sort_expression(sort: Sort, expression: &Expression, bindings: &mut Bindings) -> String {
+fn sort_expression(sort: Sort, expression: &Expression, bindings: &mut Bindings<'_>) -> String {
     match sort {
         Sort::Created => "d.created_at_ms".into(),
         Sort::Updated => "d.updated_at_ms".into(),
@@ -489,7 +514,7 @@ fn sort_expression(sort: Sort, expression: &Expression, bindings: &mut Bindings)
         Sort::Eyes => reaction_expression(Kind::Eyes, bindings),
     }
 }
-fn reaction_expression(kind: Kind, bindings: &mut Bindings) -> String {
+fn reaction_expression(kind: Kind, bindings: &mut Bindings<'_>) -> String {
     let kind = bindings.text(kind.key());
     format!(
         "COALESCE((SELECT count FROM discussion_index_reaction_counts r WHERE r.document = d.rowid AND r.kind = {kind}),0)"

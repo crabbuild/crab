@@ -7,8 +7,10 @@ import { repoHref } from "@/lib/repository-route";
 import {
   DiscussionListControls,
   discussionFilters,
+  discussionQuery,
   type DiscussionPage,
 } from "./list";
+import { useDiscussionNavigation } from "./workspace";
 import { DiscussionRow, type DiscussionItem } from "./row";
 
 export function DiscussionResults({
@@ -29,6 +31,11 @@ export function DiscussionResults({
   const query = url.searchParams.get("q") ?? "";
   const page = useRequest<DiscussionPage<DiscussionItem>>(
     endpoint(repo, view, { ...filters, before }),
+  );
+  useDiscussionNavigation(
+    view,
+    discussionQuery(url, view),
+    page.data?.authored_by_me,
   );
   const Icon = view === "issues" ? IssueOpenedIcon : GitPullRequestIcon;
   return (

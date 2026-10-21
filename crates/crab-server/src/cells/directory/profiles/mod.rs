@@ -27,6 +27,19 @@ pub(crate) enum ProfileOutcome {
 }
 
 pub(crate) fn validate_profile(handle: &str, name: &str) -> std::result::Result<(), &'static str> {
+    validate_handle(handle)?;
+    if name.trim() != name
+        || name.is_empty()
+        || name.chars().count() > 100
+        || name.chars().any(char::is_control)
+    {
+        return Err(
+            "Display name must contain 1–100 characters without surrounding whitespace or controls",
+        );
+    }
+    Ok(())
+}
+pub(crate) fn validate_handle(handle: &str) -> std::result::Result<(), &'static str> {
     if handle.is_empty()
         || handle.len() > 39
         || handle.starts_with('-')
@@ -37,15 +50,6 @@ pub(crate) fn validate_profile(handle: &str, name: &str) -> std::result::Result<
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
     {
         return Err("Username must contain 1–39 lowercase letters, digits or single hyphens");
-    }
-    if name.trim() != name
-        || name.is_empty()
-        || name.chars().count() > 100
-        || name.chars().any(char::is_control)
-    {
-        return Err(
-            "Display name must contain 1–100 characters without surrounding whitespace or controls",
-        );
     }
     Ok(())
 }

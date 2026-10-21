@@ -32,6 +32,7 @@ export interface DiscussionPage<T> {
   next: string | null;
   counts: { open: number; closed: number; merged: number };
   matching: number;
+  authored_by_me: boolean;
   navigation:
     | { kind: "results" }
     | {
@@ -63,6 +64,13 @@ const sorts = [
 
 // Search, state, sort, and pagination share one URL. A changed filter starts at
 // the first page because the native cursor belongs to its original query.
+export function discussionQuery(url: URL, view: "issues" | "pulls") {
+  return (
+    url.searchParams.get("q") ||
+    (view === "issues" ? "is:issue is:open" : "is:open")
+  );
+}
+
 export function discussionFilters(url: URL) {
   return {
     q: url.searchParams.get("q") || undefined,
@@ -157,10 +165,7 @@ export function DiscussionListControls({
             key={kind}
             kind={kind}
             repo={repo}
-            query={
-              url.searchParams.get("q") ??
-              (view === "issues" ? "is:issue is:open" : "is:open")
-            }
+            query={discussionQuery(url, view)}
             onSelect={(q) => change({ q })}
           />
         ))}

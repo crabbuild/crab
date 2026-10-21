@@ -156,7 +156,7 @@ fn malformed_or_unsupported_queries_never_become_free_text() {
         "draft:yes",
         "no:project",
         "-no:label",
-        "author:alice",
+        "author:app/bot",
         "sort:updated",
         "-",
         "()",

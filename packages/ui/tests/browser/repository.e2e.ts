@@ -724,6 +724,7 @@ test.beforeEach(async ({ page }) => {
             closed: 1,
             merged: 0,
           },
+          authored_by_me: false,
           matching: 1,
           navigation: {
             kind: "state",

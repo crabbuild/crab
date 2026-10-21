@@ -86,7 +86,7 @@ The native query path shares a single parser and SQL compiler between issue and
 PR lists. It supports implicit/explicit AND, OR, up to five nested groups,
 quoted phrases, exclusions, exact case-insensitive labels (comma means OR),
 `is:`/`state:`, `draft:`, `milestone:"title"`, `no:milestone`, `no:label`, and
-`no:assignee`. Unknown qualifiers and
+`no:assignee`, `author:username` and `author:@me`. Unknown qualifiers and
 malformed syntax return input errors. Suggestions come from the authorized
 repository's native label catalog and preserve browser UTF-16 caret ranges.
 The search box supports keyboard selection, Escape, syntax feedback, URL/reload,
@@ -144,7 +144,7 @@ organization/team/project grants and their explicit
 catalog authority cutover remain required; the combined model checklist above
 stays incomplete.
 
-Actor/project/type predicates and complete GitHub workspace controls
+Other actor/project/type predicates and complete GitHub workspace controls
 remain delivery work. This slice does not finish the full parity checklist.
 
 Milestone predicates now use an indexed native catalog and assignment
@@ -158,8 +158,8 @@ Sort, diagnostics, URL/reload and cursor resets stay consistent. Maximum-sized
 queries disable unusable choices with an explanation. Request failures remain
 visible and retryable; rapid reopen has a new focus scope.
 
-Index format 2 requires explicit preparation for existing format-1 indexes,
-reported as `outdated`. The management command rebuilds titles from canonical
+The milestone slice introduced index format 2 and explicit preparation of
+format-1 indexes, reported as `outdated`. The management command rebuilds titles from canonical
 milestones in bounded batches before issue/PR assignments; it resumes after
 restart. Indexed serving never falls back to old projections or creates tables.
 
@@ -190,8 +190,8 @@ authors or branch context, changing the query/cursor, or fetching results again.
 Both preferences persist on the current browser, shared between discussion
 lists; they are not account preferences or saved views. If browser storage is
 denied, the current component still supports the interaction in memory.
-Personal navigation, saved views, bulk selection and the rest of the workspace
-checklist remain unfinished.
+Other personal navigation, saved views, bulk selection and the rest of the
+workspace checklist remain unfinished.
 
 List attribution now distinguishes the stored author name from its optional
 current public actor summary. A bounded native Directory read resolves unique
@@ -203,7 +203,7 @@ recheck durable membership. Missing Directory preparation fails visibly and can
 be retried after explicit initialization. Git credentials retain their existing
 exclusion from browser list/profile routes. The UI consumes one object contract
 without a string alias. Detail/comment/review attribution, assignee profiles
-and actor-based filtering are still unfinished; public names grant no authority.
+and other actor predicates are still unfinished; public names grant no authority.
 
 ## Data and query contracts
 
@@ -267,6 +267,22 @@ stronger text step of each palette for contrast. Theme changes suppress color
 transitions so intermediate colors cannot make controls unreadable. Primer CSS
 variable names and component imports are removed rather than aliased. Octicons
 remain repository-domain icons; Lucide supplies the shared shadcn controls.
+
+Author predicates now bind current public usernames to qualified accounts via
+native Directory reads. Unknown handles produce no match; display names never
+select an account. `@me` uses the session identity before profile enrollment.
+Boolean/excluded filters, counts, ordering and both list kinds share the native
+predicate. Cursors include resolved bindings so handle reuse invalidates an old
+cursor without requiring a repository write. Completion searches indexed handles
+and preserves UTF-16 offsets and query bounds. Created by me/Authored by me links
+use real queries; selection comes from a native global-conjunction flag rather
+than browser string matching, and survives state/sort/reload.
+
+This requires explicit index-format-3 rebuilds for existing repositories, plus
+fleet-wide native input/output and Directory operation updates. Account handles
+and repository data remain separate snapshots, not a distributed transaction or
+authority. Author dropdowns, integration accounts, assigned/mentioned/review
+views and owner/team/project authority remain delivery work.
 
 ## Verification and completion
 
@@ -391,6 +407,27 @@ survived process restart and index rebuild alongside the existing Git, review,
 merge, label and milestone qualification. Both persistent preview repositories
 compared unchanged after their server update; no profile was enrolled there.
 These qualify the implemented slice, not the remaining parity checklist.
+
+The author-filter slice passed 341 isolated server tests (five existing ignored),
+107 UI unit tests and all 88 browser tests. Focused native peer tests cover
+handle resolution/completion and authored results after mTLS owner handoff in
+object and fleet durability modes. HTTP/native cases cover qualified issuer
+separation, unknown/renamed/reused handles, cursor invalidation without a
+repository mutation, unenrolled self queries, UTF-16 completion bounds and
+revoked durable grants. Browser proof covers both personal views through state,
+sort, reload, keyboard completion and dark mobile accessibility. The shared axe
+helper now awaits the actual Radix exit lifecycle instead of a retired Primer
+selector; assertions and contrast checks remain enabled.
+
+UI/server builds, all-target Clippy, formatting, architecture gates and relative
+documentation links passed. A real RustFS process workflow exercised embedded
+personal views, Git publication/merge and author search/completion across
+restart and explicit index rebuild. Both existing preview repositories reported
+format 2 as outdated, rejected indexed reads until explicit preparation, and
+upgraded to format 3. All 18 captured canonical collaboration resources compared
+unchanged; the operator remained unenrolled and self filtering still worked.
+This does not qualify full GitHub parity or remove the Cellar 0.1.0 release
+limitations documented in `crates/crab-server/CELLAR.md`.
 
 ## Primary references
 

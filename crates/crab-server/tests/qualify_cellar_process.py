@@ -309,6 +309,12 @@ with open(run / "commands.log", "w") as log:
         assert request("/api/repos/team/project/issues", body)["number"] == number
         author_summary = {"name": "Local operator", "profile": {key: actor_profile[key] for key in ["id", "handle", "name"]}}
         assert request("/api/repos/team/project/issues")["items"][0]["author"] == author_summary
+        author_search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": "author:" + actor_profile["handle"]})
+        self_search = "/api/repos/team/project/issues?q=author%3A%40me"
+        assert request(author_search)["matching"] == 1
+        assert request(self_search)["authored_by_me"] is True
+        author_completion = "/api/repos/team/project/discussion-search?" + urllib.parse.urlencode({"query": "author:qualification", "cursor": 20})
+        assert request(author_completion)["items"][0]["value"] == "author:" + actor_profile["handle"]
         issue_path = f"/api/repos/team/project/issues/{number}"
         reaction_path = f"/api/repos/team/project/reactions/issues/{number}"
         reaction = request(reaction_path, {"kind": "heart", "active": True}, method="PUT")
@@ -533,6 +539,11 @@ with open(run / "commands.log", "w") as log:
         assert request(issue_path) == labeled_issue
         assert request(label_options) == choices
         assert request(label_search)["matching"] == 1
+        for path in [author_search, self_search]:
+            page = request(path)
+            assert page["matching"] == 2 and page["counts"] == {"open": 0, "closed": 2, "merged": 1}
+        assert request(author_completion)["items"][0]["value"] == "author:" + actor_profile["handle"]
+        assert request("/api/repos/team/project/pulls?q=author%3A%40me")["matching"] == 1
         stop()
         count = subprocess.check_output(
             [
@@ -562,6 +573,8 @@ with open(run / "commands.log", "w") as log:
             "actor_directory_restart": True,
             "actor_profile_retry": True,
             "actor_attribution_restart": True,
+            "author_search_restart_rebuild": True,
+            "author_completion_restart": True,
             "discussion_search_restart": True,
             "mixed_discussion_cursor_restart": True,
             "search_suggestions_restart": True,

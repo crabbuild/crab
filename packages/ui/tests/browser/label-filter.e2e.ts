@@ -74,6 +74,7 @@ async function fixture(page: Page) {
       json: {
         items: [],
         next: null,
+        authored_by_me: false,
         matching,
         counts: { open: matching, closed: 0, merged: 0 },
         navigation: { kind: "results" },

@@ -40,7 +40,7 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
         ),
     };
     let query = format!(
-        "SELECT title, body, author_name, state, label_ids, assignee_subjects, created_at_ms, updated_at_ms FROM {table} WHERE number = ?"
+        "SELECT title, body, author_name, state, label_ids, assignee_subjects, created_at_ms, updated_at_ms, author_issuer, author_subject FROM {table} WHERE number = ?"
     );
     let rows = context.sql(&SqlBatch {
         statements: vec![statement(&query, vec![integer(subject.number)?])],
@@ -57,6 +57,9 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
     let assignees = decode_assignees(result_blob(row, 5)?)?;
     let created = result_u64_from_row(row, 6)?;
     let updated = result_u64_from_row(row, 7)?;
+    let issuer = result_text(row, 8)?;
+    let subject_key = result_text(row, 9)?;
+    let author_identity = super::super::authors::identity(&issuer, &subject_key)?;
     let draft = subject.kind == SubjectKind::Pull
         && crate::cells::repository::pulls::readiness::load(context, subject.number)?
             == crate::cells::repository::PullReadiness::Draft;
@@ -84,6 +87,10 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
         vec![integer(id)?, SqlValue::Integer(kind(subject.kind)), integer(subject.number)?, integer(state)?, SqlValue::Integer(i64::from(draft)), integer(created)?, integer(updated)?, SqlValue::Text(title.clone()), SqlValue::Text(body.clone()), SqlValue::Text(author.clone()), integer(comments)?, integer(total)?],
     )] })?;
     let mut statements = Vec::with_capacity(labels.len() + assignees.len() + counts.len() + 1);
+    statements.push(statement(
+        "INSERT INTO discussion_index_authors(document, identity) VALUES (?, ?)",
+        vec![integer(id)?, SqlValue::Blob(author_identity.to_vec())],
+    ));
     for label in labels {
         statements.push(statement(
             "INSERT INTO discussion_index_labels(document, label) VALUES (?, ?)",

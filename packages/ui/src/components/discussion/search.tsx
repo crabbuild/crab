@@ -249,7 +249,7 @@ export function DiscussionSearch({
           role={data?.error ? "status" : undefined}
         >
           {data?.error ??
-            'Use AND, OR, parentheses, label:"name", or is:closed.'}
+            'Use AND, OR, parentheses, label:"name", author:@me, or is:closed.'}
         </p>
         {current && suggestions.error && (
           <div

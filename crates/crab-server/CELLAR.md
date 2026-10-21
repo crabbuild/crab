@@ -128,11 +128,11 @@ recorded command replays and detail reads remain available. Readiness stays
 unavailable until every repository's index is ready. Run preparation before
 admitting public traffic after upgrading an existing native deployment.
 
-Discussion index format 2 adds a bounded milestone catalog and one assignment
+Discussion index format 2 added a bounded milestone catalog and one assignment
 projection per discussion. Titles/states and assignments update inside the same
 native transaction as their canonical milestone commands and replay receipt.
 Renames invalidate query cursors without rewriting every assigned discussion.
-Existing format-1 indexes report `outdated` with their generation and format;
+Existing older indexes report `outdated` with their generation and format;
 indexed reads and fresh mutations return unavailable. Run the same
 `cells rebuild-search` command to begin a new generation. Preparation clears
 old projections, rebuilds milestone titles in batches of eight from their
@@ -140,6 +140,18 @@ canonical KV catalog, then rebuilds issues and PRs with their assignments.
 Interrupted steps resume their persisted phase/cursor/version. Serving never
 installs these tables or falls back to old projections. Unknown formats fail.
 Repository domain records and stored command replies retain their formats.
+
+Discussion index format 3 adds one 32-byte qualified-author digest per
+indexed discussion and an indexed lookup. Canonical issuer/subject pairs are
+encoded as a JSON tuple before hashing; their codec belongs to this index
+format. The canonical discussion row and projection commit together. Rebuild
+format-1/2 indexes explicitly with the same bounded management command;
+canonical data and replay receipts stay unchanged. Author handles resolve in
+Directory reads 7/8, with private bindings carried in native list inputs and
+included in cursor fingerprints. There is no distributed snapshot across the
+Directory and repository Cell; each query uses the identities it resolved and
+rechecks the durable repository grant after awaited reads. Update fleet peers
+together for the changed native list input/output and Directory operations.
 
 `failure_zone` maps to the native Cellar region. Management uses the native
 runtime directly; there are no release bootstrap/prepare/activate, pinned

@@ -452,7 +452,7 @@ async fn advanced_search_preserves_caseful_operators_and_reports_invalid_syntax(
         "(keyboard",
         "label:\"unfinished",
         "sort:updated",
-        "author:alice",
+        "author:app/bot",
     ] {
         let response = h
             .http

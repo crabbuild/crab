@@ -106,8 +106,15 @@ choices and a no-milestone option. It preserves boolean queries, sort and
 pagination semantics and searches the complete native catalog. The search box
 also accepts `milestone:"title"`, `-milestone:"title"` and `no:milestone`, with
 native suggestions. Existing indexes need explicit `cells rebuild-search`
-preparation for discussion index format 2; canonical collaboration data remains
+preparation for discussion index format 3; canonical collaboration data remains
 unchanged.
+
+Search also accepts `author:username`, `-author:username` and `author:@me`.
+Usernames resolve through current public profiles; `@me` works before enrollment.
+Created by me and Authored by me are native filtered views with URL/reload,
+state and sort support. Author suggestions search indexed public handles; names
+never act as identities or grants. Format-1/2 indexes need an explicit rebuild
+before serving the new lists; update fleet peers together.
 
 Pull request conversations show merge requirements above the comment editor.
 Choose a merge method, review the commit message, and confirm the merge; an

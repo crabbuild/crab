@@ -169,7 +169,8 @@ async fn qualify_handoff(
     use crate::cells::{
         Address,
         directory::{
-            CreateProfile, CreateProfileInput, GetActor, IdentityKey, LookupActors, ProfileOutcome,
+            CompleteHandles, CreateProfile, CreateProfileInput, GetActor, IdentityKey,
+            LookupActors, ProfileOutcome, ResolveHandles,
         },
     };
     first
@@ -240,11 +241,49 @@ async fn qualify_handoff(
         .query::<LookupActors>(
             Address::Directory,
             Some(actor.receipt),
-            vec![lookup_identity],
+            vec![lookup_identity.clone()],
         )
         .await
         .unwrap();
     assert_eq!(lookup.output, vec![Some(profile.clone().into())]);
+    let resolved = remote
+        .client
+        .query::<ResolveHandles>(
+            Address::Directory,
+            Some(actor.receipt),
+            vec![profile.handle.clone()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved.output, vec![Some(lookup_identity.clone())]);
+    let completed = remote
+        .client
+        .query::<CompleteHandles>(Address::Directory, Some(actor.receipt), "al".into())
+        .await
+        .unwrap();
+    assert_eq!(completed.output, vec![profile.clone().into()]);
+    use crate::cells::repository::{ListDiscussions, SearchInput, search::authors};
+    let authored = remote
+        .client
+        .query::<ListDiscussions>(
+            repository,
+            Some(created.receipt),
+            SearchInput {
+                query: Some("author:@me".into()),
+                authors: vec![authors::Binding {
+                    name: "@me".into(),
+                    identity: Some(
+                        authors::identity(&lookup_identity.issuer, &lookup_identity.subject)
+                            .unwrap(),
+                    ),
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(authored.output.matching, 1);
+    assert!(authored.output.authored_by_me);
 
     let replayed = remote
         .client

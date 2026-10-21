@@ -307,10 +307,12 @@ async fn list(
     let actor = app::actor(&principal)?;
     let assignees = assignees::available(repo, &actor);
     let routed = app::repository_cell(&server, repo)?;
+    let mut input = params.input("is:open")?;
+    super::discussion_search::resolve_authors(&server, &principal, &mut input).await?;
     let page = app::query_output(
         routed
             .client
-            .query::<ListPulls>(&routed.target, None, params.input("is:open")?)
+            .query::<ListPulls>(&routed.target, None, input)
             .await,
     )?;
     let authors = super::profiles::attribution::Authors::load(
@@ -326,7 +328,7 @@ async fn list(
         .map(|pull| pull_list_view(&authors, pull, &page.labels, &assignees))
         .collect::<Vec<_>>();
     Ok(Json(
-        json!({"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation}),
+        json!({"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"authored_by_me":page.authored_by_me}),
     ))
 }
 

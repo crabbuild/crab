@@ -109,6 +109,35 @@ fn replacement(input: &CompletionInput) -> Result<(usize, usize, usize), &'stati
     Ok((cursor, cursor, cursor))
 }
 
+pub(crate) fn author_prefix(input: &CompletionInput) -> Result<Option<String>, &'static str> {
+    let (start, _, cursor) = replacement(input)?;
+    let prefix = input.query[start..cursor]
+        .trim_start_matches('-')
+        .to_ascii_lowercase();
+    Ok(prefix.strip_prefix("author:").map(value_prefix))
+}
+
+pub(crate) fn append_authors(
+    input: &CompletionInput,
+    result: &mut Suggestions,
+    handles: impl Iterator<Item = (String, String)>,
+) -> Result<(), &'static str> {
+    let (start, end, _) = replacement(input)?;
+    let sign = if input.query[start..].starts_with('-') {
+        "-"
+    } else {
+        ""
+    };
+    let retained = input.query[..start].chars().count() + input.query[end..].chars().count();
+    for (handle, description) in handles {
+        let value = format!("{sign}author:{handle}");
+        if retained + value.chars().count() <= 256 && result.items.len() < 20 {
+            result.items.push(Suggestion { value, description });
+        }
+    }
+    Ok(())
+}
+
 fn suggestions(
     input: &CompletionInput,
     start: usize,
@@ -156,6 +185,13 @@ fn suggestions(
                 .into(),
             });
         }
+    } else if prefix.starts_with("author:") {
+        if "author:@me".starts_with(&prefix) {
+            items.push(Suggestion {
+                value: format!("{sign}author:@me"),
+                description: "Work created by you".into(),
+            });
+        }
     } else {
         for (value, description) in [
             ("is:open", "Open work"),
@@ -171,6 +207,8 @@ fn suggestions(
             ("no:assignee", "Unassigned work"),
             ("milestone:", "Filter by repository milestone"),
             ("no:milestone", "Work without a milestone"),
+            ("author:", "Filter by public username"),
+            ("author:@me", "Work created by you"),
         ] {
             if negative && value.starts_with("no:") || !value.starts_with(&prefix) {
                 continue;

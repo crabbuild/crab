@@ -28,6 +28,12 @@ CREATE INDEX IF NOT EXISTS discussion_index_comments ON discussion_index(kind, c
 CREATE INDEX IF NOT EXISTS discussion_index_reactions ON discussion_index(kind, reactions, number);
 CREATE INDEX IF NOT EXISTS discussion_index_states ON discussion_index(kind, state, number);
 
+CREATE TABLE IF NOT EXISTS discussion_index_authors (
+    document INTEGER PRIMARY KEY REFERENCES discussion_index(rowid) ON DELETE CASCADE,
+    identity BLOB NOT NULL CHECK (length(identity) = 32)
+) STRICT;
+CREATE INDEX IF NOT EXISTS discussion_index_author_lookup ON discussion_index_authors(identity, document);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS discussion_fts USING fts5(
     title, body, author, content='', contentless_delete=1,
     tokenize='trigram case_sensitive 1'

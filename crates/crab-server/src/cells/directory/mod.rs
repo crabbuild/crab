@@ -13,11 +13,13 @@ const MAX_VERSION: u64 = 9_007_199_254_740_991;
 const COLUMNS: &str = "id, handle, name, version, created_at_ms, updated_at_ms";
 
 mod lookup;
+mod search;
+pub(crate) use search::{CompleteHandles, ResolveHandles};
 mod profiles;
 pub(crate) use lookup::{ActorSummary, LookupActors};
 pub(crate) use profiles::{
     CreateProfile, CreateProfileInput, EditProfile, EditProfileInput, ProfileOutcome,
-    validate_profile,
+    validate_handle, validate_profile,
 };
 
 // Authentication keys stay private to native commands. Public records expose
@@ -188,6 +190,8 @@ pub(in crate::cells) fn dispatch_read(
         GetActor::ID => invoke_read::<GetActor>(context, input),
         GetDirectoryRevision::ID => invoke_read::<GetDirectoryRevision>(context, input),
         LookupActors::ID => invoke_read::<LookupActors>(context, input),
+        ResolveHandles::ID => invoke_read::<ResolveHandles>(context, input),
+        CompleteHandles::ID => invoke_read::<CompleteHandles>(context, input),
         _ => Err(Error::Invalid("unknown directory query")),
     }
 }

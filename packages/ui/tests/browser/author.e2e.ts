@@ -55,6 +55,7 @@ test("mixed list attribution links stable actors and follows renamed profiles wi
           },
         ],
         counts: { open: 2, closed: 0, merged: 0 },
+        authored_by_me: false,
         matching: 2,
         next: null,
         navigation: { kind: "results" },
@@ -119,6 +120,7 @@ test("missing Directory preparation is a visible list failure with an explicit r
           json: {
             items: [],
             next: null,
+            authored_by_me: false,
             matching: 0,
             counts: { open: 0, closed: 0, merged: 0 },
             navigation: { kind: "results" },

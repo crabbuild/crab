@@ -11,6 +11,8 @@ use axum::{
     routing::get,
 };
 use std::sync::Arc;
+mod authors;
+pub(super) use authors::resolve as resolve_authors;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
@@ -37,12 +39,44 @@ async fn complete(
     // because peer callers cross a separate trust boundary.
     input.validate().map_err(app::Error::Invalid)?;
     let routed = app::repository_cell(&server, &repo)?;
-    let result = app::query_output(
+    let prefix = crate::cells::repository::search::completion::author_prefix(&input)
+        .map_err(app::Error::Invalid)?;
+    let mut result = app::query_output(
         routed
             .client
-            .query::<CompleteSearch>(&routed.target, None, input)
+            .query::<CompleteSearch>(
+                &routed.target,
+                None,
+                CompletionInput {
+                    query: input.query.clone(),
+                    cursor: input.cursor,
+                },
+            )
             .await,
     )?;
+    if let Some(prefix) = prefix.filter(|prefix| {
+        prefix.len() <= 39
+            && prefix
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    }) {
+        let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
+        let handles = app::query_output(
+            cells
+                .query::<crate::cells::directory::CompleteHandles>(
+                    crate::cells::Address::Directory,
+                    None,
+                    prefix,
+                )
+                .await,
+        )?;
+        crate::cells::repository::search::completion::append_authors(
+            &input,
+            &mut result,
+            handles.into_iter().map(|actor| (actor.handle, actor.name)),
+        )
+        .map_err(app::Error::Invalid)?;
+    }
     // Recheck the durable grant after the awaited read: the materialized
     // repository may still contain a member whose access has been revoked.
     app::membership(&server, &principal, &repo).await?;
@@ -110,6 +144,7 @@ impl ListParameters {
             query: app::search_query(self.q.as_deref().or(Some(default_query)))?,
             sort: self.sort.unwrap_or_default(),
             direction: self.direction.unwrap_or_default(),
+            authors: Vec::new(),
         };
         input.validate().map_err(app::Error::Invalid)?;
         Ok(input)

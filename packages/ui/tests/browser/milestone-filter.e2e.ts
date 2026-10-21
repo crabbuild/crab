@@ -16,6 +16,7 @@ async function fixture(page: Page) {
           items: [],
           next: null,
           counts: { open: 0, closed: 0, merged: 0 },
+          authored_by_me: false,
           matching: 0,
           navigation: { kind: "results" },
         },
