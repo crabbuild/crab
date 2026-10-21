@@ -21,6 +21,9 @@ mod storage_root;
 mod test_support;
 mod transfer_admission;
 
+pub use cells::repository::search::index::{
+    RebuildSearchInput, SearchIndexPhase, SearchIndexProgress, SearchIndexStatus,
+};
 pub use config::{
     AuthProvider, BranchProtection, CellDurabilityMode, CellsConfig, Config, GitHubConfig,
     ImportConfig, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember, StorageConfig,

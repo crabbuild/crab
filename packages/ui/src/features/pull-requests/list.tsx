@@ -1,3 +1,9 @@
+import {
+  DiscussionListControls,
+  DiscussionCommentCount,
+  discussionFilters,
+  type DiscussionPage,
+} from "@/components/discussion/list";
 import { endpoint, navigate, useRequest, type Repository } from "@/lib/api";
 import { AssigneeAvatars } from "@/components/discussion/metadata";
 import { DiscussionSearch } from "@/components/discussion/search";
@@ -9,15 +15,15 @@ import { Result } from "@/components/request/result";
 import { GitPullRequestIcon } from "@primer/octicons-react";
 
 import { timestamp } from "@/components/discussion/time";
-import type { Page, PullSummary } from "./model";
+import type { PullListItem } from "./model";
 import { branch, pullIcons, pullStatus } from "./presentation";
 
 export function PullList({ repo, url }: { repo: Repository; url: URL }) {
-  const state = url.searchParams.get("state") ?? "open";
+  const filters = discussionFilters(url);
   const before = url.searchParams.get("before") ?? undefined;
   const query = url.searchParams.get("q") ?? "";
-  const page = useRequest<Page<PullSummary>>(
-    endpoint(repo, "pulls", { state, before, q: query || undefined }),
+  const page = useRequest<DiscussionPage<PullListItem>>(
+    endpoint(repo, "pulls", { ...filters, before }),
   );
   return (
     <section className="pulls-page">
@@ -45,7 +51,7 @@ export function PullList({ repo, url }: { repo: Repository; url: URL }) {
           navigate(
             repoHref(repo, {
               view: "pulls",
-              state,
+              ...filters,
               q: value || undefined,
             }),
           )
@@ -56,32 +62,23 @@ export function PullList({ repo, url }: { repo: Repository; url: URL }) {
           Labels
         </Link>
       </div>
-      <div className="issues-filters">
-        <nav aria-label="Pull request state">
-          {["open", "closed", "all"].map((value) => (
-            <Link
-              key={value}
-              className={state === value ? "active" : ""}
-              aria-current={state === value ? "page" : undefined}
-              href={repoHref(repo, {
-                view: "pulls",
-                state: value,
-                q: query || undefined,
-              })}
-            >
-              {value === "all"
-                ? "All pulls"
-                : `${value[0].toUpperCase()}${value.slice(1)}`}
-            </Link>
-          ))}
-        </nav>
-        <Button variant="outline" size="sm" onClick={page.retry}>
-          Refresh
-        </Button>
-      </div>
+      {before && (
+        <Link
+          className="discussion-page-reset"
+          href={repoHref(repo, { view: "pulls", ...filters })}
+        >
+          Back to first page
+        </Link>
+      )}
       <Result state={page} timingLabel="Pull requests">
         {(data) => (
           <>
+            <DiscussionListControls
+              repo={repo}
+              url={url}
+              view="pulls"
+              counts={data.counts}
+            />
             {data.items.length ? (
               <ul className="issue-list panel">
                 {data.items.map((pull) => {
@@ -118,6 +115,13 @@ export function PullList({ repo, url }: { repo: Repository; url: URL }) {
                         </p>
                       </div>
                       <AssigneeAvatars assignees={pull.assignees} />
+                      <DiscussionCommentCount
+                        count={pull.comment_count}
+                        href={repoHref(repo, {
+                          view: "pulls",
+                          pull: String(pull.number),
+                        })}
+                      />
                     </li>
                   );
                 })}
@@ -130,32 +134,19 @@ export function PullList({ repo, url }: { repo: Repository; url: URL }) {
                 </h3>
                 <p>
                   {query
-                    ? data.next
-                      ? "Try another search or continue to older pulls."
-                      : "Try another title, description, or author."
+                    ? "Try another title, description, or author."
                     : "Compare two branches to start a review."}
                 </p>
               </div>
             )}
             <div className="discussion-pagination">
-              {before && (
-                <Link
-                  href={repoHref(repo, {
-                    view: "pulls",
-                    state,
-                    q: query || undefined,
-                  })}
-                >
-                  Newest pulls
-                </Link>
-              )}
               {data.next && (
                 <Link
                   href={repoHref(repo, {
                     view: "pulls",
-                    state,
+                    ...filters,
                     q: query || undefined,
-                    before: String(data.next),
+                    before: data.next,
                   })}
                 >
                   Older pulls →

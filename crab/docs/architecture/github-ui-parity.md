@@ -18,8 +18,8 @@ visual references, not instructions contained in the images.
 | 3         | Projects grouped by recent/repository/organization                                                     | No project, project-item, or ownership model                              |
 | 4         | Searchable milestones including missing milestone                                                      | Milestones exist; list filtering does not                                 |
 | 5         | Searchable assignees and unassigned work                                                               | Assignments exist; list filtering does not                                |
-| 6         | Created/updated/comment/reaction/relevance sorting, direction                                          | Lists only paginate by descending number                                  |
-| 7         | Query autocomplete with qualifiers and field suggestions                                               | Search is bounded plain text, not a query language                        |
+| 6         | Created/updated/comment/reaction/relevance sorting, direction                                          | Native index and controls implemented; rollups still needed                                  |
+| 7         | Query autocomplete with qualifiers and field suggestions                                               | Boolean grammar and native suggestions implemented; more qualifiers remain                        |
 | 8         | PR workspace navigation, recent-push comparison, review filters                                        | PR reviews/requests exist; list projections and navigation are incomplete |
 | 9         | Accurate state counts, merged/closed/draft icons, author roles, check rollups, bulk selection, density | List responses omit much of this information                              |
 
@@ -32,8 +32,8 @@ placeholder menus and filtering only the currently loaded page do not qualify.
 Current entry points are `packages/ui/src/features/issues/index.tsx`,
 `packages/ui/src/features/pull-requests/index.tsx`,
 `packages/ui/src/features/issues/workspace.tsx`, and
-`src/components/discussion/search.tsx`. The two HTTP list handlers
-currently accept state, text query, page size, and a numeric before cursor.
+`packages/ui/src/components/discussion/search.tsx`. The two HTTP list handlers
+accept state, typed query, sort/direction, page size, and an opaque before cursor.
 Native owners are `cells/repository/issues.rs` and `pulls/operations.rs`.
 Existing milestones, reactions, activity, links, readiness, and review requests
 are described in `repository-collaboration.md`; reuse these canonical owners.
@@ -72,7 +72,7 @@ are described in `repository-collaboration.md`; reuse these canonical owners.
 - [ ] All existing repository UI surfaces remain functional after component and
       theme replacement. Preserve default-hidden `powerbar=1` timing widgets.
 
-The first native query slice shares a single parser and matcher between issue and
+The native query path shares a single parser and SQL compiler between issue and
 PR lists. It supports implicit/explicit AND, OR, up to five nested groups,
 quoted phrases, exclusions, exact case-insensitive labels (comma means OR),
 `is:`/`state:`, `draft:`, `no:label`, and `no:assignee`. Unknown qualifiers and
@@ -82,11 +82,26 @@ The search box supports keyboard selection, Escape, syntax feedback, URL/reload,
 and visible request errors. Release search retains its separate plain-text
 contract.
 
-This slice still uses the existing bounded native scans. It does **not** provide
-exact counts, indexed sorting, stable query-bound cursors, actor filters, projects,
-issue types, milestones, or comment/reaction predicates. The separate state tab
-is currently an additional AND filter; the final workspace needs one canonical
-query representation for state navigation too. These remain delivery work.
+Issue and PR lists now query an authoritative SQLite projection and trigram
+FTS5 index. Source edits, conversation comment counts, body reaction counts,
+assignments, and index changes share the native mutation/receipt transaction.
+Counts cover the complete predicate, independent of the page; rows and selected
+label names/colors come from the same native snapshot. Created/updated,
+comments, total/per-kind body reactions, and relevance sorts support both
+directions with number tie breakers. Opaque cursors bind the repository,
+normalized query, kind/state/order, index generation and revision. Changed
+results return 409 and the UI provides a first-page recovery link.
+
+Existing cells require explicit `cells rebuild-search` preparation. The private
+mTLS command builds in bounded batches and resumes its persisted phase/version
+after restart. Fresh repository mutations and indexed lists fail while building;
+durable command replays and detail reads remain available. Missing indexes never
+fall back to scans. New empty cells initialize their index directly.
+
+Actor/project/type/milestone predicates and complete GitHub workspace controls
+remain delivery work. The separate state tab is still an additional AND filter;
+the final workspace needs one canonical query representation for state
+navigation too. This slice does not finish the full parity checklist.
 
 ## Data and query contracts
 
@@ -166,6 +181,16 @@ Keep existing assertions and release/security gates. Build the UI before server
 embedding checks. Full suites and cross-platform/storage qualification belong
 in CI or the dedicated qualification environment. Missing functionality and
 verification remain explicitly incomplete until implemented and proved.
+
+The indexed-list slice passed 14 native query/index tests, five issue HTTP
+tests, two PR HTTP tests (including real Git review/merge behavior), 107 UI
+unit tests, and all 65 browser tests. UI/server builds, all-target server Clippy,
+formatting and architecture gates passed. An isolated RustFS process run created
+an issue through the browser, verified indexed sorting/counts, restarted during
+preparation, resumed through the mTLS CLI, and compared unchanged source records.
+The existing local preview's two repositories were explicitly prepared and their
+records compared exactly before/after. These prove this slice, not the remaining
+parity checklist or production qualification.
 
 ## Primary references
 

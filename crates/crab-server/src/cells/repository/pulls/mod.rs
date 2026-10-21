@@ -135,13 +135,14 @@ pub(crate) struct PullSummary {
     pub assignee_subjects: Vec<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    pub version: u64,
+    pub comment_count: u64,
+    pub reaction_count: u64,
 }
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PullPage {
-    pub items: Vec<PullSummary>,
-    pub next: Option<u64>,
+impl super::search::index::Labelled for PullSummary {
+    fn label_ids(&self) -> &[u64] {
+        &self.label_ids
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -182,15 +183,6 @@ pub(crate) struct PullChildKey {
 pub(crate) struct PullSubmissionKey {
     pub pull: Option<u64>,
     pub submission_id: [u8; 16],
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PullListInput {
-    pub before: Option<u64>,
-    pub limit: u8,
-    pub state: u8,
-    pub query: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -410,7 +402,7 @@ mod tests;
 
 pub(crate) mod review_requests;
 
-mod readiness;
+pub(in crate::cells::repository) mod readiness;
 pub(crate) use readiness::{
     PullReadiness, SetPullReadiness, SetPullReadinessInput, SetPullReadinessOutcome,
 };

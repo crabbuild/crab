@@ -29,10 +29,12 @@ their receipt. Identical retries recover the original decision; conflicting
 payloads fail. Receipts expire after the request expiry plus a 24-hour retention
 window, with bounded pruning on subsequent mutations.
 
-`cells/schema.sql` is the single canonical application schema. Initialization
+`cells/schema.sql` owns canonical domain tables;
+`cells/repository/search/index/schema.sql` owns the derived discussion index. Initialization
 creates it directly, including replay receipts; no historical DDL upgrade chain
-or lazy table creation runs during serving. Only explicit repository
-initialization creates application schema. Serving a
+or lazy table creation runs during serving. Explicit repository
+initialization creates both schemas for an empty cell. Existing native cells
+prepare the derived index through the private management command described below. Serving a
 catalog-ready repository without that schema fails rather than recreating an
 empty collaboration database. The initializer requires object durability, drains
 its native node, and waits for its temporary node lease to expire before marking
@@ -71,7 +73,8 @@ publications leave the async executor available for lease renewal.
 ## Operator changes
 
 Supported `cells` commands are `capacity --json [--live]`, `metrics`,
-`status --owner OWNER --name NAME`, and `runtime`. Repository create/adopt and
+`status --owner OWNER --name NAME`, `runtime`, and
+`rebuild-search --owner OWNER --name NAME`. Repository create/adopt and
 storage probing remain available. Reads use the authoritative Cell owner. `local_disk_limit_bytes` bounds the
 Crab staging envelope; Cellar 0.1.0 has no injected shared disk budget. Place its
 cache on a filesystem with an appropriate quota. Physical free-space checks
@@ -79,6 +82,16 @@ still guard staging admission. Staging reserves 20% of available disk
 (at least 1 GiB) for filesystem and native cache headroom and requires space for
 one initial Git receive reservation. Transfer reservations enforce the remaining
 capacity; small disks do not imply support for arbitrarily large imports.
+
+`cells rebuild-search` contacts the running server's private mTLS management
+listener. It explicitly installs/rebuilds the derived discussion schema from
+existing native records; it never recreates domain data. Eight records per
+command bound the work. Persisted generation, phase, cursor and version allow
+restart/resume and prevent duplicate steps from advancing twice. Indexed lists
+and fresh mutations return unavailable until preparation finishes; identical
+recorded command replays and detail reads remain available. Readiness stays
+unavailable until every repository's index is ready. Run preparation before
+admitting public traffic after upgrading an existing native deployment.
 
 `failure_zone` maps to the native Cellar region. Management uses the native
 runtime directly; there are no release bootstrap/prepare/activate, pinned

@@ -8,12 +8,12 @@ use crate::{
         CreatePull, CreatePullComment, CreatePullCommentInput, CreatePullCommentOutcome,
         CreatePullInput, CreatePullOutcome, CreatePullReview, CreatePullReviewInput,
         CreatePullReviewOutcome, GetPull, GetPullComment, GetPullMergeSubmission, GetPullReview,
-        GetPullReviewSubmission, GetPullSubmission, ListPullComments, ListPullReviews, ListPulls,
-        PullChildKey, PullChildListInput, PullListInput, PullMergeTransition, PullRecord,
-        PullSubmissionKey, ReservePullMerge, ReservePullMergeInput, ReservePullMergeOutcome,
-        TransitionPullMerge, TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull,
-        UpdatePullComment, UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput,
-        UpdatePullOutcome, UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
+        GetPullReviewSubmission, GetPullSubmission, ListPullComments, ListPullReviews,
+        PullChildKey, PullChildListInput, PullMergeTransition, PullRecord, PullSubmissionKey,
+        ReservePullMerge, ReservePullMergeInput, ReservePullMergeOutcome, TransitionPullMerge,
+        TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull, UpdatePullComment,
+        UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome,
+        UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
     },
     repository::Repository,
     server::Server,
@@ -64,21 +64,6 @@ pub(super) struct PullRequest {
     pub merge: Option<PullMerge>,
     pub review_decisions: Vec<PullReviewDecision>,
     pub version: u64,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct PullSummary {
-    pub draft: bool,
-    pub number: u64,
-    pub author: Identity,
-    pub title: String,
-    pub state: PullState,
-    pub base_ref: String,
-    pub head_ref: String,
-    pub label_ids: Vec<u64>,
-    pub assignee_subjects: Vec<String>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -183,51 +168,6 @@ pub(super) async fn pull_submission(
             .await,
     )
     .map(|pull| pull.map(from_pull))
-}
-
-pub(super) async fn list_pulls(
-    server: &Server,
-    repo: &Repository,
-    before: Option<u64>,
-    limit: u8,
-    state: u8,
-    query: Option<String>,
-) -> Result<(Vec<PullSummary>, Option<u64>)> {
-    let routed = crate::app::repository_cell(server, repo)?;
-    let page = crate::app::query_output(
-        routed
-            .client
-            .query::<ListPulls>(
-                &routed.target,
-                None,
-                PullListInput {
-                    before,
-                    limit,
-                    state,
-                    query,
-                },
-            )
-            .await,
-    )?;
-    Ok((
-        page.items
-            .into_iter()
-            .map(|item| PullSummary {
-                draft: item.draft,
-                number: item.number,
-                author: from_author(item.author),
-                title: item.title,
-                state: item.state,
-                base_ref: item.base_ref,
-                head_ref: item.head_ref,
-                label_ids: item.label_ids,
-                assignee_subjects: item.assignee_subjects,
-                created_at: item.created_at_ms,
-                updated_at: item.updated_at_ms,
-            })
-            .collect(),
-        page.next,
-    ))
 }
 
 pub(super) async fn create_pull(

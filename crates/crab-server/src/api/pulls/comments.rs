@@ -10,7 +10,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ListParameters, same_author, storage};
+use super::{same_author, storage};
 use crate::{
     api::reactions,
     app::{self, Error, Result},
@@ -186,4 +186,26 @@ async fn edit_comment(
     )
     .await?;
     Ok(Json(comment_view(&comment, &actor, &reaction)))
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ListParameters {
+    before: Option<u64>,
+    limit: Option<usize>,
+    state: Option<String>,
+    q: Option<String>,
+}
+impl ListParameters {
+    fn limit(&self) -> Result<usize> {
+        let limit = self.limit.unwrap_or(30);
+        if !(1..=50).contains(&limit)
+            || self
+                .before
+                .is_some_and(|value| value == 0 || value > crate::app::MAX_NUMBER)
+        {
+            return Err(Error::Invalid("Invalid pull comment page"));
+        }
+        Ok(limit)
+    }
 }

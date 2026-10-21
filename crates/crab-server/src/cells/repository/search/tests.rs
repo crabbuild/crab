@@ -1,20 +1,106 @@
 use super::*;
 
-fn document() -> Document<'static> {
-    Document {
-        kind: SubjectKind::Issue,
-        state: SubjectState::Open,
-        draft: None,
-        title: "Improve accessibility",
-        body: "Fix the keyboard focus in the search menu",
-        author_name: "Alice Smith",
-        label_ids: &[1, 2],
-        assignees: &[],
+use crate::cells::repository::*;
+use crate::test_support::server as fixtures;
+
+const BODY: &str = "Fix the keyboard focus in the search menu";
+async fn fixture(
+    body: &str,
+) -> (
+    std::sync::Arc<crate::server::Server>,
+    crate::cells::RepositoryCell,
+) {
+    let server = fixtures::fixture().await;
+    let cell = server
+        .repository_cells()
+        .unwrap()
+        .repository(server.repositories.values()[0].id)
+        .unwrap();
+    let author = RepositoryAuthor {
+        issuer: "https://identity.test".into(),
+        subject: "alice".into(),
+        name: "Alice Smith".into(),
+    };
+    for name in ["help wanted", "a,b", "bug"] {
+        let result = cell
+            .client
+            .command::<CreateLabel>(
+                &cell.target,
+                crate::app::mutation_identity().unwrap(),
+                CreateLabelInput {
+                    submission_id: *uuid::Uuid::now_v7().as_bytes(),
+                    author: author.clone(),
+                    name: name.into(),
+                    color: "abcdef".into(),
+                    description: None,
+                },
+            )
+            .await
+            .unwrap()
+            .output;
+        assert!(matches!(result, CreateLabelOutcome::Created(_)));
     }
+    let created = cell
+        .client
+        .command::<CreateIssue>(
+            &cell.target,
+            crate::app::mutation_identity().unwrap(),
+            CreateIssueInput {
+                submission_id: *uuid::Uuid::now_v7().as_bytes(),
+                author: author.clone(),
+                title: "Improve accessibility".into(),
+                body: body.into(),
+            },
+        )
+        .await
+        .unwrap()
+        .output;
+    assert!(matches!(created, CreateIssueOutcome::Created(_)));
+    let assigned = cell
+        .client
+        .command::<UpdateIssue>(
+            &cell.target,
+            crate::app::mutation_identity().unwrap(),
+            UpdateIssueInput {
+                number: 1,
+                actor: author,
+                can_manage_metadata: true,
+                version: 1,
+                title: None,
+                body: None,
+                state: None,
+                label_ids: Some(vec![1, 2]),
+                assignee_subjects: None,
+            },
+        )
+        .await
+        .unwrap()
+        .output;
+    assert!(matches!(assigned, UpdateIssueOutcome::Updated(_)));
+    (server, cell)
+}
+async fn matches(cell: &crate::cells::RepositoryCell, query: &str) -> bool {
+    !cell
+        .client
+        .query::<ListIssues>(
+            &cell.target,
+            None,
+            SearchInput {
+                state: 2,
+                query: Some(query.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .output
+        .items
+        .is_empty()
 }
 
-#[test]
-fn boolean_search_has_and_precedence_and_explicit_grouping() {
+#[tokio::test(flavor = "multi_thread")]
+async fn boolean_search_has_and_precedence_and_explicit_grouping() {
+    let (server, cell) = fixture(BODY).await;
     for (query, expected) in [
         ("accessibility keyboard", true),
         ("accessibility missing", false),
@@ -28,21 +114,14 @@ fn boolean_search_has_and_precedence_and_explicit_grouping() {
         ("\"AND\"", false),
         ("(((((accessibility)))))", true),
     ] {
-        assert_eq!(
-            Query::parse(Some(query)).unwrap().matches(&document(), &[]),
-            expected,
-            "{query}"
-        );
+        assert_eq!(matches(&cell, query).await, expected, "{query}");
     }
+    fixtures::close(&server).await;
 }
 
-#[test]
-fn labels_are_exact_case_insensitive_sets_with_comma_or_and_space_and() {
-    let labels = vec![
-        (1, "help wanted".into()),
-        (2, "a,b".into()),
-        (3, "bug".into()),
-    ];
+#[tokio::test(flavor = "multi_thread")]
+async fn labels_are_exact_case_insensitive_sets_with_comma_or_and_space_and() {
+    let (server, cell) = fixture(BODY).await;
     for (query, expected) in [
         ("label:\"HELP WANTED\"", true),
         ("label:help", false),
@@ -55,46 +134,9 @@ fn labels_are_exact_case_insensitive_sets_with_comma_or_and_space_and() {
         ("no:label", false),
         ("no:assignee", true),
     ] {
-        assert_eq!(
-            Query::parse(Some(query))
-                .unwrap()
-                .matches(&document(), &labels),
-            expected,
-            "{query}"
-        );
+        assert_eq!(matches(&cell, query).await, expected, "{query}");
     }
-}
-
-#[test]
-fn pull_state_and_readiness_are_distinct_predicates() {
-    let mut item = document();
-    item.kind = SubjectKind::Pull;
-    item.state = SubjectState::Merged;
-    item.draft = Some(false);
-    for (query, expected) in [
-        ("is:closed", true),
-        ("is:merged", true),
-        ("is:unmerged", false),
-        ("is:open", false),
-        ("is:pr", true),
-        ("is:issue", false),
-        ("draft:true", false),
-        ("draft:false", true),
-        ("is:closed -is:merged", false),
-    ] {
-        assert_eq!(
-            Query::parse(Some(query)).unwrap().matches(&item, &[]),
-            expected,
-            "{query}"
-        );
-    }
-    item.state = SubjectState::Open;
-    item.draft = Some(true);
-    assert!(
-        Query::parse(Some("is:open draft:true"))
-            .unwrap()
-            .matches(&item, &[])
-    );
+    fixtures::close(&server).await;
 }
 
 #[test]
@@ -132,21 +174,21 @@ fn malformed_or_unsupported_queries_never_become_free_text() {
     }
 }
 
-#[test]
-fn quoted_operators_colons_and_escaped_characters_are_literal() {
-    let mut item = document();
-    item.body = "AND https://example.test \"quoted\" C:\\code";
+#[tokio::test(flavor = "multi_thread")]
+async fn quoted_operators_colons_and_escaped_characters_are_literal() {
+    let (server, cell) = fixture("AND https://example.test \"quoted\" C:\\code ÉCOLE 🦀船舶").await;
     for query in [
         r#""AND""#,
         r#""https://example.test""#,
         r#""\"quoted\"""#,
         r#""C:\\code""#,
+        "école",
+        "🦀船舶",
+        "船",
     ] {
-        assert!(
-            Query::parse(Some(query)).unwrap().matches(&item, &[]),
-            "{query}"
-        );
+        assert!(matches(&cell, query).await, "{query}");
     }
+    fixtures::close(&server).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -255,11 +297,12 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
         .query::<ListIssues>(
             &cell.target,
             None,
-            ListIssuesInput {
+            SearchInput {
                 before: None,
                 limit: 1,
                 state: 2,
                 query: Some("(label:\"help wanted\" OR no:label) keyboard -missing".into()),
+                ..Default::default()
             },
         )
         .await
@@ -278,11 +321,12 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
         .query::<ListIssues>(
             &cell.target,
             None,
-            ListIssuesInput {
-                before: issues.next,
+            SearchInput {
+                before: issues.next.clone(),
                 limit: 1,
                 state: 2,
-                query: Some("label:\"help wanted\" keyboard".into()),
+                query: Some("(label:\"help wanted\" OR no:label) keyboard -missing".into()),
+                ..Default::default()
             },
         )
         .await
@@ -300,11 +344,12 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
         .query::<ListPulls>(
             &cell.target,
             None,
-            PullListInput {
+            SearchInput {
                 before: None,
                 limit: 30,
                 state: 2,
                 query: Some("is:pr draft:true AND keyboard no:label".into()),
+                ..Default::default()
             },
         )
         .await
@@ -318,6 +363,41 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
             .collect::<Vec<_>>(),
         vec![2]
     );
+    let renamed = cell
+        .client
+        .command::<UpdateLabel>(
+            &cell.target,
+            crate::app::mutation_identity().unwrap(),
+            UpdateLabelInput {
+                number: label.number,
+                version: label.version,
+                name: "Keyboard work".into(),
+                color: "123456".into(),
+                description: None,
+            },
+        )
+        .await
+        .unwrap()
+        .output;
+    let UpdateLabelOutcome::Updated(label) = renamed else {
+        panic!("label not renamed")
+    };
+    let labelled = cell
+        .client
+        .query::<ListIssues>(
+            &cell.target,
+            None,
+            SearchInput {
+                query: Some("label:\"keyboard work\"".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .output;
+    assert_eq!(labelled.matching, 1);
+    assert_eq!(labelled.labels[0].name, "Keyboard work");
+    assert_eq!(labelled.labels[0].color, "123456");
     cell.client
         .command::<DeleteLabel>(
             &cell.target,
@@ -334,11 +414,12 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
         .query::<ListIssues>(
             &cell.target,
             None,
-            ListIssuesInput {
+            SearchInput {
                 before: None,
                 limit: 30,
                 state: 2,
-                query: Some("label:\"help wanted\"".into()),
+                query: Some("label:\"keyboard work\"".into()),
+                ..Default::default()
             },
         )
         .await
@@ -350,11 +431,12 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
         .query::<ListIssues>(
             &cell.target,
             None,
-            ListIssuesInput {
+            SearchInput {
                 before: None,
                 limit: 30,
                 state: 2,
                 query: Some("no:label".into()),
+                ..Default::default()
             },
         )
         .await

@@ -392,7 +392,18 @@ export async function mockPullRequest(page: Page) {
           value.toLowerCase().includes(query),
         );
       return route.fulfill({
-        json: { items: matches ? [item] : [], next: null },
+        json: {
+          items: matches
+            ? [{ ...item, comment_count: comments.length, reaction_count: 0 }]
+            : [],
+          next: null,
+          counts: {
+            open: matches && item.state === "open" ? 1 : 0,
+            closed: matches && item.state !== "open" ? 1 : 0,
+            merged: matches && item.state === "merged" ? 1 : 0,
+          },
+          matching: matches ? 1 : 0,
+        },
       });
     }
     if (path.includes("/reactions/")) {

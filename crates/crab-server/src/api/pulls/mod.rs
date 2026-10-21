@@ -16,7 +16,7 @@ use crate::{
     BranchProtection,
     api::assignees::{self, Assignee},
     api::checks::{self, CheckRun},
-    api::labels::{self, Label},
+    api::labels,
     api::reactions,
     api::statuses::{self, CommitStatus, StatusState},
     app::{self, Error, Result},
@@ -33,9 +33,8 @@ mod review_requests;
 mod review_threads;
 mod reviews;
 mod storage;
-use storage::{NewPullRequest, PullRequest, PullState, PullSummary};
-
-const MAX_NUMBER: u64 = 9_007_199_254_740_991;
+use crate::cells::repository::{ListPulls, PullSummary};
+use storage::{NewPullRequest, PullRequest, PullState};
 
 fn same_author(left: &Identity, right: &Identity) -> bool {
     left.issuer == right.issuer && left.subject == right.subject
@@ -272,98 +271,54 @@ fn merge_requirements(
     }
 }
 
-fn pull_list_view(pull: &PullSummary, labels: &[Label], assignees: &[Assignee]) -> Value {
+fn pull_list_view(
+    pull: &PullSummary,
+    labels: &[crate::cells::repository::search::index::LabelSummary],
+    assignees: &[Assignee],
+) -> Value {
     json!({
         "draft": pull.draft,
+        "version": pull.version,
+        "comment_count": pull.comment_count,
+        "reaction_count": pull.reaction_count,
         "number": pull.number,
         "title": pull.title,
         "state": pull.state,
         "author": pull.author.name,
         "base_ref": pull.base_ref,
         "head_ref": pull.head_ref,
-        "created_at": pull.created_at,
-        "updated_at": pull.updated_at,
-        "labels": labels::selection_view(&pull.label_ids, labels),
+        "created_at": pull.created_at_ms,
+        "updated_at": pull.updated_at_ms,
+        "labels": pull.label_ids.iter().filter_map(|id|labels.iter().find(|label|label.id==*id)).collect::<Vec<_>>(),
         "assignees": assignees::selection_view(&pull.assignee_subjects, assignees),
     })
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct ListParameters {
-    before: Option<u64>,
-    limit: Option<usize>,
-    state: Option<String>,
-    q: Option<String>,
-}
-
-impl ListParameters {
-    fn limit(&self) -> Result<usize> {
-        let limit = self.limit.unwrap_or(30);
-        if !(1..=50).contains(&limit)
-            || self
-                .before
-                .is_some_and(|value| value == 0 || value > MAX_NUMBER)
-        {
-            return Err(Error::Invalid("Invalid pull request page"));
-        }
-        Ok(limit)
-    }
-
-    fn state(&self) -> Result<ListState> {
-        match self.state.as_deref().unwrap_or("open") {
-            "open" => Ok(ListState::Open),
-            "closed" => Ok(ListState::Closed),
-            "all" => Ok(ListState::All),
-            _ => Err(Error::Invalid(
-                "Pull request state must be open, closed or all",
-            )),
-        }
-    }
-}
-
-enum ListState {
-    Open,
-    Closed,
-    All,
-}
-
-impl ListState {
-    const fn code(&self) -> u8 {
-        match self {
-            Self::Open => 0,
-            Self::Closed => 1,
-            Self::All => 2,
-        }
-    }
 }
 
 async fn list(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
-    Query(params): Query<ListParameters>,
+    Query(params): Query<super::discussion_search::ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
     let repo = repo.as_ref();
     let actor = app::actor(&principal)?;
-    let limit =
-        u8::try_from(params.limit()?).map_err(|_| Error::Invalid("Invalid pull request page"))?;
-    let state = params.state()?.code();
-    let query = app::search_query(params.q.as_deref())?;
     let assignees = assignees::available(repo, &actor);
-    let (pulls, next) =
-        storage::list_pulls(&server, repo, params.before, limit, state, query).await?;
-    let labels = if pulls.iter().all(|pull| pull.label_ids.is_empty()) {
-        vec![]
-    } else {
-        labels::catalog(&server, repo).await?
-    };
+    let routed = app::repository_cell(&server, repo)?;
+    let page = app::query_output(
+        routed
+            .client
+            .query::<ListPulls>(&routed.target, None, params.input()?)
+            .await,
+    )?;
+    let pulls = &page.items;
     let items = pulls
         .iter()
-        .map(|pull| pull_list_view(pull, &labels, &assignees))
+        .map(|pull| pull_list_view(pull, &page.labels, &assignees))
         .collect::<Vec<_>>();
-    Ok(Json(json!({"items":items,"next":next})))
+    Ok(Json(
+        json!({"items":items,"next":page.next,"counts":page.counts,"matching":page.matching}),
+    ))
 }
 
 fn resolve_branch(repository: &RemoteGitRepository, name: &str) -> Result<String> {

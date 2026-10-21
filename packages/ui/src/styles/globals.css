@@ -2396,7 +2396,7 @@ main {
 .issue-list-panel {
   overflow: hidden;
 }
-.issue-list-panel > .issues-filters {
+.issue-list-panel .issues-filters {
   min-height: 48px;
   margin: 0;
   padding: 0 16px;
@@ -6961,4 +6961,24 @@ main {
   html {
     @apply font-sans;
   }
+}
+
+.discussion-state-count {
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.discussion-comment-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  align-self: flex-start;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.assignee-avatars + .discussion-comment-count {
+  margin-left: 0;
 }

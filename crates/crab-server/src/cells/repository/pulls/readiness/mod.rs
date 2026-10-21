@@ -16,7 +16,7 @@ fn key(number: u64) -> String {
     format!("collaboration/v1/pulls/{number:016x}/readiness")
 }
 
-pub(super) fn load(
+pub(in crate::cells::repository) fn load(
     context: &RepositoryTransaction<'_>,
     number: u64,
 ) -> crate::cells::Result<PullReadiness> {

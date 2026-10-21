@@ -1,3 +1,4 @@
+import type { DiscussionTotals, ListLabel } from "@/components/discussion/list";
 import type { ReactionSummary } from "@/components/discussion/reactions";
 import type { RepositoryLabel, RepositoryAssignee } from "@/lib/api";
 
@@ -19,16 +20,10 @@ export interface Issue extends Comment {
   can_label: boolean;
   can_assign: boolean;
 }
-export type IssueListItem = Pick<
-  Issue,
-  | "number"
-  | "title"
-  | "state"
-  | "author"
-  | "created_at"
-  | "labels"
-  | "assignees"
->;
+export type IssueListItem = DiscussionTotals & { labels: ListLabel[] } & Pick<
+    Issue,
+    "number" | "title" | "state" | "author" | "created_at" | "assignees"
+  >;
 export interface Page<T> {
   items: T[];
   next: number | null;

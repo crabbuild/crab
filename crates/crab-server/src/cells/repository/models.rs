@@ -221,14 +221,6 @@ pub(crate) enum UpdateCommentOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ListIssuesInput {
-    pub before: Option<u64>,
-    pub limit: u8,
-    pub state: u8,
-    pub query: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct IssueSummary {
     pub number: u64,
     pub author: RepositoryAuthor,
@@ -239,12 +231,13 @@ pub(crate) struct IssueSummary {
     pub version: u64,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    pub comment_count: u64,
+    pub reaction_count: u64,
 }
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct IssuePage {
-    pub items: Vec<IssueSummary>,
-    pub next: Option<u64>,
+impl super::search::index::Labelled for IssueSummary {
+    fn label_ids(&self) -> &[u64] {
+        &self.label_ids
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -157,6 +157,8 @@ impl RepositoryClient {
                 StatusCode::CONFLICT => Err(Error::RequestConflict),
                 StatusCode::GONE => Err(Error::Expired),
                 StatusCode::PRECONDITION_FAILED => Err(Error::StaleRead),
+                StatusCode::FAILED_DEPENDENCY => Err(Error::IndexUnavailable),
+                StatusCode::RANGE_NOT_SATISFIABLE => Err(Error::StaleSearch),
                 StatusCode::BAD_REQUEST => {
                     Err(Error::Invalid("repository Cell rejected the request"))
                 }
@@ -166,9 +168,13 @@ impl RepositoryClient {
         .await;
         match result {
             Ok(Ok(reply)) => Ok(reply),
-            Ok(Err(error @ (Error::RequestConflict | Error::Expired | Error::Invalid(_)))) => {
-                Err(error)
-            }
+            Ok(Err(
+                error @ (Error::RequestConflict
+                | Error::Expired
+                | Error::Invalid(_)
+                | Error::IndexUnavailable
+                | Error::StaleSearch),
+            )) => Err(error),
             Ok(Err(source)) if mutation.is_some() => Err(Error::Pending {
                 source: Box::new(source),
             }),

@@ -104,6 +104,14 @@ impl RepositoryTransaction<'_> {
             .collect()
     }
 
+    pub(crate) fn install_schema(&self, schema: &str) -> Result<()> {
+        let (remaining, _, _) = self.storage.sql_ingest(schema).map_err(Error::sdk)?;
+        if !remaining.trim().is_empty() {
+            return Err(Error::Invalid("repository schema contains incomplete SQL"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn sql(&self, batch: &SqlBatch) -> Result<Vec<SqlResultSet>> {
         batch
             .statements
@@ -131,9 +139,25 @@ impl RepositoryTransaction<'_> {
                     }
                     rows.push(row);
                 }
+                let rows_affected = if cursor.rows_written() == 0 {
+                    0
+                } else {
+                    drop(cursor);
+                    // Cellar reports total writes, including triggers. CAS callers
+                    // need SQLite's direct statement count on this same turn.
+                    let mut changes = self
+                        .storage
+                        .sql_cursor("SELECT changes()", &[])
+                        .map_err(Error::sdk)?;
+                    match changes.next_raw().map_err(Error::sdk)?.as_deref() {
+                        Some([SqlValue::Integer(count)]) => u64::try_from(*count)
+                            .map_err(|_| Error::Invalid("SQL affected-row count is negative"))?,
+                        _ => return Err(Error::Invalid("SQL affected-row count is invalid")),
+                    }
+                };
                 Ok(SqlResultSet {
                     rows,
-                    rows_affected: cursor.rows_written(),
+                    rows_affected,
                 })
             })
             .collect()
@@ -239,12 +263,12 @@ impl Cell for RepositoryCell {
                         Error::Invalid("repository route and request identity disagree").into(),
                     );
                 }
+                let mut transaction = RepositoryTransaction { storage, now_ms };
                 initialize(
-                    storage,
+                    &transaction,
                     request.repository,
                     request.operation == INITIALIZE && request.mutation.is_none(),
                 )?;
-                let mut transaction = RepositoryTransaction { storage, now_ms };
                 Ok(execute(&mut transaction, &request)?)
             });
             let response = match reply {
@@ -264,6 +288,8 @@ impl Cell for RepositoryCell {
                 Err(error) => {
                     let status = match error.downcast_ref::<Error>() {
                         Some(Error::Invalid(_) | Error::Json(_)) => 400,
+                        Some(Error::IndexUnavailable) => 424,
+                        Some(Error::StaleSearch) => 416,
                         Some(Error::RequestConflict) => 409,
                         Some(Error::Expired) => 410,
                         Some(Error::StaleRead) => 412,
@@ -283,7 +309,8 @@ impl Cell for RepositoryCell {
     }
 }
 
-fn initialize(storage: &Storage, repository: Uuid, create: bool) -> Result<()> {
+fn initialize(context: &RepositoryTransaction<'_>, repository: Uuid, create: bool) -> Result<()> {
+    let storage = context.storage;
     let mut tables = storage
         .sql_cursor(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'repository_identity'",
@@ -298,12 +325,8 @@ fn initialize(storage: &Storage, repository: Uuid, create: bool) -> Result<()> {
         if !create {
             return Err(Error::Invalid("repository Cell has not been initialized"));
         }
-        let (remaining, _, _) = storage
-            .sql_ingest(include_str!("schema.sql"))
-            .map_err(Error::sdk)?;
-        if !remaining.trim().is_empty() {
-            return Err(Error::Invalid("repository schema contains incomplete SQL"));
-        }
+        context.install_schema(include_str!("schema.sql"))?;
+        repository::search::index::initialize(context, repository)?;
         storage
             .sql_cursor(
                 "INSERT INTO repository_identity(singleton, repository_uuid) VALUES (1, ?)",

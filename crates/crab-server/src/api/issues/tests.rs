@@ -151,12 +151,14 @@ async fn concurrent_creation_is_idempotent_and_sparse_pages_do_not_duplicate_iss
             .iter()
             .all(|(status, _)| *status == StatusCode::CREATED)
     );
-    let mut cursor = None;
+    let mut cursor: Option<String> = None;
     let mut numbers = Vec::new();
     loop {
         let path = format!(
             "{ROOT}?state=all&limit=2{}",
-            cursor.map_or(String::new(), |n| format!("&before={n}"))
+            cursor
+                .as_deref()
+                .map_or(String::new(), |n| format!("&before={n}"))
         );
         let page = h.json(&path, &cookie).await;
         numbers.extend(
@@ -166,7 +168,7 @@ async fn concurrent_creation_is_idempotent_and_sparse_pages_do_not_duplicate_iss
                 .iter()
                 .map(|issue| issue["number"].as_u64().unwrap()),
         );
-        cursor = page["next"].as_u64();
+        cursor = page["next"].as_str().map(str::to_owned);
         if cursor.is_none() {
             break;
         }
@@ -360,7 +362,22 @@ async fn advanced_search_preserves_caseful_operators_and_reports_invalid_syntax(
             .collect::<Vec<_>>(),
         vec![2]
     );
-    let next = first["next"].to_string();
+    assert_eq!(first["counts"]["open"], 2);
+    assert_eq!(first["matching"], 2);
+    let next = first["next"].as_str().unwrap().to_owned();
+    let stale = h
+        .http
+        .get(format!("{}{ROOT}", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[("q", query), ("before", &next), ("sort", "comments")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        stale.json::<Value>().await.unwrap()["error"]["code"],
+        "stale_search_cursor"
+    );
     let response = h
         .http
         .get(format!("{}{ROOT}", h.origin))

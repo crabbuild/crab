@@ -1,3 +1,4 @@
+import type { DiscussionTotals, ListLabel } from "@/components/discussion/list";
 import { type RepositoryAssignee, type RepositoryLabel } from "@/lib/api";
 import { type ReactionSummary } from "@/components/discussion/reactions";
 import { type InlineDiffThread } from "@/features/repository/diff/model";
@@ -26,6 +27,9 @@ export interface PullSummary {
   labels: RepositoryLabel[];
   assignees: RepositoryAssignee[];
 }
+
+export type PullListItem = Omit<PullSummary, "labels"> &
+  DiscussionTotals & { labels: ListLabel[] };
 
 export interface PullRequest extends PullSummary {
   reactions: ReactionSummary;

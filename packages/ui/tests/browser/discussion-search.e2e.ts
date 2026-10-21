@@ -29,9 +29,13 @@ async function searchFixture(page: Page) {
             created_at: 1700000000000,
             labels: [],
             assignees: [],
+            comment_count: 3,
+            reaction_count: 0,
           },
         ],
         next: null,
+        counts: { open: 1, closed: 0, merged: 0 },
+        matching: 1,
       },
     });
   });
@@ -169,3 +173,107 @@ test("syntax and suggestion errors remain visible without losing the query", asy
   await expect(input).toHaveValue("label:");
   await expect(input).toBeFocused();
 });
+
+for (const view of ["issues", "pulls"] as const) {
+  test(`${view} counts, ordering and opaque pagination preserve the query`, async ({
+    page,
+  }) => {
+    await mockPullRequest(page);
+    const requests: URLSearchParams[] = [];
+    let stale = false;
+    await page.route(`**/api/repos/team/project/${view}?**`, async (route) => {
+      const params = new URL(route.request().url()).searchParams;
+      requests.push(params);
+      if (params.has("before") && stale)
+        return route.fulfill({
+          status: 409,
+          json: {
+            error: {
+              message:
+                "This discussion list has changed. Return to the first page to continue.",
+            },
+          },
+        });
+      return route.fulfill({
+        json: {
+          items: [
+            {
+              number: 1,
+              title: "Indexed discussion",
+              author: "Alice",
+              state: params.get("state") === "closed" ? "closed" : "open",
+              created_at: 1700000000000,
+              labels: [],
+              assignees: [],
+              comment_count: 7,
+              reaction_count: 2,
+              draft: false,
+              base_ref: "refs/heads/main",
+              head_ref: "refs/heads/topic",
+            },
+          ],
+          next: params.has("before") ? null : "opaque-native-cursor",
+          counts: { open: 1234, closed: 432, merged: 12 },
+          matching: 1234,
+        },
+      });
+    });
+    await page.goto(`/team/project/${view}?q=keyboard&powerbar=1`);
+    const states = page.getByRole("navigation", {
+      name: view === "issues" ? "Issue state" : "Pull request state",
+    });
+    await expect(
+      states.getByRole("link", { name: "Open 1,234" }),
+    ).toHaveAttribute("aria-current", "page");
+    await expect(
+      states.getByRole("link", { name: "Closed 432" }),
+    ).toBeVisible();
+    await expect(page.getByRole("link", { name: "7 comments" })).toBeVisible();
+    await page.getByRole("button", { name: "Sort discussions" }).click();
+    await expectNoAccessibilityViolations(page);
+    await page
+      .getByRole("menuitemradio", { name: "Comments", exact: true })
+      .click();
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("sort"))
+      .toBe("comments");
+    await page.getByRole("button", { name: "Sort discussions" }).click();
+    await page.getByRole("menuitemradio", { name: "Lowest first" }).click();
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("direction"))
+      .toBe("asc");
+    const older = page.getByRole("link", { name: `Older ${view} →` });
+    await older.click();
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("before"))
+      .toBe("opaque-native-cursor");
+    await expect.poll(() => requests.at(-1)?.get("direction")).toBe("asc");
+    expect(requests.at(-1)?.get("sort")).toBe("comments");
+    expect(requests.at(-1)?.get("q")).toBe("keyboard");
+    await page.reload();
+    await expect(
+      page.getByRole("link", { name: "Back to first page" }),
+    ).toBeVisible();
+    stale = true;
+    await page.reload();
+    await expect(page.getByRole("alert")).toContainText(
+      "This discussion list has changed",
+    );
+    await page.getByRole("link", { name: "Back to first page" }).click();
+    await expect(page).not.toHaveURL(/before=/);
+    await states.getByRole("link", { name: "Closed 432" }).click();
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("state"))
+      .toBe("closed");
+    expect(new URL(page.url()).searchParams.get("q")).toBe("keyboard");
+    expect(new URL(page.url()).searchParams.get("sort")).toBe("comments");
+    await selectDarkTheme(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expectNoAccessibilityViolations(page);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  });
+}

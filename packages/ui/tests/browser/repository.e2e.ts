@@ -690,6 +690,8 @@ test.beforeEach(async ({ page }) => {
           items: [
             {
               number: 42,
+              comment_count: 0,
+              reaction_count: 0,
               author: "Alice",
               body: null,
               title: "Keep object storage reads bounded",
@@ -716,6 +718,12 @@ test.beforeEach(async ({ page }) => {
             },
           ],
           next: null,
+          counts: {
+            open: url.searchParams.get("state") === "closed" ? 0 : 1,
+            closed: url.searchParams.get("state") === "closed" ? 1 : 0,
+            merged: 0,
+          },
+          matching: 1,
         },
       });
     return route.fulfill({
@@ -2266,10 +2274,10 @@ test("issues follow the GitHub list hierarchy in both themes and on mobile", asy
   );
   await expect(page.getByText("kind/bug", { exact: true })).toBeVisible();
 
-  await page.getByRole("link", { name: "Closed", exact: true }).click();
+  await page.getByRole("link", { name: /^Closed \d+$/, exact: true }).click();
   await expect(page).toHaveURL(/state=closed/);
   await expect(
-    page.getByRole("link", { name: "Closed", exact: true }),
+    page.getByRole("link", { name: /^Closed \d+$/, exact: true }),
   ).toHaveAttribute("aria-current", "page");
 
   for (const [width, theme] of [

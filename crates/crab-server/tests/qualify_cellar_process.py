@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import socket
+import ssl
 import subprocess
 import time
 import urllib.error
@@ -53,6 +54,17 @@ with open(run / "commands.log", "w") as log:
         )
         with urllib.request.urlopen(req, timeout=35) as r:
             return json.load(r)
+
+    def index_request(body=None):
+        context = ssl.create_default_context(cafile=str(run / "ca.crt"))
+        context.load_cert_chain(str(run / "peer.crt"), str(run / "peer.key"))
+        req = urllib.request.Request(
+            f"https://127.0.0.1:{private}/internal/repositories/team/project/discussion-index",
+            data=None if body is None else json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, context=context, timeout=35) as response:
+            return json.load(response)
 
     def wait():
         for i in range(100):
@@ -194,6 +206,10 @@ with open(run / "commands.log", "w") as log:
                 run / "ca.crt",
                 "-subj",
                 "/CN=Crab qualification CA",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE",
+                "-addext",
+                "keyUsage=critical,keyCertSign,cRLSign",
                 "-days",
                 "1",
             ]
@@ -215,7 +231,7 @@ with open(run / "commands.log", "w") as log:
             ]
         )
         (run / "peer.ext").write_text(
-            "subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth,clientAuth\n"
+            "subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth,clientAuth\nkeyUsage=critical,digitalSignature\nauthorityKeyIdentifier=keyid,issuer\n"
         )
         cmd(
             [
@@ -417,6 +433,37 @@ with open(run / "commands.log", "w") as log:
         })
         assert [item["number"] for item in request(merged_search)["items"]] == [pull["number"]]
 
+        for query, expected in [
+            ("is:closed", 1), ("is:merged", 1), ("is:unmerged", 0),
+            ("is:open", 0), ("is:pr", 1), ("is:issue", 0),
+            ("draft:false", 1), ("draft:true", 0), ("is:closed -is:merged", 0),
+        ]:
+            result = request("/api/repos/team/project/pulls?" + urllib.parse.urlencode({"state": "all", "q": query}))
+            assert len(result["items"]) == expected, query
+            assert result["matching"] == expected, query
+        previous_index = index_request()
+        generation = str(uuid.uuid4())
+        building = index_request({"action": "begin", "expected": previous_index["generation"], "generation": generation})
+        assert building["state"] == "building"
+        index_request({"action": "step", "generation": generation, "version": building["progress"]["version"]})
+        try:
+            request(issue_search)
+        except urllib.error.HTTPError as error:
+            assert error.code == 503
+        else:
+            raise AssertionError("a partially rebuilt index must not serve results")
+        before_rebuild_issue = request(issue_path)
+        before_rebuild_pull = request(pull_path)
+        stop()
+        server = start()
+        wait()
+        assert index_request()["state"] == "building"
+        rebuilt = json.loads(subprocess.check_output(server_command("cells", "rebuild-search", "--owner", "team", "--name", "project"), env=env, text=True))
+        assert rebuilt["state"] == "ready" and rebuilt["generation"] == generation
+        assert request(issue_path) == before_rebuild_issue
+        assert request(pull_path) == before_rebuild_pull
+        assert request(issue_search)["matching"] == 1
+        assert request(merged_search)["counts"] == {"open": 0, "closed": 1, "merged": 1}
         assert request("/api/repos/team/project/activity") == merged_activity
         assert request(issue_path + "/links")["items"][0]["work"]["state"] == "merged"
         refs = subprocess.check_output(
@@ -458,6 +505,7 @@ with open(run / "commands.log", "w") as log:
             "issue_replay": True,
             "discussion_search_restart": True,
             "search_suggestions_restart": True,
+            "search_index_rebuild_restart": True,
             "activity_restart": True,
             "activity_replay": True,
             "linked_work_restart": True,

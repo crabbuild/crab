@@ -1282,7 +1282,7 @@ Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the
 ### Search issues and pull requests
 
 List endpoints accept `q` (up to 256 characters), `state` (`open`, `closed`,
-`all`), `limit` (1–50), and an exclusive numeric `before` cursor. State is an
+`all`), `limit` (1–50), `sort`, `direction`, and an opaque exclusive `before` cursor. State is an
 additional AND filter. Text terms search titles, bodies, and recorded author
 names. Spaces and `AND` require both terms; `OR` matches either; parentheses
 support up to five nested groups. Quote phrases and multiword label names.
@@ -1300,10 +1300,33 @@ browser UTF-16 units; replacement offsets enclose the current token. `kind` is
 `issue` or `pull`. Suggestions are limited to 20 active labels and never cross
 the repository authorization boundary.
 
-Lists still use bounded native scans of up to 200 records. Continue with the
-returned cursor for older matches; counts, indexed sorting, actor qualifiers,
-and advanced metadata predicates are not implemented yet. Release search keeps
-its separate plain-text contract.
+Lists query a native SQLite/FTS5 projection across all matching records. Each
+response includes `counts: {open, closed, merged}` for the query before the
+separate state facet and `matching` for the selected state. Closed includes
+merged PRs. Counts, ordered rows, and selected label names/colors share a native
+snapshot. Summaries omit bodies; `comment_count` counts conversation comments,
+and `reaction_count` counts reactions on the issue/PR body.
+
+`sort` accepts `created` (default), `updated`, `comments`, `reactions`,
+`thumbs_up`, `thumbs_down`, `laugh`, `hooray`, `confused`, `heart`, `rocket`,
+`eyes`, and `relevance`. `updated` uses the source discussion's update timestamp;
+comment/reaction writes do not fabricate edit timestamps. Relevance sums FTS5
+BM25 ranks for positive text terms; terms shorter than three Unicode scalars
+retain literal substring matching without trigram ranking. `direction` is
+`desc` (default) or `asc`. Discussion number breaks ties in the same direction.
+`next` is null on the last page. Cursors bind the repository, query, kind,
+state/order, generation and revision. Malformed cursors return 400; changed
+queries or index contents return 409 `stale_search_cursor`. Restart at the first
+page to obtain a fresh snapshot. Comment pagination remains numeric.
+
+New empty repositories initialize their index. Existing native repositories
+require `cells rebuild-search --owner OWNER --name NAME` against the running
+private mTLS listener. This bounded operation resumes after interruption and
+blocks fresh mutations and indexed reads until complete. Missing/building
+indexes return 503 `discussion_index_unavailable`; detail reads and recorded
+command replays remain available. The command never recreates domain records.
+Actor qualifiers and advanced metadata predicates remain delivery work. Release
+search retains its separate plain-text contract.
 
 ### Browse activity
 
@@ -1397,8 +1420,8 @@ Responses expose counts and the current actor's membership, without listing
 identity claims. Archived repositories retain readable counts and reject fresh
 reaction mutations.
 
-Discussion detail and list responses include a `reactions` summary. Lists batch
-these reads in one native transaction. The summary's native `revision` orders
+Discussion detail responses include a `reactions` summary. List summaries expose
+body `reaction_count` through the transactional search projection. The summary's native `revision` orders
 completed writes and refreshes so delayed responses cannot replace newer browser
 state. Reaction writes do not change discussion edit versions.
 
@@ -1424,7 +1447,8 @@ Members can list and read issues. Members can create issues and comments. Author
 
 Identity uses the exact OIDC issuer and subject. Display names do not establish ownership. The loopback server uses one trusted operator identity.
 
-Lists accept `state=open|closed|all`, a case-insensitive `q`, `limit`, and exclusive numeric `before`. They return newest items first.
+Issue lists use the indexed search/count/sort/cursor contract above. Comment
+lists retain exclusive numeric cursors and descending comment-number order.
 
 Issue responses load the label catalog only when returned issues have selected
 labels or an edit needs to validate nonempty label input. Repository archive

@@ -28,7 +28,10 @@ function foreground(hex: string) {
   return luminance > 0.45 ? "#0d1117" : "#ffffff";
 }
 
-export function LabelBadge({ label }: { label: RepositoryLabel }) {
+type BadgeLabel = Pick<RepositoryLabel, "id" | "name" | "color"> &
+  Partial<Pick<RepositoryLabel, "description">>;
+
+export function LabelBadge({ label }: { label: BadgeLabel }) {
   return (
     <span
       className="discussion-label"
@@ -43,7 +46,7 @@ export function LabelBadge({ label }: { label: RepositoryLabel }) {
   );
 }
 
-export function LabelBadges({ labels = [] }: { labels?: RepositoryLabel[] }) {
+export function LabelBadges({ labels = [] }: { labels?: BadgeLabel[] }) {
   if (!labels.length) return null;
   return (
     <span className="discussion-labels">

@@ -18,8 +18,11 @@ use std::{
     time::Duration,
 };
 
+mod search;
+
 pub(crate) fn router(server: Arc<Server>, peers: Router) -> Router {
     Router::new()
+        .merge(search::routes())
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/readyz", get(readiness))
         .route("/capacity", get(render_capacity))
@@ -174,6 +177,23 @@ async fn check_readiness(server: &Server) -> Result<()> {
         .ok_or(crate::Error::Config("catalog is unavailable"))?;
     catalog.load().await?;
     for repository in server.repositories.values() {
+        let cell = server
+            .repository_cells()
+            .ok_or(crate::Error::Config("repository Cells are unavailable"))?
+            .repository(repository.id)?;
+        let index = cell
+            .client
+            .query::<crate::cells::repository::search::index::GetSearchIndexStatus>(
+                &cell.target,
+                None,
+                (),
+            )
+            .await?;
+        if !matches!(index.output, crate::SearchIndexStatus::Ready { .. }) {
+            return Err(crate::Error::Config(
+                "discussion index requires preparation",
+            ));
+        }
         // A pod must not enter endpoint routing while a fresh process would
         // reject Git reads and trigger shared index maintenance on first use.
         repository

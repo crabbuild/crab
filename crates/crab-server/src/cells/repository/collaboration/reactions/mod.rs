@@ -33,7 +33,7 @@ impl Kind {
         Self::Eyes,
     ];
 
-    fn key(self) -> &'static str {
+    pub(in crate::cells::repository) fn key(self) -> &'static str {
         match self {
             Self::ThumbsUp => "thumbs_up",
             Self::ThumbsDown => "thumbs_down",
@@ -98,7 +98,10 @@ fn member_key(
     ))
 }
 
-fn counts(context: &RepositoryTransaction<'_>, target: Target) -> crate::cells::Result<Counts> {
+pub(in crate::cells::repository) fn counts(
+    context: &RepositoryTransaction<'_>,
+    target: Target,
+) -> crate::cells::Result<Counts> {
     let counts: Counts = context.document(&counts_key(target))?.unwrap_or_default();
     if counts
         .values()
@@ -202,6 +205,9 @@ impl Mutation for SetReaction {
             context.delete_document(&key)?;
         } else {
             context.put_document(&key, &counts)?;
+        }
+        if matches!(input.target, Target::Issue { .. } | Target::Pull { .. }) {
+            super::super::search::index::dirty(context, input.target.subject())?;
         }
         advance_revision(context)?;
         Ok(MutationResult::Success(Outcome::Applied(summary(

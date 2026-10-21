@@ -22,8 +22,8 @@ use crate::{
         CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
         CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment,
         GetIssueDetail, IssueRecord, IssueSummary, ListComments, ListCommentsInput, ListIssues,
-        ListIssuesInput, RepositoryAuthor, UpdateComment, UpdateCommentInput, UpdateCommentOutcome,
-        UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
+        RepositoryAuthor, UpdateComment, UpdateCommentInput, UpdateCommentOutcome, UpdateIssue,
+        UpdateIssueInput, UpdateIssueOutcome,
     },
     server::Server,
 };
@@ -75,25 +75,21 @@ fn issue_view(
 
 fn issue_summary_view(
     issue: &IssueSummary,
-    author: &Identity,
-    labels: &[Label],
+    labels: &[crate::cells::repository::search::index::LabelSummary],
     assignees: &[Assignee],
-    can_manage_metadata: bool,
 ) -> Value {
     json!({
         "number": issue.number,
         "title": issue.title,
-        "body": Value::Null,
         "state": state_name(issue.state),
         "author": issue.author.name,
         "version": issue.version,
         "created_at": issue.created_at_ms,
         "updated_at": issue.updated_at_ms,
-        "labels": labels::selection_view(&issue.label_ids, labels),
+        "comment_count": issue.comment_count,
+        "reaction_count": issue.reaction_count,
+        "labels": issue.label_ids.iter().filter_map(|id| labels.iter().find(|label|label.id==*id)).collect::<Vec<_>>(),
         "assignees": assignees::selection_view(&issue.assignee_subjects, assignees),
-        "can_edit": same_author(&issue.author, author),
-        "can_label": can_manage_metadata,
-        "can_assign": can_manage_metadata,
     })
 }
 
@@ -156,15 +152,6 @@ impl ListParameters {
             .ok_or(Error::Invalid("Page size must be 1–50"))
     }
 
-    fn state(&self) -> Result<u8> {
-        match self.state.as_deref().unwrap_or("open") {
-            "open" => Ok(0),
-            "closed" => Ok(1),
-            "all" => Ok(2),
-            _ => Err(Error::Invalid("Issue state must be open, closed or all")),
-        }
-    }
-
     fn before(&self) -> Result<Option<u64>> {
         if self
             .before
@@ -180,39 +167,26 @@ async fn list(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
-    Query(params): Query<ListParameters>,
+    Query(params): Query<super::discussion_search::ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &key)?;
     let author = actor(&principal)?;
     let assignees = assignees::available(&repo, &author);
-    let can_manage_metadata = principal.can_write(&repo.config);
     let routed = crate::app::repository_cell(&server, &repo)?;
     let page = crate::app::query_output(
         routed
             .client
-            .query::<ListIssues>(
-                &routed.target,
-                None,
-                ListIssuesInput {
-                    before: params.before()?,
-                    limit: params.limit()?,
-                    state: params.state()?,
-                    query: crate::app::search_query(params.q.as_deref())?,
-                },
-            )
+            .query::<ListIssues>(&routed.target, None, params.input()?)
             .await,
     )?;
-    let labels = if page.items.iter().all(|issue| issue.label_ids.is_empty()) {
-        vec![]
-    } else {
-        labels::catalog(&server, &repo).await?
-    };
     let items = page
         .items
         .iter()
-        .map(|issue| issue_summary_view(issue, &author, &labels, &assignees, can_manage_metadata))
+        .map(|issue| issue_summary_view(issue, &page.labels, &assignees))
         .collect::<Vec<_>>();
-    Ok(Json(json!({"items":items,"next":page.next})))
+    Ok(Json(
+        json!({"items":items,"next":page.next,"counts":page.counts,"matching":page.matching}),
+    ))
 }
 
 #[derive(Deserialize)]

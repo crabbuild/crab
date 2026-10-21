@@ -205,7 +205,11 @@ credentials. Then create a cataloged repository and start:
 entry ready. `repository adopt` initializes an empty collaboration Cell for an
 existing Git repository; it does not import application data from another runtime.
 `cells capacity --json` reports admission limits. `cells runtime` reports the
-native runtime version. The supported management surface and retired commands
+native runtime version. Existing native repositories require
+`cells rebuild-search --owner OWNER --name NAME` against the running private
+mTLS listener before admitting traffic with the indexed discussion lists. The
+command resumes an interrupted rebuild without changing domain records.
+The supported management surface and retired commands
 are listed in [CELLAR.md](CELLAR.md).
 
 The bucket or container must already exist. `repository adopt` can publish an
@@ -326,7 +330,7 @@ The internal owners are:
 | `cli/` | Command parsing/dispatch, management client, and ECS address discovery |
 | `server/mod.rs` | Startup, shared application state, and ordered shutdown |
 | `server/background.rs` | Catalog refresh and fair projection scheduling |
-| `server/management.rs`, `server/capacity.rs`, `server/storage.rs` | Private management, resource policy, and storage preflight |
+| `server/management/mod.rs`, `server/capacity.rs`, `server/storage.rs` | Private management, resource policy, and storage preflight |
 | `repository/` | Pinned Git snapshots, maintenance, browse projections, and atomic catalog installation |
 | `catalog/` | Durable catalog records and membership audit |
 | `auth/mod.rs`, `auth/state.rs`, `auth/http/mod.rs`, `auth/transport.rs` | Identity, durable sessions, login endpoints, and bounded provider transport |
@@ -338,6 +342,7 @@ The internal owners are:
 | `cells/` | Native ingress and durable transaction/replay boundary |
 | `cells/repository/` | Typed domain facade and shared repository invariants |
 | `cells/repository/pulls/` | Pull records, comments, reviews, merge commands, and review threads |
+| `cells/repository/search/` | Query grammar, completion, transactional search projection, sorting/counts, and explicit index preparation |
 | `cells/repository/{checks,settings,releases,labels,statuses,projection}/` | Feature commands, local persistence/validation, and tests |
 
 Authentication always uses shared durable state, including in-memory object-store

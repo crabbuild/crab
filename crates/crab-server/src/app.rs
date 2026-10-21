@@ -350,6 +350,16 @@ impl IntoResponse for Error {
                 "submission_conflict",
                 "This submission ID was already used for different content; check the existing discussion before submitting again",
             ),
+            Self::Cell(crate::cells::Error::IndexUnavailable) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "discussion_index_unavailable",
+                "Repository search requires preparation. An administrator must rebuild the discussion index.",
+            ),
+            Self::Cell(crate::cells::Error::StaleSearch) => (
+                StatusCode::CONFLICT,
+                "stale_search_cursor",
+                "This discussion list has changed. Return to the first page to continue.",
+            ),
             Self::Cell(crate::cells::Error::StaleRead) => (
                 StatusCode::CONFLICT,
                 "stale_read",

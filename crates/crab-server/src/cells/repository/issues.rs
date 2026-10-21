@@ -535,95 +535,45 @@ impl Mutation for UpdateComment {
 }
 
 pub(crate) struct ListIssues;
-
 impl Read for ListIssues {
     const ID: u32 = 3;
-    type Input = ListIssuesInput;
-    type Output = IssuePage;
-
+    type Input = SearchInput;
+    type Output = search::index::Page<IssueSummary>;
     fn execute(
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
-        validate_list(input.before, input.limit)?;
-        if input.state > 2 {
-            return Err(crate::cells::Error::Invalid(
-                "repository issue filter is invalid",
-            ));
-        }
-        let query =
-            search::Query::parse(input.query.as_deref()).map_err(crate::cells::Error::Invalid)?;
-        let labels = if query.needs_labels() {
-            ListLabels::execute(context, ())?
-                .labels
-                .into_iter()
-                .map(|label| (label.number, label.name.to_lowercase()))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let sequence = context.sql(&SqlBatch {
-            statements: vec![statement(
-                "SELECT last FROM repository_sequences WHERE kind = 'issue'",
-                vec![],
-            )],
-        })?;
-        let last = result_u64(&sequence, 0, 0)?;
-        let maximum = input.before.map_or(last, |before| (before - 1).min(last));
-        let mut cursor = maximum;
-        let mut scanned = 0_u64;
-        let mut items = Vec::new();
-        while cursor > 0 && scanned < MAX_LIST_SCAN && items.len() < usize::from(input.limit) {
-            let count = 8_u64.min(MAX_LIST_SCAN - scanned).min(cursor);
-            let bottom = cursor - count + 1;
-            let result = context.sql(&SqlBatch {
-                statements: vec![statement(
-                    "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number BETWEEN ? AND ? ORDER BY number DESC",
-                    vec![integer(bottom)?, integer(cursor)?],
-                )],
-            })?;
-            let mut rows = result[0].rows.iter().peekable();
-            for number in (bottom..=cursor).rev() {
-                let matches = rows
-                    .peek()
-                    .is_some_and(|row| result_u64_from_row(row, 0).ok() == Some(number));
-                let row = matches.then(|| rows.next()).flatten();
-                scanned += 1;
-                cursor -= 1;
-                let Some(row) = row else {
-                    continue;
-                };
-                let issue = issue_from_row(row)?;
-                if (input.state == 2 || input.state == issue.state)
-                    && query.matches(
-                        &search::Document {
-                            kind: collaboration::SubjectKind::Issue,
-                            state: if issue.state == 0 {
-                                collaboration::SubjectState::Open
-                            } else {
-                                collaboration::SubjectState::Closed
-                            },
-                            draft: None,
-                            title: &issue.title,
-                            body: &issue.body,
-                            author_name: &issue.author.name,
-                            label_ids: &issue.label_ids,
-                            assignees: &issue.assignee_subjects,
-                        },
-                        &labels,
-                    )
-                {
-                    items.push(IssueSummary::from(issue));
-                    if items.len() == usize::from(input.limit) {
-                        break;
-                    }
-                }
-            }
-        }
-        Ok(IssuePage {
-            items,
-            next: (cursor > 0).then_some(cursor + 1),
-        })
+        search::index::page(
+            context,
+            input,
+            collaboration::SubjectKind::Issue,
+            |context, number, metrics| {
+                let result = context.sql(&SqlBatch { statements: vec![statement("SELECT number, author_issuer, author_subject, author_name, title, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?", vec![integer(number)?])] })?;
+                let row = result[0]
+                    .rows
+                    .first()
+                    .ok_or(crate::cells::Error::Invalid("indexed issue is missing"))?;
+                Ok(IssueSummary {
+                    number: result_u64_from_row(row, 0)?,
+                    author: RepositoryAuthor {
+                        issuer: result_text(row, 1)?,
+                        subject: result_text(row, 2)?,
+                        name: result_text(row, 3)?,
+                    },
+                    title: result_text(row, 4)?,
+                    state: u8::try_from(result_u64_from_row(row, 5)?).map_err(|_| {
+                        crate::cells::Error::Invalid("indexed issue state is invalid")
+                    })?,
+                    label_ids: decode_label_ids(result_blob(row, 6)?)?,
+                    assignee_subjects: decode_assignees(result_blob(row, 7)?)?,
+                    version: result_u64_from_row(row, 8)?,
+                    created_at_ms: result_u64_from_row(row, 9)?,
+                    updated_at_ms: result_u64_from_row(row, 10)?,
+                    comment_count: metrics.comments,
+                    reaction_count: metrics.reactions,
+                })
+            },
+        )
     }
 }
 
@@ -714,21 +664,5 @@ impl Read for ListComments {
             items,
             next: (cursor > 0).then_some(cursor + 1),
         })
-    }
-}
-
-impl From<IssueRecord> for IssueSummary {
-    fn from(issue: IssueRecord) -> Self {
-        Self {
-            number: issue.number,
-            author: issue.author,
-            title: issue.title,
-            state: issue.state,
-            label_ids: issue.label_ids,
-            assignee_subjects: issue.assignee_subjects,
-            version: issue.version,
-            created_at_ms: issue.created_at_ms,
-            updated_at_ms: issue.updated_at_ms,
-        }
     }
 }

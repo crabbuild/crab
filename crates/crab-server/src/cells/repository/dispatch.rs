@@ -11,7 +11,14 @@ pub(in crate::cells) fn dispatch_mutation(
     id: u32,
     input: serde_json::Value,
 ) -> crate::cells::Result<MutationResult<serde_json::Value>> {
-    match id {
+    let maintenance = id == <search::index::RebuildIndex as Mutation>::ID;
+    if !maintenance {
+        search::index::ensure_ready(context)?;
+    }
+    let result = match id {
+        <search::index::RebuildIndex as Mutation>::ID => {
+            invoke_mutation::<search::index::RebuildIndex>(context, input)
+        }
         <review_requests::SetReviewRequest as Mutation>::ID => {
             invoke_mutation::<review_requests::SetReviewRequest>(context, input)
         }
@@ -80,7 +87,13 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<projection::ApplyProjectionBatch>(context, input)
         }
         _ => Err(crate::cells::Error::Invalid("unknown repository operation")),
+    }?;
+    // Domain writes, metadata projections, and their receipt share the SDK
+    // transaction. Failed projection work must roll the domain write back.
+    if !maintenance && matches!(result, MutationResult::Success(_)) {
+        search::index::flush(context)?;
     }
+    Ok(result)
 }
 
 pub(in crate::cells) fn dispatch_read(
@@ -89,6 +102,9 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        <search::index::GetSearchIndexStatus as Read>::ID => {
+            invoke_read::<search::index::GetSearchIndexStatus>(context, input)
+        }
         <search::completion::CompleteSearch as Read>::ID => {
             invoke_read::<search::completion::CompleteSearch>(context, input)
         }

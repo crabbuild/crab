@@ -68,6 +68,13 @@ enum CellsCommand {
         #[arg(long)]
         name: String,
     },
+    /// Build or resume the authoritative issue/PR search index.
+    RebuildSearch {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+    },
     /// Inspect the compiled Cellar application version.
     Runtime,
 }
@@ -211,6 +218,9 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
             let path = format!("/internal/repositories/{owner}/{name}/cell");
             management_body(config, &path).await?
         }
+        CellsCommand::RebuildSearch { owner, name } => {
+            rebuild_search(config, &owner, &name).await?
+        }
         CellsCommand::Runtime => {
             serde_json::to_vec(&serde_json::json!({"runtime": "cellar", "version": "0.1.0"}))?
         }
@@ -222,7 +232,7 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
 }
 
 async fn healthcheck(config: &crab_server::Config) -> crab_server::Result<()> {
-    management_get(config, "/readyz").await?;
+    management_request(config, reqwest::Method::GET, "/readyz", None).await?;
     Ok(())
 }
 
@@ -231,7 +241,7 @@ async fn live_capacity(config: &crab_server::Config) -> crab_server::Result<Vec<
 }
 
 async fn management_body(config: &crab_server::Config, path: &str) -> crab_server::Result<Vec<u8>> {
-    Ok(management_get(config, path)
+    Ok(management_request(config, reqwest::Method::GET, path, None)
         .await?
         .bytes()
         .await
@@ -239,9 +249,11 @@ async fn management_body(config: &crab_server::Config, path: &str) -> crab_serve
         .to_vec())
 }
 
-async fn management_get(
+async fn management_request(
     config: &crab_server::Config,
+    method: reqwest::Method,
     path: &str,
+    body: Option<&crab_server::RebuildSearchInput>,
 ) -> crab_server::Result<reqwest::Response> {
     let mut identity = std::fs::read(&config.cells.peer_certificate)?;
     identity.extend_from_slice(&std::fs::read(&config.cells.peer_private_key)?);
@@ -264,14 +276,77 @@ async fn management_get(
     for authority in authorities {
         client = client.add_root_certificate(authority);
     }
-    client
+    let mut request = client
         .build()
         .map_err(|source| crab_server::Error::Healthcheck { source })?
-        .get(url)
+        .request(method, url);
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    request
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(|source| crab_server::Error::Healthcheck { source })
+}
+
+async fn rebuild_search(
+    config: &crab_server::Config,
+    owner: &str,
+    name: &str,
+) -> crab_server::Result<Vec<u8>> {
+    let path = format!("/internal/repositories/{owner}/{name}/discussion-index");
+    let initial = management_body(config, &path).await?;
+    let status: crab_server::SearchIndexStatus = serde_json::from_slice(&initial)?;
+    let begin = match status {
+        crab_server::SearchIndexStatus::Missing => Some(None),
+        crab_server::SearchIndexStatus::Ready { generation, .. } => Some(Some(generation)),
+        crab_server::SearchIndexStatus::Building { .. } => None,
+    };
+    let mut status = if let Some(expected) = begin {
+        let input = crab_server::RebuildSearchInput::Begin {
+            expected,
+            generation: uuid::Uuid::now_v7(),
+        };
+        serde_json::from_slice(
+            &management_request(config, reqwest::Method::POST, &path, Some(&input))
+                .await?
+                .bytes()
+                .await
+                .map_err(|source| crab_server::Error::Healthcheck { source })?,
+        )?
+    } else {
+        status
+    };
+    loop {
+        match status {
+            crab_server::SearchIndexStatus::Ready { .. } => {
+                return Ok(serde_json::to_vec(&status)?);
+            }
+            crab_server::SearchIndexStatus::Missing => {
+                return Err(crab_server::Error::Config(
+                    "discussion index preparation did not start",
+                ));
+            }
+            crab_server::SearchIndexStatus::Building {
+                generation,
+                ref progress,
+            } => {
+                tracing::info!(phase = ?progress.phase, processed = progress.processed, "preparing discussion index");
+                let input = crab_server::RebuildSearchInput::Step {
+                    generation,
+                    version: progress.version,
+                };
+                status = serde_json::from_slice(
+                    &management_request(config, reqwest::Method::POST, &path, Some(&input))
+                        .await?
+                        .bytes()
+                        .await
+                        .map_err(|source| crab_server::Error::Healthcheck { source })?,
+                )?;
+            }
+        }
+    }
 }
 
 fn management_target(

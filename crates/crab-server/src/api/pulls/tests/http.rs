@@ -809,7 +809,10 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
             "head_ref":"refs/heads/feature",
             "created_at":assigned.1["created_at"],
             "updated_at":assigned.1["updated_at"],
-            "labels":[label.1],
+            "labels":[{"id":label.1["id"],"name":"ready for merge","color":"1f883d"}],
+            "version":assigned.1["version"],
+            "comment_count":0,
+            "reaction_count":0,
             "assignees":[{"subject":"bob-id","name":"Bob"}]
         })
     );

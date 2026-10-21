@@ -31,7 +31,8 @@ readiness belongs to `pulls/readiness/`, reviewer invitations and fulfillment
 belong to `pulls/review_requests/`, and review threads belong to
 `pulls/review_threads/`; browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs. `search/` owns the shared issue/PR
-query grammar and matching; `search/completion/` owns repository-scoped
+query grammar; `search/index/` owns transactional projections, full counts,
+sorting/query-bound cursors, and explicit bounded preparation; `search/completion/` owns repository-scoped
 suggestions and browser UTF-16 replacement ranges.
 
 Collaboration documents live in `cells/repository/collaboration/`. Its `target.rs`
@@ -75,7 +76,7 @@ and session migration paths are supported.
 | Content reads | `crates/crab-server/src/api/contents.rs` | `crates/crab-remote-git/src/snapshot.rs` |
 | Auth or routing | `crates/crab-server/src/server/http/mod.rs` | `crates/crab-server/src/server/http/boundary.rs`, `src/auth/mod.rs` |
 | Read readiness | `crates/crab-server/src/repository/mod.rs` | `src/server/background.rs`, `src/repository/maintenance.rs`, `crates/crab-write/src/generation.rs` |
-| Management and capacity | `crates/crab-server/src/server/management.rs` | `src/server/capacity.rs`, `src/metrics/mod.rs` |
+| Management and capacity | `crates/crab-server/src/server/management/mod.rs` | `src/server/capacity.rs`, `src/metrics/mod.rs` |
 | Git imports | `crates/crab-server/src/git_import/mod.rs` | `src/git_import/source.rs` (validation), `src/git_import/git.rs` (process isolation) |
 | Browse APIs | `crates/crab-server/src/api/mod.rs` | `src/api/query.rs` (Git queries), `src/api/representation.rs` (encoding/ranges) |
 

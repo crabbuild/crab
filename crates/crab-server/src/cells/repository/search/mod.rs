@@ -3,6 +3,7 @@
 use super::collaboration::{SubjectKind, SubjectState};
 
 pub(crate) mod completion;
+pub(crate) mod index;
 
 const MAX_TERMS: usize = 64;
 const MAX_DEPTH: usize = 5;
@@ -12,7 +13,7 @@ pub(crate) struct Query {
     expression: Expression,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 enum Expression {
     All,
     Term(Term),
@@ -21,7 +22,7 @@ enum Expression {
     Or(Vec<Self>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 enum Term {
     Text(String),
     Label(Vec<String>),
@@ -32,21 +33,10 @@ enum Term {
     Missing(Metadata),
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 enum Metadata {
     Label,
     Assignee,
-}
-
-pub(super) struct Document<'a> {
-    pub kind: SubjectKind,
-    pub state: SubjectState,
-    pub draft: Option<bool>,
-    pub title: &'a str,
-    pub body: &'a str,
-    pub author_name: &'a str,
-    pub label_ids: &'a [u64],
-    pub assignees: &'a [String],
 }
 
 impl Query {
@@ -73,80 +63,6 @@ impl Query {
             return Err("Search query has an unexpected closing parenthesis");
         }
         Ok(Self { expression })
-    }
-
-    pub(super) fn needs_labels(&self) -> bool {
-        self.expression
-            .any_term(|term| matches!(term, Term::Label(_) | Term::Missing(Metadata::Label)))
-    }
-
-    pub(super) fn needs_draft(&self) -> bool {
-        self.expression
-            .any_term(|term| matches!(term, Term::Draft(_)))
-    }
-
-    pub(super) fn matches(&self, document: &Document<'_>, labels: &[(u64, String)]) -> bool {
-        if !self
-            .expression
-            .any_term(|term| matches!(term, Term::Text(_)))
-        {
-            return self.expression.matches(document, labels);
-        }
-        // Fold once per candidate; repeated terms must not allocate and scan
-        // a maximum-sized body again for every boolean clause.
-        let title = document.title.to_lowercase();
-        let body = document.body.to_lowercase();
-        let author_name = document.author_name.to_lowercase();
-        self.expression.matches(
-            &Document {
-                title: &title,
-                body: &body,
-                author_name: &author_name,
-                ..*document
-            },
-            labels,
-        )
-    }
-}
-
-impl Expression {
-    fn any_term(&self, predicate: fn(&Term) -> bool) -> bool {
-        match self {
-            Self::All => false,
-            Self::Term(term) => predicate(term),
-            Self::Not(inner) => inner.any_term(predicate),
-            Self::And(parts) | Self::Or(parts) => parts.iter().any(|part| part.any_term(predicate)),
-        }
-    }
-
-    fn matches(&self, document: &Document<'_>, labels: &[(u64, String)]) -> bool {
-        match self {
-            Self::All => true,
-            Self::Not(inner) => !inner.matches(document, labels),
-            Self::And(parts) => parts.iter().all(|part| part.matches(document, labels)),
-            Self::Or(parts) => parts.iter().any(|part| part.matches(document, labels)),
-            Self::Term(term) => match term {
-                Term::Text(text) => [document.title, document.body, document.author_name]
-                    .iter()
-                    .any(|value| value.contains(text)),
-                Term::Label(names) => labels
-                    .iter()
-                    .any(|(id, name)| document.label_ids.contains(id) && names.contains(name)),
-                Term::State(SubjectState::Closed) => document.state != SubjectState::Open,
-                Term::State(state) => document.state == *state,
-                Term::Kind(kind) => document.kind == *kind,
-                Term::Unmerged => {
-                    document.kind == SubjectKind::Pull && document.state != SubjectState::Merged
-                }
-                Term::Draft(draft) => {
-                    document.kind == SubjectKind::Pull && document.draft == Some(*draft)
-                }
-                Term::Missing(Metadata::Label) => {
-                    !labels.iter().any(|(id, _)| document.label_ids.contains(id))
-                }
-                Term::Missing(Metadata::Assignee) => document.assignees.is_empty(),
-            },
-        }
     }
 }
 

@@ -29,6 +29,8 @@ pub enum Error {
     Expired,
     #[error("repository Cell is unavailable")]
     Unavailable,
+    #[error("discussion index requires explicit preparation")]
+    IndexUnavailable,
     #[error("repository command may have committed; retry with the same submission ID")]
     Pending {
         #[source]
@@ -36,6 +38,8 @@ pub enum Error {
     },
     #[error("repository Cell has not reached the requested revision")]
     StaleRead,
+    #[error("discussion cursor no longer matches the index snapshot or query")]
+    StaleSearch,
 }
 
 impl Error {

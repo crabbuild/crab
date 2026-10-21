@@ -4,10 +4,10 @@ pub(crate) use models::{
     CommentKey, CommentPage, CommentRecord, CommitStatusCatalog, CommitStatusRecord,
     CommitStatusSubmissionKey, CreateCommentInput, CreateCommentOutcome, CreateCommitStatusInput,
     CreateCommitStatusOutcome, CreateIssueInput, CreateIssueOutcome, CreateLabelInput,
-    CreateLabelOutcome, DeleteLabelInput, DeleteLabelOutcome, IssuePage, IssueRecord, IssueSummary,
-    LabelCatalog, LabelRecord, ListCommentsInput, ListIssuesInput, RepositoryAuthor,
-    UpdateCommentInput, UpdateCommentOutcome, UpdateIssueInput, UpdateIssueOutcome,
-    UpdateLabelInput, UpdateLabelOutcome,
+    CreateLabelOutcome, DeleteLabelInput, DeleteLabelOutcome, IssueRecord, IssueSummary,
+    LabelCatalog, LabelRecord, ListCommentsInput, RepositoryAuthor, UpdateCommentInput,
+    UpdateCommentOutcome, UpdateIssueInput, UpdateIssueOutcome, UpdateLabelInput,
+    UpdateLabelOutcome,
 };
 
 use crate::cells::application::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
@@ -40,9 +40,9 @@ pub(crate) use pulls::{
     CreatePullInput, CreatePullOutcome, CreatePullReview, CreatePullReviewInput,
     CreatePullReviewOutcome, GetPull, GetPullComment, GetPullMergeSubmission, GetPullReview,
     GetPullReviewSubmission, GetPullSubmission, ListPullComments, ListPullReviews, ListPulls,
-    MergeMethod, PullChildKey, PullChildListInput, PullCommentRecord, PullListInput, PullMerge,
+    MergeMethod, PullChildKey, PullChildListInput, PullCommentRecord, PullMerge,
     PullMergeTransition, PullReadiness, PullRecord, PullReviewRecord, PullState, PullSubmissionKey,
-    ReservePullMerge, ReservePullMergeInput, ReservePullMergeOutcome, ReviewState,
+    PullSummary, ReservePullMerge, ReservePullMergeInput, ReservePullMergeOutcome, ReviewState,
     SetPullReadiness, SetPullReadinessInput, SetPullReadinessOutcome, TransitionPullMerge,
     TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull, UpdatePullComment,
     UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome,
@@ -88,6 +88,7 @@ mod releases;
 pub(crate) mod search;
 mod settings;
 mod statuses;
+pub(crate) use search::index::SearchInput;
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
     SqlStatement {
