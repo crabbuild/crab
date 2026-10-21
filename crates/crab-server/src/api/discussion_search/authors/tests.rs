@@ -90,6 +90,23 @@ async fn author_filters_bind_qualified_accounts_and_rebound_handle_cursors_witho
         .await
         .unwrap();
     let source = h.json(&format!("{root}/issues/1"), &alice).await;
+    let options = h.json(&format!("{root}/discussion-search/authors?query=is%3Aopen%20-author%3Abob&search=%40PUBLIC-A"), &alice).await;
+    assert_eq!(options["items"].as_array().unwrap().len(), 1);
+    assert_eq!(options["items"][0]["actor"]["id"], profile["id"]);
+    assert_eq!(options["items"][0]["query"], "is:open author:public-alice");
+    assert_eq!(options["self"]["query"], "is:open author:@me");
+    assert_eq!(options["clear"]["query"], "is:open");
+    let query = options["items"][0]["query"].as_str().unwrap();
+    let params = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("q", query)
+        .finish();
+    for view in ["issues", "pulls"] {
+        let page = h.json(&format!("{root}/{view}?{params}"), &alice).await;
+        assert_eq!(page["matching"], if view == "issues" { 2 } else { 1 });
+    }
+    let body = options.to_string();
+    assert!(!body.contains("issuer") && !body.contains("subject") && !body.contains("alice-id"));
+
     for (kind, query, cookie, expected) in [
         ("issues", "author:public-alice", &alice, 2),
         ("pulls", "author:public-alice", &alice, 1),
@@ -128,6 +145,22 @@ async fn author_filters_bind_qualified_accounts_and_rebound_handle_cursors_witho
             .await["matching"],
         0
     );
+    assert_eq!(
+        h.json(
+            &format!("{root}/discussion-search/authors?search=public-alice"),
+            &alice
+        )
+        .await["items"],
+        json!([])
+    );
+    let renamed = h
+        .json(
+            &format!("{root}/discussion-search/authors?search=renamed"),
+            &alice,
+        )
+        .await;
+    assert_eq!(renamed["items"][0]["actor"]["id"], profile["id"]);
+    assert_eq!(renamed["items"][0]["actor"]["handle"], "renamed-alice");
     h.write(
         Method::POST,
         "/api/profile",
@@ -209,6 +242,22 @@ async fn author_completion_keeps_utf16_ranges_query_limits_and_durable_access_wi
             !body.contains("issuer") && !body.contains("subject") && !body.contains("alice-id")
         );
     }
+    for (key, value) in [
+        ("search", "x".repeat(257)),
+        ("search", "bad\nname".into()),
+        ("query", "author:".into()),
+        ("state", "open".into()),
+    ] {
+        let response = h
+            .http
+            .get(format!("{}{root}/discussion-search/authors", h.origin))
+            .header(header::COOKIE, &alice)
+            .query(&[(key, value)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{key}");
+    }
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
     let members = h.server.repositories.values()[0]
@@ -228,6 +277,7 @@ async fn author_completion_keeps_utf16_ranges_query_limits_and_durable_access_wi
         format!("{root}/issues?q=author%3Aalice"),
         format!("{root}/pulls?q=author%3Aalice"),
         format!("{root}/discussion-search?query=author%3Aal&cursor=9"),
+        format!("{root}/discussion-search/authors?search=al"),
     ] {
         assert_eq!(
             h.http

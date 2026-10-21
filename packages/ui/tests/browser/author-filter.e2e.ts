@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { mockPullRequest } from "./pulls/fixture";
 import {
   expectNoAccessibilityViolations,
@@ -121,3 +121,171 @@ for (const view of ["issues", "pulls"] as const) {
     ).toBe(true);
   });
 }
+
+async function authorMenuFixture(page: Page) {
+  await mockPullRequest(page);
+  let fail = false;
+  const requests: Array<{ query: string; search: string }> = [];
+  const actors = [
+    {
+      id: "a0000000-0000-4000-8000-000000000001",
+      handle: "public-alice",
+      name: "Public Alice",
+    },
+    ...Array.from({ length: 20 }, (_, index) => ({
+      id: `a0000000-0000-4000-8000-${String(index + 2).padStart(12, "0")}`,
+      handle: `user-${index}`,
+      name: `Other author ${index}`,
+    })),
+  ];
+  for (const view of ["issues", "pulls"])
+    await page.route(`**/api/repos/team/project/${view}?**`, (route) =>
+      route.fulfill({
+        json: {
+          items: [],
+          next: null,
+          matching: 0,
+          counts: { open: 0, closed: 0, merged: 0 },
+          authored_by_me: false,
+          navigation: { kind: "results" },
+        },
+      }),
+    );
+  await page.route(
+    "**/api/repos/team/project/discussion-search/authors?**",
+    (route) => {
+      const params = new URL(route.request().url()).searchParams;
+      const query = params.get("query") ?? "";
+      const search = params.get("search") ?? "";
+      requests.push({ query, search });
+      if (fail)
+        return route.fulfill({
+          status: 503,
+          json: {
+            error: {
+              code: "directory_unavailable",
+              message: "Authors unavailable",
+            },
+          },
+        });
+      const matches = actors.filter((actor) =>
+        actor.handle.startsWith(search.toLowerCase().replace(/^@/, "")),
+      );
+      return route.fulfill({
+        json: {
+          items: matches.slice(0, 20).map((actor) => ({
+            actor,
+            query: `is:open author:${actor.handle}`,
+            selected: query === `is:open author:${actor.handle}`,
+          })),
+          self: {
+            query: "is:open author:@me",
+            selected: query === "is:open author:@me",
+          },
+          clear: { query: "is:open", selected: query === "is:open" },
+          truncated: matches.length > 20,
+        },
+      });
+    },
+  );
+  return {
+    requests,
+    fail: (value: boolean) => {
+      fail = value;
+    },
+  };
+}
+
+for (const view of ["issues", "pulls"] as const) {
+  test(`${view} author menu uses native choices and preserves navigation through selection and reload`, async ({
+    page,
+  }) => {
+    const { requests } = await authorMenuFixture(page);
+    await page.goto(
+      `/team/project/${view}?q=is%3Aopen&sort=comments&direction=asc&before=old&powerbar=1`,
+    );
+    const trigger = page.getByRole("button", {
+      name: "Filter by author",
+      exact: true,
+    });
+    await trigger.click();
+    const input = page.getByRole("combobox", { name: "Find a username" });
+    await expect(input).toBeFocused();
+    await expect(
+      page.getByRole("option", { name: "Public Alice @public-alice" }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Showing 20 matches. Refine your search for more."),
+    ).toBeVisible();
+    await input.fill("@PUBLIC");
+    await expect.poll(() => requests.at(-1)?.search).toBe("@PUBLIC");
+    await expect(
+      page.getByText("Showing 20 matches. Refine your search for more."),
+    ).toHaveCount(0);
+    await input.press("ArrowDown");
+    await input.press("ArrowDown");
+    await input.press("Enter");
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("q"))
+      .toBe("is:open author:public-alice");
+    await expect(trigger).toBeFocused();
+    const url = new URL(page.url());
+    expect(url.searchParams.get("before")).toBeNull();
+    expect(url.searchParams.get("sort")).toBe("comments");
+    expect(url.searchParams.get("direction")).toBe("asc");
+    expect(url.searchParams.get("powerbar")).toBe("1");
+    await page.reload();
+    await trigger.click();
+    await expect(
+      page.getByRole("option", { name: "Public Alice @public-alice" }),
+    ).toHaveAttribute("aria-selected", "true");
+    await page.getByRole("button", { name: "Clear author filter" }).click();
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("q"))
+      .toBe("is:open");
+    await trigger.click();
+    await page.getByRole("option", { name: "Yourself", exact: true }).click();
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("q"))
+      .toBe("is:open author:@me");
+  });
+}
+
+test("author menu reports errors, retries, and stays accessible in a narrow dark viewport", async ({
+  page,
+}) => {
+  const fixture = await authorMenuFixture(page);
+  fixture.fail(true);
+  await page.goto("/team/project/issues?q=is%3Aopen");
+  const trigger = page.getByRole("button", {
+    name: "Filter by author",
+    exact: true,
+  });
+  await trigger.click();
+  await expect(page.getByRole("alert")).toContainText("Authors unavailable");
+  await expect(page.getByRole("option")).toHaveCount(0);
+  fixture.fail(false);
+  await page.getByRole("button", { name: "Retry authors" }).click();
+  await expect(
+    page.getByRole("option", { name: "Public Alice @public-alice" }),
+  ).toBeVisible();
+  const input = page.getByRole("combobox", { name: "Find a username" });
+  await input.fill("unknown");
+  await expect(page.getByText("No usernames match.")).toBeVisible();
+  await input.press("Escape");
+  await expect(trigger).toBeFocused();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await selectDarkTheme(page);
+  await trigger.click();
+  const popup = await page
+    .getByRole("dialog", { name: "Filter by author" })
+    .boundingBox();
+  expect(popup!.x).toBeGreaterThanOrEqual(16);
+  expect(popup!.x + popup!.width).toBeLessThanOrEqual(374);
+  await expectNoAccessibilityViolations(page);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+});

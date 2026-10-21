@@ -24,6 +24,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             "/api/repos/{owner}/{name}/discussion-search/milestones",
             get(milestones),
         )
+        .route(
+            "/api/repos/{owner}/{name}/discussion-search/authors",
+            get(authors::options),
+        )
         .route("/api/repos/{owner}/{name}/discussion-search", get(complete))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
@@ -54,12 +58,9 @@ async fn complete(
             )
             .await,
     )?;
-    if let Some(prefix) = prefix.filter(|prefix| {
-        prefix.len() <= 39
-            && prefix
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    }) {
+    if let Some(prefix) =
+        prefix.filter(|prefix| crate::cells::directory::validate_handle_prefix(prefix).is_ok())
+    {
         let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
         let handles = app::query_output(
             cells
@@ -73,7 +74,10 @@ async fn complete(
         crate::cells::repository::search::completion::append_authors(
             &input,
             &mut result,
-            handles.into_iter().map(|actor| (actor.handle, actor.name)),
+            handles
+                .items
+                .into_iter()
+                .map(|actor| (actor.handle, actor.name)),
         )
         .map_err(app::Error::Invalid)?;
     }

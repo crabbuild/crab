@@ -23,17 +23,30 @@ async fn indexed_handle_completion_and_private_resolution_follow_renames_without
             )
             .await
             .unwrap();
+        if index == 19 {
+            let exact_limit = client
+                .query::<CompleteHandles>(Address::Directory, None, "alice".into())
+                .await
+                .unwrap()
+                .output;
+            assert_eq!(
+                (exact_limit.items.len(), exact_limit.truncated),
+                (20, false)
+            );
+        }
     }
     let first = client
         .query::<CompleteHandles>(Address::Directory, None, "alice".into())
         .await
         .unwrap();
-    assert_eq!(first.output.len(), 20);
+    assert_eq!(first.output.items.len(), 20);
+    assert!(first.output.truncated);
     let exact = client
         .query::<CompleteHandles>(Address::Directory, None, "alice-23".into())
         .await
         .unwrap();
-    assert_eq!(exact.output.len(), 1);
+    assert_eq!(exact.output.items.len(), 1);
+    assert!(!exact.output.truncated);
     let resolved = client
         .query::<ResolveHandles>(
             Address::Directory,
@@ -65,6 +78,7 @@ async fn indexed_handle_completion_and_private_resolution_follow_renames_without
             .await
             .unwrap()
             .output
+            .items
             .is_empty()
     );
     let renamed = client

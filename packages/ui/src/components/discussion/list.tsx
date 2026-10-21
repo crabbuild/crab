@@ -160,7 +160,7 @@ export function DiscussionListControls({
         )}
       </div>
       <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1">
-        {(["labels", "milestones"] as const).map((kind) => (
+        {(["authors", "labels", "milestones"] as const).map((kind) => (
           <DiscussionFilter
             key={kind}
             kind={kind}

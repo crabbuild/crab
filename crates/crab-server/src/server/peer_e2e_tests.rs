@@ -261,7 +261,8 @@ async fn qualify_handoff(
         .query::<CompleteHandles>(Address::Directory, Some(actor.receipt), "al".into())
         .await
         .unwrap();
-    assert_eq!(completed.output, vec![profile.clone().into()]);
+    assert_eq!(completed.output.items, vec![profile.clone().into()]);
+    assert!(!completed.output.truncated);
     use crate::cells::repository::{ListDiscussions, SearchInput, search::authors};
     let authored = remote
         .client

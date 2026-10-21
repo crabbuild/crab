@@ -38,7 +38,7 @@ sorting/query-bound cursors, and explicit bounded preparation; `search/completio
 suggestions and browser UTF-16 replacement ranges. `search/milestones/` owns
 milestone projection/catalog reads, grammar-preserving facet destinations and
 the native choice read. `search/authors/` owns qualified identity digests,
-resolved binding validation and personal-view selection. `search/labels/` owns bounded active-label choices and
+resolved binding validation, global author-facet destinations and personal-view selection. `search/labels/` owns bounded active-label choices and
 include/exclude/no-label transitions; it reuses the canonical label decoder.
 `search/navigation/` shares global-conjunction extraction, bounded destinations
 and choice records between facets and state controls. Canonical milestone
@@ -63,8 +63,10 @@ in `src/cells/repository/schema.rs`, using the canonical `src/cells/schema.sql`.
 actor profiles; its `profiles/` commands and schema have colocated tests.
 `cells/directory/lookup/` owns bounded qualified-identity reads and minimal public
 actor summaries. `cells/directory/search/` owns bounded indexed handle resolution
-and completion; `api/discussion_search/authors/` binds public qualifiers to
-qualified accounts before native repository reads. `api/profiles/attribution/` deduplicates list authors into one
+and completion. Handle completion returns bounded public matches plus an exact
+truncation flag. `api/discussion_search/authors/` binds public qualifiers to
+qualified accounts before native repository reads and exposes the authorized
+Author menu using those same public Directory choices. `api/profiles/attribution/` deduplicates list authors into one
 Directory read; issue and PR handlers recheck durable membership afterward.
 `src/api/profiles/` exposes session-authenticated profile reads/edits without
 exposing authentication claims. `src/server/management/directory.rs` owns explicit

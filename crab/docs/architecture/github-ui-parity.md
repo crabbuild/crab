@@ -144,6 +144,17 @@ organization/team/project grants and their explicit
 catalog authority cutover remain required; the combined model checklist above
 stays incomplete.
 
+The issue/PR Author menu now searches registered public usernames through the
+native Directory and edits queries through the shared grammar. Selecting one
+username or Yourself preserves conditional OR groups, sort, diagnostics and URL
+reload while resetting cursors. Clear removes global author terms; bounded
+queries disable unusable destinations. The shared shadcn picker provides
+keyboard/focus behavior, retry and responsive light/dark layout. Directory read
+8 now returns public matches with an exact truncation flag; peers must deploy
+together, with no schema/index upgrade or previous-output reader. Non-enrolled
+authors, integration-account filtering and recent-contributor ordering remain
+separate model and UX work.
+
 Other actor/project/type predicates and complete GitHub workspace controls
 remain delivery work. This slice does not finish the full parity checklist.
 
@@ -487,6 +498,28 @@ review/merge, replay, search, milestone and rebuild workflow also passed, leavin
 captured collaboration resources across both repositories exactly, without a
 schema/index rebuild or profile enrollment. This proves the implemented slice,
 not full role parity or production qualification of the embedded SDK.
+
+The Author-menu slice passed 355 isolated server tests (five existing ignored),
+107 UI unit tests and all 92 browser tests. Focused coverage includes boolean
+query destinations, exact truncation boundaries, qualified result counts,
+rename/rebinding, revoked access, private-claim exclusion, keyboard/focus/reload,
+errors/retry and narrow dark layouts. Native peer routing, strict all-target
+Clippy, architecture gates, formatting, type checks and frontend/server builds
+also passed. The live GitHub Author control was checked for its searchable
+single-selection interaction; current contributor ordering remains a known gap.
+
+An embedded-browser workflow used real sessions, native Cellar and isolated
+RustFS storage. A second synthetic user registered a public profile through the
+form, filtered both issue and PR lists by the existing author, selected Yourself
+to reach a truthful empty result, cleared to restore rows, and reloaded the saved
+query. Desktop/light and narrow/dark menu screenshots were inspected. Existing
+Git, review/merge, replay, search, rebuild and authorization-restart qualification
+also passed, leaving 62 durable Cellar objects. The persistent preview retained
+all 18 captured collaboration records across both repositories, with no profile
+enrollment or schema/index rebuild. Five reaction ordering watermarks advanced
+from 1279 to 1281; `api/reactions/` intentionally reports the repository receipt
+revision. All reaction groups, record versions and other captured fields were
+unchanged. This does not finish the full parity goal.
 
 ## Primary references
 

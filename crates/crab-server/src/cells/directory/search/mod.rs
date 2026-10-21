@@ -37,33 +37,47 @@ impl Read for ResolveHandles {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HandleMatches {
+    pub items: Vec<ActorSummary>,
+    pub truncated: bool,
+}
+
+pub(crate) fn validate_handle_prefix(prefix: &str) -> std::result::Result<(), &'static str> {
+    if prefix.len() > 39
+        || !prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err("Username prefix must contain at most 39 lowercase letters, digits or hyphens");
+    }
+    Ok(())
+}
+
 pub(crate) struct CompleteHandles;
 impl Read for CompleteHandles {
     const CLASS: &'static str = super::CLASS;
     const ID: u32 = 8;
     type Input = String;
-    type Output = Vec<ActorSummary>;
+    type Output = HandleMatches;
     fn execute(context: &mut Transaction<'_>, prefix: Self::Input) -> Result<Self::Output> {
-        if prefix.len() > 39
-            || !prefix
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        {
-            return Err(Error::Invalid(
-                "Username prefix must contain at most 39 lowercase letters, digits or hyphens",
-            ));
-        }
+        validate_handle_prefix(&prefix).map_err(Error::Invalid)?;
         // ASCII handles sort below '~'. The indexed range bounds work even
         // when the directory is large; completion never scans display names.
         let upper = format!("{prefix}~");
         let sql = format!(
-            "SELECT {COLUMNS} FROM actors WHERE handle >= ? AND handle < ? ORDER BY handle LIMIT 20"
+            "SELECT {COLUMNS} FROM actors WHERE handle >= ? AND handle < ? ORDER BY handle LIMIT 21"
         );
         let rows = context.query(&sql, &[SqlValue::Text(prefix), SqlValue::Text(upper)])?;
-        rows.rows
+        let mut items = rows
+            .rows
             .iter()
             .map(|row| ActorProfile::try_from(row.as_slice()).map(Into::into))
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        let truncated = items.len() > 20;
+        items.truncate(20);
+        Ok(HandleMatches { items, truncated })
     }
 }
 

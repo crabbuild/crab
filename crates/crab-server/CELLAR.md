@@ -65,6 +65,14 @@ the separate Directory read; profiles never act as grants. Counts/cursors keep
 their repository snapshot. Prepare Directory before enabling this DTO contract
 and update peers together; unsupported operations have no fallback reader.
 
+The Author list menu composes Directory handle completion with native query
+navigation. Directory read 8 returns a bounded `items`/`truncated` result, using
+21 indexed matches to distinguish exactly 20 from an incomplete result. Update
+native peers together for this output change; there is no old-array reader.
+Public menu records contain only actor summaries and query destinations. Catalog
+grants are rechecked after the Directory read. No canonical schema or derived
+index change is required.
+
 `cells/schema.sql` owns canonical repository domain tables;
 `cells/repository/search/index/schema.sql` owns the derived discussion index. Initialization
 creates it directly, including replay receipts; no historical DDL upgrade chain

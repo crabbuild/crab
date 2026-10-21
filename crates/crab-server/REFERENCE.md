@@ -1431,9 +1431,28 @@ normal meanings. Display names never resolve identities. Renames release the old
 handle without rewriting discussion records; handles are not access grants.
 Private native list inputs carry exactly the ordered bindings extracted from
 the query. Public HTTP parameters cannot supply those bindings. Directory reads
-7/8 resolve at most 64 handles or complete at most 20 indexed handle prefixes;
-completion returns public handles/names only. Update all native peers together.
+7/8 resolve at most 64 handles or return up to 20 public actor summaries from
+one indexed handle prefix. Read 8 returns `items` and `truncated`, rather than a
+bare array; update all native peers together. No older-output reader is supported.
 Integration-account author syntax and assignee/reviewer predicates remain open.
+
+The shared Author menu uses `GET .../discussion-search/authors` with `query` and
+`search`. It searches registered public usernames by prefix, ignoring ASCII case
+and an optional leading `@`; it does not resolve display names or infer accounts
+from repository member names. The response includes public `actor` summaries,
+validated query destinations, selection state, `self`/`clear` choices and an exact
+truncation flag. No issuer/subject claims cross HTTP. Native query navigation
+replaces global author conjunctions and exclusions while retaining predicates
+inside OR groups. Maximum-length queries disable destinations that cannot fit.
+
+Selecting a username or Yourself closes the menu, clears pagination, and preserves
+sort, direction and diagnostics in the URL. Clear removes global author terms.
+Keyboard navigation, focus return, reload, failed-read retry and narrow layouts
+use the same shadcn picker as labels and milestones. `@me` remains useful without
+a registered profile. Non-enrolled authors have no selectable username; recent
+contributor ordering, integration accounts and complete participant filtering
+remain unfinished. Directory reads recheck current repository access before
+returning choices. No canonical schema or discussion-index rebuild is needed.
 
 `GET .../discussion-search?query=label:he&cursor=8` returns authorized
 repository suggestions and syntax feedback. `cursor`, `start`, and `end` count

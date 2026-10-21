@@ -271,3 +271,11 @@ admitted scope. Git-token format 2 also binds that UUID and retires name-only
 tokens. Promotion, downgrade, authority failure, UUID reuse and real OAuth/RustFS
 restart behavior are qualified. This improves the existing catalog boundary;
 it does not migrate grants to Directory or supply atomic native authority fencing.
+
+The Author menu now composes current public Directory choices with native query
+navigation in both discussion workspaces. Selection, self/clear, exact truncation,
+counts, reload, error/focus behavior and real OAuth/RustFS browser effects are
+qualified. Directory read 8 has a bounded matches/truncation output and requires
+coordinated peers. This adds no grant store or canonical schema change; recent
+contributors, non-enrolled participants and the broader actor/project models
+remain unfinished.

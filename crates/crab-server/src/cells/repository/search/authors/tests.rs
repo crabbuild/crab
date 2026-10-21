@@ -214,3 +214,49 @@ async fn qualified_author_projection_filters_both_kinds_and_binds_cursors_to_res
     );
     fixtures::close(&server).await;
 }
+
+#[test]
+fn author_choices_replace_global_terms_and_preserve_conditional_authors() {
+    for (source, handle, expected, selected) in [
+        (
+            "is:open author:ALICE",
+            Some("alice"),
+            "is:open author:alice",
+            true,
+        ),
+        (
+            "is:open author:alice -author:bob",
+            Some("@me"),
+            "is:open author:@me",
+            false,
+        ),
+        (
+            "(author:alice OR author:bob) label:bug",
+            Some("carol"),
+            "(author:alice OR author:bob) label:bug author:carol",
+            false,
+        ),
+        ("author:@me", None, "is:issue OR is:pr", false),
+        ("label:bug", None, "label:bug", true),
+        ("-author:alice", Some("alice"), "author:alice", false),
+    ] {
+        let choice = Query::parse(Some(source))
+            .unwrap()
+            .author_choice(handle)
+            .unwrap();
+        assert_eq!(
+            (choice.query.as_deref(), choice.selected),
+            (Some(expected), selected),
+            "{source}"
+        );
+    }
+    let maximum = Query::parse(Some(&"🦀".repeat(256))).unwrap();
+    assert!(
+        maximum
+            .author_choice(Some("alice"))
+            .unwrap()
+            .query
+            .is_none()
+    );
+    assert!(maximum.author_choice(Some("not a handle")).is_err());
+}

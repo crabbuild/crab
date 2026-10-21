@@ -8,6 +8,7 @@ pub(crate) mod index;
 pub(crate) mod labels;
 pub(crate) mod milestones;
 mod navigation;
+pub(crate) use navigation::Choice;
 pub(crate) mod results;
 
 const MAX_TERMS: usize = 64;

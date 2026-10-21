@@ -14,7 +14,7 @@ const COLUMNS: &str = "id, handle, name, version, created_at_ms, updated_at_ms";
 
 mod lookup;
 mod search;
-pub(crate) use search::{CompleteHandles, ResolveHandles};
+pub(crate) use search::{CompleteHandles, ResolveHandles, validate_handle_prefix};
 mod profiles;
 pub(crate) use lookup::{ActorSummary, LookupActors};
 pub(crate) use profiles::{

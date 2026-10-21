@@ -5,6 +5,7 @@ import {
   SquareIcon,
   SquareCheckIcon,
   SquareMinusIcon,
+  UserRoundIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Field, FieldLabel } from "@/components/ui/field";
@@ -21,34 +22,45 @@ import { RequestWidget } from "@/components/request/result";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { Link } from "@/components/navigation/link";
+import type { ActorProfile } from "@/features/profile/model";
 import { cn } from "@/lib/utils";
 
 interface Choice {
   query: string | null;
   selected: boolean;
 }
-interface Options {
-  items: Array<
-    Choice & {
-      number: number;
-      title: string;
-      color?: string;
-      description?: string | null;
-      excluded?: boolean;
-      exclude_query?: string | null;
-    }
-  >;
-  missing: Choice;
-  clear: Choice;
-  truncated: boolean;
-}
+type CatalogOption = Choice & {
+  number: number;
+  title: string;
+  color?: string;
+  description?: string | null;
+  excluded?: boolean;
+  exclude_query?: string | null;
+};
+type AuthorOption = Choice & {
+  actor: Pick<ActorProfile, "id" | "handle" | "name">;
+};
+type Item = CatalogOption | AuthorOption;
+type Options = { clear: Choice; truncated: boolean } & (
+  | { items: CatalogOption[]; missing: Choice }
+  | { items: AuthorOption[]; self: Choice }
+);
 
 const presentations = {
+  authors: {
+    title: "Filter by author",
+    trigger: "Author",
+    find: "Find a username",
+    initial: "Yourself",
+    noun: "authors",
+    singular: "author",
+    timing: "Author filters",
+  },
   milestones: {
     title: "Filter by milestone",
     trigger: "Milestone",
     find: "Find a milestone",
-    missing: "No milestone",
+    initial: "No milestone",
     noun: "milestones",
     singular: "milestone",
     timing: "Milestone filters",
@@ -57,7 +69,7 @@ const presentations = {
     title: "Filter by label",
     trigger: "Labels",
     find: "Filter labels",
-    missing: "No labels",
+    initial: "No labels",
     noun: "labels",
     singular: "label",
     timing: "Label filters",
@@ -98,8 +110,15 @@ export function DiscussionFilter({
   );
   const current = requested === search;
   const data = current ? options.data : undefined;
-  const choices: Options["items"] = data
-    ? [{ ...data.missing, number: 0, title: text.missing }, ...data.items]
+  const choices: Item[] = data
+    ? [
+        {
+          ...("missing" in data ? data.missing : data.self),
+          number: 0,
+          title: text.initial,
+        },
+        ...data.items,
+      ]
     : [];
   const selected = active >= 0 && active < choices.length ? active : -1;
   useEffect(() => {
@@ -117,7 +136,7 @@ export function DiscussionFilter({
     if (query == null) return;
     onSelect(query);
     setActive(-1);
-    if (kind === "milestones") setOpen(false);
+    if (kind !== "labels") setOpen(false);
     else input.current?.focus();
   }
   return (
@@ -226,74 +245,99 @@ export function DiscussionFilter({
             <div
               id={`${id}-options`}
               role="listbox"
-              aria-label={kind === "labels" ? "Labels" : "Milestones"}
+              aria-label={
+                kind === "authors"
+                  ? "Authors"
+                  : kind === "labels"
+                    ? "Labels"
+                    : "Milestones"
+              }
               aria-multiselectable={kind === "labels" || undefined}
               className="max-h-64 overflow-y-auto"
             >
-              {choices.map((choice, index) => (
-                <Button
-                  key={choice.number}
-                  id={`${id}-${index}`}
-                  type="button"
-                  variant="ghost"
-                  role="option"
-                  aria-selected={choice.selected || choice.excluded || false}
-                  aria-description={
-                    choice.excluded ? "Excluded from results" : undefined
-                  }
-                  disabled={choice.query === null}
-                  className={cn(
-                    "h-auto w-full justify-start gap-2 whitespace-normal px-2 py-2 text-left",
-                    index === selected && "bg-accent",
-                  )}
-                  onPointerMove={() => setActive(index)}
-                  onPointerDown={(event) => event.preventDefault()}
-                  onClick={(event) => choose(choice, event.altKey)}
-                >
-                  {kind === "labels" ? (
-                    choice.excluded ? (
-                      <SquareMinusIcon className="size-4 shrink-0" />
-                    ) : choice.selected ? (
-                      <SquareCheckIcon className="size-4 shrink-0" />
+              {choices.map((choice, index) => {
+                const key = "actor" in choice ? choice.actor.id : choice.number;
+                const title =
+                  "actor" in choice ? choice.actor.name : choice.title;
+                const description =
+                  "actor" in choice
+                    ? `@${choice.actor.handle}`
+                    : choice.description;
+                const color = "color" in choice ? choice.color : undefined;
+                const excluded = "excluded" in choice && choice.excluded;
+                return (
+                  <Button
+                    key={key}
+                    id={`${id}-${index}`}
+                    type="button"
+                    variant="ghost"
+                    role="option"
+                    aria-selected={choice.selected || excluded || false}
+                    aria-description={
+                      excluded ? "Excluded from results" : undefined
+                    }
+                    disabled={choice.query === null}
+                    className={cn(
+                      "h-auto w-full justify-start gap-2 whitespace-normal px-2 py-2 text-left",
+                      index === selected && "bg-accent",
+                    )}
+                    onPointerMove={() => setActive(index)}
+                    onPointerDown={(event) => event.preventDefault()}
+                    onClick={(event) => choose(choice, event.altKey)}
+                  >
+                    {kind === "labels" ? (
+                      excluded ? (
+                        <SquareMinusIcon className="size-4 shrink-0" />
+                      ) : choice.selected ? (
+                        <SquareCheckIcon className="size-4 shrink-0" />
+                      ) : (
+                        <SquareIcon className="size-4 shrink-0 text-muted-foreground" />
+                      )
                     ) : (
-                      <SquareIcon className="size-4 shrink-0 text-muted-foreground" />
-                    )
-                  ) : (
-                    <CheckIcon
-                      className={cn(
-                        "size-4 shrink-0",
-                        !choice.selected && "invisible",
-                      )}
-                    />
-                  )}
-                  {choice.color && (
-                    <span
-                      aria-hidden="true"
-                      className="mt-0.5 size-3 shrink-0 rounded-full border"
-                      style={{ backgroundColor: `#${choice.color}` }}
-                    />
-                  )}
-                  <span className="min-w-0 flex-1 break-words">
-                    <span className="block">
-                      {choice.title}
-                      {choice.excluded && (
-                        <span className="ml-2 text-xs text-muted-foreground">
-                          Excluded
+                      <CheckIcon
+                        className={cn(
+                          "size-4 shrink-0",
+                          !choice.selected && "invisible",
+                        )}
+                      />
+                    )}
+                    {"actor" in choice && (
+                      <UserRoundIcon data-icon="inline-start" />
+                    )}
+                    {color && (
+                      <span
+                        aria-hidden="true"
+                        className="mt-0.5 size-3 shrink-0 rounded-full border"
+                        style={{ backgroundColor: `#${color}` }}
+                      />
+                    )}
+                    <span className="min-w-0 flex-1 break-words">
+                      <span className="block">
+                        {title}
+                        {excluded && (
+                          <span className="ml-2 text-xs text-muted-foreground">
+                            Excluded
+                          </span>
+                        )}
+                      </span>
+                      {description && (
+                        <span className="mt-0.5 block text-xs font-normal text-muted-foreground">
+                          {description}
                         </span>
                       )}
                     </span>
-                    {choice.description && (
-                      <span className="mt-0.5 block text-xs font-normal text-muted-foreground">
-                        {choice.description}
-                      </span>
-                    )}
-                  </span>
-                </Button>
-              ))}
+                  </Button>
+                );
+              })}
             </div>
             {data && !data.items.length && (
               <p role="status" className="p-2 text-xs text-muted-foreground">
-                No {kind === "milestones" ? `${state} milestones` : "labels"}{" "}
+                No{" "}
+                {kind === "milestones"
+                  ? `${state} milestones`
+                  : kind === "authors"
+                    ? "usernames"
+                    : text.noun}{" "}
                 match.
               </p>
             )}
@@ -326,14 +370,16 @@ export function DiscussionFilter({
               Select labels to require all. Alt+click or Alt+Enter to exclude.
             </p>
           )}
-          <Button asChild variant="link" size="sm">
-            <Link
-              href={repoHref(repo, { view: kind })}
-              onClick={() => setOpen(false)}
-            >
-              Manage {text.noun}
-            </Link>
-          </Button>
+          {kind !== "authors" && (
+            <Button asChild variant="link" size="sm">
+              <Link
+                href={repoHref(repo, { view: kind })}
+                onClick={() => setOpen(false)}
+              >
+                Manage {text.noun}
+              </Link>
+            </Button>
+          )}
         </PopoverContent>
       )}
     </Popover>
