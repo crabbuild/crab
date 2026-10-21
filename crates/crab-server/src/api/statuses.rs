@@ -246,7 +246,7 @@ async fn create(
     validate_target(input.target_url.as_deref())?;
     let parsed_oid = parse_oid(&oid)?;
     let oid = parsed_oid.to_string();
-    let request_id = submission_id(&input.request_id)?;
+    let request_id = app::submission_id(&input.request_id)?;
     let author = app::actor(&principal)?;
     let replay_route = crate::app::repository_cell(&server, repo)?;
     if let Some(record) = crate::app::query_output(
@@ -324,12 +324,6 @@ async fn create(
     )?;
     let status = created_status(outcome)?;
     Ok((StatusCode::CREATED, Json(status_view(&status))))
-}
-
-fn submission_id(value: &str) -> Result<[u8; 16]> {
-    Uuid::parse_str(&app::submission(value)?)
-        .map(Uuid::into_bytes)
-        .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
 }
 
 fn status_state_code(state: StatusState) -> u8 {

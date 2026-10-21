@@ -98,6 +98,7 @@ const Issues = lazy(() =>
 const PullRequests = lazy(() =>
   import("./pulls").then((module) => ({ default: module.PullRequests })),
 );
+const MilestonesPage = lazy(() => import("./collaboration/milestones"));
 const LabelsPage = lazy(() =>
   import("./discussion-labels").then((module) => ({
     default: module.LabelsPage,
@@ -551,7 +552,9 @@ function RepositoryPage({
   const view = route?.view ?? "code";
   const canWrite = repo.access === "write" && !repo.archived;
   const refs = useRequest<Refs>(
-    view === "issues" || view === "labels" ? null : endpoint(repo, "refs"),
+    view === "issues" || view === "labels" || view === "milestones"
+      ? null
+      : endpoint(repo, "refs"),
   );
   const [createdRefs, setCreatedRefs] = useState<Ref[]>([]);
   const [deletedRefs, setDeletedRefs] = useState<string[]>([]);
@@ -618,9 +621,12 @@ function RepositoryPage({
   }, [showTree]);
   const overview = view === "code" && !path && !showTree;
   const fileWorkspace = (view === "code" || view === "blame") && !overview;
-  const issuesView = view === "issues" || view === "labels";
+  const issuesView =
+    view === "issues" || view === "labels" || view === "milestones";
   const issueNavigation =
-    view === "labels" || (view === "issues" && !route?.issue);
+    view === "labels" ||
+    view === "milestones" ||
+    (view === "issues" && !route?.issue);
   const branch = selected?.name.startsWith("refs/heads/")
     ? selected
     : undefined;
@@ -745,7 +751,7 @@ function RepositoryPage({
               view: "code",
               label: "Code",
               icon: CodeIcon,
-              active: !["issues", "labels", "pulls", "settings"].includes(view),
+              active: !issuesView && view !== "pulls" && view !== "settings",
             },
             {
               view: "issues",
@@ -830,7 +836,17 @@ function RepositoryPage({
             view={view}
             showNavigation={issueNavigation}
           >
-            {view === "labels" ? (
+            {view === "milestones" ? (
+              <Suspense
+                fallback={
+                  <div className="notice" role="status">
+                    <Spinner size="small" /> Loading milestones…
+                  </div>
+                }
+              >
+                <MilestonesPage repo={repo} url={url} csrf={csrf} />
+              </Suspense>
+            ) : view === "labels" ? (
               <Suspense
                 fallback={
                   <div className="notice" role="status">

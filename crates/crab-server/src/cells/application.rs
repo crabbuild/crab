@@ -13,6 +13,7 @@ pub(crate) use cellar::sdk::storage::SqlValue;
 
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RESULT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES: usize = 128 * 1024;
 const MAX_RETRY_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 pub(crate) const SCRIPT: &str = "crab-repository";
 pub(crate) const CLASS: &str = "Repository";
@@ -42,6 +43,65 @@ pub(crate) struct RepositoryTransaction<'a> {
 impl RepositoryTransaction<'_> {
     pub(crate) fn now_ms(&self) -> i64 {
         self.now_ms
+    }
+
+    pub(crate) fn document<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        self.storage
+            .get(key)
+            .map_err(Error::sdk)?
+            .map(decode_document)
+            .transpose()
+    }
+
+    pub(crate) fn put_document<T: Serialize>(&self, key: &str, value: &T) -> Result<()> {
+        let value = serde_json::to_value(value)?;
+        if serde_json::to_vec(&value)?.len() > MAX_DOCUMENT_BYTES {
+            return Err(Error::Invalid("repository document exceeds its byte limit"));
+        }
+        // Native KV and application SQL share this SDK transaction. Metadata,
+        // indexes, and the command receipt must commit or roll back together.
+        self.storage.put_json(key, &value).map_err(Error::sdk)
+    }
+
+    pub(crate) fn delete_document(&self, key: &str) -> Result<bool> {
+        self.storage.delete(key).map_err(Error::sdk)
+    }
+
+    pub(crate) fn documents<T: DeserializeOwned>(
+        &self,
+        prefix: &str,
+        before: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, T)>> {
+        if !(1..=51).contains(&limit) {
+            return Err(Error::Invalid("repository document page size is invalid"));
+        }
+        // Cellar's start_after remains a lower bound even in reverse order;
+        // descending pagination needs the exclusive upper bound instead.
+        let options = cellar::sdk::storage::ListOptions {
+            prefix: Some(prefix.to_owned()),
+            end: before.map(str::to_owned),
+            limit: Some(limit),
+            reverse: true,
+            ..Default::default()
+        };
+        let mut bytes = 0usize;
+        self.storage
+            .list(&options)
+            .map_err(Error::sdk)?
+            .into_iter()
+            .map(|(key, value)| {
+                if let cellar::storage::StoredValue::Json(json) = &value {
+                    bytes = bytes.saturating_add(json.len());
+                }
+                if bytes > MAX_RESULT_BYTES {
+                    return Err(Error::Invalid(
+                        "repository document page exceeds its byte limit",
+                    ));
+                }
+                decode_document(value).map(|value| (key, value))
+            })
+            .collect()
     }
 
     pub(crate) fn sql(&self, batch: &SqlBatch) -> Result<Vec<SqlResultSet>> {
@@ -78,6 +138,16 @@ impl RepositoryTransaction<'_> {
             })
             .collect()
     }
+}
+
+fn decode_document<T: DeserializeOwned>(value: cellar::storage::StoredValue) -> Result<T> {
+    let cellar::storage::StoredValue::Json(json) = value else {
+        return Err(Error::Invalid("repository document is not JSON"));
+    };
+    if json.len() > MAX_DOCUMENT_BYTES {
+        return Err(Error::Invalid("repository document exceeds its byte limit"));
+    }
+    serde_json::from_str(&json).map_err(Error::sdk)
 }
 
 pub(crate) trait Mutation {

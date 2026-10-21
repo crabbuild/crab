@@ -1,3 +1,7 @@
+use super::collaboration::milestones::{
+    AssignMilestone, CreateMilestone, EditMilestone, GetAssignment, GetMilestone,
+    ListMilestoneItems, ListMilestones,
+};
 use super::*;
 
 pub(in crate::cells) fn dispatch_mutation(
@@ -6,6 +10,9 @@ pub(in crate::cells) fn dispatch_mutation(
     input: serde_json::Value,
 ) -> crate::cells::Result<MutationResult<serde_json::Value>> {
     match id {
+        <CreateMilestone as Mutation>::ID => invoke_mutation::<CreateMilestone>(context, input),
+        <EditMilestone as Mutation>::ID => invoke_mutation::<EditMilestone>(context, input),
+        <AssignMilestone as Mutation>::ID => invoke_mutation::<AssignMilestone>(context, input),
         <CreateIssue as Mutation>::ID => invoke_mutation::<CreateIssue>(context, input),
         <CreateComment as Mutation>::ID => invoke_mutation::<CreateComment>(context, input),
         <UpdateIssue as Mutation>::ID => invoke_mutation::<UpdateIssue>(context, input),
@@ -74,6 +81,10 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        <ListMilestoneItems as Read>::ID => invoke_read::<ListMilestoneItems>(context, input),
+        <GetMilestone as Read>::ID => invoke_read::<GetMilestone>(context, input),
+        <ListMilestones as Read>::ID => invoke_read::<ListMilestones>(context, input),
+        <GetAssignment as Read>::ID => invoke_read::<GetAssignment>(context, input),
         <GetIssue as Read>::ID => invoke_read::<GetIssue>(context, input),
         <GetIssueDetail as Read>::ID => invoke_read::<GetIssueDetail>(context, input),
         <GetComment as Read>::ID => invoke_read::<GetComment>(context, input),

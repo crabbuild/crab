@@ -292,7 +292,7 @@ async fn create(
         return Err(Error::CheckPermission);
     }
     let Json(mut input) = input?;
-    let submission_id = submission_id(&input.request_id)?;
+    let submission_id = app::submission_id(&input.request_id)?;
     validate_plain(
         &input.name,
         100,
@@ -446,7 +446,7 @@ async fn edit(
     let oid = parsed_oid.to_string();
     let number = app::number(number)?;
     let Json(mut input) = input?;
-    let submission_id = submission_id(&input.request_id)?;
+    let submission_id = app::submission_id(&input.request_id)?;
     input.version = app::number(input.version)?;
     input.request_id = Uuid::from_bytes(submission_id).to_string();
     validate_report(
@@ -812,10 +812,4 @@ fn updated_check(outcome: UpdateCheckRunOutcome) -> Result<CheckRunDetail> {
             "Completed checks are immutable and in-progress checks cannot return to queued",
         )),
     }
-}
-
-fn submission_id(value: &str) -> Result<[u8; 16]> {
-    Uuid::parse_str(&app::submission(value)?)
-        .map(Uuid::into_bytes)
-        .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
 }

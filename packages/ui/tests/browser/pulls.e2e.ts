@@ -128,6 +128,10 @@ test("pull request creation, discussion, and files follow the GitHub review flow
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if (/\/(issues|pulls)\/\d+\/milestone$/.test(path))
+      return route.fulfill({
+        json: { milestone: null, version: 0, can_manage: true },
+      });
     if (path === "/api/session")
       return route.fulfill({
         json: { authenticated: true, mode: "local", user: null, csrf: null },

@@ -65,6 +65,21 @@ describe("GitHub repository addresses", () => {
       "/team/repo.name/issues/42",
       { issue: "42" },
     ],
+    [
+      { view: "milestones" },
+      "/team/repo.name/milestones",
+      { view: "milestones" },
+    ],
+    [
+      { view: "milestones", action: "new" },
+      "/team/repo.name/milestones/new",
+      { view: "milestones", action: "new" },
+    ],
+    [
+      { view: "milestones", milestone: "9" },
+      "/team/repo.name/milestones/9",
+      { view: "milestones", milestone: "9" },
+    ],
     [{ view: "pulls" }, "/team/repo.name/pulls", { view: "pulls" }],
     [
       { view: "pulls", pull: "7", pull_tab: "files" },

@@ -10,12 +10,11 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use uuid::Uuid;
 
 use crate::{
     api::assignees::{self, Assignee},
     api::labels::{self, Label},
-    app::{Error, Result, actor, body, number, repository, submission, title},
+    app::{self, Error, Result, actor, body, number, repository, title},
     auth::{Identity, Principal},
     cells::repository::{
         CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
@@ -239,7 +238,7 @@ async fn create(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreateIssueInput {
-                    submission_id: submission_id(&input.request_id)?,
+                    submission_id: app::submission_id(&input.request_id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&author),
                     title,
                     body: input.body,
@@ -493,7 +492,7 @@ async fn comment(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreateCommentInput {
-                    submission_id: submission_id(&input.request_id)?,
+                    submission_id: app::submission_id(&input.request_id)?,
                     issue: number(id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&author),
                     body: input.body,
@@ -579,12 +578,6 @@ async fn edit_comment(
         UpdateCommentOutcome::Conflict => return Err(Error::Conflict),
     };
     Ok(Json(comment_view(&comment, &author)))
-}
-
-fn submission_id(value: &str) -> Result<[u8; 16]> {
-    Uuid::parse_str(&submission(value)?)
-        .map(Uuid::into_bytes)
-        .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
 }
 
 #[cfg(test)]

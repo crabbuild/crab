@@ -344,6 +344,7 @@ impl Mutation for UpdateIssue {
             return Ok(MutationResult::Rejected(UpdateIssueOutcome::NotFound));
         };
         let mut issue = issue_from_row(row)?;
+        let was_closed = issue.state != 0;
         let author_change = input.title.is_some() || input.body.is_some() || input.state.is_some();
         if author_change && !same_author(&issue.author, &input.actor) {
             return Ok(MutationResult::Rejected(UpdateIssueOutcome::Forbidden));
@@ -402,6 +403,12 @@ impl Mutation for UpdateIssue {
         if updated[0].rows_affected != 1 {
             return Ok(MutationResult::Rejected(UpdateIssueOutcome::Conflict));
         }
+        // Progress and the issue state must share the command transaction.
+        let subject = collaboration::Subject {
+            kind: collaboration::SubjectKind::Issue,
+            number: issue.number,
+        };
+        collaboration::milestones::state_changed(context, subject, was_closed, issue.state != 0)?;
         advance_revision(context)?;
         Ok(MutationResult::Success(UpdateIssueOutcome::Updated(
             Box::new(issue),

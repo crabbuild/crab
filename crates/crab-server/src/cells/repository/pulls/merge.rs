@@ -56,6 +56,7 @@ impl Mutation for TransitionPullMerge {
                 TransitionPullMergeOutcome::NotFound,
             ));
         };
+        let was_closed = pull.state != PullState::Open;
         let old_version = pull.version;
         match input.transition {
             PullMergeTransition::Begin => {
@@ -130,6 +131,17 @@ impl Mutation for TransitionPullMerge {
         pull.version = next_version(pull.version)?;
         pull.updated_at_ms = timestamp(context.now_ms())?;
         update_pull_row(context, &pull, old_version)?;
+        // Progress changes commit with close/reopen and merge completion.
+        let subject = collaboration::Subject {
+            kind: collaboration::SubjectKind::Pull,
+            number: pull.number,
+        };
+        collaboration::milestones::state_changed(
+            context,
+            subject,
+            was_closed,
+            pull.state != PullState::Open,
+        )?;
         advance_revision(context)?;
         Ok(MutationResult::Success(
             TransitionPullMergeOutcome::Applied(Box::new(pull)),

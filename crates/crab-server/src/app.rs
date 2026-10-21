@@ -55,6 +55,10 @@ pub(crate) enum Error {
     CheckNotFound,
     #[error("Write access is required to manage repository labels")]
     LabelPermission,
+    #[error("Write access is required to manage milestones")]
+    MilestonePermission,
+    #[error("A milestone with this title already exists")]
+    MilestoneConflict,
     #[error("A repository label with this name already exists")]
     LabelConflict,
     #[error("Repository label not found")]
@@ -243,6 +247,16 @@ impl IntoResponse for Error {
                 "Write access is required to manage check runs",
             ),
             Self::CheckNotFound => (StatusCode::NOT_FOUND, "not_found", "Check run not found"),
+            Self::MilestonePermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to manage milestones",
+            ),
+            Self::MilestoneConflict => (
+                StatusCode::CONFLICT,
+                "milestone_conflict",
+                "A milestone with this title already exists",
+            ),
             Self::LabelPermission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
@@ -467,6 +481,12 @@ pub(crate) fn submission(value: &str) -> Result<String> {
         submission_id = %value,
     );
     Ok(value)
+}
+
+pub(crate) fn submission_id(value: &str) -> Result<[u8; 16]> {
+    uuid::Uuid::parse_str(&submission(value)?)
+        .map(uuid::Uuid::into_bytes)
+        .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
 }
 
 pub(crate) fn title(value: &str) -> Result<String> {

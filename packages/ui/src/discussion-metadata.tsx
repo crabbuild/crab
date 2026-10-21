@@ -8,6 +8,7 @@ import {
   type RepositoryAssignee,
   type RepositoryLabel,
 } from "./api";
+import { MilestonePicker } from "./collaboration/milestones/picker";
 import { LabelBadges, LabelPicker } from "./discussion-labels";
 import { useMutation } from "./discussion-mutations";
 import { Result } from "./ui";
@@ -227,6 +228,7 @@ export function DiscussionMetadata({
           <p className="muted">None yet</p>
         )}
       </section>
+      <MilestonePicker key={version} repo={repo} path={path} csrf={csrf} />
     </aside>
   );
 }

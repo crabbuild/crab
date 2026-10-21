@@ -75,6 +75,7 @@ const MAX_ASSIGNEES: usize = 10;
 const MAX_LIST_OUTPUT_BYTES: usize = 1024 * 1024;
 
 mod checks;
+pub(crate) mod collaboration;
 mod dispatch;
 mod issues;
 mod labels;

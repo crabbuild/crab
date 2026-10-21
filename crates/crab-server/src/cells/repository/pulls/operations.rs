@@ -97,6 +97,7 @@ impl Mutation for UpdatePull {
         let Some(mut pull) = load_pull(context, input.number)? else {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::NotFound));
         };
+        let was_closed = pull.state != PullState::Open;
         if pull.version != input.version {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::Conflict));
         }
@@ -145,6 +146,17 @@ impl Mutation for UpdatePull {
             ))?;
         pull.updated_at_ms = timestamp(context.now_ms())?;
         update_pull_row(context, &pull, input.version)?;
+        // Progress changes commit with close/reopen and merge completion.
+        let subject = collaboration::Subject {
+            kind: collaboration::SubjectKind::Pull,
+            number: pull.number,
+        };
+        collaboration::milestones::state_changed(
+            context,
+            subject,
+            was_closed,
+            pull.state != PullState::Open,
+        )?;
         advance_revision(context)?;
         Ok(MutationResult::Success(UpdatePullOutcome::Updated(
             Box::new(pull),

@@ -38,6 +38,7 @@ pub(crate) async fn serve(request: Request) -> Response {
                         | "releases"
                         | "settings"
                         | "labels"
+                        | "milestones"
                         | "new"
                         | "upload"
                         | "edit"
@@ -106,6 +107,8 @@ mod tests {
                 StatusCode::OK,
             ),
             ("/team/repo.name/issues/1", StatusCode::OK),
+            ("/team/repo.name/milestones/1", StatusCode::OK),
+            ("/team/repo.name/milestones/new", StatusCode::OK),
             ("/team/repo.name/pull/2/files", StatusCode::OK),
             ("/team/repo.name/compare/main...feature%2Fx", StatusCode::OK),
             ("/team/repo.name/releases/tag/v1.0.0", StatusCode::OK),
