@@ -17,7 +17,7 @@ use crate::{
     api::reactions,
     app::{self, Error, Result, actor, body, number, repository, title},
     auth::{Identity, Principal},
-    cells::repository::collaboration::reactions::Target,
+    cells::repository::collaboration::Target,
     cells::repository::{
         CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
         CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment,

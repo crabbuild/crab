@@ -303,7 +303,10 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         view: "settings",
         section: tail[0] === "access" ? "members" : tail[0],
       };
-    if (["branches", "tags", "labels"].includes(page) && !tail.length)
+    if (
+      ["branches", "tags", "labels", "activity"].includes(page) &&
+      !tail.length
+    )
       return { ...route, view: page };
     return null;
   } catch {

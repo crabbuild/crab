@@ -1,3 +1,4 @@
+import { ActivityTimeline } from "./collaboration/activity";
 import { repoHref, repositoryRoute } from "./repository-route";
 import { useEffect, useMemo, useState } from "react";
 import type { SelectedLineRange } from "@pierre/diffs";
@@ -1686,6 +1687,7 @@ function PullConversation({
     endpoint(repo, `pulls/${pull.number}/reviews`),
   );
   const [body, setBody] = useState("");
+  const [activityEpoch, setActivityEpoch] = useState(0);
   const commentMutation = useMutation(csrf);
   const stateMutation = useMutation(csrf);
   const submission = useSubmission();
@@ -1719,6 +1721,11 @@ function PullConversation({
           </Result>
         )}
       </Result>
+      <ActivityTimeline
+        key={`${pull.version}:${activityEpoch}`}
+        repo={repo}
+        target={`pulls/${pull.number}`}
+      />
       {!repo.archived && (
         <MergePanel repo={repo} pull={pull} csrf={csrf} refresh={refresh} />
       )}
@@ -1734,6 +1741,7 @@ function PullConversation({
               { ...input, request_id: submission(input) },
             );
             if (created) {
+              setActivityEpoch((value) => value + 1);
               setBody("");
               comments.retry();
             }

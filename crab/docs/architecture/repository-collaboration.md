@@ -63,10 +63,11 @@ native Cellar objects were present in the bucket. Desktop and mobile dark views
 had no accessibility violations; the existing footer contrast check required
 manual review. The 390px viewport had no horizontal document overflow.
 
-This verifies the milestone slice locally, not the entire expansion. Activity,
-linked issues, draft readiness, and review requests still require their models,
-HTTP/browser workflows, and evidence. Full cross-platform/runtime proof remains
-a CI responsibility.
+This verifies the milestone slice locally, not the entire expansion. Linked
+issues, draft readiness, and review requests still require their models,
+HTTP/browser workflows, and evidence. Native PR mutations also need the same
+transactional archive enforcement as issue mutations. Full cross-platform/runtime
+proof remains a CI responsibility.
 
 ### Reaction evidence
 
@@ -84,3 +85,45 @@ reactions through the UI, including an inline thread anchored by selecting a dif
 line. Removing a reaction and reloading retains the removal. Process restart
 proof compares saved memberships/counts with restored HTTP views and checks the
 visible reaction chips after reload.
+
+### Activity contract
+
+Repository activity and issue/PR timelines record collaboration changes from new
+commands. Events cover discussion creation and edits, state transitions, reviews,
+inline conversations, replies, merge completion, and milestone relationships.
+Existing comments and reviews remain available through their original views;
+activity does not synthesize historical events. Administrative settings retain
+their existing catalog audit.
+
+Each event captures the actor name and subject title at the time of the action.
+A native sequence orders events independently of wall-clock ties, and a subject
+index supports exclusive keyset pagination. Event records, indexes, sequence,
+and the originating SQL/KV changes share the native command transaction. Creation
+reservations and command replay do not duplicate events. Rejected and unchanged
+edits do not create activity. Merge reservation and preparation do not claim that
+a merge completed; completion records the merge event.
+
+The HTTP feed exposes display names and typed resource references. Identity
+issuer/subject claims and discussion bodies stay out of activity responses.
+Browser panels retain loaded pages on failure, support retry and refresh, and
+link milestone changes to their milestone. The timing flag wraps the whole
+activity widget, including its controls.
+
+### Activity evidence
+
+Native and HTTP tests cover command/submission replay, concurrent ordering,
+rejected and unchanged edits, all seven discussion targets, review/thread/merge
+transitions, milestone reassignment, authorization, bounded pagination, and
+restart recovery. Browser tests cover retained pages through failures, retry,
+refresh, milestone navigation, automatic updates after issue/comment writes,
+whole-widget timing, and inline-link accessibility in dark mode.
+
+A dedicated RustFS-backed browser session began with an empty feed on an
+existing repository. Reopening/closing an issue, posting a comment, removing and
+reassigning its milestone, resolving/reopening an inline thread, and submitting
+a review produced eight events. A graceful server restart preserved all eight,
+the five-event issue index, and the three-event PR index. Exclusive two-item
+pagination matched the complete feed before and after restart. The same restart
+also retained milestone progress and all seven reaction memberships. A separate
+native-process qualifier verifies activity persistence and creation replay
+alongside milestone/reaction state.

@@ -98,6 +98,7 @@ const Issues = lazy(() =>
 const PullRequests = lazy(() =>
   import("./pulls").then((module) => ({ default: module.PullRequests })),
 );
+const ActivityPage = lazy(() => import("./collaboration/activity"));
 const MilestonesPage = lazy(() => import("./collaboration/milestones"));
 const LabelsPage = lazy(() =>
   import("./discussion-labels").then((module) => ({
@@ -552,7 +553,10 @@ function RepositoryPage({
   const view = route?.view ?? "code";
   const canWrite = repo.access === "write" && !repo.archived;
   const refs = useRequest<Refs>(
-    view === "issues" || view === "labels" || view === "milestones"
+    view === "issues" ||
+      view === "labels" ||
+      view === "milestones" ||
+      view === "activity"
       ? null
       : endpoint(repo, "refs"),
   );
@@ -751,7 +755,11 @@ function RepositoryPage({
               view: "code",
               label: "Code",
               icon: CodeIcon,
-              active: !issuesView && view !== "pulls" && view !== "settings",
+              active:
+                !issuesView &&
+                view !== "pulls" &&
+                view !== "settings" &&
+                view !== "activity",
             },
             {
               view: "issues",
@@ -764,6 +772,12 @@ function RepositoryPage({
               label: "Pull requests",
               icon: GitPullRequestIcon,
               active: view === "pulls",
+            },
+            {
+              view: "activity",
+              label: "Activity",
+              icon: HistoryIcon,
+              active: view === "activity",
             },
             ...(repo.can_admin
               ? [
@@ -796,7 +810,17 @@ function RepositoryPage({
       <div
         className={`repo-body${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}${issueNavigation ? " repo-issues-workspace" : ""}${view === "settings" ? " repo-settings-workspace" : ""}`}
       >
-        {view === "settings" ? (
+        {view === "activity" ? (
+          <Suspense
+            fallback={
+              <div className="notice" role="status">
+                <Spinner size="small" /> Loading activity…
+              </div>
+            }
+          >
+            <ActivityPage repo={repo} />
+          </Suspense>
+        ) : view === "settings" ? (
           repo.can_admin ? (
             <Result state={visibleRefState} timingLabel="Repository references">
               {(data) => (
@@ -1245,8 +1269,7 @@ function RepositoryPage({
                               <div className="about-links">
                                 <Link
                                   href={repoHref(repo, {
-                                    view: "commits",
-                                    rev,
+                                    view: "activity",
                                   })}
                                 >
                                   <HistoryIcon /> Activity

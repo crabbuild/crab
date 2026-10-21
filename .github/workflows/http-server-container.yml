@@ -734,7 +734,8 @@ jobs:
                   and receipt["version"] == "0.1.0" and receipt["durable_objects"] > 0
                   and all(receipt[key] is True for key in
                           ["repository_creation", "issue_replay", "git_push", "process_restart",
-                           "reaction_restart", "reaction_remove", "milestone_restart", "milestone_progress"])):
+                           "reaction_restart", "reaction_remove", "milestone_restart", "milestone_progress",
+                           "activity_restart", "activity_replay"])):
               raise SystemExit("native process proof is incomplete")
           target = root / "crab-cellar-process-qualification/native-process-receipt.json"
           target.write_text(json.dumps(receipt, indent=2))

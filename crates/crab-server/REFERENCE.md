@@ -1272,8 +1272,22 @@ Git refs unless a pull request merge publishes a ref update.
 | Assignees | `GET /api/repos/{owner}/{name}/assignees`; issue and pull `PATCH` requests replace assignments |
 | Milestones | `GET/POST /api/repos/{owner}/{name}/milestones`, `GET/PATCH /api/repos/{owner}/{name}/milestones/{number}`, `GET /api/repos/{owner}/{name}/milestones/{number}/items`; issue/pull `GET/PUT .../{number}/milestone` |
 | Reactions | `PUT /api/repos/{owner}/{name}/reactions/{target}`; discussion responses include personalized summaries |
+| Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
+
+### Browse activity
+
+Repository activity lives at `/{owner}/{name}/activity`. Issue and PR conversation
+pages include their own activity panel. Feeds use `limit` (1–50, default 30) and
+an exclusive numeric `before` cursor, ordered newest first by event number.
+
+Events record new discussion changes, review decisions, inline conversations,
+merge completion, and milestone assignments. They capture actor names and subject
+titles at the action, without exposing private identity claims or copying bodies.
+Existing history is not backfilled. Edits that change no content/state and
+creation retries do not add events. Reassigning milestones records removal and
+addition in the same transaction as the assignment and progress updates.
 
 ### React to discussions
 

@@ -21,7 +21,7 @@ use crate::{
     api::statuses::{self, CommitStatus, StatusState},
     app::{self, Error, Result},
     auth::{Identity, Principal},
-    cells::repository::collaboration::reactions::Target,
+    cells::repository::collaboration::Target,
     repository::Repository,
     server::Server,
 };

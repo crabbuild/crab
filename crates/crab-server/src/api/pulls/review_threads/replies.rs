@@ -15,7 +15,7 @@ use crate::{
     api::reactions,
     app::{self, Error, Result},
     auth::{Identity, Principal},
-    cells::repository::collaboration::reactions::Target,
+    cells::repository::collaboration::Target,
     server::Server,
 };
 

@@ -6827,3 +6827,57 @@ main {
   flex-basis: 100%;
   margin: 8px 0 0;
 }
+
+.activity-page {
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+.activity-panel {
+  padding: 16px;
+  margin-block: 20px;
+}
+.activity-panel .section-heading {
+  margin-bottom: 12px;
+}
+.activity-panel h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.activity-events {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.activity-events > li {
+  display: flex;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--borderColor-muted);
+}
+.activity-events > li > svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+  color: var(--fgColor-muted);
+}
+.activity-events > li > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.activity-events a {
+  text-decoration: underline;
+}
+.activity-events time {
+  display: block;
+  color: var(--fgColor-muted);
+  font-size: 12px;
+  margin-top: 4px;
+}
+.activity-panel > button {
+  margin-top: 12px;
+}
+
+/* Enabled activity controls must regain readable text contrast immediately. */
+.activity-panel button {
+  transition-property: background-color, border-color;
+}

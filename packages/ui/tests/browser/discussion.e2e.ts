@@ -21,6 +21,8 @@ async function openDiscussion(page: Page) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/activity"))
+      return route.fulfill({ json: { items: [], next: null } });
     if (/\/(issues|pulls)\/\d+\/milestone$/.test(path))
       return route.fulfill({
         json: { milestone: null, version: 0, can_manage: true },

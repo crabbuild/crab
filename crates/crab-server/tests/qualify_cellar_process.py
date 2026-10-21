@@ -292,6 +292,8 @@ with open(run / "commands.log", "w") as log:
         })
         request(issue_path + "/milestone", {"version": 0, "milestone": milestone["number"]}, method="PUT")
         request(issue_path, {"version": created["version"], "state": "closed"}, method="PATCH")
+        activity = request(issue_path + "/activity")
+        assert [event["action"]["kind"] for event in activity["items"]] == ["closed", "milestone_assigned", "created"]
         git = run / "input"
         git.mkdir()
         cmd(["git", "init", "--initial-branch=main", git])
@@ -332,6 +334,8 @@ with open(run / "commands.log", "w") as log:
             removed = request(reaction_path, {"kind": "heart", "active": False}, method="PUT")
             assert removed["groups"]["heart"] == {"count": 0, "reacted": False}
         assert request("/api/repos/team/project/issues", body)["number"] == number
+        assert request(issue_path + "/activity") == activity
+        assert request("/api/repos/team/project/activity") == activity
         refs = subprocess.check_output(
             ["git", "ls-remote", origin + "/git/team/project.git"], text=True, env=env
         )
@@ -369,6 +373,8 @@ with open(run / "commands.log", "w") as log:
             "image_ref": args.image,
             "repository_creation": True,
             "issue_replay": True,
+            "activity_restart": True,
+            "activity_replay": True,
             "reaction_restart": True,
             "reaction_remove": True,
             "milestone_restart": True,

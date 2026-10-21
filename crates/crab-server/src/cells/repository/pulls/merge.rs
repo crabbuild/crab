@@ -1,4 +1,8 @@
 use super::*;
+use crate::cells::repository::collaboration::{
+    Target,
+    activity::{self, Action},
+};
 
 pub(crate) struct ReservePullMerge;
 
@@ -143,6 +147,12 @@ impl Mutation for TransitionPullMerge {
             pull.state != PullState::Open,
         )?;
         advance_revision(context)?;
+        if let Some(merge) = &pull.merge {
+            let target = Target::Pull {
+                number: pull.number,
+            };
+            activity::append(context, target, &merge.author, Action::Merged)?;
+        }
         Ok(MutationResult::Success(
             TransitionPullMergeOutcome::Applied(Box::new(pull)),
         ))

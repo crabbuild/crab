@@ -1,4 +1,8 @@
 use super::*;
+use crate::cells::repository::collaboration::{
+    Target,
+    activity::{self, Action},
+};
 
 pub(crate) struct CreatePull;
 
@@ -62,6 +66,10 @@ impl Mutation for CreatePull {
             insert_pull_statement(&record)?,
         ] })?;
         advance_revision(context)?;
+        let target = Target::Pull {
+            number: record.number,
+        };
+        activity::append(context, target, &record.author, Action::Created)?;
         Ok(MutationResult::Success(CreatePullOutcome::Created(
             Box::new(record),
         )))
@@ -98,6 +106,19 @@ impl Mutation for UpdatePull {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::NotFound));
         };
         let was_closed = pull.state != PullState::Open;
+        let edited = input
+            .title
+            .as_ref()
+            .is_some_and(|value| value != &pull.title)
+            || input.body.as_ref().is_some_and(|value| value != &pull.body)
+            || input
+                .label_ids
+                .as_ref()
+                .is_some_and(|value| value != &pull.label_ids)
+            || input
+                .assignee_subjects
+                .as_ref()
+                .is_some_and(|value| value != &pull.assignee_subjects);
         if pull.version != input.version {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::Conflict));
         }
@@ -158,6 +179,20 @@ impl Mutation for UpdatePull {
             pull.state != PullState::Open,
         )?;
         advance_revision(context)?;
+        let target = Target::Pull {
+            number: pull.number,
+        };
+        if edited {
+            activity::append(context, target, &input.actor, Action::Updated)?;
+        }
+        if was_closed != (pull.state != PullState::Open) {
+            let action = if pull.state == PullState::Open {
+                Action::Reopened
+            } else {
+                Action::Closed
+            };
+            activity::append(context, target, &input.actor, action)?;
+        }
         Ok(MutationResult::Success(UpdatePullOutcome::Updated(
             Box::new(pull),
         )))

@@ -152,6 +152,8 @@ test("pull request creation, discussion, and files follow the GitHub review flow
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if (path.endsWith("/activity"))
+      return route.fulfill({ json: { items: [], next: null } });
     if (/\/(issues|pulls)\/\d+\/milestone$/.test(path))
       return route.fulfill({
         json: { milestone: null, version: 0, can_manage: true },

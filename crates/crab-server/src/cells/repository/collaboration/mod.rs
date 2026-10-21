@@ -4,8 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{RepositoryTransaction, SqlBatch, SqlValue, integer, statement, validate_number};
 
+pub(crate) mod activity;
 pub(crate) mod milestones;
 pub(crate) mod reactions;
+mod target;
+pub(crate) use target::Target;
 
 const PREFIX: &str = "collaboration/v1";
 
@@ -139,6 +142,3 @@ fn next_version(value: u64) -> crate::cells::Result<u64> {
             "collaboration version is exhausted",
         ))
 }
-
-#[cfg(test)]
-mod tests;

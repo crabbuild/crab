@@ -228,7 +228,13 @@ export function DiscussionMetadata({
           <p className="muted">None yet</p>
         )}
       </section>
-      <MilestonePicker key={version} repo={repo} path={path} csrf={csrf} />
+      <MilestonePicker
+        key={version}
+        repo={repo}
+        path={path}
+        csrf={csrf}
+        onSaved={onSaved}
+      />
     </aside>
   );
 }

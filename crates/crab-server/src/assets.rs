@@ -39,6 +39,7 @@ pub(crate) async fn serve(request: Request) -> Response {
                         | "settings"
                         | "labels"
                         | "milestones"
+                        | "activity"
                         | "new"
                         | "upload"
                         | "edit"

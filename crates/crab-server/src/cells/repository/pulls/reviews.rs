@@ -1,4 +1,8 @@
 use super::*;
+use crate::cells::repository::collaboration::{
+    Target,
+    activity::{self, Action},
+};
 
 pub(crate) struct CreatePullReview;
 
@@ -121,6 +125,16 @@ impl Mutation for CreatePullReview {
         }
         context.sql(&SqlBatch { statements })?;
         advance_revision(context)?;
+        let action = match record.state {
+            ReviewState::Commented => Action::Commented,
+            ReviewState::Approved => Action::Approved,
+            ReviewState::ChangesRequested => Action::ChangesRequested,
+        };
+        let target = Target::PullReview {
+            pull: record.pull,
+            number: record.number,
+        };
+        activity::append(context, target, &record.author, action)?;
         Ok(MutationResult::Success(CreatePullReviewOutcome::Created(
             record,
         )))
@@ -152,11 +166,19 @@ impl Mutation for UpdatePullReview {
         if record.version != input.version {
             return Ok(MutationResult::Rejected(UpdatePullReviewOutcome::Conflict));
         }
+        let edited = record.body != input.body;
         record.body = input.body;
         record.version = next_version(record.version)?;
         record.updated_at_ms = timestamp(context.now_ms())?;
         context.sql(&SqlBatch { statements: vec![statement("UPDATE repository_pull_reviews SET body = ?, version = ?, updated_at_ms = ? WHERE pull_number = ? AND number = ? AND version = ?", vec![SqlValue::Text(record.body.clone()), integer(record.version)?, integer(record.updated_at_ms)?, integer(record.pull)?, integer(record.number)?, integer(input.version)?])] })?;
         advance_revision(context)?;
+        if edited {
+            let target = Target::PullReview {
+                pull: record.pull,
+                number: record.number,
+            };
+            activity::append(context, target, &input.actor, Action::Updated)?;
+        }
         Ok(MutationResult::Success(UpdatePullReviewOutcome::Updated(
             record,
         )))

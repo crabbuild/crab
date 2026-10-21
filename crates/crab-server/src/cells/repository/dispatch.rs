@@ -83,6 +83,9 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        <collaboration::activity::ListActivity as Read>::ID => {
+            invoke_read::<collaboration::activity::ListActivity>(context, input)
+        }
         <GetReactions as Read>::ID => invoke_read::<GetReactions>(context, input),
         <ListMilestoneItems as Read>::ID => invoke_read::<ListMilestoneItems>(context, input),
         <GetMilestone as Read>::ID => invoke_read::<GetMilestone>(context, input),

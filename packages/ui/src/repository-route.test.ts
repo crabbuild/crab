@@ -80,6 +80,7 @@ describe("GitHub repository addresses", () => {
       "/team/repo.name/milestones/9",
       { view: "milestones", milestone: "9" },
     ],
+    [{ view: "activity" }, "/team/repo.name/activity", { view: "activity" }],
     [{ view: "pulls" }, "/team/repo.name/pulls", { view: "pulls" }],
     [
       { view: "pulls", pull: "7", pull_tab: "files" },

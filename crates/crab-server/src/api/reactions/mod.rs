@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     app::{self, Error, Result},
     auth::{Identity, Principal},
+    cells::repository::collaboration::Target,
     cells::repository::collaboration::reactions::{
-        GetReactions, Group, Kind, Outcome, Query, Selection, SetReaction, Target,
+        GetReactions, Group, Kind, Outcome, Query, Selection, SetReaction,
     },
     repository::Repository,
     server::Server,

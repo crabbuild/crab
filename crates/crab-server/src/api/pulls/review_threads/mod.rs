@@ -19,7 +19,7 @@ use crate::{
     api::{self, reactions},
     app::{self, Error, Result},
     auth::{Identity, Principal},
-    cells::repository::collaboration::reactions::Target,
+    cells::repository::collaboration::Target,
     cells::repository::{PullReviewThreadListInput, PullReviewThreadSide},
     repository::Repository,
     server::Server,

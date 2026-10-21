@@ -3,6 +3,10 @@ use super::super::{
     settings, timestamp, validate_author, validate_number, validate_title,
 };
 use super::{Decision, PREFIX, Page, Subject, SubjectSummary, next_version};
+use super::{
+    SubjectKind, Target,
+    activity::{self, Action},
+};
 use serde::{Deserialize, Serialize};
 
 const MAX_MILESTONES: u64 = 1_000;
@@ -528,6 +532,7 @@ impl Mutation for AssignMilestone {
         if assignment.version != input.version {
             return Ok(MutationResult::Rejected(Decision::Conflict));
         }
+        let previous = assignment.milestone;
         if let Some(number) = assignment.milestone {
             context.delete_document(&item_key(number, assignment.position))?;
             adjust(context, number, closed, false)?;
@@ -546,6 +551,33 @@ impl Mutation for AssignMilestone {
         assignment.version = next_version(assignment.version)?;
         context.put_document(&key, &assignment)?;
         advance_revision(context)?;
+        let target = match input.subject.kind {
+            SubjectKind::Issue => Target::Issue {
+                number: input.subject.number,
+            },
+            SubjectKind::Pull => Target::Pull {
+                number: input.subject.number,
+            },
+        };
+        for (number, assigned) in [(previous, false), (input.milestone, true)] {
+            if let Some(number) = number {
+                let value = load(context, number)?.ok_or(crate::cells::Error::Invalid(
+                    "activity milestone is missing",
+                ))?;
+                let action = if assigned {
+                    Action::MilestoneAssigned {
+                        number,
+                        title: value.title,
+                    }
+                } else {
+                    Action::MilestoneRemoved {
+                        number,
+                        title: value.title,
+                    }
+                };
+                activity::append(context, target, &input.actor, action)?;
+            }
+        }
         Ok(MutationResult::Success(Decision::Applied(assignment_view(
             context, assignment,
         )?)))
@@ -635,3 +667,6 @@ impl Read for ListMilestoneItems {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests;

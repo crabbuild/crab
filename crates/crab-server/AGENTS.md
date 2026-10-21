@@ -30,6 +30,11 @@ comment operations. Feature commands and their persistence helpers live under
 review threads belong to `pulls/review_threads/`; browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs.
 
+Collaboration documents live in `cells/repository/collaboration/`. Its `target.rs`
+owns shared discussion addresses, `activity/` owns append-only events and subject
+indexes, and `reactions/` owns actor membership/counts. Activity append calls stay
+inside domain commands so their SQL/KV changes and events commit together.
+
 The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns
 typed ingress, `src/cells/application.rs` owns transaction/replay dispatch, and
 `src/cells/schema.sql` is the canonical initial schema. HTTP authorization and

@@ -12,10 +12,12 @@ export function MilestonePicker({
   repo,
   path,
   csrf,
+  onSaved,
 }: {
   repo: Repository;
   path: string;
   csrf: string;
+  onSaved: () => void;
 }) {
   const selection = useRequest<MilestoneAssignment>(
     endpoint(repo, `${path}/milestone`),
@@ -146,6 +148,7 @@ export function MilestonePicker({
                     if (value) {
                       details.current?.removeAttribute("open");
                       selection.retry();
+                      onSaved();
                     }
                   }}
                 >
