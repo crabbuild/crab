@@ -1,5 +1,10 @@
 import { useState } from "react";
-import { ChevronDownIcon, MessageSquareIcon } from "lucide-react";
+import {
+  AlignJustifyIcon,
+  Rows2Icon,
+  ChevronDownIcon,
+  MessageSquareIcon,
+} from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,6 +18,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { navigate, type Repository, type RepositoryLabel } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { DiscussionFilter } from "./filter";
 
 export type ListLabel = Pick<RepositoryLabel, "id" | "name" | "color">;
@@ -66,12 +77,16 @@ export function DiscussionListControls({
   view,
   data,
   loading,
+  density,
+  onDensityChange,
 }: {
   repo: Repository;
   url: URL;
   view: "issues" | "pulls";
   data?: Pick<DiscussionPage<unknown>, "counts" | "navigation" | "matching">;
   loading: boolean;
+  density: "comfortable" | "compact";
+  onDensityChange: (density: "comfortable" | "compact") => void;
 }) {
   const filters = discussionFilters(url);
   const [sortOpen, setSortOpen] = useState(false);
@@ -189,6 +204,39 @@ export function DiscussionListControls({
             </DropdownMenuContent>
           )}
         </DropdownMenu>
+        <ToggleGroup
+          className="discussion-density"
+          type="single"
+          variant="outline"
+          size="sm"
+          spacing={0}
+          aria-label="List density"
+          value={density}
+          onValueChange={(value) => {
+            if (value === "comfortable" || value === "compact")
+              onDensityChange(value);
+          }}
+        >
+          {(
+            [
+              { value: "comfortable", label: "Comfortable", Icon: Rows2Icon },
+              { value: "compact", label: "Compact", Icon: AlignJustifyIcon },
+            ] as const
+          ).map(({ value, label, Icon }) => (
+            <Tooltip key={value}>
+              <TooltipTrigger asChild>
+                {/* Tooltip and toggle each own data-state; keep the tooltip
+                      on its wrapper so it cannot replace the selected style. */}
+                <span className="inline-flex">
+                  <ToggleGroupItem value={value} aria-label={label}>
+                    <Icon />
+                  </ToggleGroupItem>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>{label}</TooltipContent>
+            </Tooltip>
+          ))}
+        </ToggleGroup>
       </div>
       {cannotChangeState && (
         <span role="status" className="muted basis-full pb-2 text-xs">

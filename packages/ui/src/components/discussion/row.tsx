@@ -45,7 +45,7 @@ export function DiscussionRow({
       >
         <Icon />
       </span>
-      <div>
+      <div className="discussion-row-content">
         <Link className="issue-link" href={href}>
           {item.title}
         </Link>

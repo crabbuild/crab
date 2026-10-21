@@ -3,7 +3,7 @@ import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
-import { IssuesWorkspace } from "@/features/issues/workspace";
+import { DiscussionWorkspace } from "@/components/discussion/workspace";
 import {
   displayHex,
   endpoint,
@@ -195,10 +195,11 @@ export function RepositoryPage({
   const fileWorkspace = (view === "code" || view === "blame") && !overview;
   const issuesView =
     view === "issues" || view === "labels" || view === "milestones";
-  const issueNavigation =
+  const discussionNavigation =
     view === "labels" ||
     view === "milestones" ||
-    (view === "issues" && !route?.issue);
+    (view === "issues" && !route?.issue) ||
+    (view === "pulls" && !route?.pull);
   const branch = selected?.name.startsWith("refs/heads/")
     ? selected
     : undefined;
@@ -376,7 +377,7 @@ export function RepositoryPage({
         </div>
       )}
       <div
-        className={`repo-body${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}${issueNavigation ? " repo-issues-workspace" : ""}${view === "settings" ? " repo-settings-workspace" : ""}`}
+        className={`repo-body${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}${discussionNavigation ? " repo-discussion-workspace" : ""}${view === "settings" ? " repo-settings-workspace" : ""}`}
       >
         {view === "activity" ? (
           <Suspense
@@ -423,10 +424,10 @@ export function RepositoryPage({
             </div>
           )
         ) : issuesView ? (
-          <IssuesWorkspace
+          <DiscussionWorkspace
             repo={repo}
             view={view}
-            showNavigation={issueNavigation}
+            showNavigation={discussionNavigation}
           >
             {view === "milestones" ? (
               <Suspense
@@ -459,28 +460,34 @@ export function RepositoryPage({
                 <Issues repo={repo} url={url} csrf={csrf} />
               </Suspense>
             )}
-          </IssuesWorkspace>
+          </DiscussionWorkspace>
         ) : view === "pulls" ? (
-          <Result state={visibleRefState} timingLabel="Repository references">
-            {(data) => (
-              <Suspense
-                fallback={
-                  <div className="notice" role="status">
-                    <Spinner /> Loading pulls…
-                  </div>
-                }
-              >
-                <PullRequests
-                  repo={repo}
-                  refs={data}
-                  url={url}
-                  csrf={csrf}
-                  theme={theme}
-                  codeThemes={codeThemes}
-                />
-              </Suspense>
-            )}
-          </Result>
+          <DiscussionWorkspace
+            repo={repo}
+            view="pulls"
+            showNavigation={discussionNavigation}
+          >
+            <Result state={visibleRefState} timingLabel="Repository references">
+              {(data) => (
+                <Suspense
+                  fallback={
+                    <div className="notice" role="status">
+                      <Spinner /> Loading pulls…
+                    </div>
+                  }
+                >
+                  <PullRequests
+                    repo={repo}
+                    refs={data}
+                    url={url}
+                    csrf={csrf}
+                    theme={theme}
+                    codeThemes={codeThemes}
+                  />
+                </Suspense>
+              )}
+            </Result>
+          </DiscussionWorkspace>
         ) : (
           <Result state={visibleRefState} timingLabel="Repository references">
             {(data) =>

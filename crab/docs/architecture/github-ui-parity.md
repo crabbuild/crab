@@ -37,7 +37,7 @@ placeholder menus and filtering only the currently loaded page do not qualify.
 
 Current entry points are `packages/ui/src/features/issues/index.tsx`,
 `packages/ui/src/features/pull-requests/index.tsx`,
-`packages/ui/src/features/issues/workspace.tsx`, and
+`packages/ui/src/components/discussion/workspace.tsx`, and
 `packages/ui/src/components/discussion/search.tsx`. The two HTTP list handlers
 accept typed query, sort/direction, page size, and an opaque before cursor.
 Native owners are `cells/repository/search/results/`, `issues.rs` and
@@ -178,6 +178,19 @@ show unavailable counts, and the full widget retains its diagnostic boundary.
 Every popup opening owns its focus scope, including sort, so rapid reopen does
 not reuse a closing scope. The former milestone-specific picker and duplicated
 result renderers are removed.
+
+Issue and PR lists now share a collapsible workspace and comfortable/compact
+presentation controls. Collapse retains named icon links, current-page state,
+tooltips and keyboard focus. The collapse action measures its available height
+including optional diagnostic headers; narrow navigation wraps without clipping
+controls. Detail/create pages keep their existing full-width layout. Density
+changes spacing and title size without hiding labels, assignees, comments,
+authors or branch context, changing the query/cursor, or fetching results again.
+Both preferences persist on the current browser, shared between discussion
+lists; they are not account preferences or saved views. If browser storage is
+denied, the current component still supports the interaction in memory.
+Personal navigation, saved views, bulk selection and the rest of the workspace
+checklist remain unfinished.
 
 ## Data and query contracts
 
@@ -329,6 +342,24 @@ server-only update. Labels reuse the canonical catalog and index format 2;
 no rebuild or domain migration is required. Recent label suggestions and the
 remaining parity checklist are still incomplete.
 
+The workspace/density slice passed all 84 browser tests, 107 UI unit tests,
+TypeScript/Vite and embedded server builds, and formatting checks. New browser
+proof covers mixed kinds, preserved query/cursor and metadata, no extra result
+fetch, keyboard selection and selected styling, reload/navigation, visible
+collapse actions with diagnostics, dark/mobile layouts and denied browser
+storage. The first broad run exposed a clipped mobile PR collapse action; the
+source now wraps navigation and both kinds have expanded/collapsed accessibility
+coverage. The embedded UI also exercised real RustFS-backed issue/PR lists,
+saved preferences and reload in desktop and dark mobile layouts. The live mobile
+audit found zero violations, with contrast checks incomplete for existing
+clipped header links/footer decoration. This is not full accessibility proof.
+Both preview repositories retained their domain records across server restart
+and browser actions. Reaction observation receipts advanced with the repository
+revision; `api/reactions/mod.rs` supplies that ordering watermark rather than a
+per-target record version. Counts, membership and every other record field
+compared unchanged. No native schema, query, dependency or configuration
+contract changes in this slice; personal views and full parity remain open.
+
 ## Primary references
 
 - [GitHub issue/PR filtering](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/filtering-and-searching-issues-and-pull-requests)
@@ -337,3 +368,4 @@ remaining parity checklist are still incomplete.
 - [shadcn/ui](https://ui.shadcn.com/docs)
 - [Vercel Geist colors](https://vercel.com/geist/colors)
 - [Vercel Geist typography](https://vercel.com/geist/typography)
+- [GitHub refreshed PR list: collapsible navigation and compact mode](https://github.blog/changelog/2026-09-10-refreshed-repository-pull-requests-page-in-public-preview/)

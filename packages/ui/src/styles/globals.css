@@ -170,7 +170,7 @@ main {
   max-width: 1440px;
   margin: auto;
 }
-.repo-body.repo-issues-workspace {
+.repo-body.repo-discussion-workspace {
   max-width: none;
   margin: 0;
   padding: 0;
@@ -1469,7 +1469,7 @@ main {
 }
 
 .pulls-page {
-  max-width: 1080px;
+  max-width: 1136px;
   margin: 0 auto;
 }
 .pulls-page h2 {
@@ -2295,20 +2295,44 @@ main {
   }
 }
 
-.issues-workspace {
+.discussion-workspace {
   display: grid;
   grid-template-columns: 256px minmax(0, 1fr);
   min-height: calc(100vh - 113px);
 }
-.issues-sidebar {
+.discussion-workspace[data-sidebar="collapsed"] {
+  grid-template-columns: 56px minmax(0, 1fr);
+}
+.discussion-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  min-height: 200px;
+  height: var(--discussion-sidebar-height);
   padding: 16px 8px;
   border-right: 1px solid var(--border);
 }
-.issues-sidebar nav {
+.discussion-sidebar-toggle {
+  justify-content: flex-start;
+  margin-top: auto;
+  width: 100%;
+}
+.discussion-workspace[data-sidebar="collapsed"] .discussion-sidebar-label {
+  display: none;
+}
+.discussion-workspace[data-sidebar="collapsed"] .discussion-sidebar a,
+.discussion-workspace[data-sidebar="collapsed"] .discussion-sidebar-toggle {
+  justify-content: center;
+  padding-inline: 8px;
+}
+.discussion-sidebar nav {
   display: grid;
   gap: 4px;
 }
-.issues-sidebar a {
+.discussion-sidebar a {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2317,15 +2341,15 @@ main {
   border-radius: var(--radius);
   position: relative;
 }
-.issues-sidebar a:hover,
-.issues-sidebar a.active {
+.discussion-sidebar a:hover,
+.discussion-sidebar a.active {
   background: var(--muted);
   text-decoration: none;
 }
-.issues-sidebar a.active {
+.discussion-sidebar a.active {
   font-weight: 600;
 }
-.issues-sidebar a.active::before {
+.discussion-sidebar a.active::before {
   content: "";
   position: absolute;
   top: 4px;
@@ -2335,7 +2359,7 @@ main {
   border-radius: var(--radius);
   background: var(--info);
 }
-.issues-workspace-main {
+.discussion-workspace-main {
   min-width: 0;
   padding: 28px 32px;
 }
@@ -2396,6 +2420,9 @@ main {
   font-size: 14px;
   font-weight: 500;
 }
+.discussion-density {
+  background: var(--background);
+}
 .issues-filters nav a {
   color: var(--muted-foreground);
   padding: 8px 12px;
@@ -2426,8 +2453,22 @@ main {
   padding: 18px 20px;
   border-bottom: 1px solid var(--border);
 }
-.issue-list li > div {
+.discussion-row-content {
+  flex: 1;
   min-width: 0;
+}
+.issue-list .pull-branches code {
+  overflow-wrap: anywhere;
+}
+.issue-list[data-density="compact"] li {
+  padding-block: 8px;
+  gap: 8px;
+}
+.issue-list[data-density="compact"] p {
+  margin-top: 2px;
+}
+.issue-list[data-density="compact"] .issue-link {
+  font-size: 14px;
 }
 .issue-list li:last-child {
   border-bottom: 0;
@@ -2978,30 +3019,49 @@ main {
     justify-content: flex-start;
     border-top: 1px solid var(--border);
   }
-  .issues-workspace {
+  .discussion-workspace {
     display: block;
   }
-  .issues-sidebar {
+  .discussion-sidebar {
+    position: static;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    min-height: 0;
+    height: auto;
     padding: 8px 16px;
-    overflow-x: auto;
+    overflow: visible;
     border-right: 0;
     border-bottom: 1px solid var(--border);
   }
-  .issues-sidebar nav {
+  .discussion-sidebar nav {
     display: flex;
+    flex: 1;
+    min-width: 0;
+    flex-wrap: wrap;
   }
-  .issues-sidebar a {
+  .discussion-sidebar-toggle {
+    margin: 0 0 0 auto;
+    width: auto;
+    padding: 8px;
+    align-self: flex-start;
+  }
+  .discussion-sidebar-toggle .discussion-sidebar-label {
+    display: none;
+  }
+  .discussion-sidebar a {
     flex: 0 0 auto;
+    padding-inline: 8px;
   }
-  .issues-sidebar a.active::before {
+  .discussion-sidebar a.active::before {
     top: auto;
     right: 8px;
-    bottom: -8px;
+    bottom: 0;
     left: 8px;
     width: auto;
     height: 2px;
   }
-  .issues-workspace-main {
+  .discussion-workspace-main {
     padding: 20px 16px;
   }
   .issues-heading h2 {

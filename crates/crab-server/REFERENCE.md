@@ -1594,6 +1594,14 @@ loading, unavailable, retry, selection and excluded states. Issue/PR result
 ownership is shared: controls survive a refresh while counts and rows clear,
 and one `powerbar=1` boundary encloses the complete list. A failed request shows
 unavailable counts rather than a permanent loading message.
+Issue/PR lists share a collapsible icon navigation rail and comfortable/compact
+rows. These are browser-local preferences, retained across reload and list
+navigation without changing query parameters, native cursors or data requests.
+Compact rows preserve the displayed metadata. When browser storage is denied,
+the current component's selection still works in memory. The sidebar measures
+available viewport height with diagnostics present, and wraps on narrow screens.
+Detail/create routes keep full-width layouts. These controls do not implement
+saved views or personal author/assignment/review navigation.
 Count/loading rows and the optional diagnostic header retain their height during
 refresh so a completed request cannot move an open menu under a pressed pointer.
 Before a measurement exists, the diagnostic header shows a dash and explains

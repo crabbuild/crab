@@ -218,6 +218,15 @@ unchanged. Recent label suggestions, actor-backed author/assignee integration,
 organization/team authority and Projects remain unfinished; these incremental
 filter controls do not establish full GitHub parity.
 
+The shared workspace slice adds collapsible issue/PR navigation and persistent
+browser-local comfortable/compact rows, without changing Cellar data or search
+contracts. All 84 browser tests and 107 unit tests passed, along with UI/server
+builds. The real embedded UI retained preferences through reload and displayed
+both discussion kinds against RustFS; domain records remained unchanged.
+These presentation preferences are not saved views or account settings. The
+[UI evidence](github-ui-parity.md#verification-and-completion) records remaining
+workflow and accessibility gaps.
+
 [CELLAR.md](../../../crates/crab-server/CELLAR.md) already records a release
 blocker: the published SDK links SQLite 3.45.0, before the upstream WAL-reset
 fix. A matched dependency upgrade and native release qualification remain

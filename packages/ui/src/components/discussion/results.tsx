@@ -1,3 +1,4 @@
+import { useBrowserPreference } from "@/lib/browser-preference";
 import { IssueOpenedIcon, GitPullRequestIcon } from "@primer/octicons-react";
 import { Link } from "@/components/navigation/link";
 import { Result, RequestWidget } from "@/components/request/result";
@@ -19,6 +20,10 @@ export function DiscussionResults({
   url: URL;
   view: "issues" | "pulls";
 }) {
+  const [density, setDensity] = useBrowserPreference(
+    "crab-discussion-density",
+    ["comfortable", "compact"] as const,
+  );
   const filters = discussionFilters(url);
   const before = url.searchParams.get("before") ?? undefined;
   const query = url.searchParams.get("q") ?? "";
@@ -49,12 +54,14 @@ export function DiscussionResults({
             view={view}
             data={page.data}
             loading={page.loading}
+            density={density}
+            onDensityChange={setDensity}
           />
           <Result state={{ ...page, timing: undefined }}>
             {(data) => (
               <>
                 {data.items.length ? (
-                  <ul className="issue-list">
+                  <ul className="issue-list" data-density={density}>
                     {data.items.map((item) => (
                       <DiscussionRow
                         key={`${item.kind}:${item.number}`}
