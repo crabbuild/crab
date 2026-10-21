@@ -1,4 +1,4 @@
-import type { ReactionSummary } from "../../src/collaboration/reactions";
+import type { ReactionSummary } from "@/components/discussion/reactions";
 
 export function emptyReactions(revision = 1): ReactionSummary {
   return {

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { useRequest } from "@/api";
-import { Result } from "@/ui";
+import { useRequest } from "@/lib/api";
+import { Result } from "@/components/request/result";
 
 export function useMutation(csrf: string) {
   const [pending, setPending] = useState(false);

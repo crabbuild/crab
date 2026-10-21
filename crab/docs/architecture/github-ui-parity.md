@@ -30,7 +30,8 @@ complete until its query or mutation has a real effect and survives reload;
 placeholder menus and filtering only the currently loaded page do not qualify.
 
 Current entry points are `packages/ui/src/features/issues/index.tsx`,
-`src/pulls.tsx`, `src/issues-navigation.tsx`, and
+`packages/ui/src/features/pull-requests/index.tsx`,
+`packages/ui/src/features/issues/workspace.tsx`, and
 `src/components/discussion/search.tsx`. The two HTTP list handlers
 currently accept state, text query, page size, and a numeric before cursor.
 Native owners are `cells/repository/issues.rs` and `pulls/operations.rs`.
@@ -42,7 +43,7 @@ are described in `repository-collaboration.md`; reuse these canonical owners.
 - [x] One shadcn component foundation with semantic light/dark Geist tokens,
       typography, spacing, focus, elevation, and density. Remove Primer UI and
       Primer primitive theme dependencies after all consumers migrate.
-- [ ] Feature-owned modules for issues, pull requests, repository browsing,
+- [x] Feature-owned modules for issues, pull requests, repository browsing,
       releases, settings, and imports. Shared discussion components, routing,
       request contracts, and primitives have explicit owners. Tests stay beside
       their feature. Remove superseded files and compatibility wrappers.
@@ -86,6 +87,11 @@ bound to the query and ordering. New indexes need explicit population/recovery
 for existing repositories; reads must not silently manufacture metadata. Do not
 add schema fallbacks or rewrite persisted formats to make a demo succeed.
 
+GitHub issue types belong to organizations. Organization administration must
+have an explicit authority model; repository write/admin access alone cannot
+grant organization management. Types, teams, and organization projects must
+not be simulated by repository-local catalogs.
+
 Saved views store a validated query and presentation preferences with private or
 shared ownership. Projects have typed item references and field definitions with
 validated values; project membership is distinct from issue-to-PR links. Review
@@ -113,8 +119,14 @@ The first implementation slice replaces the Primer React components and theme
 imports throughout the application. Shadcn primitives live in `components/ui/`;
 shared Markdown, editing, search, metadata, mutation and conflict behavior live
 in `components/discussion/`. Issue routing, listing, creation, detail, comments
-and models have separate modules in `features/issues/`. The pull-request module
-still needs the same ownership split before its list/query work.
+and models have separate modules in `features/issues/`. Pull requests separate
+list, create, detail, conversation, commits, timeline, merge, and review owners.
+Repository browsing, refs, tree, files, commits, and diffs have distinct modules;
+preview engines and workers stay together under files. Settings separates
+general, membership, archive, and protection policy. Releases, imports, labels,
+and milestones own their local forms, selection controls, and helpers. Shared
+transport and routes live in `lib/`; app bootstrap and error handling live in
+`app/`. The former flat files and forwarding paths are removed.
 
 `styles/globals.css` maps Geist's light/dark sRGB palette to semantic component
 roles. Geist Sans and Mono are bundled locally. Tinted status labels use the
@@ -142,6 +154,7 @@ verification remain explicitly incomplete until implemented and proved.
 ## Primary references
 
 - [GitHub issue/PR filtering](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/filtering-and-searching-issues-and-pull-requests)
+- [GitHub organization issue types](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/managing-issue-types-in-an-organization)
 - [GitHub search qualifiers](https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests)
 - [shadcn/ui](https://ui.shadcn.com/docs)
 - [Vercel Geist colors](https://vercel.com/geist/colors)

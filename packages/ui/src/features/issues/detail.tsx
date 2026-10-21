@@ -1,11 +1,12 @@
-import { Reactions } from "@/collaboration/reactions";
-import { repoHref } from "@/repository-route";
+import { Reactions } from "@/components/discussion/reactions";
+import { repoHref } from "@/lib/repository-route";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 
 import { IssueClosedIcon, IssueOpenedIcon } from "@primer/octicons-react";
-import { endpoint, useRequest, type Repository } from "@/api";
-import { Link, Result } from "@/ui";
+import { endpoint, useRequest, type Repository } from "@/lib/api";
+import { Link } from "@/components/navigation/link";
+import { Result } from "@/components/request/result";
 import { ConflictReview, useMutation } from "@/components/discussion/mutations";
 
 import { DiscussionMetadata } from "@/components/discussion/metadata";
@@ -17,6 +18,7 @@ import { useReturnFocus } from "@/components/discussion/hooks";
 import { Issue } from "./model";
 import { timestamp } from "@/components/discussion/time";
 import { Comments } from "./comments";
+
 function IssueBadge({ state }: { state: Issue["state"] }) {
   return (
     <span className={`issue-state ${state}`} aria-live="polite">

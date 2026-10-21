@@ -1,7 +1,7 @@
-import { repoHref, repositoryRoute } from "@/repository-route";
+import { repoHref, repositoryRoute } from "@/lib/repository-route";
 
-import { type Repository } from "@/api";
-import { Link } from "@/ui";
+import { type Repository } from "@/lib/api";
+import { Link } from "@/components/navigation/link";
 
 import { IssueList } from "./list";
 import { NewIssue } from "./create";

@@ -1,4 +1,4 @@
-import type { ActivityEvent } from "../../src/collaboration/activity";
+import type { ActivityEvent } from "@/features/activity";
 import { expect, test, type Page } from "@playwright/test";
 import { emptyReactions } from "./fixtures";
 import {

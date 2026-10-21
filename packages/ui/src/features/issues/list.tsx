@@ -1,17 +1,19 @@
-import { repoHref } from "@/repository-route";
+import { repoHref } from "@/lib/repository-route";
 
 import { Button } from "@/components/ui/button";
 
 import { IssueClosedIcon, IssueOpenedIcon } from "@primer/octicons-react";
-import { endpoint, navigate, useRequest, type Repository } from "@/api";
-import { Link, Result } from "@/ui";
+import { endpoint, navigate, useRequest, type Repository } from "@/lib/api";
+import { Link } from "@/components/navigation/link";
+import { Result } from "@/components/request/result";
 
 import { DiscussionSearch } from "@/components/discussion/search";
-import { LabelBadges } from "@/discussion-labels";
+import { LabelBadges } from "@/features/labels/selection";
 import { AssigneeAvatars } from "@/components/discussion/metadata";
 
 import type { IssueListItem, Page } from "./model";
 import { timestamp } from "@/components/discussion/time";
+
 export function IssueList({ repo, url }: { repo: Repository; url: URL }) {
   const state = url.searchParams.get("state") ?? "open";
   const before = url.searchParams.get("before") ?? undefined;

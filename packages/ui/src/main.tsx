@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { App } from "./App";
-import { AppErrorBoundary } from "./ui";
+import { App } from "@/app";
+import { AppErrorBoundary } from "@/app/error-boundary";
 import "./styles/globals.css";
 
 const root = document.getElementById("root");

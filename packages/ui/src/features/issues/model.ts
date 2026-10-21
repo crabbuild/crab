@@ -1,5 +1,5 @@
-import type { ReactionSummary } from "@/collaboration/reactions";
-import type { RepositoryLabel, RepositoryAssignee } from "@/api";
+import type { ReactionSummary } from "@/components/discussion/reactions";
+import type { RepositoryLabel, RepositoryAssignee } from "@/lib/api";
 
 export interface Comment {
   reactions: ReactionSummary;

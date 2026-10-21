@@ -1,11 +1,11 @@
-import { ActivityTimeline } from "@/collaboration/activity";
-import { Reactions } from "@/collaboration/reactions";
+import { ActivityTimeline } from "@/features/activity";
+import { Reactions } from "@/components/discussion/reactions";
 
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 
-import { endpoint, useRequest, type Repository } from "@/api";
+import { endpoint, useRequest, type Repository } from "@/lib/api";
 
 import { ConflictReview, useMutation } from "@/components/discussion/mutations";
 
@@ -16,6 +16,7 @@ import { useReturnFocus, useSubmission } from "@/components/discussion/hooks";
 
 import { Comment, Page } from "./model";
 import { timestamp } from "@/components/discussion/time";
+
 export function Comments({
   repo,
   issue,

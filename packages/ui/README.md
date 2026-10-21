@@ -28,9 +28,18 @@ Build the UI before building `crab-server`; its build script embeds `dist/`.
 - `src/components/discussion/`: shared Markdown rendering, composer, search,
   metadata, mutations and conflict review. Markdown tests stay beside the renderer.
 - `src/features/issues/`: issue models, routing, list, creation, detail and
-  comments. Feature screens call the native HTTP APIs through `src/api.ts`.
-- `src/app/theme/`: appearance controls. The application applies the persisted
-  light/dark/system choice before paint.
+  comments. `src/features/pull-requests/` separates lists, creation, detail,
+  conversation, commits, reviews, checks, and merge/recovery.
+- `src/features/repository/`: browsing, refs, tree, file rendering, commit details,
+  and diffs. Preview engines, workers, and their tests stay under `files/`.
+- `src/features/settings/`, `releases/`, and `imports/`: feature screens with
+  local forms and helpers. Labels and milestones own their selection controls.
+- `src/app/`: bootstrap, session, error boundary, and appearance controls. The
+  application applies the persisted light/dark/system choice before paint.
+- `src/lib/`: shared HTTP transport, wire records, repository routes, formatting,
+  code themes, and class merging. Feature consumers use the native HTTP APIs.
+- `src/components/navigation/`, `request/`, and `layout/`: links, request/timing
+  presentation, and pane resizing shared across features.
 - `src/styles/globals.css`: canonical Geist semantic tokens, bundled fonts,
   Tailwind utilities and product layouts. Change semantic roles rather than
   introducing another theme or compatibility token names.

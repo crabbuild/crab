@@ -7,13 +7,13 @@ import {
   type Repository,
   type RepositoryAssignee,
   type RepositoryLabel,
-} from "@/api";
-import { ReviewRequests } from "@/collaboration/review-requests";
-import { LinkedWork } from "@/collaboration/links";
-import { MilestonePicker } from "@/collaboration/milestones/picker";
-import { LabelBadges, LabelPicker } from "@/discussion-labels";
+} from "@/lib/api";
+import { ReviewRequests } from "@/features/pull-requests/reviews/requests";
+import { LinkedWork } from "./links";
+import { MilestonePicker } from "@/features/milestones/picker";
+import { LabelBadges, LabelPicker } from "@/features/labels/selection";
 import { useMutation } from "@/components/discussion/mutations";
-import { Result } from "@/ui";
+import { Result } from "@/components/request/result";
 
 interface AssigneeCatalog {
   items: RepositoryAssignee[];

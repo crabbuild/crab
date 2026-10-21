@@ -13,7 +13,11 @@ import {
   TooltipContent,
 } from "@/components/ui/tooltip";
 import { MonitorIcon, SunIcon, MoonIcon, PaintbrushIcon } from "lucide-react";
-import { codeThemeChoices, codeThemeFrom, type CodeTheme } from "@/code-theme";
+import {
+  codeThemeChoices,
+  codeThemeFrom,
+  type CodeTheme,
+} from "@/lib/code-theme";
 
 export type Theme = "light" | "dark" | "auto";
 

@@ -1,9 +1,9 @@
-import { repoHref } from "@/repository-route";
+import { repoHref } from "@/lib/repository-route";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 
-import { endpoint, navigate, type Repository } from "@/api";
-import { Link } from "@/ui";
+import { endpoint, navigate, type Repository } from "@/lib/api";
+import { Link } from "@/components/navigation/link";
 import { useMutation } from "@/components/discussion/mutations";
 
 import { Editor } from "@/components/discussion/editor";
