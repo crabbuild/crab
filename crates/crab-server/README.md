@@ -11,18 +11,23 @@ authentication key derivation remain unchanged by the crate rename.
 Read [the native runtime contract and outstanding release gates](CELLAR.md)
 before deployment. Historical runtime receipts do not qualify this implementation.
 
+## Browse indexing
+
 Capsule browse indexing is background work, independent of native Git receive.
 Canonical attribution is available without a Cell projection; configured Cells
 project one captured snapshot and promote only if its complete source identity
 still matches. Missing/stale indexes return HTTP 202 with retry guidance;
 corrupt derived records or path metadata return 503 and schedule repair. Native
 Git and mutation validation do not load the optional browse-index record.
+
 Browse readers retain verified immutable data while revalidating the root,
 transaction-consistent refs, and derived index hashes every two seconds. Ref or
 index changes open a new reader. Attribution uses that reader's captured source
 identity instead of opening the capsule payloads again for the same request.
+
 Cold browse opens load complete control metadata; Git pack bodies stay in their
 authenticated object-store sources and objects use verified bounded range reads.
+
 Repository pages select their metadata with `/api/repos?owner=OWNER&name=NAME`
 so unrelated repository Cell reads do not block browsing. The unfiltered catalog
 still supplies the repository list and loads Git access scopes when that
@@ -30,19 +35,23 @@ selector is opened.
 
 Unchanged browse and background probes share the root/ref/index change probe.
 Immutable descriptors are verified on identity changes and at the existing
-hourly scrub boundary; explicit repair invalidates the cached proof. One worker
-per repository retains completion only for the exact verified source, so idle
+hourly scrub boundary; explicit repair invalidates the cached proof.
+
+One worker per repository retains completion only for the exact verified source, so idle
 polling does not reimport the same Cell epoch. Tree APIs use the verified remote
 reader; reconciliation imports only consumed ref, summary and attribution rows.
 It streams authenticated path-state pages into provisional Cell epochs without
 rereading raw Git commits. Retained summaries cannot authorize a revision: the
 foreground reader still checks current ref visibility before querying the Cell.
+
 New repository Cells use one canonical schema containing only consumed commit
 summaries and attribution data. Only native Cellar application storage is
 supported; no previous-runtime reader or importer is provided.
+
 Projection reads and ingestion borrow runtime-owned Cells like collaboration
 requests. Cold read completion does not drain the Cell or wait for ingestion.
 Cellar owns retained Cells, idle eviction, pressure policy, and node shutdown.
+
 The current unshipped path-state codec interns raw components per layer and
 rejects aggregate writes above the reader budget before publishing any layers.
 The full Next.js/RustFS idle and mixed-load qualification remains in progress.
@@ -51,8 +60,9 @@ The full Next.js/RustFS idle and mixed-load qualification remains in progress.
 
 The server embeds the published [Cellar 0.1.0](https://github.com/crabbuild/cellar)
 native SDK. Crab owns HTTP authorization and product policy; Cellar owns Cell
-execution, leases, routing, SQLite/LTX persistence, and output durability. Issues,
-comments, labels, checks, branch protections, pull requests, reviews, releases,
+execution, leases, routing, SQLite/LTX persistence, and output durability.
+
+Issues, comments, labels, checks, branch protections, pull requests, reviews, releases,
 and browse projections use one native Cell per repository. Git objects and the
 catalog retain their existing Crab storage paths. Private peer traffic crosses
 the existing mTLS boundary. See [CELLAR.md](CELLAR.md) for initialization,
@@ -61,6 +71,7 @@ shutdown, provider configuration, and the native storage boundary.
 Authenticated repository administrators manage the complete member list in
 **Settings → Members** or through the conditional CLI replacement command.
 Both paths commit the same catalog revision and durable membership audit event.
+
 OIDC providers can also revoke an identity's Crab browser sessions and derived
 Git tokens through the documented back-channel logout endpoint. GitHub OAuth
 uses the same server-side browser session contract but does not provide signed
@@ -92,6 +103,7 @@ page (or `&powerbar=1` when it already has a query) to show component timings.
 Each timing badge outlines its complete widget; hover the badge to highlight
 that boundary. Nested outlines identify nested requests contributing to a view.
 Expand a widget to inspect its API URL and the server's `Server-Timing` header.
+
 The displayed duration includes network transfer and JSON parsing, not React
 rendering. In-app navigation retains the flag; `powerbar=0` disables it.
 
@@ -116,14 +128,18 @@ Generated links encode a slash-containing ref as one URL segment. Pasted paths
 with unescaped ref slashes resolve against the longest known ref. Raw Git
 filename bytes are percent-encoded without UTF-8 replacement; literal percent
 signs remain distinct from escaped bytes. A tag sharing a branch name retains
-its full ref namespace. Named-ref navigation keeps its branch or tag while data
+its full ref namespace.
+
+Named-ref navigation keeps its branch or tag while data
 reads remain pinned to the resolved commit OID. On a file page, keyboard `Y`
 replaces the ref with that OID, preserving the path and line fragment, following
 [GitHub's permanent file link convention](https://docs.github.com/en/repositories/working-with-files/using-files/getting-permanent-links-to-files).
 
 Deep links survive direct reloads through the embedded asset handler; service
 and asset namespaces retain their own 404 behavior. List filters and pagination
-stay in query parameters. Browser navigation query selectors (such as `view`,
+stay in query parameters.
+
+Browser navigation query selectors (such as `view`,
 `rev`, and `path`) and numeric release pages are rejected with “Page not found”.
 Release pages address tags directly. The release tag API uses the existing
 unique tag index and the same repository permissions and draft visibility as
@@ -135,10 +151,13 @@ For a new S3-backed Cell deployment that requires every acknowledged mutation
 to have an exact object root, set `durability = "object"` in `[cells]` on every
 node. This uses the existing object publication proof and does not recruit
 durability-log followers. The default `fleet` profile can acknowledge a
-follower-fsynced cut before the object root is published. Switching a running
-fleet requires draining its old owner sessions, proving object coverage of
+follower-fsynced cut before the object root is published.
+
+Switching a running fleet requires draining its old owner sessions, proving object coverage of
 their accepted cuts, and retiring their logs before relying on the all-node-loss
-contract. Reads use the authoritative owner; configurable replicas and explicit replica
+contract.
+
+Reads use the authoritative owner; configurable replicas and explicit replica
 reads are retired in the Cellar migration.
 
 For the fastest local start, use Docker Engine with Compose v2:
@@ -192,6 +211,7 @@ are listed in [CELLAR.md](CELLAR.md).
 The bucket or container must already exist. `repository adopt` can publish an
 existing canonical repository; it does not convert arbitrary objects into a
 Crab repository. Every replica discovers catalog changes without a restart.
+
 Without authentication, the server accepts only loopback listeners and trusts
 the local operator. Team deployments need [OIDC or GitHub OAuth configuration](REFERENCE.md#team-sign-in)
 and a canonical HTTPS origin. For container deployment, use the

@@ -38,6 +38,7 @@ and finalize integration.
 
 Constructed stores preserve the storage owner's transport-target digest;
 gateway grants bind their service endpoint and retain the repository scope.
+
 Credential refresh accepts new secrets for the same target but refuses a
 changed target before replacing the active inner store or retrying a request.
 Callers must resolve a new operation after a target change. This preserves

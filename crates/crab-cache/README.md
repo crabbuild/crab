@@ -51,10 +51,13 @@ Native Git packs use file-only `put_git_pack_file` and
 Fills use bounded streaming rather than whole-pack `Bytes`. Hits verify length
 and hash, then materialize an independent copy-on-write clone when the
 filesystem supports it, falling back to a bounded copy; they never hard-link a
-repository pack to mutable cache state. Fills reserve capacity and publish
+repository pack to mutable cache state.
+
+Fills reserve capacity and publish
 privately through the shared catalog. The family participates in stats,
 health, prune, verification, and cleanup. Git structure, sidecars, visible
 object closure, and authorization are reader responsibilities.
+
 Health and catalog inventory share native-path family classification: Windows
 separators are normalized, while backslashes in Unix filenames remain literal.
 
@@ -133,9 +136,11 @@ there need evidence for both enabled paths and the affected platform.
 Private SQLite opens verify byte-lock exclusion through two independently opened
 descriptors before reading or initializing the database generation. Filesystems
 that accept OFD lock calls without enforcing exclusion are rejected as unsafe.
+
 Shared-memory opens repeat this check on the actual side file before truncation
 or mapping: a newly created side file can behave differently from a reopened
 main file. The check protects live WAL mappings from another opener's reset.
+
 The probe uses a byte beyond SQLite's lock region and releases its locks on both
 success and failure; it does not modify database contents.
 

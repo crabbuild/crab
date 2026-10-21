@@ -34,8 +34,9 @@ resolver (snapshot + overlay) → VFS engine → FUSE or NFS
 `MountPipelineBuilder::execute` runs the preparation pipeline: source clone or
 reuse, HEAD resolution, snapshot, overlay setup, reconciliation, index
 population, hydration construction, resolver creation, and engine wiring. Only
-after those steps succeed does it start workers and return their owning service. Mounting
-and refresh are lifecycle operations performed outside the pipeline so a
+after those steps succeed does it start workers and return their owning service.
+
+Mounting and refresh are lifecycle operations performed outside the pipeline so a
 daemon, coordinator, or foreground CLI can own cancellation.
 
 The `fuse` feature enables the FUSE session and mount lifecycle; `nfs` enables

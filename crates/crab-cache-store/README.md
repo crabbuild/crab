@@ -53,11 +53,16 @@ uses the caller's selected origin, even when the cache was constructed around
 another store. A verified local hit copies the immutable pack body and reads
 sidecars from that selected origin. A miss retains the existing signed-stream
 or bounded parallel-range transport, verifies the pack hash, and attempts local
-retention before returning. Corrupt/unavailable caches use origin; destination
+retention before returning.
+
+Corrupt/unavailable caches use origin; destination
 write failures are terminal, while optional cache persistence failures do not
-discard verified output. The caller owns destination cleanup after cancellation,
+discard verified output.
+
+The caller owns destination cleanup after cancellation,
 sidecar authentication, Git index checks, visibility, and authorization. This
 path does not add capsule/layer admission to the remote cache service.
+
 Its operation token reaches signed and ordinary range reads. Cancellation stops
 network waits, then drains file I/O and any already-started verified cache fill.
 Callers await the result before removing private staging; a completed immutable
@@ -122,7 +127,9 @@ up to 64 MiB for owned result buffers, offsets, both range-key copies, and entry
 structures. It copies retained slices so a few requested bytes cannot pin an
 entire serialized xorb. Oversized keys/results, empty results, and failed
 fallible reservations skip this optional cache without changing the verified
-read result. Hash-table/queue allocation slack is separate bounded bookkeeping;
+read result.
+
+Hash-table/queue allocation slack is separate bounded bookkeeping;
 this is not a whole-process RSS or reconstruction-memory limit. Caller-owned
 results, transient decode buffers, and queued work need their own admission.
 
@@ -137,7 +144,9 @@ to the canonical routing path. It reports one completed attempt as the fixed
 `memory`, `local`, or `service` source and `hit`, `miss`, or `failure` outcome,
 plus verified bytes returned by hits. It also reports best-effort local
 persistence failures separately because the verified origin or service result
-remains usable. Origin reads and writes are outside this observer; consumers
+remains usable.
+
+Origin reads and writes are outside this observer; consumers
 should combine these events with the storage transport's own metrics.
 
 Observations contain no object path, repository, endpoint, or credential data.

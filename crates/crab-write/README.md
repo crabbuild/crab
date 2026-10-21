@@ -25,14 +25,17 @@ Protocol v2 uses `capsule_protocol::publish` instead of the v1 journal.
 Callers with cancellation-sensitive immutable preparation can use
 `prepare_publication` then `publish_prepared`, checking their lease token between
 them. Publication must be awaited through outcome resolution, even if renewal
-fails after that boundary. A
-single-ref push commits by conditionally replacing only that ref head. A
-multi-ref push creates a unique preparing transaction record, conditionally
+fails after that boundary.
+
+A single-ref push commits by conditionally replacing only that ref head.
+
+A multi-ref push creates a unique preparing transaction record, conditionally
 prepares each edited head, wins a commit-vs-abort CAS on that record, and
 creates an immutable committed marker. A competing writer may abort a still
 preparing attempt, but cannot abort a committed one; a committed record with a
-missing marker is repaired before its prepared state is used. The repository
-root changes only for checkpoint and maintenance work, so distinct existing
+missing marker is repaired before its prepared state is used.
+
+The repository root changes only for checkpoint and maintenance work, so distinct existing
 refs share no foreground mutable object.
 
 After a failed per-ref conditional write, v2 reads back the exact candidate.
@@ -41,8 +44,10 @@ already-exists error. An unchanged original head permits bounded retry of a
 transient failure with the original conditional token; this also protects a
 late first request from overwriting another writer. Readback allows the larger
 of the original and candidate bodies because compaction can shrink the head.
+
 A conflict plus a different readable head confirms a competing writer;
 an unreadable result remains uncertain rather than being reported as stale.
+
 Single- and multi-ref publication share this ref-head recovery. Transaction
 commit-vs-abort records, root maintenance and rollback keep their own protocols.
 
@@ -50,14 +55,19 @@ Ref-frontier compaction gathers one selected contiguous window, then
 performs one final `CapsuleRun::compact` on a blocking worker. Ordinary push and
 coordinated repair share this path. The 32-run batching policy bounds interim
 frontiers; the normal count target rolls each newest 500-capsule window into
-one CRBRUN01 run. A 64 MiB input-byte budget also triggers prefix compaction;
+one CRBRUN01 run.
+
+A 64 MiB input-byte budget also triggers prefix compaction;
 large historical runs remain stable so appending small commits does not rewrite
 repository-sized payloads. The smallest useful merge may contain two inputs
-above that soft budget. If a new leaf would exceed the persisted 64-segment
+above that soft budget.
+
+If a new leaf would exceed the persisted 64-segment
 ceiling, the writer merges the eligible adjacent pair with the fewest bytes.
 Every resulting run still contains at most 512 capsules; a frontier with no
-eligible pair requires a checkpoint. Source
-authentication, immutable upload verification and conditional publication are
+eligible pair requires a checkpoint.
+
+Source authentication, immutable upload verification and conditional publication are
 preserved. The worker owns immutable data and cannot publish if its caller is
 cancelled.
 
@@ -74,15 +84,20 @@ reader and exact snapshot. It persists a reusable attribution prefix before the
 orchestrator publishes graph readiness. `build_path_state` then attaches that
 verified graph, resumes attribution from its checkpoint and persists progress
 every 32 commits. Completion replaces the partial record through the returned
-CAS token; cached readers observe both phases without a ref change. Graph
-construction writes paged descriptor version 3, reuses unchanged paged layers
+CAS token; cached readers observe both phases without a ref change.
+
+Graph construction writes paged descriptor version 3, reuses unchanged paged layers
 and performs bounded-directory carries. Released manifest maintenance retains
 the eager version-1 encoding. The capsule owner rebuilds an eager browse graph
 even when its state digest is otherwise current, preserving reusable attribution
-through the existing checkpoint boundary. Full readback validates graph/page
+through the existing checkpoint boundary.
+
+Full readback validates graph/page
 closure, including recomputed ancestor-set recurrence, before the returned
 descriptor can become readiness. Graph discovery
-drains a separate bounded operation per batch. `generation::with_generation_owner` shares renewed owner election and
+drains a separate bounded operation per batch.
+
+`generation::with_generation_owner` shares renewed owner election and
 global/repository GC fences between v1 maintenance and the v2 orchestrator;
 all acquired leases are released on returned failure or cancellation. The
 orchestrator rechecks capsule activity and conditionally publishes the small
@@ -118,15 +133,19 @@ Storage, metadata, Git, worker and file errors retain their sources.
 writer, checkpoint and close lifecycle. Supply a captured manifest and its complete
 pack inventory. The function checks the generation/index/visibility identity before
 planning and again after closing the writer. A superseded sample returns `None`;
-a current sample returns advancement and catalog/sweep statistics. The CLI owner
-reports superseded samples before writing a generation receipt or running later
+a current sample returns advancement and catalog/sweep statistics.
+
+The CLI owner reports superseded samples before writing a generation receipt or running later
 maintenance. Its continuous loop retries immediately; a one-shot run reports the
-superseded sample and exits. After ref-journal compaction, the CLI's continuous
+superseded sample and exits.
+
+After ref-journal compaction, the CLI's continuous
 owner instead requires a clean elapsed quiet window of at least one polling interval
 and five seconds before it starts repository-sized derived maintenance. Once that
 work is complete, unchanged manifest identity uses
-the last verified maintenance snapshot until the periodic revalidation. The shared
-anchor parser also serves native push, repack and history recovery; malformed index
+the last verified maintenance snapshot until the periodic revalidation.
+
+The shared anchor parser also serves native push, repack and history recovery; malformed index
 hashes retain their source errors.
 
 `generation::ensure_catalog_readable` owns generation election and both GC-writer
@@ -152,8 +171,10 @@ in the caller's bounded batch, with 21 bytes per key.
 `journal::compact_for_owner` folds already committed ref transactions into the
 manifest under its renewable lease. It waits up to two lease lifetimes for
 handoff, then drains at most five waves before releasing ownership.
+
 `journal::compact_for_reader` skips a busy lease and checks a half-TTL scheduling
 budget between batches. These are scheduling bounds, not hard I/O deadlines.
+
 Both use the metadata crate's conditional manifest publication, visibility
 compaction and active-marker cleanup. Ref locks are released only when their
 holder matches the committed transaction; a successor's lock survives cleanup.
@@ -171,7 +192,9 @@ transactions that were already committed.
 `journal::commit_edits` is the CLI's shared journal commit path. It validates a
 complete batch and checks each expected old OID against a caller-supplied snapshot
 before writing anything. It then reads per-ref causal parents and uses the metadata
-journal's prepared heads and single atomic active marker. The supplied snapshot
+journal's prepared heads and single atomic active marker.
+
+The supplied snapshot
 must be captured while holding every edited ref lease, with those leases retained
 and renewed through completion; passing an earlier snapshot is not a concurrency
 check. Existing committed journal edits count toward the old-value comparison,
@@ -197,17 +220,22 @@ span both calls.
 Creations and deletions additionally hold the renewable `git-ref-namespace`
 internal lease, reread the coherent repository snapshot, and validate the final
 ref set. Independently locked `feature` and `feature/sub` cannot both commit.
+
 An atomic delete of the parent and creation of its child remains valid. Updates
 to existing refs bypass this gate. The CLI's initial-manifest fast path uses the
 same gate and rechecks that no journal writer has published during its uploads.
+
 Namespace contention retries stop after two lease lifetimes and observe
 cancellation; in-flight storage calls still drain.
 
 `with_ref_namespace` exposes that gate for the initial-manifest publisher. Its
 callback must check the supplied cancellation token before publication and finish
-commit-outcome recovery once publication is attempted. The journal checks before
+commit-outcome recovery once publication is attempted.
+
+The journal checks before
 each prepared head and before its active marker: cancellation there rolls back
 prepared heads. After the marker attempt it finishes recovery and promotion.
+
 Late renewal/release errors cannot replace a known successful commit result.
 Callers must retain and renew their edited-ref leases throughout this work.
 
@@ -226,6 +254,7 @@ caller still owns the generation-owner election and any required GC fences.
 
 For journal commit, callers also own write authorization, individual ref-name/policy and
 graph/dependency validation, immutable uploads, visibility proof, and ref leases.
+
 After a failed marker write, the metadata journal attempts bounded exact readback.
 Matching marker bytes confirm commit and allow head cleanup to continue. An
 absent marker is confirmed only when every edited ref's immutable compaction
@@ -233,8 +262,10 @@ frontier descends from the exact transaction ID. If neither proof succeeds, or
 the marker is different, oversized or unreadable, `RefJournalCommitUncertain`
 retains the transaction ID, original write error and any readback error. No
 prepared-head rollback follows a marker attempt.
+
 Callers must reconcile an uncertain outcome before reporting failure. Successful journal commit
 means refs are durable, not that the derived catalog is ready for reads.
+
 Current ref values alone cannot establish the historical transaction outcome;
 use its bound receipt or retained commit evidence. An unresolved outcome does
 not authorize replay, even when the refs match the attempted update.

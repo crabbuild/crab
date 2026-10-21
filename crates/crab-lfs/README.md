@@ -30,9 +30,12 @@ verified bytes through crab-storage
 `LfsObjectStore` provides idempotent `put`, bounded-memory `put_stream`,
 `get`, `exists`, and `verify` operations. Its stream APIs let the direct Crab
 CLI transfer path verify immutable objects while keeping file-sized payloads
-out of memory. Uploads and explicit `verify_size` record a validator-bound
+out of memory.
+
+Uploads and explicit `verify_size` record a validator-bound
 receipt when the provider exposes an ETag or version, allowing later presence
 checks to avoid re-reading the object body. `get_stream` never writes receipts.
+
 A configured primary fallback can serve reads when a selected replica is stale
 or unavailable; selected replicas are verified before exposing their stream so
 corruption can trigger fallback without replaying emitted bytes.
@@ -41,14 +44,16 @@ Full `get_stream` reads without a replica fallback use one body request and
 verify delivered SHA-256 and size. Range streams first establish whole-object
 proof, then require matching strong ETag/version metadata for delivery. A
 provider without a strong validator cannot serve a verified partial stream.
+
 All streams check exact response framing and withhold their final bytes until
 EOF verification succeeds, including for HTTP Content-Length consumers.
 Dropping a stream is cancellation, not evidence that verification succeeded.
 
 Streamed uploads admit at most four part futures, including the final partial
 part. Read/assembly buffers and provider allocations sit outside that queue
-bound. Uploads verify size and SHA-256 before completion. Read, part, hash,
-and completion failures attempt multipart abort; a cleanup failure preserves
+bound. Uploads verify size and SHA-256 before completion.
+
+Read, part, hash, and completion failures attempt multipart abort; a cleanup failure preserves
 the original upload error. Await the operation to finish cleanup: dropping its
 future or terminating the process cannot guarantee remote part reclamation.
 
@@ -67,7 +72,9 @@ metadata. This adds one full verification read before later receipt hits.
 without reading/writing verification receipts or using the configured fallback.
 Supply an origin-only store and bound the expected size and request deadline at
 the caller. It checks response metadata before consuming the body and rejects
-streams that exceed it. Four body verifications may run per process; hashing
+streams that exceed it.
+
+Four body verifications may run per process; hashing
 runs on blocking workers that retain admission after caller cancellation. The
 ordinary receipt-aware path uses the same body verifier when a receipt misses.
 

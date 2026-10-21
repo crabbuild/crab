@@ -97,8 +97,9 @@ limits. The builder seals before a new unique chunk would exceed either limit,
 including when the payload is still below its target size. Serial,
 precompressed, batch and admitted streaming writes share this boundary;
 deduplication happens first, and denied rollover admission leaves staged data
-unsealed for retry. Range assembly
-grows after validating decoded chunks instead of reserving an untrusted
+unsealed for retry.
+
+Range assembly grows after validating decoded chunks instead of reserving an untrusted
 advertised total. These format checks are separate from request admission and
 whole-process memory limits.
 

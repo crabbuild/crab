@@ -125,6 +125,7 @@ Await `SchedulerLock::acquire` inside a Tokio runtime. Contention backoff yields
 to other futures, and dropping the acquisition future cancels waiting. Individual
 filesystem attempts and PID writes remain synchronous; `try_acquire` makes one
 attempt and reports contention without a timer.
+
 The caller chooses the timeout and retains the guard for the protected work.
 Execution and `--cache-only` replay both acquire it: replay can publish
 outputs even though it does not execute a command or create a journal.
