@@ -37,6 +37,8 @@ Replica selection reports readiness, generations, fallbacks, and routing
 choices so callers can distinguish an unavailable replica from a corrupt
 object.
 
+### Captured Git views
+
 `capsule_protocol::open_git_view_from_root` captures complete refs and catalog
 lookup roots while keeping catalog bodies, frontier visibility and run OID
 admission paged. It validates
@@ -46,20 +48,26 @@ the captured index; unindexed reads retain their existing pack-index path.
 Maintenance and writers requiring exact admission sets continue using the
 complete metadata entry point. Checkpoint visibility, catalog and source/ref
 enumeration are still eager; total bounded opening remains unqualified.
+
 Full-capsule and control-only views share borrowed visibility readiness/application
 checks. Canonical transaction decoding guarantees unique ref names; matched-row
 counts reject extra evidence without copying the per-object edit lists.
+
 Full and paged controls use one ref-ordering loop and preserve capsule identity
 across compaction origins: logical pack metadata is
 capsule-relative, while transport ranges stay on the captured run. Shared
 transactions deduplicate without discarding conflicting content evidence.
+
 Paged closure layers preserve
 the inherited base when its source ref later moves, and dictionary retention
 never supplies visibility for a new ref. Deletion-only capsules remove their
 live ref closure even without an OID payload, in both full-body and control reads.
+
 Initial rooted additions use their
 authenticated count; differing actual delta additions/removals remain admitted
-work. `git_visibility_index`, `candidate_git_visibility` and
+work.
+
+`git_visibility_index`, `candidate_git_visibility` and
 `tip_bound_transitions` asynchronously materialize captured controls only when
 bulk inspection needs them. They do not recapture refs or switch origins.
 
@@ -79,33 +87,41 @@ origin-backed packs with verified candidate capsules. Candidates participate
 in the same pack intake limit and external-delta ordering, so protected receive
 can use a paged view without materializing its catalog. The caller binds each
 candidate to the captured root; installation does not grant visibility.
+
 The existing candidate-free installer delegates to this implementation and
 retains its cold-clone proof and cache behavior.
+
+### Reconstruction and range streaming
 
 `ShardHydrator` provides memory, file, and half-open byte-range reconstruction.
 Before full-file reconstruction it checks that the pointer's shard terms are
 covered; after reconstruction it verifies the requested file hash. A shared
 adaptive concurrency controller limits parallel downloads. In-memory outputs
 use checked, fallible reservation and cannot grow beyond the declared size;
-short or overlong results fail. This is not configured memory admission:
+short or overlong results fail.
+
+This is not configured memory admission:
 large representable outputs, caller-retained results, and transient decode
 still need resource bounds. Cache capacity is not a whole-read memory bound.
+
 `reconstruct_range_to_writer_with_cancel` streams an exact range into a
 caller-provided writer and accepts the caller's cancellation token and lookup
 session. It checks range bounds before I/O and verifies chunk integrity and
 the exact output length without allocating a range-sized result. The caller
 must bound the writer and unblock it on cancellation. The existing in-memory
 range API retains its clamping behavior and delegates to this writer path.
+
 `reconstruct_range_stream` owns a one-chunk asynchronous backpressure channel
 for protocol adapters that do not need a file-index lookup session. Dropping
 the stream cancels pending source work; successful completion still requires
 consuming it through EOF, where late source and integrity errors surface.
 Range verification does not establish the whole-file BLAKE3 hash.
+
 The operation token also reaches download admission, availability checks and
 chunk transport. Xet waits for source futures during its final writer join;
 these reads must observe cancellation for destination cleanup to finish.
-`ReadRuntimeBuilder` attaches
-the decoded-range cache using the object cache's
+
+`ReadRuntimeBuilder` attaches the decoded-range cache using the object cache's
 resolved root and budget. Callers cannot accidentally omit range reuse;
 unavailable or unsafe cache storage degrades to verified origin reads.
 
@@ -113,10 +129,13 @@ StoreClient reads and fills the decoded-range cache while holding the term's
 download permit and reconstruction buffer admission. It caches each requested
 range independently and finishes fills before returning decoded bytes. Xet is
 not given a cache, so it cannot retain data in detached cache-write tasks.
+
 Cache write errors remain best-effort and cannot replace valid origin output.
 Cancellation/drop stops pending write attempts. This is not a persistence
 promise when caching is unavailable, over budget, or concurrently evicted,
 nor an aggregate filesystem-latency bound.
+
+### Errors and output ownership
 
 `ReadError::Reconstruction` retains Xet's failure and the operation's first
 terminal read and writer failures. Crab records typed adapter errors before
@@ -171,8 +190,10 @@ chunks overlapping the selected byte interval. The path API makes cold,
 low-coverage reads with bounded xorb requests; high-coverage reads may cache a
 complete verified xorb. The in-memory API retains its non-installing whole-xorb
 source read so VFS windows preserve one-request fetch and decoded-range reuse.
+
 The pointer and metadata remain the source of truth; caches only change where
 immutable bytes are fetched from.
+
 Use `reconstruct_to_writer` with a sink for verification or cache warming that
 does not need to retain the file. Success verifies actual whole-file hash and
 size, but a writer can receive bytes before final verification; consumers must
@@ -191,7 +212,9 @@ clamped length and underlying xorb/chunk integrity, not the whole-file hash.
 `TermResolver` serves diff callers that need reconstruction terms or ordered
 chunk sequences rather than file output. `TermResolver::new` returns a
 configuration error for zero concurrency or values above Tokio's maximum permit
-count. One semaphore limits admitted metadata work across this resolver's
+count.
+
+One semaphore limits admitted metadata work across this resolver's
 concurrent batches. Each batch also retains at most that many worker tasks,
 reaping whichever finishes first before scheduling another input. Input and
 result collections still scale with batch size; this is not total memory admission.
@@ -210,9 +233,11 @@ clones remain.
 Cancellation stops admission and drains workers before closing the shared
 file-index lookup session. Workers waiting for a concurrency permit observe the
 cancellation token; already admitted metadata reads finish before cleanup.
+
 Dropping the batch cancels its own admission waiters without cancelling the
 caller's token or sibling batches. A per-batch cleanup task waits for admission
 to end and tracked workers to release their state, then closes the session.
+
 Normal completion awaits that same task. Dropping the batch during cleanup
 does not interrupt it, but shutting down the runtime can: await the batch
 through cancellation before stopping Tokio. Admitted origin reads still need
@@ -223,19 +248,25 @@ Its error source is Tokio's `JoinError`, so diagnostic consumers can distinguish
 worker panic from task cancellation without parsing log text. The CLI preserves
 that source while retaining its internal-error diagnostic classification.
 
+### Replica readiness
+
 Replica readiness compares the exact authenticated capsule view and completes
 catalog conflict/dependency validation before checking any payload. It owns a
 `PointerCatalogInspection` cursor and verifies one shard/xorb descriptor at a time.
 Full probes validate every cataloged body; sampled probes preserve canonical
 shard-before-xorb order and stop at their existing limit. The complete metadata
-proof is required even for a zero-object sample. Every returned path finishes the
+proof is required even for a zero-object sample.
+
+Every returned path finishes the
 cursor, including missing bodies, errors and early sample limits; abandonment
 retains local cleanup behind blocking workers.
 
 Large-body hashing and parsing run outside the async executor; worker failures
 remain typed as `ReadError::ReadinessTask`. Streamed recipes move into that worker;
 already-built publication catalogs clone borrowed recipes only at the worker
-boundary. Both inputs share the physical body verifiers. Product caches may skip
+boundary. Both inputs share the physical body verifiers.
+
+Product caches may skip
 repeated immutable-body validation, but must recheck the replica's authenticated
 view digest before selection; a sampled probe does not publish full-readiness
 cache state.
@@ -250,6 +281,7 @@ their composing owners.
 `dependency_proof::verify_dependencies` consumes the pointer list produced by
 `crab-git::receive_plan::validate`. It binds Crab shard selection to the same
 captured repository snapshot, then verifies Crab and LFS payloads at origin.
+
 It checks count, individual size, conflicting declarations and total unique
 file bytes before I/O; duplicate content is verified once. The batch deadline
 covers selection, admission waits and content verification. Its successful body
@@ -267,12 +299,15 @@ immutable materialization path. Large bodies download in concurrent ranges,
 while full-body hash and source/member commitments remain mandatory. The
 returned body remains resident; this does not bound total clone memory.
 
+### Capsule capture and read strategies
+
 `capsule_protocol::open_view` loads the v2 checkpoint root, double-collects
 complete per-ref-head object metadata around concurrent head reads, and retries
 a changing snapshot. It resolves each activation record still referenced by a
 prepared head exactly once; committed selects all prepared states for that
-activation, while preparing or aborted selects every predecessor. It then loads
-the checkpoint and reachable capsule runs with caller-supplied individual and
+activation, while preparing or aborted selects every predecessor.
+
+It then loads the checkpoint and reachable capsule runs with caller-supplied individual and
 aggregate byte limits. Exact size, provider version, BLAKE3 identity,
 transaction identity, base-root binding, and materialized refs are verified
 before the view is returned. Git clone/fetch, pointer catalog lookup, checkout,
@@ -283,15 +318,18 @@ Checkpoints use the layered source directory exclusively. Ordinary fetch uses
 cold; `open_view_from_root_with_control` loads those bodies before the first
 checkpoint for consumers that need embedded pack bytes. These entry points differ in read
 requirements, not storage-format compatibility.
+
 `open_view_from_root_with_metadata` captures the complete visibility and pointer
 catalog controls while leaving Git pack bodies cold, including before the first
 checkpoint. Background index builders use this complete path; browsing uses the
 Git view with the origin-backed Git reader. Metadata capture still verifies transaction ordering,
 activations and exact resulting refs; it is not footer-only fetch admission.
+
 Pack installation from metadata views also requires the origin layout and consumes
 authenticated source ranges. The embedded-pack reader and candidate installers
 retain complete body views. Control directories and ref capture remain separate
 indexing work; this change does not make their historical decoding constant-cost.
+
 For an ordinary fetch whose admitted capsule frontier totals at most 128 MiB,
 the reader verifies each complete run once and reuses its resident pack and
 index bytes. Larger frontiers retain bounded suffix and range reads; stable
@@ -302,8 +340,9 @@ Upload-pack graph selection defers content reads for non-root blob leaves only
 after visibility admission and pinned locator proof of their resolved kind.
 Size-independent filters already admit these leaves without inspecting bytes;
 they still consume the operation's logical-object budget. Explicit blob roots,
-missing kind proof, and size-dependent filters retain bounded reads. Deferral
-changes selection work only: packed-entry verification, response limits, and
+missing kind proof, and size-dependent filters retain bounded reads.
+
+Deferral changes selection work only: packed-entry verification, response limits, and
 native Git installation checks remain mandatory.
 
 `CapsuleRepositoryView::git_snapshot` captures the same canonical pack inventory
@@ -312,21 +351,27 @@ and does not publish a v1 manifest. Its synthetic ETag covers the root and every
 visible per-ref transaction; unchanged root generation is not sufficient for
 snapshot equality. The token is not a provider CAS token. Identical packs in
 multiple runs appear once; conflicting metadata for one pack fails closed.
+
 `with_browse_indexes` opt-in attaches only an exact-state derived record without
 I/O. Such views require the origin-backed reader; the explicit private-memory
 reader cannot resolve external index objects. Ordinary Git readers do not load
-the record. Fetch transition hints accept the same authenticated cross-ref
+the record.
+
+Fetch transition hints accept the same authenticated cross-ref
 closure reuse as visibility application when creating a new branch; existing
 refs still require an exact expected-old match.
+
 For ordinary tip-bound Git negotiation, an exact chain from every advertised
 want to a client have is a sufficient cut point. This proof does not establish
 that a historical have remains visible, so the wire owner may send `ready`
 without ACKing it. The ordinary authorization, object budget, and complete
 pack plan still run before any pack bytes are sent. Unknown, ambiguous, or
 incomplete chains continue negotiation.
+
 Publication must recheck capsule activity against a freshly loaded root;
 `RemoteGitRepository::is_current` checks the v1 manifest and is not a v2
 freshness check.
+
 `git_repository_from_store` retains the supplied origin before and after the
 first checkpoint, so placement checks and derived-index readers share the
 real repository store. Uncheckpointed pack-byte admission still precedes opening;
@@ -334,13 +379,17 @@ verified bodies already present in complete capsules are reused without another
 origin read. Only the explicit `git_repository` embedded-pack helper uses a
 private in-memory store.
 
+### Targeted ref capture
+
 `capsule_protocol::open_ref_view_from_root_for_refs` is the explicit-push
 variant. It double-reads only the requested deterministic head keys without
 loading checkpoint or capsule payloads, avoiding repository-wide LIST,
 unrelated-head GET, and immutable-history GET requests. Its non-selected ref
 values are not authoritative; complete advertisement uses
 `open_ref_view_from_root`, while Git transfer and cross-ref pointer catalogs
-must continue to use `open_view`. Protected-push admission uses the narrower
+must continue to use `open_view`.
+
+Protected-push admission uses the narrower
 `read_visible_refs_from_root_for_refs`, which retains the same stable-head and
 atomic-activation checks but returns only requested refs and fetches no capsule
 or checkpoint payloads.
@@ -351,14 +400,18 @@ declared object totals, and visibility identity use the same member inventory.
 Concurrent source-range reads own their request descriptors before suspension,
 so HTTP and background-maintenance tasks retain Tokio's `Send` contract.
 
+### Pack installation
+
 Captured `CRBRUN01` frontier controls supply contiguous lookup-index ranges for
 compacted runs. The shared Git reader still validates each original index hash,
 checksum and inventory under its existing request/byte limits. Canonical pack
 and sidecar ranges remain authoritative for installation and maintenance; the
 lookup pool neither changes visibility nor adds eager stable-source reads.
+
 Exact run-member admission is verified in the same control-suffix read, rather
 than fetched separately. The caller's frontier byte admission still bounds the
 whole source; combining these already-required bytes does not skip admission.
+
 The layered reader also uses the complete authenticated run-member OID map as
 physical placement hints for delta bases absent from visibility additions.
 These hints avoid unrelated index scans after cache eviction; they do not
@@ -368,10 +421,12 @@ Cold layered installation stages and authenticates every pack and sidecar
 before publishing pack files. Body and sidecar ranges share one pre-I/O byte
 budget. Its result reports complete visibility only after the downloaded index
 OID union exactly matches the authenticated closure and includes every captured
-ref/peeled tip; metadata alone is not installation proof. Duplicate pack bodies
-are installed once, including repeated members in one compacted run. Native
+ref/peeled tip; metadata alone is not installation proof.
+
+Duplicate pack bodies are installed once, including repeated members in one compacted run. Native
 installation and remote object reads use metadata's content comparison to reject
 conflicting commitments while retaining authenticated physical member positions.
+
 A newer per-ref frontier disqualifies checkpoint-only
 installation; physical packs with extra objects still require caller-owned
 connectivity checks. Hidden-ref/filter/shallow selection remains caller policy
@@ -385,8 +440,10 @@ origin path; destination I/O failures remain terminal. The same aggregate byte
 admission applies before cache or origin I/O. Strict administrative verification
 passes no cache. Filtered, shallow, and incremental selected-object paths do not
 inherit complete-pack cache admission.
+
 The selected `StoreLayout` owns both paths and origin for these installers;
 there is no independent store argument that can disagree with its authority.
+
 Native and incremental installers take the operation token. They cancel source
 waits and await local/blocking work before returning, so the caller can release
 reader admission and remove staging afterwards. Do not implement cancellation
@@ -396,20 +453,27 @@ older administrative entry points that do not accept an operation token.
 Native installation and maintenance have different pack contracts. Maintenance
 preserves authenticated thin source bytes and their identities. Complete native
 installation orders source members by their declared base dependencies, rejects
-missing or cyclic dependencies, and repairs only thin packs with Git. Repair
-must produce exactly the source OIDs plus declared bases before its files are
+missing or cyclic dependencies, and repairs only thin packs with Git.
+
+Repair must produce exactly the source OIDs plus declared bases before its files are
 installed under their repaired content hash. Self-contained sources keep their
-original bytes. Repeated installation verifies existing bodies and sidecars;
+original bytes.
+
+Repeated installation verifies existing bodies and sidecars;
 corrupt local artifacts are errors, not cache hits. Thin-source installation
 does not claim the self-contained cold path's complete-visibility proof.
 
+### Historical and administrative verification
+
 Historical verification uses that native installer directly from its retained
 layered checkpoint, without constructing a synthetic current-root snapshot.
+
 Physical maintenance can bind a retained complete checkpoint to its exact
 root with `compacted_view_from_checkpoint`. It checks the same pointer identity,
 size ceiling, visibility and transition metadata as the stored compacted reader,
 rejects footer-only input, and excludes newer ref heads. The stored compacted
 reader uses this same constructor after loading its checkpoint.
+
 Strict fsck and recovery share full immutable-source validation, including the
 retained capsule-run transaction/base binding. Source/member hashes remain
 mandatory. Recovery currently reads complete sources for this strict proof and
@@ -425,21 +489,29 @@ Git sources separately; an immutable catalog root does not authorize Git objects
 Current-view and historical integrity checks share the installed-database
 dependency verifier. It validates external catalog bodies, looks up Crab file
 identities in canonical Xet MerkleHash encoding, and verifies whole-file bytes
-at origin for both Crab and LFS pointers. Distinct pointer blobs sharing a file
+at origin for both Crab and LFS pointers.
+
+Distinct pointer blobs sharing a file
 identity reuse its content proof only after every declared size is validated.
 Its scan worker drains on cooperative cancellation before the caller may
 release the temporary Git database.
+
 Deep metadata diagnosis, rebuild, HTTP adoption and background integrity consume
 this same proof after layered installation, without repacking the repository.
+
 Current-view administrative verification also authenticates complete immutable
 sources, including framing outside member ranges. It admits the deduplicated
 source inventory before the first source read, and bounds source verification
 and pack installation separately under the caller's Git byte ceiling. These
 strict checks read source bodies and then member ranges; ordinary push/fetch
-does not inherit those extra reads. Token cancellation drains native installation
+does not inherit those extra reads.
+
+Token cancellation drains native installation
 before releasing its temporary database, as it already does for the Git scan.
+
 Rebuild verifies the reachable Git/Xet/LFS closure before publishing a new
 checkpoint or claiming a no-op.
+
 Catalog-read statistics count logical shard/xorb verification reads, separately
 from file reconstruction and transport retries.
 
@@ -448,9 +520,13 @@ origin-reconstruction proof. It ignores pointer shard hints, bounds each shard
 by the existing 512 MiB format limit, authenticates the selected recipe, and
 uses `verify_origin_recipe` to stream its ordered chunks and prove the final
 file hash/size. Reconstruction retains at most one bounded xorb and one decoded
-chunk. This deep administrative check rereads selected shard/xorb bodies after
+chunk.
+
+This deep administrative check rereads selected shard/xorb bodies after
 catalog verification; it is not a foreground-request optimization. Live
 historical Xet restoration and the complete qualification matrix remain required.
+
+### Incremental installation
 
 Incremental installation revalidates existing pack, index, and reverse-index
 hashes before treating a member as local. An entirely local selection returns
@@ -463,6 +539,8 @@ Cold installation resolves source/member iterator closures before awaiting I/O,
 keeping its future usable in spawned server integrity tasks. Checkpoint fixtures
 exercise that same task boundary as well as pack bytes and visibility proofs.
 
+### Crate ownership
+
 - [`crab-metadata`](../crab-metadata/README.md) defines manifests, file
   indexes, and shard metadata; this crate consumes them.
 - [`crab-cache-store`](../crab-cache-store/README.md) supplies cache-aware
@@ -472,6 +550,8 @@ exercise that same task boundary as well as pack bytes and visibility proofs.
 - [`crab-vfs`](../crab-vfs/README.md) and
   [`crab-auth-server`](../crab-auth-server/README.md) are callers, not
   alternate reconstruction implementations.
+
+### Hydrator admission and lookup
 
 `ShardHydrator::with_read_admission` scopes GET/HEAD origin admission to a cloned
 hydrator while retaining its shared cache, download concurrency and decoded
@@ -502,10 +582,13 @@ catalog together with authenticated run roots and exactly the selected
 publication-ordered capsule occurrences. File
 bindings retain later-wins precedence with equal sizes; selected shard/xorb
 identities retain conflict checks across sources. Queries do not read a newer
-root. Checkpoint and run catalog pages stay cold during lookup construction and
+root.
+
+Checkpoint and run catalog pages stay cold during lookup construction and
 share one cache and aggregate query budget. The complete catalog API remains
-for explicit maintenance and integrity inspection. Fetch-only captures lack
-reconciled logical delta state; both catalog APIs return
+for explicit maintenance and integrity inspection.
+
+Fetch-only captures lack reconciled logical delta state; both catalog APIs return
 `ReadError::IncompleteCatalogView` before I/O rather than treating that state
 as an authenticated miss. A complete capture with an empty suffix can still
 return a legitimate miss.
@@ -513,10 +596,13 @@ return a legitimate miss.
 Deep `capsule_protocol::verify_reachable_dependencies` streams the complete
 captured catalog proof and physical descriptor verification, then resolves
 reachable pointer bindings in batches of 64 from those same roots. Catalog
-cardinalities come from the completed metadata reduction. Recovery's assembled
-replacement catalogs share the Git scan and whole-file/LFS proof in
+cardinalities come from the completed metadata reduction.
+
+Recovery's assembled replacement catalogs share the Git scan and whole-file/LFS proof in
 `capsule_protocol/dependency.rs`; binding source selection does not change the
-integrity checks. Fsck composes its stronger decoded-chunk and cross-recipe proof
+integrity checks.
+
+Fsck composes its stronger decoded-chunk and cross-recipe proof
 with `verify_captured_installed_pointer_bytes`, the same canonical Git scan and
 whole-file/LFS byte phase. That API validates selected dependency closures only;
 it does not certify unrelated catalog health. Complete fsck must first finish

@@ -32,8 +32,10 @@ Single repository mutation                 Active-active mutation
 `PushLock` protects a Git ref or internal resource under a repository prefix.
 It has a default five-minute TTL, holder-checked release, renewal, and
 expired-lease reclamation. Enable it with `object-store-lock`.
+
 Unrepresentable expiry or renewal deadlines return a configuration error;
 deadline arithmetic must not panic or wrap into an expired lease.
+
 Nonblocking slot acquisition reuses the inspected lease's CAS token: reclaiming
 a released slot needs one GET and one conditional PUT (plus a failed create for
 a new acquisition context). A diagnostic expiry can avoid a backend-clock probe
@@ -70,7 +72,9 @@ fixed number of reusable CAS lease slots. Waiting writers own no object and
 probe slots in rotating order, so admission work and stored coordination state
 remain bounded independently of queue depth. Slot expiry uses backend-authored
 object time from one reusable clock key; admission is best-effort fair rather
-than FIFO. A direct CLI publication already owns the repository and global GC
+than FIFO.
+
+A direct CLI publication already owns the repository and global GC
 writer fences, so its capacity ticket reuses those claims instead of acquiring
 a duplicate fence pair. Standalone admission tickets continue to acquire and
 release their own GC fences.

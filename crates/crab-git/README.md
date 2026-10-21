@@ -89,12 +89,17 @@ For a local repository, use `discover_git_dir_from` and the ref helpers before
 walking objects. `walk_reachable` returns the Git objects and Crab pointers
 needed by the push pipeline; it does not upload anything.
 
+### Bounded pointer discovery
+
 `walk::scan_pointers` uses the same traversal with explicit distinct-object,
 lookup-work and Gitoxide single-allocation limits. It consumes one ref closure
 at a time and returns unique pointer candidates plus outstanding large-blob
-headers, instead of retaining a full closure for every ref. Shared history consumes lookup work even when its objects are
+headers, instead of retaining a full closure for every ref.
+
+Shared history consumes lookup work even when its objects are
 already in the distinct-object union. Cancellation is cooperative between
 object reads; callers must await their worker before releasing its local ODB.
+
 Tags are resolved from the captured OIDs, including chains ending in commits,
 trees or blobs; this does not extend the product's publication support profile.
 
@@ -103,15 +108,20 @@ not inflated just to classify them. Missing/unreadable/wrong-kind blob objects
 fail the shared walker; small candidate bodies must match their Git checksum.
 The bounded scanner additionally verifies decoded commit/tree/tag checksums and
 passes its allocation ceiling to the ODB for loose objects and packed deltas.
+
 The returned `unchecked_blobs` are required work, not verified non-pointers.
+
 `batch::verify_blob_batch` verifies native Git's ordered raw `cat-file --batch`
 response against their captured OIDs, kinds and sizes, hashing bodies through a
 64 KiB buffer with Git-compatible collision detection. Missing, reordered,
-truncated, extra and checksum-invalid responses fail. The caller owns the
-process, disables replacements/filters and supervises blocked I/O; the parser
+truncated, extra and checksum-invalid responses fail.
+
+The caller owns the process, disables replacements/filters and supervises blocked I/O; the parser
 does not spawn or detach workers. Mirror inspection/pre-push use this second
 step before trusting the pointer inventory. Other reachable-set APIs retain
-their documented narrower behavior. Neither the ODB allocation ceiling nor
+their documented narrower behavior.
+
+Neither the ODB allocation ceiling nor
 the parser buffer is a total-process RSS guarantee; native Git delta memory,
 pack-index mappings and filesystem I/O still need qualification.
 
@@ -120,6 +130,7 @@ discovery. It hashes every requested object's raw body and visits only blobs
 within the caller's capture ceiling, retaining original request ordinals.
 Both SHA-1 and SHA-256 Git OIDs are accepted here; this does not enable native
 SHA-256 Crab transport. The parser reuses one 64 KiB body buffer per batch.
+
 Callers must discard accumulated candidates after any later framing, checksum,
 I/O, cancellation or child-exit failure, and enforce aggregate inventory limits.
 
@@ -148,6 +159,7 @@ the supplied base length and reserves output fallibly.
 `pack_writer::write_pack` streams full objects through a 64 KiB input buffer
 and zlib directly to the caller's writer. Its byte limit includes the pack
 headers and checksum trailer; it rejects truncated or oversized object readers.
+
 Call it on a blocking worker with caller-owned I/O deadlines and private output
 that is discarded on failure. It does not validate object graphs or publish
 anything. HTTP generated-object publication uses this writer, removing its
@@ -159,30 +171,43 @@ on a blocking worker. Input reads and base lookups need caller-owned deadlines;
 base lookup must authorize access before returning bounded object bytes. The
 returned `IncomingPack` retains decoded objects in a private spool, exposes exact
 object IDs/kinds/bytes, and removes its files when dropped.
+
+### Scratch admission and generated objects
+
 `ScratchAdmission` reserves the combined live bytes before private files grow;
 quarantine and preparation share it, including bounded index sidecars. Its owner
 retains admission on refusal and releases bytes after directory cleanup. Hosts
 inject their shared disk policy; standalone and generated inputs use their
 finite `ReceiveLimits` without importing host-specific dependencies.
+
 `IncomingPack::from_generated_objects` gives trusted in-process Git object
 builders the same bounded identity spool without first compressing and then
 inflating an artificial wire pack. `prepare` remains mandatory and produces the
 same independently readable canonical pack and checksummed standard sidecars.
+
 `prepare_with_delta_bases` additionally accepts caller-proven generated-object
 relationships. It writes only self-contained OFS deltas, caps chain depth and
 eligible object size, falls back to full entries when a base is absent or a
 delta is not smaller, and records pack offsets and entry CRCs during the one
-bounded write. `prepare_with_external_delta_bases` may instead encode a bounded
+bounded write.
+
+`prepare_with_external_delta_bases` may instead encode a bounded
 REF delta when the caller supplies the decoded base, its immutable object ID,
 kind, and verified prior depth. Preparation recomputes the base identity and
 falls back to a full entry for unknown, mismatched, over-depth, oversized, or
-unprofitable candidates. Such a prepared pack depends on the surrounding object
+unprofitable candidates.
+
+Such a prepared pack depends on the surrounding object
 database; a native Git transfer must materialize that closure or repair the thin
-pack with `git index-pack --fix-thin`. Preparation emits Git v2 and reverse indexes directly, then
+pack with `git index-pack --fix-thin`.
+
+Preparation emits Git v2 and reverse indexes directly, then
 reopens them through the production locator to prove their checksum, pack
 identity, and exact object inventory. Tests compare these artifacts byte for
 byte with native `git index-pack`, repair external-base packs through native Git,
 and reconstruct every object with Git.
+
+### Thin-pack installation and consolidation
 
 Native thin-pack installation uses one private repair workspace and an explicit
 destination object directory for base lookup. `install_thin_pack_with_content_identity`
@@ -197,6 +222,7 @@ header scan; consolidation installs those verified objects temporarily, repairs
 the selected thin packs with native Git, and emits a self-contained pack whose
 index must equal the selected OID set. This preserves cross-pack deduplication
 without requiring the stable pack prefix to participate in the rewrite.
+
 Overlapping consolidation feeds Git the verified index OID union directly,
 avoiding `--stdin-packs`' revision/tree walk for optional packing name hints.
 Maintenance and response consolidation retain exact output-set checks; loss of
@@ -206,42 +232,56 @@ Complete response inventories with duplicate OIDs can also retain compressed
 entries: structural assembly emits the first occurrence and checks every source
 entry CRC, including discarded entries. Intact source bodies retain their OFS
 links byte-for-byte; bodies that lose entries rewrite them as OID-based REF
-links without recompression. This requires each
-overlapping source to be self-contained; mixing independently thin source
+links without recompression.
+
+This requires each overlapping source to be self-contained; mixing independently thin source
 representations could introduce a delta cycle. Disjoint sources retain the
-whole-body copy path, including proven cross-pack REF dependencies. The caller
-still proves that the source OID union equals the authorized response set, and
+whole-body copy path, including proven cross-pack REF dependencies.
+
+The caller still proves that the source OID union equals the authorized response set, and
 native Git validates the received response before making its objects visible.
+
+### Receive validation and publication ownership
 
 This is an integrity boundary, not a Git publisher. It validates the complete pack
 checksum, compressed streams, entry framing and delta reconstruction. Callers
 use `receive_plan::validate` for object syntax, graph connectivity and exact ref
 checks, then prove pointer payload dependencies and publish metadata under the
-existing writer fences. Storage
-credentials, canonical writes and the decision to acknowledge or reject a push
+existing writer fences.
+
+Storage credentials, canonical writes and the decision to acknowledge or reject a push
 belong above this crate. HTTP push remains unavailable until those layers are
 implemented.
 
 `receive_wire` preserves command order and exact old/new SHA-1 values, limits the
 command section to 1,024 refs and 1 MiB, and rejects malformed refs, duplicate
 destinations and unadvertised capabilities. Call its synchronous reader on a
-blocking worker with a transport deadline. The caller must validate pack presence
+blocking worker with a transport deadline.
+
+The caller must validate pack presence
 and completeness, authorize writes and determine the actual publication outcome
 before emitting status. An uncertain commit must fail the transport rather than
-reporting a ref rejection. Shallow pushes, certificates, sidebands and push options
+reporting a ref rejection.
+
+Shallow pushes, certificates, sidebands and push options
 are not advertised. Framing alone does not enable HTTP push.
 
 `receive_plan::GraphSource` supplies committed objects and an optional trusted
 kind. A trusted kind must come from a generation-bound proof of the object's
 complete closure; pack/locator presence alone does not suffice. Without that proof,
-validation traverses the object. The planner checks every incoming object, supports
+validation traverses the object.
+
+The planner checks every incoming object, supports
 raw-byte tree names and external gitlinks, and rejects malformed/sortedness/mode
 violations and protected `.git` aliases. It also preserves source lookup errors.
 
 The plan applies all old-tip comparisons before reading objects, validates the
 final ref namespace, requires commits for branch tips, checks ancestry when force
 updates are prohibited, and peels annotated tags without changing submitted OIDs.
+
 The caller supplies per-ref deletion/non-fast-forward policy; Git's wire protocol
 has no separate force flag. Returned pointer dependencies still require artifact
-storage checks. Recheck the pinned base under writer locks before publishing; a
+storage checks.
+
+Recheck the pinned base under writer locks before publishing; a
 validated plan alone is not an atomic commit or evidence of working HTTP push.

@@ -31,12 +31,14 @@ identity, integrity and admission checks; a journal ref change discards stale
 base indexes even when its generation is unchanged. Snapshots without indexes
 make no additional index requests. Publication of capsule-bound browse indexes
 is a separate maintenance responsibility, not part of opening or pushing.
+
 Captured physical indexes resolve both OIDs and offset-delta bases through
 authenticated pages. Snapshot opening checks their state, origin and prefixes;
 queries retain storage admission, encoded-work limits and cancellation. Complete
 index misses are definitive. Physical placement never assigns catalog ordinals
 or authorizes ref visibility; ordinary unindexed snapshots retain their existing
 pack-index inspection path until background readiness is published.
+
 Capsule graphs retain an immutable paged reader and captured commit roots;
 membership reads exact ancestor sets rather than allocating a full reachability
 bitmap. A full commit ID matching a verified captured root reuses that visibility
@@ -45,6 +47,7 @@ Graph/OID/parent reads share operation admission and cancellation, including
 warm queries. Released manifest graph version 1 retains complete graph validation.
 `commits_reachable_from` is asynchronous and uses a metadata-admitted operation
 without opening the object-locator database.
+
 Without a commit graph, full commit-ID resolution checks matching ref tips
 before traversing other roots. Matching annotated tags still require verified
 peeling; non-tip commits retain bounded breadth-first reachability traversal.
@@ -105,11 +108,14 @@ Pack-inventory downloads cancel only their operation's child token on a source
 failure, drain started body/sidecar writers, and skip queued work. Canonical,
 embedded and inline pack bodies share the same length/hash verifier and flush
 pending file writes before returning, including on cancellation or stream
-failure. Large canonical, capsule-backed and cached response packs use the storage
+failure.
+
+Large canonical, capsule-backed and cached response packs use the storage
 owner's ordered concurrent range stream. Four range requests are shared across
 store clones, including concurrent source packs; complete pack SHA-1/BLAKE3
 verification and request/byte admission remain mandatory. Small artifacts keep
 a single GET. Pack/sidecar writes and response-pack file reads use 1 MiB buffers.
+
 Cached and source packs share the authenticated writer and drain pending writes on every returned
 exit. Pack generation passes that semantic result to explicit session
 closure. Callers must await cancellation cleanup before deleting destinations;
@@ -218,28 +224,38 @@ admission boundary: failed headers charge a request but no advertised body,
 and each facade retry reserves its own request and response bytes. An early
 range-size check rejects work that already exceeds the remaining byte budget.
 
+### Shared immutable-read work
+
 Packed-entry, pack-index body and index-size producers share one immutable-read
 flight implementation with independent participant budgets. Request attempts and
 advertised responses are admitted for each participating operation; packed-entry
-allocations are additionally admitted before decode. Rejection reaches only the
-affected participant. Late
-joiners reserve prior work once per operation. When no participant can admit
+allocations are additionally admitted before decode.
+
+Rejection reaches only the affected participant. Late
+joiners reserve prior work once per operation.
+
+When no participant can admit
 further work, the producer retires and fresh callers can start new work without
 inheriting a retired caller's budget failure. Successful callers still share
 one origin read and one decode; cancellation of one operation does not cancel
-another participant's work. Each waiter holds a lease on the producer. Releasing
+another participant's work.
+
+Each waiter holds a lease on the producer. Releasing
 its last lease atomically closes admission and cancels a child runtime token;
 explicit cancellation joins producer cleanup before returning. Dropped waiters
 signal cancellation through the same lease, with runtime shutdown retaining the
-join obligation. Departed participants stop accumulating charges; rejoining the
+join obligation.
+
+Departed participants stop accumulating charges; rejoining the
 same operation reserves work performed while it was absent without charging
 previously admitted work twice.
 
 Batch locator reads coalesce nearby lazy pack indexes within one immutable
 source. Windows retain the source-range and overread bounds and at most 256
 indexes; each index still passes its descriptor hash, Git checksum, and inventory
-checks before the batch enters the existing parsed-index cache. Identical windows
-share a budget-participating producer. Standalone, inline, and single-index reads
+checks before the batch enters the existing parsed-index cache.
+
+Identical windows share a budget-participating producer. Standalone, inline, and single-index reads
 retain their existing path. This reduces index requests, not the number of
 physical capsule objects or the payload requests needed to fetch them.
 
@@ -249,11 +265,15 @@ request-set scan per small frontier member or an index scan per point read.
 Self-contained matches remain preferred over external deltas. This bounds CPU
 lookup work; it does not change source-range admission or reduce origin requests.
 
+### Indexed history and blame
+
 First-parent path history and blame use captured path-state change points when
 an index is available. History verifies each candidate against raw first-parent
 commit/tree entries, including deletion, mode changes and covering type resets.
 Continuations resume from the candidate's parent without rewalking unrelated
-commits. Blame preserves line comparison and deletion boundaries while jumping
+commits.
+
+Blame preserves line comparison and deletion boundaries while jumping
 between relevant versions. Root-path and all-parent history retain their existing
 raw traversal; index absence retains the ordinary Git read path. Missing or
 corrupt advertised pages are errors, not a reason to switch traversal.
@@ -262,6 +282,7 @@ Snapshot constructors treat supplied graph readiness as required metadata: a
 missing, corrupt or retired advertised graph fails opening. Index absence still
 permits ordinary raw reads. The manifest-based `open` retains its release-tagged
 optional-graph policy; cancellation and admission failures are never suppressed.
+
 Operation finalization normalizes wrapped cancellation only when its own scope
 was interrupted, preserving real failures and typed locator-close errors.
 

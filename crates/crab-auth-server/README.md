@@ -40,11 +40,13 @@ Before source materialization, scoped candidates are verified using only the
 filtered view and incoming packs. Newly reachable Git objects must be visible
 under that capture or supplied by the candidate; retained physical objects do
 not grant access. Both receive paths share the graph/visibility verifier.
+
 Receive then queries pointer files and candidate shard/xorb identities under
 each capture and applies the candidate delta.
 File-only deltas can reference historical filtered artifacts; source-first
-file selection and immutable descriptor conflicts remain enforced. Prepare
-reads only ref authority. Git workspace intake combines captured packs and
+file selection and immutable descriptor conflicts remain enforced.
+
+Prepare reads only ref authority. Git workspace intake combines captured packs and
 candidate packs under the existing byte and external-delta checks, including
 checkpoint-backed views. Physical shard/xorb verification and copy-before-ref
 publication remain unchanged.
