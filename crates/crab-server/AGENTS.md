@@ -27,8 +27,17 @@ The Cell repository facade in `src/cells/repository/mod.rs` exposes typed
 operations. `models.rs` owns common records/inputs; `issues.rs` owns issue and
 comment operations. Feature commands and their persistence helpers live under
 `checks/`, `labels/`, `statuses/`, `settings/`, `releases/`, and `pulls/`. Pull
-review threads belong to `pulls/review_threads/`; browse projection reads and
+readiness belongs to `pulls/readiness/`, reviewer invitations and fulfillment
+belong to `pulls/review_requests/`, and review threads belong to
+`pulls/review_threads/`; browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs.
+
+Collaboration documents live in `cells/repository/collaboration/`. Its `target.rs`
+owns shared discussion addresses, `activity/` owns append-only events and subject
+indexes, and `reactions/` owns actor membership/counts. Activity append calls stay
+inside domain commands so their SQL/KV changes and events commit together.
+`links/` owns versioned issue/PR relationships and both subject indexes; its
+single activity event is indexed into both timelines.
 
 The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns
 typed ingress, `src/cells/application.rs` owns transaction/replay dispatch, and
@@ -42,7 +51,8 @@ and session migration paths are supported.
   implementation, submodules, and tests in that directory. Avoid custom `#[path]`
   mounts and sibling `<component>.rs` entry points.
 - `api/` owns browser HTTP feature handlers and route assembly; pull merge-tree
-  mechanics live in `api/pulls/merge/`, and thread persistence in
+  mechanics live in `api/pulls/merge/`, comments in `api/pulls/comments.rs`,
+  replies in `api/pulls/review_threads/replies.rs`, and thread persistence in
   `api/pulls/review_threads/`. `git/` owns native Git, object,
   receive, and LFS endpoints and their route assembly. `auth/` assembles login
   and session routes. `server/http/mod.rs` applies the common security boundary

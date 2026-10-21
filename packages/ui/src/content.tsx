@@ -900,7 +900,7 @@ function ChangeTree({
     renderRowDecoration,
     unsafeCSS: `
       [data-item-section="decoration"] {
-        color: var(--trees-accent);
+        color: var(--trees-fg);
         font-size: 11px;
         font-variant-numeric: tabular-nums;
         font-weight: 600;

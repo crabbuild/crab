@@ -23,6 +23,7 @@ pub(crate) use checks::{
 };
 pub(crate) use issues::{ListComments, ListIssues, UpdateComment, UpdateIssue};
 pub(crate) use labels::{CreateLabel, DeleteLabel, ListLabels, UpdateLabel};
+pub(crate) use pulls::review_requests;
 pub(crate) use pulls::review_threads::{
     CreatePullReviewReply, CreatePullReviewReplyInput, CreatePullReviewReplyOutcome,
     CreatePullReviewThread, CreatePullReviewThreadInput, CreatePullReviewThreadOutcome,
@@ -40,11 +41,12 @@ pub(crate) use pulls::{
     CreatePullReviewOutcome, GetPull, GetPullComment, GetPullMergeSubmission, GetPullReview,
     GetPullReviewSubmission, GetPullSubmission, ListPullComments, ListPullReviews, ListPulls,
     MergeMethod, PullChildKey, PullChildListInput, PullCommentRecord, PullListInput, PullMerge,
-    PullMergeTransition, PullRecord, PullReviewRecord, PullState, PullSubmissionKey,
+    PullMergeTransition, PullReadiness, PullRecord, PullReviewRecord, PullState, PullSubmissionKey,
     ReservePullMerge, ReservePullMergeInput, ReservePullMergeOutcome, ReviewState,
-    TransitionPullMerge, TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull,
-    UpdatePullComment, UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput,
-    UpdatePullOutcome, UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
+    SetPullReadiness, SetPullReadinessInput, SetPullReadinessOutcome, TransitionPullMerge,
+    TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull, UpdatePullComment,
+    UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome,
+    UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
 };
 pub(crate) use releases::{
     AttachReleaseAsset, AttachReleaseAssetInput, AttachReleaseAssetOutcome,
@@ -75,6 +77,7 @@ const MAX_ASSIGNEES: usize = 10;
 const MAX_LIST_OUTPUT_BYTES: usize = 1024 * 1024;
 
 mod checks;
+pub(crate) mod collaboration;
 mod dispatch;
 mod issues;
 mod labels;

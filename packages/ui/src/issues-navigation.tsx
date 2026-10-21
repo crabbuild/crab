@@ -1,6 +1,10 @@
 import { repoHref } from "./repository-route";
 import type { ReactNode } from "react";
-import { IssueOpenedIcon, TagIcon } from "@primer/octicons-react";
+import {
+  IssueOpenedIcon,
+  TagIcon,
+  MilestoneIcon,
+} from "@primer/octicons-react";
 import { type Repository } from "./api";
 import { Link } from "./ui";
 
@@ -11,7 +15,7 @@ export function IssuesWorkspace({
   children,
 }: {
   repo: Repository;
-  view: "issues" | "labels";
+  view: "issues" | "labels" | "milestones";
   showNavigation: boolean;
   children: ReactNode;
 }) {
@@ -35,6 +39,14 @@ export function IssuesWorkspace({
           >
             <TagIcon />
             Labels
+          </Link>
+          <Link
+            className={view === "milestones" ? "active" : ""}
+            aria-current={view === "milestones" ? "page" : undefined}
+            href={repoHref(repo, { view: "milestones" })}
+          >
+            <MilestoneIcon />
+            Milestones
           </Link>
         </nav>
       </aside>

@@ -1,7 +1,15 @@
+import { PullReadinessControl } from "./collaboration/pull-readiness";
+import { ActivityTimeline } from "./collaboration/activity";
 import { repoHref, repositoryRoute } from "./repository-route";
 import { useEffect, useMemo, useState } from "react";
 import type { SelectedLineRange } from "@pierre/diffs";
-import { ActionList, ActionMenu, Button, TextInput } from "@primer/react";
+import {
+  ActionList,
+  ActionMenu,
+  Button,
+  Checkbox,
+  TextInput,
+} from "@primer/react";
 import {
   CheckCircleFillIcon,
   ChecklistIcon,
@@ -12,6 +20,7 @@ import {
   GitMergeIcon,
   GitPullRequestClosedIcon,
   GitPullRequestIcon,
+  GitPullRequestDraftIcon,
   ShieldLockIcon,
   XCircleFillIcon,
 } from "@primer/octicons-react";
@@ -35,6 +44,7 @@ import {
 } from "./content";
 import { CommitList } from "./browse";
 import { CheckRuns } from "./check-runs";
+import { Reactions, type ReactionSummary } from "./collaboration/reactions";
 import { changeContent } from "./content-editor";
 import { useMutation } from "./discussion-mutations";
 import { DiscussionSearch } from "./discussion-search";
@@ -51,6 +61,7 @@ import type { CodeThemes } from "./code-theme";
 import { replaceSelectedLines } from "./pull-review-model";
 
 interface PullComment {
+  reactions: ReactionSummary;
   number: number;
   author: string;
   body: string;
@@ -61,6 +72,7 @@ interface PullComment {
 }
 
 interface PullSummary {
+  draft: boolean;
   number: number;
   title: string;
   state: "open" | "closed" | "merged";
@@ -74,6 +86,7 @@ interface PullSummary {
 }
 
 interface PullRequest extends PullSummary {
+  reactions: ReactionSummary;
   body: string;
   version: number;
   can_edit: boolean;
@@ -126,6 +139,7 @@ interface PullRequest extends PullSummary {
 type ReviewState = "commented" | "approved" | "changes_requested";
 
 interface PullReview {
+  reactions: ReactionSummary;
   number: number;
   author: string;
   body: string;
@@ -139,6 +153,7 @@ interface PullReview {
 }
 
 interface PullReviewThread extends InlineDiffThread {
+  reactions: ReactionSummary;
   path: string;
   base_oid: string;
   head_oid: string;
@@ -156,6 +171,7 @@ interface PullReviewThread extends InlineDiffThread {
 }
 
 interface PullReviewReply {
+  reactions: ReactionSummary;
   number: number;
   author: string;
   body: string;
@@ -230,17 +246,22 @@ function branch(name: string) {
     : name;
 }
 
-function PullBadge({ state }: { state: PullRequest["state"] }) {
-  const Icon =
-    state === "open"
-      ? GitPullRequestIcon
-      : state === "merged"
-        ? GitMergeIcon
-        : GitPullRequestClosedIcon;
+const pullIcons = {
+  open: GitPullRequestIcon,
+  draft: GitPullRequestDraftIcon,
+  closed: GitPullRequestClosedIcon,
+  merged: GitMergeIcon,
+};
+function pullStatus(pull: { state: PullRequest["state"]; draft: boolean }) {
+  return pull.state === "open" && pull.draft ? "draft" : pull.state;
+}
+function PullBadge({ pull }: { pull: PullRequest }) {
+  const status = pullStatus(pull);
+  const Icon = pullIcons[status];
   return (
-    <span className={`pull-state ${state}`} aria-live="polite">
+    <span className={`pull-state ${status}`} aria-live="polite">
       <Icon />
-      {state === "open" ? "Open" : state === "merged" ? "Merged" : "Closed"}
+      {status[0].toUpperCase() + status.slice(1)}
     </span>
   );
 }
@@ -372,45 +393,43 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
           <>
             {data.items.length ? (
               <ul className="issue-list panel">
-                {data.items.map((pull) => (
-                  <li key={pull.number}>
-                    <span
-                      className={`pull-status-icon ${pull.state}`}
-                      role="img"
-                      aria-label={pull.state}
-                    >
-                      {pull.state === "open" ? (
-                        <GitPullRequestIcon />
-                      ) : pull.state === "merged" ? (
-                        <GitMergeIcon />
-                      ) : (
-                        <GitPullRequestClosedIcon />
-                      )}
-                    </span>
-                    <div>
-                      <Link
-                        className="issue-link"
-                        href={repoHref(repo, {
-                          view: "pulls",
-                          pull: String(pull.number),
-                        })}
+                {data.items.map((pull) => {
+                  const status = pullStatus(pull);
+                  const Icon = pullIcons[status];
+                  return (
+                    <li key={pull.number}>
+                      <span
+                        className={`pull-status-icon ${status}`}
+                        role="img"
+                        aria-label={status}
                       >
-                        {pull.title}
-                      </Link>
-                      <LabelBadges labels={pull.labels} />
-                      <p className="muted">
-                        #{pull.number} opened {timestamp(pull.created_at)} by{" "}
-                        {pull.author}
-                      </p>
-                      <p className="pull-branches muted">
-                        <code>{branch(pull.head_ref)}</code>
-                        <span>into</span>
-                        <code>{branch(pull.base_ref)}</code>
-                      </p>
-                    </div>
-                    <AssigneeAvatars assignees={pull.assignees} />
-                  </li>
-                ))}
+                        <Icon />
+                      </span>
+                      <div>
+                        <Link
+                          className="issue-link"
+                          href={repoHref(repo, {
+                            view: "pulls",
+                            pull: String(pull.number),
+                          })}
+                        >
+                          {pull.title}
+                        </Link>
+                        <LabelBadges labels={pull.labels} />
+                        <p className="muted">
+                          #{pull.number} opened {timestamp(pull.created_at)} by{" "}
+                          {pull.author}
+                        </p>
+                        <p className="pull-branches muted">
+                          <code>{branch(pull.head_ref)}</code>
+                          <span>into</span>
+                          <code>{branch(pull.base_ref)}</code>
+                        </p>
+                      </div>
+                      <AssigneeAvatars assignees={pull.assignees} />
+                    </li>
+                  );
+                })}
               </ul>
             ) : (
               <div className="notice issue-empty">
@@ -498,6 +517,7 @@ function NewPull({
     (url.searchParams.get("title") ?? "").slice(0, 256),
   );
   const [body, setBody] = useState("");
+  const [draft, setDraft] = useState(false);
   const mutation = useMutation(csrf);
   const submission = useSubmission();
   const baseOid = branches.find((ref) => ref.name === base)?.oid;
@@ -558,7 +578,13 @@ function NewPull({
             className="panel discussion-form pull-form"
             onSubmit={async (event) => {
               event.preventDefault();
-              const input = { title, body, base_ref: base, head_ref: head };
+              const input = {
+                title,
+                body,
+                draft,
+                base_ref: base,
+                head_ref: head,
+              };
               const created = await mutation.run<PullRequest>(
                 endpoint(repo, "pulls"),
                 "POST",
@@ -592,13 +618,25 @@ function NewPull({
               disabled={mutation.pending}
             />
             <Failure message={mutation.error} />
+            <label className="pull-draft-option">
+              <Checkbox
+                checked={draft}
+                disabled={mutation.pending}
+                onChange={(event) => setDraft(event.target.checked)}
+              />
+              Create as draft
+            </label>
             <div className="discussion-actions">
               <Button
                 type="submit"
                 variant="primary"
                 disabled={mutation.pending || !title.trim()}
               >
-                {mutation.pending ? "Creating…" : "Create pull request"}
+                {mutation.pending
+                  ? "Creating…"
+                  : draft
+                    ? "Create draft pull request"
+                    : "Create pull request"}
               </Button>
             </div>
           </form>
@@ -659,7 +697,7 @@ function PullDetail({
                 {data.title} <span className="muted">#{data.number}</span>
               </h2>
               <div className="pull-summary">
-                <PullBadge state={data.state} />
+                <PullBadge pull={data} />
                 {data.merge ? (
                   <span>
                     <strong>{data.merge.author}</strong>{" "}
@@ -1259,6 +1297,12 @@ function ReviewThreadCard({
               <DiscussionMarkdown>{thread.body}</DiscussionMarkdown>
             )}
           </div>
+          <Reactions
+            repo={repo}
+            csrf={csrf}
+            target={`pulls/${pull.number}/threads/${thread.number}`}
+            summary={thread.reactions}
+          />
           {thread.suggested_text !== null &&
             !thread.outdated &&
             !thread.vanished &&
@@ -1566,6 +1610,12 @@ function ReviewReplyItem({
           )}
         </>
       )}
+      <Reactions
+        repo={repo}
+        csrf={csrf}
+        target={`pulls/${pull.number}/threads/${thread.number}/replies/${reply.number}`}
+        summary={reply.reactions}
+      />
       <Failure message={mutation.error} />
     </div>
   );
@@ -1668,6 +1718,7 @@ function PullConversation({
     endpoint(repo, `pulls/${pull.number}/reviews`),
   );
   const [body, setBody] = useState("");
+  const [activityEpoch, setActivityEpoch] = useState(0);
   const commentMutation = useMutation(csrf);
   const stateMutation = useMutation(csrf);
   const submission = useSubmission();
@@ -1679,12 +1730,21 @@ function PullConversation({
           <span className="muted">commented {timestamp(pull.created_at)}</span>
         </header>
         <DiscussionMarkdown>{pull.body}</DiscussionMarkdown>
+        <Reactions
+          repo={repo}
+          csrf={csrf}
+          target={`pulls/${pull.number}`}
+          summary={pull.reactions}
+        />
       </article>
       <Result state={comments} timingLabel="Conversation comments">
         {(commentPage) => (
           <Result state={reviews} timingLabel="Pull request reviews">
             {(reviewPage) => (
               <PullTimeline
+                repo={repo}
+                pull={pull.number}
+                csrf={csrf}
                 comments={commentPage.items}
                 reviews={reviewPage.items}
               />
@@ -1692,9 +1752,12 @@ function PullConversation({
           </Result>
         )}
       </Result>
-      {!repo.archived && (
-        <MergePanel repo={repo} pull={pull} csrf={csrf} refresh={refresh} />
-      )}
+      <ActivityTimeline
+        key={`${pull.version}:${activityEpoch}`}
+        repo={repo}
+        target={`pulls/${pull.number}`}
+      />
+      <MergePanel repo={repo} pull={pull} csrf={csrf} refresh={refresh} />
       {!repo.archived && (
         <form
           className="discussion-form pull-comment-form"
@@ -1707,6 +1770,7 @@ function PullConversation({
               { ...input, request_id: submission(input) },
             );
             if (created) {
+              setActivityEpoch((value) => value + 1);
               setBody("");
               comments.retry();
             }
@@ -1844,6 +1908,39 @@ function MergePanel({
           <div>
             <strong>This pull request is closed</strong>
             <p>Reopen it before merging these commits.</p>
+          </div>
+        </div>
+      </section>
+    );
+  if (pull.draft)
+    return (
+      <section className="pull-merge-note draft" aria-label="Merge status">
+        <div className="merge-summary">
+          <GitPullRequestDraftIcon size={24} />
+          <div>
+            <strong>This pull request is a draft</strong>
+            <p>
+              Mark it ready for review before merging. Comments and reviews
+              remain available.
+            </p>
+          </div>
+        </div>
+        <PullReadinessControl
+          repo={repo}
+          pull={pull}
+          csrf={csrf}
+          onSaved={refresh}
+        />
+      </section>
+    );
+  if (repo.archived && !pending)
+    return (
+      <section className="pull-merge-note archived" aria-label="Merge status">
+        <div className="merge-summary">
+          <ShieldLockIcon size={24} />
+          <div>
+            <strong>This repository is archived</strong>
+            <p>Pull requests are read-only while the repository is archived.</p>
           </div>
         </div>
       </section>
@@ -2008,7 +2105,20 @@ function MergePanel({
             </p>
           )}
           <Failure message={mutation.error} />
+          {mutation.error && repo.archived && pending && (
+            <Button size="small" onClick={refresh}>
+              Refresh merge status
+            </Button>
+          )}
         </div>
+      )}
+      {!pending && (
+        <PullReadinessControl
+          repo={repo}
+          pull={pull}
+          csrf={csrf}
+          onSaved={refresh}
+        />
       )}
     </section>
   );
@@ -2103,9 +2213,15 @@ function RequiredChecks({
 }
 
 function PullTimeline({
+  repo,
+  pull,
+  csrf,
   comments,
   reviews,
 }: {
+  repo: Repository;
+  pull: number;
+  csrf: string;
   comments: PullComment[];
   reviews: PullReview[];
 }) {
@@ -2131,10 +2247,19 @@ function PullTimeline({
               </span>
             </header>
             <DiscussionMarkdown>{event.value.body}</DiscussionMarkdown>
+            <Reactions
+              repo={repo}
+              csrf={csrf}
+              target={`pulls/${pull}/comments/${event.value.number}`}
+              summary={event.value.reactions}
+            />
           </article>
         ) : (
           <ReviewEvent
             key={`review-${event.value.number}`}
+            repo={repo}
+            pull={pull}
+            csrf={csrf}
             review={event.value}
           />
         ),
@@ -2143,7 +2268,17 @@ function PullTimeline({
   );
 }
 
-function ReviewEvent({ review }: { review: PullReview }) {
+function ReviewEvent({
+  repo,
+  pull,
+  csrf,
+  review,
+}: {
+  repo: Repository;
+  pull: number;
+  csrf: string;
+  review: PullReview;
+}) {
   const action =
     review.state === "approved"
       ? "approved these changes"
@@ -2168,6 +2303,12 @@ function ReviewEvent({ review }: { review: PullReview }) {
         <span className="muted">{timestamp(review.created_at)}</span>
       </header>
       {review.body && <DiscussionMarkdown>{review.body}</DiscussionMarkdown>}
+      <Reactions
+        repo={repo}
+        csrf={csrf}
+        target={`pulls/${pull}/reviews/${review.number}`}
+        summary={review.reactions}
+      />
       <footer className="muted">
         Reviewed commit <code>{short(review.commit_oid)}</code>
       </footer>

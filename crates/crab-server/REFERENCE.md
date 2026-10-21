@@ -398,6 +398,8 @@ The blame view links commit OIDs and subjects to immutable commit details. Its a
 | Go to file | Bounded full-tree fuzzy search without blob reads; `T` opens and focuses search |
 | Releases | Releases/Tags navigation, search, drafts, publication, edits, deletion, source ZIPs, and binary assets |
 | Pull requests | Conversation, Commits, Checks, Files changed, reviews, shared Markdown formatting, approval state, and merge controls |
+| Review requests | Versioned member requests, cancellation, submitted-review fulfillment, and reviewer sidebar |
+| Pull readiness | `PUT /api/repos/{owner}/{name}/pulls/{number}/readiness`; list/detail responses include `draft` |
 | Issues and metadata | Searchable issues, comments, labels, assignees, Markdown formatting and preview, and conflict recovery |
 | Settings | Default branch, exact protection rules, and archive state with stale-version checks |
 | Appearance | System, light, and dark themes persisted across desktop and narrow layouts |
@@ -1251,10 +1253,10 @@ Create the temporary directory first. Replace the test name with `receive_faults
 
 ## Issues, pull requests and reviews
 
-Issue, issue-comment and label state use one repository SQLite Cell whose committed
-LTX roots are authoritative in object storage. Remaining collaboration domains
-still use versioned JSON documents under the repository prefix. Collaboration
-does not mutate Git refs unless a pull request merge publishes a ref update.
+Collaboration state lives in one native repository Cell whose committed LTX roots
+are authoritative in object storage. Milestones and reactions use bounded typed KV
+documents in that same SQLite transaction boundary. Collaboration does not mutate
+Git refs unless a pull request merge publishes a ref update.
 
 ### Use the collaboration route families
 
@@ -1270,8 +1272,109 @@ does not mutate Git refs unless a pull request merge publishes a ref update.
 | Merge | `POST /api/repos/{owner}/{name}/pulls/{number}/merge` |
 | Labels | `GET/POST /api/repos/{owner}/{name}/labels`, `PATCH/DELETE /api/repos/{owner}/{name}/labels/{number}` |
 | Assignees | `GET /api/repos/{owner}/{name}/assignees`; issue and pull `PATCH` requests replace assignments |
+| Milestones | `GET/POST /api/repos/{owner}/{name}/milestones`, `GET/PATCH /api/repos/{owner}/{name}/milestones/{number}`, `GET /api/repos/{owner}/{name}/milestones/{number}/items`; issue/pull `GET/PUT .../{number}/milestone` |
+| Reactions | `PUT /api/repos/{owner}/{name}/reactions/{target}`; discussion responses include personalized summaries |
+| Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
+| Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
+
+### Browse activity
+
+Repository activity lives at `/{owner}/{name}/activity`. Issue and PR conversation
+pages include their own activity panel. Feeds use `limit` (1–50, default 30) and
+an exclusive numeric `before` cursor, ordered newest first by event number.
+
+Events record new discussion changes, review decisions, inline conversations,
+merge completion, and milestone assignments. They capture actor names and subject
+titles at the action, without exposing private identity claims or copying bodies.
+Existing history is not backfilled. Edits that change no content/state and
+creation retries do not add events. Reassigning milestones records removal and
+addition in the same transaction as the assignment and progress updates.
+
+### Draft pull requests
+
+Create with `"draft":true` to open a draft; omission opens a normal ready PR.
+The creation reservation binds this mode alongside the original title, body,
+branches, and author. Retrying that original payload recovers the existing PR,
+including later edits and current readiness; changing the creation mode is a
+submission conflict.
+
+Authors or repository writers convert an open PR with
+`PUT .../pulls/{number}/readiness`, for example `{"version":1,"draft":false}`.
+Readiness and the PR version come from one native read transaction. Conversion
+advances the version only when readiness changes. Stale opposite changes return 409; closed or merged PRs and pending merges reject conversion. Closing
+and reopening preserves readiness. Drafts allow discussion/reviews but cannot
+reserve or begin a new merge. Readiness changes invalidate old merge versions.
+
+Fresh PR commands enforce archive transactionally, including comments, reviews,
+inline conversations, and merge admission. Existing receipts remain replayable.
+A retry may complete an already-published merge after archive; unpublished work
+is aborted without changing Git. Archived conversations retain merge status and
+allow recovery of a pending publication, with explicit refresh after an abort.
+These recovery paths retain ordinary membership, writer, Origin, CSRF,
+immutable-submission, and exact-ref checks.
+
+### Request pull request reviews
+
+`GET /api/repos/{owner}/{name}/pulls/{number}/review-requests` returns bounded
+pages with an opaque exclusive `before` cursor, the current PR version, eligible
+members, and the caller's management permission. Items retain requested,
+cancelled, or fulfilled state. Fulfilled items name their submitted review.
+
+`PUT` to the same endpoint takes `version` and a typed `change`:
+`{"version":1,"change":{"kind":"request","subject":"member-subject"}}` or
+`{"version":2,"change":{"kind":"cancel","id":"opaque-request-id"}}`. Authors or writers manage open
+PR requests; pending merges block changes and archived repositories reject them.
+The PR author cannot request their own review. Selection resolves durable
+membership instead of waiting for background catalog materialization. A renamed
+member retains identity; an existing request for a removed member can be cancelled
+by its opaque ID. Public request items omit identity issuer/subject claims.
+
+New reviews fulfill a matching outstanding request atomically. Reviewing twice
+or replaying an earlier submission cannot fulfill a later re-request. The PR
+version advances once for fulfillment and a decision committed together. Requests
+do not add a merge gate or alter required approvals. The sidebar keeps failed
+choices, requires explicit conflict refresh, and preserves read-only status.
+
+### Link related work
+
+Writers link issues from the PR sidebar and can unlink from either subject.
+Readers can follow backlinks. Links are repository-local relationships; linking
+does not automatically close issues or satisfy merge requirements.
+
+Read the pair endpoint for its current `active` and `version`, then send a desired
+state such as `{"active":true,"version":0}` with `PUT`. A changed relationship
+increments its version; an unchanged desired state returns the current version
+without another event. An opposite change with a stale version returns 409.
+Unlinking retains its version, so delayed retries cannot overwrite later changes.
+
+Both lists use `limit` (1–50, default 30) and an exclusive numeric `before` cursor
+ordered by the related issue/PR number. Items include the current title, state,
+subject address, and relationship version. Relationship changes update both
+indexes and one canonical activity event atomically; that event appears in both
+timelines and once in the repository feed. Archived repositories keep backlinks
+readable and reject fresh relationship mutations.
+
+### React to discussions
+
+Members with read access can add or remove reactions on issue and PR bodies,
+comments, reviews, inline threads, and replies. The target is the resource path
+relative to the repository API, for example `issues/1/comments/2` or
+`pulls/1/threads/2/replies/3`. Parent IDs are validated; equal-numbered resources
+have independent reaction memberships.
+
+Send a desired state such as `{"kind":"heart","active":true}`. Supported kinds
+are `thumbs_up`, `thumbs_down`, `laugh`, `hooray`, `confused`, `heart`, `rocket`,
+and `eyes`. Repeating the same desired membership does not increment counts.
+Responses expose counts and the current actor's membership, without listing
+identity claims. Archived repositories retain readable counts and reject fresh
+reaction mutations.
+
+Discussion detail and list responses include a `reactions` summary. Lists batch
+these reads in one native transaction. The summary's native `revision` orders
+completed writes and refreshes so delayed responses cannot replace newer browser
+state. Reaction writes do not change discussion edit versions.
 
 ### Retry creations safely
 

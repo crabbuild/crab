@@ -11,6 +11,7 @@ export interface RepositoryRoute {
   pull?: string;
   pullTab?: string;
   release?: string;
+  milestone?: string;
   action?: string;
   section?: string;
   base?: string;
@@ -90,6 +91,7 @@ export function repoHref(
     pull,
     pull_tab,
     release,
+    milestone,
     action,
     section,
     ...filters
@@ -124,6 +126,13 @@ export function repoHref(
         ? `/pull/${encodeURIComponent(pull)}${pull_tab && pull_tab !== "conversation" ? `/${pull_tab}` : ""}`
         : "/pulls";
     }
+  } else if (view === "milestones") {
+    suffix =
+      action === "new"
+        ? "/milestones/new"
+        : milestone
+          ? `/milestones/${encodeURIComponent(milestone)}`
+          : "/milestones";
   } else if (view === "releases") {
     suffix =
       action === "new"
@@ -154,6 +163,7 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
       "pull",
       "pull_tab",
       "release",
+      "milestone",
       "action",
       "section",
       "base",
@@ -262,6 +272,14 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         head: comparison && decodeURIComponent(comparison[1]),
       };
     }
+    if (page === "milestones" && tail.length <= 1) {
+      if (!tail.length) return { ...route, view: "milestones" };
+      if (tail[0] === "new")
+        return { ...route, view: "milestones", action: "new" };
+      if (/^[1-9]\d*$/.test(tail[0]))
+        return { ...route, view: "milestones", milestone: tail[0] };
+      return null;
+    }
     if (page === "releases") {
       if (!tail.length) return { ...route, view: "releases" };
       if (tail[0] === "new" && tail.length === 1)
@@ -285,7 +303,10 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         view: "settings",
         section: tail[0] === "access" ? "members" : tail[0],
       };
-    if (["branches", "tags", "labels"].includes(page) && !tail.length)
+    if (
+      ["branches", "tags", "labels", "activity"].includes(page) &&
+      !tail.length
+    )
       return { ...route, view: page };
     return null;
   } catch {

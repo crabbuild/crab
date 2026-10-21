@@ -97,6 +97,10 @@ pub(crate) struct PullReviewDecision {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PullRecord {
+    // Durable command receipts contain JSON replies. Pre-readiness replies
+    // describe ordinary PRs and must still deserialize during retry recovery.
+    #[serde(default)]
+    pub draft: bool,
     pub number: u64,
     pub create_submission_id: [u8; 16],
     pub author: RepositoryAuthor,
@@ -120,6 +124,7 @@ pub(crate) struct PullRecord {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PullSummary {
+    pub draft: bool,
     pub number: u64,
     pub author: RepositoryAuthor,
     pub title: String,
@@ -213,6 +218,8 @@ pub(crate) struct PullReviewPage {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreatePullInput {
+    #[serde(default)]
+    pub draft: bool,
     pub submission_id: [u8; 16],
     pub author: RepositoryAuthor,
     pub title: String,
@@ -225,6 +232,7 @@ pub(crate) struct CreatePullInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum CreatePullOutcome {
+    Archived,
     Created(Box<PullRecord>),
     RequestConflict,
 }
@@ -245,6 +253,7 @@ pub(crate) struct UpdatePullInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum UpdatePullOutcome {
+    Archived,
     Updated(Box<PullRecord>),
     NotFound,
     Forbidden,
@@ -265,6 +274,7 @@ pub(crate) struct CreatePullCommentInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum CreatePullCommentOutcome {
+    Archived,
     Created(PullCommentRecord),
     PullNotFound,
     RequestConflict,
@@ -281,6 +291,7 @@ pub(crate) struct UpdatePullCommentInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum UpdatePullCommentOutcome {
+    Archived,
     Updated(PullCommentRecord),
     NotFound,
     Forbidden,
@@ -300,6 +311,7 @@ pub(crate) struct CreatePullReviewInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum CreatePullReviewOutcome {
+    Archived,
     Created(PullReviewRecord),
     PullNotFound,
     PullClosed,
@@ -320,6 +332,7 @@ pub(crate) struct UpdatePullReviewInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum UpdatePullReviewOutcome {
+    Archived,
     Updated(PullReviewRecord),
     NotFound,
     Forbidden,
@@ -335,6 +348,8 @@ pub(crate) struct ReservePullMergeInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum ReservePullMergeOutcome {
+    Draft,
+    Archived,
     Reserved(Box<PullMerge>),
     PullNotFound,
     RequestConflict,
@@ -357,6 +372,8 @@ pub(crate) struct TransitionPullMergeInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum TransitionPullMergeOutcome {
+    Draft,
+    Archived,
     Applied(Box<PullRecord>),
     NotFound,
     Conflict,
@@ -390,3 +407,10 @@ pub(super) mod review_threads;
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) mod review_requests;
+
+mod readiness;
+pub(crate) use readiness::{
+    PullReadiness, SetPullReadiness, SetPullReadinessInput, SetPullReadinessOutcome,
+};

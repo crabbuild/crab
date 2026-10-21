@@ -1,4 +1,5 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
+import { emptyReactions, emptyReviewRequests } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -14,6 +15,27 @@ const pathHex = "README.md"
 test("pull request creation, discussion, and files follow the GitHub review flow", async ({
   page,
 }) => {
+  const reactionStates = new Map<string, ReturnType<typeof emptyReactions>>();
+  const reactionWrites: string[] = [];
+  function reactions(target: string) {
+    let summary = reactionStates.get(target);
+    if (!summary) {
+      summary = emptyReactions();
+      reactionStates.set(target, summary);
+    }
+    return summary;
+  }
+  async function react(scope: Locator) {
+    await scope
+      .getByRole("button", { name: "Add reaction", exact: true })
+      .click();
+    await page
+      .getByRole("menuitemcheckbox", { name: "Heart", exact: true })
+      .click();
+    await expect(
+      scope.getByRole("button", { name: "Heart: 1 reaction", exact: true }),
+    ).toHaveAttribute("aria-pressed", "true");
+  }
   let state: "open" | "closed" | "merged" = "open";
   let created = false;
   let branchesAvailable = true;
@@ -35,6 +57,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
       end_line: 1,
       author: "Bob",
       body: "Consider a clearer opening.",
+      reactions: reactions("pulls/2/threads/1"),
       suggested_text: "Applied content",
       base_oid: base,
       head_oid: head,
@@ -57,9 +80,11 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   const pull = () => {
     const approvals = branchesAvailable && reviews.length ? 1 : 0;
     return {
+      draft: false,
       number: created ? 2 : 1,
       title: created ? "Document the feature" : "Improve the README",
       body: created ? "This explains the **new behavior**." : "Please review.",
+      reactions: reactions(`pulls/${created ? 2 : 1}`),
       state,
       author: "Alice",
       base_ref: "refs/heads/main",
@@ -128,6 +153,18 @@ test("pull request creation, discussion, and files follow the GitHub review flow
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if (path.endsWith("/review-requests"))
+      return route.fulfill({ json: emptyReviewRequests() });
+    if (path.endsWith("/links"))
+      return route.fulfill({
+        json: { items: [], next: null, can_manage: false },
+      });
+    if (path.endsWith("/activity"))
+      return route.fulfill({ json: { items: [], next: null } });
+    if (/\/(issues|pulls)\/\d+\/milestone$/.test(path))
+      return route.fulfill({
+        json: { milestone: null, version: 0, can_manage: true },
+      });
     if (path === "/api/session")
       return route.fulfill({
         json: { authenticated: true, mode: "local", user: null, csrf: null },
@@ -350,6 +387,23 @@ test("pull request creation, discussion, and files follow the GitHub review flow
         json: { items: matches ? [item] : [], next: null },
       });
     }
+    if (path.includes("/reactions/")) {
+      expect(request.method()).toBe("PUT");
+      const target = path.split("/reactions/")[1];
+      const summary = reactionStates.get(target);
+      expect(summary).toBeDefined();
+      const input = request.postDataJSON() as {
+        kind: keyof ReturnType<typeof emptyReactions>["groups"];
+        active: boolean;
+      };
+      summary!.groups[input.kind] = {
+        count: input.active ? 1 : 0,
+        reacted: input.active,
+      };
+      summary!.revision++;
+      reactionWrites.push(target);
+      return route.fulfill({ json: summary });
+    }
     if (/\/pulls\/\d+$/.test(path)) {
       if (request.method() === "PATCH") {
         state = "closed";
@@ -366,6 +420,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
           number: 1,
           author: "Alice",
           body: "Verified in the browser.",
+          reactions: reactions("pulls/2/comments/1"),
           version: 1,
           created_at: 1_700_000_100_000,
           updated_at: 1_700_000_100_000,
@@ -380,6 +435,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
         const input = request.postDataJSON();
         const thread = {
           number: threads.length + 1,
+          reactions: reactions(`pulls/2/threads/${threads.length + 1}`),
           pull: 2,
           path: "README.md",
           path_hex: input.path_hex,
@@ -423,6 +479,9 @@ test("pull request creation, discussion, and files follow the GitHub review flow
         const input = request.postDataJSON();
         const reply = {
           number: replies.length + 1,
+          reactions: reactions(
+            `pulls/2/threads/${Number(path.match(/threads\/(\d+)\/replies$/)?.[1])}/replies/${replies.length + 1}`,
+          ),
           pull: 2,
           thread: Number(path.match(/threads\/(\d+)\/replies$/)?.[1] ?? 1),
           author: "Alice",
@@ -463,6 +522,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
           number: 1,
           author: "Bob",
           body: "Ready to merge.",
+          reactions: reactions("pulls/2/reviews/1"),
           state: "approved",
           commit_oid: head,
           current: branchesAvailable,
@@ -572,6 +632,13 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(page.locator(".pull-summary")).toContainText(
     "feature/docs into main",
   );
+  await react(page.locator(".pull-conversation > article.discussion-card"));
+  await page.reload();
+  await expect(
+    page
+      .locator(".pull-conversation > article.discussion-card")
+      .getByRole("button", { name: "Heart: 1 reaction", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".timing")).toHaveCount(0);
   await expect(page.locator(".timing-widget")).toHaveCount(0);
   const mergePosition = await page.locator(".pull-merge-note").boundingBox();
@@ -694,6 +761,10 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(
     page.getByRole("button", { name: "Apply suggestion" }),
   ).toBeVisible();
+  await page.getByRole("button", { name: "Light", exact: true }).click();
+  await expectNoAccessibilityViolations(page);
+  await selectDarkTheme(page);
+  await react(page.locator(".review-thread-card"));
   await page.getByRole("button", { name: "Apply suggestion" }).click();
   await page.locator(".inline-review-outdated > summary").click();
   await expect(page.locator(".inline-review-outdated")).toContainText(
@@ -725,6 +796,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(page.locator(".review-thread-card")).toContainText(
     "I will update the wording.",
   );
+  await react(page.locator(".review-reply"));
   await expectNoAccessibilityViolations(page);
 
   await page
@@ -751,6 +823,15 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(page.locator(".discussion-thread")).toContainText(
     "Verified in the browser.",
   );
+  await react(page.locator(".review-event"));
+  await react(page.locator(".discussion-thread article.discussion-card"));
+  expect(reactionWrites).toEqual([
+    "pulls/2",
+    "pulls/2/threads/1",
+    "pulls/2/threads/1/replies/1",
+    "pulls/2/reviews/1",
+    "pulls/2/comments/1",
+  ]);
   await page
     .getByRole("button", { name: "Close pull request", exact: true })
     .click();

@@ -1,3 +1,4 @@
+import { emptyReactions } from "./fixtures";
 import { expect, test } from "@playwright/test";
 import {
   expectNoAccessibilityViolations,
@@ -14,6 +15,16 @@ test("repository metadata can be managed and assigned to an issue", async ({
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/links"))
+      return route.fulfill({
+        json: { items: [], next: null, can_manage: false },
+      });
+    if (path.endsWith("/activity"))
+      return route.fulfill({ json: { items: [], next: null } });
+    if (/\/(issues|pulls)\/\d+\/milestone$/.test(path))
+      return route.fulfill({
+        json: { milestone: null, version: 0, can_manage: true },
+      });
     if (path === "/api/session")
       return route.fulfill({
         json: {
@@ -103,6 +114,7 @@ test("repository metadata can be managed and assigned to an issue", async ({
           body: "Please investigate.",
           state: "open",
           version: issueVersion,
+          reactions: emptyReactions(),
           created_at: 1_700_000_000_000,
           updated_at: 1_700_000_000_000,
           can_edit: true,

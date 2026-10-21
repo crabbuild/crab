@@ -10,7 +10,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use uuid::Uuid;
 
 use crate::{
     app::{self, Error, Result},
@@ -189,7 +188,7 @@ async fn create(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreateLabelInput {
-                    submission_id: submission_id(&input.request_id)?,
+                    submission_id: app::submission_id(&input.request_id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&actor),
                     name: name(&input.name)?,
                     color: color(&input.color)?,
@@ -283,12 +282,6 @@ async fn remove(
         DeleteLabelOutcome::NotFound => Err(Error::LabelNotFound),
         DeleteLabelOutcome::Conflict => Err(Error::Conflict),
     }
-}
-
-fn submission_id(value: &str) -> Result<[u8; 16]> {
-    Uuid::parse_str(&app::submission(value)?)
-        .map(Uuid::into_bytes)
-        .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
 }
 
 #[cfg(test)]

@@ -61,7 +61,7 @@ impl DiskBudget {
     fn acquire(&self, bytes: u64) -> Result<(), Error> {
         self.0
             .used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(bytes)
                     .filter(|used| *used <= self.capacity())
             })

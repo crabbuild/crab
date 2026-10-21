@@ -1,7 +1,7 @@
 import { Component } from "react";
 import type { AnchorHTMLAttributes, ReactNode } from "react";
 import { Button, Spinner } from "@primer/react";
-import { navigate, useLocation, type Loaded } from "./api";
+import { navigate, useLocation, type Loaded, type Timing } from "./api";
 
 export function Link({
   href = "/",
@@ -39,10 +39,6 @@ export function Result<T>({
   children: (data: T) => ReactNode;
   timingLabel?: string;
 }) {
-  const location = useLocation();
-  const powerbar =
-    new URL(location, window.location.origin).searchParams.get("powerbar") ===
-    "1";
   if (state.error)
     return (
       <div className="notice error" role="alert">
@@ -57,34 +53,55 @@ export function Result<T>({
         <Spinner size="small" /> Loading repository data…
       </div>
     );
-  const content = children(state.data);
-  if (!powerbar || !state.timing) return <>{content}</>;
-  const label = timingLabel ?? state.timing.url;
+  return (
+    <RequestWidget timing={state.timing} label={timingLabel}>
+      {children(state.data)}
+    </RequestWidget>
+  );
+}
+
+export function RequestWidget({
+  timing,
+  label: timingLabel,
+  children,
+}: {
+  timing?: Timing;
+  label?: string;
+  children: ReactNode;
+}) {
+  const location = useLocation();
+  const powerbar =
+    new URL(location, window.location.origin).searchParams.get("powerbar") ===
+    "1";
+  const label = timingLabel ?? timing?.url;
+  if (!powerbar || !label) return <>{children}</>;
   return (
     <div
       className="timing-widget"
       role="group"
       aria-label={`${label} request widget`}
     >
-      <details className="timing" aria-label={`${label} request timing`}>
-        <summary>
-          <span>{label}</span>
-          <strong>{state.timing.roundtrip.toFixed(1)} ms</strong>
-        </summary>
-        <div className="timing-details">
-          <code>{state.timing.url}</code>
-          <p>
-            Round trip includes the request, response transfer, and JSON
-            parsing.
-          </p>
-          {state.timing.server && (
+      {timing && (
+        <details className="timing" aria-label={`${label} request timing`}>
+          <summary>
+            <span>{label}</span>
+            <strong>{timing.roundtrip.toFixed(1)} ms</strong>
+          </summary>
+          <div className="timing-details">
+            <code>{timing.url}</code>
             <p>
-              Server-Timing: <code>{state.timing.server}</code>
+              Round trip includes the request, response transfer, and JSON
+              parsing.
             </p>
-          )}
-        </div>
-      </details>
-      {content}
+            {timing.server && (
+              <p>
+                Server-Timing: <code>{timing.server}</code>
+              </p>
+            )}
+          </div>
+        </details>
+      )}
+      {children}
     </div>
   );
 }

@@ -27,6 +27,25 @@ pub(crate) struct Harness {
 }
 
 impl Harness {
+    pub(crate) async fn write(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        cookie: &str,
+        body: Value,
+    ) -> reqwest::Response {
+        let session = self.json("/api/session", cookie).await;
+        self.http
+            .request(method, format!("{}{path}", self.origin))
+            .header(header::COOKIE, cookie)
+            .header(header::ORIGIN, &self.origin)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    }
+
     pub(crate) async fn new(confidential: bool) -> Self {
         Self::new_with_auth(confidential, false).await
     }

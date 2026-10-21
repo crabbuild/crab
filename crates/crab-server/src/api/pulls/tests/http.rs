@@ -145,20 +145,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     git_url.set_password(Some(&git_token)).unwrap();
     let source = tempfile::tempdir().unwrap();
     let path = source.path();
-    crate::test_support::git::success(
-        path,
-        &["init", "--initial-branch=main", "--object-format=sha1", "."],
-    )
-    .await;
-    std::fs::write(path.join("README.md"), "base\n").unwrap();
-    crate::test_support::git::success(path, &["add", "README.md"]).await;
-    crate::test_support::git::success(path, &["commit", "-m", "base"]).await;
-    crate::test_support::git::success(path, &["push", git_url.as_str(), "main"]).await;
-    crate::test_support::git::success(path, &["checkout", "-b", "feature"]).await;
-    std::fs::write(path.join("README.md"), "base\nfeature\n").unwrap();
-    crate::test_support::git::success(path, &["commit", "-am", "feature"]).await;
-    let first_head = crate::test_support::git::success(path, &["rev-parse", "HEAD"]).await;
-    crate::test_support::git::success(path, &["push", git_url.as_str(), "feature"]).await;
+    let first_head = crate::test_support::git::push_review_branches(path, git_url.as_str()).await;
     let created = mutate(
         &h,
         &alice,
@@ -814,6 +801,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
         h.json(ROOT, &bob).await["items"][0],
         json!({
             "number":1,
+            "draft":false,
             "title":"Proposed change",
             "state":"open",
             "author":"Alice",

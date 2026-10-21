@@ -1,4 +1,8 @@
 use super::*;
+use crate::cells::repository::collaboration::{
+    Target,
+    activity::{self, Action},
+};
 
 pub(crate) struct CreatePull;
 
@@ -11,6 +15,9 @@ impl Mutation for CreatePull {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(CreatePullOutcome::Archived));
+        }
         validate_create_pull(&input)?;
         let digest = create_pull_digest(&input);
         let existing = context.sql(&SqlBatch { statements: vec![statement(
@@ -38,6 +45,7 @@ impl Mutation for CreatePull {
         }
         let now = timestamp(context.now_ms())?;
         let record = PullRecord {
+            draft: input.draft,
             number: result_u64(&sequence, 1, 0)?,
             create_submission_id: input.submission_id,
             author: input.author,
@@ -61,7 +69,17 @@ impl Mutation for CreatePull {
             statement("INSERT INTO repository_pull_submissions(request_id, payload_digest, pull_number) VALUES (?, ?, ?)", vec![SqlValue::Blob(record.create_submission_id.to_vec()), SqlValue::Blob(digest.as_bytes().to_vec()), integer(record.number)?]),
             insert_pull_statement(&record)?,
         ] })?;
+        let state = if input.draft {
+            PullReadiness::Draft
+        } else {
+            PullReadiness::Ready
+        };
+        readiness::store(context, record.number, state)?;
         advance_revision(context)?;
+        let target = Target::Pull {
+            number: record.number,
+        };
+        activity::append(context, target, &record.author, Action::Created)?;
         Ok(MutationResult::Success(CreatePullOutcome::Created(
             Box::new(record),
         )))
@@ -79,6 +97,9 @@ impl Mutation for UpdatePull {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(UpdatePullOutcome::Archived));
+        }
         validate_number(input.number)?;
         validate_author(&input.actor)?;
         validate_number(input.version)?;
@@ -97,6 +118,20 @@ impl Mutation for UpdatePull {
         let Some(mut pull) = load_pull(context, input.number)? else {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::NotFound));
         };
+        let was_closed = pull.state != PullState::Open;
+        let edited = input
+            .title
+            .as_ref()
+            .is_some_and(|value| value != &pull.title)
+            || input.body.as_ref().is_some_and(|value| value != &pull.body)
+            || input
+                .label_ids
+                .as_ref()
+                .is_some_and(|value| value != &pull.label_ids)
+            || input
+                .assignee_subjects
+                .as_ref()
+                .is_some_and(|value| value != &pull.assignee_subjects);
         if pull.version != input.version {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::Conflict));
         }
@@ -145,7 +180,32 @@ impl Mutation for UpdatePull {
             ))?;
         pull.updated_at_ms = timestamp(context.now_ms())?;
         update_pull_row(context, &pull, input.version)?;
+        // Progress changes commit with close/reopen and merge completion.
+        let subject = collaboration::Subject {
+            kind: collaboration::SubjectKind::Pull,
+            number: pull.number,
+        };
+        collaboration::milestones::state_changed(
+            context,
+            subject,
+            was_closed,
+            pull.state != PullState::Open,
+        )?;
         advance_revision(context)?;
+        let target = Target::Pull {
+            number: pull.number,
+        };
+        if edited {
+            activity::append(context, target, &input.actor, Action::Updated)?;
+        }
+        if was_closed != (pull.state != PullState::Open) {
+            let action = if pull.state == PullState::Open {
+                Action::Reopened
+            } else {
+                Action::Closed
+            };
+            activity::append(context, target, &input.actor, action)?;
+        }
         Ok(MutationResult::Success(UpdatePullOutcome::Updated(
             Box::new(pull),
         )))
@@ -244,6 +304,8 @@ impl Read for ListPulls {
             });
             if matches_state && matches_text {
                 items.push(PullSummary {
+                    draft: readiness::load(context, result_u64_from_row(row, 0)?)?
+                        == PullReadiness::Draft,
                     number: result_u64_from_row(row, 0)?,
                     author: author_from_row(row, 1)?,
                     title: result_text(row, 4)?,
@@ -324,6 +386,11 @@ fn create_pull_digest(input: &CreatePullInput) -> blake3::Hash {
         &input.head_oid,
     ] {
         hash_text(&mut hasher, value);
+    }
+    // A default-ready request retains its durable submission identity.
+    // Draft adds a tagged contribution so reusing an ID for another mode conflicts.
+    if input.draft {
+        hasher.update(b"draft\0");
     }
     hasher.finalize()
 }

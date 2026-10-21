@@ -1,4 +1,8 @@
 use super::*;
+use crate::cells::repository::collaboration::{
+    Target,
+    activity::{self, Action},
+};
 
 pub(crate) struct ReservePullMerge;
 
@@ -11,12 +15,18 @@ impl Mutation for ReservePullMerge {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(ReservePullMergeOutcome::Archived));
+        }
         validate_number(input.pull)?;
         validate_merge(&input.merge)?;
-        if load_pull(context, input.pull)?.is_none() {
+        let Some(pull) = load_pull(context, input.pull)? else {
             return Ok(MutationResult::Rejected(
                 ReservePullMergeOutcome::PullNotFound,
             ));
+        };
+        if pull.draft {
+            return Ok(MutationResult::Rejected(ReservePullMergeOutcome::Draft));
         }
         let digest = merge_digest(input.pull, &input.merge);
         let existing = context.sql(&SqlBatch { statements: vec![statement("SELECT payload_digest, merge_record FROM repository_pull_merge_submissions WHERE pull_number = ? AND request_id = ?", vec![integer(input.pull)?, SqlValue::Blob(input.merge.request_id.to_vec())])] })?;
@@ -56,6 +66,7 @@ impl Mutation for TransitionPullMerge {
                 TransitionPullMergeOutcome::NotFound,
             ));
         };
+        let was_closed = pull.state != PullState::Open;
         let old_version = pull.version;
         match input.transition {
             PullMergeTransition::Begin => {
@@ -80,6 +91,16 @@ impl Mutation for TransitionPullMerge {
                             TransitionPullMergeOutcome::Conflict,
                         ))
                     };
+                }
+                // Completed/pending retries above do not start new work. Only
+                // a fresh admission must lose to an earlier archive command.
+                if settings::archived(context)? {
+                    return Ok(MutationResult::Rejected(
+                        TransitionPullMergeOutcome::Archived,
+                    ));
+                }
+                if pull.draft {
+                    return Ok(MutationResult::Rejected(TransitionPullMergeOutcome::Draft));
                 }
                 if pull.state != PullState::Open || pull.version != input.merge.pull_version {
                     return Ok(MutationResult::Rejected(
@@ -130,7 +151,24 @@ impl Mutation for TransitionPullMerge {
         pull.version = next_version(pull.version)?;
         pull.updated_at_ms = timestamp(context.now_ms())?;
         update_pull_row(context, &pull, old_version)?;
+        // Progress changes commit with close/reopen and merge completion.
+        let subject = collaboration::Subject {
+            kind: collaboration::SubjectKind::Pull,
+            number: pull.number,
+        };
+        collaboration::milestones::state_changed(
+            context,
+            subject,
+            was_closed,
+            pull.state != PullState::Open,
+        )?;
         advance_revision(context)?;
+        if let Some(merge) = &pull.merge {
+            let target = Target::Pull {
+                number: pull.number,
+            };
+            activity::append(context, target, &merge.author, Action::Merged)?;
+        }
         Ok(MutationResult::Success(
             TransitionPullMergeOutcome::Applied(Box::new(pull)),
         ))

@@ -35,6 +35,8 @@ pub(crate) enum Error {
     Archived,
     #[error("Pull request authors cannot approve or request changes on their own changes")]
     OwnReview,
+    #[error("Draft pull requests must be marked ready before merging")]
+    DraftPull,
     #[error("This content changed; reload before saving your draft")]
     Conflict,
     #[error("The pull request changes conflict or its branch tips changed")]
@@ -55,6 +57,12 @@ pub(crate) enum Error {
     CheckNotFound,
     #[error("Write access is required to manage repository labels")]
     LabelPermission,
+    #[error("Write access is required to manage milestones")]
+    MilestonePermission,
+    #[error("Write access is required to manage linked work")]
+    LinkPermission,
+    #[error("A milestone with this title already exists")]
+    MilestoneConflict,
     #[error("A repository label with this name already exists")]
     LabelConflict,
     #[error("Repository label not found")]
@@ -227,6 +235,11 @@ impl IntoResponse for Error {
                 "merge_pending",
                 "A merge is in progress. Reload the pull request and retry that merge before editing",
             ),
+            Self::DraftPull => (
+                StatusCode::CONFLICT,
+                "pull_draft",
+                "Draft pull requests must be marked ready before merging",
+            ),
             Self::MergeBlocked => (
                 StatusCode::CONFLICT,
                 "merge_blocked",
@@ -243,6 +256,21 @@ impl IntoResponse for Error {
                 "Write access is required to manage check runs",
             ),
             Self::CheckNotFound => (StatusCode::NOT_FOUND, "not_found", "Check run not found"),
+            Self::MilestonePermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to manage milestones",
+            ),
+            Self::LinkPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to manage linked work",
+            ),
+            Self::MilestoneConflict => (
+                StatusCode::CONFLICT,
+                "milestone_conflict",
+                "A milestone with this title already exists",
+            ),
             Self::LabelPermission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
@@ -435,6 +463,43 @@ pub(crate) fn repository(
         .ok_or(Error::NotFound)
 }
 
+pub(crate) struct Membership {
+    pub members: Vec<crate::RepositoryMember>,
+    pub can_write: bool,
+}
+
+pub(crate) async fn membership(
+    server: &Server,
+    principal: &Principal,
+    repo: &Repository,
+) -> Result<Membership> {
+    if matches!(principal, Principal::Local) {
+        return Ok(Membership {
+            members: Vec::new(),
+            can_write: true,
+        });
+    }
+    let catalog = server.catalog().ok_or(Error::NotFound)?;
+    // Participant selection must use durable membership, not a background
+    // materialization that could still offer a renamed or revoked reviewer.
+    let snapshot = catalog
+        .membership(&repo.config.owner, &repo.config.name)
+        .await
+        .map_err(|error| match error {
+            crate::catalog::CatalogError::NotFound => Error::NotFound,
+            error => Error::Repository(crate::Error::Catalog(error)),
+        })?;
+    let mut config = repo.config.clone();
+    config.members = snapshot.members;
+    if !principal.can_read(&config) {
+        return Err(Error::NotFound);
+    }
+    Ok(Membership {
+        can_write: principal.can_write(&config),
+        members: config.members,
+    })
+}
+
 pub(crate) fn actor(principal: &Principal) -> Result<Identity> {
     let mut identity = principal.identity().ok_or(Error::Forbidden)?;
     identity.name = identity.name.chars().take(160).collect();
@@ -467,6 +532,12 @@ pub(crate) fn submission(value: &str) -> Result<String> {
         submission_id = %value,
     );
     Ok(value)
+}
+
+pub(crate) fn submission_id(value: &str) -> Result<[u8; 16]> {
+    uuid::Uuid::parse_str(&submission(value)?)
+        .map(uuid::Uuid::into_bytes)
+        .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
 }
 
 pub(crate) fn title(value: &str) -> Result<String> {

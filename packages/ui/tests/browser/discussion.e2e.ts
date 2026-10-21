@@ -1,3 +1,4 @@
+import { emptyReactions } from "./fixtures";
 import { expect, test, type Page } from "@playwright/test";
 import {
   expectNoAccessibilityViolations,
@@ -6,6 +7,7 @@ import {
 
 async function openDiscussion(page: Page) {
   const record = {
+    reactions: emptyReactions(),
     number: 1,
     author: "Alice",
     body: "Original description",
@@ -19,6 +21,16 @@ async function openDiscussion(page: Page) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/links"))
+      return route.fulfill({
+        json: { items: [], next: null, can_manage: false },
+      });
+    if (path.endsWith("/activity"))
+      return route.fulfill({ json: { items: [], next: null } });
+    if (/\/(issues|pulls)\/\d+\/milestone$/.test(path))
+      return route.fulfill({
+        json: { milestone: null, version: 0, can_manage: true },
+      });
     let json: unknown;
     if (path === "/api/session") {
       json = {

@@ -8,6 +8,9 @@ import {
   type RepositoryAssignee,
   type RepositoryLabel,
 } from "./api";
+import { ReviewRequests } from "./collaboration/review-requests";
+import { LinkedWork } from "./collaboration/links";
+import { MilestonePicker } from "./collaboration/milestones/picker";
 import { LabelBadges, LabelPicker } from "./discussion-labels";
 import { useMutation } from "./discussion-mutations";
 import { Result } from "./ui";
@@ -177,6 +180,15 @@ export function DiscussionMetadata({
 }) {
   return (
     <aside className="discussion-metadata" aria-label="Metadata">
+      {path.startsWith("pulls/") && (
+        <ReviewRequests
+          key={`reviewers:${version}`}
+          repo={repo}
+          pull={Number(path.split("/")[1])}
+          csrf={csrf}
+          onSaved={onSaved}
+        />
+      )}
       <section>
         <header>
           <strong>Assignees</strong>
@@ -227,6 +239,20 @@ export function DiscussionMetadata({
           <p className="muted">None yet</p>
         )}
       </section>
+      <LinkedWork
+        key={`links:${version}`}
+        repo={repo}
+        path={path}
+        csrf={csrf}
+        onSaved={onSaved}
+      />
+      <MilestonePicker
+        key={version}
+        repo={repo}
+        path={path}
+        csrf={csrf}
+        onSaved={onSaved}
+      />
     </aside>
   );
 }

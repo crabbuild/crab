@@ -1,4 +1,8 @@
 use super::*;
+use crate::cells::repository::collaboration::{
+    Target,
+    activity::{self, Action},
+};
 
 pub(crate) struct CreatePullComment;
 
@@ -11,6 +15,9 @@ impl Mutation for CreatePullComment {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(CreatePullCommentOutcome::Archived));
+        }
         validate_number(input.pull)?;
         validate_author(&input.author)?;
         validate_body(&input.body, true)?;
@@ -64,6 +71,11 @@ impl Mutation for CreatePullComment {
             statement("INSERT INTO repository_pull_comments(pull_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![integer(record.pull)?, integer(record.number)?, SqlValue::Text(record.author.issuer.clone()), SqlValue::Text(record.author.subject.clone()), SqlValue::Text(record.author.name.clone()), SqlValue::Text(record.body.clone()), integer(record.version)?, integer(record.created_at_ms)?, integer(record.updated_at_ms)?]),
         ] })?;
         advance_revision(context)?;
+        let target = Target::PullComment {
+            pull: record.pull,
+            number: record.number,
+        };
+        activity::append(context, target, &record.author, Action::Created)?;
         Ok(MutationResult::Success(CreatePullCommentOutcome::Created(
             record,
         )))
@@ -81,6 +93,9 @@ impl Mutation for UpdatePullComment {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(UpdatePullCommentOutcome::Archived));
+        }
         validate_number(input.key.pull)?;
         validate_number(input.key.number)?;
         validate_number(input.version)?;
@@ -97,11 +112,19 @@ impl Mutation for UpdatePullComment {
         if record.version != input.version {
             return Ok(MutationResult::Rejected(UpdatePullCommentOutcome::Conflict));
         }
+        let edited = record.body != input.body;
         record.body = input.body;
         record.version = next_version(record.version)?;
         record.updated_at_ms = timestamp(context.now_ms())?;
         context.sql(&SqlBatch { statements: vec![statement("UPDATE repository_pull_comments SET body = ?, version = ?, updated_at_ms = ? WHERE pull_number = ? AND number = ? AND version = ?", vec![SqlValue::Text(record.body.clone()), integer(record.version)?, integer(record.updated_at_ms)?, integer(record.pull)?, integer(record.number)?, integer(input.version)?])] })?;
         advance_revision(context)?;
+        if edited {
+            let target = Target::PullComment {
+                pull: record.pull,
+                number: record.number,
+            };
+            activity::append(context, target, &input.actor, Action::Updated)?;
+        }
         Ok(MutationResult::Success(UpdatePullCommentOutcome::Updated(
             record,
         )))

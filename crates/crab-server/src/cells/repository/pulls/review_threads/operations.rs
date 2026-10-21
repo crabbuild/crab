@@ -1,4 +1,8 @@
 use super::*;
+use crate::cells::repository::collaboration::{
+    Target,
+    activity::{self, Action},
+};
 
 pub(crate) struct CreatePullReviewThread;
 
@@ -11,6 +15,11 @@ impl Mutation for CreatePullReviewThread {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(
+                CreatePullReviewThreadOutcome::Archived,
+            ));
+        }
         validate_create_thread(&input)?;
         let digest = thread_digest(&input);
         let existing = context.sql(&SqlBatch {
@@ -95,6 +104,11 @@ impl Mutation for CreatePullReviewThread {
             ],
         })?;
         advance_revision(context)?;
+        let target = Target::PullThread {
+            pull: record.pull,
+            number: record.number,
+        };
+        activity::append(context, target, &record.author, Action::Created)?;
         Ok(MutationResult::Success(
             CreatePullReviewThreadOutcome::Created(Box::new(record)),
         ))
@@ -112,6 +126,11 @@ impl Mutation for UpdatePullReviewThread {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(
+                UpdatePullReviewThreadOutcome::Archived,
+            ));
+        }
         validate_number(input.key.pull)?;
         validate_number(input.key.number)?;
         validate_number(input.version)?;
@@ -154,6 +173,15 @@ impl Mutation for UpdatePullReviewThread {
                 UpdatePullReviewThreadOutcome::Conflict,
             ));
         }
+        let was_resolved = record.resolved;
+        let edited = input
+            .body
+            .as_ref()
+            .is_some_and(|value| value != &record.body)
+            || input
+                .suggested_text
+                .as_ref()
+                .is_some_and(|value| value != &record.suggested_text);
         let now = timestamp(context.now_ms())?;
         if let Some(body) = input.body {
             record.body = body;
@@ -164,7 +192,7 @@ impl Mutation for UpdatePullReviewThread {
         if let Some(resolved) = input.resolved {
             record.resolved = resolved;
             if resolved {
-                record.resolved_by = Some(input.actor);
+                record.resolved_by = Some(input.actor.clone());
                 record.resolved_at_ms = Some(now);
             } else {
                 record.resolved_by = None;
@@ -178,6 +206,21 @@ impl Mutation for UpdatePullReviewThread {
             statements: vec![update_thread_statement(&record, old_version)?],
         })?;
         advance_revision(context)?;
+        let target = Target::PullThread {
+            pull: record.pull,
+            number: record.number,
+        };
+        if edited {
+            activity::append(context, target, &input.actor, Action::Updated)?;
+        }
+        if was_resolved != record.resolved {
+            let action = if record.resolved {
+                Action::Resolved
+            } else {
+                Action::Unresolved
+            };
+            activity::append(context, target, &input.actor, action)?;
+        }
         Ok(MutationResult::Success(
             UpdatePullReviewThreadOutcome::Updated(Box::new(record)),
         ))
@@ -195,6 +238,11 @@ impl Mutation for CreatePullReviewReply {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(
+                CreatePullReviewReplyOutcome::Archived,
+            ));
+        }
         validate_number(input.pull)?;
         validate_number(input.thread)?;
         validate_author(&input.author)?;
@@ -272,6 +320,12 @@ impl Mutation for CreatePullReviewReply {
             ],
         })?;
         advance_revision(context)?;
+        let target = Target::PullReply {
+            pull: record.pull,
+            thread: record.thread,
+            number: record.number,
+        };
+        activity::append(context, target, &record.author, Action::Created)?;
         Ok(MutationResult::Success(
             CreatePullReviewReplyOutcome::Created(record),
         ))
@@ -289,6 +343,11 @@ impl Mutation for UpdatePullReviewReply {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(
+                UpdatePullReviewReplyOutcome::Archived,
+            ));
+        }
         validate_number(input.key.pull)?;
         validate_number(input.key.thread)?;
         validate_number(input.key.number)?;
@@ -310,6 +369,7 @@ impl Mutation for UpdatePullReviewReply {
                 UpdatePullReviewReplyOutcome::Conflict,
             ));
         }
+        let edited = record.body != input.body;
         record.body = input.body;
         record.version = next_version(record.version)?;
         record.updated_at_ms = timestamp(context.now_ms())?;
@@ -328,6 +388,14 @@ impl Mutation for UpdatePullReviewReply {
             )],
         })?;
         advance_revision(context)?;
+        if edited {
+            let target = Target::PullReply {
+                pull: record.pull,
+                thread: record.thread,
+                number: record.number,
+            };
+            activity::append(context, target, &input.actor, Action::Updated)?;
+        }
         Ok(MutationResult::Success(
             UpdatePullReviewReplyOutcome::Updated(record),
         ))

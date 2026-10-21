@@ -228,7 +228,9 @@ async fn finish(
                 != Some(record.commit_oid.as_str())
             {
                 let error = map_receive(error);
-                if matches!(&error, Error::MergeConflict) {
+                // The ref proof above excludes publication. Clear an admission
+                // denied by archive instead of leaving an unfinishable pending merge.
+                if matches!(&error, Error::MergeConflict | Error::Archived) {
                     storage::abort_merge(server, repo, pull.number, record).await?;
                 }
                 return Err(error);
@@ -320,6 +322,9 @@ async fn execute(
         let pull = storage::begin_merge(&server, repo, id, &record).await?;
         let value = finish(&server, &principal, repo, &pull, &record).await?;
         return Ok((StatusCode::OK, Json(value)));
+    }
+    if pull.draft {
+        return Err(Error::DraftPull);
     }
     if pull.state != PullState::Open
         || pull.version != candidate.pull_version

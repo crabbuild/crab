@@ -1,4 +1,8 @@
 use super::*;
+use crate::cells::repository::collaboration::{
+    Target,
+    activity::{self, Action},
+};
 
 pub(crate) struct CreateIssue;
 
@@ -87,6 +91,10 @@ impl Mutation for CreateIssue {
         })?;
         insert_issue(context, &record)?;
         advance_revision(context)?;
+        let target = Target::Issue {
+            number: record.number,
+        };
+        activity::append(context, target, &record.author, Action::Created)?;
         Ok(MutationResult::Success(CreateIssueOutcome::Created(
             Box::new(record),
         )))
@@ -189,6 +197,11 @@ impl Mutation for CreateComment {
         })?;
         insert_comment(context, &record)?;
         advance_revision(context)?;
+        let target = Target::IssueComment {
+            issue: record.issue,
+            number: record.number,
+        };
+        activity::append(context, target, &record.author, Action::Created)?;
         Ok(MutationResult::Success(CreateCommentOutcome::Created(
             record,
         )))
@@ -344,6 +357,23 @@ impl Mutation for UpdateIssue {
             return Ok(MutationResult::Rejected(UpdateIssueOutcome::NotFound));
         };
         let mut issue = issue_from_row(row)?;
+        let was_closed = issue.state != 0;
+        let edited = input
+            .title
+            .as_ref()
+            .is_some_and(|value| value != &issue.title)
+            || input
+                .body
+                .as_ref()
+                .is_some_and(|value| value != &issue.body)
+            || input
+                .label_ids
+                .as_ref()
+                .is_some_and(|value| value != &issue.label_ids)
+            || input
+                .assignee_subjects
+                .as_ref()
+                .is_some_and(|value| value != &issue.assignee_subjects);
         let author_change = input.title.is_some() || input.body.is_some() || input.state.is_some();
         if author_change && !same_author(&issue.author, &input.actor) {
             return Ok(MutationResult::Rejected(UpdateIssueOutcome::Forbidden));
@@ -402,7 +432,27 @@ impl Mutation for UpdateIssue {
         if updated[0].rows_affected != 1 {
             return Ok(MutationResult::Rejected(UpdateIssueOutcome::Conflict));
         }
+        // Progress and the issue state must share the command transaction.
+        let subject = collaboration::Subject {
+            kind: collaboration::SubjectKind::Issue,
+            number: issue.number,
+        };
+        collaboration::milestones::state_changed(context, subject, was_closed, issue.state != 0)?;
         advance_revision(context)?;
+        let target = Target::Issue {
+            number: issue.number,
+        };
+        if edited {
+            activity::append(context, target, &input.actor, Action::Updated)?;
+        }
+        if was_closed != (issue.state != 0) {
+            let action = if issue.state == 0 {
+                Action::Reopened
+            } else {
+                Action::Closed
+            };
+            activity::append(context, target, &input.actor, action)?;
+        }
         Ok(MutationResult::Success(UpdateIssueOutcome::Updated(
             Box::new(issue),
         )))
@@ -444,6 +494,7 @@ impl Mutation for UpdateComment {
         if comment.version != input.version {
             return Ok(MutationResult::Rejected(UpdateCommentOutcome::Conflict));
         }
+        let edited = comment.body != input.body;
         comment.body = input.body;
         comment.version = comment
             .version
@@ -470,6 +521,13 @@ impl Mutation for UpdateComment {
             return Ok(MutationResult::Rejected(UpdateCommentOutcome::Conflict));
         }
         advance_revision(context)?;
+        if edited {
+            let target = Target::IssueComment {
+                issue: comment.issue,
+                number: comment.number,
+            };
+            activity::append(context, target, &input.actor, Action::Updated)?;
+        }
         Ok(MutationResult::Success(UpdateCommentOutcome::Updated(
             comment,
         )))

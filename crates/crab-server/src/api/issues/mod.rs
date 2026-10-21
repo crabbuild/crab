@@ -10,13 +10,14 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use uuid::Uuid;
 
 use crate::{
     api::assignees::{self, Assignee},
     api::labels::{self, Label},
-    app::{Error, Result, actor, body, number, repository, submission, title},
+    api::reactions,
+    app::{self, Error, Result, actor, body, number, repository, title},
     auth::{Identity, Principal},
+    cells::repository::collaboration::Target,
     cells::repository::{
         CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
         CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment,
@@ -52,12 +53,13 @@ fn issue_view(
     labels: &[Label],
     assignees: &[Assignee],
     can_manage_metadata: bool,
-    full: bool,
+    reactions: &reactions::View,
 ) -> Value {
     json!({
         "number": issue.number,
         "title": issue.title,
-        "body": full.then_some(&issue.body),
+        "body": issue.body,
+        "reactions": reactions,
         "state": state_name(issue.state),
         "author": issue.author.name,
         "version": issue.version,
@@ -95,10 +97,11 @@ fn issue_summary_view(
     })
 }
 
-fn comment_view(comment: &CommentRecord, author: &Identity) -> Value {
+fn comment_view(comment: &CommentRecord, author: &Identity, reactions: &reactions::View) -> Value {
     json!({
         "number": comment.number,
         "body": comment.body,
+        "reactions": reactions,
         "author": comment.author.name,
         "version": comment.version,
         "created_at": comment.created_at_ms,
@@ -239,7 +242,7 @@ async fn create(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreateIssueInput {
-                    submission_id: submission_id(&input.request_id)?,
+                    submission_id: app::submission_id(&input.request_id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&author),
                     title,
                     body: input.body,
@@ -261,6 +264,15 @@ async fn create(
         labels::catalog(&server, &repo).await?
     };
     let assignees = assignees::available(&repo, &author);
+    let reaction = reactions::one(
+        &server,
+        &repo,
+        &author,
+        Target::Issue {
+            number: issue.number,
+        },
+    )
+    .await?;
     let response = (
         StatusCode::CREATED,
         Json(issue_view(
@@ -269,7 +281,7 @@ async fn create(
             &labels,
             &assignees,
             principal.can_write(&repo.config),
-            true,
+            &reaction,
         )),
     );
     tracing::debug!(
@@ -313,13 +325,22 @@ async fn detail(
     let labels = detail.labels.labels;
     let issue = issue.ok_or(Error::NotFound)?;
     let assignees = assignees::available(&repo, &author);
+    let reaction = reactions::one(
+        &server,
+        &repo,
+        &author,
+        Target::Issue {
+            number: issue.number,
+        },
+    )
+    .await?;
     let response = Json(issue_view(
         &issue,
         &author,
         &labels,
         &assignees,
         principal.can_write(&repo.config),
-        true,
+        &reaction,
     ))
     .into_response();
     Ok(response)
@@ -420,13 +441,22 @@ async fn edit(
     } else {
         labels
     };
+    let reaction = reactions::one(
+        &server,
+        &repo,
+        &author,
+        Target::Issue {
+            number: issue.number,
+        },
+    )
+    .await?;
     Ok(Json(issue_view(
         &issue,
         &author,
         &labels,
         &assignees,
         can_manage_metadata,
-        true,
+        &reaction,
     )))
 }
 
@@ -459,10 +489,19 @@ async fn comments(
     let CommentPage::Found { items, next } = page else {
         return Err(Error::NotFound);
     };
+    let targets = items
+        .iter()
+        .map(|comment| Target::IssueComment {
+            issue: comment.issue,
+            number: comment.number,
+        })
+        .collect();
+    let reactions = reactions::read(&server, &repo, &author, targets).await?;
     Ok(Json(json!({
         "items": items
             .iter()
-            .map(|comment| comment_view(comment, &author))
+            .zip(reactions)
+            .map(|(comment, reactions)| comment_view(comment, &author, &reactions))
             .collect::<Vec<_>>(),
         "next": next,
     })))
@@ -493,7 +532,7 @@ async fn comment(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreateCommentInput {
-                    submission_id: submission_id(&input.request_id)?,
+                    submission_id: app::submission_id(&input.request_id)?,
                     issue: number(id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&author),
                     body: input.body,
@@ -507,7 +546,20 @@ async fn comment(
         CreateCommentOutcome::IssueNotFound => return Err(Error::NotFound),
         CreateCommentOutcome::RequestConflict => return Err(Error::RequestConflict),
     };
-    Ok((StatusCode::CREATED, Json(comment_view(&comment, &author))))
+    let reaction = reactions::one(
+        &server,
+        &repo,
+        &author,
+        Target::IssueComment {
+            issue: comment.issue,
+            number: comment.number,
+        },
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(comment_view(&comment, &author, &reaction)),
+    ))
 }
 
 async fn comment_detail(
@@ -532,7 +584,17 @@ async fn comment_detail(
             .await,
     )?
     .ok_or(Error::NotFound)?;
-    Ok(Json(comment_view(&comment, &author)))
+    let reaction = reactions::one(
+        &server,
+        &repo,
+        &author,
+        Target::IssueComment {
+            issue: comment.issue,
+            number: comment.number,
+        },
+    )
+    .await?;
+    Ok(Json(comment_view(&comment, &author, &reaction)))
 }
 
 #[derive(Deserialize)]
@@ -578,13 +640,17 @@ async fn edit_comment(
         UpdateCommentOutcome::Forbidden => return Err(Error::Forbidden),
         UpdateCommentOutcome::Conflict => return Err(Error::Conflict),
     };
-    Ok(Json(comment_view(&comment, &author)))
-}
-
-fn submission_id(value: &str) -> Result<[u8; 16]> {
-    Uuid::parse_str(&submission(value)?)
-        .map(Uuid::into_bytes)
-        .map_err(|_| Error::Invalid("Submission ID must be a UUID"))
+    let reaction = reactions::one(
+        &server,
+        &repo,
+        &author,
+        Target::IssueComment {
+            issue: comment.issue,
+            number: comment.number,
+        },
+    )
+    .await?;
+    Ok(Json(comment_view(&comment, &author, &reaction)))
 }
 
 #[cfg(test)]

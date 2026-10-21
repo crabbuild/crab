@@ -210,10 +210,10 @@ fn is_local_host(host: Option<&str>) -> bool {
 }
 
 fn command_checks_archive(path: &str) -> bool {
-    // All issue/comment/label mutations check lifecycle inside their command.
-    // Other mutation families retain their existing preflight policy.
+    // These commands enforce lifecycle transactionally. Merge recovery may
+    // finish an admitted Git publication after archive; preflight must not strand it.
     path.strip_prefix("/api/repos/")
-        .is_some_and(|path| matches!(path.split('/').nth(2), Some("issues" | "labels")))
+        .is_some_and(|path| matches!(path.split('/').nth(2), Some("issues" | "labels" | "pulls")))
 }
 
 async fn archived_mutation_response(

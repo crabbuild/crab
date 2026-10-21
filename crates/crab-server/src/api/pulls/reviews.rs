@@ -13,8 +13,10 @@ use serde_json::{Value, json};
 
 use super::{current_branches, storage};
 use crate::{
+    api::reactions,
     app::{self, Error, Result},
     auth::{Identity, Principal},
+    cells::repository::collaboration::Target,
     server::Server,
 };
 use storage::{NewPullReview, PullRequest, PullReview, PullState, ReviewState};
@@ -37,11 +39,17 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         )
 }
 
-fn review_view(review: &PullReview, actor: &Identity, current_head: Option<&str>) -> Value {
+fn review_view(
+    review: &PullReview,
+    actor: &Identity,
+    current_head: Option<&str>,
+    reactions: &reactions::View,
+) -> Value {
     json!({
         "number": review.number,
         "author": review.author.name,
         "body": review.body,
+        "reactions": reactions,
         "state": review.state,
         "commit_oid": review.commit_oid,
         "current": current_head.is_some_and(|oid| oid == review.commit_oid),
@@ -111,9 +119,18 @@ async fn list(
     let (reviews, next) = storage::reviews(&server, repo, id, params.before, limit)
         .await?
         .ok_or(Error::NotFound)?;
+    let targets = reviews
+        .iter()
+        .map(|review| Target::PullReview {
+            pull: id,
+            number: review.number,
+        })
+        .collect();
+    let reactions = reactions::read(&server, repo, &actor, targets).await?;
     let items = reviews
         .iter()
-        .map(|review| review_view(review, &actor, head.as_deref()))
+        .zip(reactions)
+        .map(|(review, reactions)| review_view(review, &actor, head.as_deref(), &reactions))
         .collect::<Vec<_>>();
     Ok(Json(json!({"items":items,"next":next})))
 }
@@ -151,9 +168,19 @@ async fn create(
             return Err(Error::RequestConflict);
         }
         let (_, head) = pull_and_head(&server, repo, id).await?;
+        let reaction = reactions::one(
+            &server,
+            repo,
+            &actor,
+            Target::PullReview {
+                pull: id,
+                number: review.number,
+            },
+        )
+        .await?;
         return Ok((
             StatusCode::CREATED,
-            Json(review_view(&review, &actor, head.as_deref())),
+            Json(review_view(&review, &actor, head.as_deref(), &reaction)),
         ));
     }
     let (pull, head) = pull_and_head(&server, repo, id).await?;
@@ -179,9 +206,19 @@ async fn create(
         },
     )
     .await?;
+    let reaction = reactions::one(
+        &server,
+        repo,
+        &actor,
+        Target::PullReview {
+            pull: id,
+            number: review.number,
+        },
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
-        Json(review_view(&review, &actor, Some(&head))),
+        Json(review_view(&review, &actor, Some(&head), &reaction)),
     ))
 }
 
@@ -198,7 +235,22 @@ async fn detail(
     let review = storage::review(&server, repo, id, app::number(review)?)
         .await?
         .ok_or(Error::NotFound)?;
-    Ok(Json(review_view(&review, &actor, head.as_deref())))
+    let reaction = reactions::one(
+        &server,
+        repo,
+        &actor,
+        Target::PullReview {
+            pull: id,
+            number: review.number,
+        },
+    )
+    .await?;
+    Ok(Json(review_view(
+        &review,
+        &actor,
+        head.as_deref(),
+        &reaction,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -235,5 +287,20 @@ async fn edit(
     )
     .await?;
     let (_, head) = pull_and_head(&server, repo, id).await?;
-    Ok(Json(review_view(&review, &actor, head.as_deref())))
+    let reaction = reactions::one(
+        &server,
+        repo,
+        &actor,
+        Target::PullReview {
+            pull: id,
+            number: review.number,
+        },
+    )
+    .await?;
+    Ok(Json(review_view(
+        &review,
+        &actor,
+        head.as_deref(),
+        &reaction,
+    )))
 }

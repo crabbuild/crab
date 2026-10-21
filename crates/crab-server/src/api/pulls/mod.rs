@@ -17,18 +17,23 @@ use crate::{
     api::assignees::{self, Assignee},
     api::checks::{self, CheckRun},
     api::labels::{self, Label},
+    api::reactions,
     api::statuses::{self, CommitStatus, StatusState},
     app::{self, Error, Result},
     auth::{Identity, Principal},
+    cells::repository::collaboration::Target,
     repository::Repository,
     server::Server,
 };
 
+mod comments;
 mod merge;
+mod readiness;
+mod review_requests;
 mod review_threads;
 mod reviews;
 mod storage;
-use storage::{NewPullRequest, PullComment, PullRequest, PullState, PullSummary};
+use storage::{NewPullRequest, PullRequest, PullState, PullSummary};
 
 const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 
@@ -43,17 +48,12 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             "/api/repos/{owner}/{name}/pulls/{number}",
             get(detail).patch(edit),
         )
-        .route(
-            "/api/repos/{owner}/{name}/pulls/{number}/comments",
-            get(comments).post(comment),
-        )
-        .route(
-            "/api/repos/{owner}/{name}/pulls/{number}/comments/{comment}",
-            get(comment_detail).patch(edit_comment),
-        )
+        .merge(comments::routes())
         .merge(reviews::routes())
         .merge(review_threads::routes())
         .merge(merge::routes())
+        .merge(readiness::routes())
+        .merge(review_requests::routes())
         .layer(axum::extract::DefaultBodyLimit::max(160 * 1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
@@ -91,10 +91,21 @@ async fn pull_view(
     };
     let assignees = assignees::available(repo, actor);
     let requirements = merge_requirements(pull, protection, head_oid, &statuses, &check_runs);
+    let reaction = reactions::one(
+        server,
+        repo,
+        actor,
+        Target::Pull {
+            number: pull.number,
+        },
+    )
+    .await?;
     Ok(json!({
+        "draft": pull.draft,
         "number": pull.number,
         "title": pull.title,
         "body": pull.body,
+        "reactions": reaction,
         "state": pull.state,
         "author": pull.author.name,
         "base_ref": pull.base_ref,
@@ -118,6 +129,7 @@ async fn pull_view(
             && current.is_some()
             && !same_author(&pull.author, actor),
         "can_merge": pull.state == PullState::Open
+            && !pull.draft
             && can_write
             && (pull.merge_pending.is_some()
                 || (current.is_some() && requirements.satisfied)),
@@ -262,6 +274,7 @@ fn merge_requirements(
 
 fn pull_list_view(pull: &PullSummary, labels: &[Label], assignees: &[Assignee]) -> Value {
     json!({
+        "draft": pull.draft,
         "number": pull.number,
         "title": pull.title,
         "state": pull.state,
@@ -272,18 +285,6 @@ fn pull_list_view(pull: &PullSummary, labels: &[Label], assignees: &[Assignee]) 
         "updated_at": pull.updated_at,
         "labels": labels::selection_view(&pull.label_ids, labels),
         "assignees": assignees::selection_view(&pull.assignee_subjects, assignees),
-    })
-}
-
-fn comment_view(comment: &PullComment, actor: &Identity) -> Value {
-    json!({
-        "number": comment.number,
-        "body": comment.body,
-        "author": comment.author.name,
-        "version": comment.version,
-        "created_at": comment.created_at,
-        "updated_at": comment.updated_at,
-        "can_edit": same_author(&comment.author, actor),
     })
 }
 
@@ -398,6 +399,8 @@ fn current_branches(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NewPull {
+    #[serde(default)]
+    draft: bool,
     request_id: String,
     title: String,
     body: String,
@@ -422,14 +425,24 @@ async fn create(
         return Err(Error::Invalid("Base and head branches must differ"));
     }
     if let Some(pull) = storage::pull_submission(&server, repo, &request_id).await? {
-        if !same_author(&pull.author, &actor)
-            || pull.title != title
-            || pull.body != input.body
-            || pull.base_ref != input.base_ref
-            || pull.head_ref != input.head_ref
-        {
-            return Err(Error::RequestConflict);
-        }
+        // Native submission validation compares the original payload, even when
+        // the current PR body or readiness changed after creation.
+        let pull = storage::create_pull(
+            &server,
+            repo,
+            NewPullRequest {
+                draft: input.draft,
+                author: actor.clone(),
+                request_id,
+                title,
+                body: input.body,
+                base_ref: input.base_ref,
+                head_ref: input.head_ref,
+                base_oid: pull.base_oid,
+                head_oid: pull.head_oid,
+            },
+        )
+        .await?;
         let repository = repo
             .open_current(&server, RepositoryOptions::default(), &server.cancellation)
             .await
@@ -464,6 +477,7 @@ async fn create(
         &server,
         repo,
         NewPullRequest {
+            draft: input.draft,
             author: actor.clone(),
             request_id,
             title,
@@ -647,107 +661,6 @@ async fn edit(
         )
         .await?,
     ))
-}
-
-async fn comments(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path((owner, name, id)): Path<(String, String, u64)>,
-    Query(params): Query<ListParameters>,
-) -> Result<Json<Value>> {
-    let repo = app::repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
-    let id = app::number(id)?;
-    if params.state.is_some() || params.q.is_some() {
-        return Err(Error::Invalid("Comments do not support list filters"));
-    }
-    let actor = app::actor(&principal)?;
-    let limit =
-        u8::try_from(params.limit()?).map_err(|_| Error::Invalid("Invalid pull request page"))?;
-    let (comments, next) = storage::comments(&server, repo, id, params.before, limit)
-        .await?
-        .ok_or(Error::NotFound)?;
-    let items = comments
-        .iter()
-        .map(|comment| comment_view(comment, &actor))
-        .collect::<Vec<_>>();
-    Ok(Json(json!({"items":items,"next":next})))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NewComment {
-    request_id: String,
-    body: String,
-}
-
-async fn comment(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path((owner, name, id)): Path<(String, String, u64)>,
-    input: std::result::Result<Json<NewComment>, JsonRejection>,
-) -> Result<impl IntoResponse> {
-    let repo = app::repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
-    let id = app::number(id)?;
-    let Json(input) = input?;
-    app::body(&input.body, true)?;
-    let actor = app::actor(&principal)?;
-    let comment = storage::create_comment(
-        &server,
-        repo,
-        id,
-        actor.clone(),
-        app::submission(&input.request_id)?,
-        input.body,
-    )
-    .await?;
-    Ok((StatusCode::CREATED, Json(comment_view(&comment, &actor))))
-}
-
-async fn comment_detail(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path((owner, name, id, comment)): Path<(String, String, u64, u64)>,
-) -> Result<Json<Value>> {
-    let repo = app::repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
-    let actor = app::actor(&principal)?;
-    let comment = storage::comment(&server, repo, app::number(id)?, app::number(comment)?)
-        .await?
-        .ok_or(Error::NotFound)?;
-    Ok(Json(comment_view(&comment, &actor)))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CommentEdit {
-    version: u64,
-    body: String,
-}
-
-async fn edit_comment(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path((owner, name, id, comment)): Path<(String, String, u64, u64)>,
-    input: std::result::Result<Json<CommentEdit>, JsonRejection>,
-) -> Result<Json<Value>> {
-    let repo = app::repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
-    let Json(input) = input?;
-    let actor = app::actor(&principal)?;
-    app::body(&input.body, true)?;
-    let comment = storage::update_comment(
-        &server,
-        repo,
-        app::number(id)?,
-        app::number(comment)?,
-        actor.clone(),
-        input.version,
-        input.body,
-    )
-    .await?;
-    Ok(Json(comment_view(&comment, &actor)))
 }
 
 #[cfg(test)]
