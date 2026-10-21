@@ -18,6 +18,10 @@ test("reactions persist on refresh, stay scoped, and ignore older snapshots", as
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/links"))
+      return route.fulfill({
+        json: { items: [], next: null, can_manage: false },
+      });
     if (path.endsWith("/activity"))
       return route.fulfill({ json: { items: [], next: null } });
     if (path === "/api/session")

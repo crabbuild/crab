@@ -57,6 +57,8 @@ pub(crate) enum Error {
     LabelPermission,
     #[error("Write access is required to manage milestones")]
     MilestonePermission,
+    #[error("Write access is required to manage linked work")]
+    LinkPermission,
     #[error("A milestone with this title already exists")]
     MilestoneConflict,
     #[error("A repository label with this name already exists")]
@@ -251,6 +253,11 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "Write access is required to manage milestones",
+            ),
+            Self::LinkPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to manage linked work",
             ),
             Self::MilestoneConflict => (
                 StatusCode::CONFLICT,

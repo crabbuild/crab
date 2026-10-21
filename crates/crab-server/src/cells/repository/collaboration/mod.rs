@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::{RepositoryTransaction, SqlBatch, SqlValue, integer, statement, validate_number};
 
 pub(crate) mod activity;
+pub(crate) mod links;
 pub(crate) mod milestones;
 pub(crate) mod reactions;
 mod target;

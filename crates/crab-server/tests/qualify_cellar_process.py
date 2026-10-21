@@ -316,6 +316,24 @@ with open(run / "commands.log", "w") as log:
         commit = subprocess.check_output(
             ["git", "-C", git, "rev-parse", "HEAD"], text=True
         ).strip()
+        (git / "README.md").write_text("Native Cellar qualification\nRelated issue workflow\n")
+        cmd(["git", "-C", git, "commit", "-am", "Add related issue input"])
+        cmd(["git", "-C", git, "push", origin + "/git/team/project.git", "HEAD:refs/heads/feature"], env=env)
+        pull = request("/api/repos/team/project/pulls", {
+            "request_id": str(uuid.uuid4()), "title": "Related issue workflow", "body": "Link without automatic closure",
+            "base_ref": "refs/heads/main", "head_ref": "refs/heads/feature",
+        })
+        pull_path = f"/api/repos/team/project/pulls/{pull['number']}"
+        link_path = pull_path + f"/linked-issues/{number}"
+        for active, version in [(True, 0), (False, 1), (True, 2)]:
+            linked = request(link_path, {"active": active, "version": version}, method="PUT")
+            assert linked == {"active": active, "version": version + 1}
+        issue_links = request(issue_path + "/links")
+        pull_links = request(pull_path + "/links")
+        assert issue_links["items"][0]["work"]["subject"] == {"kind": "pull", "number": pull["number"]}
+        assert pull_links["items"][0]["work"]["subject"] == {"kind": "issue", "number": number}
+        activity = request(issue_path + "/activity")
+        repository_activity = request("/api/repos/team/project/activity")
         stop()
         server = start()
         wait()
@@ -335,7 +353,18 @@ with open(run / "commands.log", "w") as log:
             assert removed["groups"]["heart"] == {"count": 0, "reacted": False}
         assert request("/api/repos/team/project/issues", body)["number"] == number
         assert request(issue_path + "/activity") == activity
-        assert request("/api/repos/team/project/activity") == activity
+        assert request("/api/repos/team/project/activity") == repository_activity
+        assert request(issue_path + "/links") == issue_links
+        assert request(pull_path + "/links") == pull_links
+        assert request(link_path) == {"active": True, "version": 3}
+        assert request(link_path, {"active": True, "version": 0}, method="PUT") == {"active": True, "version": 3}
+        try:
+            request(link_path, {"active": False, "version": 1}, method="PUT")
+        except urllib.error.HTTPError as error:
+            assert error.code == 409
+        else:
+            raise AssertionError("stale unlink must not overwrite a later link")
+        assert request("/api/repos/team/project/activity") == repository_activity
         refs = subprocess.check_output(
             ["git", "ls-remote", origin + "/git/team/project.git"], text=True, env=env
         )
@@ -375,6 +404,8 @@ with open(run / "commands.log", "w") as log:
             "issue_replay": True,
             "activity_restart": True,
             "activity_replay": True,
+            "linked_work_restart": True,
+            "linked_work_retry": True,
             "reaction_restart": True,
             "reaction_remove": True,
             "milestone_restart": True,

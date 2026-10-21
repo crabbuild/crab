@@ -63,10 +63,10 @@ native Cellar objects were present in the bucket. Desktop and mobile dark views
 had no accessibility violations; the existing footer contrast check required
 manual review. The 390px viewport had no horizontal document overflow.
 
-This verifies the milestone slice locally, not the entire expansion. Linked
-issues, draft readiness, and review requests still require their models,
-HTTP/browser workflows, and evidence. Native PR mutations also need the same
-transactional archive enforcement as issue mutations. Full cross-platform/runtime
+This verifies the milestone slice locally, not the entire expansion. Draft
+readiness and review requests still require their models, HTTP/browser workflows,
+and evidence. Linked work qualification is described below. Native PR mutations
+need the same transactional archive enforcement as issue mutations. Full cross-platform/runtime
 proof remains a CI responsibility.
 
 ### Reaction evidence
@@ -127,3 +127,36 @@ pagination matched the complete feed before and after restart. The same restart
 also retained milestone progress and all seven reaction memberships. A separate
 native-process qualifier verifies activity persistence and creation replay
 alongside milestone/reaction state.
+
+### Linked work contract
+
+An issue and a PR in the same repository have one versioned relationship. Active
+relationships appear in both subject indexes; removing one retains its version
+so a stale retry cannot overwrite a later link or unlink. Desired-state retries
+do not increment the version or create another event. Both subject indexes and
+one canonical activity event commit with the relationship in the same native
+transaction. The event appears in both timelines and once in repository activity.
+
+Lists use bounded, exclusive keyset pages ordered by the related subject number.
+They resolve current titles and open/closed/merged states from the native SQL
+records. No historical relationship or activity is inferred from Markdown.
+Writers manage links, readers follow backlinks, and archived repositories reject
+fresh mutations. The browser retains failed input, requires explicit refresh
+after a conflict, and preserves backlinks in read-only and archived views.
+Linking does not automatically close an issue or alter merge requirements.
+
+### Linked work evidence
+
+Native tests cover both indexes, receipt replay, concurrent duplicate links,
+versioned tombstones, stale add/unlink rejection, current subject summaries,
+exclusive pagination, invalid/missing targets, archive rejection, and native
+restart. HTTP tests cover membership, writer permissions, CSRF, input bounds,
+identity privacy, archive policy, and unchanged desired-state retries.
+
+Browser tests exercise failed writes with retained issue numbers, explicit
+conflict refresh, linking from a PR, navigating to its issue backlink, unlinking
+from the issue side, reload, read-only/archived views, and light/dark accessibility.
+The synthetic RustFS-backed browser repeats link → backlink → unlink → reload →
+relink. The process qualifier creates a real Git branch and PR, links/unlinks/
+relinks its issue, and restores both indexes and version 3 after restart. An old
+unlink is rejected and leaves the restored relationship and activity unchanged.

@@ -161,6 +161,10 @@ test("issue changes and new comments refresh their durable activity panel", asyn
     const path = new URL(request.url()).pathname;
     if (path.endsWith("/activity"))
       return route.fulfill({ json: { items: events, next: null } });
+    if (path.endsWith("/links"))
+      return route.fulfill({
+        json: { items: [], next: null, can_manage: false },
+      });
     if (path.endsWith("/milestone"))
       return route.fulfill({
         json: { milestone: null, version: 0, can_manage: false },

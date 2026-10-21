@@ -8,6 +8,7 @@ import {
   type RepositoryAssignee,
   type RepositoryLabel,
 } from "./api";
+import { LinkedWork } from "./collaboration/links";
 import { MilestonePicker } from "./collaboration/milestones/picker";
 import { LabelBadges, LabelPicker } from "./discussion-labels";
 import { useMutation } from "./discussion-mutations";
@@ -228,6 +229,13 @@ export function DiscussionMetadata({
           <p className="muted">None yet</p>
         )}
       </section>
+      <LinkedWork
+        key={`links:${version}`}
+        repo={repo}
+        path={path}
+        csrf={csrf}
+        onSaved={onSaved}
+      />
       <MilestonePicker
         key={version}
         repo={repo}

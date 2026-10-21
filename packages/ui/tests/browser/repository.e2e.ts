@@ -757,11 +757,15 @@ test("GitHub paths retain file context, pin permalinks, and restore browser hist
     "Code",
     "Issues",
     "Pull requests",
+    "Activity",
     "Settings",
   ]);
   await expect(
     navigation.getByRole("link", { name: "Pull requests" }),
   ).toHaveAttribute("href", "/team/project/pulls");
+  await expect(
+    navigation.getByRole("link", { name: "Activity", exact: true }),
+  ).toHaveAttribute("href", "/team/project/activity");
   await page.getByRole("button", { name: "Add file", exact: true }).click();
   await page.getByRole("menuitem", { name: "Create new file" }).click();
   await expect(page).toHaveURL("/team/project/new/main");

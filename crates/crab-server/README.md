@@ -70,7 +70,7 @@ OIDC logout tokens. The exact API, catalog, and identity contracts are in
 ## Browser navigation
 
 Repository pages use GitHub-style paths. **Code**, **Issues**, **Pull requests**,
-and **Settings** appear in that order; commit history lives under Code.
+**Activity**, and **Settings** appear in that order; commit history lives under Code.
 **Go to file** (keyboard `T`) opens file search, and **Add file** offers the
 existing create and upload actions.
 
@@ -95,6 +95,7 @@ rendering. In-app navigation retains the flag; `powerbar=0` disables it.
 | Issues or new issue | `/issues`, `/issues/{number}`, `/issues/new` |
 | Pull requests or detail | `/pulls`, `/pull/{number}` |
 | Pull request tabs | `/pull/{number}/commits`, `/pull/{number}/files`, `/pull/{number}/checks` |
+| Repository activity | `/activity` |
 | New pull request | `/compare/{base}...{head}` |
 | Releases or release detail | `/releases`, `/releases/tag/{tag}` |
 | Release creation or editing | `/releases/new`, `/releases/edit/{tag}` |

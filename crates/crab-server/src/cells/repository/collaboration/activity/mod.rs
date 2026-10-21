@@ -24,9 +24,23 @@ pub(crate) enum Action {
     Unresolved,
     MilestoneAssigned { number: u64, title: String },
     MilestoneRemoved { number: u64, title: String },
+    IssueLinked { number: u64, title: String },
+    IssueUnlinked { number: u64, title: String },
 }
 
 impl Action {
+    fn related_subject(&self) -> Option<Subject> {
+        match self {
+            Self::IssueLinked { number, .. } | Self::IssueUnlinked { number, .. } => {
+                Some(Subject {
+                    kind: super::SubjectKind::Issue,
+                    number: *number,
+                })
+            }
+            _ => None,
+        }
+    }
+
     fn validate(&self, target: Target) -> crate::cells::Result<()> {
         let valid = match target {
             Target::Issue { .. } => matches!(
@@ -45,6 +59,8 @@ impl Action {
                     | Self::Closed
                     | Self::Reopened
                     | Self::Merged
+                    | Self::IssueLinked { .. }
+                    | Self::IssueUnlinked { .. }
                     | Self::MilestoneAssigned { .. }
                     | Self::MilestoneRemoved { .. }
             ),
@@ -61,7 +77,9 @@ impl Action {
             ),
         };
         if let Self::MilestoneAssigned { number, title }
-        | Self::MilestoneRemoved { number, title } = self
+        | Self::MilestoneRemoved { number, title }
+        | Self::IssueLinked { number, title }
+        | Self::IssueUnlinked { number, title } = self
         {
             validate_number(*number)?;
             validate_title(title)?;
@@ -130,6 +148,15 @@ pub(in crate::cells::repository) fn append(
     context.put_document(SEQUENCE, &number)?;
     context.put_document(&format!("{}{number:016x}", events(None)), &event)?;
     context.put_document(&format!("{}{number:016x}", events(Some(subject))), &true)?;
+    if let Some(related) = event.action.related_subject() {
+        if related.closed(context)?.is_none() {
+            return Err(crate::cells::Error::Invalid(
+                "related activity subject is missing",
+            ));
+        }
+        // A relationship is one repository event visible from both subjects.
+        context.put_document(&format!("{}{number:016x}", events(Some(related))), &true)?;
+    }
     Ok(())
 }
 
@@ -218,7 +245,11 @@ fn number(key: &str, prefix: &str) -> crate::cells::Result<u64> {
 }
 
 fn validate(event: Event, number: u64, subject: Option<Subject>) -> crate::cells::Result<Event> {
-    if event.number != number || subject.is_some_and(|subject| event.target.subject() != subject) {
+    if event.number != number
+        || subject.is_some_and(|subject| {
+            event.target.subject() != subject && event.action.related_subject() != Some(subject)
+        })
+    {
         return Err(crate::cells::Error::Invalid(
             "activity event does not match its index",
         ));

@@ -1273,6 +1273,7 @@ Git refs unless a pull request merge publishes a ref update.
 | Milestones | `GET/POST /api/repos/{owner}/{name}/milestones`, `GET/PATCH /api/repos/{owner}/{name}/milestones/{number}`, `GET /api/repos/{owner}/{name}/milestones/{number}/items`; issue/pull `GET/PUT .../{number}/milestone` |
 | Reactions | `PUT /api/repos/{owner}/{name}/reactions/{target}`; discussion responses include personalized summaries |
 | Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
+| Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
 
@@ -1288,6 +1289,25 @@ titles at the action, without exposing private identity claims or copying bodies
 Existing history is not backfilled. Edits that change no content/state and
 creation retries do not add events. Reassigning milestones records removal and
 addition in the same transaction as the assignment and progress updates.
+
+### Link related work
+
+Writers link issues from the PR sidebar and can unlink from either subject.
+Readers can follow backlinks. Links are repository-local relationships; linking
+does not automatically close issues or satisfy merge requirements.
+
+Read the pair endpoint for its current `active` and `version`, then send a desired
+state such as `{"active":true,"version":0}` with `PUT`. A changed relationship
+increments its version; an unchanged desired state returns the current version
+without another event. An opposite change with a stale version returns 409.
+Unlinking retains its version, so delayed retries cannot overwrite later changes.
+
+Both lists use `limit` (1–50, default 30) and an exclusive numeric `before` cursor
+ordered by the related issue/PR number. Items include the current title, state,
+subject address, and relationship version. Relationship changes update both
+indexes and one canonical activity event atomically; that event appears in both
+timelines and once in the repository feed. Archived repositories keep backlinks
+readable and reject fresh relationship mutations.
 
 ### React to discussions
 

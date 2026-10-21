@@ -6881,3 +6881,32 @@ main {
 .activity-panel button {
   transition-property: background-color, border-color;
 }
+
+.linked-work ul {
+  list-style: none;
+  padding: 0;
+  margin-block: 12px;
+}
+.linked-work li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-block: 8px;
+}
+.linked-work li a {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+.linked-work li span {
+  font-size: 12px;
+}
+.linked-work form {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.linked-work label {
+  display: grid;
+  gap: 6px;
+}

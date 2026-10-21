@@ -30,7 +30,8 @@ type Action =
         | "unresolved";
     }
   | { kind: "milestone_assigned"; number: number; title: string }
-  | { kind: "milestone_removed"; number: number; title: string };
+  | { kind: "milestone_removed"; number: number; title: string }
+  | { kind: "issue_linked" | "issue_unlinked"; number: number; title: string };
 export interface ActivityEvent {
   number: number;
   target: Target;
@@ -95,6 +96,10 @@ function action(event: ActivityEvent): string {
       return "added milestone";
     case "milestone_removed":
       return "removed milestone";
+    case "issue_linked":
+      return "linked issue";
+    case "issue_unlinked":
+      return "unlinked issue";
   }
 }
 
@@ -187,15 +192,15 @@ export function ActivityTimeline({
             };
             const href = repoHref(repo, parameters);
             const date = new Date(event.created_at);
-            const milestone =
-              event.action.kind === "milestone_assigned" ||
-              event.action.kind === "milestone_removed"
-                ? event.action
-                : undefined;
-            const milestoneHref = milestone
+            const related = "number" in event.action ? event.action : undefined;
+            const linkedIssue =
+              related?.kind === "issue_linked" ||
+              related?.kind === "issue_unlinked";
+            const relatedHref = related
               ? repoHref(repo, {
-                  view: "milestones",
-                  milestone: String(milestone.number),
+                  view: linkedIssue ? "issues" : "milestones",
+                  issue: linkedIssue ? String(related.number) : undefined,
+                  milestone: linkedIssue ? undefined : String(related.number),
                 })
               : undefined;
             return (
@@ -203,10 +208,9 @@ export function ActivityTimeline({
                 <HistoryIcon aria-hidden="true" />
                 <div>
                   <strong>{event.actor}</strong> {action(event)}{" "}
-                  {milestone && (
+                  {related && (
                     <>
-                      <Link href={milestoneHref}>{milestone.title}</Link>{" "}
-                      on{" "}
+                      <Link href={relatedHref}>{related.title}</Link> on{" "}
                     </>
                   )}
                   <Link href={href}>
