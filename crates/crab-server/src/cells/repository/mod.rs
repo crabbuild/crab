@@ -15,19 +15,15 @@ use crate::cells::records::{RecordDecoder, RecordEncoder, StoredRecord};
 
 use crate::cells::application::{Mutation, MutationResult, Read, RepositoryTransaction};
 
-#[cfg(test)]
-pub(crate) use checks::CheckRunPage;
 pub(crate) use checks::{
     CheckAnnotationRecord, CheckOutputRecord, CheckReportInput, CheckRunDetail, CheckRunKey,
     CheckRunRecord, CheckStepRecord, CheckSubmissionKey, CreateCheckRun, CreateCheckRunInput,
     CreateCheckRunOutcome, GetCheckCreateSubmission, GetCheckRun, GetCheckUpdateSubmission,
     ListCheckRuns, ListCheckRunsInput, UpdateCheckRun, UpdateCheckRunInput, UpdateCheckRunOutcome,
 };
-pub(crate) use operations::{
-    CreateCommitStatus, CreateLabel, DeleteLabel, GetCommitStatusSubmission, ListComments,
-    ListCommitStatuses, ListIssues, ListLabels, UpdateComment, UpdateIssue, UpdateLabel,
-};
-pub(crate) use pull_review_threads::{
+pub(crate) use issues::{ListComments, ListIssues, UpdateComment, UpdateIssue};
+pub(crate) use labels::{CreateLabel, DeleteLabel, ListLabels, UpdateLabel};
+pub(crate) use pulls::review_threads::{
     CreatePullReviewReply, CreatePullReviewReplyInput, CreatePullReviewReplyOutcome,
     CreatePullReviewThread, CreatePullReviewThreadInput, CreatePullReviewThreadOutcome,
     GetPullReviewReply, GetPullReviewReplySubmission, GetPullReviewThread,
@@ -50,8 +46,6 @@ pub(crate) use pulls::{
     UpdatePullComment, UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput,
     UpdatePullOutcome, UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
 };
-#[cfg(test)]
-pub(crate) use releases::ReleaseAssetRecord;
 pub(crate) use releases::{
     AttachReleaseAsset, AttachReleaseAssetInput, AttachReleaseAssetOutcome,
     CompleteReleasePublication, CompleteReleasePublicationInput, CompleteReleasePublicationOutcome,
@@ -68,6 +62,7 @@ pub(crate) use settings::{
     ReplaceRepositoryLifecycle, ReplaceRepositoryLifecycleInput, ReplaceRepositoryLifecycleOutcome,
     RepositoryLifecycleRecord,
 };
+pub(crate) use statuses::{CreateCommitStatus, GetCommitStatusSubmission, ListCommitStatuses};
 
 const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 const MAX_LIST_ITEMS: usize = 50;
@@ -80,17 +75,15 @@ const MAX_ASSIGNEES: usize = 10;
 const MAX_LIST_OUTPUT_BYTES: usize = 1024 * 1024;
 
 mod checks;
-mod checks_codec;
 mod dispatch;
 mod issues;
+mod labels;
 mod models;
-mod operations;
 pub(crate) mod projection;
-mod pull_review_threads;
 mod pulls;
 mod releases;
 mod settings;
-mod settings_codec;
+mod statuses;
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
     SqlStatement {
@@ -168,38 +161,6 @@ pub(super) fn comment_submission_digest(input: &CreateCommentInput) -> blake3::H
     hash_text(&mut hasher, &input.author.issuer);
     hash_text(&mut hasher, &input.author.subject);
     hash_text(&mut hasher, &input.body);
-    hasher.finalize()
-}
-
-pub(super) fn label_submission_digest(input: &CreateLabelInput) -> blake3::Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"crab.repository.label-submission.v1\0");
-    hash_text(&mut hasher, &input.author.issuer);
-    hash_text(&mut hasher, &input.author.subject);
-    hash_text(&mut hasher, &input.name);
-    hash_text(&mut hasher, &input.color);
-    match &input.description {
-        Some(description) => {
-            hasher.update(&[1]);
-            hash_text(&mut hasher, description);
-        }
-        None => {
-            hasher.update(&[0]);
-        }
-    }
-    hasher.finalize()
-}
-
-pub(super) fn status_submission_digest(input: &CreateCommitStatusInput) -> blake3::Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"crab.repository.commit-status-submission.v1\0");
-    hash_text(&mut hasher, &input.author.issuer);
-    hash_text(&mut hasher, &input.author.subject);
-    hash_text(&mut hasher, &input.oid);
-    hash_text(&mut hasher, &input.context);
-    hasher.update(&[input.state]);
-    hash_optional_text(&mut hasher, input.description.as_deref());
-    hash_optional_text(&mut hasher, input.target_url.as_deref());
     hasher.finalize()
 }
 
@@ -281,45 +242,6 @@ fn result_optional_text(row: &[SqlValue], column: usize) -> crate::cells::Result
             "repository query returned invalid optional text",
         )),
     }
-}
-
-fn label_from_row(row: &[SqlValue]) -> crate::cells::Result<LabelRecord> {
-    let record = LabelRecord {
-        number: result_u64_from_row(row, 0)?,
-        name: result_text(row, 1)?,
-        color: result_text(row, 2)?,
-        description: result_optional_text(row, 3)?,
-        version: result_u64_from_row(row, 4)?,
-        created_at_ms: result_u64_from_row(row, 5)?,
-        updated_at_ms: result_u64_from_row(row, 6)?,
-    };
-    validate_label(&record)?;
-    Ok(record)
-}
-
-fn status_from_row(row: &[SqlValue]) -> crate::cells::Result<CommitStatusRecord> {
-    let submission = result_blob(row, 1)?;
-    let submission_id = <[u8; 16]>::try_from(submission)
-        .map_err(|_| crate::cells::Error::Invalid("repository status submission ID is invalid"))?;
-    let state = u8::try_from(result_u64_from_row(row, 7)?)
-        .map_err(|_| crate::cells::Error::Invalid("repository status state is invalid"))?;
-    let record = CommitStatusRecord {
-        number: result_u64_from_row(row, 0)?,
-        submission_id,
-        author: RepositoryAuthor {
-            issuer: result_text(row, 2)?,
-            subject: result_text(row, 3)?,
-            name: result_text(row, 4)?,
-        },
-        oid: result_text(row, 5)?,
-        context: result_text(row, 6)?,
-        state,
-        description: result_optional_text(row, 8)?,
-        target_url: result_optional_text(row, 9)?,
-        created_at_ms: result_u64_from_row(row, 10)?,
-    };
-    validate_status_record(&record)?;
-    Ok(record)
 }
 
 fn issue_from_row(row: &[SqlValue]) -> crate::cells::Result<IssueRecord> {
@@ -423,101 +345,6 @@ fn validate_body(body: &str, required: bool) -> crate::cells::Result<()> {
     if (required && body.trim().is_empty()) || body.len() > 64 * 1024 || body.contains('\0') {
         return Err(crate::cells::Error::Invalid(
             "repository discussion body is invalid",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_label_fields(
-    name: &str,
-    color: &str,
-    description: Option<&str>,
-) -> crate::cells::Result<()> {
-    if name.is_empty()
-        || name.trim() != name
-        || name.chars().count() > 50
-        || name.chars().any(char::is_control)
-        || color.len() != 6
-        || !color.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || color.to_ascii_lowercase() != color
-        || description.is_some_and(|value| {
-            value.is_empty()
-                || value.trim() != value
-                || value.chars().count() > 100
-                || value.chars().any(char::is_control)
-        })
-    {
-        return Err(crate::cells::Error::Invalid(
-            "repository label fields are invalid",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_status_fields(
-    oid: &str,
-    context: &str,
-    state: u8,
-    description: Option<&str>,
-    target_url: Option<&str>,
-) -> crate::cells::Result<()> {
-    if oid.len() != 40
-        || !oid
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        || oid.bytes().all(|byte| byte == b'0')
-        || context.is_empty()
-        || context.trim() != context
-        || context.chars().count() > 100
-        || context.chars().any(char::is_control)
-        || state > 3
-        || description
-            .is_some_and(|value| value.chars().count() > 140 || value.chars().any(char::is_control))
-        || target_url
-            .is_some_and(|value| value.len() > 2_048 || value.chars().any(char::is_control))
-    {
-        return Err(crate::cells::Error::Invalid(
-            "repository commit status is invalid",
-        ));
-    }
-    if let Some(value) = target_url {
-        let url = url::Url::parse(value).map_err(|_| {
-            crate::cells::Error::Invalid("repository commit status target is invalid")
-        })?;
-        crate::config::validate_identity_url(&url, true).map_err(|_| {
-            crate::cells::Error::Invalid("repository commit status target is invalid")
-        })?;
-    }
-    Ok(())
-}
-
-fn validate_status_record(record: &CommitStatusRecord) -> crate::cells::Result<()> {
-    if record.number == 0 || record.number > MAX_STATUS_SUBMISSIONS {
-        return Err(crate::cells::Error::Invalid(
-            "repository commit status number is invalid",
-        ));
-    }
-    validate_author(&record.author)?;
-    validate_status_fields(
-        &record.oid,
-        &record.context,
-        record.state,
-        record.description.as_deref(),
-        record.target_url.as_deref(),
-    )
-}
-
-fn validate_label(record: &LabelRecord) -> crate::cells::Result<()> {
-    if record.number == 0 || record.number > MAX_REPOSITORY_LABELS {
-        return Err(crate::cells::Error::Invalid(
-            "repository label number is invalid",
-        ));
-    }
-    validate_label_fields(&record.name, &record.color, record.description.as_deref())?;
-    validate_number(record.version)?;
-    if record.updated_at_ms < record.created_at_ms {
-        return Err(crate::cells::Error::Invalid(
-            "repository label row is invalid",
         ));
     }
     Ok(())
