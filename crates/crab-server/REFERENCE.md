@@ -823,7 +823,7 @@ snapshot.
 
 Administrators can make the same full replacement in **Settings → Members**.
 The browser loads membership only when that section opens, presents stable
-subject, display name, and `read`/`write`/`admin` access, and sends the session
+subject, display name, and `read`/`triage`/`write`/`admin` access, and sends the session
 CSRF token with a single revision-guarded replacement. Add, edit, and remove
 are staged locally; removal requires an explicit confirmation. A conflict keeps
 the unsaved draft and requires **Reload members** before another save; it never
@@ -1350,6 +1350,34 @@ owner label does not acquire ownership.
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
+
+### Separate collaboration triage from code write access
+
+Repository membership supports `read`, `triage`, `write` and `admin` roles.
+The collaboration split follows [GitHub’s repository-role reference](https://docs.github.com/en/organizations/managing-user-access-to-your-organizations-repositories/managing-repository-roles/repository-roles-for-an-organization); full role parity remains incomplete.
+Triage can close/reopen other authors’ issues and PRs, apply/remove existing
+labels and assignees, apply milestones, and request/cancel reviews. It cannot
+push code, issue write-scoped Git tokens, merge, change draft readiness on
+another author’s PR, edit another author’s title/body, create/edit label or
+milestone definitions, publish releases, or administer members/settings. Write
+and Admin retain Triage capabilities. Authors retain their existing description
+and own-item state controls; archive, pending-merge and version guards still
+apply inside native commands.
+
+Issue detail responses include `can_close` separately from `can_edit`; the
+browser uses that capability for state controls. PR `can_manage` controls state
+while `can_merge` still requires code write permission. Role edits use the
+existing revisioned membership catalog and audit chain. Detail capabilities and
+edit admission read durable membership instead of inferring it from a public
+profile or delayed routing snapshot. Rechecks across awaited reads are not an
+atomic cross-authority fence: the planned native grant cutover remains required.
+Maintain, owner/organization/team grants, complete moderation and required-review
+permission parity remain delivery work.
+
+Native issue/PR edit inputs carry `can_triage` instead of their earlier coarse
+management flag. Update fleet peers together before assigning the new role.
+No catalog, canonical repository or discussion-index schema change is needed;
+existing member records remain valid. No alias accepts superseded native inputs.
 
 ### Search issues and pull requests
 

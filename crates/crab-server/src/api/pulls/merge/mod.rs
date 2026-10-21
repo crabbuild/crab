@@ -238,15 +238,7 @@ async fn finish(
         }
     }
     let pull = storage::complete_merge(server, repo, pull.number, record).await?;
-    pull_view(
-        &pull,
-        &actor,
-        server,
-        repo,
-        principal.can_write(&repo.config),
-        None,
-    )
-    .await
+    pull_view(&pull, &actor, server, repo, principal, None).await
 }
 
 async fn execute(
@@ -308,7 +300,7 @@ async fn execute(
         }
         return Ok((
             StatusCode::OK,
-            Json(pull_view(&pull, &candidate.author, &server, repo, true, None).await?),
+            Json(pull_view(&pull, &candidate.author, &server, repo, &principal, None).await?),
         ));
     }
     if let Some(record) = &pull.merge_pending {

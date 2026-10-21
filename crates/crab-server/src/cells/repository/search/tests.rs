@@ -64,7 +64,7 @@ async fn fixture(
             UpdateIssueInput {
                 number: 1,
                 actor: author,
-                can_manage_metadata: true,
+                can_triage: true,
                 version: 1,
                 title: None,
                 body: None,
@@ -257,7 +257,7 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
                     UpdateIssueInput {
                         number: issue.number,
                         actor: author.clone(),
-                        can_manage_metadata: true,
+                        can_triage: true,
                         version: issue.version,
                         title: None,
                         body: None,

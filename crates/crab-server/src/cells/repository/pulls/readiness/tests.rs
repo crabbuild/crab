@@ -407,7 +407,7 @@ async fn missing_closed_and_archived_pulls_reject_readiness_changes() {
         UpdatePullInput {
             number: 1,
             actor: actor("Alice"),
-            can_manage: false,
+            can_triage: false,
             version: 1,
             title: None,
             body: None,
@@ -491,7 +491,7 @@ async fn closing_and_reopening_a_draft_preserves_its_merge_block() {
     let close = UpdatePullInput {
         number: pull.number,
         actor: actor("Alice"),
-        can_manage: false,
+        can_triage: false,
         version: pull.version,
         title: None,
         body: None,

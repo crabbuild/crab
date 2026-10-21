@@ -291,8 +291,9 @@ async fn selection(
             .await,
     )?
     .ok_or(Error::NotFound)?;
+    let permissions = app::membership(&server, &principal, &repo).await?;
     Ok(Json(
-        json!({"milestone":value.milestone.as_ref().map(view),"version":value.version,"can_manage":principal.can_write(&repo.config)}),
+        json!({"milestone":value.milestone.as_ref().map(view),"version":value.version,"can_manage":permissions.can_triage}),
     ))
 }
 
@@ -304,7 +305,10 @@ async fn assign(
     input: std::result::Result<Json<MilestoneSelection>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
-    if !principal.can_write(&repo.config) {
+    if !app::membership(&server, &principal, &repo)
+        .await?
+        .can_triage
+    {
         return Err(Error::MilestonePermission);
     }
     let actor = app::actor(&principal)?;

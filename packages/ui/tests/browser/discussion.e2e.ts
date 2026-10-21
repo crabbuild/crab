@@ -15,6 +15,7 @@ async function openDiscussion(page: Page) {
     created_at: 1_700_000_000_000,
     updated_at: 1_700_000_000_000,
     can_edit: true,
+    can_close: true,
   };
   let issue = { ...record, title: "Keyboard discussion", state: "open" };
   const comments = [{ ...record, body: "Original comment" }];

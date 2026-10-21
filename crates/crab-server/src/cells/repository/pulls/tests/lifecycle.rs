@@ -76,7 +76,7 @@ fn edit(version: u64, title: &str) -> UpdatePullInput {
     UpdatePullInput {
         number: 1,
         actor: actor("Alice"),
-        can_manage: false,
+        can_triage: false,
         version,
         title: Some(title.into()),
         body: None,

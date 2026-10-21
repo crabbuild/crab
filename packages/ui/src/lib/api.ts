@@ -43,7 +43,7 @@ export interface Repository {
 export interface RepositoryMember {
   subject: string;
   name: string;
-  access: "read" | "write" | "admin";
+  access: "read" | "triage" | "write" | "admin";
 }
 export interface MembershipState {
   revision: number;

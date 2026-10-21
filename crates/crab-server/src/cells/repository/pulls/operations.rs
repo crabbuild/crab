@@ -142,8 +142,8 @@ impl Mutation for UpdatePull {
         }
         let author = same_author(&pull.author, &input.actor);
         if (input.title.is_some() || input.body.is_some()) && !author
-            || input.state.is_some() && !(author || input.can_manage)
-            || (input.label_ids.is_some() || input.assignee_subjects.is_some()) && !input.can_manage
+            || input.state.is_some() && !(author || input.can_triage)
+            || (input.label_ids.is_some() || input.assignee_subjects.is_some()) && !input.can_triage
         {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::Forbidden));
         }

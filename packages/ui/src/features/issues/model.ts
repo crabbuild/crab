@@ -20,6 +20,7 @@ export interface Issue extends Comment {
   assignees: RepositoryAssignee[];
   can_label: boolean;
   can_assign: boolean;
+  can_close: boolean;
 }
 export type IssueListItem = DiscussionTotals & {
   kind: "issue";

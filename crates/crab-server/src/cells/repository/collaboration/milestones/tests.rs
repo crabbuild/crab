@@ -100,7 +100,7 @@ async fn assignment_progress_tracks_issue_state_and_duplicate_commands() {
     let close = UpdateIssueInput {
         number: issue.number,
         actor: actor(),
-        can_manage_metadata: true,
+        can_triage: true,
         version: issue.version,
         title: None,
         body: None,
@@ -610,7 +610,7 @@ async fn pull_close_reopen_and_merge_completion_update_milestone_progress() {
                 UpdatePullInput {
                     number: pull.number,
                     actor: actor(),
-                    can_manage: true,
+                    can_triage: true,
                     version,
                     title: None,
                     body: None,

@@ -284,6 +284,18 @@ and repository data remain separate snapshots, not a distributed transaction or
 authority. Author dropdowns, integration accounts, assigned/mentioned/review
 views and owner/team/project authority remain delivery work.
 
+Repository roles now separate Triage from code write access. Settings → Members
+can grant/change it through the canonical revisioned catalog. Issue detail has
+an independent `can_close` capability; state actions can remain available when
+description editing is forbidden. Triage also manages existing labels,
+assignments, milestones and PR review requests. Publication and merge/readiness
+permissions remain separate; archive/version guards are preserved in native
+commands. Durable role reads prevent delayed routing snapshots from deciding
+these new capabilities. Native edit inputs change, requiring peers to deploy
+together, with no new persistent schema or index preparation. Complete role
+parity, qualified membership, owner/organization/team authority and atomic
+cross-authority fencing remain incomplete.
+
 ## Verification and completion
 
 Each requirement needs source and executable proof, not a checked box alone.
@@ -428,6 +440,27 @@ upgraded to format 3. All 18 captured canonical collaboration resources compared
 unchanged; the operator remained unenrolled and self filtering still worked.
 This does not qualify full GitHub parity or remove the Cellar 0.1.0 release
 limitations documented in `crates/crab-server/CELLAR.md`.
+
+The Triage slice passed 344 isolated server tests (five existing ignored),
+107 UI unit tests and all 89 browser tests. Native/HTTP proof covers role/scope
+ordering, durable promotion before routing materialization, both discussion
+kinds, rejected mixed title/state edits without a partial mutation, close/reopen,
+labels, assignees, milestone assignment, review requests, denied definition/merge/
+write-token actions and downgrade. Browser proof covers the role selector through
+save/reload, state actions with description editing forbidden, downgrade, focus,
+dark/mobile layouts and automated accessibility checks. Builds, all-target
+Clippy, formatting, architecture gates and relative documentation links passed.
+
+A real embedded browser workflow used an isolated RustFS bucket and a synthetic
+loopback GitHub OAuth provider with PKCE verification. An administrator granted
+Triage through Settings, a separate signed-in user reopened/closed another
+author’s issue, and write-token issuance was denied. Catalog grants, sessions and
+issue changes survived process restart; a subsequent Read downgrade removed the
+state controls. The existing Git, review, merge, replay, search and rebuild
+qualification also passed. Both persistent preview repositories retained all
+18 captured collaboration resources, apart from the newly computed `can_close`
+field; no profile was enrolled or schema/index rebuilt. Native authority fencing,
+remaining role capabilities and the full parity checklist remain unfinished.
 
 ## Primary references
 

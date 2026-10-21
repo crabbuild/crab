@@ -260,7 +260,7 @@ async fn comments_reactions_and_rejected_edits_keep_index_totals_consistent() {
         UpdateIssueInput {
             number: 1,
             actor: actor(),
-            can_manage_metadata: true,
+            can_triage: true,
             version: 99,
             title: Some("Wrong".into()),
             body: None,
@@ -421,7 +421,7 @@ async fn state_counters_equal_their_navigation_queries_across_boolean_and_litera
         UpdateIssueInput {
             number: 2,
             actor: actor(),
-            can_manage_metadata: true,
+            can_triage: true,
             version: 1,
             title: None,
             body: None,

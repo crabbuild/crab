@@ -61,9 +61,9 @@ pub(crate) enum Error {
     CheckPermission,
     #[error("Check run not found")]
     CheckNotFound,
-    #[error("Write access is required to manage repository labels")]
+    #[error("You do not have permission to change labels")]
     LabelPermission,
-    #[error("Write access is required to manage milestones")]
+    #[error("You do not have permission to change milestones")]
     MilestonePermission,
     #[error("Write access is required to manage linked work")]
     LinkPermission,
@@ -73,7 +73,7 @@ pub(crate) enum Error {
     LabelConflict,
     #[error("Repository label not found")]
     LabelNotFound,
-    #[error("Write access is required to manage assignees")]
+    #[error("Triage access is required to manage assignees")]
     AssigneePermission,
     #[error("Write access is required to manage releases")]
     ReleasePermission,
@@ -285,7 +285,7 @@ impl IntoResponse for Error {
             Self::MilestonePermission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
-                "Write access is required to manage milestones",
+                "You do not have permission to change milestones",
             ),
             Self::LinkPermission => (
                 StatusCode::FORBIDDEN,
@@ -300,7 +300,7 @@ impl IntoResponse for Error {
             Self::LabelPermission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
-                "Write access is required to manage repository labels",
+                "You do not have permission to change labels",
             ),
             Self::LabelConflict => (
                 StatusCode::CONFLICT,
@@ -315,7 +315,7 @@ impl IntoResponse for Error {
             Self::AssigneePermission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
-                "Write access is required to manage assignees",
+                "Triage access is required to manage assignees",
             ),
             Self::ReleasePermission => (
                 StatusCode::FORBIDDEN,
@@ -502,6 +502,7 @@ pub(crate) fn repository(
 pub(crate) struct Membership {
     pub members: Vec<crate::RepositoryMember>,
     pub can_write: bool,
+    pub can_triage: bool,
 }
 
 pub(crate) async fn membership(
@@ -513,6 +514,7 @@ pub(crate) async fn membership(
         return Ok(Membership {
             members: Vec::new(),
             can_write: true,
+            can_triage: true,
         });
     }
     let catalog = server.catalog().ok_or(Error::NotFound)?;
@@ -532,6 +534,7 @@ pub(crate) async fn membership(
     }
     Ok(Membership {
         can_write: principal.can_write(&config),
+        can_triage: principal.can_triage(&config),
         members: config.members,
     })
 }

@@ -62,7 +62,7 @@ async fn pull_view(
     actor: &Identity,
     server: &Server,
     repo: &Repository,
-    can_write: bool,
+    principal: &Principal,
     current: Option<&(String, String)>,
 ) -> Result<Value> {
     let base_oid = pull.merge.as_ref().map_or_else(
@@ -99,6 +99,9 @@ async fn pull_view(
         },
     )
     .await?;
+    let permissions = app::membership(server, principal, repo).await?;
+    let can_write = permissions.can_write;
+    let can_triage = permissions.can_triage;
     Ok(json!({
         "draft": pull.draft,
         "number": pull.number,
@@ -118,12 +121,12 @@ async fn pull_view(
         "updated_at": pull.updated_at,
         "labels": labels::selection_view(&pull.label_ids, &labels),
         "assignees": assignees::selection_view(&pull.assignee_subjects, &assignees),
-        "can_label": can_write,
-        "can_assign": can_write,
+        "can_label": can_triage,
+        "can_assign": can_triage,
         "can_edit": same_author(&pull.author, actor),
         "can_manage": pull.state != PullState::Merged
             && pull.merge_pending.is_none()
-            && (can_write || same_author(&pull.author, actor)),
+            && (can_triage || same_author(&pull.author, actor)),
         "can_decide": pull.state == PullState::Open
             && current.is_some()
             && !same_author(&pull.author, actor),
@@ -418,17 +421,7 @@ async fn create(
             .and_then(|repository| current_branches(repository, &pull));
         return Ok((
             StatusCode::CREATED,
-            Json(
-                pull_view(
-                    &pull,
-                    &actor,
-                    &server,
-                    repo,
-                    principal.can_write(&repo.config),
-                    current.as_ref(),
-                )
-                .await?,
-            ),
+            Json(pull_view(&pull, &actor, &server, repo, &principal, current.as_ref()).await?),
         ));
     }
     let repository = repo
@@ -458,17 +451,7 @@ async fn create(
     let current = current_branches(&repository, &pull);
     Ok((
         StatusCode::CREATED,
-        Json(
-            pull_view(
-                &pull,
-                &actor,
-                &server,
-                repo,
-                principal.can_write(&repo.config),
-                current.as_ref(),
-            )
-            .await?,
-        ),
+        Json(pull_view(&pull, &actor, &server, repo, &principal, current.as_ref()).await?),
     ))
 }
 
@@ -491,15 +474,7 @@ async fn detail(
         .as_ref()
         .and_then(|repository| current_branches(repository, &pull));
     Ok(Json(
-        pull_view(
-            &pull,
-            &actor,
-            &server,
-            repo,
-            principal.can_write(&repo.config),
-            current.as_ref(),
-        )
-        .await?,
+        pull_view(&pull, &actor, &server, repo, &principal, current.as_ref()).await?,
     ))
 }
 
@@ -535,6 +510,7 @@ async fn edit(
         .is_some_and(|labels| !labels.is_empty())
         || (input.label_ids.is_none() && !pull.label_ids.is_empty());
     let assignee_change = input.assignees.is_some();
+    let can_triage = app::membership(&server, &principal, repo).await?.can_triage;
     let author = same_author(&pull.author, &actor);
     if pull.merge_pending.is_some() {
         return Err(Error::MergePending);
@@ -542,13 +518,13 @@ async fn edit(
     if (input.title.is_some() || input.body.is_some()) && !author {
         return Err(Error::Forbidden);
     }
-    if input.state.is_some() && !(author || principal.can_write(&repo.config)) {
+    if input.state.is_some() && !(author || can_triage) {
         return Err(Error::Forbidden);
     }
-    if label_change && !principal.can_write(&repo.config) {
+    if label_change && !can_triage {
         return Err(Error::LabelPermission);
     }
-    if assignee_change && !principal.can_write(&repo.config) {
+    if assignee_change && !can_triage {
         return Err(Error::AssigneePermission);
     }
     if input.state == Some(PullState::Merged) || (pull.merge.is_some() && input.state.is_some()) {
@@ -587,10 +563,13 @@ async fn edit(
         .assignees
         .map(|value| assignees::validate_selection(value, &assignees))
         .transpose()?;
-    if label_change && !principal.can_write(&repo.config) {
+    // Metadata reads yield before dispatch. Recheck the durable role because
+    // routing snapshots can lag permission changes.
+    let can_triage = app::membership(&server, &principal, repo).await?.can_triage;
+    if label_change && !can_triage {
         return Err(Error::LabelPermission);
     }
-    if assignee_change && !principal.can_write(&repo.config) {
+    if assignee_change && !can_triage {
         return Err(Error::AssigneePermission);
     }
     let pull = storage::update_pull(
@@ -599,7 +578,7 @@ async fn edit(
         number,
         storage::PullEdit {
             actor: actor.clone(),
-            can_manage: principal.can_write(&repo.config),
+            can_triage,
             version: input.version,
             title,
             body,
@@ -617,15 +596,7 @@ async fn edit(
         .as_ref()
         .and_then(|repository| current_branches(repository, &pull));
     Ok(Json(
-        pull_view(
-            &pull,
-            &actor,
-            &server,
-            repo,
-            principal.can_write(&repo.config),
-            current.as_ref(),
-        )
-        .await?,
+        pull_view(&pull, &actor, &server, repo, &principal, current.as_ref()).await?,
     ))
 }
 

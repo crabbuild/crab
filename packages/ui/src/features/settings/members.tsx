@@ -25,6 +25,7 @@ import {
 import { repoHref } from "@/lib/repository-route";
 import {
   AlertIcon,
+  IssueOpenedIcon,
   EyeIcon,
   PencilIcon,
   PersonIcon,
@@ -58,11 +59,18 @@ function memberAccessDetails(access: RepositoryMember["access"]) {
           description: "Can push changes and collaborate on the repository.",
           Icon: PencilIcon,
         }
-      : {
-          label: "Read",
-          description: "Can view and clone the repository.",
-          Icon: EyeIcon,
-        };
+      : access === "triage"
+        ? {
+            label: "Triage",
+            description:
+              "Can manage issues and pull requests without pushing code.",
+            Icon: IssueOpenedIcon,
+          }
+        : {
+            label: "Read",
+            description: "Can view and clone the repository.",
+            Icon: EyeIcon,
+          };
 }
 
 function MemberAccess({ access }: { access: RepositoryMember["access"] }) {
@@ -446,13 +454,14 @@ export function MemberSettings({
                           onValueChange={(access) => {
                             if (
                               access === "read" ||
+                              access === "triage" ||
                               access === "write" ||
                               access === "admin"
                             )
                               setForm({ ...form, access });
                           }}
                         >
-                          {(["read", "write", "admin"] as const).map(
+                          {(["read", "triage", "write", "admin"] as const).map(
                             (access) => {
                               const details = memberAccessDetails(access);
                               const { Icon } = details;

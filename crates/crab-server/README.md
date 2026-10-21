@@ -116,6 +116,14 @@ state and sort support. Author suggestions search indexed public handles; names
 never act as identities or grants. Format-1/2 indexes need an explicit rebuild
 before serving the new lists; update fleet peers together.
 
+Repository members can receive Triage access in Settings → Members. It permits
+issue/PR state changes, existing metadata assignment and review requests while
+code publication, merging, catalog definitions and administration retain their
+separate permissions. Issue state controls use `can_close` independently of
+`can_edit`. Existing schema/index data needs no rebuild; deploy peers together
+for the updated native edit input. Full role and organization authority parity
+remains tracked in the collaboration plan.
+
 Pull request conversations show merge requirements above the comment editor.
 Choose a merge method, review the commit message, and confirm the merge; an
 uncertain publication can be retried using the original submission.

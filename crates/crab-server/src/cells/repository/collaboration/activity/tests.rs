@@ -104,7 +104,7 @@ async fn state_and_content_changes_are_ordered_and_rejected_or_noop_edits_emit_n
         number: 1,
         version: 1,
         actor: actor("Alice"),
-        can_manage_metadata: false,
+        can_triage: false,
         title: Some("Updated title".into()),
         body: None,
         state: Some(1),

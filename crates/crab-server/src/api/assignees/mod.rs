@@ -87,10 +87,11 @@ async fn list(
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
     let repo = repo.as_ref();
+    let membership = app::membership(&server, &principal, repo).await?;
     let available = available(repo, &app::actor(&principal)?);
     Ok(Json(json!({
         "items":available.iter().map(view).collect::<Vec<_>>(),
-        "can_manage":principal.can_write(&repo.config),
+        "can_manage":membership.can_triage,
     })))
 }
 

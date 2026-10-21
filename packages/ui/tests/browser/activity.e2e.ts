@@ -152,6 +152,7 @@ test("issue changes and new comments refresh their durable activity panel", asyn
     labels: [],
     assignees: [],
     can_edit: true,
+    can_close: true,
     can_label: false,
     can_assign: false,
     reactions: emptyReactions(),

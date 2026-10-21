@@ -125,6 +125,7 @@ pub struct RepositoryMember {
 #[serde(rename_all = "lowercase")]
 pub enum RepositoryAccess {
     Read,
+    Triage,
     Write,
     Admin,
 }

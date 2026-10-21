@@ -161,6 +161,11 @@ impl Principal {
         self.access(repository).is_some()
     }
 
+    pub fn can_triage(&self, repository: &RepositoryConfig) -> bool {
+        self.access(repository)
+            .is_some_and(|access| access >= RepositoryAccess::Triage)
+    }
+
     pub fn can_write(&self, repository: &RepositoryConfig) -> bool {
         matches!(
             self.access(repository),

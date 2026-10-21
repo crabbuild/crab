@@ -436,3 +436,34 @@ async fn session_creation_racing_logout_never_leaves_an_unindexed_parent() {
         auth.remove_session(session.session_key).await.unwrap();
     }
 }
+
+#[test]
+fn triage_manages_collaboration_without_code_write_or_repository_administration() {
+    let principal = Principal::User(active_session());
+    for (access, triage, write, admin) in [
+        (RepositoryAccess::Read, false, false, false),
+        (RepositoryAccess::Triage, true, false, false),
+        (RepositoryAccess::Write, true, true, false),
+        (RepositoryAccess::Admin, true, true, true),
+    ] {
+        let repo = member_repository(access);
+        assert_eq!(
+            (
+                principal.can_read(&repo),
+                principal.can_triage(&repo),
+                principal.can_write(&repo),
+                principal.can_admin(&repo)
+            ),
+            (true, triage, write, admin),
+            "{access:?}"
+        );
+    }
+    let token = Principal::Git(Arc::new(GitToken {
+        session: active_session(),
+        owner: "team".into(),
+        repository: "private".into(),
+        access: RepositoryAccess::Read,
+        revoked: AtomicBool::new(false),
+    }));
+    assert!(!token.can_triage(&member_repository(RepositoryAccess::Triage)));
+}

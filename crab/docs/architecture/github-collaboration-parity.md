@@ -254,3 +254,12 @@ format 3 needs explicit rebuilds of older derived indexes; no source-record
 migration or compatibility reader is added. Handle bindings also belong to
 cursor fingerprints. Other actor predicates, organizations/teams and Projects
 remain unfinished; a public handle still grants no authority.
+
+The repository-role slice introduces Triage between Read and Write in the existing
+membership authority. Both issue and PR state/assignment workflows and review
+requests use it; code write, merge, readiness, definition catalogs and admin
+permissions stay distinct. The UI supports revisioned grant edits and a separate
+issue close capability. This advances authority modeling without inventing an
+owner from a name, migrating grants implicitly or adding a second grant store.
+It does not finish Maintain, native authority fencing, owner/organization/team
+registration, qualified assignee migration or required-review role weighting.

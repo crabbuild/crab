@@ -52,7 +52,7 @@ fn issue_view(
     author: &Identity,
     labels: &[Label],
     assignees: &[Assignee],
-    can_manage_metadata: bool,
+    can_triage: bool,
     reactions: &reactions::View,
 ) -> Value {
     json!({
@@ -68,8 +68,9 @@ fn issue_view(
         "labels": labels::selection_view(&issue.label_ids, labels),
         "assignees": assignees::selection_view(&issue.assignee_subjects, assignees),
         "can_edit": same_author(&issue.author, author),
-        "can_label": can_manage_metadata,
-        "can_assign": can_manage_metadata,
+        "can_close": same_author(&issue.author, author) || can_triage,
+        "can_label": can_triage,
+        "can_assign": can_triage,
     })
 }
 
@@ -268,6 +269,7 @@ async fn create(
         },
     )
     .await?;
+    let permissions = app::membership(&server, &principal, &repo).await?;
     let response = (
         StatusCode::CREATED,
         Json(issue_view(
@@ -275,7 +277,7 @@ async fn create(
             &author,
             &labels,
             &assignees,
-            principal.can_write(&repo.config),
+            permissions.can_triage,
             &reaction,
         )),
     );
@@ -329,12 +331,13 @@ async fn detail(
         },
     )
     .await?;
+    let permissions = app::membership(&server, &principal, &repo).await?;
     let response = Json(issue_view(
         &issue,
         &author,
         &labels,
         &assignees,
-        principal.can_write(&repo.config),
+        permissions.can_triage,
         &reaction,
     ))
     .into_response();
@@ -369,11 +372,13 @@ async fn edit(
     {
         return Err(Error::Invalid("No issue changes supplied"));
     }
-    let can_manage_metadata = principal.can_write(&repo.config);
-    if input.label_ids.is_some() && !can_manage_metadata {
+    let can_triage = app::membership(&server, &principal, &repo)
+        .await?
+        .can_triage;
+    if input.label_ids.is_some() && !can_triage {
         return Err(Error::LabelPermission);
     }
-    if input.assignees.is_some() && !can_manage_metadata {
+    if input.assignees.is_some() && !can_triage {
         return Err(Error::AssigneePermission);
     }
     let labels = if input.label_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
@@ -394,6 +399,11 @@ async fn edit(
         .assignees
         .map(|value| assignees::validate_selection(value, &assignees))
         .transpose()?;
+    // Metadata reads yield before dispatch. Recheck the durable role because
+    // routing snapshots can lag permission changes.
+    let can_triage = app::membership(&server, &principal, &repo)
+        .await?
+        .can_triage;
     let routed = crate::app::repository_cell(&server, &repo)?;
     let output = crate::app::command_output(
         routed
@@ -404,7 +414,7 @@ async fn edit(
                 UpdateIssueInput {
                     number: number(id)?,
                     actor: crate::cells::repository::RepositoryAuthor::from(&author),
-                    can_manage_metadata,
+                    can_triage,
                     version: input.version,
                     title,
                     body: input.body,
@@ -446,12 +456,7 @@ async fn edit(
     )
     .await?;
     Ok(Json(issue_view(
-        &issue,
-        &author,
-        &labels,
-        &assignees,
-        can_manage_metadata,
-        &reaction,
+        &issue, &author, &labels, &assignees, can_triage, &reaction,
     )))
 }
 

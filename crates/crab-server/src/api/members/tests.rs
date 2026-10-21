@@ -427,3 +427,195 @@ async fn malformed_membership_is_rejected_and_two_writers_cannot_overwrite_each_
     assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]);
     h.close().await;
 }
+
+#[tokio::test]
+async fn triage_uses_durable_grants_for_issue_and_pull_management_without_git_write() {
+    use crate::cells::repository::{CreatePull, CreatePullInput, RepositoryAuthor};
+    use reqwest::Method;
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let root = "/api/repos/team/private";
+    let issue: Value = h.write(Method::POST, &format!("{root}/issues"), &alice,
+        json!({"request_id":uuid::Uuid::now_v7(),"title":"Triage report","body":"Original body"}))
+        .await.error_for_status().unwrap().json().await.unwrap();
+    let label: Value = h
+        .write(
+            Method::POST,
+            &format!("{root}/labels"),
+            &alice,
+            json!({"request_id":uuid::Uuid::now_v7(),"name":"Investigate","color":"abcdef"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let milestone: Value = h
+        .write(
+            Method::POST,
+            &format!("{root}/milestones"),
+            &alice,
+            json!({"request_id":uuid::Uuid::now_v7(),"title":"Triage milestone"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let repo = h.server.repositories.values()[0].clone();
+    h.server
+        .cells()
+        .unwrap()
+        .command::<CreatePull>(
+            repo.id,
+            crate::app::mutation_identity().unwrap(),
+            CreatePullInput {
+                submission_id: *uuid::Uuid::now_v7().as_bytes(),
+                author: RepositoryAuthor {
+                    issuer: h.provider.issuer.clone(),
+                    subject: "alice-id".into(),
+                    name: "Alice".into(),
+                },
+                draft: false,
+                title: "Triage pull".into(),
+                body: "Original pull".into(),
+                base_ref: "refs/heads/main".into(),
+                head_ref: "refs/heads/feature".into(),
+                base_oid: "a".repeat(40),
+                head_oid: "b".repeat(40),
+            },
+        )
+        .await
+        .unwrap();
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let mut members = repo.config.members.clone();
+    members[1].access = crate::RepositoryAccess::Triage;
+    h.server
+        .catalog()
+        .unwrap()
+        .set_members("team", "private", members.clone(), true)
+        .await
+        .unwrap();
+    // Routing still contains Bob's old read role. Every capability below must
+    // come from the catalog decision rather than delayed materialization.
+    assert_eq!(repo.config.members[1].access, crate::RepositoryAccess::Read);
+    for kind in ["issues", "pulls"] {
+        let path = format!("{root}/{kind}/1");
+        let before = h.json(&path, &bob).await;
+        assert_eq!(before["can_edit"], false);
+        assert_eq!(before["can_label"], true);
+        assert_eq!(before["can_assign"], true);
+        if kind == "issues" {
+            assert_eq!(before["can_close"], true);
+        } else {
+            assert_eq!(before["can_manage"], true);
+            assert_eq!(before["can_merge"], false);
+        }
+        let denied = h.write(Method::PATCH, &path, &bob, json!({"version":before["version"],"title":"Cannot edit another author's title","state":"closed"})).await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert_eq!(h.json(&path, &bob).await["version"], before["version"]);
+        let closed: Value = h.write(Method::PATCH, &path, &bob, json!({"version":before["version"],"state":"closed","label_ids":[label["id"]],"assignees":["bob-id"]})).await.error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(closed["state"], "closed");
+        assert_eq!(closed["assignees"][0]["subject"], "bob-id");
+        let reopened: Value = h
+            .write(
+                Method::PATCH,
+                &path,
+                &bob,
+                json!({"version":closed["version"],"state":"open"}),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(reopened["state"], "open");
+        let assigned: Value = h
+            .write(
+                Method::PUT,
+                &format!("{path}/milestone"),
+                &bob,
+                json!({"version":0,"milestone":milestone["number"]}),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(assigned["milestone"]["number"], milestone["number"]);
+    }
+    let requests = format!("{root}/pulls/1/review-requests");
+    let reviews = h.json(&requests, &bob).await;
+    assert_eq!(reviews["can_manage"], true);
+    let requested: Value = h
+        .write(
+            Method::PUT,
+            &requests,
+            &bob,
+            json!({"version":reviews["version"],"change":{"kind":"request","subject":"bob-id"}}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(requested["state"]["kind"], "requested");
+    for (path, body) in [
+        (
+            format!("{root}/labels"),
+            json!({"request_id":uuid::Uuid::now_v7(),"name":"Not allowed","color":"abcdef"}),
+        ),
+        (
+            format!("{root}/milestones"),
+            json!({"request_id":uuid::Uuid::now_v7(),"title":"Not allowed"}),
+        ),
+        (
+            "/api/git-token".to_string(),
+            json!({"owner":"team","repository":"private","access":"write"}),
+        ),
+        (
+            format!("{root}/pulls/1/merge"),
+            json!({"request_id":uuid::Uuid::now_v7(),"version":1,"method":"fast_forward","base_oid":"a".repeat(40),"head_oid":"b".repeat(40)}),
+        ),
+    ] {
+        assert_eq!(
+            h.write(Method::POST, &path, &bob, body).await.status(),
+            StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
+    members[1].access = crate::RepositoryAccess::Read;
+    h.server
+        .catalog()
+        .unwrap()
+        .set_members("team", "private", members, true)
+        .await
+        .unwrap();
+    for kind in ["issues", "pulls"] {
+        let path = format!("{root}/{kind}/1");
+        let current = h.json(&path, &bob).await;
+        assert_eq!(current["can_label"], false);
+        assert_eq!(
+            h.write(
+                Method::PATCH,
+                &path,
+                &bob,
+                json!({"version":current["version"],"state":"closed"})
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        h.json(&format!("{root}/issues/1"), &alice).await["title"],
+        issue["title"]
+    );
+    h.close().await;
+}

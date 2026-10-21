@@ -95,6 +95,7 @@ test("reactions persist on refresh, stay scoped, and ignore older snapshots", as
           created_at: 1700000000000,
           updated_at: 1700000000000,
           can_edit: false,
+          can_close: false,
           can_label: false,
           can_assign: false,
           labels: [],

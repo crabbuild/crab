@@ -265,7 +265,7 @@ async fn requests_require_an_author_or_writer_and_an_open_unarchived_pull() {
     let edit = UpdatePullInput {
         number: 1,
         actor: author("Alice"),
-        can_manage: false,
+        can_triage: false,
         version: 2,
         title: None,
         body: None,

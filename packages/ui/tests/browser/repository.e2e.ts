@@ -2911,7 +2911,7 @@ test("repository settings manage members with a revisioned CSRF-protected replac
   form = page.locator(".member-form");
   await form.getByLabel("Display name").fill("Charles");
   await form.getByRole("button", { name: "Access" }).click();
-  await page.getByRole("menuitemradio", { name: /^Write/ }).click();
+  await page.getByRole("menuitemradio", { name: /^Triage/ }).click();
   await form.getByRole("button", { name: "Save member" }).click();
 
   await page.getByRole("button", { name: "Remove Bob" }).click();
@@ -2923,10 +2923,23 @@ test("repository settings manage members with a revisioned CSRF-protected replac
     expected_revision: 42,
     members: [
       { subject: "alice-id", name: "Alice", access: "admin" },
-      { subject: "charlie-id", name: "Charles", access: "write" },
+      { subject: "charlie-id", name: "Charles", access: "triage" },
     ],
   });
   await expect(page.getByRole("status")).toContainText("Membership updated.");
+  await page.reload();
+  await expect(
+    page.locator('.member-role[data-access="triage"]'),
+  ).toContainText("Triage");
+  await page.getByRole("button", { name: "Edit Charles" }).click();
+  form = page.locator(".member-form");
+  await form.getByRole("button", { name: "Access" }).click();
+  await page.getByRole("menuitemradio", { name: /^Write/ }).click();
+  await form.getByRole("button", { name: "Save member" }).click();
+  await page.getByRole("button", { name: "Save members" }).click();
+  await expect(page.locator('.member-role[data-access="write"]')).toContainText(
+    "Write",
+  );
 
   await page.getByRole("button", { name: "Edit Charles" }).click();
   form = page.locator(".member-form");

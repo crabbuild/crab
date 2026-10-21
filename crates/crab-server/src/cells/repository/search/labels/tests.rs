@@ -211,7 +211,7 @@ async fn native_label_choices_search_the_whole_catalog_and_follow_assignments_re
             UpdateIssueInput {
                 number,
                 actor: author(),
-                can_manage_metadata: true,
+                can_triage: true,
                 version: 1,
                 title: None,
                 body: None,
@@ -292,7 +292,7 @@ async fn native_label_choices_search_the_whole_catalog_and_follow_assignments_re
         UpdatePullInput {
             number: 1,
             actor: author(),
-            can_manage: true,
+            can_triage: true,
             version: 1,
             title: None,
             body: None,

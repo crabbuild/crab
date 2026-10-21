@@ -106,7 +106,7 @@ pub(super) struct NewPullRequest {
 
 pub(super) struct PullEdit {
     pub actor: Identity,
-    pub can_manage: bool,
+    pub can_triage: bool,
     pub version: u64,
     pub title: Option<String>,
     pub body: Option<String>,
@@ -218,7 +218,7 @@ pub(super) async fn update_pull(
                 UpdatePullInput {
                     number,
                     actor: crate::cells::repository::RepositoryAuthor::from(&input.actor),
-                    can_manage: input.can_manage,
+                    can_triage: input.can_triage,
                     version: input.version,
                     title: input.title,
                     body: input.body,

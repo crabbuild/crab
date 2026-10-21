@@ -118,6 +118,7 @@ test("repository metadata can be managed and assigned to an issue", async ({
           created_at: 1_700_000_000_000,
           updated_at: 1_700_000_000_000,
           can_edit: true,
+          can_close: true,
           can_label: true,
           can_assign: true,
           labels: labels.filter((label) =>

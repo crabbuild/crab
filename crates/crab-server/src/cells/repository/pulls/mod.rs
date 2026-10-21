@@ -234,7 +234,7 @@ pub(crate) enum CreatePullOutcome {
 pub(crate) struct UpdatePullInput {
     pub number: u64,
     pub actor: RepositoryAuthor,
-    pub can_manage: bool,
+    pub can_triage: bool,
     pub version: u64,
     pub title: Option<String>,
     pub body: Option<String>,

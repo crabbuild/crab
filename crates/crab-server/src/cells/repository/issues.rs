@@ -377,14 +377,16 @@ impl Mutation for UpdateIssue {
                 .assignee_subjects
                 .as_ref()
                 .is_some_and(|value| value != &issue.assignee_subjects);
-        let author_change = input.title.is_some() || input.body.is_some() || input.state.is_some();
-        if author_change && !same_author(&issue.author, &input.actor) {
+        let author = same_author(&issue.author, &input.actor);
+        if (input.title.is_some() || input.body.is_some()) && !author
+            || input.state.is_some() && !(author || input.can_triage)
+        {
             return Ok(MutationResult::Rejected(UpdateIssueOutcome::Forbidden));
         }
-        if input.label_ids.is_some() && !input.can_manage_metadata {
+        if input.label_ids.is_some() && !input.can_triage {
             return Ok(MutationResult::Rejected(UpdateIssueOutcome::LabelForbidden));
         }
-        if input.assignee_subjects.is_some() && !input.can_manage_metadata {
+        if input.assignee_subjects.is_some() && !input.can_triage {
             return Ok(MutationResult::Rejected(
                 UpdateIssueOutcome::AssigneeForbidden,
             ));

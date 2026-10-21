@@ -130,7 +130,7 @@ export function IssueDetail({
               />
             </article>
           )}
-          {current.can_edit && !repo.archived && (
+          {current.can_close && !repo.archived && (
             <div className="issue-state-controls">
               <Button
                 variant="outline"
