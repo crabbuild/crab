@@ -286,6 +286,16 @@ grant effect. Existing format-1 profile identity/data/submissions migrate in
 bounded atomic frames with durable progress; a new-code old-data process upgrade
 and later UI enrollment preserve identity across restart. Explicit private CLI
 operations own preparation and registration. Subject-based assignment migration,
-current candidate resolution, actor-based filters, organization/team authority
-and cross-authority fencing remain delivery work; the registry does not guess
+actor-based filters, organization/team authority and cross-authority fencing
+remain delivery work; the registry does not guess
 those bindings from names or owner strings.
+
+Assignee candidates and display names now come from the current durable catalog
+membership, including additions, removals and renames before routing refresh.
+Issue and PR edits validate selected members against the same late membership
+snapshot that supplies the caller's triage permission. List/detail responses use
+their final membership read for rendering. This follows Fern's current-access
+eligibility rule in `apps/web/worker/thread-assignee-data.ts`; no Fern code was
+copied. Native stored subjects, replay replies and the HTTP assignment shape are
+unchanged. Removed historical assignments still need the explicit actor-backed
+migration; this snapshot check does not provide atomic cross-authority fencing.

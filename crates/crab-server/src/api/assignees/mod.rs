@@ -10,8 +10,7 @@ use serde_json::{Value, json};
 
 use crate::{
     app::{self, Error, Result},
-    auth::{Identity, Principal},
-    repository::Repository,
+    auth::Principal,
     server::Server,
 };
 
@@ -23,14 +22,14 @@ pub(crate) struct Assignee {
     pub name: String,
 }
 
-pub(crate) fn available(repo: &Repository, actor: &Identity) -> Vec<Assignee> {
-    if actor.issuer == "urn:crab:local" {
+pub(crate) fn available(membership: &app::Membership) -> Vec<Assignee> {
+    if membership.principal.is_local() {
         return vec![Assignee {
             subject: "operator".into(),
             name: "Local operator".into(),
         }];
     }
-    repo.config
+    membership
         .members
         .iter()
         .map(|member| Assignee {
@@ -88,7 +87,7 @@ async fn list(
     let repo = app::repository(&server, &principal, &key)?;
     let repo = repo.as_ref();
     let membership = app::membership(&server, &principal, repo).await?;
-    let available = available(repo, &app::actor(&principal)?);
+    let available = available(&membership);
     Ok(Json(json!({
         "items":available.iter().map(view).collect::<Vec<_>>(),
         "can_manage":membership.principal.can_triage(repo.id),

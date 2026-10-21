@@ -88,7 +88,6 @@ async fn pull_view(
     } else {
         labels::catalog(server, repo).await?
     };
-    let assignees = assignees::available(repo, actor);
     let requirements = merge_requirements(pull, protection, head_oid, &statuses, &check_runs);
     let reaction = reactions::one(
         server,
@@ -100,6 +99,7 @@ async fn pull_view(
     )
     .await?;
     let permissions = app::membership(server, principal, repo).await?;
+    let assignees = assignees::available(&permissions);
     let can_write = permissions.principal.can_write(repo.id);
     let can_triage = permissions.principal.can_triage(repo.id);
     Ok(json!({
@@ -307,8 +307,6 @@ async fn list(
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
     let repo = repo.as_ref();
-    let actor = app::actor(&principal)?;
-    let assignees = assignees::available(repo, &actor);
     let routed = app::repository_cell(&server, repo)?;
     let mut input = params.input("is:open")?;
     super::discussion_search::resolve_authors(&server, &principal, &mut input).await?;
@@ -324,7 +322,8 @@ async fn list(
         page.items.iter().map(|pull| &pull.author),
     )
     .await?;
-    app::membership(&server, &principal, repo).await?;
+    let permissions = app::membership(&server, &principal, repo).await?;
+    let assignees = assignees::available(&permissions);
     let pulls = &page.items;
     let items = pulls
         .iter()
@@ -549,7 +548,6 @@ async fn edit(
     } else {
         vec![]
     };
-    let assignees = assignees::available(repo, &actor);
     let title = input.title.map(|value| app::title(&value)).transpose()?;
     let body = input
         .body
@@ -562,22 +560,21 @@ async fn edit(
         .label_ids
         .map(|value| labels::validate_selection(value, &labels))
         .transpose()?;
-    let assignee_subjects = input
-        .assignees
-        .map(|value| assignees::validate_selection(value, &assignees))
-        .transpose()?;
-    // Metadata reads yield before dispatch. Recheck the durable role because
-    // routing snapshots can lag permission changes.
-    let can_triage = app::membership(&server, &principal, repo)
-        .await?
-        .principal
-        .can_triage(repo.id);
+    // Labels may yield. Use the same current membership for the caller's role
+    // and assignment eligibility so a stale route cannot retain removed members.
+    let permissions = app::membership(&server, &principal, repo).await?;
+    let can_triage = permissions.principal.can_triage(repo.id);
     if label_change && !can_triage {
         return Err(Error::LabelPermission);
     }
     if assignee_change && !can_triage {
         return Err(Error::AssigneePermission);
     }
+    let assignees = assignees::available(&permissions);
+    let assignee_subjects = input
+        .assignees
+        .map(|value| assignees::validate_selection(value, &assignees))
+        .transpose()?;
     let pull = storage::update_pull(
         &server,
         repo,

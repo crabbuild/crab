@@ -162,8 +162,8 @@ Existing profile UUIDs, versions, attributes, reservations and receipts survive
 bounded native migration, rollback and restart. Ordinary Directory operations
 reject format 1 until the private upgrade completes; no serving compatibility
 reader is added. This is a prerequisite for actor-based assignees and participants.
-Current subject assignments, cached candidate selection, native grant cutover and
-the missing Assignee list filter remain unfinished.
+Current subject assignments, native grant cutover and the missing Assignee list
+filter remain unfinished. Candidate eligibility uses current catalog membership.
 
 Other actor/project/type predicates and complete GitHub workspace controls
 remain delivery work. This slice does not finish the full parity checklist.
@@ -547,9 +547,22 @@ restart, and gave the new user no repository access. The existing Git, review,
 merge, search and authorization qualification also passed, leaving 73 durable
 Cellar objects. The persistent preview explicitly upgraded its empty Directory
 and retained all 18 captured collaboration resources exactly across both
-repositories, with no profile enrollment or repository/index rebuild. Cached
-assignee candidates, assignment actor migration and the Assignee list menu still
-need implementation; this is not complete GitHub parity or SDK release approval.
+repositories, with no profile enrollment or repository/index rebuild.
+Assignment actor migration and the Assignee list menu still need implementation; this is not complete GitHub parity or SDK release approval.
+
+Current assignment candidates now resolve from durable membership, including
+additions, removals and renamed members before routing refresh. Issue and PR
+writes validate eligibility and triage permission from the same late snapshot;
+list/detail rendering uses the final membership read. The regression fails on
+the previous cached implementation and passes with this change. All 76 affected
+API tests pass (one existing ignored), along with strict all-target Clippy,
+server build, formatting and architecture gates. Real RustFS browser actions
+prove visible rejection of a stale open-picker selection without an edit,
+assignment to a newly added member on both surfaces, and renamed assignments
+after process restart. The preview update preserved all 18 captured resources
+across two repositories. Stored subject assignments and replay formats remain
+unchanged; actor migration, the Assignee filter and cross-authority fencing
+remain required work.
 
 ## Primary references
 

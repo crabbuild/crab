@@ -173,8 +173,6 @@ async fn list(
     Query(params): Query<super::discussion_search::ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &key)?;
-    let author = actor(&principal)?;
-    let assignees = assignees::available(&repo, &author);
     let routed = crate::app::repository_cell(&server, &repo)?;
     let mut input = params.input("is:issue is:open")?;
     super::discussion_search::resolve_authors(&server, &principal, &mut input).await?;
@@ -193,7 +191,8 @@ async fn list(
         }),
     )
     .await?;
-    app::membership(&server, &principal, &repo).await?;
+    let permissions = app::membership(&server, &principal, &repo).await?;
+    let assignees = assignees::available(&permissions);
     let items = page
         .items
         .iter()
@@ -259,7 +258,6 @@ async fn create(
     } else {
         labels::catalog(&server, &repo).await?
     };
-    let assignees = assignees::available(&repo, &author);
     let reaction = reactions::one(
         &server,
         &repo,
@@ -270,6 +268,7 @@ async fn create(
     )
     .await?;
     let permissions = app::membership(&server, &principal, &repo).await?;
+    let assignees = assignees::available(&permissions);
     let response = (
         StatusCode::CREATED,
         Json(issue_view(
@@ -321,7 +320,6 @@ async fn detail(
     let issue = detail.issue;
     let labels = detail.labels.labels;
     let issue = issue.ok_or(Error::NotFound)?;
-    let assignees = assignees::available(&repo, &author);
     let reaction = reactions::one(
         &server,
         &repo,
@@ -332,6 +330,7 @@ async fn detail(
     )
     .await?;
     let permissions = app::membership(&server, &principal, &repo).await?;
+    let assignees = assignees::available(&permissions);
     let response = Json(issue_view(
         &issue,
         &author,
@@ -387,7 +386,6 @@ async fn edit(
     } else {
         vec![]
     };
-    let assignees = assignees::available(&repo, &author);
     let title = input.title.as_deref().map(title).transpose()?;
     if let Some(value) = input.body.as_deref() {
         body(value, false)?;
@@ -396,16 +394,18 @@ async fn edit(
         .label_ids
         .map(|value| labels::validate_selection(value, &labels))
         .transpose()?;
+    // Labels may yield. Use the same current membership for the caller's role
+    // and assignment eligibility so a stale route cannot retain removed members.
+    let permissions = app::membership(&server, &principal, &repo).await?;
+    let can_triage = permissions.principal.can_triage(repo.id);
+    if input.assignees.is_some() && !can_triage {
+        return Err(Error::AssigneePermission);
+    }
+    let assignees = assignees::available(&permissions);
     let assignee_subjects = input
         .assignees
         .map(|value| assignees::validate_selection(value, &assignees))
         .transpose()?;
-    // Metadata reads yield before dispatch. Recheck the durable role because
-    // routing snapshots can lag permission changes.
-    let can_triage = app::membership(&server, &principal, &repo)
-        .await?
-        .principal
-        .can_triage(repo.id);
     let routed = crate::app::repository_cell(&server, &repo)?;
     let output = crate::app::command_output(
         routed
@@ -457,8 +457,15 @@ async fn edit(
         },
     )
     .await?;
+    let permissions = app::membership(&server, &principal, &repo).await?;
+    let assignees = assignees::available(&permissions);
     Ok(Json(issue_view(
-        &issue, &author, &labels, &assignees, can_triage, &reaction,
+        &issue,
+        &author,
+        &labels,
+        &assignees,
+        permissions.principal.can_triage(repo.id),
+        &reaction,
     )))
 }
 
