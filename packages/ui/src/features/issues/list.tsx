@@ -37,6 +37,8 @@ export function IssueList({ repo, url }: { repo: Repository; url: URL }) {
         )}
       </div>
       <DiscussionSearch
+        repo={repo}
+        kind="issue"
         label="Search issues"
         placeholder="Search all issues"
         value={query}

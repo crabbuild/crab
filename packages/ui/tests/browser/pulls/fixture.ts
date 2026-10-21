@@ -152,6 +152,15 @@ export async function mockPullRequest(page: Page) {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if (path.endsWith("/discussion-search"))
+      return route.fulfill({
+        json: {
+          start: 0,
+          end: (url.searchParams.get("query") ?? "").length,
+          items: [],
+          error: null,
+        },
+      });
     if (path.endsWith("/review-requests"))
       return route.fulfill({ json: emptyReviewRequests() });
     if (path.endsWith("/links"))

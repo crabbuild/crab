@@ -72,6 +72,22 @@ are described in `repository-collaboration.md`; reuse these canonical owners.
 - [ ] All existing repository UI surfaces remain functional after component and
       theme replacement. Preserve default-hidden `powerbar=1` timing widgets.
 
+The first native query slice shares a single parser and matcher between issue and
+PR lists. It supports implicit/explicit AND, OR, up to five nested groups,
+quoted phrases, exclusions, exact case-insensitive labels (comma means OR),
+`is:`/`state:`, `draft:`, `no:label`, and `no:assignee`. Unknown qualifiers and
+malformed syntax return input errors. Suggestions come from the authorized
+repository's native label catalog and preserve browser UTF-16 caret ranges.
+The search box supports keyboard selection, Escape, syntax feedback, URL/reload,
+and visible request errors. Release search retains its separate plain-text
+contract.
+
+This slice still uses the existing bounded native scans. It does **not** provide
+exact counts, indexed sorting, stable query-bound cursors, actor filters, projects,
+issue types, milestones, or comment/reaction predicates. The separate state tab
+is currently an additional AND filter; the final workspace needs one canonical
+query representation for state navigation too. These remain delivery work.
+
 ## Data and query contracts
 
 New entities need stable identifiers, bounded values/pages, versions, qualified

@@ -16,7 +16,7 @@ test("pull creation and review navigation preserve GitHub-style controls", async
   await expectNoAccessibilityViolations(page);
   await selectDarkTheme(page);
   const search = page.getByRole("search", { name: "Search pulls" });
-  await search.getByRole("textbox").fill("missing workflow");
+  await search.getByRole("combobox").fill("missing workflow");
   await search.getByRole("button", { name: "Search", exact: true }).click();
   await expect(page).toHaveURL(/q=missing\+workflow/);
   await expect(

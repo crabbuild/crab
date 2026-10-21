@@ -85,6 +85,7 @@ mod models;
 pub(crate) mod projection;
 mod pulls;
 mod releases;
+pub(crate) mod search;
 mod settings;
 mod statuses;
 
@@ -407,29 +408,6 @@ fn validate_list(before: Option<u64>, limit: u8) -> crate::cells::Result<()> {
         ));
     }
     Ok(())
-}
-
-fn validate_query(query: Option<&str>) -> crate::cells::Result<()> {
-    if query.is_some_and(|query| {
-        query.is_empty()
-            || query.trim() != query
-            || query.chars().count() > 256
-            || query.chars().any(char::is_control)
-            || query.to_lowercase() != query
-    }) {
-        return Err(crate::cells::Error::Invalid(
-            "repository search query is invalid",
-        ));
-    }
-    Ok(())
-}
-
-fn matches_query(query: Option<&str>, issue: &IssueRecord) -> bool {
-    query.is_none_or(|query| {
-        [&issue.title, &issue.body, &issue.author.name]
-            .iter()
-            .any(|value| value.to_lowercase().contains(query))
-    })
 }
 
 fn same_author(left: &RepositoryAuthor, right: &RepositoryAuthor) -> bool {

@@ -260,6 +260,25 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     )
     .unwrap();
     assert_eq!(searched["items"][0]["number"], 1);
+    for (query, expected) in [
+        ("(readme OR missing) AND \"Please review\" no:label", 1),
+        ("is:pr is:closed -is:merged draft:false", 1),
+        ("is:issue OR draft:true", 0),
+    ] {
+        let response = client
+            .get(&root)
+            .query(&[("state", "closed"), ("q", query)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response: Value = response.json().await.unwrap();
+        assert_eq!(
+            response["items"].as_array().unwrap().len(),
+            expected,
+            "{query}"
+        );
+    }
 
     git::success(path, &["checkout", "main"]).await;
     git::success(path, &["push", &git_url, ":refs/heads/feature"]).await;

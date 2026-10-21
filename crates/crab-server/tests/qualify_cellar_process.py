@@ -15,6 +15,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 import uuid
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -294,6 +295,19 @@ with open(run / "commands.log", "w") as log:
         request(issue_path, {"version": created["version"], "state": "closed"}, method="PATCH")
         activity = request(issue_path + "/activity")
         assert [event["action"]["kind"] for event in activity["items"]] == ["closed", "milestone_assigned", "created"]
+        request("/api/repos/team/project/labels", {
+            "request_id": str(uuid.uuid4()), "name": "RustFS qualification", "color": "abcdef", "description": "Native search suggestions",
+        })
+        issue_search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({
+            "state": "all", "q": '("Cellar RustFS" OR missing) AND no:label -unrelated is:closed',
+        })
+        assert [item["number"] for item in request(issue_search)["items"]] == [number]
+        completion_path = "/api/repos/team/project/discussion-search?" + urllib.parse.urlencode({
+            "query": "label:rust", "cursor": 10, "kind": "issue",
+        })
+        completion = request(completion_path)
+        assert completion["items"][0]["value"] == 'label:"RustFS qualification"'
+
         git = run / "input"
         git.mkdir()
         cmd(["git", "init", "--initial-branch=main", git])
@@ -323,6 +337,11 @@ with open(run / "commands.log", "w") as log:
         })
         pull_path = f"/api/repos/team/project/pulls/{pull['number']}"
         assert pull["draft"] is True and pull["can_merge"] is False
+        pull_search = "/api/repos/team/project/pulls?" + urllib.parse.urlencode({
+            "q": 'is:pr draft:true no:assignee AND "Related issue"',
+        })
+        assert [item["number"] for item in request(pull_search)["items"]] == [pull["number"]]
+
         merge_input = {"request_id": str(uuid.uuid4()), "version": pull["version"],
                        "method": "fast_forward", "base_oid": pull["base_oid"], "head_oid": pull["head_oid"]}
         try:
@@ -368,6 +387,10 @@ with open(run / "commands.log", "w") as log:
         assert request(pull_path + "/links") == pull_links
         assert request(link_path) == {"active": True, "version": 3}
         assert request(pull_path)["draft"] is True
+        assert [item["number"] for item in request(issue_search)["items"]] == [number]
+        assert [item["number"] for item in request(pull_search)["items"]] == [pull["number"]]
+        assert request(completion_path) == completion
+
         assert request(link_path, {"active": True, "version": 0}, method="PUT") == {"active": True, "version": 3}
         try:
             request(link_path, {"active": False, "version": 1}, method="PUT")
@@ -388,6 +411,12 @@ with open(run / "commands.log", "w") as log:
         wait()
         completed = request(pull_path)
         assert completed["state"] == "merged" and completed["draft"] is False
+        assert request(pull_search)["items"] == []
+        merged_search = "/api/repos/team/project/pulls?" + urllib.parse.urlencode({
+            "state": "closed", "q": "is:merged draft:false",
+        })
+        assert [item["number"] for item in request(merged_search)["items"]] == [pull["number"]]
+
         assert request("/api/repos/team/project/activity") == merged_activity
         assert request(issue_path + "/links")["items"][0]["work"]["state"] == "merged"
         refs = subprocess.check_output(
@@ -427,6 +456,8 @@ with open(run / "commands.log", "w") as log:
             "image_ref": args.image,
             "repository_creation": True,
             "issue_replay": True,
+            "discussion_search_restart": True,
+            "search_suggestions_restart": True,
             "activity_restart": True,
             "activity_replay": True,
             "linked_work_restart": True,

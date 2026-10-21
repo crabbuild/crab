@@ -273,7 +273,17 @@ impl Read for ListPulls {
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_list(input.before, input.limit)?;
-        validate_query(input.query.as_deref())?;
+        let query =
+            search::Query::parse(input.query.as_deref()).map_err(crate::cells::Error::Invalid)?;
+        let labels = if query.needs_labels() {
+            ListLabels::execute(context, ())?
+                .labels
+                .into_iter()
+                .map(|label| (label.number, label.name.to_lowercase()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         if input.state > 2 {
             return Err(crate::cells::Error::Invalid(
                 "repository pull list state is invalid",
@@ -285,6 +295,7 @@ impl Read for ListPulls {
             vec![integer(upper)?],
         )] })?;
         let mut items = Vec::new();
+        let filter_draft = query.needs_draft();
         let mut examined = 0_u64;
         let mut last_examined = None;
         for row in &result[0].rows {
@@ -294,26 +305,58 @@ impl Read for ListPulls {
             let matches_state = input.state == 2
                 || input.state == 0 && state == PullState::Open
                 || input.state == 1 && state != PullState::Open;
+            if !matches_state {
+                continue;
+            }
             let title = result_text(row, 4)?;
             let body = result_text(row, 12)?;
             let author_name = result_text(row, 3)?;
-            let matches_text = input.query.as_ref().is_none_or(|query| {
-                [&title, &body, &author_name]
-                    .iter()
-                    .any(|value| value.to_lowercase().contains(query))
-            });
-            if matches_state && matches_text {
+            let label_ids = decode_label_ids(result_blob(row, 8)?)?;
+            let assignee_subjects = decode_assignees(result_blob(row, 9)?)?;
+            // Ordinary text searches only load readiness for returned rows.
+            // Draft predicates need the same native state before matching.
+            let draft = if filter_draft {
+                Some(
+                    readiness::load(context, result_u64_from_row(row, 0)?)? == PullReadiness::Draft,
+                )
+            } else {
+                None
+            };
+            let matches_text = query.matches(
+                &search::Document {
+                    kind: collaboration::SubjectKind::Pull,
+                    state: match state {
+                        PullState::Open => collaboration::SubjectState::Open,
+                        PullState::Closed => collaboration::SubjectState::Closed,
+                        PullState::Merged => collaboration::SubjectState::Merged,
+                    },
+                    draft,
+                    title: &title,
+                    body: &body,
+                    author_name: &author_name,
+                    label_ids: &label_ids,
+                    assignees: &assignee_subjects,
+                },
+                &labels,
+            );
+            if matches_text {
+                let draft = match draft {
+                    Some(draft) => draft,
+                    None => {
+                        readiness::load(context, result_u64_from_row(row, 0)?)?
+                            == PullReadiness::Draft
+                    }
+                };
                 items.push(PullSummary {
-                    draft: readiness::load(context, result_u64_from_row(row, 0)?)?
-                        == PullReadiness::Draft,
+                    draft,
                     number: result_u64_from_row(row, 0)?,
                     author: author_from_row(row, 1)?,
                     title: result_text(row, 4)?,
                     state,
                     base_ref: result_text(row, 6)?,
                     head_ref: result_text(row, 7)?,
-                    label_ids: decode_label_ids(result_blob(row, 8)?)?,
-                    assignee_subjects: decode_assignees(result_blob(row, 9)?)?,
+                    label_ids,
+                    assignee_subjects,
                     created_at_ms: result_u64_from_row(row, 10)?,
                     updated_at_ms: result_u64_from_row(row, 11)?,
                 });

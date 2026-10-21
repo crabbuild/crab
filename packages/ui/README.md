@@ -52,6 +52,12 @@ The remaining ownership and native model/query work is tracked in
 filters need authoritative server predicates and counts; filtering one loaded
 page cannot implement repository search.
 
+Issue/PR search shares the native query grammar. Its combobox fetches authorized
+repository suggestions and validation; it does not duplicate parsing in the
+browser. The native response supplies UTF-16 replacement offsets. Keep input
+focus while selecting suggestions and retain the settled request when focus
+moves, so timing details cannot shift a clicked control.
+
 Use the primitive APIs directly: buttons contain icons with `data-icon`, inputs
 with addons use `InputGroup`, menus compose their groups/items, and forms use
 `Field`/`FieldGroup`. The shared Button defaults to `type="button"`; mutations

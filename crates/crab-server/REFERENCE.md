@@ -1279,6 +1279,32 @@ Git refs unless a pull request merge publishes a ref update.
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
 
+### Search issues and pull requests
+
+List endpoints accept `q` (up to 256 characters), `state` (`open`, `closed`,
+`all`), `limit` (1–50), and an exclusive numeric `before` cursor. State is an
+additional AND filter. Text terms search titles, bodies, and recorded author
+names. Spaces and `AND` require both terms; `OR` matches either; parentheses
+support up to five nested groups. Quote phrases and multiword label names.
+
+Supported qualifiers are `is:open`, `is:closed`, `is:merged`, `is:unmerged`,
+`is:issue`, `is:pr`, `state:open`, `state:closed`, `draft:true`, `draft:false`,
+`label:name`, `no:label`, and `no:assignee`. `is:closed` includes merged PRs.
+Repeated label qualifiers mean AND; comma-separated label names mean OR.
+Prefix a term or qualifier with `-` to exclude it. Missing-metadata qualifiers
+cannot be negated. Unknown qualifiers and malformed syntax return 400.
+
+`GET .../discussion-search?query=label:he&cursor=8&kind=issue` returns authorized
+repository suggestions and syntax feedback. `cursor`, `start`, and `end` count
+browser UTF-16 units; replacement offsets enclose the current token. `kind` is
+`issue` or `pull`. Suggestions are limited to 20 active labels and never cross
+the repository authorization boundary.
+
+Lists still use bounded native scans of up to 200 records. Continue with the
+returned cursor for older matches; counts, indexed sorting, actor qualifiers,
+and advanced metadata predicates are not implemented yet. Release search keeps
+its separate plain-text contract.
+
 ### Browse activity
 
 Repository activity lives at `/{owner}/{name}/activity`. Issue and PR conversation

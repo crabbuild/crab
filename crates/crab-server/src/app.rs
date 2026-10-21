@@ -563,7 +563,8 @@ pub(crate) fn search_query(value: Option<&str>) -> Result<Option<String>> {
     if value.is_empty() {
         return Ok(None);
     }
-    Ok(Some(value.to_lowercase()))
+    crate::cells::repository::search::Query::parse(Some(value)).map_err(Error::Invalid)?;
+    Ok(Some(value.to_owned()))
 }
 
 pub(crate) fn body(value: &str, required: bool) -> Result<()> {

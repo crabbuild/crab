@@ -324,3 +324,69 @@ async fn invalid_inputs_fail_and_legacy_issue_objects_are_not_a_serving_path() {
     assert_eq!(h.json(ROOT, &cookie).await["items"][0]["number"], 1);
     h.close().await;
 }
+
+#[tokio::test]
+async fn advanced_search_preserves_caseful_operators_and_reports_invalid_syntax() {
+    let h = Harness::new(false).await;
+    let cookie = h.login().await;
+    for (index, title, body) in [
+        (1, "Keyboard focus", "Accessibility"),
+        (2, "Color contrast", "Accessibility"),
+        (3, "Unrelated work", "Different topic"),
+    ] {
+        let value = json!({"request_id":nonce(index),"title":title,"body":body});
+        assert_eq!(
+            write(&h, &cookie, "POST", ROOT, value).await.0,
+            StatusCode::CREATED
+        );
+    }
+    let query = "(keyboard OR contrast) AND accessibility -unrelated no:assignee";
+    let response = h
+        .http
+        .get(format!("{}{ROOT}", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[("q", query), ("limit", "1")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let first: Value = response.json().await.unwrap();
+    assert_eq!(
+        first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["number"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    let next = first["next"].to_string();
+    let response = h
+        .http
+        .get(format!("{}{ROOT}", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[("q", query), ("limit", "1"), ("before", &next)])
+        .send()
+        .await
+        .unwrap();
+    let next: Value = response.json().await.unwrap();
+    assert_eq!(next["items"][0]["number"], 1);
+    for query in [
+        "keyboard OR",
+        "(keyboard",
+        "label:\"unfinished",
+        "sort:updated",
+        "author:alice",
+    ] {
+        let response = h
+            .http
+            .get(format!("{}{ROOT}", h.origin))
+            .header(header::COOKIE, &cookie)
+            .query(&[("q", query)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+    h.close().await;
+}

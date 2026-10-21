@@ -89,6 +89,9 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        <search::completion::CompleteSearch as Read>::ID => {
+            invoke_read::<search::completion::CompleteSearch>(context, input)
+        }
         <GetLink as Read>::ID => invoke_read::<GetLink>(context, input),
         <ListLinks as Read>::ID => invoke_read::<ListLinks>(context, input),
         <collaboration::activity::ListActivity as Read>::ID => {

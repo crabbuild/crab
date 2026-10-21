@@ -214,7 +214,8 @@ pub(crate) use assets::{AttachReleaseAsset, DeleteReleaseAsset, ReserveReleaseAs
 mod validation;
 use validation::{
     asset_reservation_digest, next_version, publication_result_version, release_digest,
-    validate_asset_result, validate_create, validate_oid, validate_reservation, validate_tag_name,
+    validate_asset_result, validate_create, validate_oid, validate_query, validate_reservation,
+    validate_tag_name,
 };
 
 mod storage;

@@ -551,7 +551,17 @@ impl Read for ListIssues {
                 "repository issue filter is invalid",
             ));
         }
-        validate_query(input.query.as_deref())?;
+        let query =
+            search::Query::parse(input.query.as_deref()).map_err(crate::cells::Error::Invalid)?;
+        let labels = if query.needs_labels() {
+            ListLabels::execute(context, ())?
+                .labels
+                .into_iter()
+                .map(|label| (label.number, label.name.to_lowercase()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let sequence = context.sql(&SqlBatch {
             statements: vec![statement(
                 "SELECT last FROM repository_sequences WHERE kind = 'issue'",
@@ -585,7 +595,23 @@ impl Read for ListIssues {
                 };
                 let issue = issue_from_row(row)?;
                 if (input.state == 2 || input.state == issue.state)
-                    && matches_query(input.query.as_deref(), &issue)
+                    && query.matches(
+                        &search::Document {
+                            kind: collaboration::SubjectKind::Issue,
+                            state: if issue.state == 0 {
+                                collaboration::SubjectState::Open
+                            } else {
+                                collaboration::SubjectState::Closed
+                            },
+                            draft: None,
+                            title: &issue.title,
+                            body: &issue.body,
+                            author_name: &issue.author.name,
+                            label_ids: &issue.label_ids,
+                            assignees: &issue.assignee_subjects,
+                        },
+                        &labels,
+                    )
                 {
                     items.push(IssueSummary::from(issue));
                     if items.len() == usize::from(input.limit) {

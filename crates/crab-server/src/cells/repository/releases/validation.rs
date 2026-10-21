@@ -120,3 +120,18 @@ pub(super) fn publication_result_version(expected_version: u64) -> crate::cells:
         next_version(expected_version)
     }
 }
+
+pub(super) fn validate_query(query: Option<&str>) -> crate::cells::Result<()> {
+    if query.is_some_and(|query| {
+        query.is_empty()
+            || query.trim() != query
+            || query.chars().count() > 256
+            || query.chars().any(char::is_control)
+            || query.to_lowercase() != query
+    }) {
+        return Err(crate::cells::Error::Invalid(
+            "repository search query is invalid",
+        ));
+    }
+    Ok(())
+}

@@ -30,7 +30,9 @@ comment operations. Feature commands and their persistence helpers live under
 readiness belongs to `pulls/readiness/`, reviewer invitations and fulfillment
 belong to `pulls/review_requests/`, and review threads belong to
 `pulls/review_threads/`; browse projection reads and
-writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs.
+writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs. `search/` owns the shared issue/PR
+query grammar and matching; `search/completion/` owns repository-scoped
+suggestions and browser UTF-16 replacement ranges.
 
 Collaboration documents live in `cells/repository/collaboration/`. Its `target.rs`
 owns shared discussion addresses, `activity/` owns append-only events and subject

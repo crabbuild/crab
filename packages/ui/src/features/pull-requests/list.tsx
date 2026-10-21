@@ -36,6 +36,8 @@ export function PullList({ repo, url }: { repo: Repository; url: URL }) {
       </div>
       <p className="muted">Review and discuss changes between branches.</p>
       <DiscussionSearch
+        repo={repo}
+        kind="pull"
         label="Search pulls"
         placeholder="Search titles, descriptions, or authors"
         value={query}
