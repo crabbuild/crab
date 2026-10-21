@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button } from "@primer/react";
+import { Button } from "@/components/ui/button";
 import {
   IssueOpenedIcon,
   IssueClosedIcon,
@@ -7,8 +7,8 @@ import {
   GitMergeIcon,
 } from "@primer/octicons-react";
 import { endpoint, navigate, useRequest, type Repository } from "../../api";
-import { useMutation } from "../../discussion-mutations";
-import { DiscussionMarkdown } from "../../discussion";
+import { useMutation } from "@/components/discussion/mutations";
+import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import { repoHref, repositoryRoute } from "../../repository-route";
 import { Link, Result } from "../../ui";
 import { MilestoneForm } from "./form";
@@ -57,7 +57,7 @@ function MilestoneList({ repo, url }: { repo: Repository; url: URL }) {
         <h2>Milestones</h2>
         {resource.data?.can_manage && !repo.archived && (
           <Button
-            variant="primary"
+            variant="default"
             onClick={() =>
               navigate(repoHref(repo, { view: "milestones", action: "new" }))
             }
@@ -197,6 +197,7 @@ function MilestoneDetailPage({
                 <h1>{milestone.title}</h1>
                 {can_manage && !repo.archived && (
                   <Button
+                    variant="outline"
                     disabled={mutation.pending}
                     onClick={() => setEditing(true)}
                   >
@@ -214,6 +215,7 @@ function MilestoneDetailPage({
               <DiscussionMarkdown>{milestone.description}</DiscussionMarkdown>
               {can_manage && !repo.archived && (
                 <Button
+                  variant="outline"
                   disabled={mutation.pending}
                   onClick={async () => {
                     const value = await mutation.run<Milestone>(
@@ -238,7 +240,7 @@ function MilestoneDetailPage({
               {mutation.error && (
                 <p className="notice error" role="alert">
                   {mutation.error}{" "}
-                  <Button variant="invisible" onClick={resource.retry}>
+                  <Button variant="ghost" onClick={resource.retry}>
                     Reload milestone
                   </Button>
                 </p>
@@ -318,10 +320,15 @@ function MilestoneWork({ repo, number }: { repo: Repository; number: number }) {
             )}
             <div className="discussion-pagination">
               {before && (
-                <Button onClick={() => setBefore(undefined)}>First page</Button>
+                <Button variant="outline" onClick={() => setBefore(undefined)}>
+                  First page
+                </Button>
               )}
               {page.next !== null && (
-                <Button onClick={() => setBefore(String(page.next))}>
+                <Button
+                  variant="outline"
+                  onClick={() => setBefore(String(page.next))}
+                >
                   Older assignments
                 </Button>
               )}

@@ -1,5 +1,7 @@
+import { Spinner } from "@/components/ui/spinner";
+import { Button } from "@/components/ui/button";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Button, Spinner } from "@primer/react";
+
 import {
   AlertIcon,
   CheckCircleFillIcon,
@@ -129,7 +131,8 @@ export function GitImport({
 
   if (!open)
     return (
-      <Button leadingVisual={GitPullRequestIcon} onClick={() => setOpen(true)}>
+      <Button variant="outline" onClick={() => setOpen(true)}>
+        <GitPullRequestIcon data-icon="inline-start" />
         Import from Git
       </Button>
     );
@@ -150,11 +153,8 @@ export function GitImport({
             repositories and is never stored.
           </p>
         </div>
-        <Button
-          aria-label="Close Git import"
-          leadingVisual={XIcon}
-          onClick={reset}
-        >
+        <Button variant="outline" aria-label="Close Git import" onClick={reset}>
+          <XIcon data-icon="inline-start" />
           Close
         </Button>
       </header>
@@ -236,7 +236,7 @@ export function GitImport({
             aria-live="polite"
           >
             {running ? (
-              <Spinner size="small" />
+              <Spinner />
             ) : job.state === "succeeded" ? (
               <CheckCircleFillIcon aria-hidden="true" />
             ) : (
@@ -253,12 +253,17 @@ export function GitImport({
         <div className="git-import-actions">
           <Button
             type="submit"
-            variant="primary"
+            variant="default"
             disabled={running || submitting}
           >
             {submitting || running ? "Importing…" : "Start import"}
           </Button>
-          <Button type="button" onClick={reset} disabled={running}>
+          <Button
+            variant="outline"
+            type="button"
+            onClick={reset}
+            disabled={running}
+          >
             Cancel
           </Button>
         </div>

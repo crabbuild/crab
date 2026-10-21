@@ -1,6 +1,13 @@
+import { Badge } from "@/components/ui/badge";
+import {
+  InputGroup,
+  InputGroupInput,
+  InputGroupAddon,
+} from "@/components/ui/input-group";
+import { Button } from "@/components/ui/button";
 import { repoHref, revisionAddress } from "./repository-route";
 import { useState } from "react";
-import { Button, IconButton, Label, TextInput } from "@primer/react";
+
 import {
   CopyIcon,
   GitBranchIcon,
@@ -51,12 +58,11 @@ function RefRow({
     <li>
       <div className="ref-name-cell">
         <Link href={repoHref(repo, { rev: revision })}>{name}</Link>
-        <IconButton
-          icon={CopyIcon}
+        <Button
           aria-label={copied ? `Copied ${name}` : `Copy ${name}`}
           title={copied ? "Copied" : "Copy ref name"}
-          size="small"
-          variant="invisible"
+          size="icon-sm"
+          variant="ghost"
           onClick={async () => {
             try {
               await navigator.clipboard.writeText(name);
@@ -65,7 +71,9 @@ function RefRow({
               setCopied(false);
             }
           }}
-        />
+        >
+          <CopyIcon data-icon="inline-start" />
+        </Button>
       </div>
       <Link
         className="ref-commit"
@@ -74,8 +82,8 @@ function RefRow({
         {short(ref.peeled ?? ref.oid)}
       </Link>
       <div className="ref-labels">
-        {defaultBranch && <Label>default</Label>}
-        {protectedBranch && <Label variant="accent">protected</Label>}
+        {defaultBranch && <Badge variant="outline">default</Badge>}
+        {protectedBranch && <Badge variant="info">protected</Badge>}
       </div>
       <div className="ref-actions">
         {tag && (
@@ -101,17 +109,18 @@ function RefRow({
           </Link>
         )}
         {onDelete && (
-          <IconButton
-            icon={TrashIcon}
+          <Button
             aria-label={`Delete ${name}`}
             title={`Delete ${name}`}
-            size="small"
-            variant="danger"
+            size="icon-sm"
+            variant="destructive"
             onClick={() => {
               setError(undefined);
               setConfirming(true);
             }}
-          />
+          >
+            <TrashIcon data-icon="inline-start" />
+          </Button>
         )}
       </div>
       {confirming && (
@@ -127,7 +136,8 @@ function RefRow({
           </div>
           <div>
             <Button
-              size="small"
+              variant="outline"
+              size="sm"
               disabled={deleting}
               onClick={() => {
                 setConfirming(false);
@@ -137,8 +147,8 @@ function RefRow({
               Cancel
             </Button>
             <Button
-              size="small"
-              variant="danger"
+              size="sm"
+              variant="destructive"
               disabled={deleting}
               onClick={async () => {
                 if (!onDelete) return;
@@ -223,14 +233,17 @@ export function RefsPage({
           <TagIcon /> Tags
         </Link>
       </nav>
-      <TextInput
-        block
-        leadingVisual={SearchIcon}
-        aria-label={`Search ${type}`}
-        placeholder={`Search ${type}…`}
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
-      />
+      <InputGroup>
+        <InputGroupInput
+          aria-label={`Search ${type}`}
+          placeholder={`Search ${type}…`}
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <InputGroupAddon>
+          <SearchIcon aria-hidden="true" />
+        </InputGroupAddon>
+      </InputGroup>
       {defaultRef && (
         <RefGroup
           knownRefs={refs}

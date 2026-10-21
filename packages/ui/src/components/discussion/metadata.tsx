@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Button } from "@primer/react";
+import { Button } from "@/components/ui/button";
 import { PersonAddIcon } from "@primer/octicons-react";
 import {
   endpoint,
@@ -7,13 +7,13 @@ import {
   type Repository,
   type RepositoryAssignee,
   type RepositoryLabel,
-} from "./api";
-import { ReviewRequests } from "./collaboration/review-requests";
-import { LinkedWork } from "./collaboration/links";
-import { MilestonePicker } from "./collaboration/milestones/picker";
-import { LabelBadges, LabelPicker } from "./discussion-labels";
-import { useMutation } from "./discussion-mutations";
-import { Result } from "./ui";
+} from "@/api";
+import { ReviewRequests } from "@/collaboration/review-requests";
+import { LinkedWork } from "@/collaboration/links";
+import { MilestonePicker } from "@/collaboration/milestones/picker";
+import { LabelBadges, LabelPicker } from "@/discussion-labels";
+import { useMutation } from "@/components/discussion/mutations";
+import { Result } from "@/ui";
 
 interface AssigneeCatalog {
   items: RepositoryAssignee[];
@@ -90,8 +90,8 @@ function AssigneePicker({
           <header>
             <strong>Assign people</strong>
             <Button
-              size="small"
-              variant="invisible"
+              size="sm"
+              variant="ghost"
               aria-label="Close assignee picker"
               onClick={() => details.current?.removeAttribute("open")}
             >
@@ -131,8 +131,8 @@ function AssigneePicker({
                   </p>
                 )}
                 <Button
-                  size="small"
-                  variant="primary"
+                  size="sm"
+                  variant="default"
                   disabled={mutation.pending || selected.length > 10}
                   onClick={async () => {
                     const saved = await mutation.run(

@@ -1,8 +1,10 @@
 import { useState } from "react";
-import { Button } from "@primer/react";
+import { Button } from "@/components/ui/button";
 import { endpoint, navigate, useRequest, type Repository } from "../../api";
-import { useMutation } from "../../discussion-mutations";
-import { DiscussionMarkdown, Editor, useSubmission } from "../../discussion";
+import { useMutation } from "@/components/discussion/mutations";
+import { DiscussionMarkdown } from "@/components/discussion/markdown";
+import { Editor } from "@/components/discussion/editor";
+import { useSubmission } from "@/components/discussion/hooks";
 import { repoHref } from "../../repository-route";
 import { Link, Result } from "../../ui";
 import type { Milestone, MilestoneDetail } from "./model";
@@ -113,6 +115,7 @@ export function MilestoneForm({
               </p>
               <div className="discussion-actions">
                 <Button
+                  variant="outline"
                   type="button"
                   onClick={() => {
                     setVersion(latest.version);
@@ -122,6 +125,7 @@ export function MilestoneForm({
                   Continue with my draft
                 </Button>
                 <Button
+                  variant="outline"
                   type="button"
                   onClick={() => {
                     setTitle(latest.title);
@@ -141,7 +145,7 @@ export function MilestoneForm({
       <div className="discussion-actions">
         <Button
           type="submit"
-          variant="primary"
+          variant="default"
           disabled={mutation.pending || mutation.conflict || !title.trim()}
         >
           {mutation.pending
@@ -151,7 +155,7 @@ export function MilestoneForm({
               : "Create milestone"}
         </Button>
         {onCancel ? (
-          <Button type="button" onClick={onCancel}>
+          <Button variant="outline" type="button" onClick={onCancel}>
             Cancel
           </Button>
         ) : (

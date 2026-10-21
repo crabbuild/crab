@@ -1,6 +1,8 @@
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { repoHref } from "./repository-route";
 import { useMemo, useState } from "react";
-import { Button, TextInput } from "@primer/react";
+
 import {
   DownloadIcon,
   PencilIcon,
@@ -14,7 +16,9 @@ import {
   type Refs,
   type Repository,
 } from "./api";
-import { Editor, Failure, useSubmission } from "./discussion";
+import { Editor } from "@/components/discussion/editor";
+import { Failure } from "@/components/discussion/failure";
+import { useSubmission } from "@/components/discussion/hooks";
 import {
   mutateRelease,
   removeReleaseAsset,
@@ -46,7 +50,7 @@ function ReleaseNotesFields({
     <>
       <div className="release-notes-form">
         <label htmlFor="release-title">Release title</label>
-        <TextInput
+        <Input
           id="release-title"
           value={title}
           onChange={(event) => setTitle(event.target.value)}
@@ -177,9 +181,8 @@ function ReleaseAssetsEditor({
               </span>
               <Button
                 type="button"
-                size="small"
-                variant="invisible"
-                leadingVisual={TrashIcon}
+                size="sm"
+                variant="ghost"
                 aria-label={`Remove ${asset.name}`}
                 disabled={pending || uploading || Boolean(removing)}
                 onClick={async () => {
@@ -206,7 +209,9 @@ function ReleaseAssetsEditor({
                     setRemoving(undefined);
                   }
                 }}
-              />
+              >
+                <TrashIcon data-icon="inline-start" />
+              </Button>
             </li>
           ))}
         </ul>
@@ -313,6 +318,7 @@ function EditReleaseForm({
       <Failure message={error} />
       <div className="release-form-actions">
         <Button
+          variant="outline"
           type="button"
           onClick={() => navigate(detailHref)}
           disabled={pending}
@@ -321,13 +327,13 @@ function EditReleaseForm({
         </Button>
         <div className="release-form-submit">
           {release.draft && (
-            <Button type="submit" disabled={pending}>
+            <Button variant="outline" type="submit" disabled={pending}>
               {pendingAction === "draft" ? "Saving…" : "Save draft"}
             </Button>
           )}
           <Button
             type={release.draft ? "button" : "submit"}
-            variant="primary"
+            variant="default"
             disabled={pending}
             onClick={release.draft ? () => void update(false) : undefined}
           >
@@ -485,7 +491,7 @@ export function NewRelease({
       <fieldset className="release-target-picker">
         <legend>Choose a tag</legend>
         <label htmlFor="release-tag">Tag name</label>
-        <TextInput
+        <Input
           id="release-tag"
           value={tag}
           onChange={(event) => setTag(event.target.value)}
@@ -533,6 +539,7 @@ export function NewRelease({
       <Failure message={error} />
       <div className="release-form-actions">
         <Button
+          variant="outline"
           type="button"
           onClick={() => navigate(repoHref(repo, { view: "releases" }))}
           disabled={pending}
@@ -541,13 +548,14 @@ export function NewRelease({
         </Button>
         <div className="release-form-submit">
           <Button
+            variant="outline"
             type="button"
             disabled={pending || !target}
             onClick={() => void submit(true)}
           >
             {pendingAction === "draft" ? "Saving…" : "Save draft"}
           </Button>
-          <Button type="submit" variant="primary" disabled={pending || !target}>
+          <Button type="submit" variant="default" disabled={pending || !target}>
             {pendingAction === "publish" ? "Publishing…" : "Publish release"}
           </Button>
         </div>

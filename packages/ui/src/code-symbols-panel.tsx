@@ -1,5 +1,7 @@
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { IconButton, Spinner } from "@primer/react";
+
 import {
   ChevronLeftIcon,
   CodeIcon,
@@ -119,13 +121,14 @@ export function CodeSymbolsPanel({
           <strong>Symbols</strong>
           <span>Current file</span>
         </div>
-        <IconButton
-          icon={XIcon}
-          size="small"
-          variant="invisible"
+        <Button
+          size="icon-sm"
+          variant="ghost"
           aria-label="Close symbols"
           onClick={onClose}
-        />
+        >
+          <XIcon data-icon="inline-start" />
+        </Button>
       </header>
       {active === null ? (
         <>
@@ -141,7 +144,7 @@ export function CodeSymbolsPanel({
           <div className="code-symbols-list" aria-live="polite">
             {state.status === "loading" ? (
               <div className="code-symbols-status">
-                <Spinner size="small" /> Parsing in your browser…
+                <Spinner /> Parsing in your browser…
               </div>
             ) : state.status === "error" ? (
               <div className="code-symbols-status" title={state.message}>

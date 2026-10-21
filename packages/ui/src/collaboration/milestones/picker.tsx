@@ -1,8 +1,8 @@
 import { useRef, useState } from "react";
-import { Button } from "@primer/react";
+import { Button } from "@/components/ui/button";
 import { PencilIcon } from "@primer/octicons-react";
 import { endpoint, useRequest, type Repository } from "../../api";
-import { useMutation } from "../../discussion-mutations";
+import { useMutation } from "@/components/discussion/mutations";
 import { repoHref } from "../../repository-route";
 import { Link, Result } from "../../ui";
 import type { MilestoneAssignment, MilestonePage } from "./model";
@@ -94,8 +94,8 @@ export function MilestonePicker({
                     <div className="milestone-picker-pages">
                       {before && (
                         <Button
-                          size="small"
-                          variant="invisible"
+                          size="sm"
+                          variant="ghost"
                           onClick={() => setBefore(undefined)}
                         >
                           First page
@@ -103,8 +103,8 @@ export function MilestonePicker({
                       )}
                       {page.next !== null && (
                         <Button
-                          size="small"
-                          variant="invisible"
+                          size="sm"
+                          variant="ghost"
                           onClick={() => setBefore(String(page.next))}
                         >
                           More milestones
@@ -121,7 +121,8 @@ export function MilestonePicker({
               )}
               {mutation.conflict && (
                 <Button
-                  size="small"
+                  variant="outline"
+                  size="sm"
                   onClick={() => {
                     selection.retry();
                     details.current?.removeAttribute("open");
@@ -132,8 +133,8 @@ export function MilestonePicker({
               )}
               <div className="discussion-actions">
                 <Button
-                  size="small"
-                  variant="primary"
+                  size="sm"
+                  variant="default"
                   disabled={mutation.pending || !selection.data}
                   onClick={async () => {
                     if (!selection.data) return;
@@ -155,7 +156,8 @@ export function MilestonePicker({
                   {mutation.pending ? "Saving…" : "Apply milestone"}
                 </Button>
                 <Button
-                  size="small"
+                  variant="outline"
+                  size="sm"
                   onClick={() => details.current?.removeAttribute("open")}
                 >
                   Cancel

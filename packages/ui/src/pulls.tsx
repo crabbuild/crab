@@ -1,15 +1,19 @@
+import { Button } from "@/components/ui/button";
 import { PullReadinessControl } from "./collaboration/pull-readiness";
 import { ActivityTimeline } from "./collaboration/activity";
 import { repoHref, repositoryRoute } from "./repository-route";
 import { useEffect, useMemo, useState } from "react";
 import type { SelectedLineRange } from "@pierre/diffs";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import {
-  ActionList,
-  ActionMenu,
-  Button,
-  Checkbox,
-  TextInput,
-} from "@primer/react";
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+} from "@/components/ui/dropdown-menu";
+import { ChevronDownIcon } from "lucide-react";
 import {
   CheckCircleFillIcon,
   ChecklistIcon,
@@ -46,16 +50,17 @@ import { CommitList } from "./browse";
 import { CheckRuns } from "./check-runs";
 import { Reactions, type ReactionSummary } from "./collaboration/reactions";
 import { changeContent } from "./content-editor";
-import { useMutation } from "./discussion-mutations";
-import { DiscussionSearch } from "./discussion-search";
+import { useMutation } from "@/components/discussion/mutations";
+import { DiscussionSearch } from "@/components/discussion/search";
 import { LabelBadges } from "./discussion-labels";
-import { AssigneeAvatars, DiscussionMetadata } from "./discussion-metadata";
 import {
-  DiscussionMarkdown,
-  Editor,
-  Failure,
-  useSubmission,
-} from "./discussion";
+  AssigneeAvatars,
+  DiscussionMetadata,
+} from "@/components/discussion/metadata";
+import { DiscussionMarkdown } from "@/components/discussion/markdown";
+import { Editor } from "@/components/discussion/editor";
+import { Failure } from "@/components/discussion/failure";
+import { useSubmission } from "@/components/discussion/hooks";
 import { Link, Result, short } from "./ui";
 import type { CodeThemes } from "./code-theme";
 import { replaceSelectedLines } from "./pull-review-model";
@@ -336,7 +341,7 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
         <h2>Pull requests</h2>
         {!repo.archived && (
           <Button
-            variant="primary"
+            variant="default"
             onClick={() =>
               navigate(repoHref(repo, { view: "pulls", pull: "new" }))
             }
@@ -384,7 +389,7 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
             </Link>
           ))}
         </nav>
-        <Button size="small" onClick={page.retry}>
+        <Button variant="outline" size="sm" onClick={page.retry}>
           Refresh
         </Button>
       </div>
@@ -622,14 +627,14 @@ function NewPull({
               <Checkbox
                 checked={draft}
                 disabled={mutation.pending}
-                onChange={(event) => setDraft(event.target.checked)}
+                onCheckedChange={(value) => setDraft(value === true)}
               />
               Create as draft
             </label>
             <div className="discussion-actions">
               <Button
                 type="submit"
-                variant="primary"
+                variant="default"
                 disabled={mutation.pending || !title.trim()}
               >
                 {mutation.pending
@@ -1073,12 +1078,12 @@ function PullReviewThreads({
           <div className="discussion-actions">
             <Button
               type="submit"
-              variant="primary"
+              variant="default"
               disabled={mutation.pending || !body.trim()}
             >
               {mutation.pending ? "Posting…" : "Comment"}
             </Button>
-            <Button type="button" onClick={clearSelection}>
+            <Button variant="outline" type="button" onClick={clearSelection}>
               Cancel
             </Button>
           </div>
@@ -1097,7 +1102,7 @@ function PullReviewThreads({
                   Outdated threads remain visible for context.
                 </p>
               </div>
-              <Button size="small" onClick={threads.retry}>
+              <Button variant="outline" size="sm" onClick={threads.retry}>
                 Refresh
               </Button>
             </div>
@@ -1121,7 +1126,7 @@ function PullReviewThreads({
               <p className="muted">No inline review threads yet.</p>
             )}
             {threads.next !== null && (
-              <Button size="small" onClick={threads.loadMore}>
+              <Button variant="outline" size="sm" onClick={threads.loadMore}>
                 Load more threads
               </Button>
             )}
@@ -1152,7 +1157,11 @@ function PullReviewThreads({
                   />
                 ))}
                 {outdatedThreads.next !== null && (
-                  <Button size="small" onClick={outdatedThreads.loadMore}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={outdatedThreads.loadMore}
+                  >
                     Load more outdated conversations
                   </Button>
                 )}
@@ -1273,15 +1282,16 @@ function ReviewThreadCard({
                 />
                 <div className="discussion-actions">
                   <Button
-                    size="small"
-                    variant="primary"
+                    size="sm"
+                    variant="default"
                     type="submit"
                     disabled={mutation.pending || !editBody.trim()}
                   >
                     {mutation.pending ? "Saving…" : "Save"}
                   </Button>
                   <Button
-                    size="small"
+                    variant="outline"
+                    size="sm"
                     type="button"
                     disabled={mutation.pending}
                     onClick={() => {
@@ -1320,7 +1330,8 @@ function ReviewThreadCard({
           <div className="discussion-actions review-thread-actions">
             {onJumpToDiff && !thread.outdated && !thread.vanished && (
               <Button
-                size="small"
+                variant="outline"
+                size="sm"
                 onClick={() => onJumpToDiff(thread)}
                 disabled={mutation.pending}
               >
@@ -1329,7 +1340,8 @@ function ReviewThreadCard({
             )}
             {thread.can_edit && !repo.archived && !editing && (
               <Button
-                size="small"
+                variant="outline"
+                size="sm"
                 disabled={mutation.pending}
                 onClick={() => {
                   setEditBody(thread.body);
@@ -1341,7 +1353,8 @@ function ReviewThreadCard({
             )}
             {thread.can_resolve && (
               <Button
-                size="small"
+                variant="outline"
+                size="sm"
                 disabled={mutation.pending}
                 onClick={toggleResolved}
               >
@@ -1428,12 +1441,7 @@ function SuggestionAction({
     <div className="review-suggestion">
       <pre>{thread.suggested_text}</pre>
       {pull.state === "open" && !repo.archived && repo.access === "write" && (
-        <Button
-          size="small"
-          variant="primary"
-          disabled={pending}
-          onClick={apply}
-        >
+        <Button size="sm" variant="default" disabled={pending} onClick={apply}>
           {pending ? "Applying…" : "Apply suggestion"}
         </Button>
       )}
@@ -1497,7 +1505,7 @@ function ReviewReplies({
         }
       </Result>
       {replies.next !== null && (
-        <Button size="small" onClick={replies.loadMore}>
+        <Button variant="outline" size="sm" onClick={replies.loadMore}>
           Load more replies
         </Button>
       )}
@@ -1513,7 +1521,8 @@ function ReviewReplies({
           />
           <Failure message={mutation.error} />
           <Button
-            size="small"
+            variant="outline"
+            size="sm"
             type="submit"
             disabled={mutation.pending || !body.trim()}
           >
@@ -1576,15 +1585,16 @@ function ReviewReplyItem({
           />
           <div className="discussion-actions">
             <Button
-              size="small"
-              variant="primary"
+              size="sm"
+              variant="default"
               type="submit"
               disabled={mutation.pending || !body.trim()}
             >
               {mutation.pending ? "Saving…" : "Save"}
             </Button>
             <Button
-              size="small"
+              variant="outline"
+              size="sm"
               type="button"
               disabled={mutation.pending}
               onClick={() => {
@@ -1601,7 +1611,8 @@ function ReviewReplyItem({
           <DiscussionMarkdown>{body}</DiscussionMarkdown>
           {reply.can_edit && !repo.archived && (
             <Button
-              size="small"
+              variant="outline"
+              size="sm"
               disabled={mutation.pending}
               onClick={() => setEditing(true)}
             >
@@ -1649,7 +1660,7 @@ function PullCommits({
             from <code>{branch(pull.base_ref)}</code>.
           </p>
         </div>
-        <Button size="small" onClick={commits.retry}>
+        <Button variant="outline" size="sm" onClick={commits.retry}>
           Refresh
         </Button>
       </div>
@@ -1790,7 +1801,7 @@ function PullConversation({
             {pull.can_manage && (
               <Button
                 type="button"
-                variant={pull.state === "open" ? "danger" : "default"}
+                variant={pull.state === "open" ? "destructive" : "outline"}
                 disabled={stateMutation.pending}
                 onClick={async () => {
                   const updated = await stateMutation.run<PullRequest>(
@@ -1811,7 +1822,7 @@ function PullConversation({
             )}
             <Button
               type="submit"
-              variant="primary"
+              variant="default"
               disabled={commentMutation.pending || !body.trim()}
             >
               {commentMutation.pending ? "Commenting…" : "Comment"}
@@ -2013,38 +2024,48 @@ function MergePanel({
             <div className="merge-controls">
               {!pending && !confirming && (
                 <div className="merge-method-row">
-                  <Button variant="primary" onClick={() => setConfirming(true)}>
+                  <Button variant="default" onClick={() => setConfirming(true)}>
                     Merge pull request
                   </Button>
-                  <ActionMenu>
-                    <ActionMenu.Button>
-                      {method === "merge_commit"
-                        ? "Create a merge commit"
-                        : "Fast-forward only"}
-                    </ActionMenu.Button>
-                    <ActionMenu.Overlay width="medium">
-                      <ActionList selectionVariant="single">
-                        <ActionList.Item
-                          selected={method === "merge_commit"}
-                          onSelect={() => setMethod("merge_commit")}
-                        >
-                          Create a merge commit
-                          <ActionList.Description variant="block">
-                            Add all commits with a two-parent merge commit.
-                          </ActionList.Description>
-                        </ActionList.Item>
-                        <ActionList.Item
-                          selected={method === "fast_forward"}
-                          onSelect={() => setMethod("fast_forward")}
-                        >
-                          Fast-forward only
-                          <ActionList.Description variant="block">
-                            Move the base branch only when it is an ancestor.
-                          </ActionList.Description>
-                        </ActionList.Item>
-                      </ActionList>
-                    </ActionMenu.Overlay>
-                  </ActionMenu>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="outline">
+                        {method === "merge_commit"
+                          ? "Create a merge commit"
+                          : "Fast-forward only"}
+                        <ChevronDownIcon data-icon="inline-end" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent className="w-80">
+                      <DropdownMenuRadioGroup
+                        value={method}
+                        onValueChange={(value) => {
+                          if (
+                            value === "merge_commit" ||
+                            value === "fast_forward"
+                          )
+                            setMethod(value);
+                        }}
+                      >
+                        <DropdownMenuRadioItem value="merge_commit">
+                          <div>
+                            <div>Create a merge commit</div>
+                            <p className="text-xs text-muted-foreground">
+                              Add all commits with a two-parent merge commit.
+                            </p>
+                          </div>
+                        </DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="fast_forward">
+                          <div>
+                            <div>Fast-forward only</div>
+                            <p className="text-xs text-muted-foreground">
+                              Move the base branch only when it is an ancestor.
+                            </p>
+                          </div>
+                        </DropdownMenuRadioItem>
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </div>
               )}
               {(pending || confirming) && (
@@ -2057,8 +2078,7 @@ function MergePanel({
                   {!pending && method === "merge_commit" && (
                     <label className="merge-message">
                       Commit message
-                      <TextInput
-                        block
+                      <Input
                         autoFocus
                         aria-label="Merge commit message"
                         value={message}
@@ -2071,7 +2091,7 @@ function MergePanel({
                   <div className="merge-method-row">
                     <Button
                       type="submit"
-                      variant="primary"
+                      variant="default"
                       disabled={
                         mutation.pending ||
                         (!pending &&
@@ -2087,6 +2107,7 @@ function MergePanel({
                     </Button>
                     {!pending && (
                       <Button
+                        variant="outline"
                         disabled={mutation.pending}
                         onClick={() => setConfirming(false)}
                       >
@@ -2106,7 +2127,7 @@ function MergePanel({
           )}
           <Failure message={mutation.error} />
           {mutation.error && repo.archived && pending && (
-            <Button size="small" onClick={refresh}>
+            <Button variant="outline" size="sm" onClick={refresh}>
               Refresh merge status
             </Button>
           )}
@@ -2160,7 +2181,7 @@ function RequiredChecks({
               ? "Required checks are waiting"
               : "All required checks have passed"}
         </strong>
-        <Button size="small" onClick={refresh}>
+        <Button variant="outline" size="sm" onClick={refresh}>
           Refresh checks
         </Button>
       </div>
@@ -2414,7 +2435,7 @@ function ReviewForm({
       <div className="discussion-actions">
         <Button
           type="submit"
-          variant="primary"
+          variant="default"
           disabled={mutation.pending || (required && !body.trim())}
         >
           {mutation.pending ? "Submitting…" : "Submit review"}

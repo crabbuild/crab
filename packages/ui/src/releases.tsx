@@ -1,6 +1,13 @@
+import { Badge } from "@/components/ui/badge";
+import {
+  InputGroup,
+  InputGroupInput,
+  InputGroupAddon,
+} from "@/components/ui/input-group";
+import { Button } from "@/components/ui/button";
 import { repoHref, repositoryRoute } from "./repository-route";
 import { useState } from "react";
-import { Button, IconButton, Label, TextInput } from "@primer/react";
+
 import {
   ChevronLeftIcon,
   DownloadIcon,
@@ -17,7 +24,7 @@ import {
   type Refs,
   type Repository,
 } from "./api";
-import { DiscussionMarkdown } from "./discussion";
+import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import { EditRelease, NewRelease } from "./release-form";
 import { mutateRelease, type Release, type ReleasePage } from "./release-api";
 import { Link, Result, short } from "./ui";
@@ -63,14 +70,18 @@ function ReleaseNavigation({
             );
           }}
         >
-          <TextInput
-            aria-label="Find a release"
-            leadingVisual={SearchIcon}
-            placeholder="Find a release"
-            value={search}
-            maxLength={256}
-            onChange={(event) => setSearch(event.target.value)}
-          />
+          <InputGroup>
+            <InputGroupInput
+              aria-label="Find a release"
+              placeholder="Find a release"
+              value={search}
+              maxLength={256}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+            <InputGroupAddon>
+              <SearchIcon aria-hidden="true" />
+            </InputGroupAddon>
+          </InputGroup>
         </form>
       )}
     </div>
@@ -184,31 +195,31 @@ function ReleaseCard({
             </div>
           </div>
           <div className="release-header-actions">
-            {release.draft && <Label variant="accent">Draft</Label>}
-            {release.prerelease && (
-              <Label variant="attention">Pre-release</Label>
-            )}
+            {release.draft && <Badge variant="info">Draft</Badge>}
+            {release.prerelease && <Badge variant="warning">Pre-release</Badge>}
             {manage && (
               <>
-                <IconButton
-                  icon={PencilIcon}
+                <Button
                   aria-label={`Edit ${release.title}`}
                   title="Edit release"
-                  size="small"
-                  variant="invisible"
+                  size="icon-sm"
+                  variant="ghost"
                   onClick={manage.edit}
-                />
-                <IconButton
-                  icon={TrashIcon}
+                >
+                  <PencilIcon data-icon="inline-start" />
+                </Button>
+                <Button
                   aria-label={`Delete ${release.title}`}
                   title="Delete release"
-                  size="small"
-                  variant="danger"
+                  size="icon-sm"
+                  variant="destructive"
                   onClick={() => {
                     setError(undefined);
                     setConfirming(true);
                   }}
-                />
+                >
+                  <TrashIcon data-icon="inline-start" />
+                </Button>
               </>
             )}
           </div>
@@ -231,7 +242,8 @@ function ReleaseCard({
             </div>
             <div>
               <Button
-                size="small"
+                variant="outline"
+                size="sm"
                 disabled={deleting}
                 onClick={() => {
                   setConfirming(false);
@@ -241,8 +253,8 @@ function ReleaseCard({
                 Cancel
               </Button>
               <Button
-                size="small"
-                variant="danger"
+                size="sm"
+                variant="destructive"
                 disabled={deleting}
                 onClick={async () => {
                   setDeleting(true);

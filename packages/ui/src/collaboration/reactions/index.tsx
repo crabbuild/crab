@@ -1,8 +1,16 @@
+import { Button } from "@/components/ui/button";
 import { useEffect, useState } from "react";
-import { ActionList, ActionMenu, Button, IconButton } from "@primer/react";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuCheckboxItem,
+} from "@/components/ui/dropdown-menu";
+import { cn } from "@/lib/utils";
 import { SmileyIcon } from "@primer/octicons-react";
 import { endpoint, type Repository } from "../../api";
-import { useMutation } from "../../discussion-mutations";
+import { useMutation } from "@/components/discussion/mutations";
 
 const kinds = [
   { kind: "thumbs_up", emoji: "👍", label: "Thumbs up" },
@@ -62,40 +70,43 @@ export function Reactions({
   return (
     <div className="reaction-bar" role="group" aria-label="Reactions">
       {!repo.archived && (
-        <ActionMenu open={open} onOpenChange={setOpen}>
-          <ActionMenu.Anchor>
-            <IconButton
-              icon={SmileyIcon}
+        <DropdownMenu open={open} onOpenChange={setOpen}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="outline"
+              size="icon-sm"
               aria-label="Add reaction"
               title="Add reaction"
-              size="small"
               disabled={mutation.pending}
-            />
-          </ActionMenu.Anchor>
-          <ActionMenu.Overlay width="small">
-            <ActionList selectionVariant="multiple">
+            >
+              <SmileyIcon data-icon="inline-start" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent className="w-44">
+            <DropdownMenuGroup>
               {kinds.map(({ kind, emoji, label }) => (
-                <ActionList.Item
+                <DropdownMenuCheckboxItem
                   key={kind}
-                  selected={current.groups[kind].reacted}
-                  onSelect={() => {
+                  checked={current.groups[kind].reacted}
+                  onCheckedChange={() => {
                     void select(kind);
                   }}
                 >
                   <span aria-hidden="true">{emoji}</span> {label}
-                </ActionList.Item>
+                </DropdownMenuCheckboxItem>
               ))}
-            </ActionList>
-          </ActionMenu.Overlay>
-        </ActionMenu>
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
       )}
       {visible.map(({ kind, emoji, label }) => {
         const group = current.groups[kind];
         return (
           <Button
+            variant="outline"
             key={kind}
-            size="small"
-            className={`reaction-chip${group.reacted ? " reacted" : ""}`}
+            size="sm"
+            className={cn("reaction-chip", group.reacted && "reacted")}
             aria-pressed={group.reacted}
             aria-label={`${label}: ${group.count} ${group.count === 1 ? "reaction" : "reactions"}`}
             disabled={repo.archived || mutation.pending}

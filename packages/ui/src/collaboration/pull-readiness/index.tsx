@@ -1,6 +1,6 @@
-import { Button } from "@primer/react";
+import { Button } from "@/components/ui/button";
 import { endpoint, type Repository } from "../../api";
-import { useMutation } from "../../discussion-mutations";
+import { useMutation } from "@/components/discussion/mutations";
 
 export function PullReadinessControl({
   repo,
@@ -25,8 +25,8 @@ export function PullReadinessControl({
       className={`pull-readiness-control${pull.draft ? " merge-footer" : ""}`}
     >
       <Button
-        size="small"
-        variant={pull.draft ? "primary" : "invisible"}
+        size="sm"
+        variant={pull.draft ? "default" : "ghost"}
         disabled={mutation.pending}
         onClick={async () => {
           const saved = await mutation.run(
@@ -49,7 +49,7 @@ export function PullReadinessControl({
         </p>
       )}
       {mutation.conflict && (
-        <Button size="small" onClick={onSaved}>
+        <Button variant="outline" size="sm" onClick={onSaved}>
           Reload pull request
         </Button>
       )}

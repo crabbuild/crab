@@ -1,5 +1,7 @@
+import { Spinner } from "@/components/ui/spinner";
+import { Button } from "@/components/ui/button";
 import { useEffect, useRef, useState } from "react";
-import { Button, Spinner } from "@primer/react";
+
 import { HistoryIcon } from "@primer/octicons-react";
 import { endpoint, useRequest, type Repository } from "../../api";
 import { repoHref } from "../../repository-route";
@@ -170,19 +172,24 @@ export function ActivityTimeline({
           <h3 ref={heading} tabIndex={-1}>
             Recent activity
           </h3>
-          <Button size="small" disabled={resource.loading} onClick={refresh}>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={resource.loading}
+            onClick={refresh}
+          >
             Refresh activity
           </Button>
         </div>
         {resource.loading && (
           <p className="muted" role="status">
-            <Spinner size="small" /> Loading activity…
+            <Spinner /> Loading activity…
           </p>
         )}
         {resource.error && (
           <div className="notice error" role="alert">
             <p>{resource.error}</p>
-            <Button size="small" onClick={resource.retry}>
+            <Button variant="outline" size="sm" onClick={resource.retry}>
               Retry activity
             </Button>
           </div>
@@ -240,7 +247,8 @@ export function ActivityTimeline({
         </ol>
         {next !== null && (
           <Button
-            size="small"
+            variant="outline"
+            size="sm"
             disabled={resource.loading}
             onClick={() => setBefore(next)}
           >

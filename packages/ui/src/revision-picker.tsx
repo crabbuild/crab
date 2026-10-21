@@ -1,12 +1,20 @@
+import { Badge } from "@/components/ui/badge";
+import {
+  InputGroup,
+  InputGroupInput,
+  InputGroupAddon,
+} from "@/components/ui/input-group";
+import { Button } from "@/components/ui/button";
 import { useId, useRef, useState } from "react";
 import {
-  ActionList,
-  AnchoredOverlay,
-  Button,
-  IconButton,
-  Label,
-  TextInput,
-} from "@primer/react";
+  Popover,
+  PopoverTrigger,
+  PopoverContent,
+  PopoverTitle,
+} from "@/components/ui/popover";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import * as RovingFocus from "@radix-ui/react-roving-focus";
+import { CheckIcon } from "lucide-react";
 import {
   GitBranchIcon,
   GitCommitIcon,
@@ -37,14 +45,14 @@ export function RevisionPicker({
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
   const input = useRef<HTMLInputElement>(null);
-  const menu = useRef<HTMLUListElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
   const createAction = useRef<HTMLButtonElement>(null);
   const id = useId();
   const selected = refs.refs.find((ref) => ref.name === revision);
   const label = selected
     ? selected.name.replace(/^refs\/(heads|tags)\//, "")
     : short(revision);
-  const icon = !selected
+  const Icon = !selected
     ? GitCommitIcon
     : selected.name.startsWith("refs/tags/")
       ? TagIcon
@@ -83,173 +91,161 @@ export function RevisionPicker({
     }
   }
   return (
-    <AnchoredOverlay
+    <Popover
       open={open}
-      onOpen={() => {
-        setType(revision.startsWith("refs/tags/") ? "tags" : "branches");
-        setFilter("");
-        setCreateError("");
-        setOpen(true);
+      onOpenChange={(next) => {
+        if (next) {
+          setType(revision.startsWith("refs/tags/") ? "tags" : "branches");
+          setFilter("");
+          setCreateError("");
+        }
+        setOpen(next);
       }}
-      onClose={() => setOpen(false)}
-      width="medium"
-      preventOverflow={false}
-      displayCloseButton={false}
-      focusZoneSettings={{ disabled: true }}
-      focusTrapSettings={{ initialFocusRef: input }}
-      overlayProps={{
-        role: "dialog",
-        "aria-labelledby": `${id}-title`,
-        className: "revision-picker-panel",
-      }}
-      renderAnchor={(props) => (
+    >
+      <PopoverTrigger asChild>
         <Button
-          {...props}
-          leadingVisual={icon}
-          trailingVisual={TriangleDownIcon}
-          alignContent="start"
-          className="revision-picker-anchor"
+          variant="outline"
+          className="revision-picker-anchor justify-start"
           aria-label={`Switch branches or tags, current ${label}`}
           title={revision}
         >
-          {label}
+          <Icon data-icon="inline-start" />
+          <span className="min-w-0 flex-1 truncate text-left">{label}</span>
+          <TriangleDownIcon data-icon="inline-end" />
         </Button>
-      )}
-    >
-      <header className="revision-picker-heading">
-        <h2 id={`${id}-title`}>Switch branches/tags</h2>
-        <IconButton
-          icon={XIcon}
-          aria-label="Close branch picker"
-          variant="invisible"
-          size="small"
-          onClick={() => setOpen(false)}
-        />
-      </header>
-      <div className="revision-picker-search">
-        <TextInput
-          ref={input}
-          block
-          leadingVisual={SearchIcon}
-          aria-label={`Filter ${type}`}
-          placeholder={`Find a ${type === "branches" ? "branch" : "tag"}…`}
-          value={filter}
-          onChange={(event) => {
-            setFilter(event.target.value);
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="revision-picker-panel w-80 gap-0 p-0"
+        aria-labelledby={`${id}-title`}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          input.current?.focus();
+        }}
+      >
+        <header className="revision-picker-heading">
+          <PopoverTitle id={`${id}-title`}>Switch branches/tags</PopoverTitle>
+          <Button
+            aria-label="Close branch picker"
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => setOpen(false)}
+          >
+            <XIcon data-icon="inline-start" />
+          </Button>
+        </header>
+        <div className="revision-picker-search">
+          <InputGroup>
+            <InputGroupInput
+              ref={input}
+              aria-label={`Filter ${type}`}
+              placeholder={`Find a ${type === "branches" ? "branch" : "tag"}…`}
+              value={filter}
+              onChange={(event) => {
+                setFilter(event.target.value);
+                setCreateError("");
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  const first = menu.current?.querySelector<HTMLElement>(
+                    '[role="menuitemradio"]',
+                  );
+                  (first ?? createAction.current)?.focus();
+                } else if (
+                  event.key === "Enter" &&
+                  canCreate &&
+                  !matches.length
+                ) {
+                  event.preventDefault();
+                  void createBranch();
+                }
+              }}
+            />
+            <InputGroupAddon>
+              <SearchIcon aria-hidden="true" />
+            </InputGroupAddon>
+          </InputGroup>
+        </div>
+        <Tabs
+          value={type}
+          onValueChange={(value) => {
+            if (value !== "branches" && value !== "tags") return;
+            setType(value);
             setCreateError("");
           }}
-          onKeyDown={(event) => {
-            if (event.key === "ArrowDown") {
-              event.preventDefault();
-              const first = menu.current?.querySelector<HTMLElement>(
-                '[role="menuitemradio"]',
-              );
-              (first ?? createAction.current)?.focus();
-            } else if (event.key === "Enter" && canCreate && !matches.length) {
-              event.preventDefault();
-              void createBranch();
-            }
-          }}
-        />
-      </div>
-      <div
-        className="revision-picker-tabs"
-        role="tablist"
-        aria-label="Ref type"
-      >
-        {(["branches", "tags"] as const).map((tab) => (
-          <button
-            key={tab}
-            id={`${id}-${tab}`}
-            role="tab"
-            type="button"
-            aria-selected={type === tab}
-            aria-controls={`${id}-results`}
-            tabIndex={type === tab ? 0 : -1}
-            onClick={() => {
-              setType(tab);
-              setCreateError("");
-            }}
-            onKeyDown={(event) => {
-              if (
-                ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
-              ) {
-                event.preventDefault();
-                const next =
-                  event.key === "Home"
-                    ? "branches"
-                    : event.key === "End"
-                      ? "tags"
-                      : tab === "branches"
-                        ? "tags"
-                        : "branches";
-                setType(next);
-                document.getElementById(`${id}-${next}`)?.focus();
-              }
-            }}
-          >
-            {tab === "branches" ? "Branches" : "Tags"}
-          </button>
-        ))}
-      </div>
-      <div
-        id={`${id}-results`}
-        role="tabpanel"
-        aria-labelledby={`${id}-${type}`}
-        className="revision-picker-results"
-      >
-        {matches.length ? (
-          <ActionList
-            ref={menu}
-            role="menu"
-            aria-label={type === "branches" ? "Branches" : "Tags"}
-            selectionVariant="single"
-          >
-            {matches.map((ref) => (
-              <ActionList.Item
-                key={ref.name}
-                role="menuitemradio"
-                selected={revision === ref.name}
-                onSelect={() => {
-                  setOpen(false);
-                  onSelect(ref.name);
-                }}
+        >
+          <TabsList variant="line" className="mx-2" aria-label="Ref type">
+            <TabsTrigger value="branches">Branches</TabsTrigger>
+            <TabsTrigger value="tags">Tags</TabsTrigger>
+          </TabsList>
+          <TabsContent value={type} className="revision-picker-results">
+            {matches.length ? (
+              <RovingFocus.Root
+                ref={menu}
+                role="menu"
+                orientation="vertical"
+                loop
+                aria-label={type === "branches" ? "Branches" : "Tags"}
+                className="flex flex-col gap-1 p-2"
               >
-                {ref.name.slice(prefix.length)}
-                {refs.head?.name === ref.name && (
-                  <ActionList.TrailingVisual>
-                    <Label>default</Label>
-                  </ActionList.TrailingVisual>
-                )}
-              </ActionList.Item>
-            ))}
-          </ActionList>
-        ) : (
-          <p className="revision-picker-empty" role="status">
-            {filter ? `No ${type} match “${filter}”.` : `No ${type} yet.`}
+                {matches.map((ref) => (
+                  <RovingFocus.Item
+                    key={ref.name}
+                    asChild
+                    active={revision === ref.name}
+                  >
+                    <Button
+                      variant={revision === ref.name ? "secondary" : "ghost"}
+                      className="w-full justify-start"
+                      role="menuitemradio"
+                      aria-checked={revision === ref.name}
+                      onClick={() => {
+                        setOpen(false);
+                        onSelect(ref.name);
+                      }}
+                    >
+                      <span className="min-w-0 flex-1 truncate text-left">
+                        {ref.name.slice(prefix.length)}
+                      </span>
+                      {refs.head?.name === ref.name && (
+                        <Badge variant="outline">default</Badge>
+                      )}
+                      {revision === ref.name && (
+                        <CheckIcon data-icon="inline-end" />
+                      )}
+                    </Button>
+                  </RovingFocus.Item>
+                ))}
+              </RovingFocus.Root>
+            ) : (
+              <p className="revision-picker-empty" role="status">
+                {filter ? `No ${type} match “${filter}”.` : `No ${type} yet.`}
+              </p>
+            )}
+          </TabsContent>
+        </Tabs>
+        {canCreate && (
+          <button
+            ref={createAction}
+            type="button"
+            className="revision-picker-create"
+            disabled={creating}
+            onClick={() => void createBranch()}
+          >
+            <GitBranchIcon />
+            <span>
+              {creating ? "Creating branch" : "Create branch"}:{" "}
+              <strong>{candidate}</strong> from &apos;{label}&apos;
+            </span>
+          </button>
+        )}
+        {createError && (
+          <p className="revision-picker-error" role="alert">
+            {createError}
           </p>
         )}
-      </div>
-      {canCreate && (
-        <button
-          ref={createAction}
-          type="button"
-          className="revision-picker-create"
-          disabled={creating}
-          onClick={() => void createBranch()}
-        >
-          <GitBranchIcon />
-          <span>
-            {creating ? "Creating branch" : "Create branch"}:{" "}
-            <strong>{candidate}</strong> from &apos;{label}&apos;
-          </span>
-        </button>
-      )}
-      {createError && (
-        <p className="revision-picker-error" role="alert">
-          {createError}
-        </p>
-      )}
-    </AnchoredOverlay>
+      </PopoverContent>
+    </Popover>
   );
 }

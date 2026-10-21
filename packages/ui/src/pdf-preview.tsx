@@ -1,4 +1,5 @@
-import { Spinner } from "@primer/react";
+import { Spinner } from "@/components/ui/spinner";
+
 import { useEffect, useRef, useState } from "react";
 import type {
   PDFDocumentLoadingTask,
@@ -106,7 +107,7 @@ export function PdfPreview({
   if (!document)
     return (
       <div className="file-preview-notice" role="status">
-        <Spinner size="small" /> Preparing this PDF in your browser…
+        <Spinner /> Preparing this PDF in your browser…
       </div>
     );
   return (

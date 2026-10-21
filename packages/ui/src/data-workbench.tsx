@@ -1,3 +1,6 @@
+import { Badge } from "@/components/ui/badge";
+import { Spinner } from "@/components/ui/spinner";
+import { Button } from "@/components/ui/button";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   ColumnsIcon,
@@ -6,7 +9,7 @@ import {
   PlayIcon,
   StopIcon,
 } from "@primer/octicons-react";
-import { Button, Label, SegmentedControl, Spinner } from "@primer/react";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { DataTable } from "./data-explorer";
 import { displayCell, type TableData } from "./file-preview-model";
 import {
@@ -490,7 +493,7 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
           <strong title={shortName}>{shortName}</strong>
         </div>
         <div className="data-workbench-badges">
-          <Label variant="accent">{engine}</Label>
+          <Badge variant="info">{engine}</Badge>
           <span>{format.toUpperCase()}</span>
           <span>{formatBytes(size)}</span>
           <span>{sourceMode}</span>
@@ -557,27 +560,28 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
           <div className="data-query-primary-actions">
             {busy ? (
               <Button
-                leadingVisual={StopIcon}
-                variant="danger"
+                variant="destructive"
                 disabled={phase === "cancelling"}
                 onClick={() => void cancel()}
               >
+                <StopIcon data-icon="inline-start" />
                 {phase === "cancelling" ? "Stopping…" : "Stop query"}
               </Button>
             ) : (
               <>
                 <Button
+                  variant="outline"
                   disabled={!session}
                   onClick={() => void execute("explain")}
                 >
                   Explain
                 </Button>
                 <Button
-                  leadingVisual={PlayIcon}
-                  variant="primary"
+                  variant="default"
                   disabled={!session}
                   onClick={() => void execute("query")}
                 >
+                  <PlayIcon data-icon="inline-start" />
                   Run query
                 </Button>
               </>
@@ -630,7 +634,10 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
             <span>{error.message}</span>
           </div>
           {!session && (
-            <Button onClick={() => setGeneration((value) => value + 1)}>
+            <Button
+              variant="outline"
+              onClick={() => setGeneration((value) => value + 1)}
+            >
               Retry engine
             </Button>
           )}
@@ -650,27 +657,44 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
         />
         <div className="data-results">
           <div className="data-results-toolbar">
-            <SegmentedControl
+            <ToggleGroup
+              role="group"
+              type="single"
+              variant="outline"
+              spacing={0}
               aria-label="Result view"
-              onChange={(index) => setView(index === 1 ? "chart" : "table")}
+              value={view}
+              onValueChange={(value) => {
+                if (value === "chart" || value === "table") setView(value);
+              }}
             >
-              <SegmentedControl.Button selected={view === "table"}>
+              <ToggleGroupItem
+                value="table"
+                role="button"
+                aria-pressed={view === "table"}
+                aria-checked={undefined}
+              >
                 Table
-              </SegmentedControl.Button>
-              <SegmentedControl.Button selected={view === "chart"}>
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="chart"
+                role="button"
+                aria-pressed={view === "chart"}
+                aria-checked={undefined}
+              >
                 Chart
-              </SegmentedControl.Button>
-            </SegmentedControl>
+              </ToggleGroupItem>
+            </ToggleGroup>
             <div className="data-results-actions">
               <span className="data-query-stats" aria-live="polite">
                 {phase === "starting" ? (
                   <>
-                    <Spinner size="small" /> Loading engine
+                    <Spinner /> Loading engine
                     {engineProgress !== undefined && ` · ${engineProgress}%`}
                   </>
                 ) : phase === "running" ? (
                   <>
-                    <Spinner size="small" />
+                    <Spinner />
                     {operation === "explain"
                       ? "Building query plan…"
                       : "Running locally…"}
@@ -695,15 +719,17 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
               {result && (
                 <div className="data-result-downloads">
                   <Button
+                    variant="outline"
                     aria-label="Download query result as CSV"
-                    leadingVisual={DownloadIcon}
                     onClick={() =>
                       downloadResult(result.data, "csv", shortName)
                     }
                   >
+                    <DownloadIcon data-icon="inline-start" />
                     CSV
                   </Button>
                   <Button
+                    variant="outline"
                     aria-label="Download query result as JSON"
                     onClick={() =>
                       downloadResult(result.data, "json", shortName)

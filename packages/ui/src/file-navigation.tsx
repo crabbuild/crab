@@ -1,6 +1,7 @@
+import { Button } from "@/components/ui/button";
 import { repoHref, revisionAddress } from "./repository-route";
 import { Fragment, useState } from "react";
-import { IconButton } from "@primer/react";
+
 import {
   CheckIcon,
   CopyIcon,
@@ -57,13 +58,12 @@ export function FileBreadcrumb({
             </Fragment>
           ))}
           <strong>{displayHex(parts.at(-1) ?? "")}</strong>
-          <IconButton
+          <Button
             className="copy-path-button"
-            icon={copied ? CheckIcon : CopyIcon}
             aria-label={copied ? "Path copied" : "Copy path"}
             title={copied ? "Path copied" : "Copy path"}
-            variant="invisible"
-            size="small"
+            variant="ghost"
+            size="icon-sm"
             onClick={async () => {
               try {
                 await navigator.clipboard.writeText(displayedPath);
@@ -72,7 +72,13 @@ export function FileBreadcrumb({
                 setCopiedPath(null);
               }
             }}
-          />
+          >
+            {copied ? (
+              <CheckIcon data-icon="inline-start" />
+            ) : (
+              <CopyIcon data-icon="inline-start" />
+            )}
+          </Button>
         </>
       )}
     </div>
@@ -104,12 +110,15 @@ export function FileNavigation({
 }) {
   return (
     <div className="file-navigation">
-      <IconButton
-        icon={SidebarExpandIcon}
+      <Button
         onClick={onOpenTree}
         aria-label="Open file tree"
         aria-expanded={false}
-      />
+        size="icon"
+        variant="outline"
+      >
+        <SidebarExpandIcon data-icon="inline-start" />
+      </Button>
       <RevisionPicker
         refs={refs}
         revision={revision}

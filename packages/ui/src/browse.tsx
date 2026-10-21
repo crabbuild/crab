@@ -1,6 +1,6 @@
 import { repoHref } from "./repository-route";
 import { useEffect, useState, type ReactNode } from "react";
-import { Button } from "@primer/react";
+import { Button } from "@/components/ui/button";
 import {
   BookIcon,
   FileDirectoryFillIcon,
@@ -180,7 +180,9 @@ export function Directory({
               {attribution.error && (
                 <div className="notice" role="status">
                   Commit metadata is temporarily unavailable.{" "}
-                  <Button onClick={attribution.retry}>Try again</Button>
+                  <Button variant="outline" onClick={attribution.retry}>
+                    Try again
+                  </Button>
                 </div>
               )}
               {items.length === 0 ? (
@@ -268,12 +270,14 @@ export function Directory({
               {(page.next || cursors.length > 1) && (
                 <div className="pagination">
                   <Button
+                    variant="outline"
                     disabled={cursors.length === 1}
                     onClick={() => setCursors((value) => value.slice(0, -1))}
                   >
                     Previous
                   </Button>
                   <Button
+                    variant="outline"
                     disabled={!page.next}
                     onClick={() =>
                       setCursors((value) => [...value, page.next ?? undefined])
@@ -346,12 +350,14 @@ export function History({
             <CommitList repo={repo} commits={page.items} />
             <div className="pagination">
               <Button
+                variant="outline"
                 disabled={cursors.length === 1}
                 onClick={() => setCursors((value) => value.slice(0, -1))}
               >
                 Newer
               </Button>
               <Button
+                variant="outline"
                 disabled={!page.next}
                 onClick={() =>
                   setCursors((value) => [...value, page.next ?? undefined])

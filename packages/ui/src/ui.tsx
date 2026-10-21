@@ -1,6 +1,8 @@
+import { Spinner } from "@/components/ui/spinner";
+import { Button } from "@/components/ui/button";
 import { Component } from "react";
 import type { AnchorHTMLAttributes, ReactNode } from "react";
-import { Button, Spinner } from "@primer/react";
+
 import { navigate, useLocation, type Loaded, type Timing } from "./api";
 
 export function Link({
@@ -44,13 +46,15 @@ export function Result<T>({
       <div className="notice error" role="alert">
         <strong>Unable to load this view</strong>
         <p>{state.error}</p>
-        <Button onClick={state.retry}>Try again</Button>
+        <Button variant="outline" onClick={state.retry}>
+          Try again
+        </Button>
       </div>
     );
   if (state.loading || state.data === undefined)
     return (
       <div className="notice" role="status">
-        <Spinner size="small" /> Loading repository data…
+        <Spinner /> Loading repository data…
       </div>
     );
   return (

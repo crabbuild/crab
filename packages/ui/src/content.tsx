@@ -1,3 +1,5 @@
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { repoHref } from "./repository-route";
 import {
   lazy,
@@ -18,7 +20,7 @@ import type {
 } from "@pierre/diffs";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import type { FileTreeRowDecorationContext, GitStatus } from "@pierre/trees";
-import { IconButton, Label, SegmentedControl } from "@primer/react";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   CopyIcon,
   CodeIcon,
@@ -71,9 +73,9 @@ type Props = {
   write?: { branch: string };
 };
 const diffColors = {
-  "--diffs-addition-color-override": "var(--fgColor-success)",
-  "--diffs-deletion-color-override": "var(--button-danger-fgColor-rest)",
-  "--diffs-modified-color-override": "var(--fgColor-accent)",
+  "--diffs-addition-color-override": "var(--success)",
+  "--diffs-deletion-color-override": "var(--destructive)",
+  "--diffs-modified-color-override": "var(--info)",
 } as CSSProperties;
 const DEFAULT_BLAME_PANE_WIDTH = 48;
 const MIN_BLAME_PANE_WIDTH = 25;
@@ -86,7 +88,7 @@ function formatSize(bytes: number) {
 
 function changeVariant(kind: string) {
   if (kind === "Added") return "success" as const;
-  if (kind === "Deleted") return "danger" as const;
+  if (kind === "Deleted") return "destructive" as const;
   return "secondary" as const;
 }
 
@@ -267,8 +269,8 @@ export function FileView({
       ...(symbolLanguage
         ? {
             unsafeCSS: `
-              [data-code-symbol-hover] { background: var(--bgColor-attention-muted); border-radius: 3px; cursor: pointer; }
-              [data-code-symbol-target] { background: var(--bgColor-accent-muted); }
+              [data-code-symbol-hover] { background: color-mix(in srgb, var(--warning) 10%, transparent); border-radius: 3px; cursor: pointer; }
+              [data-code-symbol-target] { background: color-mix(in srgb, var(--info) 10%, transparent); }
             `,
             onTokenEnter: (token: TokenEventBase) => {
               if (tokenSymbol(token)) {
@@ -301,18 +303,16 @@ export function FileView({
         <section className="panel file-panel" aria-label={`File ${name}`}>
           <div className="panel-header">
             <div className="file-view-controls">
-              <SegmentedControl
+              <ToggleGroup
+                role="group"
+                type="single"
+                variant="outline"
+                spacing={0}
                 aria-label="File view"
-                onChange={(index) => {
-                  const views = [
-                    "code",
-                    ...(activePreview ? (["preview"] as const) : []),
-                    ...(content.text !== null &&
-                    content.classification === "OrdinaryGit"
-                      ? (["blame"] as const)
-                      : []),
-                  ] as const;
-                  const next = views[index] ?? "code";
+                value={view}
+                onValueChange={(next) => {
+                  if (next !== "code" && next !== "preview" && next !== "blame")
+                    return;
                   setView(next === "blame" ? "code" : next);
                   if (blameView || next === "blame")
                     navigate(
@@ -325,21 +325,36 @@ export function FileView({
                     );
                 }}
               >
-                <SegmentedControl.Button selected={view === "code"}>
+                <ToggleGroupItem
+                  value="code"
+                  role="button"
+                  aria-pressed={view === "code"}
+                  aria-checked={undefined}
+                >
                   {content.text === null ? "Info" : "Code"}
-                </SegmentedControl.Button>
+                </ToggleGroupItem>
                 {activePreview && (
-                  <SegmentedControl.Button selected={view === "preview"}>
+                  <ToggleGroupItem
+                    value="preview"
+                    role="button"
+                    aria-pressed={view === "preview"}
+                    aria-checked={undefined}
+                  >
                     Preview
-                  </SegmentedControl.Button>
+                  </ToggleGroupItem>
                 )}
                 {content.text !== null &&
                   content.classification === "OrdinaryGit" && (
-                    <SegmentedControl.Button selected={view === "blame"}>
+                    <ToggleGroupItem
+                      value="blame"
+                      role="button"
+                      aria-pressed={view === "blame"}
+                      aria-checked={undefined}
+                    >
                       Blame
-                    </SegmentedControl.Button>
+                    </ToggleGroupItem>
                   )}
-              </SegmentedControl>
+              </ToggleGroup>
               <span className="file-metadata muted">
                 {content.text === null
                   ? content.text_truncated
@@ -351,21 +366,22 @@ export function FileView({
             </div>
             <div className="file-actions">
               {view === "code" && symbolLanguage && !symbolsOpen && (
-                <IconButton
-                  icon={CodeIcon}
+                <Button
                   aria-label="Open code symbols"
-                  size="small"
+                  size="icon-sm"
                   onClick={() => setSymbolsOpen(true)}
-                />
+                  variant="outline"
+                >
+                  <CodeIcon data-icon="inline-start" />
+                </Button>
               )}
               <a href={endpoint(repo, "blob", { rev, path_hex: path })}>Raw</a>
               {content.text !== null && (
-                <IconButton
-                  icon={CopyIcon}
+                <Button
                   aria-label={
                     copied ? "File contents copied" : "Copy file contents"
                   }
-                  size="small"
+                  size="icon-sm"
                   onClick={async () => {
                     try {
                       await navigator.clipboard.writeText(content.text ?? "");
@@ -374,7 +390,10 @@ export function FileView({
                       setCopied(false);
                     }
                   }}
-                />
+                  variant="outline"
+                >
+                  <CopyIcon data-icon="inline-start" />
+                </Button>
               )}
               <a
                 className="file-icon-button"
@@ -388,10 +407,9 @@ export function FileView({
               {write &&
                 content.text !== null &&
                 content.classification === "OrdinaryGit" && (
-                  <IconButton
-                    icon={PencilIcon}
+                  <Button
                     aria-label="Edit this file"
-                    size="small"
+                    size="icon-sm"
                     onClick={() =>
                       navigate(
                         repoHref(repo, {
@@ -402,14 +420,16 @@ export function FileView({
                         }),
                       )
                     }
-                  />
+                    variant="outline"
+                  >
+                    <PencilIcon data-icon="inline-start" />
+                  </Button>
                 )}
               {write && (
-                <IconButton
-                  icon={TrashIcon}
+                <Button
                   aria-label="Delete this file"
-                  size="small"
-                  variant="danger"
+                  size="icon-sm"
+                  variant="destructive"
                   onClick={() =>
                     navigate(
                       repoHref(repo, {
@@ -420,7 +440,9 @@ export function FileView({
                       }),
                     )
                   }
-                />
+                >
+                  <TrashIcon data-icon="inline-start" />
+                </Button>
               )}
             </div>
           </div>
@@ -1070,24 +1092,41 @@ function DiffView({
           <h4 id={`${changePanelId(change.path_hex)}-heading`}>
             {change.path}
           </h4>
-          <Label variant={changeVariant(change.kind)}>{change.kind}</Label>
+          <Badge variant={changeVariant(change.kind)}>{change.kind}</Badge>
           {change.old?.mode !== change.new?.mode && (
             <code>
               {change.old?.mode ?? "—"} → {change.new?.mode ?? "—"}
             </code>
           )}
         </div>
-        <SegmentedControl
+        <ToggleGroup
+          role="group"
+          type="single"
+          variant="outline"
+          spacing={0}
           aria-label={`Diff layout for ${change.path}`}
-          onChange={(index) => setStyle(index === 0 ? "split" : "unified")}
+          value={style}
+          onValueChange={(value) => {
+            if (value === "split" || value === "unified") setStyle(value);
+          }}
         >
-          <SegmentedControl.Button selected={style === "split"}>
+          <ToggleGroupItem
+            value="split"
+            role="button"
+            aria-pressed={style === "split"}
+            aria-checked={undefined}
+          >
             Split
-          </SegmentedControl.Button>
-          <SegmentedControl.Button selected={style === "unified"}>
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="unified"
+            role="button"
+            aria-pressed={style === "unified"}
+            aria-checked={undefined}
+          >
             Unified
-          </SegmentedControl.Button>
-        </SegmentedControl>
+          </ToggleGroupItem>
+        </ToggleGroup>
       </div>
       {load ? (
         <Result state={state}>

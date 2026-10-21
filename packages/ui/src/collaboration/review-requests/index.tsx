@@ -1,8 +1,13 @@
+import { Button } from "@/components/ui/button";
 import { useState } from "react";
-import { Button, FormControl, Select } from "@primer/react";
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import {
+  NativeSelect,
+  NativeSelectOption,
+} from "@/components/ui/native-select";
 import { CheckCircleFillIcon, ClockIcon } from "@primer/octicons-react";
 import { endpoint, useRequest, type Repository } from "../../api";
-import { useMutation } from "../../discussion-mutations";
+import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "../../ui";
 
 interface ReviewRequest {
@@ -93,8 +98,8 @@ export function ReviewRequests({
                     </div>
                     {canManage && request.state.kind === "requested" && (
                       <Button
-                        size="small"
-                        variant="invisible"
+                        size="sm"
+                        variant="ghost"
                         aria-label={`Cancel review request for ${request.name}`}
                         disabled={mutation.pending || mutation.conflict}
                         onClick={() =>
@@ -112,13 +117,18 @@ export function ReviewRequests({
             )}
             <div className="discussion-actions">
               {before && (
-                <Button size="small" onClick={() => setBefore(undefined)}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setBefore(undefined)}
+                >
                   First reviewer page
                 </Button>
               )}
               {page.next !== null && (
                 <Button
-                  size="small"
+                  variant="outline"
+                  size="sm"
                   onClick={() => setBefore(page.next ?? undefined)}
                 >
                   More reviewers
@@ -137,29 +147,37 @@ export function ReviewRequests({
                       });
                   }}
                 >
-                  <FormControl required disabled={mutation.pending}>
-                    <FormControl.Label>Request a reviewer</FormControl.Label>
-                    <Select
-                      block
-                      value={selected}
-                      onChange={(event) => setSelected(event.target.value)}
-                    >
-                      <Select.Option value="">
-                        Choose a repository member
-                      </Select.Option>
-                      {page.eligible.map((member) => (
-                        <Select.Option
-                          key={member.subject}
-                          value={member.subject}
-                        >
-                          {member.name}
-                        </Select.Option>
-                      ))}
-                    </Select>
-                  </FormControl>
+                  <FieldGroup>
+                    <Field data-disabled={mutation.pending}>
+                      <FieldLabel htmlFor="requested-reviewer">
+                        Request a reviewer
+                      </FieldLabel>
+                      <NativeSelect
+                        id="requested-reviewer"
+                        required
+                        disabled={mutation.pending}
+                        value={selected}
+                        onChange={(event) => setSelected(event.target.value)}
+                      >
+                        <NativeSelectOption value="">
+                          Choose a repository member
+                        </NativeSelectOption>
+                        {page.eligible.map((member) => (
+                          <NativeSelectOption
+                            key={member.subject}
+                            value={member.subject}
+                          >
+                            {member.name}
+                          </NativeSelectOption>
+                        ))}
+                      </NativeSelect>
+                    </Field>
+                  </FieldGroup>
+
                   <Button
+                    variant="outline"
                     type="submit"
-                    size="small"
+                    size="sm"
                     disabled={
                       !selected || mutation.pending || mutation.conflict
                     }
@@ -179,7 +197,8 @@ export function ReviewRequests({
             )}
             {mutation.conflict && (
               <Button
-                size="small"
+                variant="outline"
+                size="sm"
                 onClick={() => {
                   resource.retry();
                   mutation.reset();

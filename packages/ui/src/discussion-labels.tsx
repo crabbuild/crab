@@ -1,6 +1,6 @@
 import { repoHref } from "./repository-route";
 import { useEffect, useRef, useState } from "react";
-import { Button } from "@primer/react";
+import { Button } from "@/components/ui/button";
 import { TagIcon } from "@primer/octicons-react";
 import {
   endpoint,
@@ -8,8 +8,8 @@ import {
   type Repository,
   type RepositoryLabel,
 } from "./api";
-import { useMutation } from "./discussion-mutations";
-import { useSubmission } from "./discussion";
+import { useMutation } from "@/components/discussion/mutations";
+import { useSubmission } from "@/components/discussion/hooks";
 import { Link, Result } from "./ui";
 
 interface LabelCatalog {
@@ -99,8 +99,8 @@ export function LabelPicker({
             <span>
               <Link href={repoHref(repo, { view: "labels" })}>Manage</Link>
               <Button
-                size="small"
-                variant="invisible"
+                size="sm"
+                variant="ghost"
                 aria-label="Close label picker"
                 onClick={() => details.current?.removeAttribute("open")}
               >
@@ -140,8 +140,8 @@ export function LabelPicker({
                   </p>
                 )}
                 <Button
-                  size="small"
-                  variant="primary"
+                  size="sm"
+                  variant="default"
                   disabled={mutation.pending || selected.length > 20}
                   onClick={async () => {
                     const saved = await mutation.run(
@@ -240,7 +240,7 @@ export function LabelsPage({ repo, csrf }: { repo: Repository; csrf: string }) {
                 </label>
                 <Button
                   type="submit"
-                  variant="primary"
+                  variant="default"
                   disabled={mutation.pending || !name.trim()}
                 >
                   {mutation.pending ? "Creating…" : "Create label"}
@@ -359,13 +359,18 @@ function LabelRow({
         <div className="discussion-actions">
           <Button
             type="submit"
-            size="small"
-            variant="primary"
+            size="sm"
+            variant="default"
             disabled={mutation.pending}
           >
             Save changes
           </Button>
-          <Button type="button" size="small" onClick={() => setEditing()}>
+          <Button
+            variant="outline"
+            type="button"
+            size="sm"
+            onClick={() => setEditing()}
+          >
             Cancel
           </Button>
         </div>
@@ -381,12 +386,16 @@ function LabelRow({
       </p>
       {canManage && (
         <div className="discussion-actions">
-          <Button size="small" onClick={() => setEditing(label.id)}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setEditing(label.id)}
+          >
             Edit
           </Button>
           <Button
-            size="small"
-            variant="danger"
+            size="sm"
+            variant="destructive"
             disabled={mutation.pending}
             onClick={async () => {
               if (!window.confirm(`Delete the “${label.name}” label?`)) return;

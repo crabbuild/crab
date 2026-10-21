@@ -1,6 +1,12 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Button, TextInput } from "@primer/react";
-import { SearchIcon } from "@primer/octicons-react";
+import { SearchIcon } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from "@/components/ui/input-group";
 
 export function DiscussionSearch({
   label,
@@ -21,34 +27,32 @@ export function DiscussionSearch({
   };
   return (
     <form
-      className="discussion-search"
+      className="my-4 flex min-w-0 items-center gap-2"
       role="search"
       aria-label={label}
       onSubmit={submit}
     >
-      <div className="discussion-search-field">
-        <TextInput
-          block
-          leadingVisual={SearchIcon}
+      <InputGroup>
+        <InputGroupInput
           aria-label={label}
           placeholder={placeholder}
           maxLength={256}
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
         />
-      </div>
-      <Button
-        className="discussion-search-submit"
-        type="submit"
-        aria-label="Search"
-        title={label}
-      >
-        <SearchIcon />
-      </Button>
+        <InputGroupAddon>
+          <SearchIcon aria-hidden="true" />
+        </InputGroupAddon>
+        <InputGroupAddon align="inline-end">
+          <InputGroupButton type="submit" aria-label="Search" title={label}>
+            Search
+          </InputGroupButton>
+        </InputGroupAddon>
+      </InputGroup>
       {value && (
         <Button
           type="button"
-          size="small"
+          variant="outline"
           onClick={() => {
             setDraft("");
             onSearch("");

@@ -1,3 +1,7 @@
+import { Badge } from "@/components/ui/badge";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Spinner } from "@/components/ui/spinner";
+import { Button } from "@/components/ui/button";
 import {
   repoHref,
   repositoryRoute,
@@ -14,31 +18,16 @@ import {
   type CSSProperties,
 } from "react";
 import {
-  ActionList,
-  ActionMenu,
-  BaseStyles,
-  Button,
-  IconButton,
-  Label,
-  SegmentedControl,
-  Spinner,
-} from "@primer/react";
-import { ThemeProvider } from "@primer/react/next";
-import {
   AlertIcon,
   ArchiveIcon,
   CodeIcon,
-  DeviceDesktopIcon,
   GitBranchIcon,
   GitPullRequestIcon,
   GearIcon,
   HistoryIcon,
   IssueOpenedIcon,
-  MoonIcon,
-  PaintbrushIcon,
   RepoIcon,
   SidebarCollapseIcon,
-  SunIcon,
   TagIcon,
 } from "@primer/octicons-react";
 import {
@@ -93,7 +82,7 @@ const CommitView = lazy(() =>
   import("./content").then((module) => ({ default: module.CommitView })),
 );
 const Issues = lazy(() =>
-  import("./issues").then((module) => ({ default: module.Issues })),
+  import("@/features/issues").then((module) => ({ default: module.Issues })),
 );
 const PullRequests = lazy(() =>
   import("./pulls").then((module) => ({ default: module.PullRequests })),
@@ -114,7 +103,7 @@ const Releases = lazy(() =>
 const Settings = lazy(() =>
   import("./settings").then((module) => ({ default: module.Settings })),
 );
-type Theme = "light" | "dark" | "auto";
+import { ThemeControl, type Theme } from "@/app/theme/control";
 const DEFAULT_TREE_PANE_WIDTH = 356;
 const MIN_TREE_PANE_WIDTH = 240;
 const MAX_TREE_PANE_WIDTH = 640;
@@ -174,9 +163,7 @@ export function App() {
   useLayoutEffect(() => {
     const root = document.documentElement;
     root.style.colorScheme = resolved;
-    root.dataset.colorMode = resolved;
-    root.dataset.darkTheme = "dark";
-    root.dataset.lightTheme = "light";
+    root.classList.toggle("dark", resolved === "dark");
     root.dataset.codeTheme = codeTheme;
     root.dataset.themeChanging = "";
     let settledFrame: number | undefined;
@@ -262,8 +249,8 @@ export function App() {
     }
   }, [catalog.data, importedRepository]);
   return (
-    <ThemeProvider colorMode={resolved} dayScheme="light" nightScheme="dark">
-      <BaseStyles className="app-shell">
+    <TooltipProvider>
+      <div className="app-shell">
         <a className="skip-link" href="#main">
           Skip to content
         </a>
@@ -280,7 +267,7 @@ export function App() {
                   <strong>{repo.name}</strong>
                 </Link>
               </h1>
-              {repo.archived && <Label>Archived</Label>}
+              {repo.archived && <Badge variant="outline">Archived</Badge>}
             </div>
           ) : (
             <Link className="global-catalog-link" href="/">
@@ -297,7 +284,12 @@ export function App() {
               <span title={session.data.user.subject}>
                 {session.data.user.name}
               </span>
-              <Button size="small" disabled={signingOut} onClick={signOut}>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={signingOut}
+                onClick={signOut}
+              >
                 {signingOut ? "Signing out…" : "Sign out"}
               </Button>
             </div>
@@ -319,11 +311,13 @@ export function App() {
             <div className="notice error" role="alert">
               <h1>Unable to check your session</h1>
               <p>{session.error}</p>
-              <Button onClick={session.retry}>Try again</Button>
+              <Button variant="outline" onClick={session.retry}>
+                Try again
+              </Button>
             </div>
           ) : session.loading || !session.data ? (
             <div className="notice" role="status">
-              <Spinner size="small" /> Checking your session…
+              <Spinner /> Checking your session…
             </div>
           ) : !session.data.authenticated ? (
             <div className="notice sign-in">
@@ -340,7 +334,7 @@ export function App() {
                 </p>
               )}
               <Button
-                variant="primary"
+                variant="default"
                 onClick={() =>
                   window.location.assign(
                     `/auth/login?${new URLSearchParams({ return_to: url.pathname + (url.searchParams.has("auth_error") ? "" : url.search) })}`,
@@ -365,7 +359,9 @@ export function App() {
                     <div className="section-heading">
                       <div className="catalog-heading-title">
                         <h1>Your repositories</h1>
-                        <Label>{data.repositories.length}</Label>
+                        <Badge variant="outline">
+                          {data.repositories.length}
+                        </Badge>
                       </div>
                       <GitImport
                         csrf={session.data?.csrf ?? ""}
@@ -407,7 +403,9 @@ export function App() {
                                 {repo.owner} / <strong>{repo.name}</strong>
                               </Link>
                             </h2>
-                            {repo.archived && <Label>Archived</Label>}
+                            {repo.archived && (
+                              <Badge variant="outline">Archived</Badge>
+                            )}
                           </div>
                           <p className="muted">
                             {repo.description ||
@@ -455,80 +453,8 @@ export function App() {
           </span>
           <span className="footer-tagline">Git for any file at any scale</span>
         </footer>
-      </BaseStyles>
-    </ThemeProvider>
-  );
-}
-
-function ThemeControl({
-  theme,
-  setTheme,
-  codeTheme,
-  setCodeTheme,
-}: {
-  theme: Theme;
-  setTheme: (theme: Theme) => void;
-  codeTheme: CodeTheme;
-  setCodeTheme: (theme: CodeTheme) => void;
-}) {
-  const themeEntries = Object.entries(codeThemeChoices) as [
-    CodeTheme,
-    (typeof codeThemeChoices)[CodeTheme],
-  ][];
-  const selectedCodeTheme = codeThemeChoices[codeTheme];
-  const choices = [
-    { value: "auto", label: "System", icon: DeviceDesktopIcon },
-    { value: "light", label: "Light", icon: SunIcon },
-    { value: "dark", label: "Dark", icon: MoonIcon },
-  ] as const;
-  return (
-    <div className="theme-control">
-      <ActionMenu>
-        <ActionMenu.Anchor>
-          <IconButton
-            className="code-theme-control"
-            icon={PaintbrushIcon}
-            aria-label={`Code theme: ${selectedCodeTheme.label}`}
-            title={`Code theme: ${selectedCodeTheme.label}`}
-            size="small"
-          />
-        </ActionMenu.Anchor>
-        <ActionMenu.Overlay width="small">
-          <ActionList selectionVariant="single">
-            {themeEntries.map(([value, choice]) => (
-              <ActionList.Item
-                key={value}
-                selected={codeTheme === value}
-                onSelect={() => setCodeTheme(codeThemeFrom(value))}
-              >
-                {choice.label}
-                <ActionList.Description variant="block">
-                  {choice.description}
-                </ActionList.Description>
-              </ActionList.Item>
-            ))}
-          </ActionList>
-        </ActionMenu.Overlay>
-      </ActionMenu>
-      <SegmentedControl
-        aria-label="Appearance"
-        size="small"
-        onChange={(index) => {
-          const choice = choices[index];
-          if (choice) setTheme(choice.value);
-        }}
-      >
-        {choices.map((choice) => (
-          <SegmentedControl.IconButton
-            key={choice.value}
-            aria-label={choice.label}
-            description={`Use ${choice.label.toLowerCase()} appearance`}
-            icon={choice.icon}
-            selected={theme === choice.value}
-          />
-        ))}
-      </SegmentedControl>
-    </div>
+      </div>
+    </TooltipProvider>
   );
 }
 
@@ -814,7 +740,7 @@ function RepositoryPage({
           <Suspense
             fallback={
               <div className="notice" role="status">
-                <Spinner size="small" /> Loading activity…
+                <Spinner /> Loading activity…
               </div>
             }
           >
@@ -827,7 +753,7 @@ function RepositoryPage({
                 <Suspense
                   fallback={
                     <div className="notice" role="status">
-                      <Spinner size="small" /> Loading settings…
+                      <Spinner /> Loading settings…
                     </div>
                   }
                 >
@@ -864,7 +790,7 @@ function RepositoryPage({
               <Suspense
                 fallback={
                   <div className="notice" role="status">
-                    <Spinner size="small" /> Loading milestones…
+                    <Spinner /> Loading milestones…
                   </div>
                 }
               >
@@ -874,7 +800,7 @@ function RepositoryPage({
               <Suspense
                 fallback={
                   <div className="notice" role="status">
-                    <Spinner size="small" /> Loading labels…
+                    <Spinner /> Loading labels…
                   </div>
                 }
               >
@@ -884,7 +810,7 @@ function RepositoryPage({
               <Suspense
                 fallback={
                   <div className="notice" role="status">
-                    <Spinner size="small" /> Loading issues…
+                    <Spinner /> Loading issues…
                   </div>
                 }
               >
@@ -898,7 +824,7 @@ function RepositoryPage({
               <Suspense
                 fallback={
                   <div className="notice" role="status">
-                    <Spinner size="small" /> Loading pulls…
+                    <Spinner /> Loading pulls…
                   </div>
                 }
               >
@@ -920,7 +846,7 @@ function RepositoryPage({
                 <Suspense
                   fallback={
                     <div className="notice" role="status">
-                      <Spinner size="small" /> Loading releases…
+                      <Spinner /> Loading releases…
                     </div>
                   }
                 >
@@ -936,7 +862,7 @@ function RepositoryPage({
                 <Suspense
                   fallback={
                     <div className="notice" role="status">
-                      <Spinner size="small" /> Loading repository refs…
+                      <Spinner /> Loading repository refs…
                     </div>
                   }
                 >
@@ -958,7 +884,7 @@ function RepositoryPage({
                   <Suspense
                     fallback={
                       <div className="notice" role="status">
-                        <Spinner size="small" /> Loading viewer…
+                        <Spinner /> Loading viewer…
                       </div>
                     }
                   >
@@ -1135,13 +1061,15 @@ function RepositoryPage({
                                       ?.focus()
                                   }
                                 />
-                                <IconButton
-                                  icon={SidebarCollapseIcon}
-                                  size="small"
+                                <Button
+                                  size="icon-sm"
                                   onClick={() => setShowTree(false)}
                                   aria-label="Close file tree"
                                   aria-expanded={true}
-                                />
+                                  variant="outline"
+                                >
+                                  <SidebarCollapseIcon data-icon="inline-start" />
+                                </Button>
                               </div>
                               <RepositoryTree
                                 key={rev}
@@ -1206,8 +1134,7 @@ function RepositoryPage({
                             <Suspense
                               fallback={
                                 <div className="notice" role="status">
-                                  <Spinner size="small" /> Loading repository
-                                  content…
+                                  <Spinner /> Loading repository content…
                                 </div>
                               }
                             >
@@ -1349,7 +1276,7 @@ function LatestCommit({
   if (state.loading || (!state.data && !state.error))
     return (
       <div className="latest-commit" role="status">
-        <Spinner size="small" />
+        <Spinner />
         <span className="muted">Loading latest commit…</span>
       </div>
     );
@@ -1361,7 +1288,8 @@ function LatestCommit({
           <strong>Latest commit unavailable.</strong> {state.error}
         </span>
         <Button
-          size="small"
+          variant="outline"
+          size="sm"
           aria-label="Retry latest commit"
           onClick={state.retry}
         >

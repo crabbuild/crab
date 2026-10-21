@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { SearchIcon, SortAscIcon, SortDescIcon } from "@primer/octicons-react";
-import { Button } from "@primer/react";
+import { Button } from "@/components/ui/button";
 import { displayCell, type TableData } from "./file-preview-model";
 
 const PAGE_SIZE = 100;
@@ -156,6 +156,7 @@ export function DataTable({ data, name }: { data: TableData; name: string }) {
         {pages > 1 && (
           <div className="data-pagination">
             <Button
+              variant="outline"
               disabled={current === 0}
               onClick={() => setPage(current - 1)}
             >
@@ -165,6 +166,7 @@ export function DataTable({ data, name }: { data: TableData; name: string }) {
               Page {current + 1} of {pages}
             </span>
             <Button
+              variant="outline"
               disabled={current + 1 === pages}
               onClick={() => setPage(current + 1)}
             >

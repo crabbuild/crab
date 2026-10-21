@@ -1,6 +1,13 @@
+import {
+  InputGroup,
+  InputGroupInput,
+  InputGroupAddon,
+} from "@/components/ui/input-group";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { repoHref } from "./repository-route";
 import { useState } from "react";
-import { Button, IconButton, TextInput, VisuallyHidden } from "@primer/react";
+
 import {
   FileAddedIcon,
   GitBranchIcon,
@@ -157,9 +164,8 @@ function CommitPanel({
     <section className="create-file-commit" aria-labelledby="commit-heading">
       <h3 id="commit-heading">Commit changes</h3>
       <label htmlFor="commit-message">Commit message</label>
-      <TextInput
+      <Input
         id="commit-message"
-        block
         placeholder={placeholder}
         value={message}
         required
@@ -204,15 +210,18 @@ function CommitPanel({
         </label>
         {target.mode === "pull" && (
           <div className="commit-branch-name">
-            <TextInput
-              block
-              leadingVisual={GitBranchIcon}
-              aria-label="New branch name"
-              placeholder="my-change"
-              value={target.newBranch}
-              required
-              onChange={(event) => target.setNewBranch(event.target.value)}
-            />
+            <InputGroup>
+              <InputGroupInput
+                aria-label="New branch name"
+                placeholder="my-change"
+                value={target.newBranch}
+                required
+                onChange={(event) => target.setNewBranch(event.target.value)}
+              />
+              <InputGroupAddon>
+                <GitBranchIcon aria-hidden="true" />
+              </InputGroupAddon>
+            </InputGroup>
           </div>
         )}
       </fieldset>
@@ -223,7 +232,9 @@ function CommitPanel({
       )}
       <div className="create-file-actions">
         <Button
-          variant={danger && target.mode === "direct" ? "danger" : "primary"}
+          variant={
+            danger && target.mode === "direct" ? "destructive" : "default"
+          }
           type="submit"
           disabled={
             saving || (target.mode === "pull" && !target.newBranch.trim())
@@ -237,7 +248,7 @@ function CommitPanel({
               ? "Propose changes"
               : "Commit changes"}
         </Button>
-        <Button type="button" onClick={cancel}>
+        <Button variant="outline" type="button" onClick={cancel}>
           Cancel changes
         </Button>
       </div>
@@ -302,7 +313,7 @@ export function CreateFile({
         <span className="muted">
           {repo.name}/{directory ? `${directory}/` : ""}
         </span>
-        <TextInput
+        <Input
           aria-label="File name"
           placeholder="Name your file…"
           value={name}
@@ -437,14 +448,14 @@ export function UploadFiles({
         <UploadIcon size={32} />
         <strong>Drag files here to add them to your repository</strong>
         <span>or choose your files</span>
-        <VisuallyHidden>
+        <span className="sr-only">
           <input
             type="file"
             multiple
             aria-label="Choose files to upload"
             onChange={(event) => selectFiles([...(event.target.files ?? [])])}
           />
-        </VisuallyHidden>
+        </span>
         <small>Up to 100 files, 900 KiB each and 4 MiB total</small>
       </label>
       {files.length > 0 && (
@@ -454,17 +465,18 @@ export function UploadFiles({
               <FileAddedIcon />
               <span>{file.name}</span>
               <small>{fileSize(file.size)}</small>
-              <IconButton
-                icon={XIcon}
+              <Button
                 aria-label={`Remove ${file.name}`}
-                size="small"
-                variant="invisible"
+                size="icon-sm"
+                variant="ghost"
                 onClick={() =>
                   setFiles((current) =>
                     current.filter((candidate) => candidate !== file),
                   )
                 }
-              />
+              >
+                <XIcon data-icon="inline-start" />
+              </Button>
             </li>
           ))}
         </ul>

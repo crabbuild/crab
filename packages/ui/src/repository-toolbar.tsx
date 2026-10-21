@@ -1,5 +1,12 @@
+import { Button } from "@/components/ui/button";
 import { repoHref, revisionAddress } from "./repository-route";
-import { ActionList, ActionMenu, Button, IconButton } from "@primer/react";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
 import {
   FileAddedIcon,
   GitBranchIcon,
@@ -56,12 +63,14 @@ export function RepositoryRefControls({
         />
       )}
       {compact && onSearch ? (
-        <IconButton
-          icon={SearchIcon}
+        <Button
           aria-label="Focus file search"
-          size="small"
+          size="icon-sm"
           onClick={onSearch}
-        />
+          variant="outline"
+        >
+          <SearchIcon data-icon="inline-start" />
+        </Button>
       ) : (
         <div className="ref-summary">
           <Link
@@ -130,11 +139,8 @@ export function RepositoryToolbar({
       />
       <div className="repository-actions">
         {onBrowse && (
-          <Button
-            leadingVisual={SearchIcon}
-            onClick={onBrowse}
-            aria-expanded={false}
-          >
+          <Button variant="outline" onClick={onBrowse} aria-expanded={false}>
+            <SearchIcon data-icon="inline-start" />
             Go to file <kbd>T</kbd>
           </Button>
         )}
@@ -144,7 +150,9 @@ export function RepositoryToolbar({
             onUploadFiles={onUploadFiles}
           />
         )}
-        <Button onClick={onRefresh}>Refresh</Button>
+        <Button variant="outline" onClick={onRefresh}>
+          Refresh
+        </Button>
         {view === "code" && (
           <CloneMenu repo={repo} revision={archiveRevision} />
         )}
@@ -163,35 +171,36 @@ function AddFileMenu({
   onUploadFiles: () => void;
 }) {
   return (
-    <ActionMenu>
-      <ActionMenu.Anchor>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
         {compact ? (
-          <IconButton
+          <Button
             className="add-file-menu"
-            icon={PlusIcon}
             aria-label="Add file"
-            size="small"
-          />
+            size="icon-sm"
+            variant="outline"
+          >
+            <PlusIcon data-icon="inline-start" />
+          </Button>
         ) : (
-          <Button trailingVisual={PlusIcon}>Add file</Button>
+          <Button variant="outline">
+            Add file
+            <PlusIcon data-icon="inline-end" />
+          </Button>
         )}
-      </ActionMenu.Anchor>
-      <ActionMenu.Overlay width="small">
-        <ActionList>
-          <ActionList.Item onSelect={onCreateFile}>
-            <ActionList.LeadingVisual>
-              <FileAddedIcon />
-            </ActionList.LeadingVisual>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent className="w-44">
+        <DropdownMenuGroup>
+          <DropdownMenuItem onSelect={onCreateFile}>
+            <FileAddedIcon />
             Create new file
-          </ActionList.Item>
-          <ActionList.Item onSelect={onUploadFiles}>
-            <ActionList.LeadingVisual>
-              <UploadIcon />
-            </ActionList.LeadingVisual>
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onUploadFiles}>
+            <UploadIcon />
             Upload files
-          </ActionList.Item>
-        </ActionList>
-      </ActionMenu.Overlay>
-    </ActionMenu>
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

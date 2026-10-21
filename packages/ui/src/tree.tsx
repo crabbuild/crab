@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { Button } from "@primer/react";
+import { Button } from "@/components/ui/button";
 import { FileIcon, SearchIcon } from "@primer/octicons-react";
 import {
   displayHex,
@@ -86,7 +86,7 @@ export function RepositoryTree({
         overscroll-behavior: contain;
       }
       [data-type="item"][data-item-selected="true"]::after {
-        background: var(--fgColor-accent);
+        background: var(--info);
         border-radius: 0 6px 6px 0;
         content: "";
         inset-block: 0;
@@ -394,7 +394,10 @@ export function RepositoryTree({
           {error && (
             <div className="error tree-hint" role="alert">
               {error}
-              <Button onClick={() => setAttempt((value) => value + 1)}>
+              <Button
+                variant="outline"
+                onClick={() => setAttempt((value) => value + 1)}
+              >
                 Reload tree
               </Button>
             </div>

@@ -1733,14 +1733,14 @@ test("file tree controls align the branch picker and place collapse after search
   );
   expect(collapseBounds!.y).toBe(searchBounds!.y);
   const iconOffset = await branch.evaluate((node) => {
-    const icon = node.querySelector('[data-component="leadingVisual"]')!;
+    const icon = node.querySelector('[data-icon="inline-start"]')!;
     return (
       icon.getBoundingClientRect().left - node.getBoundingClientRect().left
     );
   });
   expect(iconOffset).toBeLessThan(16);
   const arrowOffset = await branch.evaluate((node) => {
-    const arrow = node.querySelector('[data-component="trailingVisual"]')!;
+    const arrow = node.querySelector('[data-icon="inline-end"]')!;
     return (
       node.getBoundingClientRect().right - arrow.getBoundingClientRect().right
     );
@@ -1976,9 +1976,8 @@ test("deep links expand the active path and select its file", async ({
       const selectedStyle = active ? getComputedStyle(active) : null;
       const selectedRail = active ? getComputedStyle(active, "::after") : null;
       const tokenProbe = document.createElement("span");
-      tokenProbe.style.backgroundColor =
-        "var(--control-transparent-bgColor-hover)";
-      tokenProbe.style.color = "var(--fgColor-accent)";
+      tokenProbe.style.backgroundColor = "var(--secondary)";
+      tokenProbe.style.color = "var(--info)";
       tree.closest(".app-shell")?.append(tokenProbe);
       const neutralBackground = getComputedStyle(tokenProbe).backgroundColor;
       const accentColor = getComputedStyle(tokenProbe).color;

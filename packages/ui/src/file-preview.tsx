@@ -1,3 +1,4 @@
+import { Spinner } from "@/components/ui/spinner";
 import {
   lazy,
   useEffect,
@@ -6,7 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Spinner } from "@primer/react";
+
 import type { Repository } from "./api";
 import { DataTable } from "./data-explorer";
 import { RepositoryMarkdown } from "./repository-markdown";
@@ -325,7 +326,7 @@ function AsyncValue<T>({
   if (state.value === undefined)
     return (
       <PreviewNotice>
-        <Spinner size="small" /> Parsing this file in your browser…
+        <Spinner /> Parsing this file in your browser…
       </PreviewNotice>
     );
   return children(state.value);
@@ -467,8 +468,8 @@ function BinaryPreview({ descriptor, blobUrl, name, size, ...props }: Props) {
   if (state.loading || !state.bytes)
     return (
       <PreviewNotice>
-        <Spinner size="small" /> Loading {formatBytes(size)} for a private
-        in-browser preview…
+        <Spinner /> Loading {formatBytes(size)} for a private in-browser
+        preview…
       </PreviewNotice>
     );
   if (["markdown", "delimited", "json", "notebook"].includes(descriptor.kind)) {

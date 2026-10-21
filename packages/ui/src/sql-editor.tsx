@@ -77,67 +77,69 @@ function language(
 
 const editorTheme = EditorView.theme({
   "&": {
-    backgroundColor: "var(--bgColor-default)",
-    color: "var(--fgColor-default)",
+    backgroundColor: "var(--background)",
+    color: "var(--foreground)",
     fontSize: "13px",
   },
+  // Browser editing can retain a resolved inline color from a syntax span.
+  // Keep ordinary line text theme-aware after replacement and appearance changes.
+  ".cm-line": { color: "var(--foreground) !important" },
   ".cm-content": {
-    caretColor: "var(--fgColor-accent)",
-    fontFamily: "var(--fontStack-monospace)",
+    caretColor: "var(--info)",
+    fontFamily: "var(--font-mono)",
     lineHeight: "20px",
     minHeight: "116px",
     padding: "10px 0",
   },
   ".cm-cursor, .cm-dropCursor": {
-    borderLeftColor: "var(--fgColor-accent)",
+    borderLeftColor: "var(--info)",
   },
   ".cm-gutters": {
-    backgroundColor: "var(--bgColor-muted)",
+    backgroundColor: "var(--muted)",
     border: "0",
-    color: "var(--fgColor-muted)",
+    color: "var(--muted-foreground)",
   },
   ".cm-activeLine, .cm-activeLineGutter": {
-    backgroundColor: "var(--bgColor-accent-muted)",
+    backgroundColor: "color-mix(in srgb, var(--info) 10%, transparent)",
   },
   ".cm-selectionBackground, ::selection": {
-    backgroundColor: "var(--control-transparent-bgColor-selected) !important",
+    backgroundColor: "var(--secondary) !important",
   },
   ".cm-tooltip": {
-    backgroundColor: "var(--overlay-bgColor)",
-    borderColor: "var(--borderColor-default)",
-    borderRadius: "var(--borderRadius-medium)",
-    boxShadow: "var(--shadow-floating-small)",
-    color: "var(--fgColor-default)",
+    backgroundColor: "var(--popover)",
+    borderColor: "var(--border)",
+    borderRadius: "var(--radius)",
+    boxShadow: "var(--shadow-overlay)",
+    color: "var(--foreground)",
     overflow: "hidden",
   },
   ".cm-tooltip-autocomplete > ul > li": {
     padding: "4px 8px",
   },
   ".cm-tooltip-autocomplete > ul > li[aria-selected]": {
-    backgroundColor: "var(--bgColor-accent-muted)",
-    color: "var(--fgColor-default)",
+    backgroundColor: "color-mix(in srgb, var(--info) 10%, transparent)",
+    color: "var(--foreground)",
   },
   ".cm-completionDetail": {
-    color: "var(--fgColor-muted)",
+    color: "var(--muted-foreground)",
     fontStyle: "normal",
   },
 });
 
 const editorHighlight = HighlightStyle.define([
-  { tag: tags.keyword, color: "var(--fgColor-accent)", fontWeight: "600" },
+  { tag: tags.keyword, color: "var(--info)", fontWeight: "600" },
   {
     tag: [tags.string, tags.special(tags.string)],
-    color:
-      "color-mix(in srgb, var(--fgColor-success) 82%, var(--fgColor-default))",
+    color: "color-mix(in srgb, var(--success) 82%, var(--foreground))",
   },
-  { tag: [tags.number, tags.bool, tags.null], color: "var(--fgColor-done)" },
+  { tag: [tags.number, tags.bool, tags.null], color: "var(--done)" },
   {
     tag: [tags.lineComment, tags.blockComment],
-    color: "var(--fgColor-muted)",
+    color: "var(--muted-foreground)",
     fontStyle: "italic",
   },
-  { tag: [tags.operator, tags.punctuation], color: "var(--fgColor-muted)" },
-  { tag: tags.typeName, color: "var(--fgColor-attention)" },
+  { tag: [tags.operator, tags.punctuation], color: "var(--muted-foreground)" },
+  { tag: tags.typeName, color: "var(--warning)" },
 ]);
 
 export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(

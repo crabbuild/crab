@@ -1,5 +1,4 @@
 import {
-  useEffect,
   useImperativeHandle,
   useRef,
   useState,
@@ -13,13 +12,17 @@ import {
   ItalicIcon,
   LinkIcon,
   ListOrderedIcon,
-  ListUnorderedIcon,
-  MentionIcon,
+  ListIcon,
+  AtSignIcon,
   QuoteIcon,
-  TasklistIcon,
-} from "@primer/octicons-react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+  ListTodoIcon,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Field, FieldGroup } from "@/components/ui/field";
+import { Separator } from "@/components/ui/separator";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { DiscussionMarkdown } from "@/components/discussion/markdown";
 
 type MarkdownFormat =
   | "heading"
@@ -54,16 +57,16 @@ const MARKDOWN_TOOLS = [
     {
       format: "unordered-list",
       label: "Add a bulleted list",
-      icon: ListUnorderedIcon,
+      icon: ListIcon,
     },
     {
       format: "ordered-list",
       label: "Add a numbered list",
       icon: ListOrderedIcon,
     },
-    { format: "task-list", label: "Add a task list", icon: TasklistIcon },
+    { format: "task-list", label: "Add a task list", icon: ListTodoIcon },
   ],
-  [{ format: "mention", label: "Mention a user", icon: MentionIcon }],
+  [{ format: "mention", label: "Mention a user", icon: AtSignIcon }],
 ] as const;
 
 function wrapSelection(
@@ -137,58 +140,6 @@ function formatMarkdown(
   return { value: next, start: start + 1, end: start + 1 };
 }
 
-export function useReturnFocus<T extends HTMLElement>(active: boolean) {
-  const target = useRef<T>(null);
-  const previous = useRef(active);
-  useEffect(() => {
-    // Removed/disabled controls leave focus on the body. Preserve any deliberate
-    // move elsewhere while an edit or request was in progress.
-    if (previous.current && !active && document.activeElement === document.body)
-      target.current?.focus();
-    previous.current = active;
-  }, [active]);
-  return target;
-}
-
-// Retain the key for an unchanged submission so an ambiguous retry cannot duplicate it.
-export function useSubmission() {
-  const current = useRef({ body: "", id: crypto.randomUUID() });
-  return (input: object) => {
-    const body = JSON.stringify(input);
-    if (body !== current.current.body)
-      current.current = { body, id: crypto.randomUUID() };
-    return current.current.id;
-  };
-}
-
-export function DiscussionMarkdown({ children }: { children: string }) {
-  return (
-    <div className="discussion-markdown">
-      <Markdown
-        skipHtml
-        remarkPlugins={[remarkGfm]}
-        components={{
-          img: ({ src, alt }) => (
-            <a
-              href={typeof src === "string" ? src : undefined}
-              rel="noreferrer"
-            >
-              {alt || "View image"}
-            </a>
-          ),
-          a: ({ href, children }) => (
-            <a href={href} rel="noreferrer">
-              {children}
-            </a>
-          ),
-        }}
-      >
-        {children || "_No description provided._"}
-      </Markdown>
-    </div>
-  );
-}
-
 export function Editor({
   id,
   label,
@@ -244,51 +195,16 @@ export function Editor({
   }
 
   return (
-    <div className="discussion-editor">
+    <Tabs
+      className="discussion-editor gap-0"
+      value={preview ? "preview" : "write"}
+      onValueChange={(value) => setPreview(value === "preview")}
+    >
       <div className="editor-header">
-        <div
-          className="editor-tabs"
-          role="tablist"
-          aria-label={`${label} mode`}
-          onKeyDown={(event) => {
-            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key))
-              return;
-            event.preventDefault();
-            const next =
-              event.key === "Home"
-                ? false
-                : event.key === "End"
-                  ? true
-                  : !preview;
-            setPreview(next);
-            document
-              .getElementById(`${id}-${next ? "preview" : "write"}-tab`)
-              ?.focus();
-          }}
-        >
-          <button
-            type="button"
-            role="tab"
-            id={`${id}-write-tab`}
-            aria-controls={`${id}-write`}
-            aria-selected={!preview}
-            tabIndex={preview ? -1 : 0}
-            onClick={() => setPreview(false)}
-          >
-            Write
-          </button>
-          <button
-            type="button"
-            role="tab"
-            id={`${id}-preview-tab`}
-            aria-controls={`${id}-preview`}
-            aria-selected={preview}
-            tabIndex={preview ? 0 : -1}
-            onClick={() => setPreview(true)}
-          >
-            Preview
-          </button>
-        </div>
+        <TabsList variant="editor" aria-label={`${label} mode`}>
+          <TabsTrigger value="write">Write</TabsTrigger>
+          <TabsTrigger value="preview">Preview</TabsTrigger>
+        </TabsList>
         <div
           className="editor-toolbar"
           role="toolbar"
@@ -298,7 +214,7 @@ export function Editor({
           {MARKDOWN_TOOLS.map((group, groupIndex) => (
             <span className="editor-tool-group" key={group[0].format}>
               {groupIndex > 0 && (
-                <span className="editor-tool-divider" aria-hidden="true" />
+                <Separator orientation="vertical" className="mx-1" />
               )}
               {group.map((tool) => {
                 const Icon = tool.icon;
@@ -311,68 +227,57 @@ export function Editor({
                         ? "Control+K Meta+K"
                         : undefined;
                 return (
-                  <button
+                  <Button
                     key={tool.format}
                     type="button"
-                    className="editor-tool"
+                    variant="ghost"
+                    size="icon-sm"
                     aria-label={tool.label}
                     aria-keyshortcuts={shortcut}
                     title={tool.label}
                     disabled={disabled}
                     onClick={() => applyFormat(tool.format)}
                   >
-                    <Icon size={16} />
-                  </button>
+                    <Icon data-icon="inline-start" />
+                  </Button>
                 );
               })}
             </span>
           ))}
         </div>
       </div>
-      <div
-        id={`${id}-preview`}
-        role="tabpanel"
-        aria-labelledby={`${id}-preview-tab`}
-        className="editor-preview"
-        hidden={!preview}
-        tabIndex={0}
-      >
-        {preview && <DiscussionMarkdown>{value}</DiscussionMarkdown>}
-      </div>
-      <div
-        id={`${id}-write`}
+      <TabsContent value="preview" className="editor-preview" tabIndex={0}>
+        <DiscussionMarkdown>{value}</DiscussionMarkdown>
+      </TabsContent>
+      <TabsContent
+        value="write"
         className="editor-write"
-        role="tabpanel"
-        aria-labelledby={`${id}-write-tab`}
+        forceMount
         hidden={preview}
       >
-        <label className="sr-only" htmlFor={id}>
-          {label}
-        </label>
-        <textarea
-          ref={textarea}
-          autoFocus={autoFocus}
-          id={id}
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          disabled={disabled}
-          required={required}
-          maxLength={65_536}
-          rows={8}
-          placeholder="Add context, ask a question, or share an update…"
-          onKeyDown={formatShortcut}
-        />
-      </div>
-      <p className="editor-help muted">
+        <FieldGroup>
+          <Field data-disabled={disabled}>
+            <Textarea
+              ref={textarea}
+              aria-label={label}
+              aria-describedby={`${id}-help`}
+              autoFocus={autoFocus}
+              id={id}
+              value={value}
+              onChange={(event) => onChange(event.target.value)}
+              disabled={disabled}
+              required={required}
+              maxLength={65_536}
+              rows={8}
+              placeholder="Add context, ask a question, or share an update…"
+              onKeyDown={formatShortcut}
+            />
+          </Field>
+        </FieldGroup>
+      </TabsContent>
+      <p id={`${id}-help`} className="editor-help">
         Markdown is supported. External images appear as links.
       </p>
-    </div>
+    </Tabs>
   );
-}
-export function Failure({ message }: { message?: string }) {
-  return message ? (
-    <p className="notice error" role="alert">
-      {message} Your draft is still in this form.
-    </p>
-  ) : null;
 }

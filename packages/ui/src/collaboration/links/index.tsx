@@ -1,7 +1,9 @@
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { useState } from "react";
-import { Button, TextInput } from "@primer/react";
+
 import { endpoint, useRequest, type Repository } from "../../api";
-import { useMutation } from "../../discussion-mutations";
+import { useMutation } from "@/components/discussion/mutations";
 import { repoHref } from "../../repository-route";
 import { Link, Result } from "../../ui";
 
@@ -96,8 +98,8 @@ export function LinkedWork({
                       <span className="muted">{work.state}</span>
                       {page.can_manage && !repo.archived && (
                         <Button
-                          size="small"
-                          variant="invisible"
+                          size="sm"
+                          variant="ghost"
                           disabled={mutation.pending}
                           aria-label={`Unlink ${isIssue ? "issue" : "pull request"} #${number}`}
                           onClick={() =>
@@ -118,13 +120,18 @@ export function LinkedWork({
             )}
             <div className="discussion-actions">
               {before && (
-                <Button size="small" onClick={() => setBefore(undefined)}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setBefore(undefined)}
+                >
                   First linked page
                 </Button>
               )}
               {page.next !== null && (
                 <Button
-                  size="small"
+                  variant="outline"
+                  size="sm"
                   onClick={() => setBefore(String(page.next))}
                 >
                   More linked work
@@ -141,8 +148,7 @@ export function LinkedWork({
               >
                 <label>
                   Issue number
-                  <TextInput
-                    block
+                  <Input
                     type="number"
                     min={1}
                     max={Number.MAX_SAFE_INTEGER}
@@ -169,8 +175,9 @@ export function LinkedWork({
                   </Result>
                 )}
                 <Button
+                  variant="outline"
                   type="submit"
-                  size="small"
+                  size="sm"
                   disabled={
                     mutation.pending ||
                     !selection.data ||
@@ -192,7 +199,8 @@ export function LinkedWork({
       )}
       {mutation.conflict && (
         <Button
-          size="small"
+          variant="outline"
+          size="sm"
           onClick={() => {
             resource.retry();
             selection.retry();

@@ -1,14 +1,23 @@
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { repoHref } from "./repository-route";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
-  ActionList,
-  ActionMenu,
-  Button,
   Dialog,
-  IconButton,
-  Label,
-  TextInput,
-} from "@primer/react";
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+} from "@/components/ui/dropdown-menu";
+import { ChevronDownIcon } from "lucide-react";
 import {
   AlertIcon,
   ArchiveIcon,
@@ -338,7 +347,9 @@ function MemberSettings({
     return (
       <section className="settings-content">
         <p role="alert">{error ?? "Membership could not be loaded"}</p>
-        <Button onClick={() => void load()}>Retry</Button>
+        <Button variant="outline" onClick={() => void load()}>
+          Retry
+        </Button>
       </section>
     );
   return (
@@ -348,12 +359,8 @@ function MemberSettings({
           <h2 id="member-settings">Members</h2>
           <p>Manage who can access this repository and what they can do.</p>
         </div>
-        <Button
-          size="small"
-          variant="primary"
-          leadingVisual={PlusIcon}
-          onClick={startNewMember}
-        >
+        <Button size="sm" variant="default" onClick={startNewMember}>
+          <PlusIcon data-icon="inline-start" />
           Add member
         </Button>
       </div>
@@ -363,7 +370,8 @@ function MemberSettings({
             Another administrator changed membership. Reload before saving
             again.
           </p>
-          <Button leadingVisual={SyncIcon} onClick={() => void load()}>
+          <Button variant="outline" onClick={() => void load()}>
+            <SyncIcon data-icon="inline-start" />
             Reload members
           </Button>
         </div>
@@ -402,18 +410,18 @@ function MemberSettings({
                     </div>
                     <MemberAccess access={member.access} />
                     <div className="member-actions">
-                      <IconButton
-                        icon={PencilIcon}
-                        size="small"
-                        variant="invisible"
+                      <Button
+                        size="icon-sm"
+                        variant="ghost"
                         aria-label={`Edit ${label}`}
                         title={`Edit ${label}`}
                         onClick={() => startEdit(member)}
-                      />
-                      <IconButton
-                        icon={TrashIcon}
-                        size="small"
-                        variant="danger"
+                      >
+                        <PencilIcon data-icon="inline-start" />
+                      </Button>
+                      <Button
+                        size="icon-sm"
+                        variant="destructive"
                         aria-label={`Remove ${label}`}
                         title={`Remove ${label}`}
                         onClick={() => {
@@ -421,7 +429,9 @@ function MemberSettings({
                           setEditing(undefined);
                           setForm(undefined);
                         }}
-                      />
+                      >
+                        <TrashIcon data-icon="inline-start" />
+                      </Button>
                     </div>
                   </li>
                 );
@@ -432,104 +442,130 @@ function MemberSettings({
       </div>
       {form && (
         <Dialog
-          title={editing === undefined ? "Add member" : "Edit member"}
-          subtitle="Grant repository access to someone who can sign in with your identity provider."
-          width="large"
-          position={{ narrow: "bottom", regular: "center" }}
-          initialFocusRef={subjectInput}
-          onClose={closeForm}
+          open
+          onOpenChange={(open) => {
+            if (!open) closeForm();
+          }}
         >
-          <form className="member-form" onSubmit={saveMember}>
-            <div className="member-form-fields">
-              <label className="member-field">
-                <span>Subject</span>
-                <TextInput
-                  ref={subjectInput}
-                  block
-                  value={form.subject}
-                  required
-                  placeholder="e.g. provider|user-id"
-                  autoComplete="off"
-                  aria-describedby="member-subject-help"
-                  onChange={(event) =>
-                    setForm({ ...form, subject: event.target.value })
-                  }
-                />
-                <span id="member-subject-help" className="member-field-help">
-                  The stable identity-provider subject for this person.
-                </span>
-              </label>
-              <label className="member-field">
-                <span>Display name</span>
-                <TextInput
-                  block
-                  value={form.name}
-                  required
-                  placeholder="e.g. Ada Lovelace"
-                  autoComplete="name"
-                  aria-describedby="member-name-help"
-                  onChange={(event) =>
-                    setForm({ ...form, name: event.target.value })
-                  }
-                />
-                <span id="member-name-help" className="member-field-help">
-                  The name shown in this repository&apos;s member list.
-                </span>
-              </label>
-              <div className="member-field">
-                <span>Access</span>
-                <div className="member-access-control">
-                  <ActionMenu>
-                    <ActionMenu.Button
-                      className="member-access-trigger"
-                      aria-label="Access"
-                      aria-describedby="member-access-help"
-                    >
-                      {memberAccessDetails(form.access).label}
-                    </ActionMenu.Button>
-                    <ActionMenu.Overlay width="medium">
-                      <ActionList
-                        selectionVariant="single"
-                        aria-label="Access level"
-                      >
-                        {(["read", "write", "admin"] as const).map((access) => {
-                          const details = memberAccessDetails(access);
-                          const { Icon } = details;
-                          return (
-                            <ActionList.Item
-                              key={access}
-                              role="menuitemradio"
-                              selected={form.access === access}
-                              onSelect={() => setForm({ ...form, access })}
-                            >
-                              <ActionList.LeadingVisual>
-                                <Icon aria-hidden="true" />
-                              </ActionList.LeadingVisual>
-                              {details.label}
-                              <ActionList.Description variant="block">
-                                {details.description}
-                              </ActionList.Description>
-                            </ActionList.Item>
-                          );
-                        })}
-                      </ActionList>
-                    </ActionMenu.Overlay>
-                  </ActionMenu>
-                  <span id="member-access-help" className="member-field-help">
-                    <MemberAccess access={form.access} />
+          <DialogContent
+            className="sm:max-w-xl max-h-[calc(100dvh-2rem)] overflow-y-auto"
+            onOpenAutoFocus={(event) => {
+              event.preventDefault();
+              subjectInput.current?.focus();
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>
+                {editing === undefined ? "Add member" : "Edit member"}
+              </DialogTitle>
+              <DialogDescription>
+                Grant repository access to someone who can sign in with your
+                identity provider.
+              </DialogDescription>
+            </DialogHeader>
+            <form className="member-form" onSubmit={saveMember}>
+              <div className="member-form-fields">
+                <label className="member-field">
+                  <span>Subject</span>
+                  <Input
+                    ref={subjectInput}
+                    value={form.subject}
+                    required
+                    placeholder="e.g. provider|user-id"
+                    autoComplete="off"
+                    aria-describedby="member-subject-help"
+                    onChange={(event) =>
+                      setForm({ ...form, subject: event.target.value })
+                    }
+                  />
+                  <span id="member-subject-help" className="member-field-help">
+                    The stable identity-provider subject for this person.
                   </span>
+                </label>
+                <label className="member-field">
+                  <span>Display name</span>
+                  <Input
+                    value={form.name}
+                    required
+                    placeholder="e.g. Ada Lovelace"
+                    autoComplete="name"
+                    aria-describedby="member-name-help"
+                    onChange={(event) =>
+                      setForm({ ...form, name: event.target.value })
+                    }
+                  />
+                  <span id="member-name-help" className="member-field-help">
+                    The name shown in this repository&apos;s member list.
+                  </span>
+                </label>
+                <div className="member-field">
+                  <span>Access</span>
+                  <div className="member-access-control">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="outline"
+                          className="member-access-trigger"
+                          aria-label="Access"
+                          aria-describedby="member-access-help"
+                        >
+                          {memberAccessDetails(form.access).label}
+                          <ChevronDownIcon data-icon="inline-end" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent className="w-72">
+                        <DropdownMenuRadioGroup
+                          value={form.access}
+                          aria-label="Access level"
+                          onValueChange={(access) => {
+                            if (
+                              access === "read" ||
+                              access === "write" ||
+                              access === "admin"
+                            )
+                              setForm({ ...form, access });
+                          }}
+                        >
+                          {(["read", "write", "admin"] as const).map(
+                            (access) => {
+                              const details = memberAccessDetails(access);
+                              const { Icon } = details;
+                              return (
+                                <DropdownMenuRadioItem
+                                  key={access}
+                                  value={access}
+                                >
+                                  <Icon aria-hidden="true" />
+                                  <div>
+                                    <div>{details.label}</div>
+                                    <p className="text-xs text-muted-foreground">
+                                      {details.description}
+                                    </p>
+                                  </div>
+                                </DropdownMenuRadioItem>
+                              );
+                            },
+                          )}
+                        </DropdownMenuRadioGroup>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+
+                    <span id="member-access-help" className="member-field-help">
+                      <MemberAccess access={form.access} />
+                    </span>
+                  </div>
                 </div>
               </div>
-            </div>
-            <div className="member-form-actions">
-              <Button type="button" onClick={closeForm}>
-                Cancel
-              </Button>
-              <Button variant="primary" type="submit">
-                {editing === undefined ? "Add member" : "Save member"}
-              </Button>
-            </div>
-          </form>
+              <div className="member-form-actions">
+                <Button variant="outline" type="button" onClick={closeForm}>
+                  Cancel
+                </Button>
+                <Button variant="default" type="submit">
+                  {editing === undefined ? "Add member" : "Save member"}
+                </Button>
+              </div>
+            </form>
+          </DialogContent>
         </Dialog>
       )}
       {removing !== undefined && (
@@ -543,12 +579,16 @@ function MemberSettings({
             <strong>Remove this member?</strong>
             <p>The change will take effect when you save membership.</p>
             <div className="member-actions">
-              <Button size="small" onClick={() => setRemoving(undefined)}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setRemoving(undefined)}
+              >
                 Cancel
               </Button>
               <Button
-                size="small"
-                variant="danger"
+                size="sm"
+                variant="destructive"
                 onClick={() => {
                   setDraft((members) =>
                     members.filter((member) => member.id !== removing),
@@ -573,7 +613,7 @@ function MemberSettings({
           Changes apply to the repository when you save.
         </span>
         <Button
-          variant="primary"
+          variant="default"
           disabled={saving || missingRequiredField || redirecting}
           onClick={() => void save()}
         >
@@ -679,10 +719,11 @@ function DefaultBranchSettings({
           </div>
           {!repo.archived && !editing && choices.length > 0 && (
             <Button
-              size="small"
-              leadingVisual={PencilIcon}
+              variant="outline"
+              size="sm"
               onClick={() => setEditing(true)}
             >
+              <PencilIcon data-icon="inline-start" />
               Change
             </Button>
           )}
@@ -693,7 +734,7 @@ function DefaultBranchSettings({
             {refs.head ? branchName(refs.head) : "No default branch"}
           </strong>
           {refs.head && <code>{short(refs.head.oid)}</code>}
-          <Label>default</Label>
+          <Badge variant="outline">default</Badge>
         </div>
         {choices.length === 0 && (
           <p className="settings-help">
@@ -715,12 +756,12 @@ function DefaultBranchSettings({
               ))}
             </select>
             <div>
-              <Button size="small" onClick={cancel}>
+              <Button variant="outline" size="sm" onClick={cancel}>
                 Cancel
               </Button>
               <Button
-                size="small"
-                variant="primary"
+                size="sm"
+                variant="default"
                 disabled={!selected}
                 onClick={() => setConfirming(true)}
               >
@@ -746,12 +787,17 @@ function DefaultBranchSettings({
                 </p>
               )}
               <div>
-                <Button size="small" disabled={saving} onClick={cancel}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={saving}
+                  onClick={cancel}
+                >
                   Cancel
                 </Button>
                 <Button
-                  size="small"
-                  variant="danger"
+                  size="sm"
+                  variant="destructive"
                   disabled={saving}
                   onClick={updateDefaultBranch}
                 >
@@ -847,8 +893,8 @@ function ArchiveSettings({
         </div>
         {!confirming && (
           <Button
-            size="small"
-            variant="danger"
+            size="sm"
+            variant="destructive"
             onClick={() => setConfirming(true)}
           >
             {repo.archived
@@ -887,7 +933,8 @@ function ArchiveSettings({
             )}
             <div>
               <Button
-                size="small"
+                variant="outline"
+                size="sm"
                 disabled={saving}
                 onClick={() => {
                   setConfirming(false);
@@ -898,12 +945,12 @@ function ArchiveSettings({
                 Cancel
               </Button>
               <Button
-                size="small"
-                variant="danger"
+                size="sm"
+                variant="destructive"
                 disabled={saving || confirmation !== fullName}
-                leadingVisual={ArchiveIcon}
                 onClick={updateArchive}
               >
+                <ArchiveIcon data-icon="inline-start" />
                 {saving
                   ? `${repo.archived ? "Unarchiving" : "Archiving"}…`
                   : `I understand the consequences, ${action} this repository`}
@@ -1030,12 +1077,8 @@ function BranchProtectionSettings({
           <p>Control how changes reach important branches.</p>
         </div>
         {!repo.archived && editing === undefined && (
-          <Button
-            size="small"
-            variant="primary"
-            leadingVisual={PlusIcon}
-            onClick={() => startEdit("new")}
-          >
+          <Button size="sm" variant="default" onClick={() => startEdit("new")}>
+            <PlusIcon data-icon="inline-start" />
             Add branch protection rule
           </Button>
         )}
@@ -1076,7 +1119,9 @@ function BranchProtectionSettings({
                   {rule.required_checks.length > 0 && (
                     <div className="protection-checks">
                       {rule.required_checks.map((check) => (
-                        <Label key={check}>{check}</Label>
+                        <Badge variant="outline" key={check}>
+                          {check}
+                        </Badge>
                       ))}
                     </div>
                   )}
@@ -1084,17 +1129,17 @@ function BranchProtectionSettings({
                 {!repo.archived && (
                   <div className="protection-actions">
                     <Button
-                      size="small"
-                      leadingVisual={PencilIcon}
+                      variant="outline"
+                      size="sm"
                       aria-label={`Edit ${rule.branch}`}
                       onClick={() => startEdit(index)}
                     >
+                      <PencilIcon data-icon="inline-start" />
                       Edit
                     </Button>
                     <Button
-                      size="small"
-                      variant="danger"
-                      leadingVisual={TrashIcon}
+                      size="sm"
+                      variant="destructive"
                       aria-label={`Delete ${rule.branch}`}
                       onClick={() => {
                         setDeleting(index);
@@ -1102,6 +1147,7 @@ function BranchProtectionSettings({
                         setError(undefined);
                       }}
                     >
+                      <TrashIcon data-icon="inline-start" />
                       Delete
                     </Button>
                   </div>
@@ -1125,12 +1171,17 @@ function BranchProtectionSettings({
                         </p>
                       )}
                       <div>
-                        <Button size="small" disabled={saving} onClick={cancel}>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={saving}
+                          onClick={cancel}
+                        >
                           Cancel
                         </Button>
                         <Button
-                          size="small"
-                          variant="danger"
+                          size="sm"
+                          variant="destructive"
                           disabled={saving}
                           onClick={() =>
                             void replaceRules(
@@ -1200,12 +1251,17 @@ function BranchProtectionSettings({
               </p>
             )}
             <div>
-              <Button size="small" disabled={saving} onClick={cancel}>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={saving}
+                onClick={cancel}
+              >
                 Cancel
               </Button>
               <Button
-                size="small"
-                variant="primary"
+                size="sm"
+                variant="default"
                 disabled={saving || branch.trim().length === 0}
                 onClick={saveRule}
               >

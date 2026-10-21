@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button } from "@primer/react";
+import { Button } from "@/components/ui/button";
 import {
   CodeIcon,
   DownloadIcon,
@@ -150,6 +150,7 @@ export function GitAccess({
               autoComplete="off"
             />
             <Button
+              variant="outline"
               onClick={async () => {
                 try {
                   await navigator.clipboard.writeText(token.token);
@@ -167,13 +168,17 @@ export function GitAccess({
         )}
         <div className="git-actions">
           <Button
-            variant="primary"
+            variant="default"
             disabled={pending || !repository}
             onClick={() => change("POST")}
           >
             {pending ? "Updating…" : "Generate token"}
           </Button>
-          <Button disabled={pending} onClick={() => change("DELETE")}>
+          <Button
+            variant="outline"
+            disabled={pending}
+            onClick={() => change("DELETE")}
+          >
             Revoke tokens
           </Button>
         </div>
@@ -221,6 +226,7 @@ export function CloneMenu({
           onFocus={(event) => event.currentTarget.select()}
         />
         <Button
+          variant="outline"
           onClick={async () => {
             try {
               await navigator.clipboard.writeText(url);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DiscussionMarkdown } from "./discussion";
+import { DiscussionMarkdown } from "@/components/discussion/markdown";
 
 describe("discussion Markdown", () => {
   it("renders GFM formatting while treating raw HTML and dangerous URLs as untrusted", () => {

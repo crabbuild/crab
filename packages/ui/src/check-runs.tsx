@@ -7,7 +7,7 @@ import {
   XCircleFillIcon,
 } from "@primer/octicons-react";
 import { endpoint, useRequest, type Repository } from "./api";
-import { DiscussionMarkdown } from "./discussion";
+import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import { Link, Result, short } from "./ui";
 
 type CheckStatus = "queued" | "in_progress" | "completed";

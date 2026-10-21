@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Button } from "@primer/react";
-import { useRequest } from "./api";
-import { Result } from "./ui";
+import { Button } from "@/components/ui/button";
+import { useRequest } from "@/api";
+import { Result } from "@/ui";
 
 export function useMutation(csrf: string) {
   const [pending, setPending] = useState(false);
@@ -121,12 +121,14 @@ export function ConflictReview<
                 </p>
                 <div className="discussion-actions">
                   <Button
+                    variant="outline"
                     type="button"
                     onClick={() => onResolve(saved, "draft")}
                   >
                     Continue with my draft
                   </Button>
                   <Button
+                    variant="outline"
                     type="button"
                     onClick={() => onResolve(saved, "saved")}
                   >
