@@ -268,6 +268,7 @@ impl Mutation for CreateMilestone {
         context.put_document(&format!("{PREFIX}/milestone-index/{number:016x}"), &number)?;
         context.put_document(&submission, &Submission { digest, number })?;
         context.put_document(&key(number), &milestone)?;
+        super::super::search::milestones::project(context, &milestone)?;
         advance_revision(context)?;
         Ok(MutationResult::Success(Decision::Applied(milestone)))
     }
@@ -318,6 +319,7 @@ impl Mutation for EditMilestone {
         context.put_document(&new_name, &current.number)?;
         context.put_document(&state_key(current.state, current.number), &current.number)?;
         context.put_document(&key(current.number), &current)?;
+        super::super::search::milestones::project(context, &current)?;
         advance_revision(context)?;
         Ok(MutationResult::Success(Decision::Applied(current)))
     }
@@ -453,6 +455,13 @@ fn assignment(
     Ok(value)
 }
 
+pub(in crate::cells::repository) fn selected(
+    context: &Transaction<'_>,
+    subject: Subject,
+) -> crate::cells::Result<Option<u64>> {
+    Ok(assignment(context, subject)?.milestone)
+}
+
 fn assignment_view(
     context: &Transaction<'_>,
     value: StoredAssignment,
@@ -550,6 +559,7 @@ impl Mutation for AssignMilestone {
         assignment.milestone = input.milestone;
         assignment.version = next_version(assignment.version)?;
         context.put_document(&key, &assignment)?;
+        super::super::search::index::dirty(context, input.subject)?;
         advance_revision(context)?;
         let target = match input.subject.kind {
             SubjectKind::Issue => Target::Issue {

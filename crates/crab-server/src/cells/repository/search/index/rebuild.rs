@@ -39,14 +39,14 @@ impl Mutation for RebuildIndex {
             } => {
                 if current
                     .as_ref()
-                    .is_some_and(|state| state.generation == generation)
+                    .is_some_and(|state| state.generation == generation && state.format == FORMAT)
                 {
                     return progress(context);
                 }
                 if current.as_ref().map(|state| state.generation) != expected
                     || current
                         .as_ref()
-                        .is_some_and(|state| state.progress.is_some())
+                        .is_some_and(|state| state.progress.is_some() && state.format == FORMAT)
                 {
                     return conflict(context);
                 }
@@ -74,7 +74,7 @@ impl Mutation for RebuildIndex {
                 let Some(mut current) = current else {
                     return conflict(context);
                 };
-                if current.generation != generation {
+                if current.generation != generation || current.format != FORMAT {
                     return conflict(context);
                 }
                 let Some(build) = current.progress.as_mut() else {
@@ -86,33 +86,57 @@ impl Mutation for RebuildIndex {
                 if version != build.version {
                     return conflict(context);
                 }
-                let (sql, parameters) = match build.phase {
-                    SearchIndexPhase::Clear => (
-                        "SELECT rowid FROM discussion_index ORDER BY rowid LIMIT 8",
-                        vec![],
-                    ),
-                    SearchIndexPhase::Issues => (
-                        "SELECT number FROM repository_issues WHERE number > ? ORDER BY number LIMIT 8",
-                        vec![integer(build.after)?],
-                    ),
-                    SearchIndexPhase::Pulls => (
-                        "SELECT number FROM repository_pulls WHERE number > ? ORDER BY number LIMIT 8",
-                        vec![integer(build.after)?],
-                    ),
-                };
-                let rows = context.sql(&SqlBatch {
-                    statements: vec![statement(sql, parameters)],
-                })?;
-                for row in &rows[0].rows {
-                    let number = crate::cells::repository::result_u64_from_row(row, 0)?;
-                    match build.phase {
-                        SearchIndexPhase::Clear => projection::remove(context, number)?,
-                        SearchIndexPhase::Issues | SearchIndexPhase::Pulls => {
-                            let kind = if build.phase == SearchIndexPhase::Issues {
-                                SubjectKind::Issue
+                let done = match build.phase {
+                    SearchIndexPhase::Milestones => {
+                        use crate::cells::repository::collaboration::milestones::{
+                            ListMilestones, ListMilestonesInput,
+                        };
+                        let page = ListMilestones::execute(
+                            context,
+                            ListMilestonesInput {
+                                before: (build.after != 0).then_some(build.after),
+                                limit: BATCH as u8,
+                                state: None,
+                            },
+                        )?;
+                        for milestone in page.items {
+                            super::super::milestones::project(context, &milestone)?;
+                            build.after = milestone.number;
+                        }
+                        page.next.is_none()
+                    }
+                    SearchIndexPhase::Clear | SearchIndexPhase::ClearMilestones => {
+                        let sql = if build.phase == SearchIndexPhase::Clear {
+                            "SELECT rowid FROM discussion_index ORDER BY rowid LIMIT 8"
+                        } else {
+                            "SELECT number FROM discussion_index_milestone_catalog ORDER BY number LIMIT 8"
+                        };
+                        let rows = context.query(sql, &[])?;
+                        for row in &rows.rows {
+                            let number = crate::cells::repository::result_u64_from_row(row, 0)?;
+                            if build.phase == SearchIndexPhase::Clear {
+                                projection::remove(context, number)?;
                             } else {
-                                SubjectKind::Pull
-                            };
+                                context.query("DELETE FROM discussion_index_milestone_catalog WHERE number = ?", &[integer(number)?])?;
+                            }
+                        }
+                        rows.rows.len() < BATCH
+                    }
+                    SearchIndexPhase::Issues | SearchIndexPhase::Pulls => {
+                        let (sql, kind) = if build.phase == SearchIndexPhase::Issues {
+                            (
+                                "SELECT number FROM repository_issues WHERE number > ? ORDER BY number LIMIT 8",
+                                SubjectKind::Issue,
+                            )
+                        } else {
+                            (
+                                "SELECT number FROM repository_pulls WHERE number > ? ORDER BY number LIMIT 8",
+                                SubjectKind::Pull,
+                            )
+                        };
+                        let rows = context.query(sql, &[integer(build.after)?])?;
+                        for row in &rows.rows {
+                            let number = crate::cells::repository::result_u64_from_row(row, 0)?;
                             projection::refresh(context, Subject { kind, number })?;
                             build.after = number;
                             build.processed = build
@@ -123,8 +147,9 @@ impl Mutation for RebuildIndex {
                                     "discussion build count is exhausted",
                                 ))?;
                         }
+                        rows.rows.len() < BATCH
                     }
-                }
+                };
                 build.version = build
                     .version
                     .checked_add(1)
@@ -132,9 +157,17 @@ impl Mutation for RebuildIndex {
                     .ok_or(crate::cells::Error::Invalid(
                         "discussion build version is exhausted",
                     ))?;
-                if rows[0].rows.len() < BATCH {
+                if done {
                     match build.phase {
                         SearchIndexPhase::Clear => {
+                            build.phase = SearchIndexPhase::ClearMilestones;
+                            build.after = 0;
+                        }
+                        SearchIndexPhase::ClearMilestones => {
+                            build.phase = SearchIndexPhase::Milestones;
+                            build.after = 0;
+                        }
+                        SearchIndexPhase::Milestones => {
                             build.phase = SearchIndexPhase::Issues;
                             build.after = 0;
                         }

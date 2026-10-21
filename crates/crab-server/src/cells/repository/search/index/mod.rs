@@ -8,7 +8,7 @@ use crate::cells::repository::collaboration::{Subject, SubjectKind};
 use crate::cells::repository::{MAX_NUMBER, SqlBatch, integer, result_u64, statement};
 
 const STATE_KEY: &str = "discussion-search/v1/state";
-const FORMAT: u16 = 1;
+const FORMAT: u16 = 2;
 const BATCH: usize = 8;
 const MAX_DIRTY: usize = 128;
 
@@ -26,6 +26,8 @@ pub(crate) use rebuild::RebuildSearchOutcome;
 #[serde(rename_all = "snake_case")]
 pub enum SearchIndexPhase {
     Clear,
+    ClearMilestones,
+    Milestones,
     Issues,
     Pulls,
 }
@@ -53,6 +55,10 @@ pub(crate) struct State {
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SearchIndexStatus {
     Missing,
+    Outdated {
+        generation: Uuid,
+        format: u16,
+    },
     Building {
         generation: Uuid,
         progress: SearchIndexProgress,
@@ -65,7 +71,10 @@ pub enum SearchIndexStatus {
 
 fn state(context: &Transaction<'_>) -> crate::cells::Result<Option<State>> {
     let state = context.document::<State>(STATE_KEY)?;
-    if state.as_ref().is_some_and(|state| state.format != FORMAT) {
+    if state
+        .as_ref()
+        .is_some_and(|state| state.format == 0 || state.format > FORMAT)
+    {
         return Err(crate::cells::Error::Invalid(
             "discussion index format is unsupported",
         ));
@@ -77,7 +86,7 @@ pub(crate) fn ensure_ready(context: &Transaction<'_>) -> crate::cells::Result<Uu
     let Some(state) = state(context)? else {
         return Err(crate::cells::Error::IndexUnavailable);
     };
-    if state.progress.is_some() {
+    if state.format != FORMAT || state.progress.is_some() {
         return Err(crate::cells::Error::IndexUnavailable);
     }
     Ok(state.generation)
@@ -119,6 +128,10 @@ impl Read for GetSearchIndexStatus {
 fn status(context: &Transaction<'_>) -> crate::cells::Result<SearchIndexStatus> {
     Ok(match state(context)? {
         None => SearchIndexStatus::Missing,
+        Some(state) if state.format != FORMAT => SearchIndexStatus::Outdated {
+            generation: state.generation,
+            format: state.format,
+        },
         Some(State {
             generation,
             progress: Some(progress),

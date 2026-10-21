@@ -1319,6 +1319,7 @@ a handle matching a catalog owner label does not acquire ownership.
 | Inline review threads | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/threads`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}` |
 | Thread replies | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}/replies`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}/replies/{reply}` |
 | Merge | `POST /api/repos/{owner}/{name}/pulls/{number}/merge` |
+| Milestone search choices | `GET /api/repos/{owner}/{name}/discussion-search/milestones` |
 | Labels | `GET/POST /api/repos/{owner}/{name}/labels`, `PATCH/DELETE /api/repos/{owner}/{name}/labels/{number}` |
 | Assignees | `GET /api/repos/{owner}/{name}/assignees`; issue and pull `PATCH` requests replace assignments |
 | Milestones | `GET/POST /api/repos/{owner}/{name}/milestones`, `GET/PATCH /api/repos/{owner}/{name}/milestones/{number}`, `GET /api/repos/{owner}/{name}/milestones/{number}/items`; issue/pull `GET/PUT .../{number}/milestone` |
@@ -1343,8 +1344,12 @@ support up to five nested groups. Quote phrases and multiword label names.
 
 Supported qualifiers are `is:open`, `is:closed`, `is:merged`, `is:unmerged`,
 `is:issue`, `is:pr`, `state:open`, `state:closed`, `draft:true`, `draft:false`,
-`label:name`, `no:label`, and `no:assignee`. `is:closed` includes merged PRs.
+`label:name`, `milestone:"title"`, `no:label`, `no:assignee`, and `no:milestone`. `is:closed` includes merged PRs.
 Repeated label qualifiers mean AND; comma-separated label names mean OR.
+Milestone titles match exactly, case-insensitively, including closed milestones.
+Quote spaces, commas, colons or escaped quotation marks as literal title content.
+`-milestone:"title"` excludes that milestone; `no:milestone` finds unassigned
+issues and PRs. Counts use the same authoritative predicate as results.
 Prefix a term or qualifier with `-` to exclude it. Missing-metadata qualifiers
 cannot be negated. Unknown qualifiers and malformed syntax return 400.
 
@@ -1385,6 +1390,12 @@ retain literal substring matching without trigram ranking. `direction` is
 ordering, generation and revision. Malformed cursors return 400; changed
 queries or index contents return 409 `stale_search_cursor`. Restart at the first
 page to obtain a fresh snapshot. Comment pagination remains numeric.
+
+Milestone filtering requires discussion index format 2. Format-1 indexes report
+`outdated`; run the explicit rebuild below before admitting indexed traffic.
+It rebuilds only derived tables and preserves canonical milestone and assignment
+records. Clearing, milestone catalog preparation and discussion projection are
+separate bounded phases, with restart/resume through the existing management CLI.
 
 New empty repositories initialize their index. Existing native repositories
 require `cells rebuild-search --owner OWNER --name NAME` against the running
@@ -1561,6 +1572,23 @@ Label constraints:
 - Descriptions up to 100 characters
 - At most 20 labels per issue or pull
 - At most 500 allocated label IDs during repository lifetime
+
+The Milestone dropdown on issue and PR lists searches the complete native
+milestone catalog and switches between open/closed milestones. Its choice
+endpoint accepts the current `query`, a bounded `search` substring and optional
+`state=open|closed`. It returns at most 20 choices, an explicit truncation flag,
+and native query destinations/selection for each choice, no milestone and
+clearing the global facet. Exact title matches sort first. Refine the search to
+reach additional matches; filtering never uses only a browser-loaded page.
+Both search metadata endpoints recheck durable repository membership after the
+awaited native read, so a stale materialized grant cannot expose revoked choices.
+
+Choosing a milestone replaces global milestone conjunctions while retaining
+other filters and boolean groups. Milestone predicates inside OR remain intact;
+the chosen facet adds a global conjunction. The UI preserves sort/direction and
+`powerbar=1`, resets pagination, and disables destinations that exceed query
+bounds rather than truncating other filters. Keyboard selection, Escape/focus
+return, empty/loading, request failure and retry are supported.
 
 Assignments contain at most 10 distinct configured member subjects. Only repository writers can change label or assignee sets.
 

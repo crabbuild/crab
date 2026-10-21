@@ -111,7 +111,7 @@ fn has_state(expression: &Expression) -> bool {
     }
 }
 
-fn source(expression: &Expression, parent: u8) -> String {
+pub(super) fn source(expression: &Expression, parent: u8) -> String {
     match expression {
         Expression::All => String::new(),
         Expression::Term { source, .. } => source.clone(),

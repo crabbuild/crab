@@ -47,6 +47,26 @@ CREATE TABLE IF NOT EXISTS discussion_index_assignees (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS discussion_index_assignee_lookup ON discussion_index_assignees(subject, document);
 
+CREATE TABLE IF NOT EXISTS discussion_index_milestone_catalog (
+    number INTEGER PRIMARY KEY CHECK (number BETWEEN 1 AND 9007199254740991),
+    title TEXT NOT NULL,
+    title_key TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL CHECK (state IN ('open', 'closed'))
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS discussion_index_milestones (
+    document INTEGER PRIMARY KEY REFERENCES discussion_index(rowid) ON DELETE CASCADE,
+    milestone INTEGER NOT NULL REFERENCES discussion_index_milestone_catalog(number)
+) STRICT;
+CREATE INDEX IF NOT EXISTS discussion_index_milestone_lookup ON discussion_index_milestones(milestone, document);
+
+CREATE TRIGGER IF NOT EXISTS discussion_milestone_insert AFTER INSERT ON discussion_index_milestone_catalog BEGIN
+    UPDATE discussion_index_revision SET revision = revision + 1 WHERE singleton = 1;
+END;
+CREATE TRIGGER IF NOT EXISTS discussion_milestone_update AFTER UPDATE ON discussion_index_milestone_catalog BEGIN
+    UPDATE discussion_index_revision SET revision = revision + 1 WHERE singleton = 1;
+END;
+
 CREATE TABLE IF NOT EXISTS discussion_index_reaction_counts (
     document INTEGER NOT NULL REFERENCES discussion_index(rowid) ON DELETE CASCADE,
     kind TEXT NOT NULL CHECK (kind IN ('thumbs_up','thumbs_down','laugh','hooray','confused','heart','rocket','eyes')),

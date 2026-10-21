@@ -57,7 +57,16 @@ impl Read for CompleteSearch {
         } else {
             Vec::new()
         };
-        suggestions(&input, start, end, cursor, &labels)
+        let milestones = if let Some(value) = prefix
+            .trim_start_matches('-')
+            .to_lowercase()
+            .strip_prefix("milestone:")
+        {
+            super::milestones::matching(context, &value_prefix(value), None)?
+        } else {
+            Vec::new()
+        };
+        suggestions(&input, start, end, cursor, &labels, &milestones)
     }
 }
 
@@ -106,6 +115,7 @@ fn suggestions(
     end: usize,
     cursor: usize,
     labels: &[LabelRecord],
+    milestones: &[super::milestones::Summary],
 ) -> crate::cells::Result<Suggestions> {
     let prefix = &input.query[start..cursor];
     let negative = prefix.starts_with('-');
@@ -128,6 +138,24 @@ fn suggestions(
                 break;
             }
         }
+    } else if prefix.starts_with("milestone:") {
+        for milestone in milestones.iter().take(20) {
+            items.push(Suggestion {
+                value: format!(
+                    "{sign}milestone:{}",
+                    serde_json::to_string(&milestone.title)?
+                ),
+                description: match milestone.state {
+                    crate::cells::repository::collaboration::milestones::MilestoneState::Open => {
+                        "Open milestone"
+                    }
+                    crate::cells::repository::collaboration::milestones::MilestoneState::Closed => {
+                        "Closed milestone"
+                    }
+                }
+                .into(),
+            });
+        }
     } else {
         for (value, description) in [
             ("is:open", "Open work"),
@@ -141,6 +169,8 @@ fn suggestions(
             ("label:", "Filter by repository label"),
             ("no:label", "Work without labels"),
             ("no:assignee", "Unassigned work"),
+            ("milestone:", "Filter by repository milestone"),
+            ("no:milestone", "Work without a milestone"),
         ] {
             if negative && value.starts_with("no:") || !value.starts_with(&prefix) {
                 continue;
@@ -187,9 +217,12 @@ fn label_prefix(value: &str) -> (&str, String) {
             start = offset + 1;
         }
     }
-    let typed = &value[start..];
+    (&value[..start], value_prefix(&value[start..]))
+}
+
+fn value_prefix(typed: &str) -> String {
     let Some(quoted) = typed.strip_prefix('"') else {
-        return (&value[..start], typed.to_owned());
+        return typed.to_owned();
     };
     let mut prefix = String::new();
     let mut characters = quoted.chars();
@@ -204,7 +237,7 @@ fn label_prefix(value: &str) -> (&str, String) {
             _ => prefix.push(character),
         }
     }
-    (&value[..start], prefix)
+    prefix
 }
 
 #[cfg(test)]

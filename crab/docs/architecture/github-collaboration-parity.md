@@ -26,7 +26,7 @@ assessment. Existing Fern test source was inspected, not executed here.
 | Hierarchy and dependencies              | `packages/contracts/src/issue-hierarchy.ts`, `issue-dependencies.ts`; `apps/web/worker/issue-hierarchy-data.ts`, `issue-dependency-data.ts`; related test suites        | `cells/repository/collaboration/links/` provides same-repository issue-to-PR related-work links                                                                                      | Parent/child, blocked-by/blocking, duplicate and related work need distinct typed invariants; existing links do not implement those semantics.                       |
 | Projects                                | `packages/contracts/src/projects.ts`; `apps/web/worker/project-{routes,data,model}.ts`; `migrations/tenant/0015_projects.sql`; `apps/web/test/projects.test.ts`         | No canonical project, project item, field, view or project grant model                                                                                                               | Implement native project authority and real repository references; use Fern command/validation behavior as reference.                                                |
 | Project draft conversion and automation | `project-data.ts`, `apps/web/test/project-draft-conversion.test.ts`: reserve, canonical creation, finalize, recover lost reply; event deduplication and automation jobs | Repository submission/command receipts exist; no project orchestration                                                                                                               | Build persisted cross-Cell workflows; never retry uncertain creation with a new identity.                                                                            |
-| Milestones                              | `packages/contracts/src/index.ts`: versioned milestone/date/counts; `apps/web/test/issues-management.test.ts`                                                           | `cells/repository/collaboration/milestones/`, `api/milestones/`, `packages/ui/src/features/milestones/`; existing native/HTTP/browser/restart proof in `repository-collaboration.md` | Extend the existing owner for search, creation defaults, prioritization and missing interactions; do not introduce a second milestone store.                         |
+| Milestones                              | `packages/contracts/src/index.ts`: versioned milestone/date/counts; `apps/web/test/issues-management.test.ts`                                                           | `cells/repository/collaboration/milestones/`, `api/milestones/`, `packages/ui/src/features/milestones/`; existing native/HTTP/browser/restart proof in `repository-collaboration.md` | Native search/filter choices are implemented; extend creation defaults, prioritization and missing interactions; do not introduce a second milestone store.                         |
 | Pull requests                           | `apps/web/worker/pulls.ts`: review requests, comments, reserved merge publication/recovery; `repo-do.ts`: repository authority                                          | `cells/repository/pulls/`, `api/pulls/`, `packages/ui/src/features/pull-requests/`: review/thread/readiness/merge owners                                                             | Keep Crab's exact-head Git publication path. Port missing behavior and acceptance cases without replacing it with Fern's Artifacts transport.                        |
 | Presentation                            | `docs/issues-projects-experience.md`, `apps/web/src/projects.tsx`: Linear planning, shadcn, table/board, contextual editing                                             | `packages/ui/src/components/ui/`, `components/discussion/`, `styles/globals.css`: shadcn/Geist foundation                                                                            | Share Crab primitives; reproduce GitHub navigation, keyboard/focus behavior and information hierarchy.                                                               |
 
@@ -193,6 +193,20 @@ and state after process restart and repository-index rebuild, alongside existing
 Git/review/merge/replay proof. The persistent preview initializes the directory
 empty and preserves both repositories' records; the operator chooses their own
 profile. These checks qualify the implemented slice, not complete parity.
+
+The subsequent milestone slice adds exact/excluded/missing milestone queries,
+native suggestions and a shared searchable issue/PR dropdown. It uses the
+existing milestone authority; no duplicate domain store or organization grants
+were introduced. Native projections update atomically with source commands and
+require explicit index-format-2 preparation for existing repositories. This
+advances the Issues/Milestones phases while organization/owner authority
+continues to require its explicit cutover.
+The slice passed 329 isolated server tests (five existing ignored), 107 UI unit
+tests and 75 browser tests, plus final focused mobile-margin proof. Real RustFS
+browser filtering and restart/rebuild checks passed. The persistent preview's
+two format-1 indexes were explicitly upgraded and canonical records compared
+unchanged; [the UI evidence](github-ui-parity.md#verification-and-completion)
+records the scope and remaining gaps.
 
 [CELLAR.md](../../../crates/crab-server/CELLAR.md) already records a release
 blocker: the published SDK links SQLite 3.45.0, before the upstream WAL-reset

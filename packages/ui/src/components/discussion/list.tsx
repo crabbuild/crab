@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { navigate, type Repository, type RepositoryLabel } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
+import { MilestoneFilter } from "@/features/milestones/filter";
 import { cn } from "@/lib/utils";
 
 export type ListLabel = Pick<RepositoryLabel, "id" | "name" | "color">;
@@ -127,43 +128,53 @@ export function DiscussionListControls({
           {matching === 1 ? "result" : "results"}
         </h3>
       )}
-      <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm" aria-label="Sort discussions">
-            Sort <ChevronDownIcon size={14} />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-56" tabIndex={0}>
-          <DropdownMenuLabel>Sort by</DropdownMenuLabel>
-          <DropdownMenuRadioGroup
-            value={filters.sort}
-            onValueChange={(sort) => change({ sort })}
-          >
-            {sorts.map(([value, label]) => (
-              <DropdownMenuRadioItem key={value} value={value}>
-                {label}
+      <div className="ml-auto flex items-center gap-1">
+        <MilestoneFilter
+          repo={repo}
+          query={
+            url.searchParams.get("q") ??
+            (view === "issues" ? "is:issue is:open" : "is:open")
+          }
+          onSelect={(q) => change({ q })}
+        />
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="sm" aria-label="Sort discussions">
+              Sort <ChevronDownIcon size={14} />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56" tabIndex={0}>
+            <DropdownMenuLabel>Sort by</DropdownMenuLabel>
+            <DropdownMenuRadioGroup
+              value={filters.sort}
+              onValueChange={(sort) => change({ sort })}
+            >
+              {sorts.map(([value, label]) => (
+                <DropdownMenuRadioItem key={value} value={value}>
+                  {label}
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Order</DropdownMenuLabel>
+            <DropdownMenuRadioGroup
+              value={filters.direction}
+              onValueChange={(direction) => change({ direction })}
+            >
+              <DropdownMenuRadioItem value="desc">
+                {filters.sort === "created" || filters.sort === "updated"
+                  ? "Newest first"
+                  : "Highest first"}
               </DropdownMenuRadioItem>
-            ))}
-          </DropdownMenuRadioGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel>Order</DropdownMenuLabel>
-          <DropdownMenuRadioGroup
-            value={filters.direction}
-            onValueChange={(direction) => change({ direction })}
-          >
-            <DropdownMenuRadioItem value="desc">
-              {filters.sort === "created" || filters.sort === "updated"
-                ? "Newest first"
-                : "Highest first"}
-            </DropdownMenuRadioItem>
-            <DropdownMenuRadioItem value="asc">
-              {filters.sort === "created" || filters.sort === "updated"
-                ? "Oldest first"
-                : "Lowest first"}
-            </DropdownMenuRadioItem>
-          </DropdownMenuRadioGroup>
-        </DropdownMenuContent>
-      </DropdownMenu>
+              <DropdownMenuRadioItem value="asc">
+                {filters.sort === "created" || filters.sort === "updated"
+                  ? "Oldest first"
+                  : "Lowest first"}
+              </DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
       {cannotChangeState && (
         <span role="status" className="muted basis-full pb-2 text-xs">
           Shorten this search to change its state filter.

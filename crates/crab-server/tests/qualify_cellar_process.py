@@ -326,6 +326,10 @@ with open(run / "commands.log", "w") as log:
             "q": '("Cellar RustFS" OR missing) AND no:label -unrelated is:closed',
         })
         assert [item["number"] for item in request(issue_search)["items"]] == [number]
+        milestone_search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": 'milestone:"Durable collaboration"'})
+        milestone_options = "/api/repos/team/project/discussion-search/milestones?" + urllib.parse.urlencode({"query": "is:closed", "search": "Durable", "state": "open"})
+        assert request(milestone_search)["matching"] == 1
+        assert request(milestone_options)["items"][0]["title"] == milestone["title"]
         completion_path = "/api/repos/team/project/discussion-search?" + urllib.parse.urlencode({
             "query": "label:rust", "cursor": 10,
         })
@@ -407,6 +411,8 @@ with open(run / "commands.log", "w") as log:
         assert restored["title"] == body["title"]
         assert restored["reactions"]["groups"] == reaction["groups"]
         assert restored["reactions"]["revision"] >= reaction["revision"]
+        assert request(milestone_search)["matching"] == 1
+        assert request(milestone_options)["items"][0]["title"] == milestone["title"]
         assignment = request(issue_path + "/milestone")
         saved_milestone = assignment["milestone"]
         assert saved_milestone["number"] == milestone["number"]
@@ -487,6 +493,8 @@ with open(run / "commands.log", "w") as log:
         assert request(issue_path) == before_rebuild_issue
         assert request(pull_path) == before_rebuild_pull
         assert request(issue_search)["matching"] == 1
+        assert request(milestone_search)["matching"] == 1
+        assert request(milestone_options)["items"][0]["title"] == milestone["title"]
         assert request(merged_search)["counts"] == {"open": 0, "closed": 1, "merged": 1}
         assert request("/api/repos/team/project/activity") == merged_activity
         assert request(issue_path + "/links")["items"][0]["work"]["state"] == "merged"
@@ -543,6 +551,8 @@ with open(run / "commands.log", "w") as log:
             "reaction_restart": True,
             "reaction_remove": True,
             "milestone_restart": True,
+            "milestone_search_restart": True,
+            "milestone_options_rebuild": True,
             "milestone_progress": True,
             "git_push": True,
             "process_restart": True,

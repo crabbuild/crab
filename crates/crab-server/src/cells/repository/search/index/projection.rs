@@ -96,6 +96,14 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
             vec![integer(id)?, SqlValue::Text(subject)],
         ));
     }
+    if let Some(milestone) =
+        crate::cells::repository::collaboration::milestones::selected(context, subject)?
+    {
+        statements.push(statement(
+            "INSERT INTO discussion_index_milestones(document, milestone) VALUES (?, ?)",
+            vec![integer(id)?, integer(milestone)?],
+        ));
+    }
     for (kind, count) in counts {
         statements.push(statement(
             "INSERT INTO discussion_index_reaction_counts(document, kind, count) VALUES (?, ?, ?)",

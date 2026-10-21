@@ -18,7 +18,7 @@ fn complete(input: &CompletionInput) -> Suggestions {
         updated_at_ms: 1,
     };
     let (start, end, cursor) = replacement(input).unwrap();
-    suggestions(input, start, end, cursor, &[label]).unwrap()
+    suggestions(input, start, end, cursor, &[label], &[]).unwrap()
 }
 
 #[test]

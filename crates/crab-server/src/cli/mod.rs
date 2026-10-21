@@ -310,7 +310,8 @@ async fn rebuild_search(
     let status: crab_server::SearchIndexStatus = serde_json::from_slice(&initial)?;
     let begin = match status {
         crab_server::SearchIndexStatus::Missing => Some(None),
-        crab_server::SearchIndexStatus::Ready { generation, .. } => Some(Some(generation)),
+        crab_server::SearchIndexStatus::Ready { generation, .. }
+        | crab_server::SearchIndexStatus::Outdated { generation, .. } => Some(Some(generation)),
         crab_server::SearchIndexStatus::Building { .. } => None,
     };
     let mut status = if let Some(expected) = begin {
@@ -333,7 +334,8 @@ async fn rebuild_search(
             crab_server::SearchIndexStatus::Ready { .. } => {
                 return Ok(serde_json::to_vec(&status)?);
             }
-            crab_server::SearchIndexStatus::Missing => {
+            crab_server::SearchIndexStatus::Missing
+            | crab_server::SearchIndexStatus::Outdated { .. } => {
                 return Err(crab_server::Error::Config(
                     "discussion index preparation did not start",
                 ));

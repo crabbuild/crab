@@ -4,6 +4,7 @@ use super::collaboration::{SubjectKind, SubjectState};
 
 pub(crate) mod completion;
 pub(crate) mod index;
+pub(crate) mod milestones;
 mod navigation;
 pub(crate) mod results;
 
@@ -33,6 +34,7 @@ enum Expression {
 enum Term {
     Text(String),
     Label(Vec<String>),
+    Milestone(String),
     State(SubjectState),
     Kind(SubjectKind),
     Unmerged,
@@ -44,6 +46,7 @@ enum Term {
 enum Metadata {
     Label,
     Assignee,
+    Milestone,
 }
 
 impl Query {
@@ -203,6 +206,7 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
         None => Term::Text(unquote(atom)?.to_lowercase()),
         Some((qualifier, value)) => match qualifier.to_ascii_lowercase().as_str() {
             "label" => Term::Label(label_names(value)?),
+            "milestone" => Term::Milestone(unquote(value)?.to_lowercase()),
             "is" | "state" => match unquote(value)?.to_ascii_lowercase().as_str() {
                 "open" => Term::State(SubjectState::Open),
                 "closed" => Term::State(SubjectState::Closed),
@@ -226,10 +230,15 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                 match unquote(value)?.to_ascii_lowercase().as_str() {
                     "label" => Term::Missing(Metadata::Label),
                     "assignee" => Term::Missing(Metadata::Assignee),
-                    _ => return Err("Search no qualifier currently supports label and assignee"),
+                    "milestone" => Term::Missing(Metadata::Milestone),
+                    _ => return Err("Search no qualifier supports label, assignee and milestone"),
                 }
             }
-            _ => return Err("Unsupported search qualifier; use is, state, draft, label, or no"),
+            _ => {
+                return Err(
+                    "Unsupported search qualifier; use is, state, draft, label, milestone, or no",
+                );
+            }
         },
     };
     let expression = Expression::Term {

@@ -94,6 +94,14 @@ The reviewer sidebar requests or cancels reviews from current repository members
 Submitted reviews fulfill matching requests; stale changes require explicit
 reload. Requests invite review and retain the existing branch protection rules.
 
+Issue and PR lists include a searchable Milestone filter with open/closed
+choices and a no-milestone option. It preserves boolean queries, sort and
+pagination semantics and searches the complete native catalog. The search box
+also accepts `milestone:"title"`, `-milestone:"title"` and `no:milestone`, with
+native suggestions. Existing indexes need explicit `cells rebuild-search`
+preparation for discussion index format 2; canonical collaboration data remains
+unchanged.
+
 Pull request conversations show merge requirements above the comment editor.
 Choose a merge method, review the commit message, and confirm the merge; an
 uncertain publication can be retried using the original submission.

@@ -35,7 +35,11 @@ query grammar; `search/results/` owns tagged issue/PR results and the mixed
 list operation; `search/navigation/` owns query edits and state destinations;
 `search/index/` owns transactional projections, full counts,
 sorting/query-bound cursors, and explicit bounded preparation; `search/completion/` owns repository-scoped
-suggestions and browser UTF-16 replacement ranges.
+suggestions and browser UTF-16 replacement ranges. `search/milestones/` owns
+milestone projection/catalog reads, grammar-preserving facet destinations and
+the native choice read. Canonical milestone commands update that projection in
+their transaction; assignment changes dirty the discussion projection. The HTTP
+choice endpoint stays with other search reads in `api/discussion_search/`.
 
 Collaboration documents live in `cells/repository/collaboration/`. Its `target.rs`
 owns shared discussion addresses, `activity/` owns append-only events and subject

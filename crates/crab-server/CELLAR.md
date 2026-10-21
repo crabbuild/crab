@@ -111,6 +111,19 @@ recorded command replays and detail reads remain available. Readiness stays
 unavailable until every repository's index is ready. Run preparation before
 admitting public traffic after upgrading an existing native deployment.
 
+Discussion index format 2 adds a bounded milestone catalog and one assignment
+projection per discussion. Titles/states and assignments update inside the same
+native transaction as their canonical milestone commands and replay receipt.
+Renames invalidate query cursors without rewriting every assigned discussion.
+Existing format-1 indexes report `outdated` with their generation and format;
+indexed reads and fresh mutations return unavailable. Run the same
+`cells rebuild-search` command to begin a new generation. Preparation clears
+old projections, rebuilds milestone titles in batches of eight from their
+canonical KV catalog, then rebuilds issues and PRs with their assignments.
+Interrupted steps resume their persisted phase/cursor/version. Serving never
+installs these tables or falls back to old projections. Unknown formats fail.
+Repository domain records and stored command replies retain their formats.
+
 `failure_zone` maps to the native Cellar region. Management uses the native
 runtime directly; there are no release bootstrap/prepare/activate, pinned
 backup, node-session, or configurable read-replica commands.
@@ -164,6 +177,15 @@ and logs, and removes its own RustFS container on exit. The latest build and
 all-target server Clippy check passed. The full architecture checker and its
 13 regression tests pass after rebasing onto the current `crab-v2` dependency
 policy.
+
+Discussion index format 2 passed the full isolated server suite (329 passed,
+five existing ignored). Real RustFS browser selection, milestone queries and
+choices survived process restart and interrupted rebuild. Two persistent local
+format-1 indexes reported `outdated` and were explicitly rebuilt to format 2;
+canonical repository records, milestones and assignments compared unchanged.
+The final mobile dropdown margin passed focused keyboard/accessibility/layout
+checks after the 75-test full browser run. This proves index preparation and the
+implemented list filter; it does not complete organization/project authority.
 
 These checks do not qualify mixed-version upgrades, protected cloud fault
 matrices, or production scale. Release publication remains disabled by a direct workflow gate until those

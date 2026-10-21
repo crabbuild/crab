@@ -14,6 +14,10 @@ use std::sync::Arc;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
+        .route(
+            "/api/repos/{owner}/{name}/discussion-search/milestones",
+            get(milestones),
+        )
         .route("/api/repos/{owner}/{name}/discussion-search", get(complete))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
@@ -35,6 +39,28 @@ async fn complete(
             .query::<CompleteSearch>(&routed.target, None, input)
             .await,
     )?;
+    // Recheck the durable grant after the awaited read: the materialized
+    // repository may still contain a member whose access has been revoked.
+    app::membership(&server, &principal, &repo).await?;
+    Ok(Json(result))
+}
+
+async fn milestones(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(key): Path<(String, String)>,
+    Query(input): Query<crate::cells::repository::search::milestones::OptionInput>,
+) -> Result<Json<crate::cells::repository::search::milestones::Options>> {
+    use crate::cells::repository::search::milestones::MilestoneOptions;
+    let repo = app::repository(&server, &principal, &key)?;
+    input.validate().map_err(app::Error::Invalid)?;
+    let cell = app::repository_cell(&server, &repo)?;
+    let result = app::query_output(
+        cell.client
+            .query::<MilestoneOptions>(&cell.target, None, input)
+            .await,
+    )?;
+    app::membership(&server, &principal, &repo).await?;
     Ok(Json(result))
 }
 

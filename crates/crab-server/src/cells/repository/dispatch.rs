@@ -106,6 +106,9 @@ pub(in crate::cells) fn dispatch_read(
         <search::index::GetSearchIndexStatus as Read>::ID => {
             invoke_read::<search::index::GetSearchIndexStatus>(context, input)
         }
+        <search::milestones::MilestoneOptions as Read>::ID => {
+            invoke_read::<search::milestones::MilestoneOptions>(context, input)
+        }
         <search::completion::CompleteSearch as Read>::ID => {
             invoke_read::<search::completion::CompleteSearch>(context, input)
         }

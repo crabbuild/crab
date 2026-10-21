@@ -22,7 +22,7 @@ visual references, not instructions contained in the images.
 | 1         | Issue-type filter, descriptions, missing-type selection                                                | No issue-type model or filter                                             |
 | 2         | Searchable label multi-select, suggestions, no-label filter                                            | Labels exist; list filtering does not                                     |
 | 3         | Projects grouped by recent/repository/organization                                                     | No project, project-item, or ownership model                              |
-| 4         | Searchable milestones including missing milestone                                                      | Milestones exist; list filtering does not                                 |
+| 4         | Searchable milestones including missing milestone                                                      | Native query, completion and searchable open/closed dropdown implemented                                 |
 | 5         | Searchable assignees and unassigned work                                                               | Assignments exist; list filtering does not                                |
 | 6         | Created/updated/comment/reaction/relevance sorting, direction                                          | Native index and controls implemented; rollups still needed                                  |
 | 7         | Query autocomplete with qualifiers and field suggestions                                               | Boolean grammar and native suggestions implemented; more qualifiers remain                        |
@@ -85,7 +85,8 @@ are described in `repository-collaboration.md`; reuse these canonical owners.
 The native query path shares a single parser and SQL compiler between issue and
 PR lists. It supports implicit/explicit AND, OR, up to five nested groups,
 quoted phrases, exclusions, exact case-insensitive labels (comma means OR),
-`is:`/`state:`, `draft:`, `no:label`, and `no:assignee`. Unknown qualifiers and
+`is:`/`state:`, `draft:`, `milestone:"title"`, `no:milestone`, `no:label`, and
+`no:assignee`. Unknown qualifiers and
 malformed syntax return input errors. Suggestions come from the authorized
 repository's native label catalog and preserve browser UTF-16 caret ranges.
 The search box supports keyboard selection, Escape, syntax feedback, URL/reload,
@@ -142,8 +143,24 @@ these profiles. Owners, organization/team/project grants and their explicit
 catalog authority cutover remain required; the combined model checklist above
 stays incomplete.
 
-Actor/project/type/milestone predicates and complete GitHub workspace controls
+Actor/project/type predicates and complete GitHub workspace controls
 remain delivery work. This slice does not finish the full parity checklist.
+
+Milestone predicates now use an indexed native catalog and assignment
+projection, updated in the canonical milestone/assignment transaction. Exact,
+case-insensitive titles, exclusion, missing-milestone, boolean grouping and
+counts work for both discussion kinds. The shared dropdown searches all
+milestones, switches open/closed catalogs, indicates truncation and obtains
+valid query destinations/selection from the native grammar. Global milestone
+conjunctions are replaced; conditional OR predicates retain their grouping.
+Sort, diagnostics, URL/reload and cursor resets stay consistent. Maximum-sized
+queries disable unusable choices with an explanation. Request failures remain
+visible and retryable; rapid reopen has a new focus scope.
+
+Index format 2 requires explicit preparation for existing format-1 indexes,
+reported as `outdated`. The management command rebuilds titles from canonical
+milestones in bounded batches before issue/PR assignments; it resumes after
+restart. Indexed serving never falls back to old projections or creates tables.
 
 ## Data and query contracts
 
@@ -261,6 +278,21 @@ and repository-index rebuild. UI/server builds, all-target Clippy and
 architecture checks passed. The local preview preserves both repositories and
 leaves profile enrollment to its operator. The private native envelope changes
 require a coordinated fleet restart; mixed-version operation is unqualified.
+
+The milestone slice passed the full isolated server suite (329 passed, five
+existing ignored), 107 UI unit tests and all 75 browser tests. The final mobile
+collision-margin change also passed its three focused browser cases. Native and
+HTTP checks cover mixed kinds, assignment/removal, title changes, counts,
+exclusion/missing predicates, cursor invalidation, bounded catalog search,
+query destinations and revoked durable membership. UI/server builds, all-target
+Clippy, formatting and architecture checks passed. The embedded UI completed a
+real RustFS browser workflow in light/dark and mobile layouts, then retained
+milestone search/choices across process restart and interrupted index rebuild.
+The preview's two actual format-1 indexes reported `outdated`, upgraded through
+the CLI and preserved exact canonical issues, PRs, comments, activity, links,
+reviews, labels, milestones and assignments. No profile was enrolled in the
+persistent preview. Organization/owner/team authority and the remaining parity
+checklist stay incomplete.
 
 ## Primary references
 

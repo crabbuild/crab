@@ -139,3 +139,183 @@ async fn issue_workspace_returns_tagged_pull_results_and_paginates_colliding_num
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     h.close().await;
 }
+
+#[tokio::test]
+async fn milestone_options_and_queries_follow_real_assignment_versions_and_repository_access() {
+    use reqwest::Method;
+    let h = Harness::new(false).await;
+    let cookie = h.login().await;
+    let root = "/api/repos/team/private";
+    let milestone: Value = h.write(Method::POST, &format!("{root}/milestones"), &cookie,
+        json!({"request_id":uuid::Uuid::now_v7(), "title":"Release one", "description":"Planning", "due_on":null}))
+        .await.error_for_status().unwrap().json().await.unwrap();
+    for number in 1..=2 {
+        h.write(Method::POST, &format!("{root}/issues"), &cookie,
+            json!({"request_id":uuid::Uuid::now_v7(), "title":format!("Work {number}"), "body":"Work"}))
+            .await.error_for_status().unwrap();
+        h.write(
+            Method::PUT,
+            &format!("{root}/issues/{number}/milestone"),
+            &cookie,
+            json!({"version":0,"milestone":milestone["number"]}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    h.write(
+        Method::PATCH,
+        &format!("{root}/issues/2"),
+        &cookie,
+        json!({"version":1,"state":"closed"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let response = h
+        .http
+        .get(format!("{}{root}/discussion-search/milestones", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[
+            ("query", "is:issue is:open"),
+            ("search", "release"),
+            ("state", "open"),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(response["items"][0]["title"], "Release one");
+    let query = response["items"][0]["query"].as_str().unwrap();
+    let found = h
+        .http
+        .get(format!("{}{root}/issues", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[("q", query)])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            found["matching"].as_u64(),
+            found["counts"]["open"].as_u64(),
+            found["counts"]["closed"].as_u64()
+        ),
+        (Some(1), Some(1), Some(1))
+    );
+    let missing = h
+        .http
+        .get(format!("{}{root}/issues", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[("q", "no:milestone")])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(missing["matching"], 0);
+    let current = h.json(&format!("{root}/milestones/1"), &cookie).await;
+    h.write(Method::PATCH, &format!("{root}/milestones/1"), &cookie,
+        json!({"version":current["milestone"]["version"],"title":"Release two","description":"Planning","due_on":null,"state":"closed"}))
+        .await.error_for_status().unwrap();
+    let closed = h
+        .http
+        .get(format!("{}{root}/discussion-search/milestones", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[("search", "two"), ("state", "closed")])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(closed["items"][0]["title"], "Release two");
+    let completion = h
+        .http
+        .get(format!("{}{root}/discussion-search", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[("query", "milestone:two"), ("cursor", "13")])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(completion["items"][0]["value"], "milestone:\"Release two\"");
+    for params in [
+        vec![("query", "is:open OR")],
+        vec![("search", "bad\nsearch")],
+        vec![("unknown", "true")],
+    ] {
+        assert_eq!(
+            h.http
+                .get(format!("{}{root}/discussion-search/milestones", h.origin))
+                .header(header::COOKIE, &cookie)
+                .query(&params)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    *h.provider.mode.lock().await = "member".into();
+    let revoked = h.login().await;
+    let members = h.server.repositories.values()[0]
+        .config
+        .members
+        .iter()
+        .filter(|member| member.subject != "bob-id")
+        .cloned()
+        .collect();
+    h.server
+        .catalog()
+        .unwrap()
+        .set_members("team", "private", members, true)
+        .await
+        .unwrap();
+    for path in [
+        "discussion-search/milestones",
+        "discussion-search?query=milestone:&cursor=10",
+    ] {
+        assert_eq!(
+            h.http
+                .get(format!("{}{root}/{path}", h.origin))
+                .header(header::COOKIE, &revoked)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    *h.provider.mode.lock().await = "outsider".into();
+    let outsider = h.login().await;
+    assert_eq!(
+        h.http
+            .get(format!("{}{root}/discussion-search/milestones", h.origin))
+            .header(header::COOKIE, &outsider)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    h.close().await;
+}

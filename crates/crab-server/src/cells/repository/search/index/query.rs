@@ -440,6 +440,10 @@ fn expression(expression: &Expression, bindings: &mut Bindings) -> String {
                 let values = names.iter().map(|name|bindings.text(name)).collect::<Vec<_>>().join(",");
                 format!("EXISTS (SELECT 1 FROM discussion_index_labels dl JOIN repository_labels l ON l.number = dl.label WHERE dl.document = d.rowid AND l.deleted_version IS NULL AND l.name_key IN ({values}))")
             }
+            Term::Milestone(title) => {
+                let value = bindings.text(title);
+                format!("EXISTS (SELECT 1 FROM discussion_index_milestones dm JOIN discussion_index_milestone_catalog m ON m.number = dm.milestone WHERE dm.document = d.rowid AND m.title_key = {value})")
+            }
             Term::State(SubjectState::Open) => "d.state = 0".into(),
             Term::State(SubjectState::Closed) => "d.state <> 0".into(),
             Term::State(SubjectState::Merged) => "d.state = 2".into(),
@@ -448,6 +452,7 @@ fn expression(expression: &Expression, bindings: &mut Bindings) -> String {
             Term::Draft(draft) => format!("d.kind = 1 AND d.draft = {}",u8::from(*draft)),
             Term::Missing(Metadata::Label) => "NOT EXISTS (SELECT 1 FROM discussion_index_labels dl JOIN repository_labels l ON l.number = dl.label WHERE dl.document = d.rowid AND l.deleted_version IS NULL)".into(),
             Term::Missing(Metadata::Assignee) => "NOT EXISTS (SELECT 1 FROM discussion_index_assignees a WHERE a.document = d.rowid)".into(),
+            Term::Missing(Metadata::Milestone) => "NOT EXISTS (SELECT 1 FROM discussion_index_milestones m WHERE m.document = d.rowid)".into(),
         }
     }
 }
