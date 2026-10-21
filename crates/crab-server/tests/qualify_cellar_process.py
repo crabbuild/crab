@@ -319,7 +319,7 @@ with open(run / "commands.log", "w") as log:
         request(issue_path, {"version": created["version"], "state": "closed"}, method="PATCH")
         activity = request(issue_path + "/activity")
         assert [event["action"]["kind"] for event in activity["items"]] == ["closed", "milestone_assigned", "created"]
-        request("/api/repos/team/project/labels", {
+        qualification_label = request("/api/repos/team/project/labels", {
             "request_id": str(uuid.uuid4()), "name": "RustFS qualification", "color": "abcdef", "description": "Native search suggestions",
         })
         issue_search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({
@@ -509,6 +509,27 @@ with open(run / "commands.log", "w") as log:
         )
         runtime = json.loads(status)
         assert runtime["runtime"] == "cellar" and runtime["version"] == "0.1.0"
+        follow_up = request("/api/repos/team/project/labels", {
+            "request_id": str(uuid.uuid4()), "name": "Follow up", "color": "008672", "description": "Complete filter workflow",
+        })
+        current_issue = request(issue_path)
+        labeled_issue = request(issue_path, {"version": current_issue["version"], "label_ids": [qualification_label["id"], follow_up["id"]]}, method="PATCH")
+        label_options = "/api/repos/team/project/discussion-search/labels?" + urllib.parse.urlencode({"query": "is:closed", "search": "RustFS"})
+        choices = request(label_options)
+        label_query = choices["items"][0]["query"]
+        label_search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": label_query})
+        assert request(label_search)["matching"] == 1
+        both_choices = request("/api/repos/team/project/discussion-search/labels?" + urllib.parse.urlencode({"query": label_query, "search": "Follow up"}))
+        both_query = both_choices["items"][0]["query"]
+        assert request("/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": both_query}))["matching"] == 1
+        excluded = request("/api/repos/team/project/discussion-search/labels?" + urllib.parse.urlencode({"query": both_query, "search": "RustFS"}))["items"][0]["exclude_query"]
+        assert request("/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": excluded}))["matching"] == 0
+        stop()
+        server = start()
+        wait()
+        assert request(issue_path) == labeled_issue
+        assert request(label_options) == choices
+        assert request(label_search)["matching"] == 1
         stop()
         count = subprocess.check_output(
             [
@@ -550,6 +571,8 @@ with open(run / "commands.log", "w") as log:
             "ready_merge": True,
             "reaction_restart": True,
             "reaction_remove": True,
+            "label_choices_restart": True,
+            "label_filter_restart": True,
             "milestone_restart": True,
             "milestone_search_restart": True,
             "milestone_options_rebuild": True,

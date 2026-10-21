@@ -94,6 +94,13 @@ The reviewer sidebar requests or cancels reviews from current repository members
 Submitted reviews fulfill matching requests; stale changes require explicit
 reload. Requests invite review and retain the existing branch protection rules.
 
+Issue and PR lists include a searchable Labels menu with colors, descriptions,
+multiple selections, exclusions and a no-label option. Choosing labels requires
+all selected labels; Alt+click or Alt+Enter toggles exclusion. The menu stays
+open across result refreshes, while stale counts and rows clear. Native choices
+preserve other filters and conditional boolean groups. Recent personal label
+suggestions remain unfinished.
+
 Issue and PR lists include a searchable Milestone filter with open/closed
 choices and a no-milestone option. It preserves boolean queries, sort and
 pagination semantics and searches the complete native catalog. The search box

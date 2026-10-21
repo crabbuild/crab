@@ -65,6 +65,13 @@ path-style S3 for explicit endpoints and virtual-hosted S3 otherwise; contradict
 addressing settings fail configuration. Azure authentication remains subject to
 Cellar 0.1.0's supported credential families and public-cloud restrictions.
 
+Label choices read the existing canonical SQL catalog and validate its records;
+they do not introduce a second label store or a new index format. Native query
+destinations share the parser and global-conjunction rules with milestone and
+state navigation. Definitions, assignments, counts and cursors continue to use
+the existing native transaction and revision contracts. Prepared format-2
+repositories need no additional rebuild for the label menu.
+
 ## Fleet lifecycle
 
 Cellar owns routing, leases, activation, replication, recovery, and eviction.
@@ -186,6 +193,15 @@ canonical repository records, milestones and assignments compared unchanged.
 The final mobile dropdown margin passed focused keyboard/accessibility/layout
 checks after the 75-test full browser run. This proves index preparation and the
 implemented list filter; it does not complete organization/project authority.
+
+The label-choice slice passed 333 isolated server tests (five existing ignored),
+107 UI unit tests and all 80 browser tests. The embedded UI exercised native
+multi-label, exclusion and no-label queries against real RustFS; exact records,
+choice destinations and counts survived process restart. The qualification
+script retains label-choice and filter restart receipts. Both persistent
+preview repositories compared unchanged after the server-only update. Label
+choices reuse canonical SQL records and format-2 indexes, requiring no rebuild.
+UI/server builds, all-target Clippy, formatting and architecture checks passed.
 
 These checks do not qualify mixed-version upgrades, protected cloud fault
 matrices, or production scale. Release publication remains disabled by a direct workflow gate until those

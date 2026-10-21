@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { ChevronDownIcon, MessageSquareIcon } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Button } from "@/components/ui/button";
@@ -12,8 +13,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { navigate, type Repository, type RepositoryLabel } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
-import { MilestoneFilter } from "@/features/milestones/filter";
-import { cn } from "@/lib/utils";
+import { DiscussionFilter } from "./filter";
 
 export type ListLabel = Pick<RepositoryLabel, "id" | "name" | "color">;
 export interface DiscussionPage<T> {
@@ -64,115 +64,130 @@ export function DiscussionListControls({
   repo,
   url,
   view,
-  counts,
-  navigation,
-  matching,
+  data,
+  loading,
 }: {
   repo: Repository;
   url: URL;
   view: "issues" | "pulls";
-  counts: DiscussionPage<unknown>["counts"];
-  navigation: DiscussionPage<unknown>["navigation"];
-  matching: number;
+  data?: Pick<DiscussionPage<unknown>, "counts" | "navigation" | "matching">;
+  loading: boolean;
 }) {
   const filters = discussionFilters(url);
+  const [sortOpen, setSortOpen] = useState(false);
+  const navigation = data?.navigation;
   const cannotChangeState =
-    navigation.kind === "state" &&
+    navigation?.kind === "state" &&
     (navigation.open === null || navigation.closed === null);
   const sortLabel = sorts.find(([key]) => key === filters.sort)?.[1];
   const change = (values: Partial<typeof filters>) =>
     navigate(repoHref(repo, { view, ...filters, ...values }));
   return (
-    <div className={cn("issues-filters", cannotChangeState && "flex-wrap")}>
-      {navigation.kind === "state" ? (
-        <nav
-          aria-label={view === "issues" ? "Issue state" : "Pull request state"}
-        >
-          {(["open", "closed"] as const).map((state) => {
-            const query = navigation[state];
-            const label = (
-              <>
-                {state === "open" ? "Open" : "Closed"}{" "}
-                <span className="discussion-state-count">
-                  {new Intl.NumberFormat().format(counts[state])}
-                </span>
-              </>
-            );
-            return query === null ? (
-              <Button
-                key={state}
-                variant="ghost"
-                size="sm"
-                disabled
-                title="Shorten this search to change its state filter"
-              >
-                {label}
-              </Button>
-            ) : (
-              <Link
-                key={state}
-                className={navigation.selected === state ? "active" : ""}
-                aria-current={
-                  navigation.selected === state ? "page" : undefined
-                }
-                href={repoHref(repo, { view, ...filters, q: query })}
-              >
-                {label}
-              </Link>
-            );
-          })}
-        </nav>
-      ) : (
-        <h3 className="m-0 text-sm font-medium">
-          {new Intl.NumberFormat().format(matching)}{" "}
-          {matching === 1 ? "result" : "results"}
-        </h3>
-      )}
+    <div className="issues-filters flex-wrap">
+      <div className="discussion-counts">
+        {!data ? (
+          <span role="status" className="text-sm text-muted-foreground">
+            {loading ? "Loading results…" : "Results unavailable"}
+          </span>
+        ) : navigation?.kind === "state" ? (
+          <nav
+            aria-label={
+              view === "issues" ? "Issue state" : "Pull request state"
+            }
+          >
+            {(["open", "closed"] as const).map((state) => {
+              const query = navigation[state];
+              const label = (
+                <>
+                  {state === "open" ? "Open" : "Closed"}{" "}
+                  <span className="discussion-state-count">
+                    {new Intl.NumberFormat().format(data.counts[state])}
+                  </span>
+                </>
+              );
+              return query === null ? (
+                <Button
+                  key={state}
+                  variant="ghost"
+                  size="sm"
+                  disabled
+                  title="Shorten this search to change its state filter"
+                >
+                  {label}
+                </Button>
+              ) : (
+                <Link
+                  key={state}
+                  className={navigation.selected === state ? "active" : ""}
+                  aria-current={
+                    navigation.selected === state ? "page" : undefined
+                  }
+                  href={repoHref(repo, { view, ...filters, q: query })}
+                >
+                  {label}
+                </Link>
+              );
+            })}
+          </nav>
+        ) : (
+          <h3 className="m-0 text-sm font-medium">
+            {new Intl.NumberFormat().format(data.matching)}{" "}
+            {data.matching === 1 ? "result" : "results"}
+          </h3>
+        )}
+      </div>
       <div className="ml-auto flex items-center gap-1">
-        <MilestoneFilter
-          repo={repo}
-          query={
-            url.searchParams.get("q") ??
-            (view === "issues" ? "is:issue is:open" : "is:open")
-          }
-          onSelect={(q) => change({ q })}
-        />
-        <DropdownMenu modal={false}>
+        {(["labels", "milestones"] as const).map((kind) => (
+          <DiscussionFilter
+            key={kind}
+            kind={kind}
+            repo={repo}
+            query={
+              url.searchParams.get("q") ??
+              (view === "issues" ? "is:issue is:open" : "is:open")
+            }
+            onSelect={(q) => change({ q })}
+          />
+        ))}
+        <DropdownMenu modal={false} open={sortOpen} onOpenChange={setSortOpen}>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="sm" aria-label="Sort discussions">
               Sort <ChevronDownIcon size={14} />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-56" tabIndex={0}>
-            <DropdownMenuLabel>Sort by</DropdownMenuLabel>
-            <DropdownMenuRadioGroup
-              value={filters.sort}
-              onValueChange={(sort) => change({ sort })}
-            >
-              {sorts.map(([value, label]) => (
-                <DropdownMenuRadioItem key={value} value={value}>
-                  {label}
+          {/* Closing scopes must unmount before a rapid reopen during refresh. */}
+          {sortOpen && (
+            <DropdownMenuContent align="end" className="w-56" tabIndex={0}>
+              <DropdownMenuLabel>Sort by</DropdownMenuLabel>
+              <DropdownMenuRadioGroup
+                value={filters.sort}
+                onValueChange={(sort) => change({ sort })}
+              >
+                {sorts.map(([value, label]) => (
+                  <DropdownMenuRadioItem key={value} value={value}>
+                    {label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel>Order</DropdownMenuLabel>
+              <DropdownMenuRadioGroup
+                value={filters.direction}
+                onValueChange={(direction) => change({ direction })}
+              >
+                <DropdownMenuRadioItem value="desc">
+                  {filters.sort === "created" || filters.sort === "updated"
+                    ? "Newest first"
+                    : "Highest first"}
                 </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-            <DropdownMenuSeparator />
-            <DropdownMenuLabel>Order</DropdownMenuLabel>
-            <DropdownMenuRadioGroup
-              value={filters.direction}
-              onValueChange={(direction) => change({ direction })}
-            >
-              <DropdownMenuRadioItem value="desc">
-                {filters.sort === "created" || filters.sort === "updated"
-                  ? "Newest first"
-                  : "Highest first"}
-              </DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="asc">
-                {filters.sort === "created" || filters.sort === "updated"
-                  ? "Oldest first"
-                  : "Lowest first"}
-              </DropdownMenuRadioItem>
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
+                <DropdownMenuRadioItem value="asc">
+                  {filters.sort === "created" || filters.sort === "updated"
+                    ? "Oldest first"
+                    : "Lowest first"}
+                </DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          )}
         </DropdownMenu>
       </div>
       {cannotChangeState && (

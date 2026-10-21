@@ -2,6 +2,63 @@ use serde::{Deserialize, Serialize};
 
 use super::{Expression, Query, SubjectState, Term};
 
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct Choice {
+    pub query: Option<String>,
+    pub selected: bool,
+}
+
+// A facet edits global conjunctions only. An OR subtree is a conditional
+// predicate and must keep its grouping when another filter is selected.
+pub(super) fn split_globals(
+    query: &Query,
+    matches: fn(&Expression) -> bool,
+) -> (Expression, Vec<Expression>) {
+    let mut removed = Vec::new();
+    let base = without_globals(&query.expression, matches, &mut removed).unwrap_or(Expression::All);
+    (base, removed)
+}
+fn without_globals(
+    expression: &Expression,
+    matches: fn(&Expression) -> bool,
+    removed: &mut Vec<Expression>,
+) -> Option<Expression> {
+    if matches(expression) {
+        removed.push(expression.clone());
+        return None;
+    }
+    if let Expression::And(parts) = expression {
+        let mut parts: Vec<_> = parts
+            .iter()
+            .filter_map(|part| without_globals(part, matches, removed))
+            .collect();
+        return match parts.len() {
+            0 => None,
+            1 => parts.pop(),
+            _ => Some(Expression::And(parts)),
+        };
+    }
+    Some(expression.clone())
+}
+pub(super) fn conjunction(base: Expression, atom: Expression) -> Expression {
+    if matches!(base, Expression::All) {
+        atom
+    } else {
+        Expression::And(vec![base, atom])
+    }
+}
+pub(super) fn destination(expression: &Expression) -> Option<String> {
+    let value = source(expression, 0);
+    // Empty browser queries select default lists. Spell the universal predicate
+    // explicitly so clearing a final facet preserves the unrestricted search.
+    let value = if value.is_empty() {
+        "is:issue OR is:pr".into()
+    } else {
+        value
+    };
+    Query::parse(Some(&value)).ok().map(|_| value)
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StateSelection {
@@ -25,7 +82,15 @@ impl Query {
         let Some(selected) = global_state(&self.expression).ok().flatten() else {
             return (self.expression.clone(), StateNavigation::Results);
         };
-        let base = without_states(&self.expression).unwrap_or(Expression::All);
+        let (base, _) = split_globals(self, |expression| {
+            matches!(
+                expression,
+                Expression::Term {
+                    value: Term::State(_),
+                    ..
+                }
+            )
+        });
         let with_state = |state: SubjectState| {
             let spelling = match state {
                 SubjectState::Open => "is:open",
@@ -53,24 +118,6 @@ impl Query {
             closed: with_state(SubjectState::Closed),
         };
         (base, navigation)
-    }
-}
-
-fn without_states(expression: &Expression) -> Option<Expression> {
-    match expression {
-        Expression::Term {
-            value: Term::State(_),
-            ..
-        } => None,
-        Expression::And(parts) => {
-            let mut parts: Vec<_> = parts.iter().filter_map(without_states).collect();
-            match parts.len() {
-                0 => None,
-                1 => parts.pop(),
-                _ => Some(Expression::And(parts)),
-            }
-        }
-        _ => Some(expression.clone()),
     }
 }
 

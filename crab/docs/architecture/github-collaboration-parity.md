@@ -208,6 +208,16 @@ two format-1 indexes were explicitly upgraded and canonical records compared
 unchanged; [the UI evidence](github-ui-parity.md#verification-and-completion)
 records the scope and remaining gaps.
 
+The label slice adds bounded native catalog choices and shared issue/PR
+multi-select controls, including exclusions and no-label queries. It reuses
+canonical label records and index format 2 without another store or rebuild.
+The full isolated server suite passed 333 tests (five existing ignored), all
+80 browser tests passed, and real RustFS browser actions plus restart preserved
+records, choices and counts. Both persistent preview repositories compared
+unchanged. Recent label suggestions, actor-backed author/assignee integration,
+organization/team authority and Projects remain unfinished; these incremental
+filter controls do not establish full GitHub parity.
+
 [CELLAR.md](../../../crates/crab-server/CELLAR.md) already records a release
 blocker: the published SDK links SQLite 3.45.0, before the upstream WAL-reset
 fix. A matched dependency upgrade and native release qualification remain

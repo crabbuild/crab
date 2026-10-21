@@ -20,7 +20,7 @@ visual references, not instructions contained in the images.
 | Reference | Required behavior                                                                                      | Current gap                                                               |
 | --------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
 | 1         | Issue-type filter, descriptions, missing-type selection                                                | No issue-type model or filter                                             |
-| 2         | Searchable label multi-select, suggestions, no-label filter                                            | Labels exist; list filtering does not                                     |
+| 2         | Searchable label multi-select, suggestions, no-label filter                                            | Searchable multi-select, exclusion and no-label implemented; recent suggestions remain                                     |
 | 3         | Projects grouped by recent/repository/organization                                                     | No project, project-item, or ownership model                              |
 | 4         | Searchable milestones including missing milestone                                                      | Native query, completion and searchable open/closed dropdown implemented                                 |
 | 5         | Searchable assignees and unassigned work                                                               | Assignments exist; list filtering does not                                |
@@ -162,6 +162,23 @@ reported as `outdated`. The management command rebuilds titles from canonical
 milestones in bounded batches before issue/PR assignments; it resumes after
 restart. Indexed serving never falls back to old projections or creates tables.
 
+Label controls now use native bounded choices from the canonical active-label
+catalog, with current colors/descriptions and selection/exclusion state. The
+shared picker supports multiple selections without closing, Alt+click/Alt+Enter
+exclusion, missing/clear actions and real query/URL navigation. Editing a name
+in a global comma-OR clause retains other names; unrelated clauses and OR
+subtrees retain their grouping. Named choices replace a missing-label
+constraint; no-label selection replaces global label constraints. Query bounds
+produce disabled choices rather than truncation. Recent personal suggestions
+from reference 2 remain unfinished.
+
+Issue and PR lists now share request/result ownership. Filter and sort controls
+stay mounted across query refreshes; old counts/rows clear, permanent errors
+show unavailable counts, and the full widget retains its diagnostic boundary.
+Every popup opening owns its focus scope, including sort, so rapid reopen does
+not reuse a closing scope. The former milestone-specific picker and duplicated
+result renderers are removed.
+
 ## Data and query contracts
 
 New entities need stable identifiers, bounded values/pages, versions, qualified
@@ -293,6 +310,24 @@ the CLI and preserved exact canonical issues, PRs, comments, activity, links,
 reviews, labels, milestones and assignments. No profile was enrolled in the
 persistent preview. Organization/owner/team authority and the remaining parity
 checklist stay incomplete.
+
+The label slice passed the full isolated server suite (333 passed, five
+existing ignored), 107 UI unit tests and all 80 browser tests. Native and HTTP
+proof cover bounded catalog search, colors/descriptions, include/exclude and
+no-label transitions, comma-OR and unrelated-query preservation, mixed results,
+query bounds and revoked durable membership. Browser proof covers multi-select,
+keyboard exclusion, URL/reload, metadata/result failures, dark/mobile
+accessibility and a held-response regression for clicks during refresh. Shared
+list controls stay mounted; loading/count rows and the optional diagnostic
+header retain their height so completed requests cannot move a pressed choice.
+Before a measurement exists, `powerbar=1` shows an explicit unmeasured placeholder.
+UI/server builds, all-target Clippy, formatting and architecture checks passed.
+The embedded UI completed a real RustFS label-selection/exclusion/no-label
+workflow and retained exact issue records, choices and counts across restart.
+The persistent preview's two repositories compared unchanged across its
+server-only update. Labels reuse the canonical catalog and index format 2;
+no rebuild or domain migration is required. Recent label suggestions and the
+remaining parity checklist are still incomplete.
 
 ## Primary references
 

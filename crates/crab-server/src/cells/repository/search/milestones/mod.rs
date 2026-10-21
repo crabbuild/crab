@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use super::{Expression, Metadata, Query, Term, index, navigation};
+use super::{
+    Expression, Metadata, Query, Term, index,
+    navigation::{self, Choice},
+};
 use crate::cells::repository::{
     collaboration::milestones::{Milestone, MilestoneState},
     integer, result_text, result_u64_from_row,
@@ -42,11 +45,6 @@ impl OptionInput {
         }
         Ok(())
     }
-}
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct Choice {
-    pub query: Option<String>,
-    pub selected: bool,
 }
 #[derive(Debug, Deserialize, Serialize)]
 pub(super) struct Summary {
@@ -142,32 +140,10 @@ fn milestone_atom(expression: &Expression) -> bool {
         _ => false,
     }
 }
-fn without_milestones(
-    expression: &Expression,
-    removed: &mut Vec<Expression>,
-) -> Option<Expression> {
-    if milestone_atom(expression) {
-        removed.push(expression.clone());
-        return None;
-    }
-    if let Expression::And(parts) = expression {
-        let mut parts: Vec<_> = parts
-            .iter()
-            .filter_map(|part| without_milestones(part, removed))
-            .collect();
-        return match parts.len() {
-            0 => None,
-            1 => parts.pop(),
-            _ => Some(Expression::And(parts)),
-        };
-    }
-    Some(expression.clone())
-}
 fn choice(query: &Query, filter: Filter<'_>) -> Result<Choice> {
     // Replace only global milestone conjunctions. Predicates inside OR retain
     // their grouping; treating those as a selected facet would change meaning.
-    let mut removed = Vec::new();
-    let base = without_milestones(&query.expression, &mut removed).unwrap_or(Expression::All);
+    let (base, removed) = navigation::split_globals(query, milestone_atom);
     let selected = match &filter {
         Filter::Clear => removed.is_empty(),
         Filter::Missing => matches!(
@@ -200,16 +176,8 @@ fn choice(query: &Query, filter: Filter<'_>) -> Result<Choice> {
             }
         }
     };
-    let source = navigation::source(&expression, 0);
-    // Empty URL queries are treated as default lists by browser routing. Spell
-    // the universal predicate explicitly so clearing the last facet keeps all states.
-    let source = if source.is_empty() {
-        "is:issue OR is:pr".into()
-    } else {
-        source
-    };
     Ok(Choice {
-        query: Query::parse(Some(&source)).ok().map(|_| source),
+        query: navigation::destination(&expression),
         selected,
     })
 }

@@ -307,7 +307,9 @@ fn label_submission_digest(input: &CreateLabelInput) -> blake3::Hash {
     hasher.finalize()
 }
 
-fn label_from_row(row: &[SqlValue]) -> crate::cells::Result<LabelRecord> {
+pub(in crate::cells::repository) fn label_from_row(
+    row: &[SqlValue],
+) -> crate::cells::Result<LabelRecord> {
     let record = LabelRecord {
         number: result_u64_from_row(row, 0)?,
         name: result_text(row, 1)?,

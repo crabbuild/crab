@@ -2384,6 +2384,18 @@ main {
   background: var(--muted);
   text-decoration: none;
 }
+/* Count/loading states share a row height so open filters keep their anchor. */
+.discussion-counts {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  min-width: 0;
+}
+.discussion-counts h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+}
 .issues-filters nav a {
   color: var(--muted-foreground);
   padding: 8px 12px;
@@ -3004,6 +3016,10 @@ main {
   .issues-filters {
     align-items: center;
     gap: 4px;
+  }
+
+  .discussion-counts {
+    flex-basis: 100%;
   }
 
   .issues-filters nav {

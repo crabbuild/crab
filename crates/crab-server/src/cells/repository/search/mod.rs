@@ -4,6 +4,7 @@ use super::collaboration::{SubjectKind, SubjectState};
 
 pub(crate) mod completion;
 pub(crate) mod index;
+pub(crate) mod labels;
 pub(crate) mod milestones;
 mod navigation;
 pub(crate) mod results;

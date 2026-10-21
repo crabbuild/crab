@@ -15,6 +15,10 @@ use std::sync::Arc;
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route(
+            "/api/repos/{owner}/{name}/discussion-search/labels",
+            get(labels),
+        )
+        .route(
             "/api/repos/{owner}/{name}/discussion-search/milestones",
             get(milestones),
         )
@@ -58,6 +62,25 @@ async fn milestones(
     let result = app::query_output(
         cell.client
             .query::<MilestoneOptions>(&cell.target, None, input)
+            .await,
+    )?;
+    app::membership(&server, &principal, &repo).await?;
+    Ok(Json(result))
+}
+
+async fn labels(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(key): Path<(String, String)>,
+    Query(input): Query<crate::cells::repository::search::labels::OptionInput>,
+) -> Result<Json<crate::cells::repository::search::labels::Options>> {
+    use crate::cells::repository::search::labels::LabelOptions;
+    let repo = app::repository(&server, &principal, &key)?;
+    input.validate().map_err(app::Error::Invalid)?;
+    let cell = app::repository_cell(&server, &repo)?;
+    let result = app::query_output(
+        cell.client
+            .query::<LabelOptions>(cell.target, None, input)
             .await,
     )?;
     app::membership(&server, &principal, &repo).await?;

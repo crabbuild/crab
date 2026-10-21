@@ -319,3 +319,123 @@ async fn milestone_options_and_queries_follow_real_assignment_versions_and_repos
     );
     h.close().await;
 }
+
+#[tokio::test]
+async fn label_choices_preserve_query_destinations_and_recheck_durable_access() {
+    use reqwest::Method;
+    let h = Harness::new(false).await;
+    let cookie = h.login().await;
+    let root = "/api/repos/team/private";
+    let label: Value = h
+        .write(
+            Method::POST,
+            &format!("{root}/labels"),
+            &cookie,
+            json!({
+                "request_id": uuid::Uuid::now_v7(),
+                "name": "Help wanted",
+                "color": "abcdef",
+                "description": "Good first issue",
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    h.write(
+        Method::POST,
+        &format!("{root}/issues"),
+        &cookie,
+        json!({"request_id":uuid::Uuid::now_v7(),"title":"Labeled issue","body":"Work"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::PATCH,
+        &format!("{root}/issues/1"),
+        &cookie,
+        json!({"version":1,"label_ids":[label["id"]]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let response = h
+        .http
+        .get(format!("{}{root}/discussion-search/labels", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[("query", "is:open"), ("search", "wanted")])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(response["items"][0]["title"], "Help wanted");
+    assert_eq!(response["items"][0]["description"], "Good first issue");
+    assert_eq!(response["items"][0]["color"], "abcdef");
+    for (field, matching) in [("query", 1), ("exclude_query", 0)] {
+        let target = response["items"][0][field].as_str().unwrap();
+        let result = h
+            .http
+            .get(format!("{}{root}/issues", h.origin))
+            .header(header::COOKIE, &cookie)
+            .query(&[("q", target)])
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(result["matching"], matching);
+    }
+    for params in [
+        vec![("query", "label:")],
+        vec![("search", "bad\nvalue")],
+        vec![("state", "open")],
+    ] {
+        assert_eq!(
+            h.http
+                .get(format!("{}{root}/discussion-search/labels", h.origin))
+                .header(header::COOKIE, &cookie)
+                .query(&params)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let members = h.server.repositories.values()[0]
+        .config
+        .members
+        .iter()
+        .filter(|member| member.subject != "bob-id")
+        .cloned()
+        .collect();
+    h.server
+        .catalog()
+        .unwrap()
+        .set_members("team", "private", members, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        h.http
+            .get(format!("{}{root}/discussion-search/labels", h.origin))
+            .header(header::COOKIE, &bob)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    h.close().await;
+}

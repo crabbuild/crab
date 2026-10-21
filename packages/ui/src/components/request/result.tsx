@@ -56,26 +56,34 @@ export function RequestWidget({
       role="group"
       aria-label={`${label} request widget`}
     >
-      {timing && (
-        <details className="timing" aria-label={`${label} request timing`}>
-          <summary>
-            <span>{label}</span>
-            <strong>{timing.roundtrip.toFixed(1)} ms</strong>
-          </summary>
-          <div className="timing-details">
-            <code>{timing.url}</code>
-            <p>
-              Round trip includes the request, response transfer, and JSON
-              parsing.
-            </p>
-            {timing.server && (
+      {/* Keep the diagnostic header stable while a request refreshes;
+          adding it after completion moves anchored menus during a click. */}
+      <details className="timing" aria-label={`${label} request timing`}>
+        <summary>
+          <span>{label}</span>
+          <strong aria-label={timing ? undefined : "No timing yet"}>
+            {timing ? `${timing.roundtrip.toFixed(1)} ms` : "—"}
+          </strong>
+        </summary>
+        <div className="timing-details">
+          {timing ? (
+            <>
+              <code>{timing.url}</code>
               <p>
-                Server-Timing: <code>{timing.server}</code>
+                Round trip includes the request, response transfer, and JSON
+                parsing.
               </p>
-            )}
-          </div>
-        </details>
-      )}
+              {timing.server && (
+                <p>
+                  Server-Timing: <code>{timing.server}</code>
+                </p>
+              )}
+            </>
+          ) : (
+            <p>No completed request timing yet.</p>
+          )}
+        </div>
+      </details>
       {children}
     </div>
   );

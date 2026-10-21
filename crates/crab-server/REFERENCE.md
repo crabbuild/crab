@@ -1319,6 +1319,7 @@ a handle matching a catalog owner label does not acquire ownership.
 | Inline review threads | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/threads`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}` |
 | Thread replies | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}/replies`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}/replies/{reply}` |
 | Merge | `POST /api/repos/{owner}/{name}/pulls/{number}/merge` |
+| Label search choices | `GET /api/repos/{owner}/{name}/discussion-search/labels` |
 | Milestone search choices | `GET /api/repos/{owner}/{name}/discussion-search/milestones` |
 | Labels | `GET/POST /api/repos/{owner}/{name}/labels`, `PATCH/DELETE /api/repos/{owner}/{name}/labels/{number}` |
 | Assignees | `GET /api/repos/{owner}/{name}/assignees`; issue and pull `PATCH` requests replace assignments |
@@ -1572,6 +1573,31 @@ Label constraints:
 - Descriptions up to 100 characters
 - At most 20 labels per issue or pull
 - At most 500 allocated label IDs during repository lifetime
+
+The Labels menu uses `GET .../discussion-search/labels` with `query` and a
+bounded `search` substring. It searches the complete canonical active-label
+catalog and returns up to 20 choices, exact matches first, with a truncation
+indicator. Colors and descriptions come from validated label records. Native
+include, exclude, no-label and clear destinations retain the current query's
+other terms and boolean grouping. Selection describes global label clauses;
+labels inside OR remain conditional predicates rather than global selections.
+
+Selecting several labels adds separate conjunctions. Clicking a selected label
+removes it; Alt+click or Alt+Enter toggles exclusion. Editing a name within a
+comma-OR clause retains its other members. Choosing no labels replaces global
+label constraints; clearing the final constraint spells an unrestricted query
+rather than resetting to the default open list. Oversized destinations are
+disabled. Recent personal suggestions are not yet implemented.
+
+The shared filter picker remains open during multi-selection and exposes
+loading, unavailable, retry, selection and excluded states. Issue/PR result
+ownership is shared: controls survive a refresh while counts and rows clear,
+and one `powerbar=1` boundary encloses the complete list. A failed request shows
+unavailable counts rather than a permanent loading message.
+Count/loading rows and the optional diagnostic header retain their height during
+refresh so a completed request cannot move an open menu under a pressed pointer.
+Before a measurement exists, the diagnostic header shows a dash and explains
+that no request timing has completed; normal pages have no diagnostic header.
 
 The Milestone dropdown on issue and PR lists searches the complete native
 milestone catalog and switches between open/closed milestones. Its choice
