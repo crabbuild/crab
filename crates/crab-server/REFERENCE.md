@@ -1459,8 +1459,8 @@ returns an error; it does not claim durable completion. See [CELLAR.md](CELLAR.m
 | Native restart, duplicate identity, archive/write ordering | `cells::native_tests` |
 | Signed peer routing over mTLS, owner handoff | `server::peer_e2e_tests` |
 | Real RustFS object publication and handoff | Ignored `rustfs_cellar_routes_over_mutual_tls_and_recovers_after_handoff` test with isolated test settings |
-| HTTP collaboration, authorization, CSRF, replay | `auth::tests::http` fixtures use actual native nodes |
-| Missing schema and membership installation | `auth::tests::http::members` |
+| HTTP collaboration, authorization, CSRF, replay | `api::<feature>::tests` and `auth::<feature>::tests` use shared `test_support/http` fixtures with actual native nodes |
+| Missing schema and membership installation | `api::members::tests` |
 | Retained staging capacity and restart | `local_disk::tests` |
 | Creation, Git push, issue replay, process restart | `tests/qualify_cellar_process.py` |
 

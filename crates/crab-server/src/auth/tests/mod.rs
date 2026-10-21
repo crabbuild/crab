@@ -436,5 +436,3 @@ async fn session_creation_racing_logout_never_leaves_an_unindexed_parent() {
         auth.remove_session(session.session_key).await.unwrap();
     }
 }
-
-mod http;

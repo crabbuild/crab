@@ -25,8 +25,6 @@ use crate::{
 };
 
 mod merge;
-mod merge_tree;
-mod review_thread_storage;
 mod review_threads;
 mod reviews;
 mod storage;

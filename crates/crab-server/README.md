@@ -285,8 +285,9 @@ API, Git, and authentication owners assemble their own routes;
 
 Components with children use a single `<component>/mod.rs` entry point. Tests
 live with their owner, including the HTTP authorization suites under
-`auth/tests/http/`. Shared Git and server fixtures live in test-only
-`test_support/`; tests do not depend on another feature's test suite.
+`api/<feature>/tests.rs` and `auth/<feature>/tests.rs`. Shared setup lives in
+`test_support/`; HTTP fixtures and their deterministic identity provider are
+under `test_support/http/`. Tests never import another feature's test suite.
 
 The internal owners are:
 
@@ -298,13 +299,16 @@ The internal owners are:
 | `server/management.rs`, `server/capacity.rs`, `server/storage.rs` | Private management, resource policy, and storage preflight |
 | `repository/` | Pinned Git snapshots, maintenance, browse projections, and atomic catalog installation |
 | `catalog/` | Durable catalog records and membership audit |
-| `auth/mod.rs`, `auth/state.rs`, `auth/http.rs`, `auth/transport.rs` | Identity, durable sessions, login endpoints, and bounded provider transport |
+| `auth/mod.rs`, `auth/state.rs`, `auth/http/mod.rs`, `auth/transport.rs` | Identity, durable sessions, login endpoints, and bounded provider transport |
 | `git_import/mod.rs`, `git_import/source.rs`, `git_import/git.rs` | Import jobs/workflow, source validation, and isolated Git processes |
 | `api/` | Browse HTTP orchestration, feature handlers, Git queries, and wire encoding |
 | `git/` | Native Git protocol, object, receive, and LFS endpoints |
 | `peer/`, `peer/tls/` | Private transport and mutual TLS |
 | `app.rs` | Collaboration admission, authorization, mutation identity, and error mapping |
-| `cells/` | Native ingress, durable transactions, and domain commands/queries |
+| `cells/` | Native ingress and durable transaction/replay boundary |
+| `cells/repository/` | Typed domain facade and shared repository invariants |
+| `cells/repository/pulls/` | Pull records, comments, reviews, merge commands, and review threads |
+| `cells/repository/{checks,settings,releases,labels,statuses,projection}/` | Feature commands, local persistence/validation, and tests |
 
 Authentication always uses shared durable state, including in-memory object-store
 test fixtures; there is no separate process-local authentication mode. Repository
@@ -316,7 +320,7 @@ settings operations. HTTP mutation families share one request identity policy in
 Build the frontend before Rust checks. Focused HTTP authentication coverage:
 
 ```sh
-cargo test -p crab-server --locked --lib auth::tests::http
+cargo test -p crab-server --locked --lib auth::http::tests
 cargo clippy -p crab-server --locked --all-targets -- -D warnings
 ```
 

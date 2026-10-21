@@ -15,7 +15,7 @@ and migration limitations.
 1. `crates/crab-server/src/main.rs` — thin binary entry; `src/cli/mod.rs` owns command parsing and dispatch, with ECS discovery and CLI tests beside it.
 2. `crates/crab-server/src/server/mod.rs` — `serve`: process composition and ordered shutdown; `src/server/http/mod.rs` composes routes and `src/repository/mod.rs` owns pinned reads and maintenance.
 3. `crates/crab-server/src/app.rs` — `admit / repository`: request repository/principal boundary and error mapping.
-4. `crates/crab-server/src/auth/mod.rs` — `Principal / Authentication`: identity and configuration; `auth/state.rs` owns durable sessions, `auth/http.rs` owns login/session endpoints, and `auth/transport.rs` bounds provider requests.
+4. `crates/crab-server/src/auth/mod.rs` — `Principal / Authentication`: identity and configuration; `auth/state.rs` owns durable sessions, `auth/http/mod.rs` owns login/session endpoints, and `auth/transport.rs` bounds provider requests.
 5. `crates/crab-server/src/git/receive/mod.rs` — `receive / publish_objects`: bounded native receive and publication orchestration.
 
 Trace one path: `crates/crab-server/src/main.rs` → `src/cli/mod.rs` → `serve` in
@@ -24,8 +24,11 @@ Receive continues through `crates/crab-server/src/git/receive/mod.rs` to the
 shared publication owner `crates/crab-write/src/journal.rs`.
 
 The Cell repository facade in `src/cells/repository/mod.rs` exposes typed
-operations. `models.rs` owns common records/inputs, `issues.rs` owns issue and
-comment operations, and `dispatch.rs` owns operation-ID decoding and dispatch.
+operations. `models.rs` owns common records/inputs; `issues.rs` owns issue and
+comment operations. Feature commands and their persistence helpers live under
+`checks/`, `labels/`, `statuses/`, `settings/`, `releases/`, and `pulls/`. Pull
+review threads belong to `pulls/review_threads/`; browse projection reads and
+writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs.
 
 The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns
 typed ingress, `src/cells/application.rs` owns transaction/replay dispatch, and
@@ -38,7 +41,9 @@ and session migration paths are supported.
 - Use `<component>/mod.rs` for every component with child modules; keep its
   implementation, submodules, and tests in that directory. Avoid custom `#[path]`
   mounts and sibling `<component>.rs` entry points.
-- `api/` owns browser HTTP feature handlers and route assembly; `git/` owns native Git, object,
+- `api/` owns browser HTTP feature handlers and route assembly; pull merge-tree
+  mechanics live in `api/pulls/merge/`, and thread persistence in
+  `api/pulls/review_threads/`. `git/` owns native Git, object,
   receive, and LFS endpoints and their route assembly. `auth/` assembles login
   and session routes. `server/http/mod.rs` applies the common security boundary
   after merging these routers. Shared request policy remains in `app.rs`.
@@ -78,11 +83,13 @@ No declared Cargo features. Both library and auto-discovered main binary exist. 
 ## Verification
 
 Tests live under their owner: `api/tests.rs`, `auth/tests/`,
-`catalog/tests.rs`, `git/receive/tests/`, `git/lfs/tests.rs`,
-`api/pulls/tests.rs`, and `repository/tests/`. `server/peer_e2e_tests.rs`
+`api/<feature>/tests.rs`, `auth/<feature>/tests.rs`, `catalog/tests.rs`,
+`cells/repository/<feature>/tests.rs`, `git/receive/tests/`, `git/lfs/tests.rs`,
+`api/pulls/tests/`, and `repository/tests/`. `server/peer_e2e_tests.rs`
 exercises process composition and native peer handoff.
 Shared setup lives in test-only `src/test_support/`; feature suites never import
-fixtures from another suite. Git commands/history belong in `test_support/git.rs`,
+fixtures from another suite. HTTP fixtures and their deterministic identity
+provider belong in `test_support/http/`. Git commands/history belong in `test_support/git.rs`,
 server/Cell lifecycle fixtures in `test_support/server.rs`, peer identities
 in `test_support/tls.rs`, and archive-race recovery checks in
 `test_support/archive.rs`.
@@ -95,7 +102,7 @@ writable. Stop if unavailable; never fall back to a local target directory.
 ```sh
 npm ci --prefix packages/ui
 npm run build --prefix packages/ui
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-089c" cargo test -p crab-server --locked --lib auth::tests::http
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-089c" cargo test -p crab-server --locked --lib auth::http::tests
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-089c" cargo test -p crab-server --locked --lib git::receive::tests
 ```
 
