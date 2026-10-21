@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { navigate, type Repository, type RepositoryLabel } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
+import { cn } from "@/lib/utils";
 
 export type ListLabel = Pick<RepositoryLabel, "id" | "name" | "color">;
 export interface DiscussionPage<T> {
@@ -19,6 +20,14 @@ export interface DiscussionPage<T> {
   next: string | null;
   counts: { open: number; closed: number; merged: number };
   matching: number;
+  navigation:
+    | { kind: "results" }
+    | {
+        kind: "state";
+        selected: "open" | "closed";
+        open: string | null;
+        closed: string | null;
+      };
 }
 export interface DiscussionTotals {
   comment_count: number;
@@ -44,7 +53,6 @@ const sorts = [
 // the first page because the native cursor belongs to its original query.
 export function discussionFilters(url: URL) {
   return {
-    state: url.searchParams.get("state") ?? "open",
     q: url.searchParams.get("q") || undefined,
     sort: url.searchParams.get("sort") ?? "created",
     direction: url.searchParams.get("direction") ?? "desc",
@@ -56,37 +64,69 @@ export function DiscussionListControls({
   url,
   view,
   counts,
+  navigation,
+  matching,
 }: {
   repo: Repository;
   url: URL;
   view: "issues" | "pulls";
   counts: DiscussionPage<unknown>["counts"];
+  navigation: DiscussionPage<unknown>["navigation"];
+  matching: number;
 }) {
   const filters = discussionFilters(url);
+  const cannotChangeState =
+    navigation.kind === "state" &&
+    (navigation.open === null || navigation.closed === null);
   const sortLabel = sorts.find(([key]) => key === filters.sort)?.[1];
   const change = (values: Partial<typeof filters>) =>
     navigate(repoHref(repo, { view, ...filters, ...values }));
   return (
-    <div className="issues-filters">
-      <nav
-        aria-label={view === "issues" ? "Issue state" : "Pull request state"}
-      >
-        {(["open", "closed", "all"] as const).map((state) => (
-          <Link
-            key={state}
-            className={filters.state === state ? "active" : ""}
-            aria-current={filters.state === state ? "page" : undefined}
-            href={repoHref(repo, { view, ...filters, state })}
-          >
-            {state === "all" ? "All" : state === "open" ? "Open" : "Closed"}{" "}
-            <span className="discussion-state-count">
-              {new Intl.NumberFormat().format(
-                state === "all" ? counts.open + counts.closed : counts[state],
-              )}
-            </span>
-          </Link>
-        ))}
-      </nav>
+    <div className={cn("issues-filters", cannotChangeState && "flex-wrap")}>
+      {navigation.kind === "state" ? (
+        <nav
+          aria-label={view === "issues" ? "Issue state" : "Pull request state"}
+        >
+          {(["open", "closed"] as const).map((state) => {
+            const query = navigation[state];
+            const label = (
+              <>
+                {state === "open" ? "Open" : "Closed"}{" "}
+                <span className="discussion-state-count">
+                  {new Intl.NumberFormat().format(counts[state])}
+                </span>
+              </>
+            );
+            return query === null ? (
+              <Button
+                key={state}
+                variant="ghost"
+                size="sm"
+                disabled
+                title="Shorten this search to change its state filter"
+              >
+                {label}
+              </Button>
+            ) : (
+              <Link
+                key={state}
+                className={navigation.selected === state ? "active" : ""}
+                aria-current={
+                  navigation.selected === state ? "page" : undefined
+                }
+                href={repoHref(repo, { view, ...filters, q: query })}
+              >
+                {label}
+              </Link>
+            );
+          })}
+        </nav>
+      ) : (
+        <h3 className="m-0 text-sm font-medium">
+          {new Intl.NumberFormat().format(matching)}{" "}
+          {matching === 1 ? "result" : "results"}
+        </h3>
+      )}
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <Button variant="ghost" size="sm" aria-label="Sort discussions">
@@ -124,6 +164,11 @@ export function DiscussionListControls({
           </DropdownMenuRadioGroup>
         </DropdownMenuContent>
       </DropdownMenu>
+      {cannotChangeState && (
+        <span role="status" className="muted basis-full pb-2 text-xs">
+          Shorten this search to change its state filter.
+        </span>
+      )}
       <span className="sr-only" aria-live="polite">
         Sorted by {sortLabel},{" "}
         {filters.direction === "asc" ? "ascending" : "descending"}

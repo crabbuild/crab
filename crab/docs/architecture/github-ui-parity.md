@@ -33,7 +33,7 @@ Current entry points are `packages/ui/src/features/issues/index.tsx`,
 `packages/ui/src/features/pull-requests/index.tsx`,
 `packages/ui/src/features/issues/workspace.tsx`, and
 `packages/ui/src/components/discussion/search.tsx`. The two HTTP list handlers
-accept state, typed query, sort/direction, page size, and an opaque before cursor.
+accept typed query, sort/direction, page size, and an opaque before cursor.
 Native owners are `cells/repository/issues.rs` and `pulls/operations.rs`.
 Existing milestones, reactions, activity, links, readiness, and review requests
 are described in `repository-collaboration.md`; reuse these canonical owners.
@@ -52,6 +52,9 @@ are described in `repository-collaboration.md`; reuse these canonical owners.
 - [ ] A canonical typed search grammar with quoting, qualifiers, negation and
       boolean grouping, helpful validation and suggestions, stable sort/cursors,
       exact filtered state counts, and URL-preserved filters/navigation.
+- [ ] A unified tagged discussion result model for cross-kind queries. GitHub's
+      issue search can show PR rows when `is:pr` is explicit; Crab's current
+      issue/PR list APIs still constrain results to their endpoint kind.
 - [ ] Native models, commands, indexes and HTTP contracts for issue types,
       project membership/custom fields, saved views, and qualified public actor
       profiles. Organization/project/team scope must be real authorization
@@ -89,7 +92,7 @@ Counts cover the complete predicate, independent of the page; rows and selected
 label names/colors come from the same native snapshot. Created/updated,
 comments, total/per-kind body reactions, and relevance sorts support both
 directions with number tie breakers. Opaque cursors bind the repository,
-normalized query, kind/state/order, index generation and revision. Changed
+normalized query, kind/order, index generation and revision. Changed
 results return 409 and the UI provides a first-page recovery link.
 
 Existing cells require explicit `cells rebuild-search` preparation. The private
@@ -98,10 +101,20 @@ after restart. Fresh repository mutations and indexed lists fail while building;
 durable command replays and detail reads remain available. Missing indexes never
 fall back to scans. New empty cells initialize their index directly.
 
+State navigation now edits the native query instead of combining it with a
+separate state parameter. The parser preserves the spelling of non-state atoms. Global positive
+Open/Closed conjunctions get native state destinations and their counts from
+one snapshot. Arbitrary boolean, excluded-state, merged-state and unrestricted
+queries show their matching result count, following the live GitHub reference;
+they are not rewritten into state tabs. Boolean grouping and quoted literals
+remain intact.
+Explicit searches have no hidden Open filter. An absent query defaults to open
+work. The separate state parameter and browser list addresses using it are
+rejected. Maximum-sized queries receive disabled state controls and a visible
+explanation when another qualifier cannot fit.
+
 Actor/project/type/milestone predicates and complete GitHub workspace controls
-remain delivery work. The separate state tab is still an additional AND filter;
-the final workspace needs one canonical query representation for state
-navigation too. This slice does not finish the full parity checklist.
+remain delivery work. This slice does not finish the full parity checklist.
 
 ## Data and query contracts
 
@@ -112,8 +125,8 @@ and display names are distinct: changing a name cannot change identity or grant
 access. An organization/project/team lookup must not leak inaccessible work.
 
 Search must run against native authoritative data with bounded work. Counts and
-rows must describe the same predicate and snapshot; state totals must not be
-inferred from one page. Sorting requires deterministic tie breakers and cursors
+rows and state destinations must share a snapshot; each count must match its
+destination predicate and must not be inferred from one page. Sorting requires deterministic tie breakers and cursors
 bound to the query and ordering. New indexes need explicit population/recovery
 for existing repositories; reads must not silently manufacture metadata. Do not
 add schema fallbacks or rewrite persisted formats to make a demo succeed.
@@ -182,11 +195,12 @@ embedding checks. Full suites and cross-platform/storage qualification belong
 in CI or the dedicated qualification environment. Missing functionality and
 verification remain explicitly incomplete until implemented and proved.
 
-The indexed-list slice passed 14 native query/index tests, five issue HTTP
-tests, two PR HTTP tests (including real Git review/merge behavior), 107 UI
-unit tests, and all 65 browser tests. UI/server builds, all-target server Clippy,
+The current list/search slice passed 18 native query/index tests, five issue
+HTTP tests, five PR HTTP tests (including real Git review/merge behavior),
+107 UI unit tests, and all 68 browser tests. UI/server builds, all-target server Clippy,
 formatting and architecture gates passed. An isolated RustFS process run created
-an issue through the browser, verified indexed sorting/counts, restarted during
+an issue through the browser, verified result-count and state-tab presentations
+and their destination queries, restarted during
 preparation, resumed through the mTLS CLI, and compared unchanged source records.
 The existing local preview's two repositories were explicitly prepared and their
 records compared exactly before/after. These prove this slice, not the remaining

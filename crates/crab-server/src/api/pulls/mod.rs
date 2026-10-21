@@ -317,7 +317,7 @@ async fn list(
         .map(|pull| pull_list_view(pull, &page.labels, &assignees))
         .collect::<Vec<_>>();
     Ok(Json(
-        json!({"items":items,"next":page.next,"counts":page.counts,"matching":page.matching}),
+        json!({"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation}),
     ))
 }
 

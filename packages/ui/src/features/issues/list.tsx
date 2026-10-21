@@ -75,6 +75,8 @@ export function IssueList({ repo, url }: { repo: Repository; url: URL }) {
                 url={url}
                 view="issues"
                 counts={data.counts}
+                navigation={data.navigation}
+                matching={data.matching}
               />
               {data.items.length ? (
                 <ul className="issue-list">
@@ -124,7 +126,7 @@ export function IssueList({ repo, url }: { repo: Repository; url: URL }) {
                   <h3>{query ? `No issues match “${query}”` : "No results"}</h3>
                   <p className="muted">
                     {query
-                      ? "Try another title, description, or author."
+                      ? "Try adjusting your search or filters."
                       : "Try adjusting your search filters."}
                   </p>
                 </div>

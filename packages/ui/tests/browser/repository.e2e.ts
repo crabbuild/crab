@@ -689,14 +689,14 @@ test.beforeEach(async ({ page }) => {
         json: {
           items: [
             {
-              number: 42,
+              number: url.searchParams.get("q") === "is:closed" ? 43 : 42,
               comment_count: 0,
               reaction_count: 0,
               author: "Alice",
               body: null,
               title: "Keep object storage reads bounded",
               state:
-                url.searchParams.get("state") === "closed" ? "closed" : "open",
+                url.searchParams.get("q") === "is:closed" ? "closed" : "open",
               labels: [
                 {
                   id: 1,
@@ -719,11 +719,18 @@ test.beforeEach(async ({ page }) => {
           ],
           next: null,
           counts: {
-            open: url.searchParams.get("state") === "closed" ? 0 : 1,
-            closed: url.searchParams.get("state") === "closed" ? 1 : 0,
+            open: 1,
+            closed: 1,
             merged: 0,
           },
           matching: 1,
+          navigation: {
+            kind: "state",
+            selected:
+              url.searchParams.get("q") === "is:closed" ? "closed" : "open",
+            open: "is:open",
+            closed: "is:closed",
+          },
         },
       });
     return route.fulfill({
@@ -827,6 +834,8 @@ for (const path of [
   `/team/project?rev=main&path=${pathHex("README.md")}&kind=Blob#L3`,
   "/team/project?view=releases&release=2",
   "/team/project/releases/2",
+  "/team/project/issues?state=closed",
+  "/team/project/pulls?state=open",
 ]) {
   test(`unsupported browser address shows not found without repository reads: ${path}`, async ({
     page,
@@ -2275,7 +2284,7 @@ test("issues follow the GitHub list hierarchy in both themes and on mobile", asy
   await expect(page.getByText("kind/bug", { exact: true })).toBeVisible();
 
   await page.getByRole("link", { name: /^Closed \d+$/, exact: true }).click();
-  await expect(page).toHaveURL(/state=closed/);
+  await expect(page).toHaveURL(/q=is%3Aclosed/);
   await expect(
     page.getByRole("link", { name: /^Closed \d+$/, exact: true }),
   ).toHaveAttribute("aria-current", "page");

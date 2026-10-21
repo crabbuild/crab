@@ -24,6 +24,9 @@ test("pull creation and review navigation preserve GitHub-style controls", async
       name: "No pulls match “missing workflow”",
     }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "0 results", exact: true }),
+  ).toBeVisible();
   await search.getByRole("button", { name: "Clear", exact: true }).click();
   await expect(page).not.toHaveURL(/q=/);
   await expect(

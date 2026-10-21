@@ -78,6 +78,8 @@ export function PullList({ repo, url }: { repo: Repository; url: URL }) {
               url={url}
               view="pulls"
               counts={data.counts}
+              navigation={data.navigation}
+              matching={data.matching}
             />
             {data.items.length ? (
               <ul className="issue-list panel">
@@ -134,7 +136,7 @@ export function PullList({ repo, url }: { repo: Repository; url: URL }) {
                 </h3>
                 <p>
                   {query
-                    ? "Try another title, description, or author."
+                    ? "Try adjusting your search or filters."
                     : "Compare two branches to start a review."}
                 </p>
               </div>

@@ -36,6 +36,14 @@ async function searchFixture(page: Page) {
         next: null,
         counts: { open: 1, closed: 0, merged: 0 },
         matching: 1,
+        navigation: query
+          ? { kind: "results" }
+          : {
+              kind: "state",
+              selected: "open",
+              open: "is:open",
+              closed: "is:closed",
+            },
       },
     });
   });
@@ -106,6 +114,12 @@ test("search completes native suggestions with Unicode caret ranges and preserve
   await input.press("Enter");
   await expect(page).toHaveURL(/q=label%3A%22Help\+wanted%22/);
   expect(searches).toContain('label:"Help wanted"');
+  await expect(
+    page.getByRole("heading", { name: "1 result", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Issue state" }),
+  ).toHaveCount(0);
   await input.fill("🦀 AND label:he OR keyboard");
   for (let i = 0; i < 12; i++) await input.press("ArrowLeft");
   await expect(
@@ -201,7 +215,8 @@ for (const view of ["issues", "pulls"] as const) {
               number: 1,
               title: "Indexed discussion",
               author: "Alice",
-              state: params.get("state") === "closed" ? "closed" : "open",
+              state:
+                params.get("q") === "keyboard is:closed" ? "closed" : "open",
               created_at: 1700000000000,
               labels: [],
               assignees: [],
@@ -214,11 +229,18 @@ for (const view of ["issues", "pulls"] as const) {
           ],
           next: params.has("before") ? null : "opaque-native-cursor",
           counts: { open: 1234, closed: 432, merged: 12 },
-          matching: 1234,
+          matching: params.get("q") === "keyboard is:closed" ? 432 : 1234,
+          navigation: {
+            kind: "state",
+            selected:
+              params.get("q") === "keyboard is:closed" ? "closed" : "open",
+            open: "keyboard is:open",
+            closed: "keyboard is:closed",
+          },
         },
       });
     });
-    await page.goto(`/team/project/${view}?q=keyboard&powerbar=1`);
+    await page.goto(`/team/project/${view}?q=is:open+keyboard&powerbar=1`);
     const states = page.getByRole("navigation", {
       name: view === "issues" ? "Issue state" : "Pull request state",
     });
@@ -249,7 +271,7 @@ for (const view of ["issues", "pulls"] as const) {
       .toBe("opaque-native-cursor");
     await expect.poll(() => requests.at(-1)?.get("direction")).toBe("asc");
     expect(requests.at(-1)?.get("sort")).toBe("comments");
-    expect(requests.at(-1)?.get("q")).toBe("keyboard");
+    expect(requests.at(-1)?.get("q")).toBe("is:open keyboard");
     await page.reload();
     await expect(
       page.getByRole("link", { name: "Back to first page" }),
@@ -263,9 +285,11 @@ for (const view of ["issues", "pulls"] as const) {
     await expect(page).not.toHaveURL(/before=/);
     await states.getByRole("link", { name: "Closed 432" }).click();
     await expect
-      .poll(() => new URL(page.url()).searchParams.get("state"))
-      .toBe("closed");
-    expect(new URL(page.url()).searchParams.get("q")).toBe("keyboard");
+      .poll(() => new URL(page.url()).searchParams.get("q"))
+      .toBe("keyboard is:closed");
+    expect(new URL(page.url()).searchParams.get("q")).toBe(
+      "keyboard is:closed",
+    );
     expect(new URL(page.url()).searchParams.get("sort")).toBe("comments");
     await selectDarkTheme(page);
     await page.setViewportSize({ width: 390, height: 844 });
@@ -277,3 +301,37 @@ for (const view of ["issues", "pulls"] as const) {
     ).toBe(true);
   });
 }
+
+test("maximum queries explain unavailable state changes without discarding the query", async ({
+  page,
+}) => {
+  await mockPullRequest(page);
+  await page.route("**/api/repos/team/project/issues?**", (route) =>
+    route.fulfill({
+      json: {
+        items: [],
+        next: null,
+        counts: { open: 0, closed: 0, merged: 0 },
+        matching: 0,
+        navigation: {
+          kind: "state",
+          selected: "open",
+          open: "is:open " + "x".repeat(248),
+          closed: null,
+        },
+      },
+    }),
+  );
+  const query = "is:open " + "x".repeat(248);
+  await page.goto(`/team/project/issues?q=${query}`);
+  await expect(
+    page.getByRole("combobox", { name: "Search issues" }),
+  ).toHaveValue(query);
+  await expect(
+    page.getByRole("button", { name: "Closed 0", exact: true }),
+  ).toBeDisabled();
+  await expect(page.getByRole("status")).toHaveText(
+    "Shorten this search to change its state filter.",
+  );
+  await expectNoAccessibilityViolations(page);
+});

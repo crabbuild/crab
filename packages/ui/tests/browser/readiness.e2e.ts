@@ -191,6 +191,12 @@ async function setup(page: Page, initialDraft: boolean) {
           next: null,
           counts: { open: 1, closed: 0, merged: 0 },
           matching: 1,
+          navigation: {
+            kind: "state",
+            selected: "open",
+            open: "is:open",
+            closed: "is:closed",
+          },
         },
       });
     }

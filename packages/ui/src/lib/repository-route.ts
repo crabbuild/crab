@@ -238,6 +238,11 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         return null;
       return route;
     }
+    if (
+      (page === "issues" || page === "pulls") &&
+      url.searchParams.has("state")
+    )
+      return null;
     if (page === "issues" && tail.length <= 1)
       return {
         ...route,

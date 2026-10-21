@@ -36,7 +36,6 @@ pub(crate) enum Direction {
 pub(crate) struct SearchInput {
     pub before: Option<String>,
     pub limit: u8,
-    pub state: u8,
     pub query: Option<String>,
     pub sort: Sort,
     pub direction: Direction,
@@ -46,7 +45,6 @@ impl Default for SearchInput {
         Self {
             before: None,
             limit: 30,
-            state: 0,
             query: None,
             sort: Sort::Created,
             direction: Direction::Desc,
@@ -57,9 +55,6 @@ impl SearchInput {
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         if !(1..=50).contains(&self.limit) {
             return Err("Discussion page size must be 1–50");
-        }
-        if self.state > 2 {
-            return Err("Discussion state must be open, closed or all");
         }
         Query::parse(self.query.as_deref())?;
         if let Some(cursor) = self.before.as_deref() {
@@ -83,6 +78,7 @@ pub(crate) struct Page<T> {
     pub next: Option<String>,
     pub counts: StateCounts,
     pub matching: u64,
+    pub navigation: super::super::navigation::StateNavigation,
     pub labels: Vec<LabelSummary>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -203,7 +199,6 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         FORMAT,
         repository,
         subject_kind,
-        input.state,
         input.sort,
         input.direction,
         &query.expression,
@@ -226,12 +221,15 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     }
     let mut bindings = Bindings::default();
     let kind_filter = bindings.bind(SqlValue::Integer(kind(subject_kind)));
-    let predicate = expression(&query.expression, &mut bindings);
-    let filter = format!("d.kind = {kind_filter} AND ({predicate})");
+    // Each counter describes its navigation query, even when the current query
+    // selects only closed work. Rows and both targets share this native snapshot.
+    let (base, navigation) = query.state_navigation();
+    let predicate = expression(&base, &mut bindings);
+    let count_filter = format!("d.kind = {kind_filter} AND ({predicate})");
     let totals = context.sql(&SqlBatch {
         statements: vec![statement(
             &format!(
-                "SELECT d.state, COUNT(*) FROM discussion_index d WHERE {filter} GROUP BY d.state"
+                "SELECT d.state, COUNT(*) FROM discussion_index d WHERE {count_filter} GROUP BY d.state"
             ),
             bindings.values.clone(),
         )],
@@ -258,21 +256,22 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         .ok_or(crate::cells::Error::Invalid(
             "discussion count exceeds its range",
         ))?;
-    let matching = match input.state {
-        0 => counts.open,
-        1 => counts.closed,
-        _ => counts
+    let mut bindings = Bindings::default();
+    let kind_filter = bindings.bind(SqlValue::Integer(kind(subject_kind)));
+    let predicate = expression(&query.expression, &mut bindings);
+    let filter = format!("d.kind = {kind_filter} AND ({predicate})");
+    let matching = match &navigation {
+        super::super::navigation::StateNavigation::State { selected, .. } => match selected {
+            super::super::navigation::StateSelection::Open => counts.open,
+            super::super::navigation::StateSelection::Closed => counts.closed,
+        },
+        super::super::navigation::StateNavigation::Results => counts
             .open
             .checked_add(counts.closed)
             .filter(|count| *count <= MAX_NUMBER)
             .ok_or(crate::cells::Error::Invalid(
                 "discussion count exceeds its range",
             ))?,
-    };
-    let facet = match input.state {
-        0 => "d.state = 0",
-        1 => "d.state <> 0",
-        _ => "1",
     };
     let order = sort_expression(input.sort, &query.expression, &mut bindings);
     let direction = match input.direction {
@@ -293,7 +292,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     };
     let limit = bindings.bind(SqlValue::Integer(i64::from(input.limit) + 1));
     let sql = format!(
-        "SELECT number, sort_key, comments, reactions FROM (SELECT d.number, {order} AS sort_key, d.comments, d.reactions FROM discussion_index d WHERE {filter} AND {facet}) WHERE {seek} ORDER BY sort_key {direction}, number {direction} LIMIT {limit}"
+        "SELECT number, sort_key, comments, reactions FROM (SELECT d.number, {order} AS sort_key, d.comments, d.reactions FROM discussion_index d WHERE {filter}) WHERE {seek} ORDER BY sort_key {direction}, number {direction} LIMIT {limit}"
     );
     let rows = context.sql(&SqlBatch {
         statements: vec![statement(&sql, bindings.values)],
@@ -397,6 +396,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         next,
         counts,
         matching,
+        navigation,
         labels,
     })
 }
@@ -409,7 +409,7 @@ fn expression(expression: &Expression, bindings: &mut Bindings) -> String {
             let operator = if matches!(expression, Expression::And(_)) { " AND " } else { " OR " };
             parts.iter().map(|part| format!("({})",self::expression(part, bindings))).collect::<Vec<_>>().join(operator)
         }
-        Expression::Term(term) => match term {
+        Expression::Term { value: term, .. } => match term {
             Term::Text(text) if text.chars().count() >= 3 => {
                 let phrase = quote(text);
                 let value = bindings.text(&phrase);
@@ -477,7 +477,10 @@ fn reaction_expression(kind: Kind, bindings: &mut Bindings) -> String {
 }
 fn positive_text<'a>(expression: &'a Expression, negative: bool, output: &mut Vec<&'a str>) {
     match expression {
-        Expression::Term(Term::Text(text)) if !negative => output.push(text),
+        Expression::Term {
+            value: Term::Text(text),
+            ..
+        } if !negative => output.push(text),
         Expression::Not(inner) => positive_text(inner, !negative, output),
         Expression::And(parts) | Expression::Or(parts) => {
             for part in parts {

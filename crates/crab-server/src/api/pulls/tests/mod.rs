@@ -238,7 +238,7 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     assert_eq!(recovered_review.1["current"], false);
     let closed_list: Value = serde_json::from_slice(
         &client
-            .get(format!("{root}?state=closed"))
+            .get(format!("{root}?q=is:closed"))
             .send()
             .await
             .unwrap()
@@ -250,7 +250,7 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     assert_eq!(closed_list["items"][0]["number"], 1);
     let searched: Value = serde_json::from_slice(
         &client
-            .get(format!("{root}?state=closed&q=PLEASE%20REVIEW"))
+            .get(format!("{root}?q=is:closed%20PLEASE%20REVIEW"))
             .send()
             .await
             .unwrap()
@@ -261,13 +261,16 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     .unwrap();
     assert_eq!(searched["items"][0]["number"], 1);
     for (query, expected) in [
-        ("(readme OR missing) AND \"Please review\" no:label", 1),
+        (
+            "is:closed (readme OR missing) AND \"Please review\" no:label",
+            1,
+        ),
         ("is:pr is:closed -is:merged draft:false", 1),
-        ("is:issue OR draft:true", 0),
+        ("is:closed (is:issue OR draft:true)", 0),
     ] {
         let response = client
             .get(&root)
-            .query(&[("state", "closed"), ("q", query)])
+            .query(&[("q", query)])
             .send()
             .await
             .unwrap();

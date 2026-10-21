@@ -4,6 +4,7 @@ use super::collaboration::{SubjectKind, SubjectState};
 
 pub(crate) mod completion;
 pub(crate) mod index;
+mod navigation;
 
 const MAX_TERMS: usize = 64;
 const MAX_DEPTH: usize = 5;
@@ -13,16 +14,21 @@ pub(crate) struct Query {
     expression: Expression,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 enum Expression {
     All,
-    Term(Term),
+    Term {
+        value: Term,
+        // Editing preserves spelling; cursor identity uses normalized values.
+        #[serde(skip_serializing)]
+        source: String,
+    },
     Not(Box<Self>),
     And(Vec<Self>),
     Or(Vec<Self>),
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 enum Term {
     Text(String),
     Label(Vec<String>),
@@ -33,7 +39,7 @@ enum Term {
     Missing(Metadata),
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 enum Metadata {
     Label,
     Assignee,
@@ -225,7 +231,10 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
             _ => return Err("Unsupported search qualifier; use is, state, draft, label, or no"),
         },
     };
-    let expression = Expression::Term(term);
+    let expression = Expression::Term {
+        value: term,
+        source: atom.to_owned(),
+    };
     Ok(if negative {
         Expression::Not(Box::new(expression))
     } else {

@@ -108,16 +108,16 @@ async fn issues_comments_edits_and_replays_preserve_durable_state() {
             .is_empty()
     );
     assert_eq!(
-        h.json(&format!("{ROOT}?state=closed"), &cookie).await["items"][0]["number"],
+        h.json(&format!("{ROOT}?q=is:closed"), &cookie).await["items"][0]["number"],
         id
     );
     assert_eq!(
-        h.json(&format!("{ROOT}?state=closed&q=REVIEWED"), &cookie)
+        h.json(&format!("{ROOT}?q=is:closed%20REVIEWED"), &cookie)
             .await["items"][0]["number"],
         id
     );
     assert!(
-        h.json(&format!("{ROOT}?state=closed&q=missing"), &cookie)
+        h.json(&format!("{ROOT}?q=is:closed%20missing"), &cookie)
             .await["items"]
             .as_array()
             .unwrap()
@@ -155,7 +155,7 @@ async fn concurrent_creation_is_idempotent_and_sparse_pages_do_not_duplicate_iss
     let mut numbers = Vec::new();
     loop {
         let path = format!(
-            "{ROOT}?state=all&limit=2{}",
+            "{ROOT}?q=is:issue&limit=2{}",
             cursor
                 .as_deref()
                 .map_or(String::new(), |n| format!("&before={n}"))
@@ -342,6 +342,30 @@ async fn advanced_search_preserves_caseful_operators_and_reports_invalid_syntax(
             StatusCode::CREATED
         );
     }
+    assert_eq!(
+        write(
+            &h,
+            &cookie,
+            "PATCH",
+            &format!("{ROOT}/2"),
+            json!({"version":1,"state":"closed"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let default_page = h.json(ROOT, &cookie).await;
+    assert_eq!(default_page["matching"], 2);
+    assert_eq!(default_page["counts"]["closed"], 1);
+    assert_eq!(default_page["navigation"]["selected"], "open");
+    let retired = h
+        .http
+        .get(format!("{}{ROOT}?state=closed", h.origin))
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retired.status(), StatusCode::BAD_REQUEST);
     let query = "(keyboard OR contrast) AND accessibility -unrelated no:assignee";
     let response = h
         .http
@@ -362,8 +386,38 @@ async fn advanced_search_preserves_caseful_operators_and_reports_invalid_syntax(
             .collect::<Vec<_>>(),
         vec![2]
     );
-    assert_eq!(first["counts"]["open"], 2);
+    assert_eq!(first["counts"]["open"], 1);
+    assert_eq!(first["counts"]["closed"], 1);
+    assert_eq!(first["navigation"]["kind"], "results");
     assert_eq!(first["matching"], 2);
+    let filtered_query = format!("({query}) is:open");
+    let filtered: Value = h
+        .http
+        .get(format!("{}{ROOT}", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[("q", &filtered_query)])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for state in ["open", "closed"] {
+        let query = filtered["navigation"][state].as_str().unwrap();
+        let response = h
+            .http
+            .get(format!("{}{ROOT}", h.origin))
+            .header(header::COOKIE, &cookie)
+            .query(&[("q", query)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let target: Value = response.json().await.unwrap();
+        assert_eq!(target["matching"], filtered["counts"][state]);
+        assert_eq!(target["navigation"]["selected"], state);
+        assert_eq!(target["items"][0]["state"], state);
+    }
     let next = first["next"].as_str().unwrap().to_owned();
     let stale = h
         .http

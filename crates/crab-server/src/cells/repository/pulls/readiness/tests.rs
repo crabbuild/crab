@@ -128,7 +128,6 @@ async fn draft_creation_and_mode_conflicts_preserve_the_original_submission() {
             SearchInput {
                 before: None,
                 limit: 50,
-                state: 2,
                 query: None,
                 ..Default::default()
             },

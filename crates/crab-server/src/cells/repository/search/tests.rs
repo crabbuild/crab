@@ -86,7 +86,6 @@ async fn matches(cell: &crate::cells::RepositoryCell, query: &str) -> bool {
             &cell.target,
             None,
             SearchInput {
-                state: 2,
                 query: Some(query.into()),
                 ..Default::default()
             },
@@ -300,7 +299,6 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
             SearchInput {
                 before: None,
                 limit: 1,
-                state: 2,
                 query: Some("(label:\"help wanted\" OR no:label) keyboard -missing".into()),
                 ..Default::default()
             },
@@ -324,7 +322,6 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
             SearchInput {
                 before: issues.next.clone(),
                 limit: 1,
-                state: 2,
                 query: Some("(label:\"help wanted\" OR no:label) keyboard -missing".into()),
                 ..Default::default()
             },
@@ -347,7 +344,6 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
             SearchInput {
                 before: None,
                 limit: 30,
-                state: 2,
                 query: Some("is:pr draft:true AND keyboard no:label".into()),
                 ..Default::default()
             },
@@ -417,7 +413,6 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
             SearchInput {
                 before: None,
                 limit: 30,
-                state: 2,
                 query: Some("label:\"keyboard work\"".into()),
                 ..Default::default()
             },
@@ -434,7 +429,6 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
             SearchInput {
                 before: None,
                 limit: 30,
-                state: 2,
                 query: Some("no:label".into()),
                 ..Default::default()
             },

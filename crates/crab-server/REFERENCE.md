@@ -1281,10 +1281,13 @@ Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the
 
 ### Search issues and pull requests
 
-List endpoints accept `q` (up to 256 characters), `state` (`open`, `closed`,
-`all`), `limit` (1–50), `sort`, `direction`, and an opaque exclusive `before` cursor. State is an
-additional AND filter. Text terms search titles, bodies, and recorded author
-names. Spaces and `AND` require both terms; `OR` matches either; parentheses
+List endpoints accept `q` (up to 256 characters), `limit` (1–50), `sort`,
+`direction`, and an opaque exclusive `before` cursor. State belongs in the query,
+for example `q=is:closed label:bug`. An absent `q` defaults to `is:open`; an
+explicit query is authoritative and has no additional hidden state filter.
+Use `is:issue` or `is:pr` to include all states of that kind. The former separate
+`state` parameter is rejected; milestone and release state parameters keep their
+own contracts. Text terms search titles, bodies, and recorded author names. Spaces and `AND` require both terms; `OR` matches either; parentheses
 support up to five nested groups. Quote phrases and multiword label names.
 
 Supported qualifiers are `is:open`, `is:closed`, `is:merged`, `is:unmerged`,
@@ -1301,11 +1304,21 @@ browser UTF-16 units; replacement offsets enclose the current token. `kind` is
 the repository authorization boundary.
 
 Lists query a native SQLite/FTS5 projection across all matching records. Each
-response includes `counts: {open, closed, merged}` for the query before the
-separate state facet and `matching` for the selected state. Closed includes
-merged PRs. Counts, ordered rows, and selected label names/colors share a native
-snapshot. Summaries omit bodies; `comment_count` counts conversation comments,
-and `reaction_count` counts reactions on the issue/PR body.
+response includes `matching` for the exact query, `counts: {open, closed,
+merged}`, and `navigation`. A global positive Open/Closed conjunction produces
+`navigation: {kind:"state", selected, open, closed}`. Those counters describe
+its destination queries; closed includes merged PRs. Other searches produce
+`navigation: {kind:"results"}` and retain the exact predicate, showing the total
+matching result count instead of manufacturing state tabs. This includes
+unrestricted searches, merge-state predicates, exclusions, conflicting states,
+and states inside OR groups. Repeated identical global state terms remain one
+state facet. Non-state atom spelling, quoted literals, and boolean grouping
+survive state changes. A state destination is null when it cannot fit the
+grammar's size/depth/term limits; the UI disables that control and explains the
+limit without truncating filters. Counts, ordered rows, selected label
+names/colors, and navigation share a native snapshot. Summaries omit bodies;
+`comment_count` counts conversation comments, and `reaction_count` counts
+reactions on the issue/PR body.
 
 `sort` accepts `created` (default), `updated`, `comments`, `reactions`,
 `thumbs_up`, `thumbs_down`, `laugh`, `hooray`, `confused`, `heart`, `rocket`,
@@ -1315,7 +1328,7 @@ BM25 ranks for positive text terms; terms shorter than three Unicode scalars
 retain literal substring matching without trigram ranking. `direction` is
 `desc` (default) or `asc`. Discussion number breaks ties in the same direction.
 `next` is null on the last page. Cursors bind the repository, query, kind,
-state/order, generation and revision. Malformed cursors return 400; changed
+ordering, generation and revision. Malformed cursors return 400; changed
 queries or index contents return 409 `stale_search_cursor`. Restart at the first
 page to obtain a fresh snapshot. Comment pagination remains numeric.
 

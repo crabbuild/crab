@@ -191,10 +191,9 @@ describe("GitHub repository addresses", () => {
   it("keeps list filters in the query and navigation in the path", () => {
     const href = repoHref(repo, {
       view: "issues",
-      state: "closed",
-      q: "bug fix",
+      q: "is:closed bug fix",
     });
-    expect(href).toBe("/team/repo.name/issues?state=closed&q=bug+fix");
+    expect(href).toBe("/team/repo.name/issues?q=is%3Aclosed+bug+fix");
     expect(repositoryRoute(url(href))).toMatchObject({ view: "issues" });
   });
 

@@ -155,7 +155,7 @@ async fn tied_sort_keys_paginate_both_directions_and_bind_cursors_to_the_query()
             ..Default::default()
         },
         SearchInput {
-            state: 2,
+            query: Some("is:closed".into()),
             ..Default::default()
         },
     ] {
@@ -390,5 +390,130 @@ async fn bounded_rebuild_blocks_fresh_writes_preserves_replays_and_invalidates_c
     )
     .await;
     assert_eq!(numbers(&found), [1]);
+    fixtures::close(&server).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn state_counters_equal_their_navigation_queries_across_boolean_and_literal_filters() {
+    use super::super::navigation::{StateNavigation, StateSelection};
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    for (title, body) in [
+        ("Keyboard focus", "AND"),
+        ("Color contrast", "AND"),
+        ("Other", ""),
+    ] {
+        create(&cell, title, body).await;
+    }
+    let closed = write::<UpdateIssue>(
+        &cell,
+        UpdateIssueInput {
+            number: 2,
+            actor: actor(),
+            can_manage_metadata: true,
+            version: 1,
+            title: None,
+            body: None,
+            state: Some(1),
+            label_ids: None,
+            assignee_subjects: None,
+        },
+    )
+    .await;
+    assert!(matches!(closed, UpdateIssueOutcome::Updated(_)));
+    for (query, expected, open, closed, selected) in [
+        (
+            "is:closed",
+            vec![2],
+            vec![3, 1],
+            vec![2],
+            Some(StateSelection::Closed),
+        ),
+        (
+            "keyboard is:closed",
+            vec![],
+            vec![1],
+            vec![],
+            Some(StateSelection::Closed),
+        ),
+        (
+            "(keyboard is:open) OR (contrast is:closed)",
+            vec![2, 1],
+            vec![1],
+            vec![2],
+            None,
+        ),
+        (
+            "is:open OR contrast",
+            vec![3, 2, 1],
+            vec![3, 1],
+            vec![2],
+            None,
+        ),
+        ("-is:closed \"AND\"", vec![1], vec![1], vec![], None),
+        ("\"is:closed\"", vec![], vec![], vec![], None),
+        (
+            "is:open OR contrast",
+            vec![3, 2, 1],
+            vec![3, 1],
+            vec![2],
+            None,
+        ),
+        (
+            "is:closed (is:open OR contrast)",
+            vec![2],
+            vec![],
+            vec![2],
+            None,
+        ),
+        ("no:label -is:open", vec![2], vec![], vec![2], None),
+        (
+            "\"AND\" AND (keyboard OR contrast)",
+            vec![2, 1],
+            vec![1],
+            vec![2],
+            None,
+        ),
+    ] {
+        let result = page(
+            &cell,
+            SearchInput {
+                query: Some(query.into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(numbers(&result), expected, "{query}");
+        assert_eq!(result.matching, expected.len() as u64, "{query}");
+        match result.navigation {
+            StateNavigation::State {
+                selected: actual,
+                open: open_query,
+                closed: closed_query,
+            } => {
+                assert_eq!(Some(actual), selected, "{query}");
+                for (target, expected, count) in [
+                    (open_query, open, result.counts.open),
+                    (closed_query, closed, result.counts.closed),
+                ] {
+                    let result = page(
+                        &cell,
+                        SearchInput {
+                            query: Some(target.unwrap()),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                    assert_eq!(numbers(&result), expected, "{query}");
+                    assert_eq!(result.matching, count, "{query}");
+                }
+            }
+            StateNavigation::Results => {
+                assert!(selected.is_none(), "{query}");
+                assert_eq!(result.counts.open, open.len() as u64, "{query}");
+                assert_eq!(result.counts.closed, closed.len() as u64, "{query}");
+            }
+        }
+    }
     fixtures::close(&server).await;
 }

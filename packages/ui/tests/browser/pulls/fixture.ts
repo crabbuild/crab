@@ -403,6 +403,14 @@ export async function mockPullRequest(page: Page) {
             merged: matches && item.state === "merged" ? 1 : 0,
           },
           matching: matches ? 1 : 0,
+          navigation: query
+            ? { kind: "results" }
+            : {
+                kind: "state",
+                selected: "open",
+                open: "is:open",
+                closed: "is:closed",
+              },
         },
       });
     }

@@ -315,7 +315,7 @@ with open(run / "commands.log", "w") as log:
             "request_id": str(uuid.uuid4()), "name": "RustFS qualification", "color": "abcdef", "description": "Native search suggestions",
         })
         issue_search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({
-            "state": "all", "q": '("Cellar RustFS" OR missing) AND no:label -unrelated is:closed',
+            "q": '("Cellar RustFS" OR missing) AND no:label -unrelated is:closed',
         })
         assert [item["number"] for item in request(issue_search)["items"]] == [number]
         completion_path = "/api/repos/team/project/discussion-search?" + urllib.parse.urlencode({
@@ -429,7 +429,7 @@ with open(run / "commands.log", "w") as log:
         assert completed["state"] == "merged" and completed["draft"] is False
         assert request(pull_search)["items"] == []
         merged_search = "/api/repos/team/project/pulls?" + urllib.parse.urlencode({
-            "state": "closed", "q": "is:merged draft:false",
+            "q": "is:merged draft:false",
         })
         assert [item["number"] for item in request(merged_search)["items"]] == [pull["number"]]
 
@@ -438,7 +438,7 @@ with open(run / "commands.log", "w") as log:
             ("is:open", 0), ("is:pr", 1), ("is:issue", 0),
             ("draft:false", 1), ("draft:true", 0), ("is:closed -is:merged", 0),
         ]:
-            result = request("/api/repos/team/project/pulls?" + urllib.parse.urlencode({"state": "all", "q": query}))
+            result = request("/api/repos/team/project/pulls?" + urllib.parse.urlencode({"q": query}))
             assert len(result["items"]) == expected, query
             assert result["matching"] == expected, query
         previous_index = index_request()

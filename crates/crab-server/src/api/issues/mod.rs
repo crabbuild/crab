@@ -185,7 +185,7 @@ async fn list(
         .map(|issue| issue_summary_view(issue, &page.labels, &assignees))
         .collect::<Vec<_>>();
     Ok(Json(
-        json!({"items":items,"next":page.next,"counts":page.counts,"matching":page.matching}),
+        json!({"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation}),
     ))
 }
 
