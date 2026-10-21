@@ -6806,3 +6806,24 @@ main {
   font-size: 12px;
   margin: 4px 0 0;
 }
+
+.reaction-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 16px 16px;
+}
+.reaction-bar .reaction-chip {
+  border-radius: 24px;
+  min-height: 28px;
+}
+.reaction-bar .reaction-chip.reacted {
+  color: var(--fgColor-accent);
+  background: var(--bgColor-accent-muted);
+  border-color: var(--borderColor-accent-emphasis);
+}
+.reaction-bar .notice {
+  flex-basis: 100%;
+  margin: 8px 0 0;
+}

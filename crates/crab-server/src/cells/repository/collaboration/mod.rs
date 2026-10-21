@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::{RepositoryTransaction, SqlBatch, SqlValue, integer, statement, validate_number};
 
 pub(crate) mod milestones;
+pub(crate) mod reactions;
 
 const PREFIX: &str = "collaboration/v1";
 

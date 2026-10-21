@@ -35,6 +35,7 @@ import {
 } from "./content";
 import { CommitList } from "./browse";
 import { CheckRuns } from "./check-runs";
+import { Reactions, type ReactionSummary } from "./collaboration/reactions";
 import { changeContent } from "./content-editor";
 import { useMutation } from "./discussion-mutations";
 import { DiscussionSearch } from "./discussion-search";
@@ -51,6 +52,7 @@ import type { CodeThemes } from "./code-theme";
 import { replaceSelectedLines } from "./pull-review-model";
 
 interface PullComment {
+  reactions: ReactionSummary;
   number: number;
   author: string;
   body: string;
@@ -74,6 +76,7 @@ interface PullSummary {
 }
 
 interface PullRequest extends PullSummary {
+  reactions: ReactionSummary;
   body: string;
   version: number;
   can_edit: boolean;
@@ -126,6 +129,7 @@ interface PullRequest extends PullSummary {
 type ReviewState = "commented" | "approved" | "changes_requested";
 
 interface PullReview {
+  reactions: ReactionSummary;
   number: number;
   author: string;
   body: string;
@@ -139,6 +143,7 @@ interface PullReview {
 }
 
 interface PullReviewThread extends InlineDiffThread {
+  reactions: ReactionSummary;
   path: string;
   base_oid: string;
   head_oid: string;
@@ -156,6 +161,7 @@ interface PullReviewThread extends InlineDiffThread {
 }
 
 interface PullReviewReply {
+  reactions: ReactionSummary;
   number: number;
   author: string;
   body: string;
@@ -1259,6 +1265,12 @@ function ReviewThreadCard({
               <DiscussionMarkdown>{thread.body}</DiscussionMarkdown>
             )}
           </div>
+          <Reactions
+            repo={repo}
+            csrf={csrf}
+            target={`pulls/${pull.number}/threads/${thread.number}`}
+            summary={thread.reactions}
+          />
           {thread.suggested_text !== null &&
             !thread.outdated &&
             !thread.vanished &&
@@ -1566,6 +1578,12 @@ function ReviewReplyItem({
           )}
         </>
       )}
+      <Reactions
+        repo={repo}
+        csrf={csrf}
+        target={`pulls/${pull.number}/threads/${thread.number}/replies/${reply.number}`}
+        summary={reply.reactions}
+      />
       <Failure message={mutation.error} />
     </div>
   );
@@ -1679,12 +1697,21 @@ function PullConversation({
           <span className="muted">commented {timestamp(pull.created_at)}</span>
         </header>
         <DiscussionMarkdown>{pull.body}</DiscussionMarkdown>
+        <Reactions
+          repo={repo}
+          csrf={csrf}
+          target={`pulls/${pull.number}`}
+          summary={pull.reactions}
+        />
       </article>
       <Result state={comments} timingLabel="Conversation comments">
         {(commentPage) => (
           <Result state={reviews} timingLabel="Pull request reviews">
             {(reviewPage) => (
               <PullTimeline
+                repo={repo}
+                pull={pull.number}
+                csrf={csrf}
                 comments={commentPage.items}
                 reviews={reviewPage.items}
               />
@@ -2103,9 +2130,15 @@ function RequiredChecks({
 }
 
 function PullTimeline({
+  repo,
+  pull,
+  csrf,
   comments,
   reviews,
 }: {
+  repo: Repository;
+  pull: number;
+  csrf: string;
   comments: PullComment[];
   reviews: PullReview[];
 }) {
@@ -2131,10 +2164,19 @@ function PullTimeline({
               </span>
             </header>
             <DiscussionMarkdown>{event.value.body}</DiscussionMarkdown>
+            <Reactions
+              repo={repo}
+              csrf={csrf}
+              target={`pulls/${pull}/comments/${event.value.number}`}
+              summary={event.value.reactions}
+            />
           </article>
         ) : (
           <ReviewEvent
             key={`review-${event.value.number}`}
+            repo={repo}
+            pull={pull}
+            csrf={csrf}
             review={event.value}
           />
         ),
@@ -2143,7 +2185,17 @@ function PullTimeline({
   );
 }
 
-function ReviewEvent({ review }: { review: PullReview }) {
+function ReviewEvent({
+  repo,
+  pull,
+  csrf,
+  review,
+}: {
+  repo: Repository;
+  pull: number;
+  csrf: string;
+  review: PullReview;
+}) {
   const action =
     review.state === "approved"
       ? "approved these changes"
@@ -2168,6 +2220,12 @@ function ReviewEvent({ review }: { review: PullReview }) {
         <span className="muted">{timestamp(review.created_at)}</span>
       </header>
       {review.body && <DiscussionMarkdown>{review.body}</DiscussionMarkdown>}
+      <Reactions
+        repo={repo}
+        csrf={csrf}
+        target={`pulls/${pull}/reviews/${review.number}`}
+        summary={review.reactions}
+      />
       <footer className="muted">
         Reviewed commit <code>{short(review.commit_oid)}</code>
       </footer>

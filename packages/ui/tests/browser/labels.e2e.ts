@@ -1,3 +1,4 @@
+import { emptyReactions } from "./fixtures";
 import { expect, test } from "@playwright/test";
 import {
   expectNoAccessibilityViolations,
@@ -107,6 +108,7 @@ test("repository metadata can be managed and assigned to an issue", async ({
           body: "Please investigate.",
           state: "open",
           version: issueVersion,
+          reactions: emptyReactions(),
           created_at: 1_700_000_000_000,
           updated_at: 1_700_000_000_000,
           can_edit: true,

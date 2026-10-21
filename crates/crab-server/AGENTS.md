@@ -42,7 +42,8 @@ and session migration paths are supported.
   implementation, submodules, and tests in that directory. Avoid custom `#[path]`
   mounts and sibling `<component>.rs` entry points.
 - `api/` owns browser HTTP feature handlers and route assembly; pull merge-tree
-  mechanics live in `api/pulls/merge/`, and thread persistence in
+  mechanics live in `api/pulls/merge/`, comments in `api/pulls/comments.rs`,
+  replies in `api/pulls/review_threads/replies.rs`, and thread persistence in
   `api/pulls/review_threads/`. `git/` owns native Git, object,
   receive, and LFS endpoints and their route assembly. `auth/` assembles login
   and session routes. `server/http/mod.rs` applies the common security boundary

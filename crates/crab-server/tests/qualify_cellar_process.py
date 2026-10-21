@@ -6,6 +6,7 @@ workspace volume. This creates only synthetic repositories and credentials.
 """
 
 import argparse
+import http.client
 import json
 import os
 import pathlib
@@ -42,11 +43,12 @@ with open(run / "commands.log", "w") as log:
             s.bind(("127.0.0.1", 0))
             return s.getsockname()[1]
 
-    def request(path, body=None):
+    def request(path, body=None, *, method=None):
         req = urllib.request.Request(
             origin + path,
             data=None if body is None else json.dumps(body).encode(),
             headers={"Content-Type": "application/json"},
+            method=method,
         )
         with urllib.request.urlopen(req, timeout=35) as r:
             return json.load(r)
@@ -58,7 +60,7 @@ with open(run / "commands.log", "w") as log:
             try:
                 request("/api/repos")
                 return
-            except (urllib.error.URLError, TimeoutError):
+            except (urllib.error.URLError, TimeoutError, http.client.RemoteDisconnected):
                 time.sleep(0.25)
         raise RuntimeError("server did not become available")
 
@@ -161,7 +163,7 @@ with open(run / "commands.log", "w") as log:
             try:
                 with urllib.request.urlopen(endpoint + "/health/ready", timeout=1):
                     break
-            except (urllib.error.URLError, TimeoutError):
+            except (urllib.error.URLError, TimeoutError, http.client.RemoteDisconnected):
                 time.sleep(0.25)
         else:
             raise RuntimeError("RustFS failed readiness")
@@ -280,6 +282,16 @@ with open(run / "commands.log", "w") as log:
         created = request("/api/repos/team/project/issues", body)
         number = created["number"]
         assert request("/api/repos/team/project/issues", body)["number"] == number
+        issue_path = f"/api/repos/team/project/issues/{number}"
+        reaction_path = f"/api/repos/team/project/reactions/issues/{number}"
+        reaction = request(reaction_path, {"kind": "heart", "active": True}, method="PUT")
+        assert reaction["groups"]["heart"] == {"count": 1, "reacted": True}
+        milestone = request("/api/repos/team/project/milestones", {
+            "request_id": str(uuid.uuid4()), "title": "Durable collaboration",
+            "description": "Process restart qualification", "due_on": "2028-01-01",
+        })
+        request(issue_path + "/milestone", {"version": 0, "milestone": milestone["number"]}, method="PUT")
+        request(issue_path, {"version": created["version"], "state": "closed"}, method="PATCH")
         git = run / "input"
         git.mkdir()
         cmd(["git", "init", "--initial-branch=main", git])
@@ -307,6 +319,18 @@ with open(run / "commands.log", "w") as log:
         wait()
         restored = request(f"/api/repos/team/project/issues/{number}")
         assert restored["title"] == body["title"]
+        assert restored["reactions"]["groups"] == reaction["groups"]
+        assert restored["reactions"]["revision"] >= reaction["revision"]
+        assignment = request(issue_path + "/milestone")
+        saved_milestone = assignment["milestone"]
+        assert saved_milestone["number"] == milestone["number"]
+        assert saved_milestone["due_on"] == milestone["due_on"]
+        assert (saved_milestone["open_count"], saved_milestone["closed_count"]) == (0, 1)
+        work = request(f"/api/repos/team/project/milestones/{milestone['number']}/items")
+        assert work["items"][0]["subject"] == {"kind": "issue", "number": number} and work["items"][0]["state"] == "closed"
+        for _ in range(2):
+            removed = request(reaction_path, {"kind": "heart", "active": False}, method="PUT")
+            assert removed["groups"]["heart"] == {"count": 0, "reacted": False}
         assert request("/api/repos/team/project/issues", body)["number"] == number
         refs = subprocess.check_output(
             ["git", "ls-remote", origin + "/git/team/project.git"], text=True, env=env
@@ -345,6 +369,10 @@ with open(run / "commands.log", "w") as log:
             "image_ref": args.image,
             "repository_creation": True,
             "issue_replay": True,
+            "reaction_restart": True,
+            "reaction_remove": True,
+            "milestone_restart": True,
+            "milestone_progress": True,
             "git_push": True,
             "process_restart": True,
             "durable_objects": int(count),

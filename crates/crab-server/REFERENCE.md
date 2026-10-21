@@ -1251,10 +1251,10 @@ Create the temporary directory first. Replace the test name with `receive_faults
 
 ## Issues, pull requests and reviews
 
-Issue, issue-comment and label state use one repository SQLite Cell whose committed
-LTX roots are authoritative in object storage. Remaining collaboration domains
-still use versioned JSON documents under the repository prefix. Collaboration
-does not mutate Git refs unless a pull request merge publishes a ref update.
+Collaboration state lives in one native repository Cell whose committed LTX roots
+are authoritative in object storage. Milestones and reactions use bounded typed KV
+documents in that same SQLite transaction boundary. Collaboration does not mutate
+Git refs unless a pull request merge publishes a ref update.
 
 ### Use the collaboration route families
 
@@ -1270,8 +1270,30 @@ does not mutate Git refs unless a pull request merge publishes a ref update.
 | Merge | `POST /api/repos/{owner}/{name}/pulls/{number}/merge` |
 | Labels | `GET/POST /api/repos/{owner}/{name}/labels`, `PATCH/DELETE /api/repos/{owner}/{name}/labels/{number}` |
 | Assignees | `GET /api/repos/{owner}/{name}/assignees`; issue and pull `PATCH` requests replace assignments |
+| Milestones | `GET/POST /api/repos/{owner}/{name}/milestones`, `GET/PATCH /api/repos/{owner}/{name}/milestones/{number}`, `GET /api/repos/{owner}/{name}/milestones/{number}/items`; issue/pull `GET/PUT .../{number}/milestone` |
+| Reactions | `PUT /api/repos/{owner}/{name}/reactions/{target}`; discussion responses include personalized summaries |
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
+
+### React to discussions
+
+Members with read access can add or remove reactions on issue and PR bodies,
+comments, reviews, inline threads, and replies. The target is the resource path
+relative to the repository API, for example `issues/1/comments/2` or
+`pulls/1/threads/2/replies/3`. Parent IDs are validated; equal-numbered resources
+have independent reaction memberships.
+
+Send a desired state such as `{"kind":"heart","active":true}`. Supported kinds
+are `thumbs_up`, `thumbs_down`, `laugh`, `hooray`, `confused`, `heart`, `rocket`,
+and `eyes`. Repeating the same desired membership does not increment counts.
+Responses expose counts and the current actor's membership, without listing
+identity claims. Archived repositories retain readable counts and reject fresh
+reaction mutations.
+
+Discussion detail and list responses include a `reactions` summary. Lists batch
+these reads in one native transaction. The summary's native `revision` orders
+completed writes and refreshes so delayed responses cannot replace newer browser
+state. Reaction writes do not change discussion edit versions.
 
 ### Retry creations safely
 

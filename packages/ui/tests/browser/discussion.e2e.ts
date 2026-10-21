@@ -1,3 +1,4 @@
+import { emptyReactions } from "./fixtures";
 import { expect, test, type Page } from "@playwright/test";
 import {
   expectNoAccessibilityViolations,
@@ -6,6 +7,7 @@ import {
 
 async function openDiscussion(page: Page) {
   const record = {
+    reactions: emptyReactions(),
     number: 1,
     author: "Alice",
     body: "Original description",

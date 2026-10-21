@@ -63,7 +63,24 @@ native Cellar objects were present in the bucket. Desktop and mobile dark views
 had no accessibility violations; the existing footer contrast check required
 manual review. The 390px viewport had no horizontal document overflow.
 
-This verifies the milestone slice locally, not the entire expansion. Reactions,
-activity, linked issues, draft readiness, and review requests still require their
-models, HTTP/browser workflows, and evidence. Full cross-platform/runtime proof
-remains a CI responsibility.
+This verifies the milestone slice locally, not the entire expansion. Activity,
+linked issues, draft readiness, and review requests still require their models,
+HTTP/browser workflows, and evidence. Full cross-platform/runtime proof remains
+a CI responsibility.
+
+### Reaction evidence
+
+Native tests cover unique actor membership, desired-state retries, stable identity
+when names change, concurrent add/remove, target/parent validation, archive
+rejection, bounded batch reads, and recovery of membership/counts/receipts after
+native restart. HTTP tests cover read-member participation, personalized views,
+CSRF, malformed inputs, target isolation, list batching, and preservation through
+creation replay and discussion edits.
+
+Browser tests exercise all seven target types, stale refresh protection, reload,
+failed writes and retry, archived counts, and light/dark accessibility. Dedicated
+RustFS-backed browser verification creates the discussion objects and adds
+reactions through the UI, including an inline thread anchored by selecting a diff
+line. Removing a reaction and reloading retains the removal. Process restart
+proof compares saved memberships/counts with restored HTTP views and checks the
+visible reaction chips after reload.

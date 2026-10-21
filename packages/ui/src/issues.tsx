@@ -1,3 +1,4 @@
+import { Reactions, type ReactionSummary } from "./collaboration/reactions";
 import { repoHref, repositoryRoute } from "./repository-route";
 import { useEffect, useRef, useState } from "react";
 import { Button, Spinner } from "@primer/react";
@@ -24,6 +25,7 @@ import {
 } from "./discussion";
 
 interface Comment {
+  reactions: ReactionSummary;
   number: number;
   author: string;
   body: string;
@@ -40,6 +42,16 @@ interface Issue extends Comment {
   can_label: boolean;
   can_assign: boolean;
 }
+type IssueListItem = Pick<
+  Issue,
+  | "number"
+  | "title"
+  | "state"
+  | "author"
+  | "created_at"
+  | "labels"
+  | "assignees"
+>;
 interface Page<T> {
   items: T[];
   next: number | null;
@@ -98,7 +110,7 @@ function IssueList({ repo, url }: { repo: Repository; url: URL }) {
   const state = url.searchParams.get("state") ?? "open";
   const before = url.searchParams.get("before") ?? undefined;
   const query = url.searchParams.get("q") ?? "";
-  const page = useRequest<Page<Issue>>(
+  const page = useRequest<Page<IssueListItem>>(
     endpoint(repo, "issues", { state, before, q: query || undefined }),
   );
   return (
@@ -392,6 +404,12 @@ function IssueDetail({
                 {current.version > 1 && <span className="muted">edited</span>}
               </header>
               <DiscussionMarkdown>{current.body}</DiscussionMarkdown>
+              <Reactions
+                repo={repo}
+                target={`issues/${number}`}
+                summary={current.reactions}
+                csrf={csrf}
+              />
             </article>
           )}
           {current.can_edit && !repo.archived && (
@@ -788,7 +806,15 @@ function CommentCard({
           </div>
         </form>
       ) : (
-        <DiscussionMarkdown>{comment.body}</DiscussionMarkdown>
+        <>
+          <DiscussionMarkdown>{comment.body}</DiscussionMarkdown>
+          <Reactions
+            repo={repo}
+            target={`issues/${issue}/comments/${comment.number}`}
+            summary={comment.reactions}
+            csrf={csrf}
+          />
+        </>
       )}
     </article>
   );

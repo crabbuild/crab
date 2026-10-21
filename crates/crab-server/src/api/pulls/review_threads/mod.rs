@@ -11,13 +11,15 @@ use crab_remote_git::{GitPath, RemoteGitRepository, RepositoryOptions};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+mod replies;
 mod storage;
 
 use super::{current_branches, storage as pull_storage};
 use crate::{
-    api,
+    api::{self, reactions},
     app::{self, Error, Result},
     auth::{Identity, Principal},
+    cells::repository::collaboration::reactions::Target,
     cells::repository::{PullReviewThreadListInput, PullReviewThreadSide},
     repository::Repository,
     server::Server,
@@ -36,14 +38,7 @@ pub(super) fn routes() -> Router<Arc<Server>> {
             "/api/repos/{owner}/{name}/pulls/{number}/threads/{thread}",
             get(detail).patch(edit),
         )
-        .route(
-            "/api/repos/{owner}/{name}/pulls/{number}/threads/{thread}/replies",
-            get(list_replies).post(create_reply),
-        )
-        .route(
-            "/api/repos/{owner}/{name}/pulls/{number}/threads/{thread}/replies/{reply}",
-            get(reply_detail).patch(edit_reply),
-        )
+        .merge(replies::routes())
 }
 
 #[derive(Default, Deserialize)]
@@ -91,20 +86,6 @@ struct ThreadEdit {
     body: Option<String>,
     suggested_text: Option<Option<String>>,
     resolved: Option<bool>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NewReply {
-    request_id: String,
-    body: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReplyEdit {
-    version: u64,
-    body: String,
 }
 
 struct Comparison {
@@ -244,22 +225,15 @@ fn thread_view(
     actor: &Identity,
     can_reply: bool,
     can_resolve: bool,
-    comparison: &Comparison,
-    old_blob_oid: Option<&str>,
-    new_blob_oid: Option<&str>,
-    anchors_checked: bool,
+    status: (bool, bool),
+    reactions: &reactions::View,
 ) -> Value {
-    let (outdated, vanished) = comparison_status(
-        thread,
-        comparison,
-        old_blob_oid,
-        new_blob_oid,
-        anchors_checked,
-    );
+    let (outdated, vanished) = status;
     json!({
         "number": thread.number,
         "author": thread.author.name,
         "body": thread.body,
+        "reactions": reactions,
         "suggested_text": thread.suggested_text,
         "base_oid": thread.base_oid,
         "head_oid": thread.head_oid,
@@ -282,18 +256,6 @@ fn thread_view(
         "can_edit": same_author(&thread.author, actor),
         "can_reply": can_reply,
         "can_resolve": can_resolve,
-    })
-}
-
-fn reply_view(reply: &storage::PullReviewReply, actor: &Identity) -> Value {
-    json!({
-        "number": reply.number,
-        "author": reply.author.name,
-        "body": reply.body,
-        "version": reply.version,
-        "created_at": reply.created_at,
-        "updated_at": reply.updated_at,
-        "can_edit": same_author(&reply.author, actor),
     })
 }
 
@@ -356,20 +318,22 @@ async fn list(
     .ok_or(Error::NotFound)?;
     let can_resolve = principal.can_write(&repo.config) || same_author(&pull.author, &actor);
     let can_reply = principal.can_read(&repo.config);
+    let targets = page
+        .0
+        .iter()
+        .map(|thread| Target::PullThread {
+            pull: pull.number,
+            number: thread.number,
+        })
+        .collect();
+    let reactions = reactions::read(&server, repo, &actor, targets).await?;
     let items = page
         .0
         .iter()
-        .map(|thread| {
-            thread_view(
-                thread,
-                &actor,
-                can_reply,
-                can_resolve,
-                &comparison,
-                None,
-                None,
-                false,
-            )
+        .zip(reactions)
+        .map(|(thread, reactions)| {
+            let status = comparison_status(thread, &comparison, None, None, false);
+            thread_view(thread, &actor, can_reply, can_resolve, status, &reactions)
         })
         .collect::<Vec<_>>();
     Ok(Json(json!({"items": items, "next": page.1})))
@@ -392,15 +356,30 @@ async fn detail(
     let (old_blob_oid, new_blob_oid) = current_blobs(&server, &comparison, &path).await?;
     let can_resolve = principal.can_write(&repo.config) || same_author(&pull.author, &actor);
     let can_reply = principal.can_read(&repo.config);
+    let status = comparison_status(
+        &thread,
+        &comparison,
+        old_blob_oid.as_deref(),
+        new_blob_oid.as_deref(),
+        comparison.repository.is_some(),
+    );
+    let reaction = reactions::one(
+        &server,
+        repo,
+        &actor,
+        Target::PullThread {
+            pull: pull.number,
+            number: thread.number,
+        },
+    )
+    .await?;
     Ok(Json(thread_view(
         &thread,
         &actor,
         can_reply,
         can_resolve,
-        &comparison,
-        old_blob_oid.as_deref(),
-        new_blob_oid.as_deref(),
-        comparison.repository.is_some(),
+        status,
+        &reaction,
     )))
 }
 
@@ -439,6 +418,17 @@ async fn create(
             return Err(Error::RequestConflict);
         }
         let comparison = comparison(&server, repo, &pull).await?;
+        let status = comparison_status(&existing, &comparison, None, None, false);
+        let reaction = reactions::one(
+            &server,
+            repo,
+            &actor,
+            Target::PullThread {
+                pull: pull.number,
+                number: existing.number,
+            },
+        )
+        .await?;
         return Ok((
             StatusCode::CREATED,
             Json(thread_view(
@@ -446,10 +436,8 @@ async fn create(
                 &actor,
                 principal.can_read(&repo.config),
                 principal.can_write(&repo.config) || same_author(&pull.author, &actor),
-                &comparison,
-                None,
-                None,
-                false,
+                status,
+                &reaction,
             )),
         ));
     }
@@ -507,6 +495,23 @@ async fn create(
         },
     )
     .await?;
+    let status = comparison_status(
+        &thread,
+        &comparison,
+        blob_oid(blobs.old.as_ref()).as_deref(),
+        blob_oid(blobs.new.as_ref()).as_deref(),
+        true,
+    );
+    let reaction = reactions::one(
+        &server,
+        repo,
+        &actor,
+        Target::PullThread {
+            pull: pull.number,
+            number: thread.number,
+        },
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(thread_view(
@@ -514,10 +519,8 @@ async fn create(
             &actor,
             principal.can_read(&repo.config),
             principal.can_write(&repo.config) || same_author(&pull.author, &actor),
-            &comparison,
-            blob_oid(blobs.old.as_ref()).as_deref(),
-            blob_oid(blobs.new.as_ref()).as_deref(),
-            true,
+            status,
+            &reaction,
         )),
     ))
 }
@@ -559,147 +562,23 @@ async fn edit(
     )
     .await?;
     let comparison = comparison(&server, repo, &pull).await?;
+    let status = comparison_status(&updated, &comparison, None, None, false);
+    let reaction = reactions::one(
+        &server,
+        repo,
+        &actor,
+        Target::PullThread {
+            pull: pull.number,
+            number: updated.number,
+        },
+    )
+    .await?;
     Ok(Json(thread_view(
         &updated,
         &actor,
         principal.can_read(&repo.config),
         principal.can_write(&repo.config) || same_author(&pull.author, &actor),
-        &comparison,
-        None,
-        None,
-        false,
+        status,
+        &reaction,
     )))
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct ReplyListParameters {
-    before: Option<u64>,
-    limit: Option<usize>,
-}
-
-impl ReplyListParameters {
-    fn limit(&self) -> Result<u8> {
-        let limit = self.limit.unwrap_or(50);
-        if !(1..=50).contains(&limit)
-            || self
-                .before
-                .is_some_and(|value| value == 0 || value > MAX_NUMBER)
-        {
-            return Err(Error::Invalid("Invalid review reply page"));
-        }
-        u8::try_from(limit).map_err(|_| Error::Invalid("Invalid review reply page"))
-    }
-}
-
-async fn list_replies(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path((owner, name, id, thread)): Path<(String, String, u64, u64)>,
-    Query(params): Query<ReplyListParameters>,
-) -> Result<Json<Value>> {
-    let repo = app::repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
-    let actor = app::actor(&principal)?;
-    let pull = load_pull(&server, repo, app::number(id)?).await?;
-    let page = storage::replies(
-        &server,
-        repo,
-        crate::cells::repository::PullReviewReplyListInput {
-            pull: pull.number,
-            thread: app::number(thread)?,
-            before: params.before,
-            limit: params.limit()?,
-        },
-    )
-    .await?
-    .ok_or(Error::NotFound)?;
-    Ok(Json(json!({
-        "items": page.0.iter().map(|reply| reply_view(reply, &actor)).collect::<Vec<_>>(),
-        "next": page.1,
-    })))
-}
-
-async fn create_reply(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path((owner, name, id, thread)): Path<(String, String, u64, u64)>,
-    input: std::result::Result<Json<NewReply>, JsonRejection>,
-) -> Result<impl IntoResponse> {
-    let repo = app::repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
-    let Json(input) = input?;
-    validate_text(&input.body, true)?;
-    let actor = app::actor(&principal)?;
-    let pull = load_pull(&server, repo, app::number(id)?).await?;
-    let thread = app::number(thread)?;
-    let request_id = app::submission(&input.request_id)?;
-    if let Some(existing) =
-        storage::reply_submission(&server, repo, pull.number, thread, &request_id).await?
-    {
-        if !same_author(&existing.author, &actor) || existing.body != input.body {
-            return Err(Error::RequestConflict);
-        }
-        return Ok((StatusCode::CREATED, Json(reply_view(&existing, &actor))));
-    }
-    let reply = storage::create_reply(
-        &server,
-        repo,
-        pull.number,
-        thread,
-        storage::NewPullReviewReply {
-            author: actor.clone(),
-            request_id,
-            body: input.body,
-        },
-    )
-    .await?;
-    Ok((StatusCode::CREATED, Json(reply_view(&reply, &actor))))
-}
-
-async fn reply_detail(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path((owner, name, id, thread, reply)): Path<(String, String, u64, u64, u64)>,
-) -> Result<Json<Value>> {
-    let repo = app::repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
-    let actor = app::actor(&principal)?;
-    let pull = load_pull(&server, repo, app::number(id)?).await?;
-    let reply = storage::reply(
-        &server,
-        repo,
-        pull.number,
-        app::number(thread)?,
-        app::number(reply)?,
-    )
-    .await?
-    .ok_or(Error::NotFound)?;
-    Ok(Json(reply_view(&reply, &actor)))
-}
-
-async fn edit_reply(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path((owner, name, id, thread, reply)): Path<(String, String, u64, u64, u64)>,
-    input: std::result::Result<Json<ReplyEdit>, JsonRejection>,
-) -> Result<Json<Value>> {
-    let repo = app::repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
-    let Json(input) = input?;
-    validate_text(&input.body, true)?;
-    let actor = app::actor(&principal)?;
-    let pull = load_pull(&server, repo, app::number(id)?).await?;
-    let reply = storage::update_reply(
-        &server,
-        repo,
-        pull.number,
-        app::number(thread)?,
-        app::number(reply)?,
-        actor.clone(),
-        input.version,
-        input.body,
-    )
-    .await?;
-    Ok(Json(reply_view(&reply, &actor)))
 }
