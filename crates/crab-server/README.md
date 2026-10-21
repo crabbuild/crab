@@ -224,9 +224,9 @@ Read these sources in order:
 
 | Source | Responsibility |
 | --- | --- |
-| [server/http.rs](src/server/http/mod.rs) | Route composition |
+| [server/http/mod.rs](src/server/http/mod.rs) | Route composition |
 | [server/http/boundary.rs](src/server/http/boundary.rs) | Host/session checks and mutation protection |
-| [issues.rs](src/api/issues.rs) | Route body limit, request extraction, HTTP contract, and typed command/query invocation |
+| [api/issues/mod.rs](src/api/issues/mod.rs) | Route body limit, request extraction, HTTP contract, and typed command/query invocation |
 | [app.rs](src/app.rs) | Admission timeout, repository access, input validation, and HTTP error mapping |
 | [cells/client.rs](src/cells/client.rs) | Typed requests through native ingress |
 | [cells/application.rs](src/cells/application.rs) | Transaction, replay receipts, and native output gate |
