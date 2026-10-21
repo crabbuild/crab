@@ -15,12 +15,18 @@ impl Mutation for ReservePullMerge {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(ReservePullMergeOutcome::Archived));
+        }
         validate_number(input.pull)?;
         validate_merge(&input.merge)?;
-        if load_pull(context, input.pull)?.is_none() {
+        let Some(pull) = load_pull(context, input.pull)? else {
             return Ok(MutationResult::Rejected(
                 ReservePullMergeOutcome::PullNotFound,
             ));
+        };
+        if pull.draft {
+            return Ok(MutationResult::Rejected(ReservePullMergeOutcome::Draft));
         }
         let digest = merge_digest(input.pull, &input.merge);
         let existing = context.sql(&SqlBatch { statements: vec![statement("SELECT payload_digest, merge_record FROM repository_pull_merge_submissions WHERE pull_number = ? AND request_id = ?", vec![integer(input.pull)?, SqlValue::Blob(input.merge.request_id.to_vec())])] })?;
@@ -85,6 +91,16 @@ impl Mutation for TransitionPullMerge {
                             TransitionPullMergeOutcome::Conflict,
                         ))
                     };
+                }
+                // Completed/pending retries above do not start new work. Only
+                // a fresh admission must lose to an earlier archive command.
+                if settings::archived(context)? {
+                    return Ok(MutationResult::Rejected(
+                        TransitionPullMergeOutcome::Archived,
+                    ));
+                }
+                if pull.draft {
+                    return Ok(MutationResult::Rejected(TransitionPullMergeOutcome::Draft));
                 }
                 if pull.state != PullState::Open || pull.version != input.merge.pull_version {
                     return Ok(MutationResult::Rejected(

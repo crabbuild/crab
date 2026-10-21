@@ -313,17 +313,27 @@ with open(run / "commands.log", "w") as log:
             ],
             env=env,
         )
-        commit = subprocess.check_output(
-            ["git", "-C", git, "rev-parse", "HEAD"], text=True
-        ).strip()
         (git / "README.md").write_text("Native Cellar qualification\nRelated issue workflow\n")
         cmd(["git", "-C", git, "commit", "-am", "Add related issue input"])
         cmd(["git", "-C", git, "push", origin + "/git/team/project.git", "HEAD:refs/heads/feature"], env=env)
         pull = request("/api/repos/team/project/pulls", {
             "request_id": str(uuid.uuid4()), "title": "Related issue workflow", "body": "Link without automatic closure",
+            "draft": True,
             "base_ref": "refs/heads/main", "head_ref": "refs/heads/feature",
         })
         pull_path = f"/api/repos/team/project/pulls/{pull['number']}"
+        assert pull["draft"] is True and pull["can_merge"] is False
+        merge_input = {"request_id": str(uuid.uuid4()), "version": pull["version"],
+                       "method": "fast_forward", "base_oid": pull["base_oid"], "head_oid": pull["head_oid"]}
+        try:
+            request(pull_path + "/merge", merge_input)
+        except urllib.error.HTTPError as error:
+            assert error.code == 409 and json.load(error)["error"]["code"] == "pull_draft"
+        else:
+            raise AssertionError("a draft must not publish a merge")
+        before_merge_refs = subprocess.check_output(["git", "ls-remote", origin + "/git/team/project.git", "refs/heads/main"], text=True, env=env)
+        assert before_merge_refs.split()[0] == pull["base_oid"]
+
         link_path = pull_path + f"/linked-issues/{number}"
         for active, version in [(True, 0), (False, 1), (True, 2)]:
             linked = request(link_path, {"active": active, "version": version}, method="PUT")
@@ -357,6 +367,7 @@ with open(run / "commands.log", "w") as log:
         assert request(issue_path + "/links") == issue_links
         assert request(pull_path + "/links") == pull_links
         assert request(link_path) == {"active": True, "version": 3}
+        assert request(pull_path)["draft"] is True
         assert request(link_path, {"active": True, "version": 0}, method="PUT") == {"active": True, "version": 3}
         try:
             request(link_path, {"active": False, "version": 1}, method="PUT")
@@ -365,10 +376,24 @@ with open(run / "commands.log", "w") as log:
         else:
             raise AssertionError("stale unlink must not overwrite a later link")
         assert request("/api/repos/team/project/activity") == repository_activity
+        ready = request(pull_path + "/readiness", {"version": pull["version"], "draft": False}, method="PUT")
+        assert ready["draft"] is False
+        merge_input["version"] = ready["version"]
+        merged = request(pull_path + "/merge", merge_input)
+        assert merged["state"] == "merged" and merged["draft"] is False
+        merged_activity = request("/api/repos/team/project/activity")
+        assert [event["action"]["kind"] for event in merged_activity["items"][:2]] == ["merged", "ready_for_review"]
+        stop()
+        server = start()
+        wait()
+        completed = request(pull_path)
+        assert completed["state"] == "merged" and completed["draft"] is False
+        assert request("/api/repos/team/project/activity") == merged_activity
+        assert request(issue_path + "/links")["items"][0]["work"]["state"] == "merged"
         refs = subprocess.check_output(
             ["git", "ls-remote", origin + "/git/team/project.git"], text=True, env=env
         )
-        assert commit in refs
+        assert merged["merge"]["commit_oid"] + "\trefs/heads/main" in refs
         status = subprocess.check_output(
             server_command("cells", "status", "--owner", "team", "--name", "project"),
             text=True,
@@ -406,6 +431,9 @@ with open(run / "commands.log", "w") as log:
             "activity_replay": True,
             "linked_work_restart": True,
             "linked_work_retry": True,
+            "draft_restart": True,
+            "draft_merge_blocked": True,
+            "ready_merge": True,
             "reaction_restart": True,
             "reaction_remove": True,
             "milestone_restart": True,

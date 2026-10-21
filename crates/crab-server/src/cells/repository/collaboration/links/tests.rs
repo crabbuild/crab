@@ -44,6 +44,7 @@ async fn seed(cell: &RepositoryCell, count: u64) {
     write::<CreatePull>(
         cell,
         CreatePullInput {
+            draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor(),
             title: "Pull".into(),

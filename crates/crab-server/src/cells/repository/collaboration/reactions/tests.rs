@@ -177,6 +177,7 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
     write::<CreatePull>(
         &cell,
         CreatePullInput {
+            draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("alice"),
             title: "Pull".into(),

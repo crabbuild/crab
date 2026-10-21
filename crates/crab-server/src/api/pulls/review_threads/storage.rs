@@ -168,6 +168,7 @@ pub(super) async fn create_thread(
             )
             .await,
     )? {
+        CreatePullReviewThreadOutcome::Archived => Err(Error::Archived),
         CreatePullReviewThreadOutcome::Created(thread) => Ok(from_thread(*thread)),
         CreatePullReviewThreadOutcome::PullNotFound => Err(Error::NotFound),
         CreatePullReviewThreadOutcome::PullClosed => {
@@ -203,6 +204,7 @@ pub(super) async fn update_thread(
             )
             .await,
     )? {
+        UpdatePullReviewThreadOutcome::Archived => Err(Error::Archived),
         UpdatePullReviewThreadOutcome::Updated(thread) => Ok(from_thread(*thread)),
         UpdatePullReviewThreadOutcome::NotFound => Err(Error::NotFound),
         UpdatePullReviewThreadOutcome::Forbidden => Err(Error::Forbidden),
@@ -299,6 +301,7 @@ pub(super) async fn create_reply(
             )
             .await,
     )? {
+        CreatePullReviewReplyOutcome::Archived => Err(Error::Archived),
         CreatePullReviewReplyOutcome::Created(reply) => Ok(from_reply(reply)),
         CreatePullReviewReplyOutcome::ThreadNotFound => Err(Error::NotFound),
         CreatePullReviewReplyOutcome::RequestConflict => Err(Error::RequestConflict),
@@ -335,6 +338,7 @@ pub(super) async fn update_reply(
             )
             .await,
     )? {
+        UpdatePullReviewReplyOutcome::Archived => Err(Error::Archived),
         UpdatePullReviewReplyOutcome::Updated(reply) => Ok(from_reply(reply)),
         UpdatePullReviewReplyOutcome::NotFound => Err(Error::NotFound),
         UpdatePullReviewReplyOutcome::Forbidden => Err(Error::Forbidden),

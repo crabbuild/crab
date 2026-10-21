@@ -47,6 +47,7 @@ pub(super) struct PullReviewDecision {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PullRequest {
+    pub draft: bool,
     pub number: u64,
     pub request_id: String,
     pub author: Identity,
@@ -69,6 +70,7 @@ pub(super) struct PullRequest {
 
 #[derive(Clone, Debug)]
 pub(super) struct PullSummary {
+    pub draft: bool,
     pub number: u64,
     pub author: Identity,
     pub title: String,
@@ -106,6 +108,7 @@ pub(super) struct PullReview {
 }
 
 pub(super) struct NewPullRequest {
+    pub draft: bool,
     pub author: Identity,
     pub request_id: String,
     pub title: String,
@@ -210,6 +213,7 @@ pub(super) async fn list_pulls(
         page.items
             .into_iter()
             .map(|item| PullSummary {
+                draft: item.draft,
                 number: item.number,
                 author: from_author(item.author),
                 title: item.title,
@@ -239,6 +243,7 @@ pub(super) async fn create_pull(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreatePullInput {
+                    draft: input.draft,
                     submission_id: submission_id(&input.request_id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&input.author),
                     title: input.title,
@@ -251,6 +256,7 @@ pub(super) async fn create_pull(
             )
             .await,
     )? {
+        CreatePullOutcome::Archived => Err(Error::Archived),
         CreatePullOutcome::Created(pull) => Ok(from_pull(*pull)),
         CreatePullOutcome::RequestConflict => Err(Error::RequestConflict),
     }
@@ -283,6 +289,7 @@ pub(super) async fn update_pull(
             )
             .await,
     )? {
+        UpdatePullOutcome::Archived => Err(Error::Archived),
         UpdatePullOutcome::Updated(pull) => Ok(from_pull(*pull)),
         UpdatePullOutcome::NotFound => Err(Error::NotFound),
         UpdatePullOutcome::Forbidden => Err(Error::Forbidden),
@@ -367,6 +374,7 @@ pub(super) async fn create_comment(
             )
             .await,
     )? {
+        CreatePullCommentOutcome::Archived => Err(Error::Archived),
         CreatePullCommentOutcome::Created(comment) => Ok(from_comment(comment)),
         CreatePullCommentOutcome::PullNotFound => Err(Error::NotFound),
         CreatePullCommentOutcome::RequestConflict => Err(Error::RequestConflict),
@@ -398,6 +406,7 @@ pub(super) async fn update_comment(
             )
             .await,
     )? {
+        UpdatePullCommentOutcome::Archived => Err(Error::Archived),
         UpdatePullCommentOutcome::Updated(comment) => Ok(from_comment(comment)),
         UpdatePullCommentOutcome::NotFound => Err(Error::NotFound),
         UpdatePullCommentOutcome::Forbidden => Err(Error::Forbidden),
@@ -493,6 +502,7 @@ pub(super) async fn create_review(
             )
             .await,
     )? {
+        CreatePullReviewOutcome::Archived => Err(Error::Archived),
         CreatePullReviewOutcome::Created(review) => Ok(from_review(review)),
         CreatePullReviewOutcome::PullNotFound => Err(Error::NotFound),
         CreatePullReviewOutcome::PullClosed => {
@@ -532,6 +542,7 @@ pub(super) async fn update_review(
             )
             .await,
     )? {
+        UpdatePullReviewOutcome::Archived => Err(Error::Archived),
         UpdatePullReviewOutcome::Updated(review) => Ok(from_review(review)),
         UpdatePullReviewOutcome::NotFound => Err(Error::NotFound),
         UpdatePullReviewOutcome::Forbidden => Err(Error::Forbidden),
@@ -586,6 +597,8 @@ pub(super) async fn reserve_merge(
             )
             .await,
     )? {
+        ReservePullMergeOutcome::Draft => Err(Error::DraftPull),
+        ReservePullMergeOutcome::Archived => Err(Error::Archived),
         ReservePullMergeOutcome::Reserved(merge) => Ok(from_merge(*merge)),
         ReservePullMergeOutcome::PullNotFound => Err(Error::NotFound),
         ReservePullMergeOutcome::RequestConflict => Err(Error::RequestConflict),
@@ -641,6 +654,8 @@ async fn transition_merge(
             )
             .await,
     )? {
+        TransitionPullMergeOutcome::Draft => Err(Error::DraftPull),
+        TransitionPullMergeOutcome::Archived => Err(Error::Archived),
         TransitionPullMergeOutcome::Applied(pull) => Ok(from_pull(*pull)),
         TransitionPullMergeOutcome::NotFound => Err(Error::NotFound),
         TransitionPullMergeOutcome::Conflict => Err(Error::MergeConflict),
@@ -706,8 +721,9 @@ fn to_merge(
         created_at_ms,
     })
 }
-fn from_pull(value: PullRecord) -> PullRequest {
+pub(super) fn from_pull(value: PullRecord) -> PullRequest {
     PullRequest {
+        draft: value.draft,
         number: value.number,
         request_id: Uuid::from_bytes(value.create_submission_id).to_string(),
         author: from_author(value.author),

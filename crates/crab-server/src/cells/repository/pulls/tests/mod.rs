@@ -8,6 +8,7 @@ fn maximum_pull_decisions_fit_the_registered_output_bound() {
         name: "🦀".repeat(160),
     };
     let pull = PullRecord {
+        draft: false,
         number: 1,
         create_submission_id: [8; 16],
         author: author.clone(),
@@ -54,3 +55,5 @@ fn maximum_pull_child_fits_the_registered_record_bound() {
     };
     assert!(serde_json::to_vec(&comment).unwrap().len() <= 512 * 1024);
 }
+
+mod lifecycle;

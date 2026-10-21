@@ -12,6 +12,7 @@ pub(in crate::cells) fn dispatch_mutation(
     input: serde_json::Value,
 ) -> crate::cells::Result<MutationResult<serde_json::Value>> {
     match id {
+        <SetPullReadiness as Mutation>::ID => invoke_mutation::<SetPullReadiness>(context, input),
         <SetLink as Mutation>::ID => invoke_mutation::<SetLink>(context, input),
         <SetReaction as Mutation>::ID => invoke_mutation::<SetReaction>(context, input),
         <CreateMilestone as Mutation>::ID => invoke_mutation::<CreateMilestone>(context, input),

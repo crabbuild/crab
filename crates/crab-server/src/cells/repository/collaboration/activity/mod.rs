@@ -13,6 +13,8 @@ const SEQUENCE: &str = "collaboration/v1/activity/sequence";
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Action {
     Created,
+    Drafted,
+    ReadyForReview,
     Updated,
     Closed,
     Reopened,
@@ -59,6 +61,8 @@ impl Action {
                     | Self::Closed
                     | Self::Reopened
                     | Self::Merged
+                    | Self::Drafted
+                    | Self::ReadyForReview
                     | Self::IssueLinked { .. }
                     | Self::IssueUnlinked { .. }
                     | Self::MilestoneAssigned { .. }

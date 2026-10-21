@@ -15,6 +15,11 @@ impl Mutation for CreatePullReviewThread {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(
+                CreatePullReviewThreadOutcome::Archived,
+            ));
+        }
         validate_create_thread(&input)?;
         let digest = thread_digest(&input);
         let existing = context.sql(&SqlBatch {
@@ -121,6 +126,11 @@ impl Mutation for UpdatePullReviewThread {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(
+                UpdatePullReviewThreadOutcome::Archived,
+            ));
+        }
         validate_number(input.key.pull)?;
         validate_number(input.key.number)?;
         validate_number(input.version)?;
@@ -228,6 +238,11 @@ impl Mutation for CreatePullReviewReply {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(
+                CreatePullReviewReplyOutcome::Archived,
+            ));
+        }
         validate_number(input.pull)?;
         validate_number(input.thread)?;
         validate_author(&input.author)?;
@@ -328,6 +343,11 @@ impl Mutation for UpdatePullReviewReply {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(
+                UpdatePullReviewReplyOutcome::Archived,
+            ));
+        }
         validate_number(input.key.pull)?;
         validate_number(input.key.thread)?;
         validate_number(input.key.number)?;

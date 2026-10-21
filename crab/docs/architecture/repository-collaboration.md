@@ -23,7 +23,7 @@ publication contracts remain authoritative.
 Use typed, bounded JSON documents under `collaboration/v1/` in the repository
 Cell's native KV storage. Cellar's KV and application SQL share the same SQLite
 transaction and durability/output gate. Existing repository SQL schema and
-stored records remain unchanged. New entity state is canonical native storage,
+binary record codecs remain unchanged. New entity state is canonical native storage,
 not a process cache or a fallback reader. Existing repositories gain entities
 through explicit commands; reading optional metadata does not create data.
 
@@ -63,11 +63,9 @@ native Cellar objects were present in the bucket. Desktop and mobile dark views
 had no accessibility violations; the existing footer contrast check required
 manual review. The 390px viewport had no horizontal document overflow.
 
-This verifies the milestone slice locally, not the entire expansion. Draft
-readiness and review requests still require their models, HTTP/browser workflows,
-and evidence. Linked work qualification is described below. Native PR mutations
-need the same transactional archive enforcement as issue mutations. Full cross-platform/runtime
-proof remains a CI responsibility.
+This verifies the milestone slice locally, not the entire expansion. Review
+requests still require their model, HTTP/browser workflow, and evidence.
+Cross-platform/runtime proof remains a CI responsibility.
 
 ### Reaction evidence
 
@@ -160,3 +158,60 @@ The synthetic RustFS-backed browser repeats link → backlink → unlink → rel
 relink. The process qualifier creates a real Git branch and PR, links/unlinks/
 relinks its issue, and restores both indexes and version 3 after restart. An old
 unlink is rejected and leaves the restored relationship and activity unchanged.
+
+### Draft readiness contract
+
+Pull creation accepts `draft` (default false). The PR and its readiness document
+commit together; ordinary requests retain their original submission identity.
+Creation replay validates the original payload in the native command, so editing
+an existing PR or changing readiness does not invalidate recovery of its creation.
+The original request cannot be reused for another creation mode.
+
+Readiness lives under `collaboration/v1/pulls/` without changing the existing SQL
+schema or binary record codecs. Absence means normal ready state; reads do not
+create documents or historical events. Native PR results load readiness and the
+PR version in the same transaction. JSON command replies include the draft flag;
+previously stored replies without it retain their original ready semantics.
+Only the author or a repository writer can convert an open PR. The existing PR
+version orders readiness, PR edits, review decisions, and merge admission.
+An unchanged desired readiness does not advance it.
+
+Drafts remain open for discussion and reviews but reject fresh merge reservation
+and admission. A readiness change after reservation invalidates the old PR
+version; a pending merge blocks conversion. Closing/reopening does not change
+readiness. Lists and detail views expose the draft flag, and conversion records
+one actor/action event.
+
+Every native PR mutation checks archive inside its transaction. Existing command
+receipts replay their original decision. Merge completion and abort may recover
+admitted work after archive: the HTTP boundary defers to these guarded commands,
+and Git publication retains its own lifecycle check. An already-published ref can
+complete metadata; an unpublished merge denied by archive clears its pending
+admission without changing Git. Other HTTP mutation families retain their existing
+preflight boundary.
+
+### Draft readiness evidence
+
+Native tests cover creation mode conflicts and replay, role/stale-version checks,
+unchanged-state retries, draft reservation/admission rejection, conversion between
+reservation and admission, conversion racing a merge, pending-merge protection,
+archive rejection, atomic readiness/version read snapshots, pre-readiness JSON
+receipt decoding, and readiness/receipt recovery after native restart. Lifecycle
+coverage exercises every fresh PR mutation, concurrent archive/edit receipt order,
+and cleanup of admitted work.
+
+HTTP tests cover CSRF, permissions, readiness changes and replay, and recovery of
+creation after body/readiness edits. Real Git HTTP pushes seed archive-recovery
+regressions: published merges complete metadata after archive, while unpublished
+merges abort without moving the base ref. The original PR review/protection and
+merge-method suites retain their assertions and require the new explicit draft
+flag in list responses.
+
+Browser tests exercise draft creation/reload, truthful merge controls, failed
+writes, explicit conflict refresh, conversion, draft list badges, permissions,
+archive views, recovery of already-admitted merges, and light/dark mobile
+accessibility. Archived conversations retain merge outcomes and expose a retry
+for pending publications; abort errors offer an explicit metadata refresh.
+Dedicated RustFS process qualification restores a draft after restart, proves
+a draft merge leaves the base ref unchanged, marks it ready, publishes a real merge, and restores the
+merged state and activity through another restart.

@@ -137,6 +137,7 @@ async function setup(page: Page) {
       return route.fulfill({
         json: {
           ...record,
+          draft: false,
           title: "Related pull",
           base_ref: "refs/heads/main",
           head_ref: "refs/heads/feature",

@@ -569,6 +569,7 @@ async fn pull_close_reopen_and_merge_completion_update_milestone_progress() {
             &cell.target,
             identity(),
             CreatePullInput {
+                draft: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor(),
                 title: "Ship".into(),

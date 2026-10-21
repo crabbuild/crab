@@ -337,6 +337,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePull>(
         &cell,
         CreatePullInput {
+            draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Alice"),
             title: "Pull".into(),

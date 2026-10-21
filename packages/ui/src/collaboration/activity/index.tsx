@@ -18,6 +18,8 @@ type Target =
 type Action =
   | {
       kind:
+        | "drafted"
+        | "ready_for_review"
         | "created"
         | "updated"
         | "closed"
@@ -74,6 +76,10 @@ function action(event: ActivityEvent): string {
           return "reviewed";
       }
       break;
+    case "drafted":
+      return "converted to draft";
+    case "ready_for_review":
+      return "marked ready for review";
     case "updated":
       return "updated";
     case "closed":

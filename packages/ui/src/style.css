@@ -6910,3 +6910,27 @@ main {
   display: grid;
   gap: 6px;
 }
+
+.pull-state.draft {
+  background: var(--bgColor-draft-emphasis);
+}
+.pull-status-icon.draft {
+  color: var(--fgColor-muted);
+}
+.pull-form > .pull-draft-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pull-readiness-control {
+  padding: 12px 16px;
+}
+.pull-readiness-control p {
+  margin-block: 8px;
+}
+.pull-readiness-control.merge-footer {
+  padding: 16px;
+}
+.pull-merge-note.draft .merge-summary > svg {
+  color: var(--fgColor-muted);
+}

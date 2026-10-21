@@ -35,6 +35,8 @@ pub(crate) enum Error {
     Archived,
     #[error("Pull request authors cannot approve or request changes on their own changes")]
     OwnReview,
+    #[error("Draft pull requests must be marked ready before merging")]
+    DraftPull,
     #[error("This content changed; reload before saving your draft")]
     Conflict,
     #[error("The pull request changes conflict or its branch tips changed")]
@@ -232,6 +234,11 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "merge_pending",
                 "A merge is in progress. Reload the pull request and retry that merge before editing",
+            ),
+            Self::DraftPull => (
+                StatusCode::CONFLICT,
+                "pull_draft",
+                "Draft pull requests must be marked ready before merging",
             ),
             Self::MergeBlocked => (
                 StatusCode::CONFLICT,

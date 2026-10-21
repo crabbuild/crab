@@ -154,6 +154,7 @@ pub(crate) struct CreatePullReviewThreadInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum CreatePullReviewThreadOutcome {
+    Archived,
     Created(Box<PullReviewThreadRecord>),
     PullNotFound,
     PullClosed,
@@ -174,6 +175,7 @@ pub(crate) struct UpdatePullReviewThreadInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum UpdatePullReviewThreadOutcome {
+    Archived,
     Updated(Box<PullReviewThreadRecord>),
     NotFound,
     Forbidden,
@@ -192,6 +194,7 @@ pub(crate) struct CreatePullReviewReplyInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum CreatePullReviewReplyOutcome {
+    Archived,
     Created(PullReviewReplyRecord),
     ThreadNotFound,
     RequestConflict,
@@ -208,6 +211,7 @@ pub(crate) struct UpdatePullReviewReplyInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum UpdatePullReviewReplyOutcome {
+    Archived,
     Updated(PullReviewReplyRecord),
     NotFound,
     Forbidden,

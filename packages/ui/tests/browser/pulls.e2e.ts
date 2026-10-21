@@ -80,6 +80,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   const pull = () => {
     const approvals = branchesAvailable && reviews.length ? 1 : 0;
     return {
+      draft: false,
       number: created ? 2 : 1,
       title: created ? "Document the feature" : "Improve the README",
       body: created ? "This explains the **new behavior**." : "Please review.",

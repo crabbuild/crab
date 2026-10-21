@@ -15,6 +15,9 @@ impl Mutation for CreatePullComment {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(CreatePullCommentOutcome::Archived));
+        }
         validate_number(input.pull)?;
         validate_author(&input.author)?;
         validate_body(&input.body, true)?;
@@ -90,6 +93,9 @@ impl Mutation for UpdatePullComment {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(UpdatePullCommentOutcome::Archived));
+        }
         validate_number(input.key.pull)?;
         validate_number(input.key.number)?;
         validate_number(input.version)?;

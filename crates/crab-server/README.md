@@ -74,6 +74,11 @@ Repository pages use GitHub-style paths. **Code**, **Issues**, **Pull requests**
 **Go to file** (keyboard `T`) opens file search, and **Add file** offers the
 existing create and upload actions.
 
+Pull requests can be created as drafts, converted to drafts, and marked ready
+for review. Draft badges appear in lists and details; merge admission rejects
+drafts and stale readiness changes. Authors or writers manage readiness, and
+conversion is blocked while a merge is pending.
+
 Pull request conversations show merge requirements above the comment editor.
 Choose a merge method, review the commit message, and confirm the merge; an
 uncertain publication can be retried using the original submission.

@@ -398,6 +398,7 @@ The blame view links commit OIDs and subjects to immutable commit details. Its a
 | Go to file | Bounded full-tree fuzzy search without blob reads; `T` opens and focuses search |
 | Releases | Releases/Tags navigation, search, drafts, publication, edits, deletion, source ZIPs, and binary assets |
 | Pull requests | Conversation, Commits, Checks, Files changed, reviews, shared Markdown formatting, approval state, and merge controls |
+| Pull readiness | `PUT /api/repos/{owner}/{name}/pulls/{number}/readiness`; list/detail responses include `draft` |
 | Issues and metadata | Searchable issues, comments, labels, assignees, Markdown formatting and preview, and conflict recovery |
 | Settings | Default branch, exact protection rules, and archive state with stale-version checks |
 | Appearance | System, light, and dark themes persisted across desktop and narrow layouts |
@@ -1289,6 +1290,29 @@ titles at the action, without exposing private identity claims or copying bodies
 Existing history is not backfilled. Edits that change no content/state and
 creation retries do not add events. Reassigning milestones records removal and
 addition in the same transaction as the assignment and progress updates.
+
+### Draft pull requests
+
+Create with `"draft":true` to open a draft; omission opens a normal ready PR.
+The creation reservation binds this mode alongside the original title, body,
+branches, and author. Retrying that original payload recovers the existing PR,
+including later edits and current readiness; changing the creation mode is a
+submission conflict.
+
+Authors or repository writers convert an open PR with
+`PUT .../pulls/{number}/readiness`, for example `{"version":1,"draft":false}`.
+Readiness and the PR version come from one native read transaction. Conversion
+advances the version only when readiness changes. Stale opposite changes return 409; closed or merged PRs and pending merges reject conversion. Closing
+and reopening preserves readiness. Drafts allow discussion/reviews but cannot
+reserve or begin a new merge. Readiness changes invalidate old merge versions.
+
+Fresh PR commands enforce archive transactionally, including comments, reviews,
+inline conversations, and merge admission. Existing receipts remain replayable.
+A retry may complete an already-published merge after archive; unpublished work
+is aborted without changing Git. Archived conversations retain merge status and
+allow recovery of a pending publication, with explicit refresh after an abort.
+These recovery paths retain ordinary membership, writer, Origin, CSRF,
+immutable-submission, and exact-ref checks.
 
 ### Link related work
 

@@ -28,6 +28,7 @@ use crate::{
 
 mod comments;
 mod merge;
+mod readiness;
 mod review_threads;
 mod reviews;
 mod storage;
@@ -50,6 +51,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .merge(reviews::routes())
         .merge(review_threads::routes())
         .merge(merge::routes())
+        .merge(readiness::routes())
         .layer(axum::extract::DefaultBodyLimit::max(160 * 1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
@@ -97,6 +99,7 @@ async fn pull_view(
     )
     .await?;
     Ok(json!({
+        "draft": pull.draft,
         "number": pull.number,
         "title": pull.title,
         "body": pull.body,
@@ -124,6 +127,7 @@ async fn pull_view(
             && current.is_some()
             && !same_author(&pull.author, actor),
         "can_merge": pull.state == PullState::Open
+            && !pull.draft
             && can_write
             && (pull.merge_pending.is_some()
                 || (current.is_some() && requirements.satisfied)),
@@ -268,6 +272,7 @@ fn merge_requirements(
 
 fn pull_list_view(pull: &PullSummary, labels: &[Label], assignees: &[Assignee]) -> Value {
     json!({
+        "draft": pull.draft,
         "number": pull.number,
         "title": pull.title,
         "state": pull.state,
@@ -392,6 +397,8 @@ fn current_branches(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NewPull {
+    #[serde(default)]
+    draft: bool,
     request_id: String,
     title: String,
     body: String,
@@ -416,14 +423,24 @@ async fn create(
         return Err(Error::Invalid("Base and head branches must differ"));
     }
     if let Some(pull) = storage::pull_submission(&server, repo, &request_id).await? {
-        if !same_author(&pull.author, &actor)
-            || pull.title != title
-            || pull.body != input.body
-            || pull.base_ref != input.base_ref
-            || pull.head_ref != input.head_ref
-        {
-            return Err(Error::RequestConflict);
-        }
+        // Native submission validation compares the original payload, even when
+        // the current PR body or readiness changed after creation.
+        let pull = storage::create_pull(
+            &server,
+            repo,
+            NewPullRequest {
+                draft: input.draft,
+                author: actor.clone(),
+                request_id,
+                title,
+                body: input.body,
+                base_ref: input.base_ref,
+                head_ref: input.head_ref,
+                base_oid: pull.base_oid,
+                head_oid: pull.head_oid,
+            },
+        )
+        .await?;
         let repository = repo
             .open_current(&server, RepositoryOptions::default(), &server.cancellation)
             .await
@@ -458,6 +475,7 @@ async fn create(
         &server,
         repo,
         NewPullRequest {
+            draft: input.draft,
             author: actor.clone(),
             request_id,
             title,

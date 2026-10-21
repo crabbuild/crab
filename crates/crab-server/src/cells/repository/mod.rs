@@ -40,11 +40,12 @@ pub(crate) use pulls::{
     CreatePullReviewOutcome, GetPull, GetPullComment, GetPullMergeSubmission, GetPullReview,
     GetPullReviewSubmission, GetPullSubmission, ListPullComments, ListPullReviews, ListPulls,
     MergeMethod, PullChildKey, PullChildListInput, PullCommentRecord, PullListInput, PullMerge,
-    PullMergeTransition, PullRecord, PullReviewRecord, PullState, PullSubmissionKey,
+    PullMergeTransition, PullReadiness, PullRecord, PullReviewRecord, PullState, PullSubmissionKey,
     ReservePullMerge, ReservePullMergeInput, ReservePullMergeOutcome, ReviewState,
-    TransitionPullMerge, TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull,
-    UpdatePullComment, UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput,
-    UpdatePullOutcome, UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
+    SetPullReadiness, SetPullReadinessInput, SetPullReadinessOutcome, TransitionPullMerge,
+    TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull, UpdatePullComment,
+    UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome,
+    UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
 };
 pub(crate) use releases::{
     AttachReleaseAsset, AttachReleaseAssetInput, AttachReleaseAssetOutcome,

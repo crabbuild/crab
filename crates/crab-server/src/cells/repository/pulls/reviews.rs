@@ -15,6 +15,9 @@ impl Mutation for CreatePullReview {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(CreatePullReviewOutcome::Archived));
+        }
         validate_number(input.pull)?;
         validate_author(&input.author)?;
         validate_body(&input.body, input.state != ReviewState::Approved)?;
@@ -152,6 +155,9 @@ impl Mutation for UpdatePullReview {
         context: &mut RepositoryTransaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(UpdatePullReviewOutcome::Archived));
+        }
         validate_number(input.key.pull)?;
         validate_number(input.key.number)?;
         validate_number(input.version)?;

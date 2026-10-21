@@ -19,6 +19,7 @@ async fn seed(h: &Harness, cookie: &str) {
             &cell.target,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                draft: false,
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: RepositoryAuthor {
                     issuer: h.provider.issuer.clone(),

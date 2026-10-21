@@ -86,7 +86,7 @@ pub(super) fn load_pull(
     result[0]
         .rows
         .first()
-        .map(|row| pull_from_rows(row, &result[1].rows))
+        .map(|row| pull_from_rows(context, row, &result[1].rows))
         .transpose()
 }
 
@@ -98,11 +98,12 @@ pub(super) fn load_pull_query(
     result[0]
         .rows
         .first()
-        .map(|row| pull_from_rows(row, &result[1].rows))
+        .map(|row| pull_from_rows(context, row, &result[1].rows))
         .transpose()
 }
 
 fn pull_from_rows(
+    context: &RepositoryTransaction<'_>,
     row: &[SqlValue],
     decisions: &[Vec<SqlValue>],
 ) -> crate::cells::Result<PullRecord> {
@@ -119,8 +120,10 @@ fn pull_from_rows(
             })
         })
         .collect::<crate::cells::Result<Vec<_>>>()?;
+    let number = result_u64_from_row(row, 0)?;
     Ok(PullRecord {
-        number: result_u64_from_row(row, 0)?,
+        draft: readiness::load(context, number)? == PullReadiness::Draft,
+        number,
         create_submission_id: submission,
         author: author_from_row(row, 2)?,
         title: result_text(row, 5)?,
